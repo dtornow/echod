@@ -60,9 +60,11 @@ pub trait Model {
     /// empty list means it cannot take effect here.
     fn external(&self, req: &Self::External, state: &Self::State, now: Time) -> Vec<Outcome<Self>>;
 
-    /// Internal work runs in `state` at `now`.
-    fn internal(&self, _req: &Self::Internal, _state: &Self::State, _now: Time) -> StepResult<Self> {
-        StepResult::Disabled
+    /// Internal work runs in `state` at `now`: every possible successor. An empty
+    /// list means it can't run yet and stays pending; `Succ::same(state)` means it
+    /// has nothing left to do and is removed.
+    fn internal(&self, _req: &Self::Internal, _state: &Self::State, _now: Time) -> Vec<Succ<Self>> {
+        Vec::new()
     }
 
     /// How internal work must behave over time.
@@ -155,7 +157,7 @@ impl<M: Model + ?Sized> Outcome<M> {
     }
 }
 
-/// One possible effect of internal work.
+/// One possible effect of internal work: the next state and the internal work it starts.
 pub struct Succ<M: Model + ?Sized> {
     pub next: M::State,
     pub spawn: Vec<Sched<M::Internal>>,
@@ -164,6 +166,11 @@ pub struct Succ<M: Model + ?Sized> {
 impl<M: Model + ?Sized> Succ<M> {
     pub fn new(next: M::State) -> Self {
         Succ { next, spawn: Vec::new() }
+    }
+
+    /// Runs and changes nothing: the work is done.
+    pub fn same(state: &M::State) -> Self {
+        Succ::new(state.clone())
     }
 
     pub fn spawn(mut self, step: M::Internal) -> Self {
@@ -175,16 +182,6 @@ impl<M: Model + ?Sized> Succ<M> {
         self.spawn.push(Sched { step, at: Some(at) });
         self
     }
-}
-
-/// What internal work does in a state.
-pub enum StepResult<M: Model + ?Sized> {
-    /// Can't run here; stays pending.
-    Disabled,
-    /// Already done (Accordant's `IsTerminalState`); removed without a state change.
-    Discharged,
-    /// Runs: each entry is one possible successor.
-    Next(Vec<Succ<M>>),
 }
 
 /// The keys a step touches.

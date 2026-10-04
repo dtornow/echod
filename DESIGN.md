@@ -44,7 +44,7 @@ pub trait Model {
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
 
     fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<Outcome<Self>>;
-    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> StepResult<Self>; // Disabled | Discharged | Next(..)
+    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<Succ<Self>>;  // [] = can't run yet; [Succ::same(s)] = done
     fn fairness(&self, step: &Self::Internal) -> Fairness;                                   // May | Eventually { within }
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
@@ -80,7 +80,7 @@ Mapping from Accordant:
   The response is a value, not a predicate, so it can be stored in a node and
   hashed. Wildcards (server ids, timestamps) go in `admits`.
 - `Expect.OneOf` → returning several outcomes.
-- `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → `StepResult::Discharged`.
+- `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → returning `vec![Succ::same(state)]`.
 - `StateProfile` → `Checker::profile()`, a `Vec<Node>`.
 - `spec.Allows(op, req, resp, profile)` → `checker.call(id, op, resp)`.
 - `AllowsConcurrent` with happens-before edges → overlapping `invoke`/`ret`; real-time order *is* the happens-before relation.
@@ -307,7 +307,7 @@ still walks every entry. The incremental hash is what fixes time.
 | `AdvanceClock` request | `checker.tick(t)` alongside the call that advances the server's debug clock |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, Step::Timeout(id))` with `within: Some(0)`; the projection becomes a real transition at the deadline |
-| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `step` returns `Discharged` when it's no longer fireable |
+| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `internal` returns `vec![Succ::same(state)]` when it's no longer fireable |
 | `LeaseTriggers`, `RetryTriggers` | timers: `.timer(expires, Step::Lease { id, expires })` installed when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
@@ -391,7 +391,7 @@ Porting also found three checker bugs, all fixed:
 
 ## Files
 
-- `src/lib.rs`: the `Spec` trait, `Outcome`, `Succ`, `StepResult`, `Fairness`, `Keys`, `Time`.
+- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `Outcome`, `Succ`, `Fairness`, `Touches`, `Time`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.

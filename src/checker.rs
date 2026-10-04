@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
-use crate::{CallId, Engine, Fairness, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, StepResult, Time};
+use crate::{CallId, Engine, Fairness, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
 
 type St<S> = <<S as Engine>::M as Model>::State;
 type Ex<S> = <<S as Engine>::M as Model>::External;
@@ -804,7 +804,7 @@ impl<S: Engine> Checker<S> {
 
     fn enabled(&self, item: &P<S>, step: &In<S>, state: &St<S>) -> bool {
         matches!(item, Pending::Step { after, .. } if *after <= self.now)
-            && !matches!(self.engine.model().internal(step, state, self.now), StepResult::Disabled)
+            && !self.engine.model().internal(step, state, self.now).is_empty()
     }
 
     /// The footprint of what is owed, closed over pending work that shares keys with it.
@@ -893,18 +893,16 @@ impl<S: Engine> Checker<S> {
                 vec![Node { state: m.state.clone(), pending: p }]
             }
             Pending::Step { step, after, .. } if *after <= self.now => {
-                match self.engine.model().internal(step, &m.state, self.now) {
-                    StepResult::Disabled => Vec::new(),
-                    StepResult::Discharged => vec![Node { state: m.state.clone(), pending: without() }],
-                    StepResult::Next(succ) => succ
-                        .into_iter()
-                        .map(|s| {
-                            let mut p = without();
-                            self.spawn(&mut p, s.spawn);
-                            Node { state: self.states.intern(s.next), pending: p }
-                        })
-                        .collect(),
-                }
+                self.engine
+                    .model()
+                    .internal(step, &m.state, self.now)
+                    .into_iter()
+                    .map(|s| {
+                        let mut p = without();
+                        self.spawn(&mut p, s.spawn);
+                        Node { state: self.states.intern(s.next), pending: p }
+                    })
+                    .collect()
             }
             _ => Vec::new(),
         }

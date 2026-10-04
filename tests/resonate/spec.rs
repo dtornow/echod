@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use accordant::{Fairness, Footprint, HashedMap, Model, Outcome, Partitioned, StepResult, Succ, Time, Touches};
+use accordant::{Fairness, Footprint, HashedMap, Model, Outcome, Partitioned, Succ, Time, Touches};
 
 pub type Id = String;
 
@@ -636,12 +636,12 @@ impl Model for Resonate {
         }
     }
 
-    fn internal(&self, step: &Internal, s: &Server, _now: Time) -> StepResult<Self> {
-        match step {
+    fn internal(&self, req: &Internal, s: &Server, _now: Time) -> Vec<Succ<Self>> {
+        match req {
             Internal::Timeout(id) => {
                 let p = &s.promises[id];
                 if !p.live() {
-                    return StepResult::Discharged;
+                    return vec![Succ::same(s)];
                 }
                 let state = if p.timer_tag { PState::Resolved } else { PState::TimedOut };
                 let mut n = s.clone();
@@ -650,12 +650,12 @@ impl Model for Resonate {
                 for r in resumes(p, id) {
                     succ = succ.spawn(r);
                 }
-                StepResult::Next(vec![succ])
+                vec![succ]
             }
             Internal::Lease { id, expires } => {
                 let t = &s.tasks[id];
                 if t.state != TState::Acquired || t.lease_expires() != *expires {
-                    return StepResult::Discharged; // released, fulfilled, or extended
+                    return vec![Succ::same(s)]; // released, fulfilled, or extended
                 }
                 let mut n = s.clone();
                 n.tasks.update(id, |t| {
@@ -663,18 +663,18 @@ impl Model for Resonate {
                     t.pid = None;
                     t.ttl = None;
                 });
-                StepResult::Next(vec![Succ::new(n)])
+                vec![Succ::new(n)]
             }
             Internal::Resume { awaited, awaiter } => {
                 if !fireable(s, awaited, awaiter) {
-                    return StepResult::Discharged;
+                    return vec![Succ::same(s)];
                 }
                 let mut n = s.clone();
                 n.promises.update(awaited, |p| {
                     p.callbacks.remove(awaiter);
                 });
                 n.tasks.update(awaiter, |t| t.state = TState::Pending);
-                StepResult::Next(vec![Succ::new(n)])
+                vec![Succ::new(n)]
             }
         }
     }

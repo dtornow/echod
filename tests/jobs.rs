@@ -1,7 +1,7 @@
 //! The JobQueue sample: background work that eventually completes, and a timer
 //! that times a job out if it has not.
 
-use accordant::{Checker, Config, Fairness, Footprint, HashedMap, Keyed, Model, Outcome, StepResult, Succ, Time, Touches};
+use accordant::{Checker, Config, Fairness, Footprint, HashedMap, Keyed, Model, Outcome, Succ, Time, Touches};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 enum Status {
@@ -65,19 +65,19 @@ impl Model for JobModel {
         }]
     }
 
-    fn internal(&self, step: &Internal, s: &Queue, _now: Time) -> StepResult<Self> {
-        let (Internal::Run(j) | Internal::Timeout(j)) = *step;
+    fn internal(&self, req: &Internal, s: &Queue, _now: Time) -> Vec<Succ<Self>> {
+        let (Internal::Run(j) | Internal::Timeout(j)) = *req;
         if s.jobs.get(&j) != Some(&Status::Pending) {
-            return StepResult::Discharged;
+            return vec![Succ::same(s)]; // done already
         }
         let to = |st| {
             let mut n = s.clone();
             n.jobs.insert(j, st);
             Succ::new(n)
         };
-        match step {
-            Internal::Run(_) => StepResult::Next(vec![to(Status::Completed), to(Status::Failed)]),
-            Internal::Timeout(_) => StepResult::Next(vec![to(Status::TimedOut)]),
+        match req {
+            Internal::Run(_) => vec![to(Status::Completed), to(Status::Failed)],
+            Internal::Timeout(_) => vec![to(Status::TimedOut)],
         }
     }
 
