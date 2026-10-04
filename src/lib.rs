@@ -122,8 +122,8 @@ pub enum Fairness {
 /// Internal work to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sched<T> {
-    /// Runs whenever: any time from now on, within its fairness window.
-    Whenever(T),
+    /// Runs later: any time from now on, within its fairness window.
+    Later(T),
     /// A timer: can't run before `at`.
     Timer(Time, T),
 }
@@ -146,9 +146,9 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
         ExternalOutcome::new(resp, state.clone())
     }
 
-    /// Internal work that runs whenever.
+    /// Internal work that runs later.
     pub fn spawn(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Whenever(step));
+        self.spawn.push(Sched::Later(step));
         self
     }
 
@@ -176,9 +176,9 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
         InternalOutcome::new(state.clone())
     }
 
-    /// Internal work that runs whenever.
+    /// Internal work that runs later.
     pub fn spawn(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Whenever(step));
+        self.spawn.push(Sched::Later(step));
         self
     }
 
