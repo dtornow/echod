@@ -1,12 +1,10 @@
 //! The BankAccount sample from Accordant, with calls split into request and response.
 
-use std::collections::BTreeMap;
-
-use accordant::{Checker, Config, Keys, Outcome, Spec};
+use accordant::{HashedMap, Checker, Config, Keys, Outcome, Spec};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
-    accounts: BTreeMap<&'static str, i64>,
+    accounts: HashedMap<&'static str, i64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -41,18 +39,18 @@ impl Spec for BankSpec {
             n
         };
         let out = match *op {
-            Op::Open(a) if s.accounts.contains_key(a) => Outcome::same(Resp::Conflict, s),
+            Op::Open(a) if s.accounts.contains_key(&a) => Outcome::same(Resp::Conflict, s),
             Op::Open(a) => Outcome::new(Resp::Ok(0), with(a, 0)),
-            Op::Deposit(a, x) => match s.accounts.get(a) {
+            Op::Deposit(a, x) => match s.accounts.get(&a) {
                 None => Outcome::same(Resp::NotFound, s),
                 Some(b) => Outcome::new(Resp::Ok(b + x), with(a, b + x)),
             },
-            Op::Withdraw(a, x) => match s.accounts.get(a) {
+            Op::Withdraw(a, x) => match s.accounts.get(&a) {
                 None => Outcome::same(Resp::NotFound, s),
                 Some(b) if *b < x => Outcome::same(Resp::Insufficient, s),
                 Some(b) => Outcome::new(Resp::Ok(b - x), with(a, b - x)),
             },
-            Op::Balance(a) => match s.accounts.get(a) {
+            Op::Balance(a) => match s.accounts.get(&a) {
                 None => Outcome::same(Resp::NotFound, s),
                 Some(b) => Outcome::same(Resp::Ok(*b), s),
             },
@@ -81,7 +79,7 @@ fn overlapping_withdrawals_linearize() {
     c.invoke(3, Op::Withdraw("alice", 60)).unwrap();
     c.ret(3, Resp::Ok(40)).unwrap();
     c.ret(2, Resp::Insufficient).unwrap();
-    assert!(c.all(|s| s.accounts["alice"] == 40));
+    assert!(c.all(|s| s.accounts[&"alice"] == 40));
 }
 
 #[test]
@@ -114,7 +112,7 @@ fn lost_request_may_take_effect_late() {
     c.lost(2).unwrap();
     c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
     c.call(4, Op::Balance("alice"), Resp::Ok(150)).unwrap();
-    assert!(c.all(|s| s.accounts["alice"] == 150));
+    assert!(c.all(|s| s.accounts[&"alice"] == 150));
 }
 
 #[test]

@@ -6,3 +6,4 @@ description = "Executable behavioral specifications: a Rust take on Microsoft Ac
 license = "MIT"
 
 [dependencies]
+imbl = "7.0.2"

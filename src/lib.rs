@@ -17,8 +17,12 @@
 //!   most `ghost_ttl` responses. Bounded lag is what keeps the profile small.
 
 mod checker;
+mod hashed_map;
+mod intern;
 
 pub use checker::{Checker, Config, Event, Node, Pending, Stats, Violation};
+pub use hashed_map::HashedMap;
+pub use intern::{Interned, Interner};
 
 use std::fmt::Debug;
 use std::hash::Hash;

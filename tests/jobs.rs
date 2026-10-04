@@ -1,8 +1,6 @@
 //! The JobQueue sample: background work that eventually completes.
 
-use std::collections::BTreeMap;
-
-use accordant::{Checker, Config, Fairness, Keys, Outcome, Spec, StepResult};
+use accordant::{HashedMap, Checker, Config, Fairness, Keys, Outcome, Spec, StepResult};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 enum Status {
@@ -13,7 +11,7 @@ enum Status {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Queue {
-    jobs: BTreeMap<u32, Status>,
+    jobs: HashedMap<u32, Status>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

@@ -56,8 +56,8 @@ pub trait Spec {
 Mapping from Accordant:
 
 - `[State]` + source generator → `#[derive(Clone, PartialEq, Eq, Hash)]`. Ownership
-  replaces freezing: `apply` gets `&State` and returns new states. Nodes hold
-  `Arc<State>` and are deduplicated with full equality, not just a hash.
+  replaces freezing: `apply` gets `&State` and returns new states. States are
+  immutable once the checker has them; see [State representation](#state-representation).
 - `Expect.That(pred).ThenState(f).Triggers(t)` → `Outcome { resp, next, spawn }`.
   The response is a value, not a predicate, so it can be stored in a node and
   hashed. Wildcards (server ids, timestamps) go in `admits`.
@@ -67,7 +67,7 @@ Mapping from Accordant:
 - `spec.Allows(op, req, resp, profile)` → `checker.call(id, op, resp)`.
 - `AllowsConcurrent` with happens-before edges → overlapping `invoke`/`ret`; real-time order *is* the happens-before relation.
 
-A node is `(Arc<State>, BTreeSet<Pending>)`:
+A node is `(Interned<State>, BTreeSet<Pending>)`:
 
 ```rust
 enum Pending<Op, Resp, Step> {
@@ -156,8 +156,6 @@ Not in the prototype yet, and worth adding in this order:
 - **Sleep sets / dynamic POR** inside a single explanation. Today the visited set
   already merges commuting diamonds into one node; sleep sets would also skip
   the redundant edges.
-- **Hash-consing** of states (`Arc` interner plus a cached 128-bit hash), so
-  equality is a pointer comparison and hashing isn't repeated per node.
 - **Symmetry reduction**: canonicalize interchangeable ids (`rd:A` vs `rd:B`).
 - **Response-dependent state** (server-chosen ids): a `refine(op, observed, s)`
   hook applied at `Return`, or a finite id domain enumerated in `apply`.
@@ -165,11 +163,46 @@ Not in the prototype yet, and worth adding in this order:
   an input set. This gives test generation and Büchi-style lasso detection for
   unbounded `Eventually` obligations that a cycle can postpone forever.
 
+## State representation
+
+States are immutable and shared. Two pieces make that cheap:
+
+- **`HashedMap<K, V>`** (`src/hashed_map.rs`): an `imbl::OrdMap` that also keeps a
+  wrapping sum of per-entry hashes. A clone is O(1) and an update copies one path,
+  so states that differ in one account share everything else. Its `Hash` writes
+  only the length and the sum, so hashing a state is O(1) per map instead of a
+  walk over every entry. Equality still compares contents, but `imbl`'s diff skips
+  shared subtrees. A sum collision costs one comparison and is never unsound.
+- **Interner** (`src/intern.rs`): each new state is hashed once and stored once.
+  Nodes hold an `Interned<State>`, a pointer plus the cached hash, so node hashing
+  and equality inside the search are a `u64` and a pointer comparison. States no
+  node holds are dropped after every event.
+
+Use `HashedMap` for every map-shaped part of the state. A field outside a map
+still hashes in full, which is fine when it is small, like `now`.
+
+`examples/bank_bench.rs` runs rounds of 8 concurrent deposits with footprints
+off, so the profile fans out to 128 nodes. 48,840 nodes are explored either way.
+These times are with the interner on.
+
+| accounts | state | time | nodes/s | peak memory |
+|---:|---|---:|---:|---:|
+| 10,000 | `BTreeMap` (copied) | 14.6 s | 3,340 | 64.2 MiB |
+| 10,000 | `imbl::OrdMap` | 5.8 s | 8,379 | 0.6 MiB |
+| 10,000 | `HashedMap` | 0.20 s | 248,948 | 0.6 MiB |
+| 100,000 | `BTreeMap` (copied) | 171.4 s | 285 | 640.2 MiB |
+| 100,000 | `imbl::OrdMap` | 58.5 s | 835 | 1.3 MiB |
+| 100,000 | `HashedMap` | 0.27 s | 183,530 | 1.3 MiB |
+
+Before the interner, the 10,000-account runs took 27.6 s with `BTreeMap` and
+21.3 s with `OrdMap`. A persistent map alone fixes memory but not time: hashing
+still walks every entry. The incremental hash is what fixes time.
+
 ## Resonate on this model
 
 | Resonate (C#) | Rust |
 |---|---|
-| `ServerState { Promises, Tasks, Now }` | `State` with `BTreeMap`s (deterministic `Hash`) |
+| `ServerState { Promises, Tasks, Now }` | `State` with `HashedMap<Id, PromiseState>`, `HashedMap<Id, TaskState>`, `now` |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `step` returns `Discharged` when it's no longer fireable |
 | `LeaseTriggers`, `RetryTriggers` | `Step::LeaseTimeout(id)`, `Step::Retry(id)`; `Fairness::Eventually { within: Some(k) }` |
@@ -182,5 +215,8 @@ Not in the prototype yet, and worth adding in this order:
 
 - `src/lib.rs`: the `Spec` trait, `Outcome`, `StepResult`, `Fairness`, `Keys`.
 - `src/checker.rs`: profile, events, budgets, footprint-pruned search, subsumption.
+- `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
+- `src/intern.rs`: hash-consing of states.
+- `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, late and lost effects, pruning measurement.
 - `tests/jobs.rs`: background completion, bounded eventually, `Quiesce`, deferred independent jobs.

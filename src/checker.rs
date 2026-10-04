@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
+use crate::intern::{Interned, Interner};
 use crate::{CallId, Fairness, Keys, Spec, StepResult};
 
 /// Work a node still carries. Sorted, so a node's identity is canonical.
@@ -26,7 +26,7 @@ type P<S> = Pending<<S as Spec>::Op, <S as Spec>::Resp, <S as Spec>::Step>;
 
 /// One explanation of the history so far.
 pub struct Node<S: Spec> {
-    pub state: Arc<S::State>,
+    pub state: Interned<S::State>,
     pub pending: BTreeSet<P<S>>,
 }
 
@@ -120,13 +120,15 @@ pub struct Checker<S: Spec> {
     spec: S,
     cfg: Config,
     profile: Vec<Node<S>>,
+    states: Interner<S::State>,
     pub stats: Stats,
 }
 
 impl<S: Spec> Checker<S> {
     pub fn new(spec: S, init: S::State, cfg: Config) -> Self {
-        let root = Node { state: Arc::new(init), pending: BTreeSet::new() };
-        Checker { spec, cfg, profile: vec![root], stats: Stats { max_width: 1, ..Stats::default() } }
+        let states = Interner::new();
+        let root = Node { state: states.intern(init), pending: BTreeSet::new() };
+        Checker { spec, cfg, profile: vec![root], states, stats: Stats { max_width: 1, ..Stats::default() } }
     }
 
     pub fn profile(&self) -> &[Node<S>] {
@@ -190,6 +192,7 @@ impl<S: Spec> Checker<S> {
         }
         self.stats.max_width = self.stats.max_width.max(next.len());
         self.profile = next;
+        self.states.collect();
         Ok(())
     }
 
@@ -380,7 +383,7 @@ impl<S: Spec> Checker<S> {
                         p.insert(Pending::Responded { call: *call, resp: o.resp });
                     }
                     self.spawn(&mut p, o.spawn);
-                    Node { state: Arc::new(o.next), pending: p }
+                    Node { state: self.states.intern(o.next), pending: p }
                 })
                 .collect(),
             Pending::Step { step, .. } | Pending::Due { step } => match self.spec.step(step, &m.state) {
@@ -391,7 +394,7 @@ impl<S: Spec> Checker<S> {
                     .map(|(s, spawned)| {
                         let mut p = without();
                         self.spawn(&mut p, spawned);
-                        Node { state: Arc::new(s), pending: p }
+                        Node { state: self.states.intern(s), pending: p }
                     })
                     .collect(),
             },
@@ -486,7 +489,7 @@ fn covers<O: Eq, R, T: Eq>(b: &Pending<O, R, T>, a: &Pending<O, R, T>) -> bool {
 /// Keeps only nodes no other node simulates. Nodes with the same state and the
 /// same owed work are compared on optional work: more of it is more behaviors.
 fn subsume<S: Spec>(nodes: Vec<Node<S>>) -> Vec<Node<S>> {
-    type Group<S> = (Arc<<S as Spec>::State>, Vec<P<S>>);
+    type Group<S> = (Interned<<S as Spec>::State>, Vec<P<S>>);
     let mut groups: HashMap<Group<S>, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
         let owed: Vec<_> = n.pending.iter().filter(|x| !optional(*x)).cloned().collect();
