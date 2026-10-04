@@ -1,20 +1,23 @@
 //! Executable behavioral specifications, after Microsoft Accordant.
 //!
-//! A [`Spec`] says, for any state and any request, which responses are allowed and
-//! how the state changes. A [`Checker`] replays an observed history against it and
-//! keeps the *profile*: every (state, pending work) pair that is still consistent
-//! with what has been seen.
+//! A [`Spec`] says, for any state, time and request, which responses are allowed
+//! and how the state changes. A [`Checker`] replays an observed history against it
+//! and keeps the *profile*: every (state, pending work) pair that is still
+//! consistent with what has been seen.
 //!
-//! Three things differ from Accordant:
+//! Four things differ from Accordant:
 //!
 //! * **Request and response are separate events.** A call is `Invoke`, then a
-//!   linearization point the checker places, then `Return` (or `Lost`). Coupled
-//!   calls are `Invoke` immediately followed by `Return`.
+//!   linearization point the checker places, then `Return`. A call that never
+//!   returns stays in flight: it may or may not have taken effect, because the
+//!   client cannot know. Coupled calls are `Invoke` immediately followed by `Return`.
+//! * **Time is first class.** The checker owns the clock; `tick` advances it. Specs
+//!   read `now`, install timers, and give obligations deadlines in time.
 //! * **Background work is data, not closures.** A [`Spec::Step`] is a value, so two
 //!   branches that spawn the same step converge on the same node.
-//! * **"Eventually" has a budget.** An obligation may lag at most `within`
-//!   responses before it must fire; a lost request may still take effect for at
-//!   most `ghost_ttl` responses. Bounded lag is what keeps the profile small.
+//! * **"Eventually" has a deadline.** An obligation must fire within its window;
+//!   an unanswered request takes effect within `request_lifetime` or never.
+//!   Bounded windows are what keep the profile small.
 
 mod checker;
 mod hashed_map;
@@ -33,6 +36,9 @@ impl<T: Clone + Eq + Hash + Ord + Debug> Data for T {}
 
 pub type CallId = u64;
 
+/// Logical time, in whatever unit the spec uses (milliseconds in the examples).
+pub type Time = u64;
+
 /// What a request or step may read or write. Work whose keys are disjoint from
 /// what an observation depends on commutes with it and is not explored.
 #[derive(Clone, Debug)]
@@ -47,23 +53,30 @@ impl<K> Keys<K> {
     }
 }
 
-/// How a step must behave over time.
+/// How a step must behave over time, measured from when it becomes due (its timer
+/// time, or the moment it was spawned).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fairness {
     /// May fire, may never fire (a daemon, a retry that is allowed but not owed).
     May,
-    /// Must fire. `within: Some(k)`: it has fired by the time the `k`-th later
-    /// response completes (a call that linearized just before may still miss it),
-    /// and once overdue it fires before every response while it is enabled. `None` defers the
+    /// Must fire. `within: Some(d)`: by `due + d`; `Some(0)` is an exact timer.
+    /// Once overdue it fires as soon as it is enabled. `None` defers the
     /// obligation to the next [`Event::Quiesce`].
-    Eventually { within: Option<u32> },
+    Eventually { within: Option<Time> },
+}
+
+/// A step to start: now, or as a timer at an absolute time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sched<T> {
+    pub step: T,
+    pub at: Option<Time>,
 }
 
 /// One possible effect of a request at its linearization point.
 pub struct Outcome<S: Spec + ?Sized> {
     pub resp: S::Resp,
     pub next: S::State,
-    pub spawn: Vec<S::Step>,
+    pub spawn: Vec<Sched<S::Step>>,
 }
 
 impl<S: Spec + ?Sized> Outcome<S> {
@@ -76,9 +89,37 @@ impl<S: Spec + ?Sized> Outcome<S> {
         Outcome::new(resp, state.clone())
     }
 
-    /// Background work this outcome starts.
+    /// Background work this outcome starts now.
     pub fn spawn(mut self, step: S::Step) -> Self {
-        self.spawn.push(step);
+        self.spawn.push(Sched { step, at: None });
+        self
+    }
+
+    /// Background work that becomes due at `at`.
+    pub fn timer(mut self, at: Time, step: S::Step) -> Self {
+        self.spawn.push(Sched { step, at: Some(at) });
+        self
+    }
+}
+
+/// One successor of a background step.
+pub struct Succ<S: Spec + ?Sized> {
+    pub next: S::State,
+    pub spawn: Vec<Sched<S::Step>>,
+}
+
+impl<S: Spec + ?Sized> Succ<S> {
+    pub fn new(next: S::State) -> Self {
+        Succ { next, spawn: Vec::new() }
+    }
+
+    pub fn spawn(mut self, step: S::Step) -> Self {
+        self.spawn.push(Sched { step, at: None });
+        self
+    }
+
+    pub fn timer(mut self, at: Time, step: S::Step) -> Self {
+        self.spawn.push(Sched { step, at: Some(at) });
         self
     }
 }
@@ -89,8 +130,8 @@ pub enum StepResult<S: Spec + ?Sized> {
     Disabled,
     /// Its work is done (Accordant's `IsTerminalState`); removed without a state change.
     Discharged,
-    /// Fires: each entry is one non-deterministic successor and the steps it spawns.
-    Next(Vec<(S::State, Vec<S::Step>)>),
+    /// Fires: each entry is one non-deterministic successor.
+    Next(Vec<Succ<S>>),
 }
 
 pub trait Spec {
@@ -103,11 +144,11 @@ pub trait Spec {
     type Step: Data;
     type Key: Data;
 
-    /// The linearization point of `op` in `state`: every allowed outcome.
-    /// An empty list means `op` cannot take effect in this state.
-    fn apply(&self, op: &Self::Op, state: &Self::State) -> Vec<Outcome<Self>>;
+    /// The linearization point of `op` in `state` at time `now`: every allowed
+    /// outcome. An empty list means `op` cannot take effect here.
+    fn apply(&self, op: &Self::Op, state: &Self::State, now: Time) -> Vec<Outcome<Self>>;
 
-    fn step(&self, _step: &Self::Step, _state: &Self::State) -> StepResult<Self> {
+    fn step(&self, _step: &Self::Step, _state: &Self::State, _now: Time) -> StepResult<Self> {
         StepResult::Disabled
     }
 

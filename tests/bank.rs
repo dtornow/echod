@@ -1,6 +1,6 @@
 //! The BankAccount sample from Accordant, with calls split into request and response.
 
-use accordant::{HashedMap, Checker, Config, Keys, Outcome, Spec};
+use accordant::{Checker, Config, HashedMap, Keys, Outcome, Spec, Time};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
@@ -32,7 +32,7 @@ impl Spec for BankSpec {
     type Step = ();
     type Key = &'static str;
 
-    fn apply(&self, op: &Op, s: &Bank) -> Vec<Outcome<Self>> {
+    fn apply(&self, op: &Op, s: &Bank, _now: Time) -> Vec<Outcome<Self>> {
         let with = |a: &'static str, b: i64| {
             let mut n = s.clone();
             n.accounts.insert(a, b);
@@ -104,36 +104,87 @@ fn real_time_order_is_respected() {
 }
 
 #[test]
-fn lost_request_may_take_effect_late() {
-    // Accordant models a timeout as OneOf(before, after) at the moment of the
-    // timeout. Here the deposit may land after a read that did not see it.
+fn unanswered_request_may_take_effect_late() {
+    // The client never learns what happened to call 2. Accordant would have to
+    // decide "before or never" at the timeout; here the deposit may land after a
+    // read that missed it.
     let mut c = checker();
     c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.lost(2).unwrap();
     c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
     c.call(4, Op::Balance("alice"), Resp::Ok(150)).unwrap();
     assert!(c.all(|s| s.accounts[&"alice"] == 150));
 }
 
 #[test]
-fn lost_request_cannot_land_after_its_ttl() {
-    // ghost_ttl = 3: the deposit lands by the 3rd response or never, but it may land
-    // just after the 3rd read linearized. Once a 4th read misses it, it never happened.
+fn unanswered_request_may_never_take_effect() {
     let mut c = checker();
     c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.lost(2).unwrap();
-    for i in 0..4 {
+    for i in 0..10 {
         c.call(10 + i, Op::Balance("alice"), Resp::Ok(100)).unwrap();
     }
-    assert!(c.call(20, Op::Balance("alice"), Resp::Ok(150)).is_err());
+    // Both explanations remain: it may still land.
+    assert!(c.states().any(|s| s.accounts[&"alice"] == 100));
+}
+
+fn with_lifetime(life: Time) -> Checker<BankSpec> {
+    let cfg = Config { request_lifetime: Some(life), ..Config::default() };
+    let mut c = Checker::new(BankSpec, Bank::default(), cfg);
+    c.call(0, Op::Open("alice"), Resp::Ok(0)).unwrap();
+    c.call(1, Op::Deposit("alice", 100), Resp::Ok(100)).unwrap();
+    c
 }
 
 #[test]
-fn lost_response_after_effect_is_seen() {
+fn request_lifetime_bounds_a_late_effect() {
+    // A request takes effect within 1s of its invoke, or never.
+    let mut c = with_lifetime(1_000);
+    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.tick(500).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    c.tick(900).unwrap();
+    c.call(4, Op::Balance("alice"), Resp::Ok(150)).unwrap(); // landed between 500 and 900
+    let mut c = with_lifetime(1_000);
+    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.tick(1_500).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap(); // past its lifetime: it never happened
+    assert!(c.call(4, Op::Balance("alice"), Resp::Ok(150)).is_err());
+}
+
+#[test]
+fn request_lifetime_prunes_the_profile() {
+    let mut c = with_lifetime(1_000);
+    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    assert!(c.profile().iter().all(|n| n.pending.len() == 1), "call 2 still in flight");
+    c.tick(2_000).unwrap();
+    c.call(4, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    assert_eq!(c.profile().len(), 1);
+    assert!(c.profile()[0].pending.is_empty(), "call 2 resolved to never: {:?}", c.profile());
+}
+
+#[test]
+fn late_response_after_effect_is_still_accepted() {
+    let mut c = with_lifetime(1_000);
+    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(150)).unwrap(); // it took effect
+    c.tick(5_000).unwrap();
+    c.ret(2, Resp::Ok(150)).unwrap(); // the response arrives much later
+}
+
+#[test]
+fn response_after_lifetime_without_effect_is_rejected() {
+    let mut c = with_lifetime(1_000);
+    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.tick(5_000).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap(); // it never took effect
+    assert!(c.ret(2, Resp::Ok(150)).is_err());
+}
+
+#[test]
+fn effect_seen_then_undone_is_rejected() {
     let mut c = checker();
     c.invoke(2, Op::Withdraw("alice", 30)).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(70)).unwrap(); // forces the withdraw to have linearized
-    c.lost(2).unwrap();
+    c.call(3, Op::Balance("alice"), Resp::Ok(70)).unwrap(); // the withdraw linearized
     assert!(c.call(4, Op::Balance("alice"), Resp::Ok(100)).is_err());
 }
 
@@ -163,16 +214,4 @@ fn footprints_keep_the_cone_small() {
     assert_eq!(with.max_width, 1);
     assert!(without.max_width >= 64, "{without:?}");
     assert!(with.explored * 50 < without.explored, "{with:?} vs {without:?}");
-}
-
-#[test]
-fn ghost_ttl_boundary() {
-    let mut c = checker();
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.lost(2).unwrap();
-    for i in 0..3 {
-        c.call(10 + i, Op::Balance("alice"), Resp::Ok(100)).unwrap();
-    }
-    // ghost_ttl = 3: three reads may miss it and the fourth may still see it.
-    c.call(20, Op::Balance("alice"), Resp::Ok(150)).unwrap();
 }

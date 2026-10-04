@@ -80,7 +80,7 @@ impl<M: Accounts> Spec for Bank<M> {
     type Step = ();
     type Key = u32;
 
-    fn apply(&self, op: &Op, s: &M) -> Vec<Outcome<Self>> {
+    fn apply(&self, op: &Op, s: &M, _now: accordant::Time) -> Vec<Outcome<Self>> {
         let Op::Deposit(a, x) = *op;
         let b = s.get(a).unwrap_or(0) + x;
         let mut n = s.clone();
