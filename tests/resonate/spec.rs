@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use accordant::{Fairness, Footprint, HashedMap, Model, Outcome, Partitioned, Succ, Time, Touches};
+use accordant::{Fairness, Footprint, HashedMap, Model, ExternalOutcome, Partitioned, InternalOutcome, Time, Touches};
 
 pub type Id = String;
 
@@ -246,14 +246,14 @@ pub enum Internal {
 
 pub struct Resonate;
 
-type Outcomes = Vec<Outcome<Resonate>>;
+type Outcomes = Vec<ExternalOutcome<Resonate>>;
 
 fn status(code: u16, s: &Server) -> Outcomes {
-    vec![Outcome::same(Response::Status(code), s)]
+    vec![ExternalOutcome::same(Response::Status(code), s)]
 }
 
 fn echo(resp: Response, s: &Server) -> Outcomes {
-    vec![Outcome::same(resp, s)]
+    vec![ExternalOutcome::same(resp, s)]
 }
 
 fn origin(id: &str) -> &str {
@@ -294,7 +294,7 @@ fn resumes(p: &Promise, awaited: &str) -> Vec<Internal> {
         .collect()
 }
 
-fn with_spawns(mut o: Outcome<Resonate>, steps: Vec<Internal>) -> Outcome<Resonate> {
+fn with_spawns(mut o: ExternalOutcome<Resonate>, steps: Vec<Internal>) -> ExternalOutcome<Resonate> {
     for st in steps {
         o = o.spawn(st);
     }
@@ -341,7 +341,7 @@ impl Resonate {
             let state = if live { TState::Pending } else { TState::Fulfilled };
             n.tasks.insert(req.id.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0 });
         }
-        let o = Outcome::new(Response::Promise(prec(&req.id, &p)), n);
+        let o = ExternalOutcome::new(Response::Promise(prec(&req.id, &p)), n);
         vec![if live { o.timer(req.timeout_at, Internal::Timeout(req.id.clone())) } else { o }]
     }
 
@@ -358,7 +358,7 @@ impl Resonate {
         let mut n = s.clone();
         settle(&mut n, &req.id, state, req.data.clone(), now);
         let rec = prec(&req.id, &n.promises[&req.id]);
-        vec![with_spawns(Outcome::new(Response::Promise(rec), n), resumes(p, &req.id))]
+        vec![with_spawns(ExternalOutcome::new(Response::Promise(rec), n), resumes(p, &req.id))]
     }
 
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
@@ -387,7 +387,7 @@ impl Resonate {
                     n.tasks.update(id, |t| t.acquire(t.version + 1, "worker-self", TASK_CREATE_TTL, now));
                     let rec = trec(id, &n.tasks[id]);
                     let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
-                    vec![Outcome::new(Response::Task(rec), n).timer(now + TASK_CREATE_TTL, lease)]
+                    vec![ExternalOutcome::new(Response::Task(rec), n).timer(now + TASK_CREATE_TTL, lease)]
                 }
                 _ => status(409, s),
             };
@@ -410,7 +410,7 @@ impl Resonate {
         n.promises.insert(id.clone(), p.clone());
         n.tasks.insert(id.clone(), t.clone());
         let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
-        vec![Outcome::new(Response::Created(prec(id, &p), trec(id, &t)), n)
+        vec![ExternalOutcome::new(Response::Created(prec(id, &p), trec(id, &t)), n)
             .timer(timeout_at, Internal::Timeout(id.clone()))
             .timer(now + TASK_CREATE_TTL, lease)]
     }
@@ -447,7 +447,7 @@ impl Resonate {
                 p.callbacks.insert(id.clone());
             });
         }
-        vec![Outcome::new(Response::Status(200), n)]
+        vec![ExternalOutcome::new(Response::Status(200), n)]
     }
 
     fn claimable(&self, s: &Server, now: Time) -> Vec<Id> {
@@ -488,7 +488,7 @@ impl Resonate {
                         });
                     }
                 }
-                let mut o = Outcome::new(Response::Claimed(recs), n);
+                let mut o = ExternalOutcome::new(Response::Claimed(recs), n);
                 for l in leases {
                     o = o.timer(now + ttl, l);
                 }
@@ -544,7 +544,7 @@ impl Model for Resonate {
                 n.promises.update(awaited, |p| {
                     p.callbacks.insert(awaiter.clone());
                 });
-                vec![Outcome::new(resp, n)]
+                vec![ExternalOutcome::new(resp, n)]
             }
 
             Request::RegisterListener { awaited, address } => {
@@ -574,7 +574,7 @@ impl Model for Resonate {
                 n.tasks.update(id, |t| t.acquire(t.version + 1, pid, *ttl, now));
                 let rec = trec(id, &n.tasks[id]);
                 let lease = Internal::Lease { id: id.clone(), expires: now + ttl };
-                vec![Outcome::new(Response::Task(rec), n).timer(now + ttl, lease)]
+                vec![ExternalOutcome::new(Response::Task(rec), n).timer(now + ttl, lease)]
             }
 
             Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
@@ -586,7 +586,7 @@ impl Model for Resonate {
                         t.pid = None;
                         t.ttl = None;
                     });
-                    vec![Outcome::new(Response::Status(200), n)]
+                    vec![ExternalOutcome::new(Response::Status(200), n)]
                 }
             },
 
@@ -598,7 +598,7 @@ impl Model for Resonate {
                 let mut n = s.clone();
                 settle(&mut n, id, st, data.clone(), now);
                 let rec = prec(id, &n.promises[id]);
-                vec![with_spawns(Outcome::new(Response::Promise(rec), n), resumes(&s.promises[id], id))]
+                vec![with_spawns(ExternalOutcome::new(Response::Promise(rec), n), resumes(&s.promises[id], id))]
             }
 
             Request::HeartbeatTask { id, version, pid } => {
@@ -609,7 +609,7 @@ impl Model for Resonate {
                 let mut n = s.clone();
                 n.tasks.update(id, |t| t.acquired_at = now);
                 let expires = n.tasks[id].lease_expires();
-                vec![Outcome::new(Response::Status(200), n).timer(expires, Internal::Lease { id: id.clone(), expires })]
+                vec![ExternalOutcome::new(Response::Status(200), n).timer(expires, Internal::Lease { id: id.clone(), expires })]
             }
 
             Request::SuspendTask { id, version, awaited } => self.task_suspend(id, *version, awaited, s),
@@ -636,17 +636,17 @@ impl Model for Resonate {
         }
     }
 
-    fn internal(&self, req: &Internal, s: &Server, _now: Time) -> Vec<Succ<Self>> {
+    fn internal(&self, req: &Internal, s: &Server, _now: Time) -> Vec<InternalOutcome<Self>> {
         match req {
             Internal::Timeout(id) => {
                 let p = &s.promises[id];
                 if !p.live() {
-                    return vec![Succ::same(s)];
+                    return vec![InternalOutcome::same(s)];
                 }
                 let state = if p.timer_tag { PState::Resolved } else { PState::TimedOut };
                 let mut n = s.clone();
                 settle(&mut n, id, state, None, p.timeout_at);
-                let mut succ = Succ::new(n);
+                let mut succ = InternalOutcome::new(n);
                 for r in resumes(p, id) {
                     succ = succ.spawn(r);
                 }
@@ -655,7 +655,7 @@ impl Model for Resonate {
             Internal::Lease { id, expires } => {
                 let t = &s.tasks[id];
                 if t.state != TState::Acquired || t.lease_expires() != *expires {
-                    return vec![Succ::same(s)]; // released, fulfilled, or extended
+                    return vec![InternalOutcome::same(s)]; // released, fulfilled, or extended
                 }
                 let mut n = s.clone();
                 n.tasks.update(id, |t| {
@@ -663,18 +663,18 @@ impl Model for Resonate {
                     t.pid = None;
                     t.ttl = None;
                 });
-                vec![Succ::new(n)]
+                vec![InternalOutcome::new(n)]
             }
             Internal::Resume { awaited, awaiter } => {
                 if !fireable(s, awaited, awaiter) {
-                    return vec![Succ::same(s)];
+                    return vec![InternalOutcome::same(s)];
                 }
                 let mut n = s.clone();
                 n.promises.update(awaited, |p| {
                     p.callbacks.remove(awaiter);
                 });
                 n.tasks.update(awaiter, |t| t.state = TState::Pending);
-                vec![Succ::new(n)]
+                vec![InternalOutcome::new(n)]
             }
         }
     }

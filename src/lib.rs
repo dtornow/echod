@@ -58,12 +58,12 @@ pub trait Model {
 
     /// A request takes effect in `state` at `now`: every allowed outcome. An
     /// empty list means it cannot take effect here.
-    fn external(&self, req: &Self::External, state: &Self::State, now: Time) -> Vec<Outcome<Self>>;
+    fn external(&self, req: &Self::External, state: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
 
     /// Internal work runs in `state` at `now`: every possible successor. An empty
-    /// list means it can't run yet and stays pending; `Succ::same(state)` means it
+    /// list means it can't run yet and stays pending; `InternalOutcome::same(state)` means it
     /// has nothing left to do and is removed.
-    fn internal(&self, _req: &Self::Internal, _state: &Self::State, _now: Time) -> Vec<Succ<Self>> {
+    fn internal(&self, _req: &Self::Internal, _state: &Self::State, _now: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
     }
 
@@ -119,67 +119,72 @@ pub enum Fairness {
     Eventually { within: Option<Time> },
 }
 
-/// Internal work to start: now, or as a timer at an absolute time.
+/// Internal work to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sched<T> {
-    pub step: T,
-    pub at: Option<Time>,
+pub enum Sched<T> {
+    /// Runs whenever: any time from now on, within its fairness window.
+    Whenever(T),
+    /// A timer: can't run before `at`.
+    Timer(Time, T),
 }
 
-/// One possible effect of a request: the response, the next state, and the
+/// One possible effect of a request: the next state, the response, and the
 /// internal work it starts.
-pub struct Outcome<M: Model + ?Sized> {
-    pub resp: M::Response,
+pub struct ExternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
+    pub resp: M::Response,
     pub spawn: Vec<Sched<M::Internal>>,
 }
 
-impl<M: Model + ?Sized> Outcome<M> {
+impl<M: Model + ?Sized> ExternalOutcome<M> {
     pub fn new(resp: M::Response, next: M::State) -> Self {
-        Outcome { resp, next, spawn: Vec::new() }
+        ExternalOutcome { next, resp, spawn: Vec::new() }
     }
 
     /// The response, with the state unchanged.
     pub fn same(resp: M::Response, state: &M::State) -> Self {
-        Outcome::new(resp, state.clone())
+        ExternalOutcome::new(resp, state.clone())
     }
 
-    /// Internal work this outcome starts now.
+    /// Internal work that runs whenever.
     pub fn spawn(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched { step, at: None });
+        self.spawn.push(Sched::Whenever(step));
         self
     }
 
-    /// Internal work that becomes due at `at`.
+    /// Internal work that can't run before `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched { step, at: Some(at) });
+        self.spawn.push(Sched::Timer(at, step));
         self
     }
 }
 
-/// One possible effect of internal work: the next state and the internal work it starts.
-pub struct Succ<M: Model + ?Sized> {
+/// One possible effect of internal work: the next state and the internal work
+/// it starts.
+pub struct InternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
     pub spawn: Vec<Sched<M::Internal>>,
 }
 
-impl<M: Model + ?Sized> Succ<M> {
+impl<M: Model + ?Sized> InternalOutcome<M> {
     pub fn new(next: M::State) -> Self {
-        Succ { next, spawn: Vec::new() }
+        InternalOutcome { next, spawn: Vec::new() }
     }
 
     /// Runs and changes nothing: the work is done.
     pub fn same(state: &M::State) -> Self {
-        Succ::new(state.clone())
+        InternalOutcome::new(state.clone())
     }
 
+    /// Internal work that runs whenever.
     pub fn spawn(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched { step, at: None });
+        self.spawn.push(Sched::Whenever(step));
         self
     }
 
+    /// Internal work that can't run before `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched { step, at: Some(at) });
+        self.spawn.push(Sched::Timer(at, step));
         self
     }
 }

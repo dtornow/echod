@@ -43,8 +43,8 @@ pub trait Model {
     type Response: Data;   // what the system answers to a request
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
 
-    fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<Outcome<Self>>;
-    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<Succ<Self>>;  // [] = can't run yet; [Succ::same(s)] = done
+    fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
+    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
     fn fairness(&self, step: &Self::Internal) -> Fairness;                                   // May | Eventually { within }
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
@@ -65,7 +65,7 @@ pub trait Partitioned: Footprint {
 }
 ```
 
-`Outcome` is one thing the system may do when a request takes effect: the
+`ExternalOutcome` is one thing the system may do when a request takes effect: the
 response, the next state, and the internal work it starts. `external` returns
 several when the system may do several things. Rust can't tell whether a model
 implements an optional trait, so the constructor says how much to use:
@@ -76,11 +76,11 @@ Mapping from Accordant:
 - `[State]` + source generator → `#[derive(Clone, PartialEq, Eq, Hash)]`. Ownership
   replaces freezing: `apply` gets `&State` and returns new states. States are
   immutable once the checker has them; see [State representation](#state-representation).
-- `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `Outcome::new(resp, next).spawn(t)`.
+- `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `ExternalOutcome::new(resp, next).spawn(t)`.
   The response is a value, not a predicate, so it can be stored in a node and
   hashed. Wildcards (server ids, timestamps) go in `admits`.
 - `Expect.OneOf` → returning several outcomes.
-- `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → returning `vec![Succ::same(state)]`.
+- `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → returning `vec![InternalOutcome::same(state)]`.
 - `StateProfile` → `Checker::profile()`, a `Vec<Node>`.
 - `spec.Allows(op, req, resp, profile)` → `checker.call(id, op, resp)`.
 - `AllowsConcurrent` with happens-before edges → overlapping `invoke`/`ret`; real-time order *is* the happens-before relation.
@@ -133,7 +133,7 @@ The checker owns the clock. Every event happens at `now`. `tick(t)` advances it,
 and the spec reads it in `apply` and `step`.
 
 - **Timers.** An outcome or step successor can install one:
-  `Outcome::new(resp, next).timer(at, Step::Timeout(id))`. A timer is a step that
+  `ExternalOutcome::new(resp, next).timer(at, Step::Timeout(id))`. A timer is a step that
   is not enabled before `at`.
 - **Deadlines are inclusive.** `Fairness::Eventually { within: Some(d) }` means
   the step has fired by `due + d`: anything observed at that instant already
@@ -177,7 +177,7 @@ explains it. There are five sources of choice.
 
 | Source | How it's written | Who resolves it |
 |---|---|---|
-| **Outcome**: the server may answer or act in several ways | `apply` / `step` return several outcomes or successors (Accordant's `OneOf`) | the observations that follow |
+| **ExternalOutcome**: the server may answer or act in several ways | `apply` / `step` return several outcomes or successors (Accordant's `OneOf`) | the observations that follow |
 | **Interleaving**: the order of concurrent calls and background work | implicit: every pending item is a possible next move | the search, pruned by footprints |
 | **Timing**: when due work fires inside its window | `after` / `by` windows from timers and `Fairness` | the search, bounded by deadlines |
 | **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads; `request_lifetime` bounds it |
@@ -307,7 +307,7 @@ still walks every entry. The incremental hash is what fixes time.
 | `AdvanceClock` request | `checker.tick(t)` alongside the call that advances the server's debug clock |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, Step::Timeout(id))` with `within: Some(0)`; the projection becomes a real transition at the deadline |
-| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `internal` returns `vec![Succ::same(state)]` when it's no longer fireable |
+| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `internal` returns `vec![InternalOutcome::same(state)]` when it's no longer fireable |
 | `LeaseTriggers`, `RetryTriggers` | timers: `.timer(expires, Step::Lease { id, expires })` installed when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
@@ -337,10 +337,10 @@ Ranked by how much each one hurt.
    one of … / observed …" per candidate, and state printed only for the keys in
    the event's footprint.
 2. **Clone-then-mutate on every transition.** Nearly every write is
-   `let mut n = s.clone(); n.tasks.update(id, |t| …); vec![Outcome::new(resp, n)]`,
+   `let mut n = s.clone(); n.tasks.update(id, |t| …); vec![ExternalOutcome::new(resp, n)]`,
    often followed by re-reading `n.tasks[id]` to build the response. C#'s
    `.ThenState(s => …)` hides the clone. `HashedMap` has no `get_mut`, only an
-   `update` closure. Needed: `Outcome::then(resp, s, |n| …)`, a one-outcome
+   `update` closure. Needed: `ExternalOutcome::then(resp, s, |n| …)`, a one-outcome
    return that isn't `vec![…]`, and `get_mut` on `HashedMap` that rehashes on drop.
 3. **Unchanged state must still be passed in.** Every error branch is
    `status(409, s)`, which clones the state only to say it didn't change, and
@@ -368,7 +368,7 @@ Ranked by how much each one hurt.
 8. **Choices have to be enumerated by hand.** `PollTask` past its limit needs a
    `combinations` helper. Accordant has `Choose.Each`; a small set of choice
    helpers belongs in the crate.
-9. **Builder chaining in loops.** `Outcome::spawn`/`timer` take `self`, so a loop
+9. **Builder chaining in loops.** `ExternalOutcome::spawn`/`timer` take `self`, so a loop
    needs `o = o.timer(…)`. `spawn_all` and `timers` that take iterators fix it.
 
 What got better:
@@ -391,7 +391,7 @@ Porting also found three checker bugs, all fixed:
 
 ## Files
 
-- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `Outcome`, `Succ`, `Fairness`, `Touches`, `Time`.
+- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Fairness`, `Touches`, `Time`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.

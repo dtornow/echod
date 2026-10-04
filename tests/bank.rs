@@ -1,6 +1,6 @@
 //! The BankAccount sample from Accordant, with calls split into request and response.
 
-use accordant::{Checker, Config, Footprint, HashedMap, Keyed, Model, Outcome, Time, Touches};
+use accordant::{Checker, Config, Footprint, HashedMap, Keyed, Model, ExternalOutcome, Time, Touches};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
@@ -31,27 +31,27 @@ impl Model for BankModel {
     type Response = Response;
     type Internal = ();
 
-    fn external(&self, op: &Request, s: &Bank, _now: Time) -> Vec<Outcome<Self>> {
+    fn external(&self, op: &Request, s: &Bank, _now: Time) -> Vec<ExternalOutcome<Self>> {
         let with = |a: &'static str, b: i64| {
             let mut n = s.clone();
             n.accounts.insert(a, b);
             n
         };
         let out = match *op {
-            Request::Open(a) if s.accounts.contains_key(&a) => Outcome::same(Response::Conflict, s),
-            Request::Open(a) => Outcome::new(Response::Ok(0), with(a, 0)),
+            Request::Open(a) if s.accounts.contains_key(&a) => ExternalOutcome::same(Response::Conflict, s),
+            Request::Open(a) => ExternalOutcome::new(Response::Ok(0), with(a, 0)),
             Request::Deposit(a, x) => match s.accounts.get(&a) {
-                None => Outcome::same(Response::NotFound, s),
-                Some(b) => Outcome::new(Response::Ok(b + x), with(a, b + x)),
+                None => ExternalOutcome::same(Response::NotFound, s),
+                Some(b) => ExternalOutcome::new(Response::Ok(b + x), with(a, b + x)),
             },
             Request::Withdraw(a, x) => match s.accounts.get(&a) {
-                None => Outcome::same(Response::NotFound, s),
-                Some(b) if *b < x => Outcome::same(Response::Insufficient, s),
-                Some(b) => Outcome::new(Response::Ok(b - x), with(a, b - x)),
+                None => ExternalOutcome::same(Response::NotFound, s),
+                Some(b) if *b < x => ExternalOutcome::same(Response::Insufficient, s),
+                Some(b) => ExternalOutcome::new(Response::Ok(b - x), with(a, b - x)),
             },
             Request::Balance(a) => match s.accounts.get(&a) {
-                None => Outcome::same(Response::NotFound, s),
-                Some(b) => Outcome::same(Response::Ok(*b), s),
+                None => ExternalOutcome::same(Response::NotFound, s),
+                Some(b) => ExternalOutcome::same(Response::Ok(*b), s),
             },
         };
         vec![out]

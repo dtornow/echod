@@ -909,7 +909,11 @@ impl<S: Engine> Checker<S> {
     }
 
     fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
-        for Sched { step, at } in steps {
+        for sched in steps {
+            let (step, at) = match sched {
+                Sched::Whenever(step) => (step, None),
+                Sched::Timer(at, step) => (step, Some(at)),
+            };
             if let Some(Some(parts)) = &self.scope {
                 let escaped = match self.engine.internal_keys(&step) {
                     Touches::Everything => true,

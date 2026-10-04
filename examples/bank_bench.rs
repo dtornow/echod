@@ -12,7 +12,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use accordant::{Checker, Config, Footprint, Model, Outcome, Touches};
+use accordant::{Checker, Config, Footprint, Model, ExternalOutcome, Touches};
 
 struct Counting;
 
@@ -79,12 +79,12 @@ impl<M: Accounts> Model for Bank<M> {
     type Response = i64;
     type Internal = ();
 
-    fn external(&self, op: &Request, s: &M, _now: accordant::Time) -> Vec<Outcome<Self>> {
+    fn external(&self, op: &Request, s: &M, _now: accordant::Time) -> Vec<ExternalOutcome<Self>> {
         let Request::Deposit(a, x) = *op;
         let b = s.get(a).unwrap_or(0) + x;
         let mut n = s.clone();
         n.put(a, b);
-        vec![Outcome::new(b, n)]
+        vec![ExternalOutcome::new(b, n)]
     }
 
 }

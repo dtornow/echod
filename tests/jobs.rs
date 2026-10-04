@@ -1,7 +1,7 @@
 //! The JobQueue sample: background work that eventually completes, and a timer
 //! that times a job out if it has not.
 
-use accordant::{Checker, Config, Fairness, Footprint, HashedMap, Keyed, Model, Outcome, Succ, Time, Touches};
+use accordant::{Checker, Config, Fairness, Footprint, HashedMap, Keyed, Model, ExternalOutcome, InternalOutcome, Time, Touches};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 enum Status {
@@ -50,30 +50,30 @@ impl Model for JobModel {
     type Response = Response;
     type Internal = Internal;
 
-    fn external(&self, op: &Request, s: &Queue, _now: Time) -> Vec<Outcome<Self>> {
+    fn external(&self, op: &Request, s: &Queue, _now: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match *op {
-            Request::Submit(j, _) if s.jobs.contains_key(&j) => Outcome::same(Response::Duplicate, s),
+            Request::Submit(j, _) if s.jobs.contains_key(&j) => ExternalOutcome::same(Response::Duplicate, s),
             Request::Submit(j, timeout_at) => {
                 let mut n = s.clone();
                 n.jobs.insert(j, Status::Pending);
-                Outcome::new(Response::Accepted, n).spawn(Internal::Run(j)).timer(timeout_at, Internal::Timeout(j))
+                ExternalOutcome::new(Response::Accepted, n).spawn(Internal::Run(j)).timer(timeout_at, Internal::Timeout(j))
             }
             Request::Get(j) => match s.jobs.get(&j) {
-                None => Outcome::same(Response::NotFound, s),
-                Some(st) => Outcome::same(Response::Is(*st), s),
+                None => ExternalOutcome::same(Response::NotFound, s),
+                Some(st) => ExternalOutcome::same(Response::Is(*st), s),
             },
         }]
     }
 
-    fn internal(&self, req: &Internal, s: &Queue, _now: Time) -> Vec<Succ<Self>> {
+    fn internal(&self, req: &Internal, s: &Queue, _now: Time) -> Vec<InternalOutcome<Self>> {
         let (Internal::Run(j) | Internal::Timeout(j)) = *req;
         if s.jobs.get(&j) != Some(&Status::Pending) {
-            return vec![Succ::same(s)]; // done already
+            return vec![InternalOutcome::same(s)]; // done already
         }
         let to = |st| {
             let mut n = s.clone();
             n.jobs.insert(j, st);
-            Succ::new(n)
+            InternalOutcome::new(n)
         };
         match req {
             Internal::Run(_) => vec![to(Status::Completed), to(Status::Failed)],
