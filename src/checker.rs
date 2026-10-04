@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
-use crate::{CallId, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
+use crate::{CallId, Data, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
 
 type St<S> = <<S as Engine>::M as Model>::State;
 type Ex<S> = <<S as Engine>::M as Model>::External;
@@ -23,6 +23,9 @@ pub enum Pending<O, R, T> {
     InFlight { call: CallId, op: O, since: Time, must: bool, early: BTreeSet<R> },
     /// Linearized; the spec predicted `resp`, which the `Return` must match.
     Responded { call: CallId, resp: R },
+    /// A message the server sent and the client has not received yet, `count`
+    /// times over. It may be received later, or never.
+    Sent { msg: R, count: u32 },
     /// Background work, due from `after`. `must`: owed by `by`, or by the next
     /// `Quiesce` if `by` is `None`.
     Step { step: T, after: Time, by: Option<Time>, must: bool },
@@ -68,6 +71,8 @@ impl<S: Engine> fmt::Debug for Node<S> {
 pub enum Event<O, R> {
     Invoke(CallId, O),
     Return(CallId, R),
+    /// The client received a message the server sent on its own.
+    Receive(R),
     /// Time advances to the given instant. The checker stops at every timer and
     /// deadline on the way, so work fires at the instant it is due.
     Tick(Time),
@@ -264,6 +269,10 @@ impl<S: Engine> Checker<S> {
         self.observe(Event::Return(call, resp))
     }
 
+    pub fn receive(&mut self, msg: Re<S>) -> Result<(), Violation> {
+        self.observe(Event::Receive(msg))
+    }
+
     pub fn tick(&mut self, to: Time) -> Result<(), Violation> {
         self.observe(Event::Tick(to))
     }
@@ -303,7 +312,7 @@ impl<S: Engine> Checker<S> {
             let mut m = n.clone();
             m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)), false);
-            let relevant = if self.cfg.footprints { self.relevant(&m, &owed) } else { Touches::Everything };
+            let relevant = if self.cfg.footprints { self.relevant(&m, &owed, Touches::Only(Vec::new())) } else { Touches::Everything };
             let _ = self.search(m, &relevant, &mut explored, |x| {
                 for i in &x.pending {
                     let found: Vec<&Re<S>> = match i {
@@ -335,6 +344,11 @@ impl<S: Engine> Checker<S> {
                         self.calls.insert(*call, p.clone());
                     }
                 }
+                let i = self.gather(scope);
+                self.within(i, |c| c.observe_in(index, &e))
+            }
+            Event::Receive(msg) => {
+                let scope = self.scope(self.engine.message_keys(msg));
                 let i = self.gather(scope);
                 self.within(i, |c| c.observe_in(index, &e))
             }
@@ -665,23 +679,33 @@ impl<S: Engine> Checker<S> {
     /// with what is owed is tried. Everything else commutes past `e` and waits.
     fn explain(&self, n: Node<S>, e: &Event<Ex<S>, Re<S>>, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
         let owed = self.owed(&n, e);
-        if owed.is_empty() {
-            return Ok(self.consume(&n, e)?.into_iter().collect());
+        let unsent = |m: &Node<S>| matches!(e, Event::Receive(msg) if !self.has_sent(m, msg));
+        if owed.is_empty() && !unsent(&n) {
+            return self.consume(&n, e);
         }
         let relevant = if matches!(e, Event::Quiesce) || !self.cfg.footprints {
             Touches::Everything
         } else {
-            self.relevant(&n, &owed)
+            let seed = match e {
+                Event::Receive(msg) => self.engine.message_keys(msg),
+                _ => Touches::Only(Vec::new()),
+            };
+            self.relevant(&n, &owed, seed)
         };
         let mut out = Vec::new();
         self.search(n, &relevant, explored, |m| {
-            if !self.owed(m, e).is_empty() {
+            // Keep firing while something is owed, or the message isn't sent yet.
+            if !self.owed(m, e).is_empty() || unsent(m) {
                 return Ok(true);
             }
             out.extend(self.consume(m, e)?);
             Ok(false)
         })?;
         Ok(out)
+    }
+
+    fn has_sent(&self, m: &Node<S>, msg: &Re<S>) -> bool {
+        m.pending.iter().any(|i| matches!(i, Pending::Sent { msg: sent, .. } if self.engine.model().admits(sent, msg)))
     }
 
     /// Before the clock moves to `t`, anything that may happen at the current
@@ -702,7 +726,7 @@ impl<S: Engine> Checker<S> {
         if forced.is_empty() {
             return Ok(vec![n]);
         }
-        let relevant = if self.cfg.footprints { self.relevant(&n, &forced) } else { Touches::Everything };
+        let relevant = if self.cfg.footprints { self.relevant(&n, &forced, Touches::Only(Vec::new())) } else { Touches::Everything };
         let mut out = Vec::new();
         self.search(n, &relevant, explored, |m| {
             let ready = !m.pending.iter().any(|i| matches!(i, Pending::InFlight { must: true, .. }))
@@ -808,8 +832,11 @@ impl<S: Engine> Checker<S> {
     }
 
     /// The footprint of what is owed, closed over pending work that shares keys with it.
-    fn relevant(&self, n: &Node<S>, owed: &[&P<S>]) -> Touches<S::Key> {
-        let mut keys: BTreeSet<S::Key> = BTreeSet::new();
+    fn relevant(&self, n: &Node<S>, owed: &[&P<S>], seed: Touches<S::Key>) -> Touches<S::Key> {
+        let mut keys: BTreeSet<S::Key> = match seed {
+            Touches::Everything => return Touches::Everything,
+            Touches::Only(ks) => ks.into_iter().collect(),
+        };
         for item in owed {
             match self.keys(item) {
                 Touches::Everything => return Touches::Everything,
@@ -840,7 +867,7 @@ impl<S: Engine> Checker<S> {
         match item {
             Pending::InFlight { .. } => true,
             Pending::Step { after, .. } => *after <= self.now,
-            Pending::Responded { .. } => false,
+            Pending::Responded { .. } | Pending::Sent { .. } => false,
         }
     }
 
@@ -849,6 +876,7 @@ impl<S: Engine> Checker<S> {
             Pending::InFlight { op, .. } => self.engine.external_keys(op),
             Pending::Step { step, .. } => self.engine.internal_keys(step),
             Pending::Responded { .. } => Touches::Only(Vec::new()),
+            Pending::Sent { msg, .. } => self.engine.message_keys(msg),
         }
     }
 
@@ -900,6 +928,9 @@ impl<S: Engine> Checker<S> {
                     .map(|s| {
                         let mut p = without();
                         self.spawn(&mut p, s.spawn);
+                        for msg in s.send {
+                            add_sent(&mut p, msg);
+                        }
                         Node { state: self.states.intern(s.next), pending: p }
                     })
                     .collect()
@@ -935,7 +966,7 @@ impl<S: Engine> Checker<S> {
     }
 
     /// Applies the observation itself. `Ok(None)` means this node cannot explain it.
-    fn consume(&self, m: &Node<S>, e: &Event<Ex<S>, Re<S>>) -> Result<Option<Node<S>>, String> {
+    fn consume(&self, m: &Node<S>, e: &Event<Ex<S>, Re<S>>) -> Result<Vec<Node<S>>, String> {
         let mut p = m.pending.clone();
         match e {
             Event::Invoke(call, op) => {
@@ -961,12 +992,29 @@ impl<S: Engine> Checker<S> {
                     Some(i) => {
                         p.remove(&i);
                     }
-                    None => return Ok(None),
+                    None => return Ok(Vec::new()),
                 }
+            }
+            Event::Receive(observed) => {
+                // Any matching message may be the one received.
+                return Ok(p
+                    .iter()
+                    .filter_map(|i| match i {
+                        Pending::Sent { msg, count } if self.engine.model().admits(msg, observed) => {
+                            let mut q = p.clone();
+                            q.remove(i);
+                            if *count > 1 {
+                                q.insert(Pending::Sent { msg: msg.clone(), count: count - 1 });
+                            }
+                            Some(Node { state: m.state.clone(), pending: q })
+                        }
+                        _ => None,
+                    })
+                    .collect());
             }
             Event::Tick(_) | Event::Quiesce => {}
         }
-        Ok(Some(Node { state: m.state.clone(), pending: p }))
+        Ok(vec![Node { state: m.state.clone(), pending: p }])
     }
 }
 
@@ -978,9 +1026,22 @@ fn intersects<K: Ord>(a: &Touches<K>, b: &Touches<K>) -> bool {
     }
 }
 
-/// Work a node may simply never do: dropping it cannot add behaviors.
+/// Records one more copy of a sent message.
+fn add_sent<O: Data, R: Data, T: Data>(p: &mut HashedSet<Pending<O, R, T>>, msg: R) {
+    let have = p.iter().find_map(|i| match i {
+        Pending::Sent { msg: m, count } if *m == msg => Some(*count),
+        _ => None,
+    });
+    if let Some(n) = have {
+        p.remove(&Pending::Sent { msg: msg.clone(), count: n });
+    }
+    p.insert(Pending::Sent { msg, count: have.unwrap_or(0) + 1 });
+}
+
+/// Work a node may simply never do, and messages it may never deliver: dropping
+/// them cannot add behaviors.
 fn optional<O, R, T>(item: &Pending<O, R, T>) -> bool {
-    matches!(item, Pending::Step { must: false, .. })
+    matches!(item, Pending::Step { must: false, .. } | Pending::Sent { .. })
 }
 
 /// An item with its early answers cleared, so calls compare by identity alone.

@@ -90,6 +90,8 @@ pub struct Task {
     pub pid: Option<String>,
     pub ttl: Option<Time>,
     pub acquired_at: Time,
+    /// The execute message for the task's current pending period has been sent.
+    pub dispatched: bool,
 }
 
 impl Task {
@@ -204,6 +206,8 @@ pub enum Response {
     Created(PromiseRec, TaskRec),
     /// `task.poll`: claimed tasks, ordered by id.
     Claimed(Vec<TaskRec>),
+    /// Server-sent: a worker should run this task at this version.
+    Execute { id: Id, version: u32 },
 }
 
 impl Response {
@@ -341,9 +345,12 @@ impl Resonate {
         n.promises.insert(req.id.clone(), p.clone());
         if req.target {
             let state = if live { TState::Pending } else { TState::Fulfilled };
-            n.tasks.insert(req.id.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0 });
+            let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, dispatched: false };
+            n.tasks.insert(req.id.clone(), task);
         }
         let o = ExternalOutcome::new(Response::Promise(prec(&req.id, &p)), n);
+        // A live targeted promise gets its task dispatched: an internal step sends `Execute`.
+        let o = if live && req.target { o.later(on(&[&req.id])) } else { o };
         vec![if live { o.timer(req.timeout_at, on(&[&req.id])) } else { o }]
     }
 
@@ -405,7 +412,8 @@ impl Resonate {
             timer_tag: false,
             callbacks: BTreeSet::new(),
         };
-        let mut t = Task { state: TState::Pending, version: 0, pid: None, ttl: None, acquired_at: 0 };
+        // Acquired by the caller right away: nothing to dispatch.
+        let mut t = Task { state: TState::Pending, version: 0, pid: None, ttl: None, acquired_at: 0, dispatched: true };
         t.acquire(1, "worker-self", TASK_CREATE_TTL, now);
         let mut n = s.clone();
         n.promises.insert(id.clone(), p.clone());
@@ -584,8 +592,9 @@ impl Model for Resonate {
                         t.state = TState::Pending;
                         t.pid = None;
                         t.ttl = None;
+                        t.dispatched = false;
                     });
-                    vec![ExternalOutcome::new(Response::Status(200), n)]
+                    vec![ExternalOutcome::new(Response::Status(200), n).later(on(&[id]))]
                 }
             },
 
@@ -651,6 +660,7 @@ impl Model for Resonate {
                     t.state = TState::Pending;
                     t.pid = None;
                     t.ttl = None;
+                    t.dispatched = false;
                 });
             }
         }
@@ -661,13 +671,29 @@ impl Model for Resonate {
                     n.promises.update(awaited, |p| {
                         p.callbacks.remove(awaiter);
                     });
-                    n.tasks.update(awaiter, |t| t.state = TState::Pending);
+                    n.tasks.update(awaiter, |t| {
+                        t.state = TState::Pending;
+                        t.dispatched = false;
+                    });
                 }
+            }
+        }
+        // A pending task that hasn't been dispatched yet is: the server sends `Execute`.
+        let mut send = Vec::new();
+        for id in ids {
+            let due = n.tasks.get(id).is_some_and(|t| t.state == TState::Pending && !t.dispatched)
+                && n.promises.get(id).is_some_and(Promise::live);
+            if due {
+                n.tasks.update(id, |t| t.dispatched = true);
+                send.push(Response::Execute { id: id.clone(), version: n.tasks[id].version });
             }
         }
         let mut out = InternalOutcome::new(n);
         for r in spawn {
             out = out.later(r);
+        }
+        for m in send {
+            out = out.send(m);
         }
         vec![out]
     }
@@ -708,6 +734,13 @@ impl Footprint for Resonate {
 
     fn internal_touches(&self, ids: &Internal) -> Touches<Id> {
         Touches::Only(ids.iter().cloned().collect())
+    }
+
+    fn message_touches(&self, msg: &Response) -> Touches<Id> {
+        match msg {
+            Response::Execute { id, .. } => Touches::one(id.clone()),
+            _ => Touches::Only(Vec::new()), // never sent: nothing can explain receiving it
+        }
     }
 }
 

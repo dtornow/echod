@@ -513,3 +513,57 @@ fn partitioning_never_changes_a_verdict() {
         assert_eq!(on.quiesce().is_ok(), off.quiesce().is_ok(), "seed {seed}: quiesce");
     }
 }
+
+// ------------------------------------------------------- server-sent messages
+
+fn execute(id: &str, version: u32) -> Response {
+    Response::Execute { id: id.into(), version }
+}
+
+#[test]
+fn a_new_task_is_dispatched_once() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "sent once, received once");
+}
+
+#[test]
+fn a_message_nobody_sent_is_rejected() {
+    let mut t = Trace::new(1_000_000);
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "no such task");
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    assert!(t.c.receive(execute("ex:t", 3)).is_err(), "wrong version");
+}
+
+#[test]
+fn a_message_may_never_arrive() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    t.c.quiesce().unwrap(); // the execute was sent; nobody has to receive it
+    t.step("acquire t", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
+}
+
+#[test]
+fn a_resume_dispatches_the_waiting_task() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create a", create("ex:a", FAR, "x").external().op(), st(200));
+    t.step("create r +target", create("ex:r", FAR, "r").target().op(), st(200));
+    t.step("acquire r", acquire("ex:r", 0, "w"), task(TState::Acquired, 1));
+    assert!(t.c.receive(execute("ex:r", 1)).is_err(), "running, not suspended");
+    t.step("suspend r on a", suspend("ex:r", 1, &["ex:a"]), st(200));
+    t.step("settle a", Request::SettlePromise(settle("ex:a", "resolved", "v")), st(200));
+    // Receiving the execute forces the hidden resume, then the dispatch.
+    t.c.receive(execute("ex:r", 1)).unwrap();
+    assert!(t.c.all(|s| s.tasks["ex:r"].state == TState::Pending));
+}
+
+#[test]
+fn a_reclaimed_lease_dispatches_again() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    t.step("acquire t ttl 5000", acquire_ttl("ex:t", 0, "w", 5_000), task(TState::Acquired, 1));
+    t.tick(1_010_000);
+    t.c.receive(execute("ex:t", 1)).unwrap();
+}

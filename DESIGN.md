@@ -64,6 +64,16 @@ pub trait Partitioned: Footprint {
 }
 ```
 
+**Server-sent messages.** Internal work can send messages to clients:
+`InternalOutcome::new(next).send(msg)`, with messages of the `Response` type.
+The client's side is `Event::Receive(msg)` (`checker.receive(msg)`). A sent
+message is delivered at most once, in any order, at any time after it was sent,
+or never; an unreceived message is optional, so it never forces a split.
+Receiving a message no explanation has sent yet forces the internal work that
+could send it, searched on the message's keys (`Footprint::message_touches`).
+Resonate uses this for `Execute { id, version }`, sent when a task becomes
+pending: created with a target, resumed, reclaimed after its lease, or released.
+
 `ExternalOutcome` is one thing the system may do when a request takes effect: the
 response, the next state, and the internal work it starts. `external` returns
 several when the system may do several things. Rust can't tell whether a model
@@ -327,7 +337,7 @@ still walks every entry. The incremental hash is what fixes time.
 | `LeaseTriggers`, `RetryTriggers` | `.after(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
-| `debug.messages` (execute/unblock) | outbound messages as their own `Invoke`/`Return` pairs, or an `Op::Drain` whose response is the message multiset |
+| `debug.messages` (execute/unblock) | `execute` is a server-sent `Response::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
 | footprint | promise id plus awaiter ids for callbacks; ticks touch only what has a timer due |
 
 Origins: the only request that may cross origins is a fence that creates a
