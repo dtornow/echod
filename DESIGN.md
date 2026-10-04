@@ -65,16 +65,19 @@ pub trait Partitioned: Footprint {
 }
 ```
 
-**Server-sent messages.** Internal work can send messages to clients:
-`InternalOutcome::new(next).send(msg)`, with messages of the model's own
+**Server-sent messages.** Requests and internal work can send dispatches to
+clients: `.send(msg)` on either outcome, with messages of the model's own
 `Dispatch` type (`()` for a model that sends nothing).
 The client's side is `Event::Receive(msg)` (`checker.receive(msg)`). A sent
 message is delivered at most once, in any order, at any time after it was sent,
 or never; an unreceived message is optional, so it never forces a split.
 Receiving a message no explanation has sent yet forces the internal work that
 could send it, searched on the message's keys (`Footprint::dispatch_touches`).
-Resonate uses this for `Dispatch::Execute { id, version }`, sent when a task becomes
-pending: created with a target, resumed, reclaimed after its lease, or released.
+Resonate uses this for `Dispatch::Execute { id, version }`, sent by the step that
+makes a task pending: created with a target, resumed, reclaimed after its lease,
+or released. Sending from that step, rather than from a separate "dispatch
+later" step, matters: a separate step may or may not have run before any later
+request, which doubles the explanations per task.
 
 `ExternalOutcome` is one thing the system may do when a request takes effect: the
 response, the next state, and the internal work it starts. `external` returns

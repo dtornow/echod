@@ -227,7 +227,7 @@ fn callback_layer() {
     t.step("suspend foreign → 400", suspend("ex:root", 1, &["other:x"]), st(400));
     t.step("settle awaited → arms resume", Request::SettlePromise(settle("ex:awaited", "resolved", "v")), st(200));
     // C# polls until the resume lands; here Quiesce says the server is idle.
-    t.c.quiesce().unwrap();
+    t.c.assert_idle().unwrap();
     assert!(t.c.all(|s| s.tasks["ex:root"].state == TState::Pending));
     t.step("re-acquire root v1 → v2", acquire("ex:root", 1, "worker-1"), task(TState::Acquired, 2));
 
@@ -479,7 +479,7 @@ fn partitioning_never_changes_a_verdict() {
                 7 => Request::GetTask(id),
                 _ => Request::GetPromise(id),
             };
-            let mut events = vec![Event::Invoke(call, op.clone())];
+            let mut events = vec![Event::Invoke { at: clock, call, req: op.clone() }];
             match rng.next(4) {
                 0 => open.push((call, op.clone())), // answered later, or never
                 _ => {
@@ -489,19 +489,18 @@ fn partitioning_never_changes_a_verdict() {
                     } else {
                         allowed[rng.next(allowed.len() as u64) as usize].clone()
                     };
-                    events.push(Event::Return(call, resp));
+                    events.push(Event::Return { at: clock, call, res: resp });
                 }
             }
             if rng.next(5) == 0 {
-                clock += rng.next(2_000);
-                events.push(Event::Tick(clock));
+                clock += rng.next(2_000); // the next observation is later
             }
             if !open.is_empty() && rng.next(4) == 0 {
                 // A late answer: whatever the op would get if called now. Valid or
                 // not, both checkers must agree.
                 let (c, op) = open.swap_remove(rng.next(open.len() as u64) as usize);
                 let resp = off.allowed(&op).first().cloned().unwrap_or(Response::Status(404));
-                events.push(Event::Return(c, resp));
+                events.push(Event::Return { at: clock, call: c, res: resp });
             }
             for e in events {
                 // A rejected event leaves both checkers as they were, so they stay comparable.
@@ -510,7 +509,7 @@ fn partitioning_never_changes_a_verdict() {
                 assert_eq!(a, b, "seed {seed}: partitioned={a} unpartitioned={b} on {e:?}");
             }
         }
-        assert_eq!(on.quiesce().is_ok(), off.quiesce().is_ok(), "seed {seed}: quiesce");
+        assert_eq!(on.assert_idle().is_ok(), off.assert_idle().is_ok(), "seed {seed}: quiesce");
     }
 }
 
@@ -540,7 +539,7 @@ fn a_message_nobody_sent_is_rejected() {
 fn a_message_may_never_arrive() {
     let mut t = Trace::new(1_000_000);
     t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
-    t.c.quiesce().unwrap(); // the execute was sent; nobody has to receive it
+    t.c.assert_idle().unwrap(); // the execute was sent; nobody has to receive it
     t.step("acquire t", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
 }
 
@@ -569,21 +568,39 @@ fn a_reclaimed_lease_dispatches_again() {
 }
 
 #[test]
-fn check_timed_takes_calls_ticks_and_dispatches() {
+fn check_takes_calls_and_dispatches_at_their_times() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     let create_r = create("ex:r", now + 10_000, "r").target().op();
     let created = t.c.allowed(&create_r).remove(0); // the pending record
     let mut c = Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() });
     let trace = vec![
-        (now, Event::Invoke(1, create_r)),
-        (now, Event::Return(1, created.clone())),
-        (now + 5, Event::Receive(execute("ex:r", 0))),
-        (now + 20_000, Event::Invoke(2, get("ex:r"))),
+        Event::Invoke { at: now, call: 1, req: create_r },
+        Event::Return { at: now, call: 1, res: created.clone() },
+        Event::Receive { at: now + 5, msg: execute("ex:r", 0) },
+        Event::Invoke { at: now + 20_000, call: 2, req: get("ex:r") },
     ];
-    c.check_timed(trace).unwrap();
+    c.check(trace).unwrap();
     // The read was sent after the deadline: it can only see the promise timed out.
     let stale = created; // pending, as of before the deadline
-    let v = c.check_timed(vec![(now + 20_000, Event::Return(2, stale))]).unwrap_err();
+    let v = c.check(vec![Event::Return { at: now + 20_000, call: 2, res: stale }]).unwrap_err();
     assert_eq!(v.index, 0);
+}
+
+/// Workflow after workflow, each sending dispatches nobody receives, must not
+/// multiply the explanations.
+#[test]
+fn workflows_keep_a_single_explanation() {
+    let mut t = Trace::new(10);
+    for i in 0..30 {
+        let (a, x) = (format!("o:a{i}"), format!("o:x{i}"));
+        t.step("create a", create(&a, FAR, "x").external().op(), st(200));
+        t.step("create x", create(&x, FAR, "w").target().op(), st(200));
+        t.step("acquire x", acquire(&x, 0, "p"), task(TState::Acquired, 1));
+        t.step("suspend x", suspend(&x, 1, &[&a]), st(200));
+        t.step("settle a", Request::SettlePromise(settle(&a, "resolved", "v")), st(200));
+        t.step("re-acquire x", acquire(&x, 1, "p"), task(TState::Acquired, 2));
+        t.step("fulfill x", fulfill(&x, 2, "resolved", "ok"), st(200));
+    }
+    assert_eq!(t.c.stats.max_width, 1, "{:?}", t.c.stats);
 }

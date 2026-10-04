@@ -118,11 +118,11 @@ pub trait Partitioned: Footprint {
 /// by its deadline is a violation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sched<T> {
-    /// Runs later: any time from now on; must have happened by the next `Quiesce`.
+    /// Runs later: any time from now on; must have happened by the next `assert_idle`.
     Later(T),
     /// A timer: runs exactly at the given time.
     Timer(Time, T),
-    /// Runs any time after the given time; must have happened by the next `Quiesce`.
+    /// Runs any time after the given time; must have happened by the next `assert_idle`.
     After(Time, T),
     /// Runs any time from now on; must have happened within the given duration.
     Within(Time, T),
@@ -130,22 +130,30 @@ pub enum Sched<T> {
     Maybe(T),
 }
 
-/// One possible effect of a request: the next state, the response, and the
-/// internal work it starts.
+/// One possible effect of a request: the next state, the response, the
+/// internal work it starts, and the dispatches it sends.
 pub struct ExternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
-    pub resp: M::Response,
+    pub res: M::Response,
     pub spawn: Vec<Sched<M::Internal>>,
+    pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> ExternalOutcome<M> {
-    pub fn new(resp: M::Response, next: M::State) -> Self {
-        ExternalOutcome { next, resp, spawn: Vec::new() }
+    pub fn new(res: M::Response, next: M::State) -> Self {
+        ExternalOutcome { next, res, spawn: Vec::new(), send: Vec::new() }
     }
 
     /// The response, with the state unchanged.
-    pub fn same(resp: M::Response, state: &M::State) -> Self {
-        ExternalOutcome::new(resp, state.clone())
+    pub fn same(res: M::Response, state: &M::State) -> Self {
+        ExternalOutcome::new(res, state.clone())
+    }
+
+    /// A dispatch to a client, sent when the request takes effect. It may be
+    /// received once, at any time after, or never.
+    pub fn send(mut self, msg: M::Dispatch) -> Self {
+        self.send.push(msg);
+        self
     }
 
     /// Internal work that runs later.

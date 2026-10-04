@@ -233,57 +233,69 @@ fn model() -> Checker<Keyed<BankModel>> {
     Checker::with_footprints(BankModel, Bank::default(), Config::default())
 }
 
+fn inv(at: Time, call: u64, req: Request) -> Event<Request, Response, ()> {
+    Event::Invoke { at, call, req }
+}
+
+fn ret(at: Time, call: u64, res: Response) -> Event<Request, Response, ()> {
+    Event::Return { at, call, res }
+}
+
 #[test]
 fn check_accepts_a_valid_trace_of_events() {
     let trace = vec![
-        Event::Invoke(0, Request::Open("alice")),
-        Event::Return(0, Response::Ok(0)),
-        Event::Invoke(1, Request::Deposit("alice", 100)),
-        Event::Return(1, Response::Ok(100)),
-        Event::Invoke(2, Request::Withdraw("alice", 60)),
-        Event::Invoke(3, Request::Withdraw("alice", 60)),
-        Event::Return(3, Response::Ok(40)),
-        Event::Return(2, Response::Insufficient),
+        inv(0, 0, Request::Open("alice")),
+        ret(0, 0, Response::Ok(0)),
+        inv(1, 1, Request::Deposit("alice", 100)),
+        ret(1, 1, Response::Ok(100)),
+        inv(2, 2, Request::Withdraw("alice", 60)),
+        inv(2, 3, Request::Withdraw("alice", 60)),
+        ret(3, 3, Response::Ok(40)),
+        ret(4, 2, Response::Insufficient),
     ];
-    let stats = model().check(trace).unwrap().clone();
-    assert_eq!(stats.events, 8);
+    model().check(trace).unwrap();
 }
 
 #[test]
 fn check_reports_the_position_of_the_first_bad_observation() {
     let trace = vec![
-        Event::Invoke(0, Request::Open("alice")),
-        Event::Return(0, Response::Ok(0)),
-        Event::Invoke(1, Request::Deposit("alice", 100)),
-        Event::Return(1, Response::Ok(100)),
-        Event::Invoke(2, Request::Withdraw("alice", 60)),
-        Event::Invoke(3, Request::Withdraw("alice", 60)),
-        Event::Return(2, Response::Ok(40)),
-        Event::Return(3, Response::Ok(40)), // double spend
-        Event::Invoke(4, Request::Balance("alice")),
+        inv(0, 0, Request::Open("alice")),
+        ret(0, 0, Response::Ok(0)),
+        inv(1, 1, Request::Deposit("alice", 100)),
+        ret(1, 1, Response::Ok(100)),
+        inv(2, 2, Request::Withdraw("alice", 60)),
+        inv(2, 3, Request::Withdraw("alice", 60)),
+        ret(3, 2, Response::Ok(40)),
+        ret(3, 3, Response::Ok(40)), // double spend
+        inv(4, 4, Request::Balance("alice")),
     ];
     let v = model().check(trace).unwrap_err();
     assert_eq!(v.index, 7, "{v}");
 }
 
 #[test]
-fn check_timed_advances_the_clock_to_each_observation() {
+fn check_rejects_time_going_backwards() {
+    let trace = vec![inv(10, 0, Request::Open("alice")), ret(5, 0, Response::Ok(0))];
+    assert_eq!(model().check(trace).unwrap_err().index, 1);
+}
+
+#[test]
+fn check_advances_the_clock_to_each_observation() {
     let cfg = Config { request_lifetime: Some(1_000), ..Config::default() };
     let open = vec![
-        (0, Event::Invoke(0, Request::Open("alice"))),
-        (0, Event::Return(0, Response::Ok(0))),
-        (10, Event::Invoke(1, Request::Deposit("alice", 50))), // never answered
+        inv(0, 0, Request::Open("alice")),
+        ret(0, 0, Response::Ok(0)),
+        inv(10, 1, Request::Deposit("alice", 50)), // never answered
     ];
-    let late_read = |at| vec![(at, Event::Invoke(2, Request::Balance("alice"))), (at, Event::Return(2, Response::Ok(50)))];
+    let late_read = |at| vec![inv(at, 2, Request::Balance("alice")), ret(at, 2, Response::Ok(50))];
 
     let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg.clone());
-    c.check_timed(open.clone().into_iter().chain(late_read(500))).unwrap(); // within its lifetime
+    c.check(open.clone().into_iter().chain(late_read(500))).unwrap(); // within its lifetime
 
     let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
-    c.check_timed(open).unwrap();
-    c.check_timed(vec![(5_000, Event::Invoke(3, Request::Balance("alice"))), (5_000, Event::Return(3, Response::Ok(0)))])
-        .unwrap(); // past it: never happened
-    assert!(c.check_timed(late_read(6_000)).is_err());
+    c.check(open).unwrap();
+    c.check(vec![inv(5_000, 3, Request::Balance("alice")), ret(5_000, 3, Response::Ok(0))]).unwrap(); // past it: never happened
+    assert!(c.check(late_read(6_000)).is_err());
 }
 
 #[test]

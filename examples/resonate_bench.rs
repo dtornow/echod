@@ -53,13 +53,12 @@ fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Dispatch>>
     for (call, (op, t)) in script.iter().enumerate() {
         if *t > c.now() {
             c.tick(*t).unwrap();
-            trace.push(Event::Tick(*t));
         }
         let allowed = c.allowed(op);
-        let resp = allowed.iter().find(|r| r.status() == 200).unwrap_or(&allowed[0]).clone();
-        c.call(call as u64, op.clone(), resp.clone()).unwrap();
-        trace.push(Event::Invoke(call as u64, op.clone()));
-        trace.push(Event::Return(call as u64, resp));
+        let res = allowed.iter().find(|r| r.status() == 200).unwrap_or(&allowed[0]).clone();
+        c.call(call as u64, op.clone(), res.clone()).unwrap();
+        trace.push(Event::Invoke { at: *t, call: call as u64, req: op.clone() });
+        trace.push(Event::Return { at: *t, call: call as u64, res });
     }
     trace
 }
@@ -68,7 +67,7 @@ fn check(trace: &[Event<Request, Response, Dispatch>], footprints: bool) -> (boo
     let t0 = Instant::now();
     let cfg = Config { footprints, max_explore: 10_000_000, max_width: 1 << 20, ..Config::default() };
     let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);
-    let ok = trace.iter().all(|e| c.observe(e.clone()).is_ok());
+    let ok = c.check(trace.iter().cloned()).is_ok();
     (ok, t0.elapsed(), c.stats.clone())
 }
 
