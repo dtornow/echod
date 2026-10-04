@@ -161,6 +161,12 @@ pub struct Checker<S: Spec> {
     profile: Vec<Node<S>>,
     states: Interner<S::State>,
     now: Time,
+    /// While an event is explained in a factor: the partitions it owns.
+    scope: Option<Option<BTreeSet<S::Key>>>,
+    /// The first spawned step that left `scope`, if any.
+    escaped: std::cell::RefCell<Option<String>>,
+    /// A partition of each outstanding call, to find its factor on `Return`.
+    calls: HashMap<CallId, S::Key>,
     pub stats: Stats,
 }
 
@@ -184,6 +190,9 @@ impl<S: Spec> Checker<S> {
             profile: Vec::new(),
             states: Interner::new(),
             now,
+            scope: None,
+            escaped: Default::default(),
+            calls: HashMap::new(),
             stats: Stats { max_width: 1, ..Stats::default() },
         }
     }
@@ -295,13 +304,22 @@ impl<S: Spec> Checker<S> {
         let index = self.stats.events;
         self.stats.events += 1;
         match &e {
-            Event::Invoke(_, op) => {
+            Event::Invoke(call, op) => {
                 let scope = self.scope(self.spec.op_keys(op));
+                if let Scope::Parts(ps) = &scope {
+                    if let Some(p) = ps.first() {
+                        self.calls.insert(*call, p.clone());
+                    }
+                }
                 let i = self.gather(scope);
                 self.within(i, |c| c.observe_in(index, &e))
             }
             Event::Return(call, _) => match self.factor_of(*call) {
-                Some(i) => self.within(i, |c| c.observe_in(index, &e)),
+                Some(i) => {
+                    self.within(i, |c| c.observe_in(index, &e))?;
+                    self.calls.remove(call);
+                    Ok(())
+                }
                 None => Err(self.violation(index, &e, format!("call {call} is not outstanding"))),
             },
             Event::Tick(to) => {
@@ -336,28 +354,20 @@ impl<S: Spec> Checker<S> {
     /// escaped the factor's partitions.
     fn within(&mut self, i: usize, f: impl FnOnce(&mut Self) -> Result<(), Violation>) -> Result<(), Violation> {
         self.profile = std::mem::take(&mut self.factors[i].nodes);
+        self.scope = Some(self.factors[i].parts.clone());
         let r = f(self);
+        self.scope = None;
         self.factors[i].nodes = std::mem::take(&mut self.profile);
         r?;
         self.stats.max_width = self.stats.max_width.max(self.factors[i].nodes.len());
-        let Some(parts) = &self.factors[i].parts else { return Ok(()) };
-        for n in &self.factors[i].nodes {
-            for item in &n.pending {
-                let escaped = match self.keys(item) {
-                    Keys::All => true,
-                    Keys::Some(ks) => ks.iter().any(|k| self.spec.part(k).is_none_or(|p| !parts.contains(&p))),
-                };
-                if escaped {
-                    return Err(Violation {
-                        index: self.stats.events - 1,
-                        now: self.now,
-                        event: format!("{item:?}"),
-                        reason: "spec error: work reaches outside the partitions of the request or step that spawned it"
-                            .into(),
-                        profile: Vec::new(),
-                    });
-                }
-            }
+        if let Some(step) = self.escaped.borrow_mut().take() {
+            return Err(Violation {
+                index: self.stats.events - 1,
+                now: self.now,
+                event: step,
+                reason: "spec error: work reaches outside the partitions of the request or step that spawned it".into(),
+                profile: Vec::new(),
+            });
         }
         self.split(i);
         Ok(())
@@ -493,6 +503,14 @@ impl<S: Spec> Checker<S> {
     }
 
     fn factor_of(&self, call: CallId) -> Option<usize> {
+        if let Some(i) = self.factors.iter().position(|f| f.parts.is_none()) {
+            return Some(i);
+        }
+        if let Some(p) = self.calls.get(&call) {
+            if let Some(i) = self.factors.iter().position(|f| f.parts.as_ref().is_some_and(|ps| ps.contains(p))) {
+                return Some(i);
+            }
+        }
         self.factors.iter().position(|f| {
             f.nodes.iter().any(|n| {
                 n.pending.iter().any(|i| {
@@ -698,6 +716,9 @@ impl<S: Spec> Checker<S> {
             }
             let urgent = self.has_overdue(&m);
             for item in &m.pending {
+                if !self.can_fire(item) {
+                    continue;
+                }
                 if urgent && !self.is_overdue(item, &m.state) {
                     continue;
                 }
@@ -776,19 +797,29 @@ impl<S: Spec> Checker<S> {
         }
         loop {
             let before = keys.len();
-            for item in &n.pending {
-                let ks = self.keys(item);
-                let set = Keys::Some(keys.iter().cloned().collect());
-                if intersects(&set, &ks) {
-                    match ks {
-                        Keys::All => return Keys::All,
-                        Keys::Some(ks) => keys.extend(ks),
+            for item in n.pending.iter().filter(|i| self.can_fire(i)) {
+                match self.keys(item) {
+                    Keys::All => return Keys::All,
+                    Keys::Some(ks) => {
+                        if ks.iter().any(|k| keys.contains(k)) {
+                            keys.extend(ks);
+                        }
                     }
                 }
             }
             if keys.len() == before {
                 return Keys::Some(keys.into_iter().collect());
             }
+        }
+    }
+
+    /// Whether `item` could fire at the current time at all: a call in flight, or
+    /// a step whose time has come. Cheap, so it filters before footprints are built.
+    fn can_fire(&self, item: &P<S>) -> bool {
+        match item {
+            Pending::InFlight { .. } => true,
+            Pending::Step { after, .. } => *after <= self.now,
+            Pending::Responded { .. } => false,
         }
     }
 
@@ -860,6 +891,15 @@ impl<S: Spec> Checker<S> {
 
     fn spawn(&self, pending: &mut BTreeSet<P<S>>, steps: Vec<Sched<S::Step>>) {
         for Sched { step, at } in steps {
+            if let Some(Some(parts)) = &self.scope {
+                let escaped = match self.spec.step_keys(&step) {
+                    Keys::All => true,
+                    Keys::Some(ks) => ks.iter().any(|k| self.spec.part(k).is_none_or(|p| !parts.contains(&p))),
+                };
+                if escaped {
+                    self.escaped.borrow_mut().get_or_insert_with(|| format!("{step:?}"));
+                }
+            }
             let after = at.map_or(self.now, |t| t.max(self.now));
             let item = match self.spec.fairness(&step) {
                 Fairness::May => Pending::Step { step, after, by: None, must: false },
