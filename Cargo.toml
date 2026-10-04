@@ -1,0 +1,8 @@
+[package]
+name = "accordant"
+version = "0.1.0"
+edition = "2021"
+description = "Executable behavioral specifications: a Rust take on Microsoft Accordant's model, with split request/response and bounded eventually"
+license = "MIT"
+
+[dependencies]
