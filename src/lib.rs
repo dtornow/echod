@@ -57,6 +57,9 @@ pub trait Model {
     type Response: Data;
     /// Internal: work the system does on its own (a timeout, a resume).
     type Internal: Data;
+    /// What the system sends to clients on its own, from internal work (an
+    /// "execute this task" to a worker). `()` if it sends nothing.
+    type Message: Data;
 
     /// A request takes effect in `state` at `now`: every allowed outcome. An
     /// empty list means it cannot take effect here.
@@ -90,7 +93,7 @@ pub trait Footprint: Model {
 
     /// The keys a server-sent message is about: receiving it can only be
     /// explained by internal work on these keys.
-    fn message_touches(&self, _msg: &Self::Response) -> Touches<Self::Key> {
+    fn message_touches(&self, _msg: &Self::Message) -> Touches<Self::Key> {
         Touches::Everything
     }
 }
@@ -182,7 +185,7 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 pub struct InternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
     pub spawn: Vec<Sched<M::Internal>>,
-    pub send: Vec<M::Response>,
+    pub send: Vec<M::Message>,
 }
 
 impl<M: Model + ?Sized> InternalOutcome<M> {
@@ -191,7 +194,7 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
     }
 
     /// A message to a client. It may be received once, at any time after, or never.
-    pub fn send(mut self, msg: M::Response) -> Self {
+    pub fn send(mut self, msg: M::Message) -> Self {
         self.send.push(msg);
         self
     }
@@ -264,7 +267,7 @@ pub trait Engine {
         Touches::Everything
     }
 
-    fn message_keys(&self, _msg: &<Self::M as Model>::Response) -> Touches<Self::Key> {
+    fn message_keys(&self, _msg: &<Self::M as Model>::Message) -> Touches<Self::Key> {
         Touches::Everything
     }
 
@@ -318,7 +321,7 @@ impl<M: Footprint> Engine for Keyed<M> {
         self.0.internal_touches(step)
     }
 
-    fn message_keys(&self, msg: &M::Response) -> Touches<M::Key> {
+    fn message_keys(&self, msg: &M::Message) -> Touches<M::Key> {
         self.0.message_touches(msg)
     }
 }
@@ -343,7 +346,7 @@ impl<M: Partitioned> Engine for Grouped<M> {
         self.0.internal_touches(step)
     }
 
-    fn message_keys(&self, msg: &M::Response) -> Touches<M::Key> {
+    fn message_keys(&self, msg: &M::Message) -> Touches<M::Key> {
         self.0.message_touches(msg)
     }
 

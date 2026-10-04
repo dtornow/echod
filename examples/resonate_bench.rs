@@ -47,7 +47,7 @@ fn fanout(n: u64) -> Vec<(Request, Time)> {
 
 /// Runs the script against the model, taking a successful answer where the
 /// model allows one: the trace an honest server would produce.
-fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response>> {
+fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Message>> {
     let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
     let mut trace = Vec::new();
     for (call, (op, t)) in script.iter().enumerate() {
@@ -64,7 +64,7 @@ fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response>> {
     trace
 }
 
-fn check(trace: &[Event<Request, Response>], footprints: bool) -> (bool, std::time::Duration, accordant::Stats) {
+fn check(trace: &[Event<Request, Response, Message>], footprints: bool) -> (bool, std::time::Duration, accordant::Stats) {
     let t0 = Instant::now();
     let cfg = Config { footprints, max_explore: 10_000_000, max_width: 1 << 20, ..Config::default() };
     let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);

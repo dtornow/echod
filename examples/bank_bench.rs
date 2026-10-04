@@ -78,6 +78,7 @@ impl<M: Accounts> Model for Bank<M> {
     type External = Request;
     type Response = i64;
     type Internal = ();
+    type Message = ();
 
     fn external(&self, op: &Request, s: &M, _now: accordant::Time) -> Vec<ExternalOutcome<Self>> {
         let Request::Deposit(a, x) = *op;

@@ -206,7 +206,12 @@ pub enum Response {
     Created(PromiseRec, TaskRec),
     /// `task.poll`: claimed tasks, ordered by id.
     Claimed(Vec<TaskRec>),
-    /// Server-sent: a worker should run this task at this version.
+}
+
+/// What the server sends on its own.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Message {
+    /// A worker should run this task at this version.
     Execute { id: Id, version: u32 },
 }
 
@@ -525,6 +530,7 @@ impl Model for Resonate {
     type External = Request;
     type Response = Response;
     type Internal = Internal;
+    type Message = Message;
 
     fn external(&self, op: &Request, s: &Server, now: Time) -> Outcomes {
         match op {
@@ -685,7 +691,7 @@ impl Model for Resonate {
                 && n.promises.get(id).is_some_and(Promise::live);
             if due {
                 n.tasks.update(id, |t| t.dispatched = true);
-                send.push(Response::Execute { id: id.clone(), version: n.tasks[id].version });
+                send.push(Message::Execute { id: id.clone(), version: n.tasks[id].version });
             }
         }
         let mut out = InternalOutcome::new(n);
@@ -736,10 +742,9 @@ impl Footprint for Resonate {
         Touches::Only(ids.iter().cloned().collect())
     }
 
-    fn message_touches(&self, msg: &Response) -> Touches<Id> {
+    fn message_touches(&self, msg: &Message) -> Touches<Id> {
         match msg {
-            Response::Execute { id, .. } => Touches::one(id.clone()),
-            _ => Touches::Only(Vec::new()), // never sent: nothing can explain receiving it
+            Message::Execute { id, .. } => Touches::one(id.clone()),
         }
     }
 }
