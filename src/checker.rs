@@ -11,7 +11,10 @@ pub enum Pending<O, R, T> {
     /// Invoked at `since`, not yet linearized. It may take effect at any point
     /// until its `Return`, or never if no `Return` comes. `must`: this branch has
     /// committed to it taking effect before its request lifetime ends.
-    InFlight { call: CallId, op: O, since: Time, must: bool },
+    /// `early`: answers it could already have gotten by linearizing at an earlier
+    /// point where it would not have changed the state. Reads accumulate here
+    /// instead of branching the profile.
+    InFlight { call: CallId, op: O, since: Time, must: bool, early: BTreeSet<R> },
     /// Linearized; the spec predicted `resp`, which the `Return` must match.
     Responded { call: CallId, resp: R },
     /// Background work, due from `after`. `must`: owed by `by`, or by the next
@@ -171,9 +174,47 @@ impl<S: Spec> Checker<S> {
     }
 
     /// A call whose request and response are observed at the same instant.
+    /// A call whose request and response are observed at the same instant.
+    /// Atomic: if the response is rejected, the checker is left as it was.
     pub fn call(&mut self, call: CallId, op: S::Op, resp: S::Resp) -> Result<(), Violation> {
-        self.invoke(call, op)?;
-        self.ret(call, resp)
+        let saved = (self.profile.clone(), self.now);
+        let r = self.invoke(call, op).and_then(|_| self.ret(call, resp));
+        if r.is_err() {
+            (self.profile, self.now) = saved;
+        }
+        r
+    }
+
+    /// Every response `op` may get if it is called now and answered now. Does not
+    /// change the checker. This is Accordant's `Allows` used as a query: the
+    /// expected responses, without having to write them down.
+    pub fn allowed(&self, op: &S::Op) -> Vec<S::Resp> {
+        let probe = CallId::MAX;
+        let mut out: Vec<S::Resp> = Vec::new();
+        let mut explored = 0;
+        for n in &self.profile {
+            let mut m = n.clone();
+            m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
+            let owed = self.owed_for(&m, Some((probe, None)), false);
+            let relevant = if self.cfg.footprints { self.relevant(&m, &owed) } else { Keys::All };
+            let _ = self.search(m, &relevant, &mut explored, |x| {
+                for i in &x.pending {
+                    let found: Vec<&S::Resp> = match i {
+                        Pending::Responded { call, resp } if *call == probe => vec![resp],
+                        Pending::InFlight { call, early, .. } if *call == probe => early.iter().collect(),
+                        _ => continue,
+                    };
+                    for r in found {
+                        if !out.contains(r) {
+                            out.push(r.clone());
+                        }
+                    }
+                }
+                Ok(x.pending.iter().any(|i| matches!(i, Pending::InFlight { call, .. } if *call == probe)))
+            });
+        }
+        out.sort();
+        out
     }
 
     pub fn observe(&mut self, e: Event<S::Op, S::Resp>) -> Result<(), Violation> {
@@ -185,8 +226,12 @@ impl<S: Spec> Checker<S> {
         if to < self.now {
             return Err(self.violation(index, &e, format!("time went backwards from {}", self.now)));
         }
+        let saved = (self.profile.clone(), self.now);
         for t in self.instants(to) {
-            self.instant(index, &Event::Tick(t))?;
+            if let Err(v) = self.instant(index, &Event::Tick(t)) {
+                (self.profile, self.now) = saved;
+                return Err(v);
+            }
         }
         Ok(())
     }
@@ -210,14 +255,34 @@ impl<S: Spec> Checker<S> {
     }
 
     fn instant(&mut self, index: usize, e: &Event<S::Op, S::Resp>) -> Result<(), Violation> {
-        let mut seen = HashSet::new();
-        let mut next = Vec::new();
         let mut explored = 0usize;
+        let mut next = Vec::new();
+        let mut seen = HashSet::new();
         for n in &self.profile {
             for p in self.prepare(n, e) {
-                self.explain(p, e, &mut seen, &mut next, &mut explored)
-                    .map_err(|reason| self.violation(index, e, reason))?;
+                let found = match e {
+                    Event::Tick(t) => self.before_tick(p, *t, &mut explored),
+                    _ => self.explain(p, e, &mut explored),
+                }
+                .map_err(|reason| self.violation(index, e, reason))?;
+                next.extend(found.into_iter().filter(|m| seen.insert(m.clone())));
             }
+        }
+        if let Event::Tick(t) = *e {
+            // The clock moves; whatever is now overdue fires at the new instant, first.
+            let old = std::mem::replace(&mut self.now, t);
+            let mut after = Vec::new();
+            let mut seen = HashSet::new();
+            for n in next {
+                match self.explain(n, e, &mut explored) {
+                    Ok(found) => after.extend(found.into_iter().filter(|m| seen.insert(m.clone()))),
+                    Err(reason) => {
+                        self.now = old;
+                        return Err(self.violation(index, e, reason));
+                    }
+                }
+            }
+            next = after;
         }
         self.stats.explored += explored;
         if self.cfg.subsume {
@@ -233,9 +298,6 @@ impl<S: Spec> Checker<S> {
         }
         self.stats.max_width = self.stats.max_width.max(next.len());
         self.profile = next;
-        if let Event::Tick(t) = e {
-            self.now = *t;
-        }
         self.states.collect();
         Ok(())
     }
@@ -268,8 +330,9 @@ impl<S: Spec> Checker<S> {
             for (i, item) in expiring.iter().enumerate() {
                 pending.remove(item);
                 if mask & (1 << i) != 0 {
-                    if let Pending::InFlight { call, op, since, .. } = item {
-                        pending.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: true });
+                    if let Pending::InFlight { call, op, since, early, .. } = item {
+                        let early = early.clone();
+                        pending.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: true, early });
                     }
                 }
             }
@@ -281,51 +344,88 @@ impl<S: Spec> Checker<S> {
     /// Explores the fewest internal moves that let `e` be consumed from `n`: moves
     /// stop once nothing owed before `e` remains, and only work sharing a footprint
     /// with what is owed is tried. Everything else commutes past `e` and waits.
-    fn explain(
-        &self,
-        n: Node<S>,
-        e: &Event<S::Op, S::Resp>,
-        seen: &mut HashSet<Node<S>>,
-        out: &mut Vec<Node<S>>,
-        explored: &mut usize,
-    ) -> Result<(), String> {
+    fn explain(&self, n: Node<S>, e: &Event<S::Op, S::Resp>, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
         let owed = self.owed(&n, e);
         if owed.is_empty() {
-            if let Some(m) = self.consume(&n, e)? {
-                if seen.insert(m.clone()) {
-                    out.push(m);
-                }
-            }
-            return Ok(());
+            return Ok(self.consume(&n, e)?.into_iter().collect());
         }
         let relevant = if matches!(e, Event::Quiesce) || !self.cfg.footprints {
             Keys::All
         } else {
             self.relevant(&n, &owed)
         };
-        let mut visited: HashSet<Node<S>> = HashSet::new();
-        let mut queue = VecDeque::from([n.clone()]);
-        visited.insert(n);
+        let mut out = Vec::new();
+        self.search(n, &relevant, explored, |m| {
+            if !self.owed(m, e).is_empty() {
+                return Ok(true);
+            }
+            out.extend(self.consume(m, e)?);
+            Ok(false)
+        })?;
+        Ok(out)
+    }
+
+    /// Before the clock moves to `t`, anything that may happen at the current
+    /// instant and could change what happens at `t` gets its chance: in-flight
+    /// calls may linearize and lazy work may fire, on the keys of the work that
+    /// falls due by `t`. Every point along the way is a candidate. A call whose
+    /// request lifetime ends here and that this branch says took effect must have.
+    fn before_tick(&self, n: Node<S>, t: Time, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
+        let forced: Vec<&P<S>> = n
+            .pending
+            .iter()
+            .filter(|i| match i {
+                Pending::InFlight { must, .. } => *must,
+                Pending::Step { must: true, by: Some(by), .. } => *by <= t,
+                _ => false,
+            })
+            .collect();
+        if forced.is_empty() {
+            return Ok(vec![n]);
+        }
+        let relevant = if self.cfg.footprints { self.relevant(&n, &forced) } else { Keys::All };
+        let mut out = Vec::new();
+        self.search(n, &relevant, explored, |m| {
+            let ready = !m.pending.iter().any(|i| matches!(i, Pending::InFlight { must: true, .. }))
+                && !self.has_overdue(m);
+            if ready {
+                out.push(m.clone());
+            }
+            Ok(true)
+        })?;
+        Ok(out)
+    }
+
+    /// Breadth-first over moves on `relevant` keys. `visit` returns whether to keep
+    /// expanding a node. Overdue work has priority: while a node has some, nothing
+    /// else may fire, so an overdue timer is never overtaken.
+    fn search(
+        &self,
+        n: Node<S>,
+        relevant: &Keys<S::Key>,
+        explored: &mut usize,
+        mut visit: impl FnMut(&Node<S>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let mut visited: HashSet<Node<S>> = HashSet::from([n.clone()]);
+        let mut queue = VecDeque::from([n]);
         while let Some(m) = queue.pop_front() {
             *explored += 1;
             if *explored > self.cfg.max_explore {
                 return Err(format!("explored more than {} nodes", self.cfg.max_explore));
             }
-            if self.owed(&m, e).is_empty() {
-                if let Some(c) = self.consume(&m, e)? {
-                    if seen.insert(c.clone()) {
-                        out.push(c);
-                    }
-                }
+            if !visit(&m)? {
                 continue;
             }
+            let urgent = self.has_overdue(&m);
             for item in &m.pending {
-                if !intersects(&relevant, &self.keys(item)) {
+                if urgent && !self.is_overdue(item, &m.state) {
+                    continue;
+                }
+                if !urgent && !intersects(relevant, &self.keys(item)) {
                     continue;
                 }
                 for m2 in self.fire(&m, item) {
-                    if !visited.contains(&m2) {
-                        visited.insert(m2.clone());
+                    if visited.insert(m2.clone()) {
                         queue.push_back(m2);
                     }
                 }
@@ -334,20 +434,46 @@ impl<S: Spec> Checker<S> {
         Ok(())
     }
 
+    /// An obligation whose deadline is now or past and that can fire: it must fire
+    /// before anything else is observed or happens at this instant.
+    fn is_overdue(&self, item: &P<S>, state: &S::State) -> bool {
+        match item {
+            Pending::Step { step, must: true, by: Some(by), .. } => *by <= self.now && self.enabled(item, step, state),
+            _ => false,
+        }
+    }
+
+    fn has_overdue(&self, m: &Node<S>) -> bool {
+        m.pending.iter().any(|i| self.is_overdue(i, &m.state))
+    }
+
     /// What must happen, at the current time, before `e` can be consumed from `m`.
     fn owed<'a>(&self, m: &'a Node<S>, e: &Event<S::Op, S::Resp>) -> Vec<&'a P<S>> {
+        let returning = match e {
+            Event::Return(c, r) => Some((*c, Some(r))),
+            _ => None,
+        };
+        self.owed_for(m, returning, matches!(e, Event::Quiesce))
+    }
+
+    /// `returning`: the call being answered, and the answer if known. A call whose
+    /// early answers already admit it owes nothing.
+    fn owed_for<'a>(
+        &self,
+        m: &'a Node<S>,
+        returning: Option<(CallId, Option<&S::Resp>)>,
+        quiesce: bool,
+    ) -> Vec<&'a P<S>> {
         m.pending
             .iter()
             .filter(|item| match item {
                 Pending::InFlight { must: true, .. } => true,
-                Pending::InFlight { call, .. } => matches!(e, Event::Return(c, _) if c == call),
-                Pending::Step { step, must: true, by, .. } => {
-                    let overdue = match e {
-                        Event::Tick(t) => by.is_some_and(|by| by < *t),
-                        Event::Quiesce => true,
-                        _ => false,
-                    };
-                    overdue && self.enabled(item, step, &m.state)
+                Pending::InFlight { call, early, .. } => match returning {
+                    Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| self.spec.admits(r, o))),
+                    _ => false,
+                },
+                Pending::Step { step, must: true, .. } => {
+                    self.is_overdue(item, &m.state) || (quiesce && self.enabled(item, step, &m.state))
                 }
                 _ => false,
             })
@@ -402,17 +528,38 @@ impl<S: Spec> Checker<S> {
             p
         };
         match item {
-            Pending::InFlight { call, op, .. } => self
-                .spec
-                .apply(op, &m.state, self.now)
-                .into_iter()
-                .map(|o| {
-                    let mut p = without();
-                    p.insert(Pending::Responded { call: *call, resp: o.resp });
-                    self.spawn(&mut p, o.spawn);
-                    Node { state: self.states.intern(o.next), pending: p }
-                })
-                .collect(),
+            Pending::InFlight { call, op, since, must, early } => {
+                let outs = self.spec.apply(op, &m.state, self.now);
+                let read_only = outs.iter().all(|o| o.spawn.is_empty() && o.next == *m.state);
+                if !read_only {
+                    return outs
+                        .into_iter()
+                        .map(|o| {
+                            let mut p = without();
+                            p.insert(Pending::Responded { call: *call, resp: o.resp });
+                            self.spawn(&mut p, o.spawn);
+                            Node { state: self.states.intern(o.next), pending: p }
+                        })
+                        .collect();
+                }
+                // Linearizing here changes nothing but the answer: remember the
+                // answer instead of placing the call.
+                let mut seen = early.clone();
+                seen.extend(outs.into_iter().map(|o| o.resp));
+                if *must {
+                    return seen
+                        .into_iter()
+                        .map(|resp| {
+                            let mut p = without();
+                            p.insert(Pending::Responded { call: *call, resp });
+                            Node { state: m.state.clone(), pending: p }
+                        })
+                        .collect();
+                }
+                let mut p = without();
+                p.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: false, early: seen });
+                vec![Node { state: m.state.clone(), pending: p }]
+            }
             Pending::Step { step, after, .. } if *after <= self.now => {
                 match self.spec.step(step, &m.state, self.now) {
                     StepResult::Disabled => Vec::new(),
@@ -455,12 +602,15 @@ impl<S: Spec> Checker<S> {
                 if reused {
                     return Err(format!("call {call} invoked while still outstanding"));
                 }
-                p.insert(Pending::InFlight { call: *call, op: op.clone(), since: self.now, must: false });
+                p.insert(Pending::InFlight { call: *call, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
             }
             Event::Return(call, observed) => {
                 let hit = p.iter().find_map(|i| match i {
                     Pending::Responded { call: c, resp } if c == call => {
                         self.spec.admits(resp, observed).then(|| i.clone())
+                    }
+                    Pending::InFlight { call: c, early, .. } if c == call => {
+                        early.iter().any(|r| self.spec.admits(r, observed)).then(|| i.clone())
                     }
                     _ => None,
                 });
@@ -490,24 +640,41 @@ fn optional<O, R, T>(item: &Pending<O, R, T>) -> bool {
     matches!(item, Pending::Step { must: false, .. })
 }
 
-/// Keeps only nodes no other node simulates. Nodes with the same state and the
-/// same owed work are compared on optional work: more of it is more behaviors.
+/// An item with its early answers cleared, so calls compare by identity alone.
+fn skeleton<O: Clone, R: Clone, T: Clone>(item: &Pending<O, R, T>) -> Pending<O, R, T> {
+    match item {
+        Pending::InFlight { call, op, since, must, .. } => {
+            Pending::InFlight { call: *call, op: op.clone(), since: *since, must: *must, early: BTreeSet::new() }
+        }
+        _ => item.clone(),
+    }
+}
+
+/// Whether node `b` can do everything node `a` can: same state and same owed
+/// work, at least `a`'s optional work, and at least `a`'s early answers per call.
+fn simulates<S: Spec>(b: &Node<S>, a: &Node<S>) -> bool {
+    a.pending.iter().all(|x| match x {
+        Pending::InFlight { call, early, .. } => b.pending.iter().any(|y| {
+            matches!(y, Pending::InFlight { call: c, early: e, .. } if c == call && early.is_subset(e))
+        }),
+        _ if optional(x) => b.pending.contains(x),
+        _ => true,
+    })
+}
+
+/// Keeps only nodes no other node simulates.
 fn subsume<S: Spec>(nodes: Vec<Node<S>>) -> Vec<Node<S>> {
     type Group<S> = (Interned<<S as Spec>::State>, Vec<P<S>>);
     let mut groups: HashMap<Group<S>, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
-        let owed: Vec<_> = n.pending.iter().filter(|x| !optional(*x)).cloned().collect();
+        let owed: Vec<_> = n.pending.iter().filter(|x| !optional(*x)).map(skeleton).collect();
         groups.entry((n.state.clone(), owed)).or_default().push(i);
     }
     let mut keep = vec![true; nodes.len()];
     for idx in groups.values().filter(|g| g.len() > 1) {
         for &a in idx {
             for &b in idx {
-                if a == b || !keep[b] {
-                    continue;
-                }
-                let weaker = nodes[a].pending.iter().filter(|x| optional(*x));
-                if weaker.clone().all(|x| nodes[b].pending.contains(x)) {
+                if a != b && keep[b] && simulates(&nodes[b], &nodes[a]) {
                     keep[a] = false;
                     break;
                 }

@@ -117,16 +117,27 @@ and the spec reads it in `apply` and `step`.
 - **Timers.** An outcome or step successor can install one:
   `Outcome::new(resp, next).timer(at, Step::Timeout(id))`. A timer is a step that
   is not enabled before `at`.
-- **Deadlines.** `Fairness::Eventually { within: Some(d) }` means the step must
-  fire within `d` of becoming due. `Some(0)` is an exact timer: it fires at `at`,
-  unless something disables it first (a job that completed before its timeout
-  discharges the timer).
+- **Deadlines are inclusive.** `Fairness::Eventually { within: Some(d) }` means
+  the step has fired by `due + d`: anything observed at that instant already
+  sees it. `Some(0)` is an exact timer: it fires at `at`, unless something
+  disables it first (a job that completed before its timeout discharges the
+  timer). This matches servers that test `now >= deadline`, like Resonate.
+- **Overdue work goes first.** While a node has an enabled overdue step, nothing
+  else may fire or linearize, so a call at the deadline instant can't sneak in
+  ahead of the timer.
 - **Stepping through time.** `tick(t)` doesn't jump. It stops at every instant in
   `(now, t]` where some candidate's timer becomes due, a deadline passes, or a
-  request lifetime ends. At each instant, work that is overdue fires *at its
-  deadline*, so a step that reads `now` (for example to set `settled_at`) sees the
-  right time. Work that is merely due is still lazy: it fires when an
-  observation needs it, or when its deadline passes.
+  request lifetime ends. Before moving the clock to an instant, calls in flight
+  and lazy work on the keys of what falls due there may still happen at the old
+  time. That's how a read that spans a timeout may have seen the promise still
+  pending. Then the overdue work fires *at its deadline*, so a step that reads
+  `now` (for example to set `settled_at`) sees the right time. Work that is
+  merely due stays lazy: it fires when an observation needs it, or when its
+  deadline passes.
+- **Lazy work fires late.** A step that fires lazily runs at the time of the
+  observation that needed it, not at the earliest time it could have. That is
+  sound only for steps whose effect doesn't depend on `now`; a step that records
+  a timestamp should be a timer.
 - **Weak fairness.** An overdue obligation that is disabled owes nothing. It
   fires as soon as it is enabled again, before time moves on.
 - **`Quiesce`** asserts the system is idle at `now`: every obligation that is
@@ -169,8 +180,8 @@ as unknown, as Accordant's `HasUnknownJob` does.
 
 ## Pruning the cone
 
-The profile grows from work that might or might not have happened yet. Six
-mechanisms keep it small, and all six are in the prototype.
+The profile grows from work that might or might not have happened yet. Seven
+mechanisms keep it small, and all seven are in the prototype.
 
 1. **Lazy, observation-driven firing.** Nothing fires unless a response or a
    deadline needs it. For a `Return(c)`, the search fires only until nothing owed
@@ -186,16 +197,30 @@ mechanisms keep it small, and all six are in the prototype.
 3. **Deadlines.** Obligations have a `by`, and unanswered requests have a lifetime.
    When the clock passes a deadline, the uncertainty is resolved once and then
    gone. Nothing stays pending forever unless the spec says so.
-4. **Subsumption (antichains).** `May` work can always be skipped. So a node
-   simulates any node with the same state and the same owed work but a subset of
-   its `May` work, and the subset node is discarded.
-5. **Structural step identity.** Steps are values, so identical work spawned on
+4. **Subsumption (antichains).** `May` work can always be skipped, so a node
+   simulates any node with the same state and owed work but a subset of its `May`
+   work. Likewise for early answers (next item). The weaker node is discarded.
+5. **Reads don't branch.** Linearizing a call whose outcomes leave the state
+   unchanged only decides its answer. So instead of splitting the profile into
+   "answered early" and "not yet", the call keeps the set of answers it could
+   already have gotten, and `Return` accepts any of them or a later
+   linearization. Without this, the profile is the *product* of independent
+   per-key choices: footprints keep each search small, but 50 reads in flight
+   across 50 promise deadlines made 2^50 candidates. With it, width stays 1
+   (`tests/resonate`, `independent_promises_keep_the_profile_narrow`: failed
+   after 47 s before, 400 nodes and 0.02 s after). Writes in flight across
+   independent keys can still multiply; a profile partitioned by key would fix
+   that.
+6. **Structural step identity.** Steps are values, so identical work spawned on
    different branches converges to the same node. Accordant's GUIDs prevent this.
-6. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
+7. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
    names the event. Exceeding them usually means the spec is missing a footprint
    or has unbounded non-determinism.
 
 Not in the prototype yet, and worth adding in this order:
+
+- **Partitioned profiles**: keep independent keys' candidates as separate
+  factors instead of their product (`jepsen.independent`, inside one history).
 
 - **Wall-clock time**: interval timestamps on events (see [Time](#time)).
 - **Late binding for unknown values** (see [Non-determinism](#non-determinism)).
@@ -251,18 +276,82 @@ still walks every entry. The incremental hash is what fixes time.
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, Step::Timeout(id))` with `within: Some(0)`; the projection becomes a real transition at the deadline |
 | `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `step` returns `Discharged` when it's no longer fireable |
-| `LeaseTriggers`, `RetryTriggers` | timers: `.timer(acquired_at + ttl, Step::LeaseTimeout(id))`, `.timer(due, Step::Retry(id))` |
+| `LeaseTriggers`, `RetryTriggers` | timers: `.timer(expires, Step::Lease { id, expires })` installed when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
 | `debug.messages` (execute/unblock) | outbound messages as their own `Invoke`/`Return` pairs, or an `Op::Drain` whose response is the message multiset |
 | footprint | promise id plus awaiter ids for callbacks; ticks touch only what has a timer due |
 
+The port is in `tests/resonate/` (`spec.rs`, plus traces from
+`ExampleTraces.cs` and `LeaseAndTimeoutTests.cs` in `main.rs`). Not ported: the
+`egress` capability (retry timeouts) and `debug.messages`.
+
+## Porting Resonate: developer experience
+
+Ranked by how much each one hurt.
+
+1. **Violations are unreadable.** A rejected response prints the whole state
+   of every candidate on one line. It doesn't show what the spec expected, how
+   that differs from what was observed, or which rule applied. The C# spec
+   labels each outcome (`"T-03: pending v0 → acquired v1"`), and Accordant
+   prints that label. Needed: an outcome label (`.because("T-03 ...")`), "expected
+   one of … / observed …" per candidate, and state printed only for the keys in
+   the event's footprint.
+2. **Clone-then-mutate on every transition.** Nearly every write is
+   `let mut n = s.clone(); n.tasks.update(id, |t| …); vec![Outcome::new(resp, n)]`,
+   often followed by re-reading `n.tasks[id]` to build the response. C#'s
+   `.ThenState(s => …)` hides the clone. `HashedMap` has no `get_mut`, only an
+   `update` closure. Needed: `Outcome::then(resp, s, |n| …)`, a one-outcome
+   return that isn't `vec![…]`, and `get_mut` on `HashedMap` that rehashes on drop.
+3. **Unchanged state must still be passed in.** Every error branch is
+   `status(409, s)`, which clones the state only to say it didn't change, and
+   the checker then hashes and compares it. An outcome that means "state
+   unchanged" without a state would be shorter and cheaper.
+4. **One step is written in four places**: the enum variant, its `step` arm, its
+   `fairness` arm and its `step_keys` arm. C#'s `AsyncOperation.Create` keeps
+   all of it at the spawn site. A per-step trait, or the keyed-closure step
+   discussed earlier, would bring it back to one place.
+5. **Footprints can be wrong silently.** They are a function of the request
+   alone, which fits Resonate except `PollTask`, which has to be `Keys::All`. A
+   missing key doesn't fail; it hides interleavings. Needed: a debug mode that
+   re-checks events with footprints off and reports any difference.
+6. **Panics in the spec lose context.** `s.promises[id]` on a missing key panics
+   with a bare index error. Accordant wraps spec exceptions with the event and
+   the path that led there. The checker should catch the panic and turn it into
+   a violation that names the event and candidate.
+7. **String ids are noisy.** `.clone()`, `.to_string()` and `.into()` everywhere, and
+   footprints need owned keys. An interned, `Copy` id type would remove most of it.
+8. **Choices have to be enumerated by hand.** `PollTask` past its limit needs a
+   `combinations` helper. Accordant has `Choose.Each`; a small set of choice
+   helpers belongs in the crate.
+9. **Builder chaining in loops.** `Outcome::spawn`/`timer` take `self`, so a loop
+   needs `o = o.timer(…)`. `spawn_all` and `timers` that take iterators fix it.
+
+What got better:
+
+- **Timers removed the read-time projection.** C# calls `Project(now)` wherever
+  a promise is read, because a timed-out promise stays stored as pending. Here
+  the deadline is a timer that settles it, so "pending" means pending.
+- **Indefinite failures cost nothing.** `ServerOperation` duplicated every
+  outcome; here an unanswered call is already "maybe".
+- **Responses are values.** No mock generators, and `allowed(op)` lists what the
+  spec permits, which is how the traces state their expectations without a server.
+- **Exhaustive matching.** Adding an op or step without handling it doesn't compile.
+- **Smaller.** 711 lines including docs, against 1,062 for `Spec/*.cs`.
+
+Porting also found three checker bugs, all fixed:
+- **Exclusive deadlines:** a read at the exact deadline could miss the timer.
+- **Reads spanning a tick:** an in-flight read couldn't have linearized before
+  a timeout the tick passed.
+- **Product blowup:** independent reads multiplied the profile (pruning item 5).
+
 ## Files
 
 - `src/lib.rs`: the `Spec` trait, `Outcome`, `Succ`, `StepResult`, `Fairness`, `Keys`, `Time`.
-- `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption.
+- `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, request lifetime, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
+- `tests/resonate/`: the Resonate port and its traces.

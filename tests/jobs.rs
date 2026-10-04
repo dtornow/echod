@@ -120,9 +120,9 @@ fn completion_is_observed_and_the_profile_collapses() {
 fn run_deadline_rejects_a_stuck_job() {
     let mut c = checker(Some(1_000));
     c.call(1, Op::Submit(7, NEVER), Resp::Accepted).unwrap();
-    c.tick(1_000).unwrap();
-    c.call(2, Op::Get(7), Resp::Is(Status::Pending)).unwrap(); // at the deadline: still allowed
-    c.tick(1_001).unwrap();
+    c.tick(999).unwrap();
+    c.call(2, Op::Get(7), Resp::Is(Status::Pending)).unwrap(); // before the deadline: allowed
+    c.tick(1_000).unwrap(); // at the deadline the run has happened
     let v = c.call(3, Op::Get(7), Resp::Is(Status::Pending)).unwrap_err();
     println!("{v}");
 }
@@ -144,6 +144,33 @@ fn timer_does_not_fire_early() {
     c.call(1, Op::Submit(7, 500), Resp::Accepted).unwrap();
     c.tick(499).unwrap();
     assert!(c.call(2, Op::Get(7), Resp::Is(Status::TimedOut)).is_err());
+}
+
+#[test]
+fn a_get_in_flight_across_the_timeout_may_see_pending() {
+    let mut c = checker(None);
+    c.call(1, Op::Submit(7, 500), Resp::Accepted).unwrap();
+    c.tick(100).unwrap();
+    c.invoke(2, Op::Get(7)).unwrap();
+    c.tick(2_000).unwrap();
+    c.ret(2, Resp::Is(Status::Pending)).unwrap(); // it linearized before 500
+    c.call(3, Op::Get(7), Resp::Is(Status::TimedOut)).unwrap();
+}
+
+#[test]
+fn a_get_invoked_after_the_timeout_cannot_see_pending() {
+    let mut c = checker(None);
+    c.call(1, Op::Submit(7, 500), Resp::Accepted).unwrap();
+    c.tick(500).unwrap();
+    assert!(c.call(2, Op::Get(7), Resp::Is(Status::Pending)).is_err());
+}
+
+#[test]
+fn a_run_may_beat_the_timer_unobserved() {
+    let mut c = checker(None);
+    c.call(1, Op::Submit(7, 500), Resp::Accepted).unwrap();
+    c.tick(2_000).unwrap();
+    c.call(2, Op::Get(7), Resp::Is(Status::Completed)).unwrap();
 }
 
 #[test]
