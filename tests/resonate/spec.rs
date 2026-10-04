@@ -708,4 +708,29 @@ impl Spec for Resonate {
             Step::Resume { awaited, awaiter } => Keys::Some(vec![awaited.clone(), awaiter.clone()]),
         }
     }
+
+    /// Ids of different origins never interact, except through `FenceTask` across
+    /// origins and `PollTask`, whose footprints span them and merge the partitions.
+    fn part(&self, key: &Id) -> Option<Id> {
+        Some(origin(key).to_string())
+    }
+
+    fn restrict(&self, s: &Server, keep: &dyn Fn(&Id) -> bool) -> Server {
+        let mine = |k: &Id| keep(&origin(k).to_string());
+        Server {
+            promises: s.promises.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            tasks: s.tasks.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        }
+    }
+
+    fn join(&self, a: &Server, b: &Server) -> Server {
+        let mut n = a.clone();
+        for (k, v) in b.promises.iter() {
+            n.promises.insert(k.clone(), v.clone());
+        }
+        for (k, v) in b.tasks.iter() {
+            n.tasks.insert(k.clone(), v.clone());
+        }
+        n
+    }
 }

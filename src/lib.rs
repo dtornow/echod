@@ -23,7 +23,7 @@ mod checker;
 mod hashed_map;
 mod intern;
 
-pub use checker::{Checker, Config, Event, Node, Pending, Stats, Violation};
+pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Violation};
 pub use hashed_map::HashedMap;
 pub use intern::{Interned, Interner};
 
@@ -169,5 +169,28 @@ pub trait Spec {
 
     fn step_keys(&self, _step: &Self::Step) -> Keys<Self::Key> {
         Keys::All
+    }
+
+    /// Partitioning. A partitioned spec's state splits into independent parts, and
+    /// the checker keeps each part's candidates separately instead of their
+    /// product. `part` names a key's partition (Resonate: the id's origin);
+    /// `None`, the default, means the spec is not partitioned.
+    ///
+    /// Work spawned by a request or step must stay within the partitions of its
+    /// own footprint.
+    fn part(&self, _key: &Self::Key) -> Option<Self::Key> {
+        None
+    }
+
+    /// The part of `state` belonging to the partitions `keep` accepts. Required
+    /// when `part` returns `Some`.
+    fn restrict(&self, _state: &Self::State, _keep: &dyn Fn(&Self::Key) -> bool) -> Self::State {
+        unimplemented!("a partitioned spec must implement restrict")
+    }
+
+    /// The union of two states over disjoint partitions. Required when `part`
+    /// returns `Some`.
+    fn join(&self, _a: &Self::State, _b: &Self::State) -> Self::State {
+        unimplemented!("a partitioned spec must implement join")
     }
 }

@@ -83,11 +83,20 @@ pub struct Config {
     pub max_width: usize,
     /// Fail rather than explore more nodes than this for one event.
     pub max_explore: usize,
+    /// Keep independent partitions' candidates apart, for specs that define `part`.
+    pub partition: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { request_lifetime: None, footprints: true, subsume: true, max_width: 10_000, max_explore: 1_000_000 }
+        Config {
+            request_lifetime: None,
+            footprints: true,
+            subsume: true,
+            max_width: 10_000,
+            max_explore: 1_000_000,
+            partition: true,
+        }
     }
 }
 
@@ -96,7 +105,12 @@ pub struct Stats {
     pub events: usize,
     /// Nodes visited while explaining events.
     pub explored: usize,
+    /// The most candidates any one factor held.
     pub max_width: usize,
+    /// The most factors held at once.
+    pub max_factors: usize,
+    /// Factors merged because a request or step spanned them.
+    pub merges: usize,
     pub subsumed: usize,
 }
 
@@ -120,13 +134,37 @@ impl fmt::Display for Violation {
     }
 }
 
+/// The candidates for one group of partitions. The profile is the product of
+/// its factors: any choice in one factor combines with any choice in another.
+pub struct Factor<S: Spec> {
+    /// The partitions this factor owns; `None` owns everything.
+    pub parts: Option<BTreeSet<S::Key>>,
+    pub nodes: Vec<Node<S>>,
+}
+
+impl<S: Spec> Clone for Factor<S> {
+    fn clone(&self) -> Self {
+        Factor { parts: self.parts.clone(), nodes: self.nodes.clone() }
+    }
+}
+
 pub struct Checker<S: Spec> {
     spec: S,
     cfg: Config,
+    /// Partitions never touched are still in their initial state, here.
+    init: S::State,
+    factors: Vec<Factor<S>>,
+    /// The factor an event is being explained in.
     profile: Vec<Node<S>>,
     states: Interner<S::State>,
     now: Time,
     pub stats: Stats,
+}
+
+/// Where an event's footprint lands.
+enum Scope<K> {
+    All,
+    Parts(BTreeSet<K>),
 }
 
 impl<S: Spec> Checker<S> {
@@ -135,26 +173,51 @@ impl<S: Spec> Checker<S> {
     }
 
     pub fn starting_at(spec: S, init: S::State, cfg: Config, now: Time) -> Self {
-        let states = Interner::new();
-        let root = Node { state: states.intern(init), pending: BTreeSet::new() };
-        Checker { spec, cfg, profile: vec![root], states, now, stats: Stats { max_width: 1, ..Stats::default() } }
+        Checker {
+            spec,
+            cfg,
+            init,
+            factors: Vec::new(),
+            profile: Vec::new(),
+            states: Interner::new(),
+            now,
+            stats: Stats { max_width: 1, ..Stats::default() },
+        }
     }
 
     pub fn now(&self) -> Time {
         self.now
     }
 
-    pub fn profile(&self) -> &[Node<S>] {
-        &self.profile
+    pub fn factors(&self) -> &[Factor<S>] {
+        &self.factors
     }
 
-    pub fn states(&self) -> impl Iterator<Item = &S::State> {
-        self.profile.iter().map(|n| &*n.state)
+    /// The candidates, as the product of all factors. Can be large: prefer
+    /// [`Checker::width`] and [`Checker::factors`] for sizes.
+    pub fn profile(&self) -> Vec<Node<S>> {
+        let mut acc: Option<Vec<Node<S>>> = None;
+        for f in &self.factors {
+            acc = Some(match acc {
+                None => f.nodes.clone(),
+                Some(a) => self.product(&a, &f.nodes),
+            });
+        }
+        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: BTreeSet::new() }])
+    }
+
+    /// The number of candidates: the product of the factor widths.
+    pub fn width(&self) -> u128 {
+        self.factors.iter().map(|f| f.nodes.len() as u128).product()
+    }
+
+    pub fn states(&self) -> impl Iterator<Item = S::State> {
+        self.profile().into_iter().map(|n| (*n.state).clone())
     }
 
     /// True if `pred` holds in every candidate state: Accordant's "all terminal" poll check.
     pub fn all(&self, pred: impl Fn(&S::State) -> bool) -> bool {
-        self.states().all(pred)
+        self.states().all(|s| pred(&s))
     }
 
     pub fn invoke(&mut self, call: CallId, op: S::Op) -> Result<(), Violation> {
@@ -174,25 +237,33 @@ impl<S: Spec> Checker<S> {
     }
 
     /// A call whose request and response are observed at the same instant.
-    /// A call whose request and response are observed at the same instant.
     /// Atomic: if the response is rejected, the checker is left as it was.
     pub fn call(&mut self, call: CallId, op: S::Op, resp: S::Resp) -> Result<(), Violation> {
-        let saved = (self.profile.clone(), self.now);
+        let saved = (self.factors.clone(), self.now);
         let r = self.invoke(call, op).and_then(|_| self.ret(call, resp));
         if r.is_err() {
-            (self.profile, self.now) = saved;
+            (self.factors, self.now) = saved;
         }
         r
     }
 
     /// Every response `op` may get if it is called now and answered now. Does not
-    /// change the checker. This is Accordant's `Allows` used as a query: the
-    /// expected responses, without having to write them down.
-    pub fn allowed(&self, op: &S::Op) -> Vec<S::Resp> {
+    /// change what the checker accepts. This is Accordant's `Allows` used as a
+    /// query: the expected responses, without having to write them down.
+    pub fn allowed(&mut self, op: &S::Op) -> Vec<S::Resp> {
+        let saved = self.factors.clone();
+        let scope = self.scope(self.spec.op_keys(op));
+        let i = self.gather(scope);
+        let out = self.allowed_in(&self.factors[i].nodes, op);
+        self.factors = saved;
+        out
+    }
+
+    fn allowed_in(&self, nodes: &[Node<S>], op: &S::Op) -> Vec<S::Resp> {
         let probe = CallId::MAX;
         let mut out: Vec<S::Resp> = Vec::new();
         let mut explored = 0;
-        for n in &self.profile {
+        for n in nodes {
             let mut m = n.clone();
             m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)), false);
@@ -220,12 +291,165 @@ impl<S: Spec> Checker<S> {
     pub fn observe(&mut self, e: Event<S::Op, S::Resp>) -> Result<(), Violation> {
         let index = self.stats.events;
         self.stats.events += 1;
-        let Event::Tick(to) = e else {
-            return self.instant(index, &e);
-        };
-        if to < self.now {
-            return Err(self.violation(index, &e, format!("time went backwards from {}", self.now)));
+        match &e {
+            Event::Invoke(_, op) => {
+                let scope = self.scope(self.spec.op_keys(op));
+                let i = self.gather(scope);
+                self.within(i, |c| c.observe_in(index, &e))
+            }
+            Event::Return(call, _) => match self.factor_of(*call) {
+                Some(i) => self.within(i, |c| c.observe_in(index, &e)),
+                None => Err(self.violation(index, &e, format!("call {call} is not outstanding"))),
+            },
+            Event::Tick(to) => {
+                if *to < self.now {
+                    return Err(self.violation(index, &e, format!("time went backwards from {}", self.now)));
+                }
+                let (start, saved) = (self.now, self.factors.clone());
+                for i in 0..self.factors.len() {
+                    self.now = start;
+                    if let Err(v) = self.within(i, |c| c.observe_in(index, &e)) {
+                        (self.factors, self.now) = (saved, start);
+                        return Err(v);
+                    }
+                }
+                self.now = *to;
+                Ok(())
+            }
+            Event::Quiesce => {
+                let saved = self.factors.clone();
+                for i in 0..self.factors.len() {
+                    if let Err(v) = self.within(i, |c| c.observe_in(index, &e)) {
+                        self.factors = saved;
+                        return Err(v);
+                    }
+                }
+                Ok(())
+            }
         }
+    }
+
+    /// Runs `f` with factor `i` as the working profile, then checks that no work
+    /// escaped the factor's partitions.
+    fn within(&mut self, i: usize, f: impl FnOnce(&mut Self) -> Result<(), Violation>) -> Result<(), Violation> {
+        self.profile = std::mem::take(&mut self.factors[i].nodes);
+        let r = f(self);
+        self.factors[i].nodes = std::mem::take(&mut self.profile);
+        r?;
+        self.stats.max_width = self.stats.max_width.max(self.factors[i].nodes.len());
+        let Some(parts) = &self.factors[i].parts else { return Ok(()) };
+        for n in &self.factors[i].nodes {
+            for item in &n.pending {
+                let escaped = match self.keys(item) {
+                    Keys::All => true,
+                    Keys::Some(ks) => ks.iter().any(|k| self.spec.part(k).is_none_or(|p| !parts.contains(&p))),
+                };
+                if escaped {
+                    return Err(Violation {
+                        index: self.stats.events - 1,
+                        now: self.now,
+                        event: format!("{item:?}"),
+                        reason: "spec error: work reaches outside the partitions of the request or step that spawned it"
+                            .into(),
+                        profile: Vec::new(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn scope(&self, keys: Keys<S::Key>) -> Scope<S::Key> {
+        let Keys::Some(ks) = keys else { return Scope::All };
+        if !self.cfg.partition {
+            return Scope::All;
+        }
+        let mut parts = BTreeSet::new();
+        for k in &ks {
+            match self.spec.part(k) {
+                Some(p) => parts.insert(p),
+                None => return Scope::All,
+            };
+        }
+        Scope::Parts(parts)
+    }
+
+    /// The index of the one factor that owns `scope`, merging factors and pulling
+    /// untouched partitions out of the initial state as needed.
+    fn gather(&mut self, scope: Scope<S::Key>) -> usize {
+        if let Some(i) = self.factors.iter().position(|f| f.parts.is_none()) {
+            return i;
+        }
+        let (hit, fresh): (Vec<usize>, Factor<S>) = match scope {
+            Scope::All => {
+                let claimed: BTreeSet<S::Key> =
+                    self.factors.iter().flat_map(|f| f.parts.iter().flatten().cloned()).collect();
+                let rest = if self.factors.is_empty() {
+                    self.init.clone()
+                } else {
+                    self.spec.restrict(&self.init, &|p| !claimed.contains(p))
+                };
+                let node = Node { state: self.states.intern(rest), pending: BTreeSet::new() };
+                ((0..self.factors.len()).collect(), Factor { parts: None, nodes: vec![node] })
+            }
+            Scope::Parts(parts) => {
+                let hit: Vec<usize> = (0..self.factors.len())
+                    .filter(|&i| self.factors[i].parts.as_ref().is_some_and(|ps| !ps.is_disjoint(&parts)))
+                    .collect();
+                let claimed: BTreeSet<S::Key> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
+                let new: BTreeSet<S::Key> = parts.difference(&claimed).cloned().collect();
+                let state = self.spec.restrict(&self.init, &|p| new.contains(p));
+                let node = Node { state: self.states.intern(state), pending: BTreeSet::new() };
+                (hit, Factor { parts: Some(new), nodes: vec![node] })
+            }
+        };
+        let mut merged = fresh;
+        for &i in hit.iter().rev() {
+            let f = self.factors.remove(i);
+            merged = Factor {
+                parts: match (f.parts, merged.parts) {
+                    (Some(a), Some(b)) => Some(a.union(&b).cloned().collect()),
+                    _ => None,
+                },
+                nodes: self.product(&f.nodes, &merged.nodes),
+            };
+        }
+        if hit.len() > 1 {
+            self.stats.merges += hit.len() - 1;
+        }
+        self.factors.push(merged);
+        self.stats.max_factors = self.stats.max_factors.max(self.factors.len());
+        self.factors.len() - 1
+    }
+
+    /// Every combination of a candidate from `a` with one from `b`.
+    fn product(&self, a: &[Node<S>], b: &[Node<S>]) -> Vec<Node<S>> {
+        let mut out = Vec::with_capacity(a.len() * b.len());
+        for x in a {
+            for y in b {
+                let state = self.spec.join(&x.state, &y.state);
+                let pending = x.pending.union(&y.pending).cloned().collect();
+                out.push(Node { state: self.states.intern(state), pending });
+            }
+        }
+        out
+    }
+
+    fn factor_of(&self, call: CallId) -> Option<usize> {
+        self.factors.iter().position(|f| {
+            f.nodes.iter().any(|n| {
+                n.pending.iter().any(|i| {
+                    matches!(i, Pending::InFlight { call: c, .. } | Pending::Responded { call: c, .. } if *c == call)
+                })
+            })
+        })
+    }
+
+    /// One event, explained within the working profile.
+    fn observe_in(&mut self, index: usize, e: &Event<S::Op, S::Resp>) -> Result<(), Violation> {
+        let Event::Tick(to) = *e else {
+            return self.instant(index, e);
+        };
         let saved = (self.profile.clone(), self.now);
         for t in self.instants(to) {
             if let Err(v) = self.instant(index, &Event::Tick(t)) {
@@ -296,7 +520,6 @@ impl<S: Spec> Checker<S> {
         if next.len() > self.cfg.max_width {
             return Err(self.violation(index, e, format!("profile width {} exceeds max_width", next.len())));
         }
-        self.stats.max_width = self.stats.max_width.max(next.len());
         self.profile = next;
         self.states.collect();
         Ok(())

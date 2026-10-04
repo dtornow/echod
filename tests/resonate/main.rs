@@ -5,7 +5,7 @@
 
 mod spec;
 
-use accordant::{CallId, Checker, Config, Time};
+use accordant::{CallId, Checker, Config, Event, Time};
 use spec::*;
 
 struct Trace {
@@ -147,10 +147,9 @@ fn promise_layer() {
     t.tick(now + 6_000);
     // C#: "(pending|timedout) nondeterministic". Here the deadline is a timer, so it is decided.
     t.step("get p3 → timed out", get("ex:p3"), promise(PState::TimedOut, None));
-    t.rejects("get p3 → pending after its deadline", get("ex:p3"), {
-        let Resp::Promise(p) = t.c.allowed(&get("ex:p3")).remove(0) else { panic!() };
-        Resp::Promise(PromiseRec { state: PState::Pending, settled_at: None, ..p })
-    });
+    let Resp::Promise(p) = t.c.allowed(&get("ex:p3")).remove(0) else { panic!() };
+    let stale = Resp::Promise(PromiseRec { state: PState::Pending, settled_at: None, ..p });
+    t.rejects("get p3 → pending after its deadline", get("ex:p3"), stale);
 }
 
 #[test]
@@ -357,4 +356,132 @@ fn show_a_violation() {
     let id = t.id();
     let v = t.c.call(id, acquire("ex:t", 0, "w"), Resp::Status(409)).unwrap_err();
     println!("{v}");
+}
+
+// ------------------------------------------------------------- partitions
+
+/// Per origin: a promise with a deadline and a settle that is never answered.
+/// Across the deadline each origin has two explanations (the settle landed in
+/// time, or the promise timed out). Kept together that is 2^origins candidates.
+fn unanswered_settles(origins: u64, partition: bool) -> Result<Checker<Resonate>, accordant::Violation> {
+    let now = 1_000_000;
+    let cfg = Config { partition, max_width: 1 << 16, max_explore: 5_000, ..Config::default() };
+    let mut c = Checker::starting_at(Resonate, Server::default(), cfg, now);
+    for o in 0..origins {
+        let id = format!("o{o}:p");
+        let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, external: false, target: false, timer: false };
+        let r = c.allowed(&Op::CreatePromise(p.clone())).remove(0);
+        c.call(o, Op::CreatePromise(p), r)?;
+        c.invoke(1_000 + o, Op::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
+    }
+    c.tick(now + 2_000)?;
+    Ok(c)
+}
+
+#[test]
+fn partitions_keep_independent_origins_apart() {
+    let t0 = std::time::Instant::now();
+    let mut c = unanswered_settles(20, true).unwrap();
+    println!("partitioned: {:?}, width {}, {:?}", c.stats, c.width(), t0.elapsed());
+    assert_eq!(c.factors().len(), 20);
+    assert!(c.factors().iter().all(|f| f.nodes.len() == 2));
+    assert_eq!(c.width(), 1 << 20);
+    // Each origin resolves on its own read.
+    for o in 0..20u64 {
+        let id = format!("o{o}:p");
+        let want = if o % 3 == 0 { PState::Resolved } else { PState::TimedOut };
+        let r = c.allowed(&Op::GetPromise(id.clone())).into_iter().find(promise(want, None)).unwrap();
+        c.call(5_000 + o, Op::GetPromise(id), r).unwrap();
+    }
+    assert!(c.factors().iter().all(|f| f.nodes.len() == 1));
+
+    let t0 = std::time::Instant::now();
+    let v = unanswered_settles(20, false).err().expect("one profile of 2^20 candidates");
+    println!("unpartitioned: {} {:?}", v.reason, t0.elapsed());
+}
+
+#[test]
+fn a_cross_origin_fence_merges_two_partitions() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    t.step("create a:t", create("a:t", FAR, "w").target().op(), st(200));
+    t.step("acquire a:t", acquire("a:t", 0, "w"), st(200));
+    t.step("create b:p", create("b:p", FAR, "x").op(), st(200));
+    t.step("create c:p", create("c:p", FAR, "x").op(), st(200));
+    assert_eq!(t.c.factors().len(), 3);
+    t.step("fence a:t settles b:p", fence("a:t", 1, Fenced::Settle(settle("b:p", "resolved", "v"))), st(200));
+    assert_eq!(t.c.factors().len(), 2);
+    t.step("poll touches every origin", Op::PollTask { pid: "w".into(), ttl: 1_000, limit: 10 }, |_| true);
+    assert_eq!(t.c.factors().len(), 1);
+    t.step("still consistent", get("b:p"), promise(PState::Resolved, Some("v")));
+}
+
+/// A small deterministic generator, so the differential test needs no crates.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, n: u64) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+}
+
+/// Partitioned and unpartitioned checkers must agree on every verdict.
+#[test]
+fn partitioning_never_changes_a_verdict() {
+    let ids = ["a:1", "a:2", "b:1", "b:2", "c:1"];
+    for seed in 1..=40 {
+        let mut rng = Lcg(seed);
+        let now = 1_000_000;
+        let mk = |partition| Checker::starting_at(Resonate, Server::default(), Config { partition, ..Config::default() }, now);
+        let (mut on, mut off) = (mk(true), mk(false));
+        let mut open: Vec<(CallId, Op)> = Vec::new();
+        let mut clock = now;
+        for call in 0..60u64 {
+            let id = ids[rng.next(ids.len() as u64) as usize].to_string();
+            let other = ids[rng.next(ids.len() as u64) as usize].to_string();
+            let op = match rng.next(9) {
+                0 => Op::CreatePromise(Create { id, timeout_at: clock + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
+                1 => Op::SettlePromise(Settle { id, state: "resolved".into(), data: None }),
+                2 => Op::AcquireTask { id, version: rng.next(3) as u32, pid: "w".into(), ttl: 1_000 },
+                3 => Op::FulfillTask { id, version: rng.next(3) as u32, state: "resolved".into(), data: None },
+                4 => Op::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
+                5 => Op::RegisterCallback { awaited: id, awaiter: other },
+                6 => Op::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
+                7 => Op::GetTask(id),
+                _ => Op::GetPromise(id),
+            };
+            let mut events = vec![Event::Invoke(call, op.clone())];
+            match rng.next(4) {
+                0 => open.push((call, op.clone())), // answered later, or never
+                _ => {
+                    let allowed = off.allowed(&op);
+                    let resp = if allowed.is_empty() || rng.next(8) == 0 {
+                        Resp::Status(500 + rng.next(3) as u16) // bogus
+                    } else {
+                        allowed[rng.next(allowed.len() as u64) as usize].clone()
+                    };
+                    events.push(Event::Return(call, resp));
+                }
+            }
+            if rng.next(5) == 0 {
+                clock += rng.next(2_000);
+                events.push(Event::Tick(clock));
+            }
+            if !open.is_empty() && rng.next(4) == 0 {
+                // A late answer: whatever the op would get if called now. Valid or
+                // not, both checkers must agree.
+                let (c, op) = open.swap_remove(rng.next(open.len() as u64) as usize);
+                let resp = off.allowed(&op).first().cloned().unwrap_or(Resp::Status(404));
+                events.push(Event::Return(c, resp));
+            }
+            for e in events {
+                // A rejected event leaves both checkers as they were, so they stay comparable.
+                let a = on.observe(e.clone()).is_ok();
+                let b = off.observe(e.clone()).is_ok();
+                assert_eq!(a, b, "seed {seed}: partitioned={a} unpartitioned={b} on {e:?}");
+            }
+        }
+        assert_eq!(on.quiesce().is_ok(), off.quiesce().is_ok(), "seed {seed}: quiesce");
+    }
 }

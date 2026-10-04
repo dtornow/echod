@@ -180,8 +180,8 @@ as unknown, as Accordant's `HasUnknownJob` does.
 
 ## Pruning the cone
 
-The profile grows from work that might or might not have happened yet. Seven
-mechanisms keep it small, and all seven are in the prototype.
+The profile grows from work that might or might not have happened yet. Eight
+mechanisms keep it small, and all eight are in the prototype.
 
 1. **Lazy, observation-driven firing.** Nothing fires unless a response or a
    deadline needs it. For a `Return(c)`, the search fires only until nothing owed
@@ -209,18 +209,29 @@ mechanisms keep it small, and all seven are in the prototype.
    across 50 promise deadlines made 2^50 candidates. With it, width stays 1
    (`tests/resonate`, `independent_promises_keep_the_profile_narrow`: failed
    after 47 s before, 400 nodes and 0.02 s after). Writes in flight across
-   independent keys can still multiply; a profile partitioned by key would fix
-   that.
-6. **Structural step identity.** Steps are values, so identical work spawned on
+   independent keys still multiply; partitions (next item) handle that.
+6. **Partitioned profiles.** A spec that defines `part(key)`, `restrict` and
+   `join` gets its profile stored as independent *factors*, one per group of
+   partitions. The full profile is their product, but it is never built. An
+   event goes to the factor owning its footprint. A request spanning factors
+   merges them (their product, built then), and `Keys::All` merges everything.
+   Partitions not touched yet are pulled out of the initial state on first use.
+   Spawned work must stay inside its spawner's partitions; the checker reports
+   a spec error if it doesn't. Resonate partitions by origin. Measured
+   (`partitions_keep_independent_origins_apart`): 20 origins, each with an
+   unanswered settle across its promise's deadline, means 2^20 candidates. As
+   factors that is 20 factors of 2, built in 0.8 ms from 160 nodes. Unpartitioned,
+   the same history is still exploring after 246 s.
+   `partitioning_never_changes_a_verdict` runs 40 random histories over three
+   origins through both modes and asserts identical verdicts.
+7. **Structural step identity.** Steps are values, so identical work spawned on
    different branches converges to the same node. Accordant's GUIDs prevent this.
-7. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
+8. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
    names the event. Exceeding them usually means the spec is missing a footprint
    or has unbounded non-determinism.
 
 Not in the prototype yet, and worth adding in this order:
 
-- **Partitioned profiles**: keep independent keys' candidates as separate
-  factors instead of their product (`jepsen.independent`, inside one history).
 
 - **Wall-clock time**: interval timestamps on events (see [Time](#time)).
 - **Late binding for unknown values** (see [Non-determinism](#non-determinism)).
@@ -311,6 +322,11 @@ Ranked by how much each one hurt.
    `fairness` arm and its `step_keys` arm. C#'s `AsyncOperation.Create` keeps
    all of it at the spawn site. A per-step trait, or the keyed-closure step
    discussed earlier, would bring it back to one place.
+5a. **Checking enabledness is expensive.** The checker asks whether a step is
+   enabled by calling `step()`, which builds full successor states only for them
+   to be discarded. In a wide search that dominates the run time. A separate,
+   cheap `enabled(step, state)` on the spec, defaulting to calling `step()`,
+   would fix it.
 5. **Footprints can be wrong silently.** They are a function of the request
    alone, which fits Resonate except `PollTask`, which has to be `Keys::All`. A
    missing key doesn't fail; it hides interleavings. Needed: a debug mode that
