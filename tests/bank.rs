@@ -30,7 +30,7 @@ impl Model for BankModel {
     type External = Request;
     type Response = Response;
     type Internal = ();
-    type Message = ();
+    type Dispatch = ();
 
     fn external(&self, op: &Request, s: &Bank, _now: Time) -> Vec<ExternalOutcome<Self>> {
         let with = |a: &'static str, b: i64| {

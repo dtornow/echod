@@ -210,7 +210,7 @@ pub enum Response {
 
 /// What the server sends on its own.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Message {
+pub enum Dispatch {
     /// A worker should run this task at this version.
     Execute { id: Id, version: u32 },
 }
@@ -530,7 +530,7 @@ impl Model for Resonate {
     type External = Request;
     type Response = Response;
     type Internal = Internal;
-    type Message = Message;
+    type Dispatch = Dispatch;
 
     fn external(&self, op: &Request, s: &Server, now: Time) -> Outcomes {
         match op {
@@ -691,7 +691,7 @@ impl Model for Resonate {
                 && n.promises.get(id).is_some_and(Promise::live);
             if due {
                 n.tasks.update(id, |t| t.dispatched = true);
-                send.push(Message::Execute { id: id.clone(), version: n.tasks[id].version });
+                send.push(Dispatch::Execute { id: id.clone(), version: n.tasks[id].version });
             }
         }
         let mut out = InternalOutcome::new(n);
@@ -742,9 +742,9 @@ impl Footprint for Resonate {
         Touches::Only(ids.iter().cloned().collect())
     }
 
-    fn message_touches(&self, msg: &Message) -> Touches<Id> {
+    fn dispatch_touches(&self, msg: &Dispatch) -> Touches<Id> {
         match msg {
-            Message::Execute { id, .. } => Touches::one(id.clone()),
+            Dispatch::Execute { id, .. } => Touches::one(id.clone()),
         }
     }
 }

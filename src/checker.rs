@@ -10,7 +10,7 @@ type St<S> = <<S as Engine>::M as Model>::State;
 type Ex<S> = <<S as Engine>::M as Model>::External;
 type Re<S> = <<S as Engine>::M as Model>::Response;
 type In<S> = <<S as Engine>::M as Model>::Internal;
-type Ms<S> = <<S as Engine>::M as Model>::Message;
+type Ms<S> = <<S as Engine>::M as Model>::Dispatch;
 
 /// Work a node still carries. Sorted, so a node's identity is canonical.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -349,7 +349,7 @@ impl<S: Engine> Checker<S> {
                 self.within(i, |c| c.observe_in(index, &e))
             }
             Event::Receive(msg) => {
-                let scope = self.scope(self.engine.message_keys(msg));
+                let scope = self.scope(self.engine.dispatch_keys(msg));
                 let i = self.gather(scope);
                 self.within(i, |c| c.observe_in(index, &e))
             }
@@ -688,7 +688,7 @@ impl<S: Engine> Checker<S> {
             Touches::Everything
         } else {
             let seed = match e {
-                Event::Receive(msg) => self.engine.message_keys(msg),
+                Event::Receive(msg) => self.engine.dispatch_keys(msg),
                 _ => Touches::Only(Vec::new()),
             };
             self.relevant(&n, &owed, seed)
@@ -877,7 +877,7 @@ impl<S: Engine> Checker<S> {
             Pending::InFlight { op, .. } => self.engine.external_keys(op),
             Pending::Step { step, .. } => self.engine.internal_keys(step),
             Pending::Responded { .. } => Touches::Only(Vec::new()),
-            Pending::Sent { msg, .. } => self.engine.message_keys(msg),
+            Pending::Sent { msg, .. } => self.engine.dispatch_keys(msg),
         }
     }
 

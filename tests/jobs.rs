@@ -54,7 +54,7 @@ impl Model for JobModel {
     type Response = Response;
     /// Job `j` takes an internal step.
     type Internal = u32;
-    type Message = ();
+    type Dispatch = ();
 
     fn external(&self, req: &Request, s: &Queue, _now: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match *req {

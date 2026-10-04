@@ -42,7 +42,7 @@ pub trait Model {
     type External: Data;   // a request a client sends
     type Response: Data;   // what the system answers to a request
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
-    type Message: Data;    // what the system sends to clients on its own (`()` if nothing)
+    type Dispatch: Data;    // what the system sends to clients on its own (`()` if nothing)
 
     fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
     fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
@@ -67,13 +67,13 @@ pub trait Partitioned: Footprint {
 
 **Server-sent messages.** Internal work can send messages to clients:
 `InternalOutcome::new(next).send(msg)`, with messages of the model's own
-`Message` type (`()` for a model that sends nothing).
+`Dispatch` type (`()` for a model that sends nothing).
 The client's side is `Event::Receive(msg)` (`checker.receive(msg)`). A sent
 message is delivered at most once, in any order, at any time after it was sent,
 or never; an unreceived message is optional, so it never forces a split.
 Receiving a message no explanation has sent yet forces the internal work that
-could send it, searched on the message's keys (`Footprint::message_touches`).
-Resonate uses this for `Message::Execute { id, version }`, sent when a task becomes
+could send it, searched on the message's keys (`Footprint::dispatch_touches`).
+Resonate uses this for `Dispatch::Execute { id, version }`, sent when a task becomes
 pending: created with a target, resumed, reclaimed after its lease, or released.
 
 `ExternalOutcome` is one thing the system may do when a request takes effect: the
@@ -339,7 +339,7 @@ still walks every entry. The incremental hash is what fixes time.
 | `LeaseTriggers`, `RetryTriggers` | `.after(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
-| `debug.messages` (execute/unblock) | `execute` is a server-sent `Message::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
+| `debug.messages` (execute/unblock) | `execute` is a server-sent `Dispatch::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
 | footprint | promise id plus awaiter ids for callbacks; ticks touch only what has a timer due |
 
 Origins: the only request that may cross origins is a fence that creates a

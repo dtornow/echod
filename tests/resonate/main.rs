@@ -516,8 +516,8 @@ fn partitioning_never_changes_a_verdict() {
 
 // ------------------------------------------------------- server-sent messages
 
-fn execute(id: &str, version: u32) -> Message {
-    Message::Execute { id: id.into(), version }
+fn execute(id: &str, version: u32) -> Dispatch {
+    Dispatch::Execute { id: id.into(), version }
 }
 
 #[test]
