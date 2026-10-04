@@ -60,7 +60,7 @@ impl Model for BankModel {
 }
 
 impl Footprint for BankModel {
-    type Object = &'static str;
+    type Key = &'static str;
 
     fn external_touches(&self, op: &Request) -> Touches<&'static str> {
         match *op {

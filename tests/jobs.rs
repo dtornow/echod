@@ -91,7 +91,7 @@ impl Model for JobModel {
 }
 
 impl Footprint for JobModel {
-    type Object = u32;
+    type Key = u32;
 
     fn external_touches(&self, op: &Request) -> Touches<u32> {
         match *op {

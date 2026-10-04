@@ -689,7 +689,7 @@ impl Model for Resonate {
 }
 
 impl Footprint for Resonate {
-    type Object = Id;
+    type Key = Id;
 
     fn external_touches(&self, op: &Request) -> Touches<Id> {
         let ks = |v: &[&Id]| Touches::Only(v.iter().map(|k| (*k).clone()).collect());

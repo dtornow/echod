@@ -49,17 +49,17 @@ pub trait Model {
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
 
-/// Optional, for speed: which objects a step touches.
+/// Optional, for speed: which keys a step touches.
 pub trait Footprint: Model {
-    type Object: Data;     // a promise id, an account name
-    fn external_touches(&self, req: &Self::External) -> Touches<Self::Object>;  // Everything | Only(vec![..])
-    fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Object>;
+    type Key: Data;     // a promise id, an account name
+    fn external_touches(&self, req: &Self::External) -> Touches<Self::Key>;  // Everything | Only(vec![..])
+    fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Key>;
 }
 
-/// Optional, for speed: objects fall into independent groups.
+/// Optional, for speed: keys fall into independent groups.
 pub trait Partitioned: Footprint {
     type Group: Data;      // Resonate: the id's origin
-    fn group(&self, obj: &Self::Object) -> Self::Group;
+    fn group(&self, key: &Self::Key) -> Self::Group;
     fn restrict(&self, s: &Self::State, keep: &dyn Fn(&Self::Group) -> bool) -> Self::State;
     fn join(&self, a: &Self::State, b: &Self::State) -> Self::State;
 }

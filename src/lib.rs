@@ -19,8 +19,8 @@
 //! * **"Eventually" has a deadline,** which is what keeps the search small.
 //!
 //! A model is checked as it is. Two optional traits make checking faster:
-//! [`Footprint`] says which objects a step touches, and [`Partitioned`] groups
-//! objects into independent parts. Pick the constructor that matches:
+//! [`Footprint`] says which keys a step touches, and [`Partitioned`] groups
+//! keys into independent parts. Pick the constructor that matches:
 //! [`Checker::new`], [`Checker::with_footprints`] or [`Checker::with_partitions`].
 
 mod checker;
@@ -77,28 +77,28 @@ pub trait Model {
     }
 }
 
-/// Optional, for speed: which objects a request or internal step touches. To
-/// explain a response, the checker then only considers work on the same objects.
+/// Optional, for speed: which keys a request or internal step touches. To
+/// explain a response, the checker then only considers work on the same keys.
 /// A footprint must include everything the step reads or writes.
 pub trait Footprint: Model {
-    /// A thing in the state that steps touch: a promise id, an account name.
-    type Object: Data;
+    /// The key of a thing in the state that steps touch: a promise id, an account name.
+    type Key: Data;
 
-    fn external_touches(&self, req: &Self::External) -> Touches<Self::Object>;
+    fn external_touches(&self, req: &Self::External) -> Touches<Self::Key>;
 
-    fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Object>;
+    fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Key>;
 }
 
-/// Optional, for speed: objects fall into independent groups (Resonate: by
+/// Optional, for speed: keys fall into independent groups (Resonate: by
 /// origin), and the checker keeps each group's explanations apart instead of
 /// their product. Internal work started by a step must stay within the groups
 /// that step touches.
 pub trait Partitioned: Footprint {
     type Group: Data;
 
-    fn group(&self, obj: &Self::Object) -> Self::Group;
+    fn group(&self, key: &Self::Key) -> Self::Group;
 
-    /// The part of `state` whose objects belong to groups `keep` accepts.
+    /// The part of `state` whose keys belong to groups `keep` accepts.
     fn restrict(&self, state: &Self::State, keep: &dyn Fn(&Self::Group) -> bool) -> Self::State;
 
     /// The union of two states over disjoint groups.
@@ -187,7 +187,7 @@ pub enum StepResult<M: Model + ?Sized> {
     Next(Vec<Succ<M>>),
 }
 
-/// The objects a step touches.
+/// The keys a step touches.
 #[derive(Clone, Debug)]
 pub enum Touches<K> {
     /// Anything: the step may read or write any object.
@@ -254,18 +254,18 @@ pub struct Keyed<M>(pub M);
 
 impl<M: Footprint> Engine for Keyed<M> {
     type M = M;
-    type Key = M::Object;
+    type Key = M::Key;
     type Part = ();
 
     fn model(&self) -> &M {
         &self.0
     }
 
-    fn external_keys(&self, req: &M::External) -> Touches<M::Object> {
+    fn external_keys(&self, req: &M::External) -> Touches<M::Key> {
         self.0.external_touches(req)
     }
 
-    fn internal_keys(&self, step: &M::Internal) -> Touches<M::Object> {
+    fn internal_keys(&self, step: &M::Internal) -> Touches<M::Key> {
         self.0.internal_touches(step)
     }
 }
@@ -275,22 +275,22 @@ pub struct Grouped<M>(pub M);
 
 impl<M: Partitioned> Engine for Grouped<M> {
     type M = M;
-    type Key = M::Object;
+    type Key = M::Key;
     type Part = M::Group;
 
     fn model(&self) -> &M {
         &self.0
     }
 
-    fn external_keys(&self, req: &M::External) -> Touches<M::Object> {
+    fn external_keys(&self, req: &M::External) -> Touches<M::Key> {
         self.0.external_touches(req)
     }
 
-    fn internal_keys(&self, step: &M::Internal) -> Touches<M::Object> {
+    fn internal_keys(&self, step: &M::Internal) -> Touches<M::Key> {
         self.0.internal_touches(step)
     }
 
-    fn part(&self, key: &M::Object) -> Option<M::Group> {
+    fn part(&self, key: &M::Key) -> Option<M::Group> {
         Some(self.0.group(key))
     }
 

@@ -90,7 +90,7 @@ impl<M: Accounts> Model for Bank<M> {
 }
 
 impl<M: Accounts> Footprint for Bank<M> {
-    type Object = u32;
+    type Key = u32;
 
     fn external_touches(&self, Request::Deposit(a, _): &Request) -> Touches<u32> {
         Touches::one(*a)
