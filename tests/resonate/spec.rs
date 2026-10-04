@@ -11,6 +11,10 @@
 //!   already "maybe".
 //! - `PollTask` past its limit claims some subset of size `limit` (the C# spec
 //!   checks only the count and keeps the state unchanged).
+//! - The only request that may cross origins is a fence that creates a promise
+//!   in another origin: a detached workflow. A cross-origin fence-settle is 400
+//!   (the C# spec and the server allow it; the Lean spec refuses every
+//!   cross-origin fence, the detached create included).
 //! - Not ported: the `egress` capability (retry timeouts) and `debug.messages`.
 
 use std::collections::BTreeSet;
@@ -615,6 +619,11 @@ impl Spec for Resonate {
                 if action.target() == id {
                     return status(400, s); // T-04
                 }
+                if let Fenced::Settle(st) = action {
+                    if origin(&st.id) != origin(id) {
+                        return status(400, s); // only a create, a detached promise, may cross origins
+                    }
+                }
                 if let Err(code) = self.held(s, id, *version) {
                     return status(code, s);
                 }
@@ -690,13 +699,19 @@ impl Spec for Resonate {
             | Op::ReleaseTask { id, .. }
             | Op::FulfillTask { id, .. }
             | Op::HeartbeatTask { id, .. } => ks(&[id]),
+            // A request refused for crossing origins is refused on the ids alone and
+            // reads nothing, so its footprint stays in one origin.
+            Op::RegisterCallback { awaited, awaiter } if origin(awaited) != origin(awaiter) => ks(&[awaited]),
             Op::RegisterCallback { awaited, awaiter } => ks(&[awaited, awaiter]),
             Op::RegisterListener { awaited, .. } => ks(&[awaited]),
+            Op::SuspendTask { id, awaited, .. } if awaited.iter().any(|a| origin(a) != origin(id)) => ks(&[id]),
             Op::SuspendTask { id, awaited, .. } => {
                 let mut v: Vec<&Id> = awaited.iter().collect();
                 v.push(id);
                 ks(&v)
             }
+            Op::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
+            // A detached create: the one request that spans two origins.
             Op::FenceTask { id, action, .. } => ks(&[id, action.target()]),
             Op::PollTask { .. } => Keys::All,
         }
@@ -709,8 +724,10 @@ impl Spec for Resonate {
         }
     }
 
-    /// Ids of different origins never interact, except through `FenceTask` across
-    /// origins and `PollTask`, whose footprints span them and merge the partitions.
+    /// Ids of different origins never interact, except through a detached create
+    /// (`FenceTask` creating in another origin) and `PollTask`. Their footprints
+    /// span origins and merge the partitions; the checker splits them again once
+    /// the candidates are independent.
     fn part(&self, key: &Id) -> Option<Id> {
         Some(origin(key).to_string())
     }

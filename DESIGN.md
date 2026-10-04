@@ -215,6 +215,9 @@ mechanisms keep it small, and all eight are in the prototype.
    partitions. The full profile is their product, but it is never built. An
    event goes to the factor owning its footprint. A request spanning factors
    merges them (their product, built then), and `Keys::All` merges everything.
+   After each event a merged factor splits back apart if no pending work links
+   its partitions and its candidates are exactly the product of their
+   projections, so a merge lasts only as long as the request that caused it.
    Partitions not touched yet are pulled out of the initial state on first use.
    Spawned work must stay inside its spawner's partitions; the checker reports
    a spec error if it doesn't. Resonate partitions by origin. Measured
@@ -292,6 +295,13 @@ still walks every entry. The incremental hash is what fixes time.
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
 | `debug.messages` (execute/unblock) | outbound messages as their own `Invoke`/`Return` pairs, or an `Op::Drain` whose response is the message multiset |
 | footprint | promise id plus awaiter ids for callbacks; ticks touch only what has a timer due |
+
+Origins: the only request that may cross origins is a fence that creates a
+promise in another origin, which starts a detached workflow. A cross-origin
+fence-settle, `register_callback` or `suspend` is 400. Those refusals are made on
+the ids alone, so their footprint stays in one origin and doesn't merge
+anything. The C# spec and the server allow cross-origin fence-settles. The Lean
+spec refuses every cross-origin fence, the detached create included.
 
 The port is in `tests/resonate/` (`spec.rs`, plus traces from
 `ExampleTraces.cs` and `LeaseAndTimeoutTests.cs` in `main.rs`). Not ported: the

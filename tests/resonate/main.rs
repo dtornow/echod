@@ -401,19 +401,38 @@ fn partitions_keep_independent_origins_apart() {
 }
 
 #[test]
-fn a_cross_origin_fence_merges_two_partitions() {
+fn only_a_detached_create_crosses_origins() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     t.step("create a:t", create("a:t", FAR, "w").target().op(), st(200));
     t.step("acquire a:t", acquire("a:t", 0, "w"), st(200));
-    t.step("create b:p", create("b:p", FAR, "x").op(), st(200));
+    t.step("create b:p", create("b:p", FAR, "x").external().op(), st(200));
     t.step("create c:p", create("c:p", FAR, "x").op(), st(200));
     assert_eq!(t.c.factors().len(), 3);
-    t.step("fence a:t settles b:p", fence("a:t", 1, Fenced::Settle(settle("b:p", "resolved", "v"))), st(200));
-    assert_eq!(t.c.factors().len(), 2);
+
+    // Refused on the ids alone: no merge.
+    t.step("fence-settle across origins → 400", fence("a:t", 1, Fenced::Settle(settle("b:p", "resolved", "v"))), st(400));
+    t.step("callback across origins → 400", callback("b:p", "a:t"), st(400));
+    t.step("suspend across origins → 400", suspend("a:t", 1, &["b:p"]), st(400));
+    assert_eq!((t.c.factors().len(), t.c.stats.merges), (3, 0));
+
+    // A detached workflow: a:t creates d:root. The two origins merge for the
+    // request and split again once it has returned.
+    t.step("detached create d:root", fence("a:t", 1, Fenced::Create(create("d:root", FAR, "w").target())), promise(PState::Pending, None));
+    assert_eq!(t.c.stats.splits, 1);
+    assert_eq!(t.c.factors().len(), 4, "a, b, c and d, each on its own");
+    t.step("d:root is its own workflow", acquire("d:root", 0, "w2"), task(TState::Acquired, 1));
+
+    // Unanswered, the detached create keeps the two origins together until it is resolved.
+    let calls = t.next;
+    t.c.invoke(calls + 1, fence("a:t", 1, Fenced::Create(create("e:root", FAR, "w")))).unwrap();
+    assert_eq!(t.c.factors().len(), 4, "a and e merged");
+    t.next += 1;
+    t.step("e:root exists, so the create landed", get("e:root"), promise(PState::Pending, None));
+    assert_eq!(t.c.factors().len(), 4, "the unanswered fence still links a and e");
+
     t.step("poll touches every origin", Op::PollTask { pid: "w".into(), ttl: 1_000, limit: 10 }, |_| true);
     assert_eq!(t.c.factors().len(), 1);
-    t.step("still consistent", get("b:p"), promise(PState::Resolved, Some("v")));
 }
 
 /// A small deterministic generator, so the differential test needs no crates.
@@ -448,6 +467,7 @@ fn partitioning_never_changes_a_verdict() {
                 4 => Op::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
                 5 => Op::RegisterCallback { awaited: id, awaiter: other },
                 6 => Op::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
+                7 if rng.next(2) == 0 => Op::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: clock + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
                 7 => Op::GetTask(id),
                 _ => Op::GetPromise(id),
             };

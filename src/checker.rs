@@ -109,8 +109,11 @@ pub struct Stats {
     pub max_width: usize,
     /// The most factors held at once.
     pub max_factors: usize,
-    /// Factors merged because a request or step spanned them.
+    /// Factors merged because a request spanned them (a partition touched for
+    /// the first time joins without counting as a merge).
     pub merges: usize,
+    /// Factors split off again once their partitions were independent.
+    pub splits: usize,
     pub subsumed: usize,
 }
 
@@ -251,11 +254,11 @@ impl<S: Spec> Checker<S> {
     /// change what the checker accepts. This is Accordant's `Allows` used as a
     /// query: the expected responses, without having to write them down.
     pub fn allowed(&mut self, op: &S::Op) -> Vec<S::Resp> {
-        let saved = self.factors.clone();
+        let saved = (self.factors.clone(), self.stats.clone());
         let scope = self.scope(self.spec.op_keys(op));
         let i = self.gather(scope);
         let out = self.allowed_in(&self.factors[i].nodes, op);
-        self.factors = saved;
+        (self.factors, self.stats) = saved;
         out
     }
 
@@ -356,7 +359,61 @@ impl<S: Spec> Checker<S> {
                 }
             }
         }
+        self.split(i);
         Ok(())
+    }
+
+    /// Splits factor `i` back into independent factors once nothing links its
+    /// partitions: no pending work spans them, and its candidates are exactly the
+    /// product of their projections. A merge for one request (a detached create)
+    /// then lasts only as long as that request does.
+    fn split(&mut self, i: usize) {
+        let Some(parts) = &self.factors[i].parts else { return };
+        if parts.len() < 2 {
+            return;
+        }
+        let nodes = &self.factors[i].nodes;
+        let mut groups: Vec<BTreeSet<S::Key>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
+        for n in nodes {
+            for item in &n.pending {
+                if matches!(item, Pending::Responded { .. }) {
+                    return; // answered by the spec, not yet returned: its footprint is gone
+                }
+                let Keys::Some(ks) = self.keys(item) else { return };
+                let touched: BTreeSet<S::Key> = ks.iter().filter_map(|k| self.spec.part(k)).collect();
+                let (linked, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| !g.is_disjoint(&touched));
+                groups = rest;
+                groups.push(linked.into_iter().flatten().collect());
+            }
+        }
+        if groups.len() < 2 {
+            return;
+        }
+        let item_part = |item: &P<S>| match self.keys(item) {
+            Keys::Some(ks) => ks.first().and_then(|k| self.spec.part(k)),
+            Keys::All => None,
+        };
+        let mut factors = Vec::new();
+        for g in &groups {
+            let mut seen = HashSet::new();
+            let mut proj = Vec::new();
+            for n in nodes {
+                let state = self.states.intern(self.spec.restrict(&n.state, &|p| g.contains(p)));
+                let pending = n.pending.iter().filter(|x| item_part(x).is_some_and(|p| g.contains(&p))).cloned().collect();
+                let m = Node { state, pending };
+                if seen.insert(m.clone()) {
+                    proj.push(m);
+                }
+            }
+            factors.push(Factor { parts: Some(g.clone()), nodes: proj });
+        }
+        let product: u128 = factors.iter().map(|f| f.nodes.len() as u128).product();
+        if product != nodes.len() as u128 {
+            return; // the candidates correlate across the groups
+        }
+        self.stats.splits += factors.len() - 1;
+        self.factors.splice(i..=i, factors);
+        self.stats.max_factors = self.stats.max_factors.max(self.factors.len());
     }
 
     fn scope(&self, keys: Keys<S::Key>) -> Scope<S::Key> {
