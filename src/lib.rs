@@ -147,7 +147,7 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
     }
 
     /// Internal work that runs later.
-    pub fn spawn(mut self, step: M::Internal) -> Self {
+    pub fn later(mut self, step: M::Internal) -> Self {
         self.spawn.push(Sched::Later(step));
         self
     }
@@ -177,7 +177,7 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
     }
 
     /// Internal work that runs later.
-    pub fn spawn(mut self, step: M::Internal) -> Self {
+    pub fn later(mut self, step: M::Internal) -> Self {
         self.spawn.push(Sched::Later(step));
         self
     }

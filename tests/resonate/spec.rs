@@ -296,7 +296,7 @@ fn resumes(p: &Promise, awaited: &str) -> Vec<Internal> {
 
 fn with_spawns(mut o: ExternalOutcome<Resonate>, steps: Vec<Internal>) -> ExternalOutcome<Resonate> {
     for st in steps {
-        o = o.spawn(st);
+        o = o.later(st);
     }
     o
 }
@@ -648,7 +648,7 @@ impl Model for Resonate {
                 settle(&mut n, id, state, None, p.timeout_at);
                 let mut succ = InternalOutcome::new(n);
                 for r in resumes(p, id) {
-                    succ = succ.spawn(r);
+                    succ = succ.later(r);
                 }
                 vec![succ]
             }

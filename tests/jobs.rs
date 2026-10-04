@@ -56,7 +56,7 @@ impl Model for JobModel {
             Request::Submit(j, timeout_at) => {
                 let mut n = s.clone();
                 n.jobs.insert(j, Status::Pending);
-                ExternalOutcome::new(Response::Accepted, n).spawn(Internal::Run(j)).timer(timeout_at, Internal::Timeout(j))
+                ExternalOutcome::new(Response::Accepted, n).later(Internal::Run(j)).timer(timeout_at, Internal::Timeout(j))
             }
             Request::Get(j) => match s.jobs.get(&j) {
                 None => ExternalOutcome::same(Response::NotFound, s),

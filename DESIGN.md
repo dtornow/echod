@@ -76,7 +76,7 @@ Mapping from Accordant:
 - `[State]` + source generator → `#[derive(Clone, PartialEq, Eq, Hash)]`. Ownership
   replaces freezing: `apply` gets `&State` and returns new states. States are
   immutable once the checker has them; see [State representation](#state-representation).
-- `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `ExternalOutcome::new(resp, next).spawn(t)`.
+- `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `ExternalOutcome::new(resp, next).later(t)`.
   The response is a value, not a predicate, so it can be stored in a node and
   hashed. Wildcards (server ids, timestamps) go in `admits`.
 - `Expect.OneOf` → returning several outcomes.
