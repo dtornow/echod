@@ -567,3 +567,23 @@ fn a_reclaimed_lease_dispatches_again() {
     t.tick(1_010_000);
     t.c.receive(execute("ex:t", 1)).unwrap();
 }
+
+#[test]
+fn check_timed_takes_calls_ticks_and_dispatches() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    let create_r = create("ex:r", now + 10_000, "r").target().op();
+    let created = t.c.allowed(&create_r).remove(0); // the pending record
+    let mut c = Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() });
+    let trace = vec![
+        (now, Event::Invoke(1, create_r)),
+        (now, Event::Return(1, created.clone())),
+        (now + 5, Event::Receive(execute("ex:r", 0))),
+        (now + 20_000, Event::Invoke(2, get("ex:r"))),
+    ];
+    c.check_timed(trace).unwrap();
+    // The read was sent after the deadline: it can only see the promise timed out.
+    let stale = created; // pending, as of before the deadline
+    let v = c.check_timed(vec![(now + 20_000, Event::Return(2, stale))]).unwrap_err();
+    assert_eq!(v.index, 0);
+}

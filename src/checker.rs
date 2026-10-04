@@ -179,6 +179,8 @@ pub struct Checker<S: Engine> {
     escaped: std::cell::RefCell<Option<String>>,
     /// A partition of each outstanding call, to find its factor on `Return`.
     calls: HashMap<CallId, S::Part>,
+    /// Call ids `check_calls` hands out; far from the ids callers pick themselves.
+    next_call: CallId,
     pub stats: Stats,
 }
 
@@ -223,6 +225,7 @@ impl<S: Engine> Checker<S> {
             scope: None,
             escaped: Default::default(),
             calls: HashMap::new(),
+            next_call: 1 << 62,
             stats: Stats { max_width: 1, ..Stats::default() },
         }
     }
@@ -291,6 +294,55 @@ impl<S: Engine> Checker<S> {
             (self.factors, self.now) = saved;
         }
         r
+    }
+
+    /// Checks a whole trace: feeds its observations in order and stops at the
+    /// first one no run of the model can explain. The trace can be a `Vec`, or
+    /// any iterator, including one that generates observations lazily.
+    ///
+    /// The error's `index` is the position of that observation in `trace`.
+    pub fn check<I>(&mut self, trace: I) -> Result<&Stats, Violation>
+    where
+        I: IntoIterator<Item = Event<Ex<S>, Re<S>, Ms<S>>>,
+    {
+        for (i, e) in trace.into_iter().enumerate() {
+            self.observe(e).map_err(|v| Violation { index: i, ..v })?;
+        }
+        Ok(&self.stats)
+    }
+
+    /// Checks a trace whose observations carry the time they were seen. The
+    /// clock advances to each observation's time before it is checked; times
+    /// must not decrease.
+    pub fn check_timed<I>(&mut self, trace: I) -> Result<&Stats, Violation>
+    where
+        I: IntoIterator<Item = (Time, Event<Ex<S>, Re<S>, Ms<S>>)>,
+    {
+        for (i, (at, e)) in trace.into_iter().enumerate() {
+            if at > self.now {
+                self.tick(at).map_err(|v| Violation { index: i, ..v })?;
+            }
+            self.observe(e).map_err(|v| Violation { index: i, ..v })?;
+        }
+        Ok(&self.stats)
+    }
+
+    /// Checks the simplest trace: calls made one after another, each answered
+    /// before the next is sent, with the time of each. This is the shape of a
+    /// log of request/response pairs, such as resonate-specification's NDJSON.
+    pub fn check_calls<I>(&mut self, trace: I) -> Result<&Stats, Violation>
+    where
+        I: IntoIterator<Item = (Time, Ex<S>, Re<S>)>,
+    {
+        for (i, (at, req, resp)) in trace.into_iter().enumerate() {
+            if at > self.now {
+                self.tick(at).map_err(|v| Violation { index: i, ..v })?;
+            }
+            let call = self.next_call;
+            self.next_call += 1;
+            self.call(call, req, resp).map_err(|v| Violation { index: i, ..v })?;
+        }
+        Ok(&self.stats)
     }
 
     /// Every response `op` may get if it is called now and answered now. Does not

@@ -106,6 +106,26 @@ enum Pending<Op, Resp, Step> {
 }
 ```
 
+## Checking a trace
+
+A trace is a sequence of observations. It can be a `Vec`, or any iterator,
+including one that generates observations lazily: the checker consumes them one
+at a time and never holds the whole trace.
+
+```rust
+let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
+
+c.check(events)?;        // Event::Invoke / Return / Receive / Tick / Quiesce
+c.check_timed(events)?;  // (Time, Event): the clock advances to each time first
+c.check_calls(calls)?;   // (Time, External, Response): sequential calls, each answered before the next
+```
+
+Each returns `Ok(&Stats)` if some run of the model produces exactly these
+observations, or the first `Violation`, whose `index` is that observation's
+position in the trace. The checker keeps its state afterwards, so a long trace
+can be fed in pieces. `check_calls` is the shape of a request/response log, like
+resonate-specification's NDJSON traces.
+
 ## Separating request from response
 
 The history is a sequence of events, each at the checker's current time:

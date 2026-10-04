@@ -224,3 +224,99 @@ fn footprints_keep_the_cone_small() {
     assert!(without.max_width >= 64, "{without:?}");
     assert!(with.explored * 50 < without.explored, "{with:?} vs {without:?}");
 }
+
+// ------------------------------------------------------------ whole traces
+
+use accordant::Event;
+
+fn model() -> Checker<Keyed<BankModel>> {
+    Checker::with_footprints(BankModel, Bank::default(), Config::default())
+}
+
+#[test]
+fn check_accepts_a_valid_trace_of_events() {
+    let trace = vec![
+        Event::Invoke(0, Request::Open("alice")),
+        Event::Return(0, Response::Ok(0)),
+        Event::Invoke(1, Request::Deposit("alice", 100)),
+        Event::Return(1, Response::Ok(100)),
+        Event::Invoke(2, Request::Withdraw("alice", 60)),
+        Event::Invoke(3, Request::Withdraw("alice", 60)),
+        Event::Return(3, Response::Ok(40)),
+        Event::Return(2, Response::Insufficient),
+    ];
+    let stats = model().check(trace).unwrap().clone();
+    assert_eq!(stats.events, 8);
+}
+
+#[test]
+fn check_reports_the_position_of_the_first_bad_observation() {
+    let trace = vec![
+        Event::Invoke(0, Request::Open("alice")),
+        Event::Return(0, Response::Ok(0)),
+        Event::Invoke(1, Request::Deposit("alice", 100)),
+        Event::Return(1, Response::Ok(100)),
+        Event::Invoke(2, Request::Withdraw("alice", 60)),
+        Event::Invoke(3, Request::Withdraw("alice", 60)),
+        Event::Return(2, Response::Ok(40)),
+        Event::Return(3, Response::Ok(40)), // double spend
+        Event::Invoke(4, Request::Balance("alice")),
+    ];
+    let v = model().check(trace).unwrap_err();
+    assert_eq!(v.index, 7, "{v}");
+}
+
+#[test]
+fn check_timed_advances_the_clock_to_each_observation() {
+    let cfg = Config { request_lifetime: Some(1_000), ..Config::default() };
+    let open = vec![
+        (0, Event::Invoke(0, Request::Open("alice"))),
+        (0, Event::Return(0, Response::Ok(0))),
+        (10, Event::Invoke(1, Request::Deposit("alice", 50))), // never answered
+    ];
+    let late_read = |at| vec![(at, Event::Invoke(2, Request::Balance("alice"))), (at, Event::Return(2, Response::Ok(50)))];
+
+    let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg.clone());
+    c.check_timed(open.clone().into_iter().chain(late_read(500))).unwrap(); // within its lifetime
+
+    let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
+    c.check_timed(open).unwrap();
+    c.check_timed(vec![(5_000, Event::Invoke(3, Request::Balance("alice"))), (5_000, Event::Return(3, Response::Ok(0)))])
+        .unwrap(); // past it: never happened
+    assert!(c.check_timed(late_read(6_000)).is_err());
+}
+
+#[test]
+fn check_calls_takes_a_log_of_request_response_pairs() {
+    let log = vec![
+        (0, Request::Open("alice"), Response::Ok(0)),
+        (1, Request::Deposit("alice", 100), Response::Ok(100)),
+        (2, Request::Withdraw("alice", 30), Response::Ok(70)),
+        (3, Request::Withdraw("alice", 100), Response::Insufficient),
+        (4, Request::Balance("alice"), Response::Ok(70)),
+    ];
+    model().check_calls(log.clone()).unwrap();
+
+    let mut bad = log;
+    bad[3].2 = Response::Ok(-30);
+    assert_eq!(model().check_calls(bad).unwrap_err().index, 3);
+}
+
+#[test]
+fn check_calls_streams_a_generated_trace() {
+    // 10,000 deposits, generated lazily: nothing is collected up front.
+    let mut balance = 0;
+    let mut n = 0;
+    let deposits = std::iter::from_fn(move || {
+        n += 1;
+        if n > 10_000 {
+            return None;
+        }
+        balance += 1;
+        Some((n, Request::Deposit("alice", 1), Response::Ok(balance)))
+    });
+    let mut c = model();
+    c.check_calls([(0, Request::Open("alice"), Response::Ok(0))]).unwrap();
+    let stats = c.check_calls(deposits).unwrap();
+    assert_eq!(stats.max_width, 1);
+}
