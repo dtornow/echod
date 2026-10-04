@@ -132,7 +132,7 @@ The checker owns the clock. Every event happens at `now`. `tick(t)` advances it,
 and the spec reads it in `apply` and `step`.
 
 - **Timers.** An outcome or step successor can install one:
-  `ExternalOutcome::new(resp, next).timer(at, Step::Timeout(id))`. A timer is a step that
+  `ExternalOutcome::new(resp, next).timer(at, on(&[id]))`. A timer is a step that
   is not enabled before `at`.
 - **When internal work runs is part of starting it**, not part of the work:
 
