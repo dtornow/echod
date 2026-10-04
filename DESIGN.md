@@ -44,7 +44,7 @@ pub trait Model {
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
 
     fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<Outcome<Self>>;
-    fn internal(&self, step: &Self::Internal, s: &Self::State, now: Time) -> StepResult<Self>; // Disabled | Discharged | Next(..)
+    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> StepResult<Self>; // Disabled | Discharged | Next(..)
     fn fairness(&self, step: &Self::Internal) -> Fairness;                                   // May | Eventually { within }
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }

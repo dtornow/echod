@@ -61,7 +61,7 @@ pub trait Model {
     fn external(&self, req: &Self::External, state: &Self::State, now: Time) -> Vec<Outcome<Self>>;
 
     /// Internal work runs in `state` at `now`.
-    fn internal(&self, _step: &Self::Internal, _state: &Self::State, _now: Time) -> StepResult<Self> {
+    fn internal(&self, _req: &Self::Internal, _state: &Self::State, _now: Time) -> StepResult<Self> {
         StepResult::Disabled
     }
 
