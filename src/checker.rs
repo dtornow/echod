@@ -4,7 +4,12 @@ use std::hash::{Hash, Hasher};
 
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
-use crate::{CallId, Fairness, Keys, Sched, Spec, StepResult, Time};
+use crate::{CallId, Engine, Fairness, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, StepResult, Time};
+
+type St<S> = <<S as Engine>::M as Model>::State;
+type Ex<S> = <<S as Engine>::M as Model>::External;
+type Re<S> = <<S as Engine>::M as Model>::Response;
+type In<S> = <<S as Engine>::M as Model>::Internal;
 
 /// Work a node still carries. Sorted, so a node's identity is canonical.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -23,36 +28,36 @@ pub enum Pending<O, R, T> {
     Step { step: T, after: Time, by: Option<Time>, must: bool },
 }
 
-type P<S> = Pending<<S as Spec>::Op, <S as Spec>::Resp, <S as Spec>::Step>;
+type P<S> = Pending<Ex<S>, Re<S>, In<S>>;
 
 /// One explanation of the history so far.
-pub struct Node<S: Spec> {
-    pub state: Interned<S::State>,
+pub struct Node<S: Engine> {
+    pub state: Interned<St<S>>,
     pub pending: HashedSet<P<S>>,
 }
 
-impl<S: Spec> Clone for Node<S> {
+impl<S: Engine> Clone for Node<S> {
     fn clone(&self) -> Self {
         Node { state: self.state.clone(), pending: self.pending.clone() }
     }
 }
 
-impl<S: Spec> PartialEq for Node<S> {
+impl<S: Engine> PartialEq for Node<S> {
     fn eq(&self, other: &Self) -> bool {
         self.pending == other.pending && self.state == other.state
     }
 }
 
-impl<S: Spec> Eq for Node<S> {}
+impl<S: Engine> Eq for Node<S> {}
 
-impl<S: Spec> Hash for Node<S> {
+impl<S: Engine> Hash for Node<S> {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.state.hash(h);
         self.pending.hash(h);
     }
 }
 
-impl<S: Spec> fmt::Debug for Node<S> {
+impl<S: Engine> fmt::Debug for Node<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node").field("state", &self.state).field("pending", &self.pending).finish()
     }
@@ -84,8 +89,8 @@ pub struct Config {
     pub max_width: usize,
     /// Fail rather than explore more nodes than this for one event.
     pub max_explore: usize,
-    /// Keep independent partitions' candidates apart, for specs that define `part`.
-    pub partition: bool,
+    /// The time the history starts at.
+    pub start: Time,
 }
 
 impl Default for Config {
@@ -96,7 +101,7 @@ impl Default for Config {
             subsume: true,
             max_width: 10_000,
             max_explore: 1_000_000,
-            partition: true,
+            start: 0,
         }
     }
 }
@@ -140,34 +145,34 @@ impl fmt::Display for Violation {
 
 /// The candidates for one group of partitions. The profile is the product of
 /// its factors: any choice in one factor combines with any choice in another.
-pub struct Factor<S: Spec> {
+pub struct Factor<S: Engine> {
     /// The partitions this factor owns; `None` owns everything.
-    pub parts: Option<BTreeSet<S::Key>>,
+    pub parts: Option<BTreeSet<S::Part>>,
     pub nodes: Vec<Node<S>>,
 }
 
-impl<S: Spec> Clone for Factor<S> {
+impl<S: Engine> Clone for Factor<S> {
     fn clone(&self) -> Self {
         Factor { parts: self.parts.clone(), nodes: self.nodes.clone() }
     }
 }
 
-pub struct Checker<S: Spec> {
-    spec: S,
+pub struct Checker<S: Engine> {
+    engine: S,
     cfg: Config,
     /// Partitions never touched are still in their initial state, here.
-    init: S::State,
+    init: St<S>,
     factors: Vec<Factor<S>>,
     /// The factor an event is being explained in.
     profile: Vec<Node<S>>,
-    states: Interner<S::State>,
+    states: Interner<St<S>>,
     now: Time,
     /// While an event is explained in a factor: the partitions it owns.
-    scope: Option<Option<BTreeSet<S::Key>>>,
+    scope: Option<Option<BTreeSet<S::Part>>>,
     /// The first spawned step that left `scope`, if any.
     escaped: std::cell::RefCell<Option<String>>,
     /// A partition of each outstanding call, to find its factor on `Return`.
-    calls: HashMap<CallId, S::Key>,
+    calls: HashMap<CallId, S::Part>,
     pub stats: Stats,
 }
 
@@ -177,14 +182,32 @@ enum Scope<K> {
     Parts(BTreeSet<K>),
 }
 
-impl<S: Spec> Checker<S> {
-    pub fn new(spec: S, init: S::State, cfg: Config) -> Self {
-        Self::starting_at(spec, init, cfg, 0)
+impl<M: Model> Checker<Plain<M>> {
+    /// Checks `model` as it is: every step may touch everything.
+    pub fn new(model: M, init: M::State, cfg: Config) -> Self {
+        Checker::with_engine(Plain(model), init, cfg)
     }
+}
 
-    pub fn starting_at(spec: S, init: S::State, cfg: Config, now: Time) -> Self {
+impl<M: Footprint> Checker<Keyed<M>> {
+    /// Checks `model` using its footprints.
+    pub fn with_footprints(model: M, init: M::State, cfg: Config) -> Self {
+        Checker::with_engine(Keyed(model), init, cfg)
+    }
+}
+
+impl<M: Partitioned> Checker<Grouped<M>> {
+    /// Checks `model` using its footprints and its partitions.
+    pub fn with_partitions(model: M, init: M::State, cfg: Config) -> Self {
+        Checker::with_engine(Grouped(model), init, cfg)
+    }
+}
+
+impl<S: Engine> Checker<S> {
+    pub fn with_engine(engine: S, init: St<S>, cfg: Config) -> Self {
+        let now = cfg.start;
         Checker {
-            spec,
+            engine,
             cfg,
             init,
             factors: Vec::new(),
@@ -224,20 +247,20 @@ impl<S: Spec> Checker<S> {
         self.factors.iter().map(|f| f.nodes.len() as u128).product()
     }
 
-    pub fn states(&self) -> impl Iterator<Item = S::State> {
+    pub fn states(&self) -> impl Iterator<Item = St<S>> {
         self.profile().into_iter().map(|n| (*n.state).clone())
     }
 
     /// True if `pred` holds in every candidate state: Accordant's "all terminal" poll check.
-    pub fn all(&self, pred: impl Fn(&S::State) -> bool) -> bool {
+    pub fn all(&self, pred: impl Fn(&St<S>) -> bool) -> bool {
         self.states().all(|s| pred(&s))
     }
 
-    pub fn invoke(&mut self, call: CallId, op: S::Op) -> Result<(), Violation> {
+    pub fn invoke(&mut self, call: CallId, op: Ex<S>) -> Result<(), Violation> {
         self.observe(Event::Invoke(call, op))
     }
 
-    pub fn ret(&mut self, call: CallId, resp: S::Resp) -> Result<(), Violation> {
+    pub fn ret(&mut self, call: CallId, resp: Re<S>) -> Result<(), Violation> {
         self.observe(Event::Return(call, resp))
     }
 
@@ -251,7 +274,7 @@ impl<S: Spec> Checker<S> {
 
     /// A call whose request and response are observed at the same instant.
     /// Atomic: if the response is rejected, the checker is left as it was.
-    pub fn call(&mut self, call: CallId, op: S::Op, resp: S::Resp) -> Result<(), Violation> {
+    pub fn call(&mut self, call: CallId, op: Ex<S>, resp: Re<S>) -> Result<(), Violation> {
         let saved = (self.factors.clone(), self.now);
         let r = self.invoke(call, op).and_then(|_| self.ret(call, resp));
         if r.is_err() {
@@ -263,27 +286,27 @@ impl<S: Spec> Checker<S> {
     /// Every response `op` may get if it is called now and answered now. Does not
     /// change what the checker accepts. This is Accordant's `Allows` used as a
     /// query: the expected responses, without having to write them down.
-    pub fn allowed(&mut self, op: &S::Op) -> Vec<S::Resp> {
+    pub fn allowed(&mut self, op: &Ex<S>) -> Vec<Re<S>> {
         let saved = (self.factors.clone(), self.stats.clone());
-        let scope = self.scope(self.spec.op_keys(op));
+        let scope = self.scope(self.engine.external_keys(op));
         let i = self.gather(scope);
         let out = self.allowed_in(&self.factors[i].nodes, op);
         (self.factors, self.stats) = saved;
         out
     }
 
-    fn allowed_in(&self, nodes: &[Node<S>], op: &S::Op) -> Vec<S::Resp> {
+    fn allowed_in(&self, nodes: &[Node<S>], op: &Ex<S>) -> Vec<Re<S>> {
         let probe = CallId::MAX;
-        let mut out: Vec<S::Resp> = Vec::new();
+        let mut out: Vec<Re<S>> = Vec::new();
         let mut explored = 0;
         for n in nodes {
             let mut m = n.clone();
             m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)), false);
-            let relevant = if self.cfg.footprints { self.relevant(&m, &owed) } else { Keys::All };
+            let relevant = if self.cfg.footprints { self.relevant(&m, &owed) } else { Touches::Everything };
             let _ = self.search(m, &relevant, &mut explored, |x| {
                 for i in &x.pending {
-                    let found: Vec<&S::Resp> = match i {
+                    let found: Vec<&Re<S>> = match i {
                         Pending::Responded { call, resp } if *call == probe => vec![resp],
                         Pending::InFlight { call, early, .. } if *call == probe => early.iter().collect(),
                         _ => continue,
@@ -301,12 +324,12 @@ impl<S: Spec> Checker<S> {
         out
     }
 
-    pub fn observe(&mut self, e: Event<S::Op, S::Resp>) -> Result<(), Violation> {
+    pub fn observe(&mut self, e: Event<Ex<S>, Re<S>>) -> Result<(), Violation> {
         let index = self.stats.events;
         self.stats.events += 1;
         match &e {
             Event::Invoke(call, op) => {
-                let scope = self.scope(self.spec.op_keys(op));
+                let scope = self.scope(self.engine.external_keys(op));
                 if let Scope::Parts(ps) = &scope {
                     if let Some(p) = ps.first() {
                         self.calls.insert(*call, p.clone());
@@ -384,14 +407,14 @@ impl<S: Spec> Checker<S> {
             return;
         }
         let nodes = &self.factors[i].nodes;
-        let mut groups: Vec<BTreeSet<S::Key>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
+        let mut groups: Vec<BTreeSet<S::Part>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
         for n in nodes {
             for item in &n.pending {
                 if matches!(item, Pending::Responded { .. }) {
                     return; // answered by the spec, not yet returned: its footprint is gone
                 }
-                let Keys::Some(ks) = self.keys(item) else { return };
-                let touched: BTreeSet<S::Key> = ks.iter().filter_map(|k| self.spec.part(k)).collect();
+                let Touches::Only(ks) = self.keys(item) else { return };
+                let touched: BTreeSet<S::Part> = ks.iter().filter_map(|k| self.engine.part(k)).collect();
                 let (linked, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| !g.is_disjoint(&touched));
                 groups = rest;
                 groups.push(linked.into_iter().flatten().collect());
@@ -401,15 +424,15 @@ impl<S: Spec> Checker<S> {
             return;
         }
         let item_part = |item: &P<S>| match self.keys(item) {
-            Keys::Some(ks) => ks.first().and_then(|k| self.spec.part(k)),
-            Keys::All => None,
+            Touches::Only(ks) => ks.first().and_then(|k| self.engine.part(k)),
+            Touches::Everything => None,
         };
         let mut factors = Vec::new();
         for g in &groups {
             let mut seen = HashSet::new();
             let mut proj = Vec::new();
             for n in nodes {
-                let state = self.states.intern(self.spec.restrict(&n.state, &|p| g.contains(p)));
+                let state = self.states.intern(self.engine.restrict(&n.state, &|p| g.contains(p)));
                 let pending = n.pending.iter().filter(|x| item_part(x).is_some_and(|p| g.contains(&p))).cloned().collect();
                 let m = Node { state, pending };
                 if seen.insert(m.clone()) {
@@ -427,14 +450,11 @@ impl<S: Spec> Checker<S> {
         self.stats.max_factors = self.stats.max_factors.max(self.factors.len());
     }
 
-    fn scope(&self, keys: Keys<S::Key>) -> Scope<S::Key> {
-        let Keys::Some(ks) = keys else { return Scope::All };
-        if !self.cfg.partition {
-            return Scope::All;
-        }
+    fn scope(&self, keys: Touches<S::Key>) -> Scope<S::Part> {
+        let Touches::Only(ks) = keys else { return Scope::All };
         let mut parts = BTreeSet::new();
         for k in &ks {
-            match self.spec.part(k) {
+            match self.engine.part(k) {
                 Some(p) => parts.insert(p),
                 None => return Scope::All,
             };
@@ -444,18 +464,18 @@ impl<S: Spec> Checker<S> {
 
     /// The index of the one factor that owns `scope`, merging factors and pulling
     /// untouched partitions out of the initial state as needed.
-    fn gather(&mut self, scope: Scope<S::Key>) -> usize {
+    fn gather(&mut self, scope: Scope<S::Part>) -> usize {
         if let Some(i) = self.factors.iter().position(|f| f.parts.is_none()) {
             return i;
         }
         let (hit, fresh): (Vec<usize>, Factor<S>) = match scope {
             Scope::All => {
-                let claimed: BTreeSet<S::Key> =
+                let claimed: BTreeSet<S::Part> =
                     self.factors.iter().flat_map(|f| f.parts.iter().flatten().cloned()).collect();
                 let rest = if self.factors.is_empty() {
                     self.init.clone()
                 } else {
-                    self.spec.restrict(&self.init, &|p| !claimed.contains(p))
+                    self.engine.restrict(&self.init, &|p| !claimed.contains(p))
                 };
                 let node = Node { state: self.states.intern(rest), pending: HashedSet::new() };
                 ((0..self.factors.len()).collect(), Factor { parts: None, nodes: vec![node] })
@@ -464,9 +484,9 @@ impl<S: Spec> Checker<S> {
                 let hit: Vec<usize> = (0..self.factors.len())
                     .filter(|&i| self.factors[i].parts.as_ref().is_some_and(|ps| !ps.is_disjoint(&parts)))
                     .collect();
-                let claimed: BTreeSet<S::Key> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
-                let new: BTreeSet<S::Key> = parts.difference(&claimed).cloned().collect();
-                let state = self.spec.restrict(&self.init, &|p| new.contains(p));
+                let claimed: BTreeSet<S::Part> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
+                let new: BTreeSet<S::Part> = parts.difference(&claimed).cloned().collect();
+                let state = self.engine.restrict(&self.init, &|p| new.contains(p));
                 let node = Node { state: self.states.intern(state), pending: HashedSet::new() };
                 (hit, Factor { parts: Some(new), nodes: vec![node] })
             }
@@ -495,7 +515,7 @@ impl<S: Spec> Checker<S> {
         let mut out = Vec::with_capacity(a.len() * b.len());
         for x in a {
             for y in b {
-                let state = self.spec.join(&x.state, &y.state);
+                let state = self.engine.join(&x.state, &y.state);
                 let pending = x.pending.union(&y.pending);
                 out.push(Node { state: self.states.intern(state), pending });
             }
@@ -522,7 +542,7 @@ impl<S: Spec> Checker<S> {
     }
 
     /// One event, explained within the working profile.
-    fn observe_in(&mut self, index: usize, e: &Event<S::Op, S::Resp>) -> Result<(), Violation> {
+    fn observe_in(&mut self, index: usize, e: &Event<Ex<S>, Re<S>>) -> Result<(), Violation> {
         let Event::Tick(to) = *e else {
             return self.instant(index, e);
         };
@@ -554,7 +574,7 @@ impl<S: Spec> Checker<S> {
         ts.into_iter().filter(|t| *t > self.now && *t <= to).collect()
     }
 
-    fn instant(&mut self, index: usize, e: &Event<S::Op, S::Resp>) -> Result<(), Violation> {
+    fn instant(&mut self, index: usize, e: &Event<Ex<S>, Re<S>>) -> Result<(), Violation> {
         let mut explored = 0usize;
         let mut next = Vec::new();
         let mut seen = HashSet::new();
@@ -601,7 +621,7 @@ impl<S: Spec> Checker<S> {
         Ok(())
     }
 
-    fn violation(&self, index: usize, e: &Event<S::Op, S::Resp>, reason: String) -> Violation {
+    fn violation(&self, index: usize, e: &Event<Ex<S>, Re<S>>, reason: String) -> Violation {
         Violation {
             index,
             now: self.now,
@@ -613,7 +633,7 @@ impl<S: Spec> Checker<S> {
 
     /// Before time passes a request's lifetime, each branch decides: it took effect
     /// in time (and must linearize before the clock moves on), or it never will.
-    fn prepare(&self, n: &Node<S>, e: &Event<S::Op, S::Resp>) -> Vec<Node<S>> {
+    fn prepare(&self, n: &Node<S>, e: &Event<Ex<S>, Re<S>>) -> Vec<Node<S>> {
         let (Event::Tick(t), Some(life)) = (e, self.cfg.request_lifetime) else {
             return vec![n.clone()];
         };
@@ -643,13 +663,13 @@ impl<S: Spec> Checker<S> {
     /// Explores the fewest internal moves that let `e` be consumed from `n`: moves
     /// stop once nothing owed before `e` remains, and only work sharing a footprint
     /// with what is owed is tried. Everything else commutes past `e` and waits.
-    fn explain(&self, n: Node<S>, e: &Event<S::Op, S::Resp>, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
+    fn explain(&self, n: Node<S>, e: &Event<Ex<S>, Re<S>>, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
         let owed = self.owed(&n, e);
         if owed.is_empty() {
             return Ok(self.consume(&n, e)?.into_iter().collect());
         }
         let relevant = if matches!(e, Event::Quiesce) || !self.cfg.footprints {
-            Keys::All
+            Touches::Everything
         } else {
             self.relevant(&n, &owed)
         };
@@ -682,7 +702,7 @@ impl<S: Spec> Checker<S> {
         if forced.is_empty() {
             return Ok(vec![n]);
         }
-        let relevant = if self.cfg.footprints { self.relevant(&n, &forced) } else { Keys::All };
+        let relevant = if self.cfg.footprints { self.relevant(&n, &forced) } else { Touches::Everything };
         let mut out = Vec::new();
         self.search(n, &relevant, explored, |m| {
             let ready = !m.pending.iter().any(|i| matches!(i, Pending::InFlight { must: true, .. }))
@@ -701,7 +721,7 @@ impl<S: Spec> Checker<S> {
     fn search(
         &self,
         n: Node<S>,
-        relevant: &Keys<S::Key>,
+        relevant: &Touches<S::Key>,
         explored: &mut usize,
         mut visit: impl FnMut(&Node<S>) -> Result<bool, String>,
     ) -> Result<(), String> {
@@ -738,7 +758,7 @@ impl<S: Spec> Checker<S> {
 
     /// An obligation whose deadline is now or past and that can fire: it must fire
     /// before anything else is observed or happens at this instant.
-    fn is_overdue(&self, item: &P<S>, state: &S::State) -> bool {
+    fn is_overdue(&self, item: &P<S>, state: &St<S>) -> bool {
         match item {
             Pending::Step { step, must: true, by: Some(by), .. } => *by <= self.now && self.enabled(item, step, state),
             _ => false,
@@ -750,7 +770,7 @@ impl<S: Spec> Checker<S> {
     }
 
     /// What must happen, at the current time, before `e` can be consumed from `m`.
-    fn owed<'a>(&self, m: &'a Node<S>, e: &Event<S::Op, S::Resp>) -> Vec<&'a P<S>> {
+    fn owed<'a>(&self, m: &'a Node<S>, e: &Event<Ex<S>, Re<S>>) -> Vec<&'a P<S>> {
         let returning = match e {
             Event::Return(c, r) => Some((*c, Some(r))),
             _ => None,
@@ -763,7 +783,7 @@ impl<S: Spec> Checker<S> {
     fn owed_for<'a>(
         &self,
         m: &'a Node<S>,
-        returning: Option<(CallId, Option<&S::Resp>)>,
+        returning: Option<(CallId, Option<&Re<S>>)>,
         quiesce: bool,
     ) -> Vec<&'a P<S>> {
         m.pending
@@ -771,7 +791,7 @@ impl<S: Spec> Checker<S> {
             .filter(|item| match item {
                 Pending::InFlight { must: true, .. } => true,
                 Pending::InFlight { call, early, .. } => match returning {
-                    Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| self.spec.admits(r, o))),
+                    Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| self.engine.model().admits(r, o))),
                     _ => false,
                 },
                 Pending::Step { step, must: true, .. } => {
@@ -782,26 +802,26 @@ impl<S: Spec> Checker<S> {
             .collect()
     }
 
-    fn enabled(&self, item: &P<S>, step: &S::Step, state: &S::State) -> bool {
+    fn enabled(&self, item: &P<S>, step: &In<S>, state: &St<S>) -> bool {
         matches!(item, Pending::Step { after, .. } if *after <= self.now)
-            && !matches!(self.spec.step(step, state, self.now), StepResult::Disabled)
+            && !matches!(self.engine.model().internal(step, state, self.now), StepResult::Disabled)
     }
 
     /// The footprint of what is owed, closed over pending work that shares keys with it.
-    fn relevant(&self, n: &Node<S>, owed: &[&P<S>]) -> Keys<S::Key> {
+    fn relevant(&self, n: &Node<S>, owed: &[&P<S>]) -> Touches<S::Key> {
         let mut keys: BTreeSet<S::Key> = BTreeSet::new();
         for item in owed {
             match self.keys(item) {
-                Keys::All => return Keys::All,
-                Keys::Some(ks) => keys.extend(ks),
+                Touches::Everything => return Touches::Everything,
+                Touches::Only(ks) => keys.extend(ks),
             }
         }
         loop {
             let before = keys.len();
             for item in n.pending.iter().filter(|i| self.can_fire(i)) {
                 match self.keys(item) {
-                    Keys::All => return Keys::All,
-                    Keys::Some(ks) => {
+                    Touches::Everything => return Touches::Everything,
+                    Touches::Only(ks) => {
                         if ks.iter().any(|k| keys.contains(k)) {
                             keys.extend(ks);
                         }
@@ -809,7 +829,7 @@ impl<S: Spec> Checker<S> {
                 }
             }
             if keys.len() == before {
-                return Keys::Some(keys.into_iter().collect());
+                return Touches::Only(keys.into_iter().collect());
             }
         }
     }
@@ -824,11 +844,11 @@ impl<S: Spec> Checker<S> {
         }
     }
 
-    fn keys(&self, item: &P<S>) -> Keys<S::Key> {
+    fn keys(&self, item: &P<S>) -> Touches<S::Key> {
         match item {
-            Pending::InFlight { op, .. } => self.spec.op_keys(op),
-            Pending::Step { step, .. } => self.spec.step_keys(step),
-            Pending::Responded { .. } => Keys::Some(Vec::new()),
+            Pending::InFlight { op, .. } => self.engine.external_keys(op),
+            Pending::Step { step, .. } => self.engine.internal_keys(step),
+            Pending::Responded { .. } => Touches::Only(Vec::new()),
         }
     }
 
@@ -841,7 +861,7 @@ impl<S: Spec> Checker<S> {
         };
         match item {
             Pending::InFlight { call, op, since, must, early } => {
-                let outs = self.spec.apply(op, &m.state, self.now);
+                let outs = self.engine.model().external(op, &m.state, self.now);
                 let read_only = outs.iter().all(|o| o.spawn.is_empty() && o.next == *m.state);
                 if !read_only {
                     return outs
@@ -873,7 +893,7 @@ impl<S: Spec> Checker<S> {
                 vec![Node { state: m.state.clone(), pending: p }]
             }
             Pending::Step { step, after, .. } if *after <= self.now => {
-                match self.spec.step(step, &m.state, self.now) {
+                match self.engine.model().internal(step, &m.state, self.now) {
                     StepResult::Disabled => Vec::new(),
                     StepResult::Discharged => vec![Node { state: m.state.clone(), pending: without() }],
                     StepResult::Next(succ) => succ
@@ -890,19 +910,19 @@ impl<S: Spec> Checker<S> {
         }
     }
 
-    fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<S::Step>>) {
+    fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
         for Sched { step, at } in steps {
             if let Some(Some(parts)) = &self.scope {
-                let escaped = match self.spec.step_keys(&step) {
-                    Keys::All => true,
-                    Keys::Some(ks) => ks.iter().any(|k| self.spec.part(k).is_none_or(|p| !parts.contains(&p))),
+                let escaped = match self.engine.internal_keys(&step) {
+                    Touches::Everything => true,
+                    Touches::Only(ks) => ks.iter().any(|k| self.engine.part(k).is_none_or(|p| !parts.contains(&p))),
                 };
                 if escaped {
                     self.escaped.borrow_mut().get_or_insert_with(|| format!("{step:?}"));
                 }
             }
             let after = at.map_or(self.now, |t| t.max(self.now));
-            let item = match self.spec.fairness(&step) {
+            let item = match self.engine.model().fairness(&step) {
                 Fairness::May => Pending::Step { step, after, by: None, must: false },
                 Fairness::Eventually { within } => {
                     Pending::Step { step, after, by: within.map(|d| after + d), must: true }
@@ -913,7 +933,7 @@ impl<S: Spec> Checker<S> {
     }
 
     /// Applies the observation itself. `Ok(None)` means this node cannot explain it.
-    fn consume(&self, m: &Node<S>, e: &Event<S::Op, S::Resp>) -> Result<Option<Node<S>>, String> {
+    fn consume(&self, m: &Node<S>, e: &Event<Ex<S>, Re<S>>) -> Result<Option<Node<S>>, String> {
         let mut p = m.pending.clone();
         match e {
             Event::Invoke(call, op) => {
@@ -928,10 +948,10 @@ impl<S: Spec> Checker<S> {
             Event::Return(call, observed) => {
                 let hit = p.iter().find_map(|i| match i {
                     Pending::Responded { call: c, resp } if c == call => {
-                        self.spec.admits(resp, observed).then(|| i.clone())
+                        self.engine.model().admits(resp, observed).then(|| i.clone())
                     }
                     Pending::InFlight { call: c, early, .. } if c == call => {
-                        early.iter().any(|r| self.spec.admits(r, observed)).then(|| i.clone())
+                        early.iter().any(|r| self.engine.model().admits(r, observed)).then(|| i.clone())
                     }
                     _ => None,
                 });
@@ -948,11 +968,11 @@ impl<S: Spec> Checker<S> {
     }
 }
 
-fn intersects<K: Ord>(a: &Keys<K>, b: &Keys<K>) -> bool {
+fn intersects<K: Ord>(a: &Touches<K>, b: &Touches<K>) -> bool {
     match (a, b) {
-        (Keys::All, Keys::Some(v)) | (Keys::Some(v), Keys::All) => !v.is_empty(),
-        (Keys::All, Keys::All) => true,
-        (Keys::Some(x), Keys::Some(y)) => x.iter().any(|k| y.contains(k)),
+        (Touches::Everything, Touches::Only(v)) | (Touches::Only(v), Touches::Everything) => !v.is_empty(),
+        (Touches::Everything, Touches::Everything) => true,
+        (Touches::Only(x), Touches::Only(y)) => x.iter().any(|k| y.contains(k)),
     }
 }
 
@@ -973,7 +993,7 @@ fn skeleton<O: Clone, R: Clone, T: Clone>(item: &Pending<O, R, T>) -> Pending<O,
 
 /// Whether node `b` can do everything node `a` can: same state and same owed
 /// work, at least `a`'s optional work, and at least `a`'s early answers per call.
-fn simulates<S: Spec>(b: &Node<S>, a: &Node<S>) -> bool {
+fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>) -> bool {
     a.pending.iter().all(|x| match x {
         Pending::InFlight { call, early, .. } => b.pending.iter().any(|y| {
             matches!(y, Pending::InFlight { call: c, early: e, .. } if c == call && early.is_subset(e))
@@ -984,8 +1004,8 @@ fn simulates<S: Spec>(b: &Node<S>, a: &Node<S>) -> bool {
 }
 
 /// Keeps only nodes no other node simulates.
-fn subsume<S: Spec>(nodes: Vec<Node<S>>) -> Vec<Node<S>> {
-    type Group<S> = (Interned<<S as Spec>::State>, Vec<P<S>>);
+fn subsume<S: Engine>(nodes: Vec<Node<S>>) -> Vec<Node<S>> {
+    type Group<S> = (Interned<St<S>>, Vec<P<S>>);
     let mut groups: HashMap<Group<S>, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
         let owed: Vec<_> = n.pending.iter().filter(|x| !optional(*x)).map(skeleton).collect();

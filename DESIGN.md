@@ -37,32 +37,50 @@ Three properties of that model matter for the Rust version:
 ## The Rust model
 
 ```rust
-pub trait Spec {
+pub trait Model {
     type State: Clone + Eq + Hash + Debug;
-    type Op: Data;    // requests, usually one enum variant per operation
-    type Resp: Data;  // abstract response the spec predicts
-    type Step: Data;  // background work as a value, not a closure
-    type Key: Data;   // footprint keys
+    type External: Data;   // a request a client sends
+    type Response: Data;   // what the system answers to a request
+    type Internal: Data;   // work the system does on its own (a timeout, a resume)
 
-    fn apply(&self, op: &Self::Op, s: &Self::State, now: Time) -> Vec<Outcome<Self>>;  // linearization point
-    fn step(&self, st: &Self::Step, s: &Self::State, now: Time) -> StepResult<Self>;   // Disabled | Discharged | Next(..)
-    fn fairness(&self, st: &Self::Step) -> Fairness;                                   // May | Eventually { within }
-    fn admits(&self, expected: &Self::Resp, observed: &Self::Resp) -> bool;            // default: ==
-    fn op_keys(&self, op: &Self::Op) -> Keys<Self::Key>;                               // default: All
-    fn step_keys(&self, st: &Self::Step) -> Keys<Self::Key>;                           // default: All
+    fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<Outcome<Self>>;
+    fn internal(&self, step: &Self::Internal, s: &Self::State, now: Time) -> StepResult<Self>; // Disabled | Discharged | Next(..)
+    fn fairness(&self, step: &Self::Internal) -> Fairness;                                   // May | Eventually { within }
+    fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
+}
+
+/// Optional, for speed: which objects a step touches.
+pub trait Footprint: Model {
+    type Object: Data;     // a promise id, an account name
+    fn external_touches(&self, req: &Self::External) -> Touches<Self::Object>;  // Everything | Only(vec![..])
+    fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Object>;
+}
+
+/// Optional, for speed: objects fall into independent groups.
+pub trait Partitioned: Footprint {
+    type Group: Data;      // Resonate: the id's origin
+    fn group(&self, obj: &Self::Object) -> Self::Group;
+    fn restrict(&self, s: &Self::State, keep: &dyn Fn(&Self::Group) -> bool) -> Self::State;
+    fn join(&self, a: &Self::State, b: &Self::State) -> Self::State;
 }
 ```
+
+`Outcome` is one thing the system may do when a request takes effect: the
+response, the next state, and the internal work it starts. `external` returns
+several when the system may do several things. Rust can't tell whether a model
+implements an optional trait, so the constructor says how much to use:
+`Checker::new`, `Checker::with_footprints` or `Checker::with_partitions`.
 
 Mapping from Accordant:
 
 - `[State]` + source generator → `#[derive(Clone, PartialEq, Eq, Hash)]`. Ownership
   replaces freezing: `apply` gets `&State` and returns new states. States are
   immutable once the checker has them; see [State representation](#state-representation).
-- `Expect.That(pred).ThenState(f).Triggers(t)` → `Outcome::new(resp, next).spawn(t)`.
+- `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `Outcome::new(resp, next).spawn(t)`.
   The response is a value, not a predicate, so it can be stored in a node and
   hashed. Wildcards (server ids, timestamps) go in `admits`.
 - `Expect.OneOf` → returning several outcomes.
-- `IStepFunction` / `AsyncOperation` → a `Step` enum value. `IsTerminalState` → `StepResult::Discharged`.
+- `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → `StepResult::Discharged`.
 - `StateProfile` → `Checker::profile()`, a `Vec<Node>`.
 - `spec.Allows(op, req, resp, profile)` → `checker.call(id, op, resp)`.
 - `AllowsConcurrent` with happens-before edges → overlapping `invoke`/`ret`; real-time order *is* the happens-before relation.

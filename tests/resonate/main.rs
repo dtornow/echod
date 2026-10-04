@@ -5,17 +5,17 @@
 
 mod spec;
 
-use accordant::{CallId, Checker, Config, Event, Time};
+use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Time};
 use spec::*;
 
 struct Trace {
-    c: Checker<Resonate>,
+    c: Checker<Grouped<Resonate>>,
     next: CallId,
 }
 
 impl Trace {
     fn new(now: Time) -> Self {
-        Trace { c: Checker::starting_at(Resonate, Server::default(), Config::default(), now), next: 0 }
+        Trace { c: Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() }), next: 0 }
     }
 
     fn id(&mut self) -> CallId {
@@ -25,7 +25,7 @@ impl Trace {
 
     /// Calls `op` and answers it with an allowed response matching `want`.
     #[track_caller]
-    fn step(&mut self, label: &str, op: Op, want: impl Fn(&Resp) -> bool) -> Resp {
+    fn step(&mut self, label: &str, op: Request, want: impl Fn(&Response) -> bool) -> Response {
         let allowed = self.c.allowed(&op);
         let Some(r) = allowed.iter().find(|r| want(r)).cloned() else {
             panic!("{label}: no allowed response matches; spec allows {allowed:#?}");
@@ -37,7 +37,7 @@ impl Trace {
 
     /// The model must reject `resp` (Accordant's `ExpectRejected`).
     #[track_caller]
-    fn rejects(&mut self, label: &str, op: Op, resp: Resp) {
+    fn rejects(&mut self, label: &str, op: Request, resp: Response) {
         let id = self.id();
         assert!(self.c.call(id, op, resp).is_err(), "{label}: model accepted a bogus response");
     }
@@ -63,8 +63,8 @@ impl Create {
         self.target = true;
         self
     }
-    fn op(self) -> Op {
-        Op::CreatePromise(self)
+    fn op(self) -> Request {
+        Request::CreatePromise(self)
     }
 }
 
@@ -72,50 +72,50 @@ fn settle(id: &str, state: &str, data: &str) -> Settle {
     Settle { id: id.into(), state: state.into(), data: Some(data.into()) }
 }
 
-fn get(id: &str) -> Op {
-    Op::GetPromise(id.into())
+fn get(id: &str) -> Request {
+    Request::GetPromise(id.into())
 }
 
-fn get_task(id: &str) -> Op {
-    Op::GetTask(id.into())
+fn get_task(id: &str) -> Request {
+    Request::GetTask(id.into())
 }
 
-fn acquire(id: &str, version: u32, pid: &str) -> Op {
+fn acquire(id: &str, version: u32, pid: &str) -> Request {
     acquire_ttl(id, version, pid, 60_000)
 }
 
-fn acquire_ttl(id: &str, version: u32, pid: &str, ttl: Time) -> Op {
-    Op::AcquireTask { id: id.into(), version, pid: pid.into(), ttl }
+fn acquire_ttl(id: &str, version: u32, pid: &str, ttl: Time) -> Request {
+    Request::AcquireTask { id: id.into(), version, pid: pid.into(), ttl }
 }
 
-fn fulfill(id: &str, version: u32, state: &str, data: &str) -> Op {
-    Op::FulfillTask { id: id.into(), version, state: state.into(), data: Some(data.into()) }
+fn fulfill(id: &str, version: u32, state: &str, data: &str) -> Request {
+    Request::FulfillTask { id: id.into(), version, state: state.into(), data: Some(data.into()) }
 }
 
-fn fence(id: &str, version: u32, action: Fenced) -> Op {
-    Op::FenceTask { id: id.into(), version, action }
+fn fence(id: &str, version: u32, action: Fenced) -> Request {
+    Request::FenceTask { id: id.into(), version, action }
 }
 
-fn suspend(id: &str, version: u32, awaited: &[&str]) -> Op {
-    Op::SuspendTask { id: id.into(), version, awaited: awaited.iter().map(|a| a.to_string()).collect() }
+fn suspend(id: &str, version: u32, awaited: &[&str]) -> Request {
+    Request::SuspendTask { id: id.into(), version, awaited: awaited.iter().map(|a| a.to_string()).collect() }
 }
 
-fn callback(awaited: &str, awaiter: &str) -> Op {
-    Op::RegisterCallback { awaited: awaited.into(), awaiter: awaiter.into() }
+fn callback(awaited: &str, awaiter: &str) -> Request {
+    Request::RegisterCallback { awaited: awaited.into(), awaiter: awaiter.into() }
 }
 
 // ------------------------------------------------------------- predicates
 
-fn st(code: u16) -> impl Fn(&Resp) -> bool {
+fn st(code: u16) -> impl Fn(&Response) -> bool {
     move |r| r.status() == code
 }
 
-fn promise(state: PState, value: Option<&'static str>) -> impl Fn(&Resp) -> bool {
-    move |r| matches!(r, Resp::Promise(p) if p.state == state && p.value.as_deref() == value)
+fn promise(state: PState, value: Option<&'static str>) -> impl Fn(&Response) -> bool {
+    move |r| matches!(r, Response::Promise(p) if p.state == state && p.value.as_deref() == value)
 }
 
-fn task(state: TState, version: u32) -> impl Fn(&Resp) -> bool {
-    move |r| matches!(r, Resp::Task(t) if t.state == state && t.version == version)
+fn task(state: TState, version: u32) -> impl Fn(&Response) -> bool {
+    move |r| matches!(r, Response::Task(t) if t.state == state && t.version == version)
 }
 
 const FAR: Time = 9_000_000_000_000;
@@ -128,27 +128,27 @@ fn promise_layer() {
     let mut t = Trace::new(now);
     t.step("create p1 pending", create("ex:p1", now + 10_000, "hello").op(), promise(PState::Pending, None));
     t.step("get p1 → pending", get("ex:p1"), promise(PState::Pending, None));
-    t.step("settle p1 → resolved(42)", Op::SettlePromise(settle("ex:p1", "resolved", "42")), promise(PState::Resolved, Some("42")));
-    t.step("re-settle p1 → sticky", Op::SettlePromise(settle("ex:p1", "resolved", "99")), promise(PState::Resolved, Some("42")));
+    t.step("settle p1 → resolved(42)", Request::SettlePromise(settle("ex:p1", "resolved", "42")), promise(PState::Resolved, Some("42")));
+    t.step("re-settle p1 → sticky", Request::SettlePromise(settle("ex:p1", "resolved", "99")), promise(PState::Resolved, Some("42")));
     t.step("create p2", create("ex:p2", now + 10_000, "A").op(), st(200));
     let r = t.step("re-create p2 → echoes A", create("ex:p2", now + 10_000, "B").op(), st(200));
-    assert!(matches!(r, Resp::Promise(p) if p.param.as_deref() == Some("A")));
+    assert!(matches!(r, Response::Promise(p) if p.param.as_deref() == Some("A")));
     t.step("get missing → 404", get("ex:ghost"), st(404));
     t.step("create pc", create("ex:pc", now + 10_000, "z").op(), st(200));
-    t.step("cancel pc", Op::SettlePromise(settle("ex:pc", "rejected_canceled", "gone")), promise(PState::Canceled, Some("gone")));
-    t.step("re-settle cancelled → sticky", Op::SettlePromise(settle("ex:pc", "resolved", "x")), promise(PState::Canceled, Some("gone")));
-    t.step("settle invalid state → 400", Op::SettlePromise(settle("ex:pc", "bogus", "x")), st(400));
+    t.step("cancel pc", Request::SettlePromise(settle("ex:pc", "rejected_canceled", "gone")), promise(PState::Canceled, Some("gone")));
+    t.step("re-settle cancelled → sticky", Request::SettlePromise(settle("ex:pc", "resolved", "x")), promise(PState::Canceled, Some("gone")));
+    t.step("settle invalid state → 400", Request::SettlePromise(settle("ex:pc", "bogus", "x")), st(400));
 
-    let Resp::Promise(real) = t.c.allowed(&get("ex:p1")).remove(0) else { panic!() };
-    t.rejects("get p1 claiming 999", get("ex:p1"), Resp::Promise(PromiseRec { value: Some("999".into()), ..real.clone() }));
-    t.rejects("get p1 claiming pending", get("ex:p1"), Resp::Promise(PromiseRec { state: PState::Pending, ..real }));
+    let Response::Promise(real) = t.c.allowed(&get("ex:p1")).remove(0) else { panic!() };
+    t.rejects("get p1 claiming 999", get("ex:p1"), Response::Promise(PromiseRec { value: Some("999".into()), ..real.clone() }));
+    t.rejects("get p1 claiming pending", get("ex:p1"), Response::Promise(PromiseRec { state: PState::Pending, ..real }));
 
     t.step("create p3 (5s)", create("ex:p3", now + 5_000, "x").op(), st(200));
     t.tick(now + 6_000);
     // C#: "(pending|timedout) nondeterministic". Here the deadline is a timer, so it is decided.
     t.step("get p3 → timed out", get("ex:p3"), promise(PState::TimedOut, None));
-    let Resp::Promise(p) = t.c.allowed(&get("ex:p3")).remove(0) else { panic!() };
-    let stale = Resp::Promise(PromiseRec { state: PState::Pending, settled_at: None, ..p });
+    let Response::Promise(p) = t.c.allowed(&get("ex:p3")).remove(0) else { panic!() };
+    let stale = Response::Promise(PromiseRec { state: PState::Pending, settled_at: None, ..p });
     t.rejects("get p3 → pending after its deadline", get("ex:p3"), stale);
 }
 
@@ -164,19 +164,19 @@ fn task_layer() {
 
     t.step("create t2 +target", create("ex:t2", now + 100_000, "w").target().op(), st(200));
     t.step("acquire t2 → v1", acquire("ex:t2", 0, "worker-1"), task(TState::Acquired, 1));
-    t.step("release t2 v1", Op::ReleaseTask { id: "ex:t2".into(), version: 1 }, st(200));
+    t.step("release t2 v1", Request::ReleaseTask { id: "ex:t2".into(), version: 1 }, st(200));
     t.step("stale fulfill → 409", fulfill("ex:t2", 1, "resolved", "zombie"), st(409));
     t.step("get t2 → still pending", get("ex:t2"), promise(PState::Pending, None));
     t.step("acquire wrong version → 409", acquire("ex:t2", 9, "worker-1"), st(409));
     t.step("acquire missing → 404", acquire("ex:ghostTask", 0, "worker-1"), st(404));
 
-    let tc = |target| Op::CreateTask { id: "ex:tc1".into(), timeout_at: now + 100_000, data: Some("self".into()), target };
-    t.step("task.create tc1 → acquired v1", tc(true), |r| matches!(r, Resp::Created(_, t) if t.version == 1));
+    let tc = |target| Request::CreateTask { id: "ex:tc1".into(), timeout_at: now + 100_000, data: Some("self".into()), target };
+    t.step("task.create tc1 → acquired v1", tc(true), |r| matches!(r, Response::Created(_, t) if t.version == 1));
     t.step("task.create tc1 dup → 409", tc(true), st(409));
     t.step("task.create no-target → 400", tc(false), st(400));
     t.step("fulfill tc1", fulfill("ex:tc1", 1, "resolved", "ok"), st(200));
     t.step("create plain p1", create("ex:p1", now + 100_000, "p").op(), st(200));
-    let over = Op::CreateTask { id: "ex:p1".into(), timeout_at: now + 100_000, data: None, target: true };
+    let over = Request::CreateTask { id: "ex:p1".into(), timeout_at: now + 100_000, data: None, target: true };
     t.step("task.create over plain promise → 422", over, st(422));
 }
 
@@ -195,7 +195,7 @@ fn fence_layer() {
     t.step("fence-create past deadline → born timed out", fence("ex:fp", 1, Fenced::Create(create("ex:fexp", now - 1, "old"))), promise(PState::TimedOut, None));
     t.step("fence-create +target", fence("ex:fp", 1, Fenced::Create(create("ex:ftask", now + 100_000, "w").target())), st(200));
     t.step("acquire ftask → v1", acquire("ex:ftask", 0, "worker-1"), task(TState::Acquired, 1));
-    t.step("release fp", Op::ReleaseTask { id: "ex:fp".into(), version: 1 }, st(200));
+    t.step("release fp", Request::ReleaseTask { id: "ex:fp".into(), version: 1 }, st(200));
     t.step("create fchild2", create("ex:fchild2", now + 100_000, "c").op(), st(200));
     t.step("stale fence → 409", fence("ex:fp", 1, Fenced::Settle(settle("ex:fchild2", "resolved", "late"))), st(409));
     t.step("stale fence-create → 409", fence("ex:fp", 1, Fenced::Create(create("ex:fzomb", now + 100_000, "z"))), st(409));
@@ -215,7 +215,7 @@ fn callback_layer() {
     t.step("register_callback internal → 422", callback("ex:p2", "ex:t1"), st(422));
     t.step("create other:x", create("other:x", now + 100_000, "x").external().op(), st(200));
     t.step("cross-origin → 400", callback("other:x", "ex:t1"), st(400));
-    let listen = |a: &str| Op::RegisterListener { awaited: "ex:awaited".into(), address: a.into() };
+    let listen = |a: &str| Request::RegisterListener { awaited: "ex:awaited".into(), address: a.into() };
     t.step("listener http → 200", listen("http://localhost/cb"), st(200));
     t.step("listener poll://bad → 200", listen("poll://bad"), st(200));
     t.step("listener not a url → 400", listen("not a url"), st(400));
@@ -225,14 +225,14 @@ fn callback_layer() {
     t.step("suspend root on awaited → 200", suspend("ex:root", 1, &["ex:awaited"]), st(200));
     t.step("task.get root → suspended", get_task("ex:root"), task(TState::Suspended, 1));
     t.step("suspend foreign → 400", suspend("ex:root", 1, &["other:x"]), st(400));
-    t.step("settle awaited → arms resume", Op::SettlePromise(settle("ex:awaited", "resolved", "v")), st(200));
+    t.step("settle awaited → arms resume", Request::SettlePromise(settle("ex:awaited", "resolved", "v")), st(200));
     // C# polls until the resume lands; here Quiesce says the server is idle.
     t.c.quiesce().unwrap();
     assert!(t.c.all(|s| s.tasks["ex:root"].state == TState::Pending));
     t.step("re-acquire root v1 → v2", acquire("ex:root", 1, "worker-1"), task(TState::Acquired, 2));
 
     t.step("create done", create("ex:done", now + 100_000, "d").external().op(), st(200));
-    t.step("settle done", Op::SettlePromise(settle("ex:done", "resolved", "d")), st(200));
+    t.step("settle done", Request::SettlePromise(settle("ex:done", "resolved", "d")), st(200));
     t.step("create root2", create("ex:root2", now + 100_000, "r").target().op(), st(200));
     t.step("acquire root2", acquire("ex:root2", 0, "worker-1"), task(TState::Acquired, 1));
     t.step("suspend on settled → 300", suspend("ex:root2", 1, &["ex:done"]), st(300));
@@ -246,7 +246,7 @@ fn resume_may_lag_the_settle() {
     t.step("create r", create("ex:r", FAR, "r").target().op(), st(200));
     t.step("acquire r", acquire("ex:r", 0, "w"), st(200));
     t.step("suspend r on a", suspend("ex:r", 1, &["ex:a"]), st(200));
-    t.step("settle a", Op::SettlePromise(settle("ex:a", "resolved", "v")), st(200));
+    t.step("settle a", Request::SettlePromise(settle("ex:a", "resolved", "v")), st(200));
     // The resume is background work: right after the settle, either answer is fine.
     let seen = t.c.allowed(&get_task("ex:r"));
     assert!(seen.iter().any(task(TState::Suspended, 1)) && seen.iter().any(task(TState::Pending, 1)), "{seen:?}");
@@ -268,7 +268,7 @@ fn lease_and_heartbeat() {
     t.step("create H", create("H", FAR, "w").target().op(), st(200));
     t.step("acquire H ttl 5000", acquire_ttl("H", 0, "wH", 5_000), task(TState::Acquired, 1));
     t.tick(1_008_000);
-    let hb = |pid: &str, version| Op::HeartbeatTask { id: "H".into(), version, pid: pid.into() };
+    let hb = |pid: &str, version| Request::HeartbeatTask { id: "H".into(), version, pid: pid.into() };
     t.step("heartbeat H → lease to 1013000", hb("wH", 1), st(200));
     t.tick(1_012_000);
     t.step("acquire H → 409 (heartbeat kept it)", acquire_ttl("H", 1, "wX", 5_000), st(409));
@@ -287,10 +287,10 @@ fn get_in_flight_across_a_deadline_may_see_pending() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     t.step("create p", create("p", now + 1_000, "x").op(), st(200));
-    let Resp::Promise(pending) = t.c.allowed(&get("p")).remove(0) else { panic!() };
+    let Response::Promise(pending) = t.c.allowed(&get("p")).remove(0) else { panic!() };
     t.c.invoke(100, get("p")).unwrap();
     t.tick(now + 5_000);
-    t.c.ret(100, Resp::Promise(pending)).unwrap(); // linearized before the deadline
+    t.c.ret(100, Response::Promise(pending)).unwrap(); // linearized before the deadline
     t.step("now it is timed out", get("p"), promise(PState::TimedOut, None));
 }
 
@@ -299,7 +299,7 @@ fn unanswered_settle_may_land_late() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     t.step("create p", create("p", FAR, "x").op(), st(200));
-    t.c.invoke(100, Op::SettlePromise(settle("p", "resolved", "v"))).unwrap(); // never answered
+    t.c.invoke(100, Request::SettlePromise(settle("p", "resolved", "v"))).unwrap(); // never answered
     t.step("read misses it", get("p"), promise(PState::Pending, None));
     t.step("read sees it", get("p"), promise(PState::Resolved, Some("v")));
 }
@@ -311,9 +311,9 @@ fn poll_past_its_limit_claims_some_subset() {
     for id in ["a", "b", "c"] {
         t.step("create +target", create(id, FAR, "w").target().op(), st(200));
     }
-    let poll = Op::PollTask { pid: "w".into(), ttl: 60_000, limit: 2 };
+    let poll = Request::PollTask { pid: "w".into(), ttl: 60_000, limit: 2 };
     assert_eq!(t.c.allowed(&poll).len(), 3, "one outcome per 2-subset");
-    t.step("poll claims a and c", poll, |r| matches!(r, Resp::Claimed(v) if v.iter().map(|t| t.id.as_str()).eq(["a", "c"])));
+    t.step("poll claims a and c", poll, |r| matches!(r, Response::Claimed(v) if v.iter().map(|t| t.id.as_str()).eq(["a", "c"])));
     t.step("b was not claimed", get_task("b"), task(TState::Pending, 0));
 }
 
@@ -337,8 +337,8 @@ fn independent_promises_keep_the_profile_narrow() {
         let resp = if i.is_multiple_of(2) {
             before
         } else {
-            let Resp::Promise(p) = before else { panic!() };
-            Resp::Promise(PromiseRec { state: PState::TimedOut, settled_at: Some(p.timeout_at), ..p })
+            let Response::Promise(p) = before else { panic!() };
+            Response::Promise(PromiseRec { state: PState::TimedOut, settled_at: Some(p.timeout_at), ..p })
         };
         t.c.ret(1_000 + i, resp).unwrap();
     }
@@ -354,7 +354,7 @@ fn show_a_violation() {
     t.step("create +target", create("ex:t", FAR, "w").target().op(), st(200));
     t.step("create other", create("ex:o", FAR, "w").op(), st(200));
     let id = t.id();
-    let v = t.c.call(id, acquire("ex:t", 0, "w"), Resp::Status(409)).unwrap_err();
+    let v = t.c.call(id, acquire("ex:t", 0, "w"), Response::Status(409)).unwrap_err();
     println!("{v}");
 }
 
@@ -363,16 +363,21 @@ fn show_a_violation() {
 /// Per origin: a promise with a deadline and a settle that is never answered.
 /// Across the deadline each origin has two explanations (the settle landed in
 /// time, or the promise timed out). Kept together that is 2^origins candidates.
-fn unanswered_settles(origins: u64, partition: bool) -> Result<Checker<Resonate>, accordant::Violation> {
+fn settles_cfg() -> Config {
+    Config { start: 1_000_000, max_width: 1 << 16, max_explore: 5_000, ..Config::default() }
+}
+
+fn unanswered_settles<E: Engine<M = Resonate>>(
+    mut c: Checker<E>,
+    origins: u64,
+) -> Result<Checker<E>, accordant::Violation> {
     let now = 1_000_000;
-    let cfg = Config { partition, max_width: 1 << 16, max_explore: 5_000, ..Config::default() };
-    let mut c = Checker::starting_at(Resonate, Server::default(), cfg, now);
     for o in 0..origins {
         let id = format!("o{o}:p");
         let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, external: false, target: false, timer: false };
-        let r = c.allowed(&Op::CreatePromise(p.clone())).remove(0);
-        c.call(o, Op::CreatePromise(p), r)?;
-        c.invoke(1_000 + o, Op::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
+        let r = c.allowed(&Request::CreatePromise(p.clone())).remove(0);
+        c.call(o, Request::CreatePromise(p), r)?;
+        c.invoke(1_000 + o, Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
     }
     c.tick(now + 2_000)?;
     Ok(c)
@@ -381,7 +386,7 @@ fn unanswered_settles(origins: u64, partition: bool) -> Result<Checker<Resonate>
 #[test]
 fn partitions_keep_independent_origins_apart() {
     let t0 = std::time::Instant::now();
-    let mut c = unanswered_settles(20, true).unwrap();
+    let mut c = unanswered_settles(Checker::with_partitions(Resonate, Server::default(), settles_cfg()), 20).unwrap();
     println!("partitioned: {:?}, width {}, {:?}", c.stats, c.width(), t0.elapsed());
     assert_eq!(c.factors().len(), 20);
     assert!(c.factors().iter().all(|f| f.nodes.len() == 2));
@@ -390,13 +395,15 @@ fn partitions_keep_independent_origins_apart() {
     for o in 0..20u64 {
         let id = format!("o{o}:p");
         let want = if o % 3 == 0 { PState::Resolved } else { PState::TimedOut };
-        let r = c.allowed(&Op::GetPromise(id.clone())).into_iter().find(promise(want, None)).unwrap();
-        c.call(5_000 + o, Op::GetPromise(id), r).unwrap();
+        let r = c.allowed(&Request::GetPromise(id.clone())).into_iter().find(promise(want, None)).unwrap();
+        c.call(5_000 + o, Request::GetPromise(id), r).unwrap();
     }
     assert!(c.factors().iter().all(|f| f.nodes.len() == 1));
 
     let t0 = std::time::Instant::now();
-    let v = unanswered_settles(20, false).err().expect("one profile of 2^20 candidates");
+    let v = unanswered_settles(Checker::with_footprints(Resonate, Server::default(), settles_cfg()), 20)
+        .err()
+        .expect("one profile of 2^20 candidates");
     println!("unpartitioned: {} {:?}", v.reason, t0.elapsed());
 }
 
@@ -431,7 +438,7 @@ fn only_a_detached_create_crosses_origins() {
     t.step("e:root exists, so the create landed", get("e:root"), promise(PState::Pending, None));
     assert_eq!(t.c.factors().len(), 4, "the unanswered fence still links a and e");
 
-    t.step("poll touches every origin", Op::PollTask { pid: "w".into(), ttl: 1_000, limit: 10 }, |_| true);
+    t.step("poll touches every origin", Request::PollTask { pid: "w".into(), ttl: 1_000, limit: 10 }, |_| true);
     assert_eq!(t.c.factors().len(), 1);
 }
 
@@ -452,24 +459,25 @@ fn partitioning_never_changes_a_verdict() {
     for seed in 1..=40 {
         let mut rng = Lcg(seed);
         let now = 1_000_000;
-        let mk = |partition| Checker::starting_at(Resonate, Server::default(), Config { partition, ..Config::default() }, now);
-        let (mut on, mut off) = (mk(true), mk(false));
-        let mut open: Vec<(CallId, Op)> = Vec::new();
+        let cfg = || Config { start: now, ..Config::default() };
+        let mut on = Checker::with_partitions(Resonate, Server::default(), cfg());
+        let mut off = Checker::with_footprints(Resonate, Server::default(), cfg());
+        let mut open: Vec<(CallId, Request)> = Vec::new();
         let mut clock = now;
         for call in 0..60u64 {
             let id = ids[rng.next(ids.len() as u64) as usize].to_string();
             let other = ids[rng.next(ids.len() as u64) as usize].to_string();
             let op = match rng.next(9) {
-                0 => Op::CreatePromise(Create { id, timeout_at: clock + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
-                1 => Op::SettlePromise(Settle { id, state: "resolved".into(), data: None }),
-                2 => Op::AcquireTask { id, version: rng.next(3) as u32, pid: "w".into(), ttl: 1_000 },
-                3 => Op::FulfillTask { id, version: rng.next(3) as u32, state: "resolved".into(), data: None },
-                4 => Op::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
-                5 => Op::RegisterCallback { awaited: id, awaiter: other },
-                6 => Op::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
-                7 if rng.next(2) == 0 => Op::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: clock + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
-                7 => Op::GetTask(id),
-                _ => Op::GetPromise(id),
+                0 => Request::CreatePromise(Create { id, timeout_at: clock + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
+                1 => Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }),
+                2 => Request::AcquireTask { id, version: rng.next(3) as u32, pid: "w".into(), ttl: 1_000 },
+                3 => Request::FulfillTask { id, version: rng.next(3) as u32, state: "resolved".into(), data: None },
+                4 => Request::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
+                5 => Request::RegisterCallback { awaited: id, awaiter: other },
+                6 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
+                7 if rng.next(2) == 0 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: clock + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
+                7 => Request::GetTask(id),
+                _ => Request::GetPromise(id),
             };
             let mut events = vec![Event::Invoke(call, op.clone())];
             match rng.next(4) {
@@ -477,7 +485,7 @@ fn partitioning_never_changes_a_verdict() {
                 _ => {
                     let allowed = off.allowed(&op);
                     let resp = if allowed.is_empty() || rng.next(8) == 0 {
-                        Resp::Status(500 + rng.next(3) as u16) // bogus
+                        Response::Status(500 + rng.next(3) as u16) // bogus
                     } else {
                         allowed[rng.next(allowed.len() as u64) as usize].clone()
                     };
@@ -492,7 +500,7 @@ fn partitioning_never_changes_a_verdict() {
                 // A late answer: whatever the op would get if called now. Valid or
                 // not, both checkers must agree.
                 let (c, op) = open.swap_remove(rng.next(open.len() as u64) as usize);
-                let resp = off.allowed(&op).first().cloned().unwrap_or(Resp::Status(404));
+                let resp = off.allowed(&op).first().cloned().unwrap_or(Response::Status(404));
                 events.push(Event::Return(c, resp));
             }
             for e in events {

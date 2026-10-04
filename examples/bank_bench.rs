@@ -12,7 +12,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use accordant::{Checker, Config, Keys, Outcome, Spec};
+use accordant::{Checker, Config, Footprint, Model, Outcome, Touches};
 
 struct Counting;
 
@@ -67,29 +67,37 @@ impl Accounts for imbl::OrdMap<u32, i64> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-enum Op {
+enum Request {
     Deposit(u32, i64),
 }
 
 struct Bank<M>(std::marker::PhantomData<M>);
 
-impl<M: Accounts> Spec for Bank<M> {
+impl<M: Accounts> Model for Bank<M> {
     type State = M;
-    type Op = Op;
-    type Resp = i64;
-    type Step = ();
-    type Key = u32;
+    type External = Request;
+    type Response = i64;
+    type Internal = ();
 
-    fn apply(&self, op: &Op, s: &M, _now: accordant::Time) -> Vec<Outcome<Self>> {
-        let Op::Deposit(a, x) = *op;
+    fn external(&self, op: &Request, s: &M, _now: accordant::Time) -> Vec<Outcome<Self>> {
+        let Request::Deposit(a, x) = *op;
         let b = s.get(a).unwrap_or(0) + x;
         let mut n = s.clone();
         n.put(a, b);
         vec![Outcome::new(b, n)]
     }
 
-    fn op_keys(&self, Op::Deposit(a, _): &Op) -> Keys<u32> {
-        Keys::one(*a)
+}
+
+impl<M: Accounts> Footprint for Bank<M> {
+    type Object = u32;
+
+    fn external_touches(&self, Request::Deposit(a, _): &Request) -> Touches<u32> {
+        Touches::one(*a)
+    }
+
+    fn internal_touches(&self, _: &()) -> Touches<u32> {
+        Touches::Only(vec![])
     }
 }
 
@@ -102,7 +110,7 @@ fn run<M: Accounts>(name: &str, accounts: u32, rounds: u32, k: u32, footprints: 
     PEAK.store(base, Relaxed);
     let t = Instant::now();
     let cfg = Config { footprints, max_width: 1 << 20, ..Config::default() };
-    let mut c = Checker::new(Bank::<M>(Default::default()), init, cfg);
+    let mut c = Checker::with_footprints(Bank::<M>(Default::default()), init, cfg);
     let mut balance = vec![0i64; accounts as usize];
     let mut id = 0u64;
     for r in 0..rounds {
@@ -113,7 +121,7 @@ fn run<M: Accounts>(name: &str, accounts: u32, rounds: u32, k: u32, footprints: 
             })
             .collect();
         for &(call, a) in &calls {
-            c.invoke(call, Op::Deposit(a, 10)).unwrap();
+            c.invoke(call, Request::Deposit(a, 10)).unwrap();
         }
         for &(call, a) in &calls {
             balance[a as usize] += 10;

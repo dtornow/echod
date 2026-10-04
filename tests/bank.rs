@@ -1,6 +1,6 @@
 //! The BankAccount sample from Accordant, with calls split into request and response.
 
-use accordant::{Checker, Config, HashedMap, Keys, Outcome, Spec, Time};
+use accordant::{Checker, Config, Footprint, HashedMap, Keyed, Model, Outcome, Time, Touches};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
@@ -8,7 +8,7 @@ struct Bank {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-enum Op {
+enum Request {
     Open(&'static str),
     Deposit(&'static str, i64),
     Withdraw(&'static str, i64),
@@ -16,79 +16,87 @@ enum Op {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-enum Resp {
+enum Response {
     Ok(i64),
     NotFound,
     Conflict,
     Insufficient,
 }
 
-struct BankSpec;
+struct BankModel;
 
-impl Spec for BankSpec {
+impl Model for BankModel {
     type State = Bank;
-    type Op = Op;
-    type Resp = Resp;
-    type Step = ();
-    type Key = &'static str;
+    type External = Request;
+    type Response = Response;
+    type Internal = ();
 
-    fn apply(&self, op: &Op, s: &Bank, _now: Time) -> Vec<Outcome<Self>> {
+    fn external(&self, op: &Request, s: &Bank, _now: Time) -> Vec<Outcome<Self>> {
         let with = |a: &'static str, b: i64| {
             let mut n = s.clone();
             n.accounts.insert(a, b);
             n
         };
         let out = match *op {
-            Op::Open(a) if s.accounts.contains_key(&a) => Outcome::same(Resp::Conflict, s),
-            Op::Open(a) => Outcome::new(Resp::Ok(0), with(a, 0)),
-            Op::Deposit(a, x) => match s.accounts.get(&a) {
-                None => Outcome::same(Resp::NotFound, s),
-                Some(b) => Outcome::new(Resp::Ok(b + x), with(a, b + x)),
+            Request::Open(a) if s.accounts.contains_key(&a) => Outcome::same(Response::Conflict, s),
+            Request::Open(a) => Outcome::new(Response::Ok(0), with(a, 0)),
+            Request::Deposit(a, x) => match s.accounts.get(&a) {
+                None => Outcome::same(Response::NotFound, s),
+                Some(b) => Outcome::new(Response::Ok(b + x), with(a, b + x)),
             },
-            Op::Withdraw(a, x) => match s.accounts.get(&a) {
-                None => Outcome::same(Resp::NotFound, s),
-                Some(b) if *b < x => Outcome::same(Resp::Insufficient, s),
-                Some(b) => Outcome::new(Resp::Ok(b - x), with(a, b - x)),
+            Request::Withdraw(a, x) => match s.accounts.get(&a) {
+                None => Outcome::same(Response::NotFound, s),
+                Some(b) if *b < x => Outcome::same(Response::Insufficient, s),
+                Some(b) => Outcome::new(Response::Ok(b - x), with(a, b - x)),
             },
-            Op::Balance(a) => match s.accounts.get(&a) {
-                None => Outcome::same(Resp::NotFound, s),
-                Some(b) => Outcome::same(Resp::Ok(*b), s),
+            Request::Balance(a) => match s.accounts.get(&a) {
+                None => Outcome::same(Response::NotFound, s),
+                Some(b) => Outcome::same(Response::Ok(*b), s),
             },
         };
         vec![out]
     }
 
-    fn op_keys(&self, op: &Op) -> Keys<&'static str> {
+}
+
+impl Footprint for BankModel {
+    type Object = &'static str;
+
+    fn external_touches(&self, op: &Request) -> Touches<&'static str> {
         match *op {
-            Op::Open(a) | Op::Deposit(a, _) | Op::Withdraw(a, _) | Op::Balance(a) => Keys::one(a),
+            Request::Open(a) | Request::Deposit(a, _) | Request::Withdraw(a, _) | Request::Balance(a) => Touches::one(a),
         }
+    }
+
+    fn internal_touches(&self, _: &()) -> Touches<&'static str> {
+        Touches::Only(vec![])
     }
 }
 
-fn checker() -> Checker<BankSpec> {
-    let mut c = Checker::new(BankSpec, Bank::default(), Config::default());
-    c.call(0, Op::Open("alice"), Resp::Ok(0)).unwrap();
-    c.call(1, Op::Deposit("alice", 100), Resp::Ok(100)).unwrap();
+fn checker() -> Checker<Keyed<BankModel>> {
+    let mut c = Checker::with_footprints(BankModel, Bank::default(), Config::default());
+    c.call(0, Request::Open("alice"), Response::Ok(0)).unwrap();
+    c.call(1, Request::Deposit("alice", 100), Response::Ok(100)).unwrap();
     c
 }
 
 #[test]
 fn overlapping_withdrawals_linearize() {
     let mut c = checker();
-    c.invoke(2, Op::Withdraw("alice", 60)).unwrap();
-    c.invoke(3, Op::Withdraw("alice", 60)).unwrap();
-    c.ret(3, Resp::Ok(40)).unwrap();
-    c.ret(2, Resp::Insufficient).unwrap();
+    c.invoke(2, Request::Withdraw("alice", 60)).unwrap();
+    c.invoke(3, Request::Withdraw("alice", 60)).unwrap();
+    c.ret(3, Response::Ok(40)).unwrap();
+    c.ret(2, Response::Insufficient).unwrap();
     assert!(c.all(|s| s.accounts[&"alice"] == 40));
 }
 
 #[test]
 fn double_spend_is_rejected() {
     let mut c = checker();
-    c.invoke(2, Op::Withdraw("alice", 60)).unwrap();
-    c.invoke(3, Op::Withdraw("alice", 60)).unwrap();
-    c.ret(2, Resp::Ok(40)).unwrap();
-    let v = c.ret(3, Resp::Ok(40)).unwrap_err();
+    c.invoke(2, Request::Withdraw("alice", 60)).unwrap();
+    c.invoke(3, Request::Withdraw("alice", 60)).unwrap();
+    c.ret(2, Response::Ok(40)).unwrap();
+    let v = c.ret(3, Response::Ok(40)).unwrap_err();
     assert!(v.reason.contains("no candidate"), "{v}");
 }
 
@@ -96,11 +104,11 @@ fn double_spend_is_rejected() {
 fn real_time_order_is_respected() {
     // Withdraw returns before Deposit is invoked, so it cannot see the deposit.
     let mut c = checker();
-    c.call(2, Op::Withdraw("alice", 150), Resp::Insufficient).unwrap();
-    c.call(3, Op::Deposit("alice", 100), Resp::Ok(200)).unwrap();
+    c.call(2, Request::Withdraw("alice", 150), Response::Insufficient).unwrap();
+    c.call(3, Request::Deposit("alice", 100), Response::Ok(200)).unwrap();
     let mut c = checker();
-    c.call(2, Op::Deposit("alice", 100), Resp::Ok(200)).unwrap();
-    assert!(c.call(3, Op::Withdraw("alice", 150), Resp::Insufficient).is_err());
+    c.call(2, Request::Deposit("alice", 100), Response::Ok(200)).unwrap();
+    assert!(c.call(3, Request::Withdraw("alice", 150), Response::Insufficient).is_err());
 }
 
 #[test]
@@ -109,28 +117,28 @@ fn unanswered_request_may_take_effect_late() {
     // decide "before or never" at the timeout; here the deposit may land after a
     // read that missed it.
     let mut c = checker();
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
-    c.call(4, Op::Balance("alice"), Resp::Ok(150)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
+    c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
+    c.call(4, Request::Balance("alice"), Response::Ok(150)).unwrap();
     assert!(c.all(|s| s.accounts[&"alice"] == 150));
 }
 
 #[test]
 fn unanswered_request_may_never_take_effect() {
     let mut c = checker();
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     for i in 0..10 {
-        c.call(10 + i, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+        c.call(10 + i, Request::Balance("alice"), Response::Ok(100)).unwrap();
     }
     // Both explanations remain: it may still land.
     assert!(c.states().any(|s| s.accounts[&"alice"] == 100));
 }
 
-fn with_lifetime(life: Time) -> Checker<BankSpec> {
+fn with_lifetime(life: Time) -> Checker<Keyed<BankModel>> {
     let cfg = Config { request_lifetime: Some(life), ..Config::default() };
-    let mut c = Checker::new(BankSpec, Bank::default(), cfg);
-    c.call(0, Op::Open("alice"), Resp::Ok(0)).unwrap();
-    c.call(1, Op::Deposit("alice", 100), Resp::Ok(100)).unwrap();
+    let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
+    c.call(0, Request::Open("alice"), Response::Ok(0)).unwrap();
+    c.call(1, Request::Deposit("alice", 100), Response::Ok(100)).unwrap();
     c
 }
 
@@ -138,26 +146,26 @@ fn with_lifetime(life: Time) -> Checker<BankSpec> {
 fn request_lifetime_bounds_a_late_effect() {
     // A request takes effect within 1s of its invoke, or never.
     let mut c = with_lifetime(1_000);
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     c.tick(500).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
     c.tick(900).unwrap();
-    c.call(4, Op::Balance("alice"), Resp::Ok(150)).unwrap(); // landed between 500 and 900
+    c.call(4, Request::Balance("alice"), Response::Ok(150)).unwrap(); // landed between 500 and 900
     let mut c = with_lifetime(1_000);
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     c.tick(1_500).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap(); // past its lifetime: it never happened
-    assert!(c.call(4, Op::Balance("alice"), Resp::Ok(150)).is_err());
+    c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap(); // past its lifetime: it never happened
+    assert!(c.call(4, Request::Balance("alice"), Response::Ok(150)).is_err());
 }
 
 #[test]
 fn request_lifetime_prunes_the_profile() {
     let mut c = with_lifetime(1_000);
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
+    c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
     assert!(c.profile().iter().all(|n| n.pending.len() == 1), "call 2 still in flight");
     c.tick(2_000).unwrap();
-    c.call(4, Op::Balance("alice"), Resp::Ok(100)).unwrap();
+    c.call(4, Request::Balance("alice"), Response::Ok(100)).unwrap();
     assert_eq!(c.profile().len(), 1);
     assert!(c.profile()[0].pending.is_empty(), "call 2 resolved to never: {:?}", c.profile());
 }
@@ -165,27 +173,27 @@ fn request_lifetime_prunes_the_profile() {
 #[test]
 fn late_response_after_effect_is_still_accepted() {
     let mut c = with_lifetime(1_000);
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(150)).unwrap(); // it took effect
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
+    c.call(3, Request::Balance("alice"), Response::Ok(150)).unwrap(); // it took effect
     c.tick(5_000).unwrap();
-    c.ret(2, Resp::Ok(150)).unwrap(); // the response arrives much later
+    c.ret(2, Response::Ok(150)).unwrap(); // the response arrives much later
 }
 
 #[test]
 fn response_after_lifetime_without_effect_is_rejected() {
     let mut c = with_lifetime(1_000);
-    c.invoke(2, Op::Deposit("alice", 50)).unwrap();
+    c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     c.tick(5_000).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(100)).unwrap(); // it never took effect
-    assert!(c.ret(2, Resp::Ok(150)).is_err());
+    c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap(); // it never took effect
+    assert!(c.ret(2, Response::Ok(150)).is_err());
 }
 
 #[test]
 fn effect_seen_then_undone_is_rejected() {
     let mut c = checker();
-    c.invoke(2, Op::Withdraw("alice", 30)).unwrap();
-    c.call(3, Op::Balance("alice"), Resp::Ok(70)).unwrap(); // the withdraw linearized
-    assert!(c.call(4, Op::Balance("alice"), Resp::Ok(100)).is_err());
+    c.invoke(2, Request::Withdraw("alice", 30)).unwrap();
+    c.call(3, Request::Balance("alice"), Response::Ok(70)).unwrap(); // the withdraw linearized
+    assert!(c.call(4, Request::Balance("alice"), Response::Ok(100)).is_err());
 }
 
 /// Many concurrent calls on distinct accounts. With footprints each Return only
@@ -196,15 +204,15 @@ fn footprints_keep_the_cone_small() {
     let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
     let run = |footprints: bool| {
         let cfg = Config { footprints, ..Config::default() };
-        let mut c = Checker::new(BankSpec, Bank::default(), cfg);
+        let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
         for (i, n) in names.iter().enumerate() {
-            c.call(i as u64, Op::Open(n), Resp::Ok(0)).unwrap();
+            c.call(i as u64, Request::Open(n), Response::Ok(0)).unwrap();
         }
         for (i, n) in names.iter().enumerate() {
-            c.invoke(100 + i as u64, Op::Deposit(n, 10)).unwrap();
+            c.invoke(100 + i as u64, Request::Deposit(n, 10)).unwrap();
         }
         for (i, _) in names.iter().enumerate() {
-            c.ret(100 + i as u64, Resp::Ok(10)).unwrap();
+            c.ret(100 + i as u64, Response::Ok(10)).unwrap();
         }
         c.stats.clone()
     };

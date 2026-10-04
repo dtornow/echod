@@ -16,39 +16,39 @@ use spec::*;
 
 const FAR: Time = 1_000_000_000;
 
-fn create(id: &str, timeout_at: Time, external: bool, target: bool) -> Op {
-    Op::CreatePromise(Create { id: id.into(), timeout_at, data: None, external, target, timer: false })
+fn create(id: &str, timeout_at: Time, external: bool, target: bool) -> Request {
+    Request::CreatePromise(Create { id: id.into(), timeout_at, data: None, external, target, timer: false })
 }
 
 /// One workflow on a fresh pair, as Lean's `workflow i t0 t1`.
-fn workflow(i: u64, t0: Time, t1: Time) -> Vec<(Op, Time)> {
+fn workflow(i: u64, t0: Time, t1: Time) -> Vec<(Request, Time)> {
     let (a, x) = (format!("o:a{i}"), format!("o:x{i}"));
     vec![
         (create(&a, FAR, true, false), t0),
         (create(&x, FAR, false, true), t0),
-        (Op::AcquireTask { id: x.clone(), version: 0, pid: "p".into(), ttl: 50 }, t0),
-        (Op::SuspendTask { id: x.clone(), version: 1, awaited: vec![a.clone()] }, t0),
-        (Op::SettlePromise(Settle { id: a, state: "resolved".into(), data: None }), t1),
+        (Request::AcquireTask { id: x.clone(), version: 0, pid: "p".into(), ttl: 50 }, t0),
+        (Request::SuspendTask { id: x.clone(), version: 1, awaited: vec![a.clone()] }, t0),
+        (Request::SettlePromise(Settle { id: a, state: "resolved".into(), data: None }), t1),
         // the resume is hidden: the checker has to find it
-        (Op::AcquireTask { id: x.clone(), version: 1, pid: "p".into(), ttl: 50 }, t1),
-        (Op::FulfillTask { id: x, version: 2, state: "resolved".into(), data: None }, t1),
+        (Request::AcquireTask { id: x.clone(), version: 1, pid: "p".into(), ttl: 50 }, t1),
+        (Request::FulfillTask { id: x, version: 2, state: "resolved".into(), data: None }, t1),
     ]
 }
 
-fn length(k: u64) -> Vec<(Op, Time)> {
+fn length(k: u64) -> Vec<(Request, Time)> {
     (0..k).flat_map(|i| workflow(i, 10 + i * 10, 15 + i * 10)).collect()
 }
 
-fn fanout(n: u64) -> Vec<(Op, Time)> {
+fn fanout(n: u64) -> Vec<(Request, Time)> {
     let mut s: Vec<_> = (0..n).map(|i| (create(&format!("o:a{i}"), 20 + i, true, false), 10)).collect();
-    s.push((Op::GetPromise("o:a0".into()), 500));
+    s.push((Request::GetPromise("o:a0".into()), 500));
     s
 }
 
 /// Runs the script against the model, taking a successful answer where the
 /// model allows one: the trace an honest server would produce.
-fn record(script: &[(Op, Time)]) -> Vec<Event<Op, Resp>> {
-    let mut c = Checker::new(Resonate, Server::default(), Config::default());
+fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response>> {
+    let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
     let mut trace = Vec::new();
     for (call, (op, t)) in script.iter().enumerate() {
         if *t > c.now() {
@@ -64,10 +64,10 @@ fn record(script: &[(Op, Time)]) -> Vec<Event<Op, Resp>> {
     trace
 }
 
-fn check(trace: &[Event<Op, Resp>], footprints: bool) -> (bool, std::time::Duration, accordant::Stats) {
+fn check(trace: &[Event<Request, Response>], footprints: bool) -> (bool, std::time::Duration, accordant::Stats) {
     let t0 = Instant::now();
     let cfg = Config { footprints, max_explore: 10_000_000, max_width: 1 << 20, ..Config::default() };
-    let mut c = Checker::new(Resonate, Server::default(), cfg);
+    let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);
     let ok = trace.iter().all(|e| c.observe(e.clone()).is_ok());
     (ok, t0.elapsed(), c.stats.clone())
 }

@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use accordant::{Fairness, HashedMap, Keys, Outcome, Spec, StepResult, Succ, Time};
+use accordant::{Fairness, Footprint, HashedMap, Model, Outcome, Partitioned, StepResult, Succ, Time, Touches};
 
 pub type Id = String;
 
@@ -151,7 +151,7 @@ impl Fenced {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Op {
+pub enum Request {
     CreatePromise(Create),
     GetPromise(Id),
     SettlePromise(Settle),
@@ -193,7 +193,7 @@ pub struct TaskRec {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Resp {
+pub enum Response {
     /// A status with no body we check.
     Status(u16),
     Promise(PromiseRec),
@@ -204,10 +204,10 @@ pub enum Resp {
     Claimed(Vec<TaskRec>),
 }
 
-impl Resp {
+impl Response {
     pub fn status(&self) -> u16 {
         match self {
-            Resp::Status(s) => *s,
+            Response::Status(s) => *s,
             _ => 200,
         }
     }
@@ -233,7 +233,7 @@ fn trec(id: &str, t: &Task) -> TaskRec {
 // ------------------------------------------------------------------- steps
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Step {
+pub enum Internal {
     /// A promise's deadline.
     Timeout(Id),
     /// A lease ends; the server may reclaim the task any time after.
@@ -249,10 +249,10 @@ pub struct Resonate;
 type Outcomes = Vec<Outcome<Resonate>>;
 
 fn status(code: u16, s: &Server) -> Outcomes {
-    vec![Outcome::same(Resp::Status(code), s)]
+    vec![Outcome::same(Response::Status(code), s)]
 }
 
-fn echo(resp: Resp, s: &Server) -> Outcomes {
+fn echo(resp: Response, s: &Server) -> Outcomes {
     vec![Outcome::same(resp, s)]
 }
 
@@ -287,14 +287,14 @@ fn settle(s: &mut Server, id: &str, state: PState, value: Option<String>, at: Ti
 }
 
 /// One resume per stored callback; each checks for itself whether it can fire.
-fn resumes(p: &Promise, awaited: &str) -> Vec<Step> {
+fn resumes(p: &Promise, awaited: &str) -> Vec<Internal> {
     p.callbacks
         .iter()
-        .map(|a| Step::Resume { awaited: awaited.to_string(), awaiter: a.clone() })
+        .map(|a| Internal::Resume { awaited: awaited.to_string(), awaiter: a.clone() })
         .collect()
 }
 
-fn with_spawns(mut o: Outcome<Resonate>, steps: Vec<Step>) -> Outcome<Resonate> {
+fn with_spawns(mut o: Outcome<Resonate>, steps: Vec<Internal>) -> Outcome<Resonate> {
     for st in steps {
         o = o.spawn(st);
     }
@@ -313,7 +313,7 @@ impl Resonate {
             return status(400, s); // P-02: timer with target is malformed
         }
         if let Some(p) = s.promises.get(&req.id) {
-            return echo(Resp::Promise(prec(&req.id, p)), s); // P-02: re-create echoes
+            return echo(Response::Promise(prec(&req.id, p)), s); // P-02: re-create echoes
         }
         let live = req.timeout_at > now;
         let born = if live {
@@ -341,8 +341,8 @@ impl Resonate {
             let state = if live { TState::Pending } else { TState::Fulfilled };
             n.tasks.insert(req.id.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0 });
         }
-        let o = Outcome::new(Resp::Promise(prec(&req.id, &p)), n);
-        vec![if live { o.timer(req.timeout_at, Step::Timeout(req.id.clone())) } else { o }]
+        let o = Outcome::new(Response::Promise(prec(&req.id, &p)), n);
+        vec![if live { o.timer(req.timeout_at, Internal::Timeout(req.id.clone())) } else { o }]
     }
 
     fn promise_settle(&self, req: &Settle, s: &Server, now: Time) -> Outcomes {
@@ -353,12 +353,12 @@ impl Resonate {
             return status(404, s);
         };
         if !p.live() {
-            return echo(Resp::Promise(prec(&req.id, p)), s); // P-03: not settleable
+            return echo(Response::Promise(prec(&req.id, p)), s); // P-03: not settleable
         }
         let mut n = s.clone();
         settle(&mut n, &req.id, state, req.data.clone(), now);
         let rec = prec(&req.id, &n.promises[&req.id]);
-        vec![with_spawns(Outcome::new(Resp::Promise(rec), n), resumes(p, &req.id))]
+        vec![with_spawns(Outcome::new(Response::Promise(rec), n), resumes(p, &req.id))]
     }
 
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
@@ -381,13 +381,13 @@ impl Resonate {
             }
             let t = &s.tasks[id];
             return match t.state {
-                TState::Fulfilled => echo(Resp::Task(trec(id, t)), s),
+                TState::Fulfilled => echo(Response::Task(trec(id, t)), s),
                 TState::Pending => {
                     let mut n = s.clone();
                     n.tasks.update(id, |t| t.acquire(t.version + 1, "worker-self", TASK_CREATE_TTL, now));
                     let rec = trec(id, &n.tasks[id]);
-                    let lease = Step::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
-                    vec![Outcome::new(Resp::Task(rec), n).timer(now + TASK_CREATE_TTL, lease)]
+                    let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
+                    vec![Outcome::new(Response::Task(rec), n).timer(now + TASK_CREATE_TTL, lease)]
                 }
                 _ => status(409, s),
             };
@@ -409,9 +409,9 @@ impl Resonate {
         let mut n = s.clone();
         n.promises.insert(id.clone(), p.clone());
         n.tasks.insert(id.clone(), t.clone());
-        let lease = Step::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
-        vec![Outcome::new(Resp::Created(prec(id, &p), trec(id, &t)), n)
-            .timer(timeout_at, Step::Timeout(id.clone()))
+        let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
+        vec![Outcome::new(Response::Created(prec(id, &p), trec(id, &t)), n)
+            .timer(timeout_at, Internal::Timeout(id.clone()))
             .timer(now + TASK_CREATE_TTL, lease)]
     }
 
@@ -447,7 +447,7 @@ impl Resonate {
                 p.callbacks.insert(id.clone());
             });
         }
-        vec![Outcome::new(Resp::Status(200), n)]
+        vec![Outcome::new(Response::Status(200), n)]
     }
 
     fn claimable(&self, s: &Server, now: Time) -> Vec<Id> {
@@ -479,7 +479,7 @@ impl Resonate {
                 for id in &claim {
                     n.tasks.update(id, |t| t.acquire(t.version + 1, pid, ttl, now));
                     recs.push(trec(id, &n.tasks[id]));
-                    leases.push(Step::Lease { id: id.clone(), expires: now + ttl });
+                    leases.push(Internal::Lease { id: id.clone(), expires: now + ttl });
                     let holders: Vec<Id> =
                         n.promises.iter().filter(|(_, p)| p.callbacks.contains(id)).map(|(k, _)| k.clone()).collect();
                     for h in holders {
@@ -488,7 +488,7 @@ impl Resonate {
                         });
                     }
                 }
-                let mut o = Outcome::new(Resp::Claimed(recs), n);
+                let mut o = Outcome::new(Response::Claimed(recs), n);
                 for l in leases {
                     o = o.timer(now + ttl, l);
                 }
@@ -512,23 +512,22 @@ fn combinations(items: &[Id], k: usize) -> Vec<Vec<Id>> {
     out
 }
 
-impl Spec for Resonate {
+impl Model for Resonate {
     type State = Server;
-    type Op = Op;
-    type Resp = Resp;
-    type Step = Step;
-    type Key = Id;
+    type External = Request;
+    type Response = Response;
+    type Internal = Internal;
 
-    fn apply(&self, op: &Op, s: &Server, now: Time) -> Outcomes {
+    fn external(&self, op: &Request, s: &Server, now: Time) -> Outcomes {
         match op {
-            Op::CreatePromise(c) => self.promise_create(c, s, now),
-            Op::GetPromise(id) => match s.promises.get(id) {
+            Request::CreatePromise(c) => self.promise_create(c, s, now),
+            Request::GetPromise(id) => match s.promises.get(id) {
                 None => status(404, s),
-                Some(p) => echo(Resp::Promise(prec(id, p)), s),
+                Some(p) => echo(Response::Promise(prec(id, p)), s),
             },
-            Op::SettlePromise(st) => self.promise_settle(st, s, now),
+            Request::SettlePromise(st) => self.promise_settle(st, s, now),
 
-            Op::RegisterCallback { awaited, awaiter } => {
+            Request::RegisterCallback { awaited, awaiter } => {
                 if awaited == awaiter || origin(awaited) != origin(awaiter) {
                     return status(400, s); // P-04
                 }
@@ -537,7 +536,7 @@ impl Spec for Resonate {
                 if !s.tasks.contains_key(awaiter) || !p.external() {
                     return status(422, s);
                 }
-                let resp = Resp::Promise(prec(awaited, p));
+                let resp = Response::Promise(prec(awaited, p));
                 if !p.live() || !w.live() {
                     return echo(resp, s);
                 }
@@ -548,25 +547,25 @@ impl Spec for Resonate {
                 vec![Outcome::new(resp, n)]
             }
 
-            Op::RegisterListener { awaited, address } => {
+            Request::RegisterListener { awaited, address } => {
                 if !address_valid(address) {
                     return status(400, s); // P-05
                 }
                 match s.promises.get(awaited) {
                     None => status(404, s),
                     Some(p) if !p.external() => status(422, s),
-                    Some(p) => echo(Resp::Promise(prec(awaited, p)), s),
+                    Some(p) => echo(Response::Promise(prec(awaited, p)), s),
                 }
             }
 
-            Op::GetTask(id) => match s.tasks.get(id) {
+            Request::GetTask(id) => match s.tasks.get(id) {
                 None => status(404, s),
-                Some(t) => echo(Resp::Task(trec(id, t)), s),
+                Some(t) => echo(Response::Task(trec(id, t)), s),
             },
 
-            Op::CreateTask { id, timeout_at, data, target } => self.task_create(id, *timeout_at, data, *target, s, now),
+            Request::CreateTask { id, timeout_at, data, target } => self.task_create(id, *timeout_at, data, *target, s, now),
 
-            Op::AcquireTask { id, version, pid, ttl } => {
+            Request::AcquireTask { id, version, pid, ttl } => {
                 let Some(t) = s.tasks.get(id) else { return status(404, s) };
                 if t.state != TState::Pending || !s.promises[id].live() || t.version != *version {
                     return status(409, s); // T-03
@@ -574,11 +573,11 @@ impl Spec for Resonate {
                 let mut n = s.clone();
                 n.tasks.update(id, |t| t.acquire(t.version + 1, pid, *ttl, now));
                 let rec = trec(id, &n.tasks[id]);
-                let lease = Step::Lease { id: id.clone(), expires: now + ttl };
-                vec![Outcome::new(Resp::Task(rec), n).timer(now + ttl, lease)]
+                let lease = Internal::Lease { id: id.clone(), expires: now + ttl };
+                vec![Outcome::new(Response::Task(rec), n).timer(now + ttl, lease)]
             }
 
-            Op::ReleaseTask { id, version } => match self.held(s, id, *version) {
+            Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
                 Err(code) => status(code, s),
                 Ok(_) => {
                     let mut n = s.clone();
@@ -587,11 +586,11 @@ impl Spec for Resonate {
                         t.pid = None;
                         t.ttl = None;
                     });
-                    vec![Outcome::new(Resp::Status(200), n)]
+                    vec![Outcome::new(Response::Status(200), n)]
                 }
             },
 
-            Op::FulfillTask { id, version, state, data } => {
+            Request::FulfillTask { id, version, state, data } => {
                 let Some(st) = PState::settable(state) else { return status(400, s) };
                 if let Err(code) = self.held(s, id, *version) {
                     return status(code, s);
@@ -599,10 +598,10 @@ impl Spec for Resonate {
                 let mut n = s.clone();
                 settle(&mut n, id, st, data.clone(), now);
                 let rec = prec(id, &n.promises[id]);
-                vec![with_spawns(Outcome::new(Resp::Promise(rec), n), resumes(&s.promises[id], id))]
+                vec![with_spawns(Outcome::new(Response::Promise(rec), n), resumes(&s.promises[id], id))]
             }
 
-            Op::HeartbeatTask { id, version, pid } => {
+            Request::HeartbeatTask { id, version, pid } => {
                 let extends = self.held(s, id, *version).is_ok_and(|t| t.pid.as_deref() == Some(pid.as_str()));
                 if !extends {
                     return status(200, s); // T-05: always 200
@@ -610,12 +609,12 @@ impl Spec for Resonate {
                 let mut n = s.clone();
                 n.tasks.update(id, |t| t.acquired_at = now);
                 let expires = n.tasks[id].lease_expires();
-                vec![Outcome::new(Resp::Status(200), n).timer(expires, Step::Lease { id: id.clone(), expires })]
+                vec![Outcome::new(Response::Status(200), n).timer(expires, Internal::Lease { id: id.clone(), expires })]
             }
 
-            Op::SuspendTask { id, version, awaited } => self.task_suspend(id, *version, awaited, s),
+            Request::SuspendTask { id, version, awaited } => self.task_suspend(id, *version, awaited, s),
 
-            Op::FenceTask { id, version, action } => {
+            Request::FenceTask { id, version, action } => {
                 if action.target() == id {
                     return status(400, s); // T-04
                 }
@@ -633,13 +632,13 @@ impl Spec for Resonate {
                 }
             }
 
-            Op::PollTask { pid, ttl, limit } => self.task_poll(pid, *ttl, *limit, s, now),
+            Request::PollTask { pid, ttl, limit } => self.task_poll(pid, *ttl, *limit, s, now),
         }
     }
 
-    fn step(&self, step: &Step, s: &Server, _now: Time) -> StepResult<Self> {
+    fn internal(&self, step: &Internal, s: &Server, _now: Time) -> StepResult<Self> {
         match step {
-            Step::Timeout(id) => {
+            Internal::Timeout(id) => {
                 let p = &s.promises[id];
                 if !p.live() {
                     return StepResult::Discharged;
@@ -653,7 +652,7 @@ impl Spec for Resonate {
                 }
                 StepResult::Next(vec![succ])
             }
-            Step::Lease { id, expires } => {
+            Internal::Lease { id, expires } => {
                 let t = &s.tasks[id];
                 if t.state != TState::Acquired || t.lease_expires() != *expires {
                     return StepResult::Discharged; // released, fulfilled, or extended
@@ -666,7 +665,7 @@ impl Spec for Resonate {
                 });
                 StepResult::Next(vec![Succ::new(n)])
             }
-            Step::Resume { awaited, awaiter } => {
+            Internal::Resume { awaited, awaiter } => {
                 if !fireable(s, awaited, awaiter) {
                     return StepResult::Discharged;
                 }
@@ -680,56 +679,65 @@ impl Spec for Resonate {
         }
     }
 
-    fn fairness(&self, step: &Step) -> Fairness {
+    fn fairness(&self, step: &Internal) -> Fairness {
         match step {
-            Step::Timeout(_) => Fairness::Eventually { within: Some(0) },
-            Step::Lease { .. } | Step::Resume { .. } => Fairness::Eventually { within: None },
+            Internal::Timeout(_) => Fairness::Eventually { within: Some(0) },
+            Internal::Lease { .. } | Internal::Resume { .. } => Fairness::Eventually { within: None },
         }
     }
 
-    fn op_keys(&self, op: &Op) -> Keys<Id> {
-        let ks = |v: &[&Id]| Keys::Some(v.iter().map(|k| (*k).clone()).collect());
+}
+
+impl Footprint for Resonate {
+    type Object = Id;
+
+    fn external_touches(&self, op: &Request) -> Touches<Id> {
+        let ks = |v: &[&Id]| Touches::Only(v.iter().map(|k| (*k).clone()).collect());
         match op {
-            Op::CreatePromise(c) => ks(&[&c.id]),
-            Op::SettlePromise(st) => ks(&[&st.id]),
-            Op::GetPromise(id)
-            | Op::GetTask(id)
-            | Op::CreateTask { id, .. }
-            | Op::AcquireTask { id, .. }
-            | Op::ReleaseTask { id, .. }
-            | Op::FulfillTask { id, .. }
-            | Op::HeartbeatTask { id, .. } => ks(&[id]),
+            Request::CreatePromise(c) => ks(&[&c.id]),
+            Request::SettlePromise(st) => ks(&[&st.id]),
+            Request::GetPromise(id)
+            | Request::GetTask(id)
+            | Request::CreateTask { id, .. }
+            | Request::AcquireTask { id, .. }
+            | Request::ReleaseTask { id, .. }
+            | Request::FulfillTask { id, .. }
+            | Request::HeartbeatTask { id, .. } => ks(&[id]),
             // A request refused for crossing origins is refused on the ids alone and
             // reads nothing, so its footprint stays in one origin.
-            Op::RegisterCallback { awaited, awaiter } if origin(awaited) != origin(awaiter) => ks(&[awaited]),
-            Op::RegisterCallback { awaited, awaiter } => ks(&[awaited, awaiter]),
-            Op::RegisterListener { awaited, .. } => ks(&[awaited]),
-            Op::SuspendTask { id, awaited, .. } if awaited.iter().any(|a| origin(a) != origin(id)) => ks(&[id]),
-            Op::SuspendTask { id, awaited, .. } => {
+            Request::RegisterCallback { awaited, awaiter } if origin(awaited) != origin(awaiter) => ks(&[awaited]),
+            Request::RegisterCallback { awaited, awaiter } => ks(&[awaited, awaiter]),
+            Request::RegisterListener { awaited, .. } => ks(&[awaited]),
+            Request::SuspendTask { id, awaited, .. } if awaited.iter().any(|a| origin(a) != origin(id)) => ks(&[id]),
+            Request::SuspendTask { id, awaited, .. } => {
                 let mut v: Vec<&Id> = awaited.iter().collect();
                 v.push(id);
                 ks(&v)
             }
-            Op::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
+            Request::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
             // A detached create: the one request that spans two origins.
-            Op::FenceTask { id, action, .. } => ks(&[id, action.target()]),
-            Op::PollTask { .. } => Keys::All,
+            Request::FenceTask { id, action, .. } => ks(&[id, action.target()]),
+            Request::PollTask { .. } => Touches::Everything,
         }
     }
 
-    fn step_keys(&self, step: &Step) -> Keys<Id> {
+    fn internal_touches(&self, step: &Internal) -> Touches<Id> {
         match step {
-            Step::Timeout(id) | Step::Lease { id, .. } => Keys::one(id.clone()),
-            Step::Resume { awaited, awaiter } => Keys::Some(vec![awaited.clone(), awaiter.clone()]),
+            Internal::Timeout(id) | Internal::Lease { id, .. } => Touches::one(id.clone()),
+            Internal::Resume { awaited, awaiter } => Touches::Only(vec![awaited.clone(), awaiter.clone()]),
         }
     }
+}
+
+impl Partitioned for Resonate {
+    type Group = String;
 
     /// Ids of different origins never interact, except through a detached create
     /// (`FenceTask` creating in another origin) and `PollTask`. Their footprints
     /// span origins and merge the partitions; the checker splits them again once
     /// the candidates are independent.
-    fn part(&self, key: &Id) -> Option<Id> {
-        Some(origin(key).to_string())
+    fn group(&self, id: &Id) -> String {
+        origin(id).to_string()
     }
 
     fn restrict(&self, s: &Server, keep: &dyn Fn(&Id) -> bool) -> Server {
