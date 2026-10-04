@@ -16,7 +16,9 @@
 //!   Models read `now`, install timers, and give internal work deadlines.
 //! * **Internal work is data, not closures,** so two explanations that start the
 //!   same work converge.
-//! * **"Eventually" has a deadline,** which is what keeps the search small.
+//! * **When internal work runs is part of starting it** ([`Sched`]): later,
+//!   at a timer, after a time, within a window, or maybe never. Deadlines are
+//!   what keep the search small.
 //!
 //! A model is checked as it is. Two optional traits make checking faster:
 //! [`Footprint`] says which keys a step touches, and [`Partitioned`] groups
@@ -67,10 +69,6 @@ pub trait Model {
         Vec::new()
     }
 
-    /// How internal work must behave over time.
-    fn fairness(&self, _step: &Self::Internal) -> Fairness {
-        Fairness::Eventually { within: None }
-    }
 
     /// Whether an observed response matches the one the model predicts.
     /// Override for wildcards (server-chosen ids, timestamps).
@@ -107,25 +105,20 @@ pub trait Partitioned: Footprint {
     fn join(&self, a: &Self::State, b: &Self::State) -> Self::State;
 }
 
-/// How internal work must behave over time, measured from when it becomes due
-/// (its timer time, or the moment it was started).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fairness {
-    /// May happen, may never happen (a daemon, a retry that is allowed but not owed).
-    May,
-    /// Must happen. `within: Some(d)`: by `due + d`; `Some(0)` is an exact timer.
-    /// Once overdue it happens as soon as it can. `None` defers the obligation
-    /// to the next [`Event::Quiesce`].
-    Eventually { within: Option<Time> },
-}
-
-/// Internal work to start.
+/// Internal work to start, and when it runs. Work that must happen and hasn't
+/// by its deadline is a violation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sched<T> {
-    /// Runs later: any time from now on, within its fairness window.
+    /// Runs later: any time from now on; must have happened by the next `Quiesce`.
     Later(T),
-    /// A timer: can't run before `at`.
+    /// A timer: runs exactly at the given time.
     Timer(Time, T),
+    /// Runs any time after the given time; must have happened by the next `Quiesce`.
+    After(Time, T),
+    /// Runs any time from now on; must have happened within the given duration.
+    Within(Time, T),
+    /// May run any time from now on, or never.
+    Maybe(T),
 }
 
 /// One possible effect of a request: the next state, the response, and the
@@ -152,9 +145,27 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
         self
     }
 
-    /// Internal work that can't run before `at`.
+    /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
         self.spawn.push(Sched::Timer(at, step));
+        self
+    }
+
+    /// Internal work that runs any time after `at`, eventually.
+    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
+        self.spawn.push(Sched::After(at, step));
+        self
+    }
+
+    /// Internal work that runs within `d` from now.
+    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
+        self.spawn.push(Sched::Within(d, step));
+        self
+    }
+
+    /// Internal work that may run, or never.
+    pub fn maybe(mut self, step: M::Internal) -> Self {
+        self.spawn.push(Sched::Maybe(step));
         self
     }
 }
@@ -182,9 +193,27 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
         self
     }
 
-    /// Internal work that can't run before `at`.
+    /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
         self.spawn.push(Sched::Timer(at, step));
+        self
+    }
+
+    /// Internal work that runs any time after `at`, eventually.
+    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
+        self.spawn.push(Sched::After(at, step));
+        self
+    }
+
+    /// Internal work that runs within `d` from now.
+    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
+        self.spawn.push(Sched::Within(d, step));
+        self
+    }
+
+    /// Internal work that may run, or never.
+    pub fn maybe(mut self, step: M::Internal) -> Self {
+        self.spawn.push(Sched::Maybe(step));
         self
     }
 }

@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
-use crate::{CallId, Engine, Fairness, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
+use crate::{CallId, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
 
 type St<S> = <<S as Engine>::M as Model>::State;
 type Ex<S> = <<S as Engine>::M as Model>::External;
@@ -910,9 +910,16 @@ impl<S: Engine> Checker<S> {
 
     fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
         for sched in steps {
-            let (step, at) = match sched {
-                Sched::Later(step) => (step, None),
-                Sched::Timer(at, step) => (step, Some(at)),
+            let now = self.now;
+            let (step, item) = match sched {
+                Sched::Later(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: true }),
+                Sched::Timer(at, step) => {
+                    let at = at.max(now);
+                    (step.clone(), Pending::Step { step, after: at, by: Some(at), must: true })
+                }
+                Sched::After(at, step) => (step.clone(), Pending::Step { step, after: at.max(now), by: None, must: true }),
+                Sched::Within(d, step) => (step.clone(), Pending::Step { step, after: now, by: Some(now + d), must: true }),
+                Sched::Maybe(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: false }),
             };
             if let Some(Some(parts)) = &self.scope {
                 let escaped = match self.engine.internal_keys(&step) {
@@ -923,13 +930,6 @@ impl<S: Engine> Checker<S> {
                     self.escaped.borrow_mut().get_or_insert_with(|| format!("{step:?}"));
                 }
             }
-            let after = at.map_or(self.now, |t| t.max(self.now));
-            let item = match self.engine.model().fairness(&step) {
-                Fairness::May => Pending::Step { step, after, by: None, must: false },
-                Fairness::Eventually { within } => {
-                    Pending::Step { step, after, by: within.map(|d| after + d), must: true }
-                }
-            };
             pending.insert(item);
         }
     }

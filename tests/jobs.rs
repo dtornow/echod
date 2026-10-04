@@ -1,7 +1,11 @@
 //! The JobQueue sample: background work that eventually completes, and a timer
 //! that times a job out if it has not.
+//!
+//! There is one kind of internal step, "job `j` steps", scheduled twice: once to
+//! run later and once as a timer at the deadline. What the step does is decided
+//! by the job's state and the clock.
 
-use accordant::{Checker, Config, Fairness, Footprint, HashedMap, Keyed, Model, ExternalOutcome, InternalOutcome, Time, Touches};
+use accordant::{Checker, Config, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Keyed, Model, Time, Touches};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 enum Status {
@@ -11,9 +15,15 @@ enum Status {
     TimedOut,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct Job {
+    status: Status,
+    deadline: Time,
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Queue {
-    jobs: HashedMap<u32, Status>,
+    jobs: HashedMap<u32, Job>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -31,12 +41,6 @@ enum Response {
     Is(Status),
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-enum Internal {
-    Run(u32),
-    Timeout(u32),
-}
-
 /// `run_within`: how long after submission a job may run before it must be done.
 struct JobModel {
     run_within: Option<Time>,
@@ -48,60 +52,55 @@ impl Model for JobModel {
     type State = Queue;
     type External = Request;
     type Response = Response;
-    type Internal = Internal;
+    /// Job `j` takes an internal step.
+    type Internal = u32;
 
-    fn external(&self, op: &Request, s: &Queue, _now: Time) -> Vec<ExternalOutcome<Self>> {
-        vec![match *op {
+    fn external(&self, req: &Request, s: &Queue, _now: Time) -> Vec<ExternalOutcome<Self>> {
+        vec![match *req {
             Request::Submit(j, _) if s.jobs.contains_key(&j) => ExternalOutcome::same(Response::Duplicate, s),
-            Request::Submit(j, timeout_at) => {
+            Request::Submit(j, deadline) => {
                 let mut n = s.clone();
-                n.jobs.insert(j, Status::Pending);
-                ExternalOutcome::new(Response::Accepted, n).later(Internal::Run(j)).timer(timeout_at, Internal::Timeout(j))
+                n.jobs.insert(j, Job { status: Status::Pending, deadline });
+                let o = ExternalOutcome::new(Response::Accepted, n);
+                let o = match self.run_within {
+                    Some(d) => o.within(d, j),
+                    None => o.later(j),
+                };
+                o.timer(deadline, j)
             }
             Request::Get(j) => match s.jobs.get(&j) {
                 None => ExternalOutcome::same(Response::NotFound, s),
-                Some(st) => ExternalOutcome::same(Response::Is(*st), s),
+                Some(job) => ExternalOutcome::same(Response::Is(job.status), s),
             },
         }]
     }
 
-    fn internal(&self, req: &Internal, s: &Queue, _now: Time) -> Vec<InternalOutcome<Self>> {
-        let (Internal::Run(j) | Internal::Timeout(j)) = *req;
-        if s.jobs.get(&j) != Some(&Status::Pending) {
-            return vec![InternalOutcome::same(s)]; // done already
-        }
-        let to = |st| {
+    fn internal(&self, j: &u32, s: &Queue, now: Time) -> Vec<InternalOutcome<Self>> {
+        let job = &s.jobs[j];
+        let to = |status| {
             let mut n = s.clone();
-            n.jobs.insert(j, st);
+            n.jobs.insert(*j, Job { status, ..job.clone() });
             InternalOutcome::new(n)
         };
-        match req {
-            Internal::Run(_) => vec![to(Status::Completed), to(Status::Failed)],
-            Internal::Timeout(_) => vec![to(Status::TimedOut)],
+        match job.status {
+            Status::Pending if now >= job.deadline => vec![to(Status::TimedOut)],
+            Status::Pending => vec![to(Status::Completed), to(Status::Failed)],
+            _ => vec![InternalOutcome::same(s)], // finished: nothing to do
         }
     }
-
-    fn fairness(&self, step: &Internal) -> Fairness {
-        match step {
-            Internal::Run(_) => Fairness::Eventually { within: self.run_within },
-            Internal::Timeout(_) => Fairness::Eventually { within: Some(0) }, // exact timer
-        }
-    }
-
 }
 
 impl Footprint for JobModel {
     type Key = u32;
 
-    fn external_touches(&self, op: &Request) -> Touches<u32> {
-        match *op {
+    fn external_touches(&self, req: &Request) -> Touches<u32> {
+        match *req {
             Request::Submit(j, _) | Request::Get(j) => Touches::one(j),
         }
     }
 
-    fn internal_touches(&self, step: &Internal) -> Touches<u32> {
-        let (Internal::Run(j) | Internal::Timeout(j)) = *step;
-        Touches::one(j)
+    fn internal_touches(&self, j: &u32) -> Touches<u32> {
+        Touches::one(*j)
     }
 }
 
@@ -116,7 +115,7 @@ fn completion_is_observed_and_the_profile_collapses() {
     c.call(2, Request::Get(7), Response::Is(Status::Pending)).unwrap();
     assert_eq!(c.profile().len(), 1, "the run is deferred, not expanded");
     c.call(3, Request::Get(7), Response::Is(Status::Failed)).unwrap();
-    assert!(c.all(|s| s.jobs[&7] == Status::Failed));
+    assert!(c.all(|s| s.jobs[&7].status == Status::Failed));
     assert!(c.call(4, Request::Get(7), Response::Is(Status::Completed)).is_err());
 }
 
@@ -194,7 +193,7 @@ fn quiesce_discharges_unbounded_eventually() {
     c.call(1, Request::Submit(7, NEVER), Response::Accepted).unwrap();
     c.call(2, Request::Get(7), Response::Is(Status::Pending)).unwrap();
     c.quiesce().unwrap();
-    assert!(c.all(|s| s.jobs[&7] != Status::Pending));
+    assert!(c.all(|s| s.jobs[&7].status != Status::Pending));
     assert!(c.call(3, Request::Get(7), Response::Is(Status::Pending)).is_err());
 }
 
@@ -203,7 +202,7 @@ fn quiesce_does_not_fire_future_timers() {
     let mut c = checker(Some(10_000));
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
     c.quiesce().unwrap(); // the run must be done; the timeout is not due yet
-    assert!(c.all(|s| matches!(s.jobs[&7], Status::Completed | Status::Failed)));
+    assert!(c.all(|s| matches!(s.jobs[&7].status, Status::Completed | Status::Failed)));
 }
 
 #[test]

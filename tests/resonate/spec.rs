@@ -5,8 +5,10 @@
 //! - Time is the checker's clock, not `ServerState.Now`; `AdvanceClock` is `tick`.
 //! - A promise's deadline is a timer step that settles it, so there is no
 //!   `Project(now)` read-time projection anywhere.
-//! - A lease expiry is a timer installed when the lease starts, not a trigger
-//!   re-derived on every clock advance.
+//! - A lease expiry is scheduled when the lease starts (`after` its end), not a
+//!   trigger re-derived on every clock advance.
+//! - Internal steps carry no kind: a step is "process these objects", and what is
+//!   due on them comes from the state and the clock.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
 //!   already "maybe".
 //! - `PollTask` past its limit claims some subset of size `limit` (the C# spec
@@ -19,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use accordant::{Fairness, Footprint, HashedMap, Model, ExternalOutcome, Partitioned, InternalOutcome, Time, Touches};
+use accordant::{ExternalOutcome, Footprint, HashedMap, InternalOutcome, Model, Partitioned, Time, Touches};
 
 pub type Id = String;
 
@@ -232,14 +234,17 @@ fn trec(id: &str, t: &Task) -> TaskRec {
 
 // ------------------------------------------------------------------- steps
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Internal {
-    /// A promise's deadline.
-    Timeout(Id),
-    /// A lease ends; the server may reclaim the task any time after.
-    Lease { id: Id, expires: Time },
-    /// Resume `awaiter` because `awaited` settled.
-    Resume { awaited: Id, awaiter: Id },
+/// An internal step: the server processes these objects and does whatever is
+/// due on them (a promise past its deadline times out, a task past its lease is
+/// reclaimed, a suspended task whose awaited promise settled resumes). What is
+/// due is read from the state and the clock, not from the step.
+///
+/// The step names every object it may touch, so its footprint is exact. A
+/// promise deadline or a lease end is `{id}`; a resume is `{awaited, awaiter}`.
+pub type Internal = BTreeSet<Id>;
+
+pub fn on(ids: &[&str]) -> Internal {
+    ids.iter().map(|i| i.to_string()).collect()
 }
 
 // -------------------------------------------------------------------- spec
@@ -286,12 +291,9 @@ fn settle(s: &mut Server, id: &str, state: PState, value: Option<String>, at: Ti
     });
 }
 
-/// One resume per stored callback; each checks for itself whether it can fire.
+/// One resume per stored callback: process the awaited promise and its awaiter.
 fn resumes(p: &Promise, awaited: &str) -> Vec<Internal> {
-    p.callbacks
-        .iter()
-        .map(|a| Internal::Resume { awaited: awaited.to_string(), awaiter: a.clone() })
-        .collect()
+    p.callbacks.iter().map(|a| on(&[awaited, a])).collect()
 }
 
 fn with_spawns(mut o: ExternalOutcome<Resonate>, steps: Vec<Internal>) -> ExternalOutcome<Resonate> {
@@ -342,7 +344,7 @@ impl Resonate {
             n.tasks.insert(req.id.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0 });
         }
         let o = ExternalOutcome::new(Response::Promise(prec(&req.id, &p)), n);
-        vec![if live { o.timer(req.timeout_at, Internal::Timeout(req.id.clone())) } else { o }]
+        vec![if live { o.timer(req.timeout_at, on(&[&req.id])) } else { o }]
     }
 
     fn promise_settle(&self, req: &Settle, s: &Server, now: Time) -> Outcomes {
@@ -386,8 +388,7 @@ impl Resonate {
                     let mut n = s.clone();
                     n.tasks.update(id, |t| t.acquire(t.version + 1, "worker-self", TASK_CREATE_TTL, now));
                     let rec = trec(id, &n.tasks[id]);
-                    let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
-                    vec![ExternalOutcome::new(Response::Task(rec), n).timer(now + TASK_CREATE_TTL, lease)]
+                    vec![ExternalOutcome::new(Response::Task(rec), n).after(now + TASK_CREATE_TTL, on(&[id]))]
                 }
                 _ => status(409, s),
             };
@@ -409,10 +410,9 @@ impl Resonate {
         let mut n = s.clone();
         n.promises.insert(id.clone(), p.clone());
         n.tasks.insert(id.clone(), t.clone());
-        let lease = Internal::Lease { id: id.clone(), expires: now + TASK_CREATE_TTL };
         vec![ExternalOutcome::new(Response::Created(prec(id, &p), trec(id, &t)), n)
-            .timer(timeout_at, Internal::Timeout(id.clone()))
-            .timer(now + TASK_CREATE_TTL, lease)]
+            .timer(timeout_at, on(&[id]))
+            .after(now + TASK_CREATE_TTL, on(&[id]))]
     }
 
     fn task_suspend(&self, id: &Id, version: u32, ids: &[Id], s: &Server) -> Outcomes {
@@ -479,7 +479,7 @@ impl Resonate {
                 for id in &claim {
                     n.tasks.update(id, |t| t.acquire(t.version + 1, pid, ttl, now));
                     recs.push(trec(id, &n.tasks[id]));
-                    leases.push(Internal::Lease { id: id.clone(), expires: now + ttl });
+                    leases.push(on(&[id]));
                     let holders: Vec<Id> =
                         n.promises.iter().filter(|(_, p)| p.callbacks.contains(id)).map(|(k, _)| k.clone()).collect();
                     for h in holders {
@@ -490,7 +490,7 @@ impl Resonate {
                 }
                 let mut o = ExternalOutcome::new(Response::Claimed(recs), n);
                 for l in leases {
-                    o = o.timer(now + ttl, l);
+                    o = o.after(now + ttl, l);
                 }
                 o
             })
@@ -573,8 +573,7 @@ impl Model for Resonate {
                 let mut n = s.clone();
                 n.tasks.update(id, |t| t.acquire(t.version + 1, pid, *ttl, now));
                 let rec = trec(id, &n.tasks[id]);
-                let lease = Internal::Lease { id: id.clone(), expires: now + ttl };
-                vec![ExternalOutcome::new(Response::Task(rec), n).timer(now + ttl, lease)]
+                vec![ExternalOutcome::new(Response::Task(rec), n).after(now + ttl, on(&[id]))]
             }
 
             Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
@@ -609,7 +608,7 @@ impl Model for Resonate {
                 let mut n = s.clone();
                 n.tasks.update(id, |t| t.acquired_at = now);
                 let expires = n.tasks[id].lease_expires();
-                vec![ExternalOutcome::new(Response::Status(200), n).timer(expires, Internal::Lease { id: id.clone(), expires })]
+                vec![ExternalOutcome::new(Response::Status(200), n).after(expires, on(&[id]))]
             }
 
             Request::SuspendTask { id, version, awaited } => self.task_suspend(id, *version, awaited, s),
@@ -636,56 +635,42 @@ impl Model for Resonate {
         }
     }
 
-    fn internal(&self, req: &Internal, s: &Server, _now: Time) -> Vec<InternalOutcome<Self>> {
-        match req {
-            Internal::Timeout(id) => {
-                let p = &s.promises[id];
-                if !p.live() {
-                    return vec![InternalOutcome::same(s)];
-                }
+    fn internal(&self, ids: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Self>> {
+        let mut n = s.clone();
+        let mut spawn = Vec::new();
+        for id in ids {
+            // A promise past its deadline times out (a timer promise resolves).
+            if let Some(p) = s.promises.get(id).filter(|p| p.live() && now >= p.timeout_at) {
                 let state = if p.timer_tag { PState::Resolved } else { PState::TimedOut };
-                let mut n = s.clone();
                 settle(&mut n, id, state, None, p.timeout_at);
-                let mut succ = InternalOutcome::new(n);
-                for r in resumes(p, id) {
-                    succ = succ.later(r);
-                }
-                vec![succ]
+                spawn.extend(resumes(p, id));
             }
-            Internal::Lease { id, expires } => {
-                let t = &s.tasks[id];
-                if t.state != TState::Acquired || t.lease_expires() != *expires {
-                    return vec![InternalOutcome::same(s)]; // released, fulfilled, or extended
-                }
-                let mut n = s.clone();
+            // A task past its lease is reclaimed.
+            if n.tasks.get(id).is_some_and(|t| t.state == TState::Acquired && now >= t.lease_expires()) {
                 n.tasks.update(id, |t| {
                     t.state = TState::Pending;
                     t.pid = None;
                     t.ttl = None;
                 });
-                vec![InternalOutcome::new(n)]
             }
-            Internal::Resume { awaited, awaiter } => {
-                if !fireable(s, awaited, awaiter) {
-                    return vec![InternalOutcome::same(s)];
+        }
+        // A suspended task resumes when a promise it awaits has settled.
+        for awaited in ids {
+            for awaiter in ids {
+                if n.promises.get(awaited).is_some_and(|p| !p.live()) && fireable(&n, awaited, awaiter) {
+                    n.promises.update(awaited, |p| {
+                        p.callbacks.remove(awaiter);
+                    });
+                    n.tasks.update(awaiter, |t| t.state = TState::Pending);
                 }
-                let mut n = s.clone();
-                n.promises.update(awaited, |p| {
-                    p.callbacks.remove(awaiter);
-                });
-                n.tasks.update(awaiter, |t| t.state = TState::Pending);
-                vec![InternalOutcome::new(n)]
             }
         }
-    }
-
-    fn fairness(&self, step: &Internal) -> Fairness {
-        match step {
-            Internal::Timeout(_) => Fairness::Eventually { within: Some(0) },
-            Internal::Lease { .. } | Internal::Resume { .. } => Fairness::Eventually { within: None },
+        let mut out = InternalOutcome::new(n);
+        for r in spawn {
+            out = out.later(r);
         }
+        vec![out]
     }
-
 }
 
 impl Footprint for Resonate {
@@ -721,11 +706,8 @@ impl Footprint for Resonate {
         }
     }
 
-    fn internal_touches(&self, step: &Internal) -> Touches<Id> {
-        match step {
-            Internal::Timeout(id) | Internal::Lease { id, .. } => Touches::one(id.clone()),
-            Internal::Resume { awaited, awaiter } => Touches::Only(vec![awaited.clone(), awaiter.clone()]),
-        }
+    fn internal_touches(&self, ids: &Internal) -> Touches<Id> {
+        Touches::Only(ids.iter().cloned().collect())
     }
 }
 

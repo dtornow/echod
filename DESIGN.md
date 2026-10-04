@@ -45,7 +45,6 @@ pub trait Model {
 
     fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
     fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
-    fn fairness(&self, step: &Self::Internal) -> Fairness;                                   // May | Eventually { within }
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
 
@@ -135,11 +134,27 @@ and the spec reads it in `apply` and `step`.
 - **Timers.** An outcome or step successor can install one:
   `ExternalOutcome::new(resp, next).timer(at, Step::Timeout(id))`. A timer is a step that
   is not enabled before `at`.
-- **Deadlines are inclusive.** `Fairness::Eventually { within: Some(d) }` means
-  the step has fired by `due + d`: anything observed at that instant already
-  sees it. `Some(0)` is an exact timer: it fires at `at`, unless something
-  disables it first (a job that completed before its timeout discharges the
-  timer). This matches servers that test `now >= deadline`, like Resonate.
+- **When internal work runs is part of starting it**, not part of the work:
+
+  ```rust
+  pub enum Sched<T> {
+      Later(T),         // from now on; must happen by the next Quiesce
+      Timer(Time, T),   // exactly at the given time
+      After(Time, T),   // not before the given time; must happen by the next Quiesce
+      Within(Time, T),  // from now on; must happen within the given duration
+      Maybe(T),         // may happen, may never
+  }
+  ```
+
+  Each has a builder of the same name on both outcomes (`.later(..)`,
+  `.timer(..)`, ...). So the same internal step can be scheduled twice with
+  different timing: the job queue schedules "job `j` steps" once `later` and once
+  as a `timer` at the deadline, and the job's state and the clock decide what
+  the step does.
+- **Deadlines are inclusive.** Work due by a time has happened for anything
+  observed at that instant. A timer fires at its time, unless the work has
+  nothing left to do by then (a job that completed before its timeout). This
+  matches servers that test `now >= deadline`, like Resonate.
 - **Overdue work goes first.** While a node has an enabled overdue step, nothing
   else may fire or linearize, so a call at the deadline instant can't sneak in
   ahead of the timer.
@@ -162,7 +177,7 @@ and the spec reads it in `apply` and `step`.
   already due must have fired. Future timers are untouched, and so are calls
   still waiting for a response. It replaces the poll-until-terminal loop as the
   liveness check.
-- `Fairness::May` is work that is allowed but not owed: daemons, optional retries.
+- `Sched::Maybe` is work that is allowed but not owed: daemons, optional retries.
 
 The clock is logical and test-driven. That matches a server with a controllable
 clock, like Resonate's `AdvanceClock`/debug time: test time *is* server time, so
@@ -179,7 +194,7 @@ explains it. There are five sources of choice.
 |---|---|---|
 | **ExternalOutcome**: the server may answer or act in several ways | `apply` / `step` return several outcomes or successors (Accordant's `OneOf`) | the observations that follow |
 | **Interleaving**: the order of concurrent calls and background work | implicit: every pending item is a possible next move | the search, pruned by footprints |
-| **Timing**: when due work fires inside its window | `after` / `by` windows from timers and `Fairness` | the search, bounded by deadlines |
+| **Timing**: when due work fires inside its window | the `Sched` each piece of work was started with | the search, bounded by deadlines |
 | **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads; `request_lifetime` bounds it |
 | **Unknown values**: server-chosen ids, timestamps | `admits` with a pattern; see below | the `Return` |
 
@@ -215,8 +230,8 @@ mechanisms keep it small, and all eight are in the prototype.
 3. **Deadlines.** Obligations have a `by`, and unanswered requests have a lifetime.
    When the clock passes a deadline, the uncertainty is resolved once and then
    gone. Nothing stays pending forever unless the spec says so.
-4. **Subsumption (antichains).** `May` work can always be skipped, so a node
-   simulates any node with the same state and owed work but a subset of its `May`
+4. **Subsumption (antichains).** `Maybe` work can always be skipped, so a node
+   simulates any node with the same state and owed work but a subset of its `Maybe`
    work. Likewise for early answers (next item). The weaker node is discarded.
 5. **Reads don't branch.** Linearizing a call whose outcomes leave the state
    unchanged only decides its answer. So instead of splitting the profile into
@@ -262,7 +277,7 @@ Not in the prototype yet, and worth adding in this order:
 - **Symmetry reduction**: canonicalize interchangeable ids (`rd:A` vs `rd:B`).
 - **Model checking the spec itself**: BFS over the same nodes with ops drawn from
   an input set. This gives test generation and Büchi-style lasso detection for
-  unbounded `Eventually` obligations that a cycle can postpone forever.
+  unbounded `Later` obligations that a cycle can postpone forever.
 
 ## State representation
 
@@ -306,9 +321,10 @@ still walks every entry. The incremental hash is what fixes time.
 | `ServerState { Promises, Tasks, Now }` | `State` with `HashedMap<Id, PromiseState>` and `HashedMap<Id, TaskState>`; `Now` moves to the checker's clock |
 | `AdvanceClock` request | `checker.tick(t)` alongside the call that advances the server's debug clock |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
-| promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, Step::Timeout(id))` with `within: Some(0)`; the projection becomes a real transition at the deadline |
-| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `Step::Resume { awaited, awaiter }`; `internal` returns `vec![InternalOutcome::same(state)]` when it's no longer fireable |
-| `LeaseTriggers`, `RetryTriggers` | timers: `.timer(expires, Step::Lease { id, expires })` installed when the lease starts or is extended; retries not ported |
+| internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
+| promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
+| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `.later(on(&[awaited, awaiter]))` when the awaited promise settles |
+| `LeaseTriggers`, `RetryTriggers` | `.after(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
 | `debug.messages` (execute/unblock) | outbound messages as their own `Invoke`/`Return` pairs, or an `Op::Drain` whose response is the message multiset |
@@ -346,10 +362,10 @@ Ranked by how much each one hurt.
    `status(409, s)`, which clones the state only to say it didn't change, and
    the checker then hashes and compares it. An outcome that means "state
    unchanged" without a state would be shorter and cheaper.
-4. **One step is written in four places**: the enum variant, its `step` arm, its
-   `fairness` arm and its `step_keys` arm. C#'s `AsyncOperation.Create` keeps
-   all of it at the spawn site. A per-step trait, or the keyed-closure step
-   discussed earlier, would bring it back to one place.
+4. **One step was written in four places**: the enum variant, its `step` arm,
+   its `fairness` arm and its `step_keys` arm. *Since fixed:* timing moved into
+   `Sched` at the spawn site, and Resonate's internal step is now just the set
+   of ids it processes, so there is one `internal` function and no per-kind arms.
 5a. **Checking enabledness is expensive.** The checker asks whether a step is
    enabled by calling `step()`, which builds full successor states only for them
    to be discarded. In a wide search that dominates the run time. A separate,
@@ -391,7 +407,7 @@ Porting also found three checker bugs, all fixed:
 
 ## Files
 
-- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Fairness`, `Touches`, `Time`.
+- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
