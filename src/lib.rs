@@ -21,10 +21,12 @@
 
 mod checker;
 mod hashed_map;
+mod hashed_set;
 mod intern;
 
 pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Violation};
 pub use hashed_map::HashedMap;
+pub use hashed_set::HashedSet;
 pub use intern::{Interned, Interner};
 
 use std::fmt::Debug;

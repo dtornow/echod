@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
 use crate::{CallId, Fairness, Keys, Sched, Spec, StepResult, Time};
 
@@ -27,7 +28,7 @@ type P<S> = Pending<<S as Spec>::Op, <S as Spec>::Resp, <S as Spec>::Step>;
 /// One explanation of the history so far.
 pub struct Node<S: Spec> {
     pub state: Interned<S::State>,
-    pub pending: BTreeSet<P<S>>,
+    pub pending: HashedSet<P<S>>,
 }
 
 impl<S: Spec> Clone for Node<S> {
@@ -215,7 +216,7 @@ impl<S: Spec> Checker<S> {
                 Some(a) => self.product(&a, &f.nodes),
             });
         }
-        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: BTreeSet::new() }])
+        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: HashedSet::new() }])
     }
 
     /// The number of candidates: the product of the factor widths.
@@ -456,7 +457,7 @@ impl<S: Spec> Checker<S> {
                 } else {
                     self.spec.restrict(&self.init, &|p| !claimed.contains(p))
                 };
-                let node = Node { state: self.states.intern(rest), pending: BTreeSet::new() };
+                let node = Node { state: self.states.intern(rest), pending: HashedSet::new() };
                 ((0..self.factors.len()).collect(), Factor { parts: None, nodes: vec![node] })
             }
             Scope::Parts(parts) => {
@@ -466,7 +467,7 @@ impl<S: Spec> Checker<S> {
                 let claimed: BTreeSet<S::Key> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
                 let new: BTreeSet<S::Key> = parts.difference(&claimed).cloned().collect();
                 let state = self.spec.restrict(&self.init, &|p| new.contains(p));
-                let node = Node { state: self.states.intern(state), pending: BTreeSet::new() };
+                let node = Node { state: self.states.intern(state), pending: HashedSet::new() };
                 (hit, Factor { parts: Some(new), nodes: vec![node] })
             }
         };
@@ -495,7 +496,7 @@ impl<S: Spec> Checker<S> {
         for x in a {
             for y in b {
                 let state = self.spec.join(&x.state, &y.state);
-                let pending = x.pending.union(&y.pending).cloned().collect();
+                let pending = x.pending.union(&y.pending);
                 out.push(Node { state: self.states.intern(state), pending });
             }
         }
@@ -889,7 +890,7 @@ impl<S: Spec> Checker<S> {
         }
     }
 
-    fn spawn(&self, pending: &mut BTreeSet<P<S>>, steps: Vec<Sched<S::Step>>) {
+    fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<S::Step>>) {
         for Sched { step, at } in steps {
             if let Some(Some(parts)) = &self.scope {
                 let escaped = match self.spec.step_keys(&step) {
