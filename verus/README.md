@@ -1,23 +1,24 @@
 # The soundness statement, in Verus
 
-`accordant.rs` states, in Verus, the theorem the Lean spec states as
-`accepted_trace_implies_valid_trace`: what the checker accepts is a valid trace,
-meaning some run of the model produces exactly those observations.
+`accordant.rs` says the same thing as `lean/Accordant.lean`, in the same shape:
+how a system's evolution maps to what clients observe, and that the checker
+only accepts traces some run could produce.
 
-- `Event` is what a client observes: `Invoke`, `Return`, `Receive`, each with a time.
-- `Model` has `external` and `internal` as spec functions.
-- A run is a sequence of `Move`s: the next observation, or something nobody sees
-  (a call taking effect, internal work running, time passing). `step` says when
-  each is allowed: overdue work runs first, time can't pass a deadline, a return
-  must match the response the call took effect with, a received dispatch must
-  have been sent.
-- `valid(m, init, start, trace)`: some sequence of moves replays the whole trace.
-- `check` carries the contract `accepted ==> valid(...)`; the Lean-style lemma
-  says the same about an abstract `accepted` predicate.
+- `step(m, c, label, d)` is the transition relation: the cases `invoke`,
+  `ret`, `receive` (observed: the label is the observation) and `effect`,
+  `run`, `advance` (silent). Lean's `Step` constructors, one predicate each.
+- `is_run(m, configs, labels)`: every consecutive pair of configurations is a
+  step with that label. Lean's `Steps`, unfolded into sequences.
+- `visible(labels)`: the run's observations in order; silent steps show nothing.
+- `valid(m, init, start, trace)`: some run from `initial(init, start)` has
+  `visible(labels) == trace`.
+- `check` carries the contract `accepted ==> valid(...)`, and
+  `accepted_implies_valid` states it as a lemma. Not proved (`external_body`,
+  `admit()`).
 
-The theorem is stated, not proved: `check` is `external_body` and the lemma is
-`admit()`ted. `the_empty_trace_is_valid` is proved, as a check that `valid` is
-well-formed and usable.
+Proved: the empty trace is valid for every model, and for a one-call counter
+"sent `incr`, got 1" is valid via invoke (seen), effect (silent), return (seen).
+Changing the response to 2 makes that proof fail, as it should.
 
 Not modeled yet: request lifetimes and `assert_idle`.
 
@@ -29,5 +30,5 @@ github.com/verus-lang/verus), which needs Rust toolchain 1.98.1:
 ```
 rustup install 1.98.1-x86_64-unknown-linux-gnu
 verus --crate-type=lib verus/accordant.rs
-# verification results:: 3 verified, 0 errors
+# verification results:: 4 verified, 0 errors
 ```

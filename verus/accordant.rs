@@ -1,10 +1,17 @@
 //! The soundness statement of the accordant checker, in Verus.
 //!
-//! A trace is what clients observe. It is valid when some run of the model
-//! produces exactly that trace: a sequence of moves that interleaves the
-//! observations with everything nobody sees (calls taking effect, internal work
-//! running, time passing). The checker's contract, and the Lean-style theorem,
-//! say that whatever the checker accepts is valid.
+//! How a system's evolution maps to what clients observe, as in
+//! `lean/Accordant.lean`:
+//!
+//! * The system is a labeled transition system over configurations.
+//! * Every step either produces an observation (a request sent, a response
+//!   received, a dispatch received) or is silent (a call taking effect,
+//!   internal work running, time passing).
+//! * A trace is valid when some run from the start produces exactly those
+//!   observations, in order, with any number of silent steps in between.
+//!
+//! The checker's contract, and the Lean-style theorem, say that whatever the
+//! checker accepts is valid.
 //!
 //! This file states the theorem; it does not prove it. `check` is
 //! `external_body` and the lemma is `admit()`ted.
@@ -123,8 +130,6 @@ pub struct Config<S, X, R, I, D> {
     pub work: Seq<Work<I>>,
     /// Dispatches sent and not yet received.
     pub sent: Seq<D>,
-    /// How many observations of the trace this run has produced so far.
-    pub seen: nat,
 }
 
 pub type Cfg<M> = Config<
@@ -135,17 +140,13 @@ pub type Cfg<M> = Config<
     <M as Model>::Dispatch,
 >;
 
-/// One move of a run: the next observation, or something nobody sees.
-pub enum Move {
-    /// The next observation of the trace happens.
-    Observe,
-    /// A call in flight takes effect, with the `choice`-th allowed outcome.
-    Effect { call: CallId, choice: nat },
-    /// The `item`-th pending internal work runs, with the `choice`-th outcome.
-    Run { item: nat, choice: nat },
-    /// Time passes.
-    Advance { to: Time },
+/// A step either shows a client an observation, or nothing.
+pub enum Label<X, R, D> {
+    Obs(Event<X, R, D>),
+    Silent,
 }
+
+pub type Lab<M> = Label<<M as Model>::External, <M as Model>::Response, <M as Model>::Dispatch>;
 
 pub open spec fn max(a: Time, b: Time) -> Time {
     if a >= b { a } else { b }
@@ -188,125 +189,112 @@ pub open spec fn may_advance<M: Model>(m: M, c: Cfg<M>, to: Time) -> bool {
         ).len() > 0 ==> to <= c.work[i].by.unwrap()
 }
 
-/// The next observation, if it happens now from `c`.
-pub open spec fn observe<M: Model>(m: M, c: Cfg<M>, e: Ev<M>) -> Option<Cfg<M>> {
-    if e.at() != c.now || overdue(m, c) {
-        None
-    } else {
-        match e {
-            Event::Invoke { call, req, .. } => if c.calls.contains_key(call) {
-                None
-            } else {
-                Some(Config { calls: c.calls.insert(call, Call::InFlight(req)), seen: c.seen + 1, ..c })
-            },
-            Event::Return { call, res, .. } => if c.calls.contains_key(call) && c.calls[call]
-                == Call::<M::External, M::Response>::Done(res) {
-                Some(Config { calls: c.calls.remove(call), seen: c.seen + 1, ..c })
-            } else {
-                None
-            },
-            Event::Receive { msg, .. } => if c.sent.contains(msg) {
-                let i = choose|i: int| 0 <= i < c.sent.len() && c.sent[i] == msg;
-                Some(Config { sent: c.sent.remove(i), seen: c.seen + 1, ..c })
-            } else {
-                None
-            },
+// -------------------------------------------- steps: how the system evolves
+
+/// A client sends a request. Observed.
+pub open spec fn invoke<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    match l {
+        Label::Obs(Event::Invoke { at, call, req }) => at == c.now && !c.calls.contains_key(call)
+            && !overdue(m, c) && d == Config { calls: c.calls.insert(call, Call::InFlight(req)), ..c },
+        _ => false,
+    }
+}
+
+/// A client receives the response its call took effect with. Observed.
+pub open spec fn ret<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    match l {
+        Label::Obs(Event::Return { at, call, res }) => at == c.now && c.calls.contains_key(call)
+            && c.calls[call] == Call::<M::External, M::Response>::Done(res) && !overdue(m, c)
+            && d == Config { calls: c.calls.remove(call), ..c },
+        _ => false,
+    }
+}
+
+/// A client receives a dispatch that was sent and not yet received. Observed.
+pub open spec fn receive<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    match l {
+        Label::Obs(Event::Receive { at, msg }) => at == c.now && !overdue(m, c) && exists|i: int|
+            0 <= i < c.sent.len() && #[trigger] c.sent[i] == msg && d == Config { sent: c.sent.remove(i), ..c },
+        _ => false,
+    }
+}
+
+/// A call in flight takes effect with one of its allowed outcomes. Silent.
+pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    l is Silent && !overdue(m, c) && exists|call: CallId, j: int|
+        #![trigger c.calls[call], m.external(c.calls[call]->InFlight_0, c.state, c.now)[j]]
+        c.calls.contains_key(call) && c.calls[call] is InFlight && {
+            let outs = m.external(c.calls[call]->InFlight_0, c.state, c.now);
+            0 <= j < outs.len() && d == Config {
+                state: outs[j].next,
+                calls: c.calls.insert(call, Call::Done(outs[j].res)),
+                work: start_all(c.work, outs[j].spawn, c.now),
+                sent: c.sent + outs[j].send,
+                ..c
+            }
         }
-    }
 }
 
-/// One move from `c`, or `None` if the move isn't allowed there.
-pub open spec fn step<M: Model>(m: M, c: Cfg<M>, mv: Move, trace: Seq<Ev<M>>) -> Option<Cfg<M>> {
-    match mv {
-        Move::Observe => if c.seen < trace.len() {
-            observe(m, c, trace[c.seen as int])
-        } else {
-            None
-        },
-        Move::Effect { call, choice } => {
-            if !c.calls.contains_key(call) || overdue(m, c) {
-                None
-            } else {
-                match c.calls[call] {
-                    Call::InFlight(req) => {
-                        let outs = m.external(req, c.state, c.now);
-                        if choice < outs.len() {
-                            let o = outs[choice as int];
-                            Some(
-                                Config {
-                                    state: o.next,
-                                    calls: c.calls.insert(call, Call::Done(o.res)),
-                                    work: start_all(c.work, o.spawn, c.now),
-                                    sent: c.sent + o.send,
-                                    ..c
-                                },
-                            )
-                        } else {
-                            None
-                        }
-                    },
-                    Call::Done(_) => None,
-                }
+/// Pending internal work runs with one of its outcomes; while some work is
+/// overdue, only overdue work runs. Silent.
+pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    l is Silent && exists|i: int, j: int|
+        #![trigger c.work[i], m.internal(c.work[i].req, c.state, c.now)[j]]
+        0 <= i < c.work.len() && c.work[i].after <= c.now && (overdue(m, c) ==> is_overdue(m, c, i)) && {
+            let outs = m.internal(c.work[i].req, c.state, c.now);
+            0 <= j < outs.len() && d == Config {
+                state: outs[j].next,
+                work: start_all(c.work.remove(i), outs[j].spawn, c.now),
+                sent: c.sent + outs[j].send,
+                ..c
             }
-        },
-        Move::Run { item, choice } => {
-            let i = item as int;
-            if i >= c.work.len() || c.work[i].after > c.now || (overdue(m, c) && !is_overdue(m, c, i)) {
-                None
-            } else {
-                let outs = m.internal(c.work[i].req, c.state, c.now);
-                if choice < outs.len() {
-                    let o = outs[choice as int];
-                    Some(
-                        Config {
-                            state: o.next,
-                            work: start_all(c.work.remove(i), o.spawn, c.now),
-                            sent: c.sent + o.send,
-                            ..c
-                        },
-                    )
-                } else {
-                    None
-                }
-            }
-        },
-        Move::Advance { to } => if may_advance(m, c, to) {
-            Some(Config { now: to, ..c })
-        } else {
-            None
-        },
-    }
+        }
 }
 
-/// Plays `moves` from `c` against `trace`; `None` if some move isn't allowed.
-pub open spec fn replay<M: Model>(m: M, c: Cfg<M>, moves: Seq<Move>, trace: Seq<Ev<M>>) -> Option<Cfg<M>>
-    decreases moves.len(),
+/// Time passes, but not past a deadline whose work could still run. Silent.
+pub open spec fn advance<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    l is Silent && exists|t: Time| #[trigger] may_advance(m, c, t) && d == Config { now: t, ..c }
+}
+
+/// The transition relation: from `c`, a step labeled `l` reaches `d`.
+pub open spec fn step<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || effect(m, c, l, d) || run(m, c, l, d)
+        || advance(m, c, l, d)
+}
+
+// ------------------------------------------------- runs and what they show
+
+/// `configs[0] -labels[0]-> configs[1] -labels[1]-> ...`: a run of the model.
+pub open spec fn is_run<M: Model>(m: M, configs: Seq<Cfg<M>>, labels: Seq<Lab<M>>) -> bool {
+    configs.len() == labels.len() + 1 && forall|i: int|
+        0 <= i < labels.len() ==> #[trigger] step(m, configs[i], labels[i], configs[i + 1])
+}
+
+/// What a run shows a client: its observations, in order; silent steps show nothing.
+pub open spec fn visible<M: Model>(labels: Seq<Lab<M>>) -> Seq<Ev<M>>
+    decreases labels.len(),
 {
-    if moves.len() == 0 {
-        Some(c)
+    if labels.len() == 0 {
+        Seq::empty()
     } else {
-        match step(m, c, moves[0], trace) {
-            Some(next) => replay(m, next, moves.subrange(1, moves.len() as int), trace),
-            None => None,
+        let rest = visible::<M>(labels.subrange(1, labels.len() as int));
+        match labels[0] {
+            Label::Obs(e) => seq![e] + rest,
+            Label::Silent => rest,
         }
     }
 }
 
 pub open spec fn initial<M: Model>(init: M::State, start: Time) -> Cfg<M> {
-    Config { state: init, now: start, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty(), seen: 0 }
+    Config { state: init, now: start, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
 }
 
-/// The trace is valid: some run of the model, from `init` at time `start`,
-/// produces exactly these observations.
+/// The trace is valid: some run of the model, from `init` at `start`, shows
+/// exactly these observations.
 pub open spec fn valid<M: Model>(m: M, init: M::State, start: Time, trace: Seq<Ev<M>>) -> bool {
-    exists|moves: Seq<Move>|
-        #![trigger replay(m, initial::<M>(init, start), moves, trace)]
-        replay(m, initial::<M>(init, start), moves, trace) is Some && replay(
-            m,
-            initial::<M>(init, start),
-            moves,
-            trace,
-        )->Some_0.seen == trace.len()
+    exists|configs: Seq<Cfg<M>>, labels: Seq<Lab<M>>|
+        #![trigger is_run(m, configs, labels), visible::<M>(labels)]
+        is_run(m, configs, labels) && configs[0] == initial::<M>(init, start) && visible::<M>(labels) == trace
 }
 
 // ------------------------------------------------------------------ theorem
@@ -323,13 +311,8 @@ pub fn check<M: Model>(m: &M, init: Ghost<M::State>, start: Time, trace: &Vec<Ev
 /// The checker's verdict, as a predicate (Lean's `Accepted`).
 pub uninterp spec fn accepted<M: Model>(m: M, init: M::State, start: Time, trace: Seq<Ev<M>>) -> bool;
 
-/// Lean's `accepted_trace_implies_valid_trace`.
-pub proof fn accepted_trace_implies_valid_trace<M: Model>(
-    m: M,
-    init: M::State,
-    start: Time,
-    trace: Seq<Ev<M>>,
-)
+/// Soundness: whatever the checker accepts is valid. Stated, not proved.
+pub proof fn accepted_implies_valid<M: Model>(m: M, init: M::State, start: Time, trace: Seq<Ev<M>>)
     requires
         accepted(m, init, start, trace),
     ensures
@@ -338,15 +321,83 @@ pub proof fn accepted_trace_implies_valid_trace<M: Model>(
     admit();
 }
 
-// ------------------------------------------------------------ sanity checks
+// ------------------------------------------------------ sanity checks, proved
 
-/// Proved, not admitted: no observations are explained by the empty run.
-pub proof fn the_empty_trace_is_valid<M: Model>(m: M, init: M::State, start: Time)
+/// For every model, the empty trace is valid.
+pub proof fn empty_trace_valid<M: Model>(m: M, init: M::State, start: Time)
     ensures
         valid(m, init, start, Seq::<Ev<M>>::empty()),
 {
-    let moves = Seq::<Move>::empty();
-    assert(replay(m, initial::<M>(init, start), moves, Seq::<Ev<M>>::empty()) == Some(initial::<M>(init, start)));
+    let configs = seq![initial::<M>(init, start)];
+    let labels = Seq::<Lab<M>>::empty();
+    assert(is_run(m, configs, labels));
+    assert(visible::<M>(labels) =~= Seq::<Ev<M>>::empty());
+}
+
+/// A one-call counter: `incr` takes effect and answers the new value.
+pub struct Counter;
+
+impl Model for Counter {
+    type State = nat;
+    type External = ();
+    type Response = nat;
+    type Internal = ();
+    type Dispatch = ();
+
+    open spec fn external(&self, req: (), n: nat, now: Time) -> Seq<ExternalOutcome<nat, nat, (), ()>> {
+        seq![ExternalOutcome { next: n + 1, res: n + 1, spawn: Seq::empty(), send: Seq::empty() }]
+    }
+
+    open spec fn internal(&self, req: (), n: nat, now: Time) -> Seq<InternalOutcome<nat, (), ()>> {
+        Seq::empty()
+    }
+}
+
+/// Sent at 0, answered 1 at 0: valid. The run is invoke (seen), effect (silent),
+/// return (seen).
+pub proof fn counter_trace_valid()
+    ensures
+        valid(
+            Counter,
+            0nat,
+            0,
+            seq![
+                Event::Invoke { at: 0, call: 7, req: () },
+                Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat },
+            ],
+        ),
+{
+    let m = Counter;
+    let c0 = initial::<Counter>(0nat, 0);
+    let c1 = Config { calls: c0.calls.insert(7, Call::InFlight(())), ..c0 };
+    let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0), sent: c1.sent + Seq::empty(), ..c1 };
+    let c3 = Config { calls: c2.calls.remove(7), ..c2 };
+    let l0 = Label::Obs(Event::Invoke { at: 0, call: 7, req: () });
+    let l1 = Label::<(), nat, ()>::Silent;
+    let l2 = Label::Obs(Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat });
+    let configs = seq![c0, c1, c2, c3];
+    let labels = seq![l0, l1, l2];
+    // Nothing is ever overdue: there is no internal work.
+    assert(!overdue(m, c0));
+    assert(!overdue(m, c1));
+    assert(!overdue(m, c2));
+    assert(invoke(m, c0, l0, c1));
+    assert(effect(m, c1, l1, c2)) by {
+        assert(c1.calls[7] is InFlight);
+        let outs = m.external(c1.calls[7]->InFlight_0, c1.state, c1.now);
+        assert(outs[0].next == 1nat && outs[0].res == 1nat);
+        assert(start_all(c1.work, outs[0].spawn, c1.now) =~= c1.work);
+        assert(c2 == Config { state: outs[0].next, calls: c1.calls.insert(7, Call::Done(outs[0].res)),
+            work: start_all(c1.work, outs[0].spawn, c1.now), sent: c1.sent + outs[0].send, ..c1 });
+    }
+    assert(ret(m, c2, l2, c3));
+    assert(is_run(m, configs, labels));
+    assert(visible::<Counter>(labels) =~= seq![
+        Event::Invoke { at: 0, call: 7, req: () },
+        Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat },
+    ]) by {
+        reveal_with_fuel(visible, 4);
+    }
 }
 
 } // verus!
