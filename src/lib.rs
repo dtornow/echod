@@ -29,6 +29,7 @@
 
 mod certificate;
 mod checker;
+mod drive;
 mod sim;
 mod hashed_map;
 mod hashed_set;
@@ -36,6 +37,7 @@ mod intern;
 pub mod semantics;
 
 pub use certificate::{certify, marks, Certificate, Silent};
+pub use drive::{drive, Choice, Choices, Drive, Run, Tried};
 pub use sim::Sim;
 pub use checker::{Checker, Config, Factor, Node, Pending, Stats, Verdict, Violation};
 pub use hashed_map::HashedMap;
@@ -187,11 +189,21 @@ pub trait Model {
 
 } // verus!
 
-/// Optional, for testing: requests worth trying next from a state, each with
-/// why. A fuzz driver asks the checker, which asks the model for every state
-/// the system may be in ([`Checker::suggestions`]).
+/// Optional, for driving a model ([`drive`]): which requests to send.
 pub trait Explore: Model {
+    /// Requests worth trying from `state`, each with why: the ones that reach
+    /// the edges of what the state allows.
     fn suggest(&self, state: &Self::State) -> Vec<(Self::External, &'static str)>;
+
+    /// Any request, from `state`; `pick(n)` chooses among `n` alternatives
+    /// (recorded, so a run can be replayed).
+    fn arbitrary(&self, state: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Self::External;
+
+    /// Requests to send at the end of a run, one at a time (reads that show
+    /// the final state, say). None by default.
+    fn finish(&self, _state: &Self::State) -> Vec<Self::External> {
+        Vec::new()
+    }
 }
 
 /// Optional, for speed: which keys a request or internal step touches. To

@@ -152,15 +152,25 @@ impl Explore for Resonate {
         }
         out
     }
+
+    fn arbitrary(&self, s: &Server, pick: &mut dyn FnMut(usize) -> usize) -> Request {
+        random_request(pick, s.now)
+    }
+
+    /// Read everything, move the clock past every deadline (the longest is a
+    /// task.create lease), so every timer must have fired, and read again.
+    fn finish(&self, s: &Server) -> Vec<Request> {
+        let reads = || IDS.iter().flat_map(|id| [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())]);
+        reads().chain([Request::AdvanceClock(s.now + TASK_CREATE_TTL + 1)]).chain(reads()).collect()
+    }
 }
 
-/// The ids [`arbitrary`] chooses from.
+/// The ids random requests use.
 pub const IDS: &[&str] = &["a:1", "a:2", "a:3", "b:1", "b:2"];
 
-/// A request from a small pool of ids, versions and times, what a fuzzer knows
-/// without a model; `pick(n)` chooses among `n`. `clock`: the latest time the
-/// clock was moved to.
-pub fn arbitrary(pick: &mut impl FnMut(usize) -> usize, clock: Time) -> Request {
+/// A request from a small pool of ids, versions and times; `pick(n)` chooses
+/// among `n`. `clock`: the server's clock.
+fn random_request(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Request {
     let id = IDS[pick(IDS.len())].to_string();
     let other = IDS[pick(IDS.len())].to_string();
     let version = pick(3) as u32;

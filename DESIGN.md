@@ -149,63 +149,70 @@ three:
 
 `tests/verdict.rs` shows all three on one model.
 
-## Testing with the model: marks, suggestions, a simulator, a fuzzer
+## Testing with the model: driving it, and coverage
 
-The model that checks a trace can also produce one and steer it.
+The model that checks a trace can also produce one.
 
+- **`drive(model, init, &Drive, choices)`** (`src/drive.rs`) runs the model as a
+  server (`Sim`) and records what happens. Each step it either sends a request
+  or lets the system move (a call takes effect with one of its outcomes, work
+  runs, a response or dispatch is delivered); at the end it sends the model's
+  closing requests. It returns a `Run`: the trace, and the choices that made it.
+  Every move goes through the replay behind `certify`, so a driven trace is
+  valid by construction. Nothing in it knows about a particular model.
+- **`Choices`**: every decision of a run is a choice among `n` alternatives, and
+  every choice is recorded (`Choice { n, k }`). `Choices::random(seed)` draws
+  them; `Choices::replay(&recorded)` serves recorded ones back, so a run is
+  reproduced from its choices alone (an edited recording still drives a valid
+  run: a choice that no longer fits, and every choice past the end, becomes the
+  first alternative). This is what a shrinker would edit.
+- **`Explore`** (on the model): which requests to send. `suggest(state)`:
+  requests that reach the edges of what the state allows, each with why;
+  `arbitrary(state, pick)`: any request; `finish(state)`: requests for the end
+  of a run. The driver knows the model's exact state, so it asks directly.
+- **Guidance**: with `Drive { guided: true }`, three in four requests are
+  suggestions. With `Choices::random(seed).learning(&tried)`, a suggestion is
+  picked among the reasons taken least so far, across the runs that share
+  `tried`. Only the index picked is recorded, so a replay needs no memory.
 - **Marks**: names for what an outcome does, set by the model where it decides
-  it (`.mark("lease expired")` on an outcome; `marks` is a field of both
-  outcome types, empty by default). They change nothing.
-  `accordant::marks(m, init, &trace, &cert)` replays a certificate and collects
-  the marks on the outcomes it takes. That is coverage of the spec, not of the
-  server's code: which behaviors this trace is explained by. The Resonate spec
-  marks every branch (`mk("...")`, 65 in all); `resonate::MARKS` lists them so
-  a report can show the ones nothing reached, and a test keeps the list in step
-  with the spec.
-- **`Explore`** (optional trait): `suggest(state)`, requests worth trying from a
-  state, each with why. `Checker::suggestions(limit)` asks for every state the
-  system may be in, so a driver gets hints from what the checker knows.
-- **`Sim`**: the model run as a server. It takes requests and, at random, makes
-  any move the model allows: a call takes effect with any of its outcomes,
-  work runs, a response or dispatch is delivered. Every move goes through the
-  replay behind `certify`, so a simulator trace is valid by construction.
+  it (`.mark("lease expired")`; `marks` is a field of both outcome types, empty
+  by default). They change nothing. `accordant::marks(m, init, &trace, &cert)`
+  collects the marks on the outcomes a certificate takes: coverage of the spec,
+  which behaviors a trace is explained by. The Resonate spec marks every branch
+  (`mk("...")`, 65 in all); `resonate::MARKS` lists them so a report can show
+  the ones nothing reached, and a test keeps the list in step with the spec.
 
-`examples/resonate/examples/fuzz/` puts them together: a client sends requests to a
-`Sim` of the spec (or of the spec with a bug planted), a checker follows,
-and an accepted run's certificate gives its marks. In `guided` mode, three in
-four requests come from the checker's suggestions, the least tried reason
-first. Every run ends with a client reading every object, the clock moving past
-every deadline, and the client reading everything again, so every timer must
+`examples/resonate/examples/fuzz/` uses it: drive a server (the spec, or the
+spec with a bug planted), check each recorded trace against the spec, and
+collect marks from accepted ones. Resonate's `finish` reads every object, moves
+the clock past every deadline, and reads everything again, so every timer must
 have fired.
 
 ```text
-cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-fence|lease-forever]
+cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever]
 ```
 
-300 runs of 30 requests (about 0.3 s per mode):
+300 runs of 30 requests:
 
 | server | mode | runs KO | marks reached |
 |---|---|---|---|
 | spec | random | 0 | 45/65 |
 | spec | guided | 0 | 53/65 |
 | fence ignores the version | random | 43 | |
-| fence ignores the version | guided | 73 | |
+| fence ignores the version | guided | 91 | |
 | a lease never expires | random | 0 | |
-| a lease never expires | guided | 48 | |
+| a lease never expires | guided | 29 | |
 
 "Lease expired" is reached in no random run and 44 guided ones. It takes a
 chain (a task released, re-acquired with a short lease, the clock past its end
-before the promise's deadline) that random requests rarely assemble.
+before the promise's deadline) that random requests rarely assemble. Without
+the memory across runs, guided runs reach it once in 300.
 
-Every decision of a run comes from a `Choices` (`examples/fuzz/driver.rs`):
-whether the client sends a request now, which request, which move the server
-makes. Today a seeded generator answers, so a seed reproduces a run. Not done
-yet: shrinking. A KO trace is reported as found (30–60 events); a shrinker would
-record a failing run's choices, delete and lower them, and rerun, keeping any
-change the checker still rejects. (We tried Hegel, Antithesis's Rust port of
-Hypothesis, for this: it shrank the stale fence to the minimal 4 events, but
-its replay rules rule out the memory across runs that makes our guidance find
-the expiring lease, so we kept our own driver.)
+Not done yet: shrinking. A KO trace is reported as found (30–60 events); a
+shrinker would edit a failing run's recorded choices (delete, lower) and drive
+again, keeping any change the checker still rejects. (We tried Hegel,
+Antithesis's Rust port of Hypothesis, for this: it shrank the stale fence to
+the minimal 4 events, but its replay rules rule out memory across runs.)
 
 **The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
 is a checker bug. `CROSS=1` also checks every trace with the partitioned and depth-first
@@ -679,7 +686,8 @@ Porting also found three checker bugs, all fixed:
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`, recording certificates.
 - `src/certificate.rs`: `certify`, the replay that backs every certified verdict, verified: `Ok(()) ==> valid`. Below it, outside Verus: legal-move enumeration and `marks`. `src/certificate/proof.rs`: the lemmas; `src/certificate/trusted.rs`: `copy` and `same`, trusted.
 - `src/semantics.rs`: what the checker promises (`valid`), as Verus specifications: configurations, the step relation, executions and their projection, and the checker's contract `check`.
-- `src/sim.rs`: `Sim`, the model run as a server, on the same replay; its choices from a seed or from a testing library.
+- `src/sim.rs`: `Sim`, the model run as a server, on the same replay.
+- `src/drive.rs`: `drive`, `Choices` (recorded, replayable decisions), `Drive`, `Tried`.
 - `verus/README.md`: where the Verus statement and proof live, and how to run them.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.

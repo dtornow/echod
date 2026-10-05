@@ -1,17 +1,11 @@
-//! The fuzz driver. Every decision of a run (whether the client sends a
-//! request now, which request, which move the server makes) comes from a
-//! `Choices`: a seeded generator today; a recorded list of choices is what a
-//! shrinker would replay and cut down.
-//!
-//! A client sends requests to a simulated server, the spec or the spec with a
-//! bug planted; a checker follows what the client observes. A run ends with the
-//! clock moved past every deadline and a client reading every object. An accepted run comes with a
-//! certificate, and the marks along it are what the run covered.
+//! What the fuzz example adds to `accordant::drive`: Resonate with a bug
+//! planted (the system the driver runs), and checking a recorded trace against
+//! the spec itself.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use accordant::{marks, CallId, Checker, Config, Event, ExternalOutcome, InternalOutcome, Keyed, Model, Sim, Time, Verdict, Violation};
+use accordant::{marks, Checker, Config, Event, Explore, ExternalOutcome, InternalOutcome, Keyed, Model, Time, Verdict, Violation};
 use resonate::*;
 
 /// The spec with a bug planted, or not.
@@ -63,7 +57,7 @@ impl Model for Server {
     fn internal(&self, ids: &Internal, s: &Self::State) -> Vec<InternalOutcome<Self>> {
         let outs = Model::internal(&Resonate, ids, s);
         if self.bug == Bug::LeaseForever && outs.iter().any(|o| !o.send.is_empty()) {
-            return vec![InternalOutcome { next: s.clone(), work: Vec::new(), send: Vec::new(), marks: Vec::new() }];
+            return vec![InternalOutcome::same(s)];
         }
         outs.into_iter().map(|o| InternalOutcome { next: o.next, work: o.work, send: o.send, marks: o.marks }).collect()
     }
@@ -73,15 +67,20 @@ impl Model for Server {
     }
 }
 
-/// Where a run's decisions come from.
-pub trait Choices {
-    /// A number below `n`: which move the server makes, whether the client
-    /// sends a request now.
-    fn pick(&self, n: usize) -> usize;
+/// The same requests as the spec: the bug is in what the server does, not in
+/// what a client sends.
+impl Explore for Server {
+    fn suggest(&self, s: &Self::State) -> Vec<(Request, &'static str)> {
+        Resonate.suggest(s)
+    }
 
-    /// The next request, given the latest time the clock was moved to and the
-    /// model's suggestions for the states the server may be in.
-    fn request(&self, clock: Time, suggestions: &[(Request, &'static str)]) -> Request;
+    fn arbitrary(&self, s: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Request {
+        Resonate.arbitrary(s, pick)
+    }
+
+    fn finish(&self, s: &Self::State) -> Vec<Request> {
+        Resonate.finish(s)
+    }
 }
 
 pub type Trace = Vec<Event<Request, Response, Dispatch>>;
@@ -89,85 +88,34 @@ pub type Trace = Vec<Event<Request, Response, Dispatch>>;
 pub enum Outcome {
     /// Accepted, with the marks of the execution that explains it.
     Ok(BTreeSet<&'static str>),
-    Ko(Violation, Trace),
-    Unknown(Violation, Trace),
+    Ko(Violation),
+    Unknown(Violation),
 }
 
-/// One run: a client sends `steps` requests, at most three in flight, while the
-/// server makes its own moves; then the clock moves past every deadline and a client reads
-/// everything. `cross`: also check the trace with the partitioned and
-/// depth-first checkers (only meaningful against the spec itself, where every
-/// trace is valid).
-pub fn run(server: &Server, choices: &dyn Choices, steps: usize, cross: bool) -> Outcome {
-    let mut sim = Sim::with_choices(server, resonate::Server::default(), |n| if n == 1 { 0 } else { choices.pick(n) });
-    let mut c = Checker::with_footprints(Resonate, resonate::Server::default(), Config { certify: true, ..Config::default() });
-    let mut events: Trace = Vec::new();
-    let (mut clock, mut call, mut sent): (Time, CallId, usize) = (0, 0, 0);
-    let mut observe = |c: &mut Checker<Keyed<Resonate>>, e: Event<Request, Response, Dispatch>| -> Result<(), Violation> {
-        events.push(e.clone());
-        c.observe(e)
-    };
-    let verdict = (|| {
-        while sent < steps || sim.open_calls() > 0 {
-            if sent < steps && sim.open_calls() < 3 && choices.pick(2) == 0 {
-                let req = choices.request(clock, &c.suggestions(8));
-                if let Request::AdvanceClock(t) = req {
-                    clock = clock.max(t);
-                }
-                call += 1;
-                sent += 1;
-                let e = sim.invoke(call, req);
-                observe(&mut c, e)?;
-            } else if let Some(e) = sim.step() {
-                observe(&mut c, e)?;
-            } else if sent >= steps {
-                break;
-            }
-        }
-        for e in sim.settle() {
-            observe(&mut c, e)?;
-        }
-        // Finally a client reads everything, the clock moves past every
-        // deadline (the longest is a task.create lease) so every timer must have
-        // fired, and the client reads everything again.
-        for phase in 0..2 {
-            if phase == 1 {
-                call += 1;
-                let e = sim.invoke(call, Request::AdvanceClock(clock + TASK_CREATE_TTL + 1));
-                observe(&mut c, e)?;
-            }
-            for id in IDS {
-                for req in [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())] {
-                    call += 1;
-                    let e = sim.invoke(call, req);
-                    observe(&mut c, e)?;
-                    for e in sim.settle() {
-                        observe(&mut c, e)?;
-                    }
-                }
-            }
-        }
-        c.certified()
-    })();
+/// Checks a recorded trace against the spec. `cross`: also with the
+/// partitioned and depth-first checkers (only meaningful when the trace came
+/// from the spec itself, where every trace is valid).
+pub fn check(trace: &Trace, cross: bool) -> Outcome {
+    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(Resonate, resonate::Server::default(), Config { certify: true, ..Config::default() });
+    let verdict = c.check_certified(trace.clone());
     if cross {
         let mut g = Checker::with_partitions(Resonate, resonate::Server::default(), Config::default());
         let mut d = Checker::with_footprints(Resonate, resonate::Server::default(), Config::default());
-        for (name, r) in [("partitioned", g.check(events.clone()).map(|_| ())), ("depth-first", d.check_complete(&events).map(|_| ()))] {
+        for (name, r) in [("partitioned", g.check(trace.clone()).map(|_| ())), ("depth-first", d.check_complete(trace).map(|_| ()))] {
             if let Err(mut v) = r {
                 v.reason = format!("{name} checker: {}", v.reason);
-                return Outcome::Ko(v, events);
+                return Outcome::Ko(v);
             }
         }
     }
     match Verdict::from(verdict) {
-        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate, resonate::Server::default(), &events, &cert).expect("the certificate replays")),
-        Verdict::Ko(v) => Outcome::Ko(v, events),
-        Verdict::Unknown(v) => Outcome::Unknown(v, events),
+        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate, resonate::Server::default(), trace, &cert).expect("the certificate replays")),
+        Verdict::Ko(v) => Outcome::Ko(v),
+        Verdict::Unknown(v) => Outcome::Unknown(v),
     }
 }
 
-/// A trace as a client saw it, one event per line, up to the event the
-/// checker stopped at.
+/// A trace as a client saw it, one event per line, up to event `upto`.
 pub fn show(trace: &Trace, upto: usize) -> String {
     let mut out = String::new();
     for (i, e) in trace.iter().enumerate().take(upto + 1) {

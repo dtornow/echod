@@ -8,34 +8,12 @@
 //!   work a step starts);
 //! * a clock move broadcast to partitions that no factor held yet.
 
-use accordant::{certify, CallId, Checker, Config, Event, Sim, Time};
+use accordant::{certify, drive, Checker, Choices, Config, Drive, Event};
 use resonate::*;
 
-fn trace(seed: u64, steps: usize) -> Vec<Event<Request, Response, Dispatch>> {
-    let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-    let mut next = move |n: usize| {
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
-        (rng % n as u64) as usize
-    };
-    let mut sim = Sim::new(&Resonate, Server::default(), seed);
-    let (mut out, mut clock, mut call, mut sent): (Vec<_>, Time, CallId, usize) = (Vec::new(), 0, 0, 0);
-    while sent < steps {
-        if sim.open_calls() < 3 && next(2) == 0 {
-            let req = arbitrary(&mut next, clock);
-            if let Request::AdvanceClock(t) = req {
-                clock = clock.max(t);
-            }
-            call += 1;
-            sent += 1;
-            out.push(sim.invoke(call, req));
-        } else {
-            out.extend(sim.step());
-        }
-    }
-    out.extend(sim.settle());
-    out
+/// A run of the spec, driven at random and recorded.
+fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> {
+    drive(&Resonate, Server::default(), &Drive { requests, concurrency: 3, guided: seed.is_multiple_of(2) }, Choices::random(seed)).trace
 }
 
 #[test]
