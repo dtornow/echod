@@ -34,9 +34,7 @@ Lean can't see Rust code, so `check` is a name standing for that function and
 the theorem is stated, not proved. `verus/accordant.rs` states the same theorem
 on the Rust function itself.
 
-Not covered: `assert_idle`, and request lifetimes (off by default). Known to
-make the theorem false today: internal work spawned during a tick, with a
-deadline before the tick's next stop, fires late (to be fixed in the checker).
+Not covered: `assert_idle`, and request lifetimes (off by default).
 -/
 
 namespace Accordant

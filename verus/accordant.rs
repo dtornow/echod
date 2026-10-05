@@ -24,9 +24,7 @@
 //! `Checker::new(m, init, Config::default()).check(trace).is_ok()`.
 //! It is `external_body`: Verus takes the contract on trust; nothing proves it yet.
 //!
-//! Not covered: `assert_idle`, and request lifetimes (off by default). Known to
-//! make the theorem false today: internal work spawned during a tick, with a
-//! deadline before the tick's next stop, fires late (to be fixed in the checker).
+//! Not covered: `assert_idle`, and request lifetimes (off by default).
 
 use vstd::prelude::*;
 

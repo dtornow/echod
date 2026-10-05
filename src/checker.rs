@@ -645,7 +645,10 @@ impl<S: Engine> Checker<S> {
             return self.instant(index, e);
         };
         let saved = (self.profile.clone(), self.now);
-        for t in self.instants(to) {
+        // One stop at a time: work that fires at a stop can set a deadline
+        // before the next one.
+        while self.now < to {
+            let t = self.next_instant(to);
             if let Err(v) = self.instant(index, &Ev::Tick(t)) {
                 (self.profile, self.now) = saved;
                 return Err(v);
@@ -654,9 +657,9 @@ impl<S: Engine> Checker<S> {
         Ok(())
     }
 
-    /// Every instant in `(now, to]` at which some candidate's work becomes due or
-    /// its deadline passes, in order, ending with `to`.
-    fn instants(&self, to: Time) -> Vec<Time> {
+    /// The first instant in `(now, to]` at which some candidate's work becomes
+    /// due or its deadline passes, or `to`.
+    fn next_instant(&self, to: Time) -> Time {
         let mut ts = BTreeSet::from([to]);
         for n in &self.profile {
             for item in &n.pending {
@@ -669,7 +672,7 @@ impl<S: Engine> Checker<S> {
                 }
             }
         }
-        ts.into_iter().filter(|t| *t > self.now && *t <= to).collect()
+        ts.into_iter().find(|t| *t > self.now).unwrap_or(to)
     }
 
     fn instant(&mut self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
