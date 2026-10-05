@@ -550,66 +550,15 @@ theorem Server.Inv.create_account {s : Server} (h : s.Inv) (ts : Time) (a : NewA
     split; · exact h
     exact h.add_account hn rfl rfl rfl rfl rfl
 
-theorem Server.Inv.insert_transfer {s : Server} (h : s.Inv) {ts : Time} {t : NewTransfer}
-    {dr cr : Account} {amount : Amount} (hT : get s.transfers t.id = none)
-    (hd : get s.accounts t.debit_account_id = some dr)
-    (hc : get s.accounts t.credit_account_id = some cr)
-    (hne : t.credit_account_id ≠ t.debit_account_id)
-    (hex : dr.debits_exceed_credits amount = false) :
-    (s.insert_transfer ts t dr cr amount).1.Inv := by
-  unfold Server.insert_transfer
-  dsimp only
-  refine h.create rfl rfl rfl hT hd hc (Ne.symm hne) rfl rfl ?_ ?_ rfl rfl ?_ ?_
-  · unfold Account.debits_must_not_exceed_credits
-    simp only [Account.debits_exceed_credits, Bool.and_eq_false_iff, decide_eq_false_iff_not] at hex
-    intro hf
-    have hf' : dr.flags.debits_must_not_exceed_credits = true := by
-      revert hf; split <;> simp
-    rcases hex with hex | hex
-    · rw [hf'] at hex; contradiction
-    · try dsimp only
-      split <;> omega'
-  · try dsimp only
-    split <;> simp_all
-  · try dsimp only
-    split <;> omega'
-  · try dsimp only
-    split <;> rfl
-
-theorem Server.Inv.insert_post_or_void {s : Server} (h : s.Inv) {ts : Time} {t : NewTransfer}
-    {p : Transfer} {dr cr : Account} {amount : Amount} (hT : get s.transfers t.id = none)
-    (hpid : get s.transfers t.pending_id = some p)
-    (hstat : get s.transfers_pending t.pending_id = some .pending)
-    (hd : get s.accounts p.debit_account_id = some dr)
-    (hc : get s.accounts p.credit_account_id = some cr)
-    (hamt : amount ≤ p.amount) (hpend : t.flags.pending = false) :
-    (s.insert_post_or_void ts t p dr cr amount).1.Inv := by
-  unfold Server.insert_post_or_void
-  dsimp only
-  have hp := mem_of_get hpid
-  have h1 := h.complete (s' := { s with
-      transfers_pending := put s.transfers_pending t.pending_id
-        (if t.flags.post_pending_transfer then .posted else .voided),
-      accounts := put (put s.accounts p.debit_account_id
-        { dr with
-          debits_pending := dr.debits_pending - p.amount,
-          debits_posted := if t.flags.post_pending_transfer then dr.debits_posted + amount
-            else dr.debits_posted,
-          flags := if t.flags.void_pending_transfer && p.flags.closing_debit
-            then { dr.flags with closed := false } else dr.flags })
-        p.credit_account_id
-        { cr with
-          credits_pending := cr.credits_pending - p.amount,
-          credits_posted := if t.flags.post_pending_transfer then cr.credits_posted + amount
-            else cr.credits_posted,
-          flags := if t.flags.void_pending_transfer && p.flags.closing_credit
-            then { cr.flags with closed := false } else cr.flags } })
-    rfl rfl rfl hp hstat (by split <;> simp) (by split <;> simp) rfl rfl hd hc rfl
-    (by (try dsimp only); split <;> omega') (Nat.le_refl _) (by (try dsimp only); split <;> rfl)
-    rfl rfl (by (try dsimp only); split <;> omega') (by (try dsimp only); split <;> rfl)
-  refine h1.append_settled (by exact hT) (by exact hpend) ?_ ?_ rfl rfl rfl
-  · simp only; rw [get_put_ne_none, get_put_ne_none]; simp [hd]
-  · exact h.distinct _ hp
+/-- `append_settled`, read backwards: a state has the invariant if it is a state
+    with the invariant plus one settled transfer. -/
+theorem Server.Inv.of_append_settled {s s' : Server} {tid : Id} {tr : Transfer}
+    (h1 : ({ s' with transfers := s.transfers } : Server).Inv)
+    (hT : get s.transfers tid = none) (hpend : tr.flags.pending = false)
+    (hdx : get s'.accounts tr.debit_account_id ≠ none)
+    (hdc : tr.debit_account_id ≠ tr.credit_account_id)
+    (ht : s'.transfers = s.transfers ++ [(tid, tr)]) : s'.Inv :=
+  h1.append_settled hT hpend hdx hdc ht rfl rfl
 
 /-- Peels one check off a step: the state it leads to has `P` if both branches' do.
     (`split` gives up on a chain of thirty checks.) -/
@@ -658,7 +607,16 @@ theorem Server.Inv.post_or_void {s : Server} (h : s.Inv) (ts : Time) (t : NewTra
       cases st <;> simp at hposted hvoided hexpired this ⊢
   have hpend : t.flags.pending = false := by
     simp only [Bool.or_eq_true, not_or, Bool.not_eq_true] at hflags; exact hflags.1.1.1.1
-  exact h.insert_post_or_void hT hpid hstat hd hc (Nat.le_of_not_lt hamt) hpend
+  have hamt := Nat.le_of_not_lt hamt
+  have hp := mem_of_get hpid
+  -- The pending transfer completes, then the post or void is appended.
+  refine Server.Inv.of_append_settled (s := s) ?_ hT hpend ?_ ?_ rfl
+  · exact h.complete rfl rfl rfl hp hstat (by split <;> simp) (by split <;> simp) rfl rfl hd hc
+      rfl (by (try dsimp only); split <;> omega') (Nat.le_refl _)
+      (by (try dsimp only); split <;> rfl) rfl rfl (by (try dsimp only); split <;> omega')
+      (by (try dsimp only); split <;> rfl)
+  · rw [get_put_ne_none, get_put_ne_none]; simp [hd]
+  · exact h.distinct _ hp
 
 theorem Server.Inv.create_transfer {s : Server} (h : s.Inv) (ts : Time) (t : NewTransfer) :
     (s.create_transfer ts t).1.Inv := by
@@ -695,7 +653,18 @@ theorem Server.Inv.create_transfer {s : Server} (h : s.Inv) (ts : Time) (t : New
     refine fst_ite (P := Server.Inv) (fun _ => h) (fun _ => ?_)
     refine fst_ite (P := Server.Inv) (fun _ => h) (fun hex => ?_)
     refine fst_ite (P := Server.Inv) (fun _ => h) (fun _ => ?_)
-    exact h.insert_transfer hT hd hc hne (by simpa using hex)
+    simp only [Account.debits_exceed_credits, Bool.and_eq_true, decide_eq_true_eq,
+      not_and] at hex
+    refine h.create rfl rfl rfl hT hd hc (Ne.symm hne) rfl rfl ?_ ?_ rfl rfl ?_ ?_
+    · unfold Account.debits_must_not_exceed_credits
+      intro hf
+      have hf' : dr.flags.debits_must_not_exceed_credits = true := by
+        revert hf; split <;> simp
+      have := hex hf'
+      (try dsimp only); split <;> omega'
+    · (try dsimp only); cases t.flags.pending <;> simp
+    · (try dsimp only); split <;> omega'
+    · (try dsimp only); split <;> rfl
   · exact h
 
 /-! ## Batches: a rolled-back chain goes back to a state that had the invariant -/
