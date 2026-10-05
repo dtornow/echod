@@ -92,7 +92,6 @@ pub trait Model {
     fn now(&self, _state: &Self::State) -> Time {
         0
     }
-
 }
 
 /// Optional, for testing: names for interesting things a step did ("lease
