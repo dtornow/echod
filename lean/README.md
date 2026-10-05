@@ -25,8 +25,12 @@ lean lean/Accordant.lean
 It mirrors `verus/accordant.rs`, written as a relation rather than a replay
 function. Not modeled yet: request lifetimes and `assert_idle`.
 
-`TigerBeetle.lean` is a model in the same shape: TigerBeetle's state machine
-(accounts, transfers, two-phase transfers and their expiry) as the parts of a
-`Model` (state, requests, responses, internal work, dispatches), and the
-account rules `debits_must_not_exceed_credits` and
-`credits_must_not_exceed_debits`. Data model only; the steps come next.
+`TigerBeetle.lean` is TigerBeetle's state machine as a `Model`: accounts,
+transfers, two-phase transfers, linked chains, expiry by pulse, lookups and
+queries, read from `src/state_machine.zig`. It states the account rules
+`debits_must_not_exceed_credits` and `credits_must_not_exceed_debits`, and runs
+scenarios with `#guard`. It imports `Accordant`, so it builds with Lake:
+
+```
+cd lean && lake build
+```

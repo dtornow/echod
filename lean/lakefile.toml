@@ -1,0 +1,8 @@
+name = "accordant"
+defaultTargets = ["Accordant", "TigerBeetle"]
+
+[[lean_lib]]
+name = "Accordant"
+
+[[lean_lib]]
+name = "TigerBeetle"
