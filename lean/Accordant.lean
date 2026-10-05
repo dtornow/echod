@@ -1,19 +1,42 @@
 /-!
-# The soundness statement of the accordant checker, in Lean
+# What the accordant checker promises
 
-How the evolution of a system maps to what clients observe:
+In one sentence:
 
-* The system is a labeled transition system over configurations.
-* Every step either produces an observation (a request sent, a response
-  received, a dispatch received) or is silent (a call taking effect, internal
-  work running, time passing).
-* A trace is valid when some sequence of steps from the start produces exactly
-  those observations, in order, with any number of silent steps in between.
+> If the checker accepts a trace, then some execution of the system,
+> projected onto what clients observe, is exactly that trace.
 
-Everything is generic over the model: its types are fields of `Model`, and no
-proof here looks inside them.
+In Lean, at the bottom of this file:
 
-Not modeled yet: request lifetimes and `assert_idle`.
+```
+theorem soundness :
+    check m init start trace = true → Valid m init start trace
+
+def Valid m init start trace :=
+  ∃ steps, Legal m (initial init start) steps ∧ project steps = trace
+```
+
+Everything above the theorem defines its words:
+
+* `Event`: what a client observes.
+* `Model`: the system.
+* `Step`: how the system evolves; each step is observed or silent.
+* `Legal`: a sequence of steps the system can actually take.
+* `project`: what an execution shows a client.
+
+`check` is the Rust checker with its default configuration:
+
+```rust
+Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()
+```
+
+Lean can't see Rust code, so `check` is a name standing for that function and
+the theorem is stated, not proved. `verus/accordant.rs` states the same theorem
+on the Rust function itself.
+
+Not covered: `assert_idle`, and request lifetimes (off by default). Known to
+make the theorem false today: internal work spawned during a tick, with a
+deadline before the tick's next stop, fires late (to be fixed in the checker).
 -/
 
 namespace Accordant
@@ -21,9 +44,8 @@ namespace Accordant
 abbrev Time := Nat
 abbrev CallId := Nat
 
-/-! ## Observations -/
+/-! ## Observations: all a client ever sees -/
 
-/-- What a client observes, and when. -/
 inductive Event (X R D : Type) where
   /-- The client sent a request. -/
   | invoke (time : Time) (call : CallId) (req : X)
@@ -32,7 +54,7 @@ inductive Event (X R D : Type) where
   /-- The client got a dispatch the server sent on its own. -/
   | receive (time : Time) (msg : D)
 
-/-! ## The model -/
+/-! ## The system -/
 
 /-- Internal work to start, and when it runs. -/
 inductive Sched (I : Type) where
@@ -62,12 +84,16 @@ structure Model where
   Response : Type
   Internal : Type
   Dispatch : Type
+  /-- A request takes effect: every allowed outcome. -/
   external : External → State → Time → List (ExternalOutcome State Response Internal Dispatch)
+  /-- Internal work runs: every possible outcome. Empty: it can't run now. -/
   internal : Internal → State → Time → List (InternalOutcome State Internal Dispatch)
+  /-- Whether a client seeing `observed` matches the `expected` response. -/
+  admits   : Response → Response → Bool
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
-/-! ## Configurations: everything about a run at one point, seen or not -/
+/-! ## Configurations: everything about the system at one point, seen or not -/
 
 /-- A call the client has sent and not yet seen answered. -/
 inductive Call (X R : Type) where
@@ -78,7 +104,7 @@ inductive Call (X R : Type) where
 structure Work (I : Type) where
   req   : I
   after : Time          -- can't run before this
-  due   : Option Time   -- must have run before anything is observed at or after this
+  due   : Option Time   -- must have run by this time, if it can run then
   must  : Bool          -- must run at some point (false: `maybe`)
 
 structure Config (m : Model) where
@@ -105,14 +131,15 @@ def Config.overdue (c : Config m) : Prop :=
   ∃ w ∈ c.work, w.must = true ∧ w.after ≤ c.now ∧
     (∃ d, w.due = some d ∧ d ≤ c.now) ∧ m.internal w.req c.state c.now ≠ []
 
-/-- Time may move to `t` only if no work that can run is due before then. -/
+/-- Time may move to `t` only if it doesn't skip a deadline. Work whose deadline
+    has come and that can't run then owes nothing. -/
 def Config.mayAdvance (c : Config m) (t : Time) : Prop :=
   c.now < t ∧ ∀ w ∈ c.work, w.must = true → ∀ d, w.due = some d →
-    m.internal w.req c.state c.now ≠ [] → t ≤ d
+    t ≤ d ∨ (d ≤ c.now ∧ m.internal w.req c.state c.now = [])
 
 /-! ## Steps: how the system evolves, and what each step shows a client -/
 
-/-- A step either shows a client an observation, or nothing. -/
+/-- A step either shows a client an event, or nothing. -/
 inductive Label (m : Model) where
   | obs (e : m.Ev)
   | silent
@@ -124,8 +151,8 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       Step m c (.obs (.invoke c.now call req))
         { c with calls := update c.calls call (some (.inFlight req)) }
   /-- A client receives the response its call took effect with. Observed. -/
-  | ret {c : Config m} {call res} :
-      c.calls call = some (.done res) → ¬ c.overdue →
+  | ret {c : Config m} {call expected res} :
+      c.calls call = some (.done expected) → m.admits expected res = true → ¬ c.overdue →
       Step m c (.obs (.ret c.now call res)) { c with calls := update c.calls call none }
   /-- A client receives a dispatch that was sent and not yet received. Observed. -/
   | receive {c : Config m} {pre post msg} :
@@ -148,42 +175,55 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
         { c with state := o.next
                  work  := pre ++ post ++ o.spawn.map (schedule c.now)
                  sent  := c.sent ++ o.send }
-  /-- Time passes, but not past a deadline whose work could still run. Silent. -/
+  /-- Time passes. Silent. -/
   | advance {c : Config m} {t} :
       c.mayAdvance t → Step m c .silent { c with now := t }
 
-/-- `Steps m c trace c'`: from `c`, some run reaches `c'` showing exactly `trace`. -/
-inductive Steps (m : Model) : Config m → List m.Ev → Config m → Prop where
-  | done {c} : Steps m c [] c
-  | silent {c c' c'' trace} : Step m c .silent c' → Steps m c' trace c'' → Steps m c trace c''
-  | obs {c c' c'' e trace} : Step m c (.obs e) c' → Steps m c' trace c'' → Steps m c (e :: trace) c''
+/-! ## Executions, and what they show a client -/
+
+/-- An execution: the steps taken from a starting configuration, each with the
+    configuration it leads to. -/
+abbrev Execution (m : Model) := List (Label m × Config m)
+
+/-- The system can take these steps, one after the other, starting from `c`. -/
+def Legal (m : Model) : Config m → Execution m → Prop
+  | _, [] => True
+  | c, (l, c') :: rest => Step m c l c' ∧ Legal m c' rest
+
+/-- What an execution shows a client: its observed events, in order. Silent
+    steps show nothing. -/
+def project : Execution m → List m.Ev
+  | [] => []
+  | (.obs e, _) :: rest => e :: project rest
+  | (.silent, _) :: rest => project rest
 
 def initial (init : m.State) (start : Time) : Config m :=
   ⟨init, start, fun _ => none, [], []⟩
 
-/-- The trace is valid: some run of the model, from `init` at `start`, shows
-    exactly these observations. -/
+/-- The trace is valid: some execution of the system, from `init` at `start`,
+    projected onto what clients observe, is exactly the trace. -/
 def Valid (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) : Prop :=
-  ∃ c, Steps m (initial init start) trace c
+  ∃ steps, Legal m (initial init start) steps ∧ project steps = trace
 
 /-! ## The theorem -/
 
-/-- The checker's verdict (Lean's `Accepted` in resonate-specification). -/
-opaque Accepted (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) : Prop
+/-- The Rust checker:
+    `Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()`. -/
+opaque check (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) : Bool
 
-/-- Soundness: whatever the checker accepts is valid. Stated, not proved. -/
-theorem accepted_implies_valid (m : Model) (init : m.State) (start : Time) (trace : List m.Ev)
-    (_h : Accepted m init start trace) : Valid m init start trace := by
+/-- Soundness: if the checker accepts a trace, the trace is valid. Stated, not proved. -/
+theorem soundness (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) :
+    check m init start trace = true → Valid m init start trace := by
   sorry
 
-/-! ## Sanity checks, proved -/
+/-! ## Examples, proved -/
 
-/-- For every model, the empty trace is valid. -/
+/-- For every model, the empty trace is valid: the execution with no steps. -/
 theorem empty_trace_valid (m : Model) (init : m.State) (start : Time) :
     Valid m init start [] :=
-  ⟨_, .done⟩
+  ⟨[], trivial, rfl⟩
 
-/-- A one-call counter: `incr` takes effect and answers the new value. -/
+/-- A counter: `incr` takes effect and answers the new value. -/
 abbrev counter : Model where
   State    := Nat
   External := Unit
@@ -192,11 +232,16 @@ abbrev counter : Model where
   Dispatch := Empty
   external := fun _ n _ => [⟨n + 1, n + 1, [], []⟩]
   internal := fun e _ _ => nomatch e
+  admits   := fun expected observed => expected == observed
 
-/-- Sent at 0, answered 1 at 0: valid. The run is invoke (seen), effect
-    (silent), return (seen). -/
+abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
+
+/-- Sent at 0, answered 1 at 0: valid. The execution is invoke (observed),
+    effect (silent), return (observed). -/
 example : Valid counter (0 : Nat) 0 [.invoke 0 7 (), .ret 0 7 1] := by
-  refine ⟨_, .obs (.invoke ?_ ?_) (.silent (.effect (call := 7) (req := ()) (o := (⟨1, 1, [], []⟩ : ExternalOutcome counter.State counter.Response counter.Internal counter.Dispatch)) ?_ ?_ ?_) (.obs (.ret ?_ ?_) .done))⟩
+  refine ⟨[(.obs (.invoke 0 7 ()), _), (.silent, _), (.obs (.ret 0 7 1), _)],
+    ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
+     .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
   all_goals simp [initial, update, Config.overdue, counter]
 
 end Accordant
