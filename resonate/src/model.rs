@@ -42,7 +42,6 @@ fn sched(w: Work) -> Sched<Internal> {
     match w {
         Work::Later(ids) => Sched::Later(ids.into_iter().collect()),
         Work::Timer(at, ids) => Sched::Timer(at, ids.into_iter().collect()),
-        Work::After(at, ids) => Sched::After(at, ids.into_iter().collect()),
     }
 }
 
@@ -56,14 +55,14 @@ impl Model for Resonate {
     fn external(&self, op: &Request, s: &Server) -> Vec<ExternalOutcome<Self>> {
         Resonate::external(self, op, s)
             .into_iter()
-            .map(|o| ExternalOutcome { next: o.next, res: o.res, spawn: o.spawn.into_iter().map(sched).collect(), send: o.send })
+            .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send })
             .collect()
     }
 
     fn internal(&self, ids: &Internal, s: &Server) -> Vec<InternalOutcome<Self>> {
         let ids: Vec<Id> = ids.iter().cloned().collect();
         let o = Resonate::internal(self, &ids, s);
-        vec![InternalOutcome { next: o.next, spawn: o.spawn.into_iter().map(sched).collect(), send: o.send }]
+        vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send }]
     }
 
     fn now(&self, s: &Server) -> Time {

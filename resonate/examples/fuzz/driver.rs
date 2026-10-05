@@ -56,16 +56,16 @@ impl Model for Server {
         };
         Model::external(&Resonate, &op, s)
             .into_iter()
-            .map(|o| ExternalOutcome { next: o.next, res: o.res, spawn: o.spawn, send: o.send })
+            .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work, send: o.send })
             .collect()
     }
 
     fn internal(&self, ids: &Internal, s: &Self::State) -> Vec<InternalOutcome<Self>> {
         let outs = Model::internal(&Resonate, ids, s);
         if self.bug == Bug::LeaseForever && outs.iter().any(|o| !o.send.is_empty()) {
-            return vec![InternalOutcome { next: s.clone(), spawn: Vec::new(), send: Vec::new() }];
+            return vec![InternalOutcome { next: s.clone(), work: Vec::new(), send: Vec::new() }];
         }
-        outs.into_iter().map(|o| InternalOutcome { next: o.next, spawn: o.spawn, send: o.send }).collect()
+        outs.into_iter().map(|o| InternalOutcome { next: o.next, work: o.work, send: o.send }).collect()
     }
 
     fn now(&self, s: &Self::State) -> Time {

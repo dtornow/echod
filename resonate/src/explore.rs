@@ -156,10 +156,10 @@ impl Marks for Resonate {
 
     fn external_marks(&self, req: &Request, before: &Server, out: &ExternalOutcome<Self>) -> Vec<&'static str> {
         let mut m = Vec::new();
-        m.extend(named(STATUS, &format!("{} {}", kind(req), out.res.status())));
+        m.extend(named(STATUS, &format!("{} {}", kind(req), out.resp.status())));
         effects(before, &out.next, matches!(req, Request::FenceTask { .. }), &mut m);
         if let Request::PollTask { .. } = req {
-            match &out.res {
+            match &out.resp {
                 Response::Claimed(ts) if ts.is_empty() => m.push("poll claimed nothing"),
                 Response::Claimed(ts) => {
                     if ts.iter().any(|t| before.tasks.get(&t.id).is_some_and(|b| b.state == TState::Pending)) {

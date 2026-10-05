@@ -12,7 +12,7 @@
 //!     ensures accepted ==> valid(m, init, trace)
 //!
 //! valid(m, init, trace) :=
-//!     exists steps. legal(m, initial(init), steps) && project(steps) == trace
+//!     exists steps. legal(m, initial(m, init), steps) && project(steps) == trace
 //! ```
 //!
 //! Everything above defines its words, as in `lean/Accordant.lean`:
@@ -57,26 +57,20 @@ pub enum Sched<I> {
     Later(I),
     /// Exactly at the given time.
     Timer(Time, I),
-    /// Not before the given time; must have happened by the time the system is idle.
-    After(Time, I),
-    /// From now on; must have happened within the given duration.
-    Within(Time, I),
-    /// From now on, or never.
-    Maybe(I),
 }
 
 /// One possible effect of a request.
 pub struct ExternalOutcome<S, R, I, D> {
     pub next: S,
-    pub res: R,
-    pub spawn: Seq<Sched<I>>,
+    pub resp: R,
+    pub work: Seq<Sched<I>>,
     pub send: Seq<D>,
 }
 
 /// One possible effect of internal work.
 pub struct InternalOutcome<S, I, D> {
     pub next: S,
-    pub spawn: Seq<Sched<I>>,
+    pub work: Seq<Sched<I>>,
     pub send: Seq<D>,
 }
 
@@ -103,6 +97,9 @@ pub trait Model {
 
     /// The model's clock in a state. Deadlines are on this clock.
     spec fn now(&self, state: Self::State) -> Time;
+
+    /// The work the system starts with, in the initial state.
+    spec fn start(&self, state: Self::State) -> Seq<Sched<Self::Internal>>;
 }
 
 pub type Ev<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Model>::Dispatch>;
@@ -161,14 +158,11 @@ pub open spec fn schedule<I>(s: Sched<I>, now: nat) -> Work<I> {
     match s {
         Sched::Later(req) => Work { req, after: now, by: None, must: true },
         Sched::Timer(at, req) => Work { req, after: max(at as nat, now), by: Some(max(at as nat, now)), must: true },
-        Sched::After(at, req) => Work { req, after: max(at as nat, now), by: None, must: true },
-        Sched::Within(d, req) => Work { req, after: now, by: Some(now + d as nat), must: true },
-        Sched::Maybe(req) => Work { req, after: now, by: None, must: false },
     }
 }
 
-pub open spec fn start_all<I>(work: Seq<Work<I>>, spawn: Seq<Sched<I>>, now: nat) -> Seq<Work<I>> {
-    work + spawn.map_values(|s: Sched<I>| schedule(s, now))
+pub open spec fn start_all<I>(work: Seq<Work<I>>, new: Seq<Sched<I>>, now: nat) -> Seq<Work<I>> {
+    work + new.map_values(|s: Sched<I>| schedule(s, now))
 }
 
 pub open spec fn clock<M: Model>(m: M, c: Cfg<M>) -> nat {
@@ -232,8 +226,8 @@ pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
             let outs = m.external(c.calls[call]->InFlight_0, c.state);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                calls: c.calls.insert(call, Call::Done(outs[j].res)),
-                work: start_all(c.work, outs[j].spawn, m.now(outs[j].next) as nat),
+                calls: c.calls.insert(call, Call::Done(outs[j].resp)),
+                work: start_all(c.work, outs[j].work, m.now(outs[j].next) as nat),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -249,7 +243,7 @@ pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
             let outs = m.internal(c.work[i].req, c.state);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                work: start_all(c.work.remove(i), outs[j].spawn, m.now(outs[j].next) as nat),
+                work: start_all(c.work.remove(i), outs[j].work, m.now(outs[j].next) as nat),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -293,17 +287,18 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-/// The system starts in `init`, with nothing in flight.
-pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
-    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
+/// The system starts in `init`, with no calls in flight and the work the model
+/// starts with scheduled on the initial clock.
+pub open spec fn initial<M: Model>(m: M, init: M::State) -> Cfg<M> {
+    Config { state: init, calls: Map::empty(), work: start_all(Seq::empty(), m.start(init), m.now(init) as nat), sent: Seq::empty() }
 }
 
-/// The trace is valid: some execution of the system, from `initial(init)`,
+/// The trace is valid: some execution of the system, from `initial(m, init)`,
 /// projected onto what clients observe, is exactly the trace.
 pub open spec fn valid<M: Model>(m: M, init: M::State, trace: Seq<Ev<M>>) -> bool {
     exists|steps: Execution<M>|
-        #![trigger legal(m, initial::<M>(init), steps), project::<M>(steps)]
-        legal(m, initial::<M>(init), steps) && project::<M>(steps) == trace
+        #![trigger legal(m, initial::<M>(m, init), steps), project::<M>(steps)]
+        legal(m, initial::<M>(m, init), steps) && project::<M>(steps) == trace
 }
 
 // ------------------------------------------------------------------ theorem
@@ -328,7 +323,7 @@ pub proof fn empty_trace_valid<M: Model>(m: M, init: M::State)
         valid(m, init, Seq::<Ev<M>>::empty()),
 {
     let steps = Execution::<M>::empty();
-    assert(legal(m, initial::<M>(init), steps));
+    assert(legal(m, initial::<M>(m, init), steps));
     assert(project::<M>(steps) =~= Seq::<Ev<M>>::empty());
 }
 
@@ -343,7 +338,7 @@ impl Model for Counter {
     type Dispatch = ();
 
     open spec fn external(&self, req: (), n: nat) -> Seq<ExternalOutcome<nat, nat, (), ()>> {
-        seq![ExternalOutcome { next: n + 1, res: n + 1, spawn: Seq::empty(), send: Seq::empty() }]
+        seq![ExternalOutcome { next: n + 1, resp: n + 1, work: Seq::empty(), send: Seq::empty() }]
     }
 
     open spec fn internal(&self, req: (), n: nat) -> Seq<InternalOutcome<nat, (), ()>> {
@@ -356,6 +351,10 @@ impl Model for Counter {
 
     open spec fn now(&self, n: nat) -> Time {
         0
+    }
+
+    open spec fn start(&self, n: nat) -> Seq<Sched<()>> {
+        Seq::empty()
     }
 }
 
@@ -373,7 +372,7 @@ pub proof fn counter_trace_valid()
         ),
 {
     let m = Counter;
-    let c0 = initial::<Counter>(0nat);
+    let c0 = initial::<Counter>(m, 0nat);
     let c1 = Config { calls: c0.calls.insert(7, Call::InFlight(())), ..c0 };
     let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0nat), sent: c1.sent + Seq::empty(), ..c1 };
     let c3 = Config { calls: c2.calls.remove(7), ..c2 };
@@ -389,10 +388,10 @@ pub proof fn counter_trace_valid()
     assert(effect(m, c1, l1, c2)) by {
         assert(c1.calls[7] is InFlight);
         let outs = m.external(c1.calls[7]->InFlight_0, c1.state);
-        assert(outs[0].next == 1nat && outs[0].res == 1nat);
-        assert(start_all(c1.work, outs[0].spawn, m.now(outs[0].next) as nat) =~= c1.work);
-        assert(c2 == Config { state: outs[0].next, calls: c1.calls.insert(7, Call::Done(outs[0].res)),
-            work: start_all(c1.work, outs[0].spawn, m.now(outs[0].next) as nat), sent: c1.sent + outs[0].send, ..c1 });
+        assert(outs[0].next == 1nat && outs[0].resp == 1nat);
+        assert(start_all(c1.work, outs[0].work, m.now(outs[0].next) as nat) =~= c1.work);
+        assert(c2 == Config { state: outs[0].next, calls: c1.calls.insert(7, Call::Done(outs[0].resp)),
+            work: start_all(c1.work, outs[0].work, m.now(outs[0].next) as nat), sent: c1.sent + outs[0].send, ..c1 });
     }
     assert(ret(m, c2, l2, c3));
     assert(before::<Counter>(c0, steps, 0) == c0);

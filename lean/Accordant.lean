@@ -65,22 +65,19 @@ inductive Event (X R D : Type) where
 inductive Sched (I : Type) where
   | later (req : I)                  -- from now on; must happen eventually
   | timer (at_ : Time) (req : I)     -- at the given time
-  | after (at_ : Time) (req : I)     -- not before the given time; must happen eventually
-  | within (d : Time) (req : I)      -- from now on; within the given duration
-  | maybe (req : I)                  -- from now on, or never
 
 /-- One possible effect of a request. -/
 structure ExternalOutcome (S R I D : Type) where
-  next  : S
-  res   : R
-  spawn : List (Sched I)
-  send  : List D
+  next : S
+  resp : R
+  work : List (Sched I)
+  send : List D
 
 /-- One possible effect of internal work. -/
 structure InternalOutcome (S I D : Type) where
-  next  : S
-  spawn : List (Sched I)
-  send  : List D
+  next : S
+  work : List (Sched I)
+  send : List D
 
 /-- The system: requests from clients, work it does on its own, and its clock. -/
 structure Model where
@@ -97,6 +94,9 @@ structure Model where
   admits   : Response → Response → Bool
   /-- The model's clock in a state. -/
   now      : State → Time
+  /-- The work the system starts with, in the initial state (a component that
+      sends a message periodically starts its first timer here). -/
+  start    : State → List (Sched Internal) := fun _ => []
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
@@ -124,9 +124,6 @@ structure Config (m : Model) where
 def schedule {I : Type} (now : Time) : Sched I → Work I
   | .later r    => ⟨r, now, none, true⟩
   | .timer t r  => ⟨r, max t now, some (max t now), true⟩
-  | .after t r  => ⟨r, max t now, none, true⟩
-  | .within d r => ⟨r, now, some (now + d), true⟩
-  | .maybe r    => ⟨r, now, none, false⟩
 
 def update {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : α → β :=
   fun x => if x = a then b else f x
@@ -173,8 +170,8 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       c.calls call = some (.inFlight req) → o ∈ m.external req c.state → ¬ c.overdue →
       Step m c .silent
         { c with state := o.next
-                 calls := update c.calls call (some (.done o.res))
-                 work  := c.work ++ o.spawn.map (schedule (m.now o.next))
+                 calls := update c.calls call (some (.done o.resp))
+                 work  := c.work ++ o.work.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
   /-- Pending internal work runs with one of its outcomes; while some work is
       overdue, only overdue work with the earliest deadline runs. Silent. -/
@@ -183,7 +180,7 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       (c.overdue → c.First w) →
       Step m c .silent
         { c with state := o.next
-                 work  := pre ++ post ++ o.spawn.map (schedule (m.now o.next))
+                 work  := pre ++ post ++ o.work.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
 
 /-! ## Executions, and what they show a client -/
@@ -204,9 +201,10 @@ def project : Execution m → List m.Ev
   | (.obs e, _) :: rest => e :: project rest
   | (.silent, _) :: rest => project rest
 
-/-- The system starts in `init`, with nothing in flight. -/
+/-- The system starts in `init`, with no calls in flight and the work the model
+    starts with scheduled on the initial clock. -/
 def initial (init : m.State) : Config m :=
-  ⟨init, fun _ => none, [], []⟩
+  ⟨init, fun _ => none, (m.start init).map (schedule (m.now init)), []⟩
 
 /-- The trace is valid: some execution of the system, from `initial init`,
     projected onto what clients observe, is exactly the trace. -/
@@ -276,8 +274,8 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
           | some o =>
               if !c.isOverdue then
                 some (.silent, { c with state := o.next
-                                        calls := update c.calls call (some (.done o.res))
-                                        work  := c.work ++ o.spawn.map (schedule (m.now o.next))
+                                        calls := update c.calls call (some (.done o.resp))
+                                        work  := c.work ++ o.work.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
@@ -290,7 +288,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
               if decide (w.after ≤ m.now c.state) && c.mayRun w then
                 some (.silent, { c with state := o.next
                                         work  := c.work.take i ++ c.work.drop (i + 1) ++
-                                                   o.spawn.map (schedule (m.now o.next))
+                                                   o.work.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
@@ -448,5 +446,27 @@ example : Valid counter (0 : Nat) [.invoke 7 (), .ret 7 1] := by
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
      .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
   all_goals simp [initial, update, Config.overdue, counter]
+
+/-- A pinger: no requests at all; it starts with one piece of work, which sends
+    a ping. Its only behavior comes from `start`. -/
+abbrev pinger : Model where
+  State    := Unit
+  External := Empty
+  Response := Empty
+  Internal := Unit
+  Dispatch := Unit
+  external := fun e _ => nomatch e
+  internal := fun _ _ => [⟨(), [], [()]⟩]
+  admits   := fun _ _ => true
+  now      := fun _ => 0
+  start    := fun _ => [.later ()]
+
+/-- A client receives the ping: valid. The work it started with runs (silent),
+    then the client receives what it sent (observed). -/
+example : Valid pinger () [.receive ()] := by
+  refine ⟨[(.silent, _), (.obs (.receive ()), _)],
+    ⟨.run (pre := []) (post := []) (w := ⟨(), 0, none, true⟩) (o := ⟨(), [], [()]⟩) ?_ ?_ ?_ ?_,
+     .receive (pre := []) (post := []) ?_ ?_, trivial⟩, rfl⟩
+  all_goals simp [initial, schedule, Config.overdue, Config.Overdue, pinger]
 
 end Accordant

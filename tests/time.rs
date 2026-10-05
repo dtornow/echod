@@ -58,7 +58,7 @@ impl Model for Chain {
 
     fn internal(&self, w: &Work, s: &State) -> Vec<InternalOutcome<Self>> {
         vec![match w {
-            Work::A => InternalOutcome::same(s).within(2, Work::B),
+            Work::A => InternalOutcome::same(s).timer(s.now + 2, Work::B),
             Work::B => InternalOutcome::new(State { ran: Some(s.now), ..s.clone() }),
             Work::X | Work::Y => {
                 let mut n = s.clone();
@@ -87,12 +87,12 @@ fn accepts(script: &[(Req, Res)]) -> bool {
 }
 
 #[test]
-fn work_meets_its_deadline_on_the_models_clock() {
-    // A fires at 5, giving B until 7. The clock then jumps to 10: B ran either
-    // at 5, before the jump, or right after it, at 10, before anything else.
+fn a_timer_passed_in_a_jump_runs_right_after_it() {
+    // A fires at 5 and sets B for 7. The clock then jumps to 10: B runs right
+    // after the jump, at 10, before anything else.
     let read = |ran| [(Req::Start, Res::Ok), (Req::Advance(5), Res::Ok), (Req::Advance(10), Res::Ok), (Req::Read, Res::Ran(ran))];
-    assert!(accepts(&read(Some(5))));
     assert!(accepts(&read(Some(10))));
+    assert!(!accepts(&read(Some(5))), "B is a timer at 7: it can't run at 5");
     assert!(!accepts(&read(None)), "B is overdue at 10: it ran before the read");
     assert!(!accepts(&read(Some(7))), "the clock never read 7");
 }

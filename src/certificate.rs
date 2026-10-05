@@ -63,20 +63,20 @@ fn due_le<I>(w: &Work<I>, v: &Work<I>) -> bool {
     }
 }
 
-/// `None`: the time overflows, which the model's unbounded clock never does.
-fn schedule<I>(now: Time, s: Sched<I>) -> Option<Work<I>> {
-    Some(match s {
+fn schedule<I>(now: Time, s: Sched<I>) -> Work<I> {
+    match s {
         Sched::Later(req) => Work { req, after: now, due: None, must: true },
         Sched::Timer(t, req) => Work { req, after: t.max(now), due: Some(t.max(now)), must: true },
-        Sched::After(t, req) => Work { req, after: t.max(now), due: None, must: true },
-        Sched::Within(d, req) => Work { req, after: now, due: Some(now.checked_add(d)?), must: true },
-        Sched::Maybe(req) => Work { req, after: now, due: None, must: false },
-    })
+    }
 }
 
 impl<'m, M: Model> Config<'m, M> {
+    /// The system starts in `init`, with no calls in flight and the work the
+    /// model starts with scheduled on the initial clock.
     pub fn initial(m: &'m M, init: M::State) -> Self {
-        Config { m, state: init, calls: HashMap::new(), work: Vec::new(), sent: Vec::new() }
+        let now = m.now(&init);
+        let work = m.start(&init).into_iter().map(|s| schedule(now, s)).collect();
+        Config { m, state: init, calls: HashMap::new(), work, sent: Vec::new() }
     }
 
     /// Work whose deadline has come on the model's clock and that can run.
@@ -96,12 +96,9 @@ impl<'m, M: Model> Config<'m, M> {
     }
 
     /// Starts work on the clock of the state the step led to.
-    fn start(&mut self, spawn: Vec<Sched<M::Internal>>) -> Option<()> {
+    fn start(&mut self, work: Vec<Sched<M::Internal>>) {
         let now = self.m.now(&self.state);
-        for s in spawn {
-            self.work.push(schedule(now, s)?);
-        }
-        Some(())
+        self.work.extend(work.into_iter().map(|s| schedule(now, s)));
     }
 
     /// One move: the event it shows a client, if any. `Err(())`: the system
@@ -138,8 +135,8 @@ impl<'m, M: Model> Config<'m, M> {
                 }
                 let o = outs.swap_remove(j);
                 self.state = o.next;
-                self.calls.insert(call, Call::Done(o.res));
-                self.start(o.spawn).ok_or(())?;
+                self.calls.insert(call, Call::Done(o.resp));
+                self.start(o.work);
                 self.sent.extend(o.send);
                 Ok(None)
             }
@@ -152,7 +149,7 @@ impl<'m, M: Model> Config<'m, M> {
                 let o = outs.swap_remove(j);
                 self.work.remove(i);
                 self.state = o.next;
-                self.start(o.spawn).ok_or(())?;
+                self.start(o.work);
                 self.sent.extend(o.send);
                 Ok(None)
             }

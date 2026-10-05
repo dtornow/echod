@@ -319,7 +319,7 @@ fn depth_first_agrees_with_the_online_checker() {
                 let (c, req) = open.remove(rng.next(open.len() as u64) as usize);
                 let out = BankModel.external(&req, &bank).remove(0);
                 bank = out.next;
-                let res = if rng.next(12) == 0 { Response::Ok(-7) } else { out.res };
+                let res = if rng.next(12) == 0 { Response::Ok(-7) } else { out.resp };
                 if rng.next(10) != 0 {
                     trace.push(ret(c, res)); // else: never delivered
                 }

@@ -44,10 +44,16 @@ pub trait Model {
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
     type Dispatch: Data;    // what the system sends to clients on its own (`()` if nothing)
 
-    fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
-    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
+    // Each defaults to "nothing": a model writes only what it has.
+    fn external(&self, req: &Self::External, s: &Self::State) -> Vec<ExternalOutcome<Self>>;  // [] = can't take effect
+    fn internal(&self, req: &Self::Internal, s: &Self::State) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
+    fn now(&self, s: &Self::State) -> Time;                                                    // default: 0
+    fn start(&self, s: &Self::State) -> Vec<Sched<Self::Internal>>;                            // work it starts with
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
+
+pub struct ExternalOutcome<M> { next: M::State, resp: M::Response, work: Vec<Sched<M::Internal>>, send: Vec<M::Dispatch> }
+pub struct InternalOutcome<M> { next: M::State,                     work: Vec<Sched<M::Internal>>, send: Vec<M::Dispatch> }
 
 /// Optional, for speed: which keys a step touches.
 pub trait Footprint: Model {
@@ -169,7 +175,7 @@ The model that checks a trace can also produce one and steer it.
 and an accepted run's certificate gives its marks. In `guided` mode, three in
 four requests come from the checker's suggestions, the least tried reason
 first. Every run ends with the server idle and a client reading every object,
-so work the spec lets the server put off (a lease expiring) must have happened.
+so work the spec lets the server put off (a resume) must have happened.
 
 ```text
 cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-fence|lease-forever]
@@ -184,9 +190,9 @@ cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-
 | fence ignores the version | random | 42 | |
 | fence ignores the version | guided | 72 | |
 | a lease never expires | random | 1 | |
-| a lease never expires | guided | 10 | |
+| a lease never expires | guided | 25 | |
 
-"Lease expired" is reached in 1 random run and 60 guided ones. It takes a
+"Lease expired" is reached in 1 random run and 50 guided ones. It takes a
 chain (a task released, re-acquired with a short lease, the clock past its end
 before the promise's deadline) that random requests rarely assemble.
 
@@ -314,14 +320,17 @@ are on the model's clock, and the checker enforces them.
   pub enum Sched<T> {
       Later(T),         // from now on; must happen by the next assert_idle
       Timer(Time, T),   // at the given time
-      After(Time, T),   // not before the given time; must happen by the next assert_idle
-      Within(Time, T),  // from now on; must happen within the given duration
-      Maybe(T),         // may happen, may never
   }
   ```
 
   "Now" is the clock of the state the starting step leads to. Each has a builder
-  of the same name on both outcomes (`.later(..)`, `.timer(..)`, ...).
+  of the same name on both outcomes (`.later(..)`, `.timer(..)`). Work that must
+  run by a deadline but may run earlier is both: `.later(w).timer(deadline, w)`,
+  with `w` doing nothing once it has run. (There used to be `After`, `Within`
+  and `Maybe` as well; they are gone for now.)
+- **A model can start with work** (`Model::start`): scheduled in the initial
+  state, on its clock. A component that sends a message periodically starts its
+  first timer there, and each tick starts the next (`tests/start.rs`).
 - **Overdue work goes first.** Work whose deadline has come on the model's clock,
   and that can run, runs before anything else: no call takes effect and nothing
   is observed until it has. Work that can't run owes nothing until it can.
@@ -342,7 +351,6 @@ are on the model's clock, and the checker enforces them.
 - **`assert_idle`** asserts the system is idle: every obligation that can run
   has run. Future timers are untouched, and so are calls still waiting for a
   response. It replaces the poll-until-terminal loop as the liveness check.
-- `Sched::Maybe` is work that is allowed but not owed: daemons, optional retries.
 - **Partitions and the clock.** A clock step touches every partition. A request
   that `Partitioned::broadcast` marks (it acts on every partition alike, starts
   nothing, sends nothing) is explained in each partition on its own when it is
@@ -393,9 +401,9 @@ mechanisms keep it small, and all eight are in the prototype.
    1 and 32 nodes explored with footprints, versus width 128 and 2,458 nodes without.*
 3. **Deadlines.** Obligations have a `by` on the model's clock. When the clock
    passes it, the uncertainty is resolved once and then gone. Nothing stays pending forever unless the spec says so.
-4. **Subsumption (antichains).** `Maybe` work can always be skipped, so a node
-   simulates any node with the same state and owed work but a subset of its `Maybe`
-   work. Likewise for early answers (next item). The weaker node is discarded.
+4. **Subsumption (antichains).** Optional work (a call the history says never
+   returns) can always be skipped, so a node simulates any node with the same
+   state and owed work but a subset of its optional work. Likewise for early answers (next item). The weaker node is discarded.
 5. **Reads don't branch.** Linearizing a call whose outcomes leave the state
    unchanged only decides its answer. So instead of splitting the profile into
    "answered early" and "not yet", the call keeps the set of answers it could
@@ -425,6 +433,10 @@ mechanisms keep it small, and all eight are in the prototype.
    origins through both modes and asserts identical verdicts.
 7. **Structural step identity.** Steps are values, so identical work spawned on
    different branches converges to the same node. Accordant's GUIDs prevent this.
+   Pending work is still a multiset: identical work started twice is one item
+   with a count of 2, and runs twice (`tests/work.rs`). An earlier version kept a
+   set, which merged two identical lease timers into one; the fuzzer caught it
+   as certificates that did not replay.
 8. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
    names the event. Exceeding them usually means the spec is missing a footprint
    or has unbounded non-determinism.

@@ -93,7 +93,7 @@ fn main() {
                 }
                 Outcome::Unknown(v, t) => {
                     unknown += 1;
-                    eprintln!("unknown: {v}\n{}", show(&t, v.index));
+                    eprintln!("unknown (seed {seed}): {v}\n{}", show(&t, v.index));
                 }
             }
         }

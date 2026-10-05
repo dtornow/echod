@@ -301,9 +301,10 @@ fn lease_and_heartbeat() {
     t.tick(1_004_000);
     t.step("acquire while held → 409", acquire_ttl("L", 1, "wB", 5_000), st(409));
     t.tick(1_005_000);
-    // C#: "acquired OR pending (reclaim is a choice)".
+    // C#: "acquired OR pending (reclaim is a choice)". Here the lease check is
+    // a timer: at the lease end the task is reclaimed, so only pending.
     let seen = t.c.allowed(&get_task("L"));
-    assert!(seen.iter().any(task(TState::Acquired, 1)) && seen.iter().any(task(TState::Pending, 1)), "{seen:?}");
+    assert!(seen.iter().all(task(TState::Pending, 1)) && !seen.is_empty(), "{seen:?}");
     t.step("re-acquire after reclaim → v2", acquire_ttl("L", 1, "wB", 5_000), task(TState::Acquired, 2));
 
     t.step("create H", create("H", FAR, "w").target().op(), st(200));

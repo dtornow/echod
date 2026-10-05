@@ -434,7 +434,7 @@ inductive Response where
 /-! ## Internal work -/
 
 /-- TigerBeetle's `pulse`: expire every pending transfer whose timeout has passed.
-    Each pending transfer with a timeout starts one, to run after it expires;
+    Each pending transfer with a timeout starts one, to run when it expires;
     a pulse with nothing to expire does nothing. -/
 inductive Internal where
   | pulse
@@ -782,7 +782,7 @@ def spend (s : Server) (t : NewTransfer) (st : CreateTransferStatus) : Server :=
   if st.transient then { s with orphaned := s.orphaned ++ [t.id] } else s
 
 /-- Creates the transfers, and starts a pulse for each new pending transfer with a
-    timeout, to run after it expires. -/
+    timeout, to run when it expires. -/
 def Server.create_transfers (s : Server) (events : List NewTransfer) :
     Server × List (CreateResult CreateTransferStatus) × List (Sched Internal) :=
   let base := max s.prepare_timestamp s.now
@@ -791,7 +791,7 @@ def Server.create_transfers (s : Server) (events : List NewTransfer) :
     .created .linked_event_failed .linked_event_chain_open spend base n 0 events ⟨s, none, #[]⟩
   let created := b.server.transfers.drop s.transfers.length
   let pulses := created.filterMap fun (_, t) =>
-    if t.flags.pending then t.expires_at.map (Sched.after · .pulse) else none
+    if t.flags.pending then t.expires_at.map (Sched.timer · .pulse) else none
   ({ b.server with prepare_timestamp := base + n }, b.results.toList, pulses)
 
 /-! ## Expiry (`execute_expire_pending_transfers`) -/

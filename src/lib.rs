@@ -19,9 +19,8 @@
 //!   enforces them.
 //! * **Internal work is data, not closures,** so two explanations that start the
 //!   same work converge.
-//! * **When internal work runs is part of starting it** ([`Sched`]): later,
-//!   at a timer, after a time, within a window, or maybe never. Deadlines are
-//!   what keep the search small.
+//! * **When internal work runs is part of starting it** ([`Sched`]): later
+//!   or at a timer. Deadlines are what keep the search small.
 //!
 //! A model is checked as it is. Two optional traits make checking faster:
 //! [`Footprint`] says which keys a step touches, and [`Partitioned`] groups
@@ -70,8 +69,11 @@ pub trait Model {
     type Dispatch: Data;
 
     /// A request takes effect in `state`: every allowed outcome. An empty list
-    /// means it cannot take effect here.
-    fn external(&self, req: &Self::External, state: &Self::State) -> Vec<ExternalOutcome<Self>>;
+    /// means it cannot take effect here. A model that takes no requests (a
+    /// component that only sends messages on its own) keeps the default.
+    fn external(&self, _req: &Self::External, _state: &Self::State) -> Vec<ExternalOutcome<Self>> {
+        Vec::new()
+    }
 
     /// Internal work runs in `state`: every possible successor. An empty list
     /// means it can't run yet and stays pending; `InternalOutcome::same(state)`
@@ -90,6 +92,13 @@ pub trait Model {
     /// the new time fire. A model without time keeps the default, 0.
     fn now(&self, _state: &Self::State) -> Time {
         0
+    }
+
+    /// The work the system starts with, in the initial state, on its clock: a
+    /// component that sends a message periodically starts its first timer
+    /// here, and each run of it starts the next.
+    fn start(&self, _state: &Self::State) -> Vec<Sched<Self::Internal>> {
+        Vec::new()
     }
 
 
@@ -181,31 +190,25 @@ pub enum Sched<T> {
     Later(T),
     /// A timer: runs exactly at the given time.
     Timer(Time, T),
-    /// Runs any time after the given time; must have happened by the next `assert_idle`.
-    After(Time, T),
-    /// Runs any time from now on; must have happened within the given duration.
-    Within(Time, T),
-    /// May run any time from now on, or never.
-    Maybe(T),
 }
 
 /// One possible effect of a request: the next state, the response, the
 /// internal work it starts, and the dispatches it sends.
 pub struct ExternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
-    pub res: M::Response,
-    pub spawn: Vec<Sched<M::Internal>>,
+    pub resp: M::Response,
+    pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> ExternalOutcome<M> {
-    pub fn new(res: M::Response, next: M::State) -> Self {
-        ExternalOutcome { next, res, spawn: Vec::new(), send: Vec::new() }
+    pub fn new(resp: M::Response, next: M::State) -> Self {
+        ExternalOutcome { next, resp, work: Vec::new(), send: Vec::new() }
     }
 
     /// The response, with the state unchanged.
-    pub fn same(res: M::Response, state: &M::State) -> Self {
-        ExternalOutcome::new(res, state.clone())
+    pub fn same(resp: M::Response, state: &M::State) -> Self {
+        ExternalOutcome::new(resp, state.clone())
     }
 
     /// A dispatch to a client, sent when the request takes effect. It may be
@@ -217,31 +220,13 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 
     /// Internal work that runs later.
     pub fn later(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Later(step));
+        self.work.push(Sched::Later(step));
         self
     }
 
     /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Timer(at, step));
-        self
-    }
-
-    /// Internal work that runs any time after `at`, eventually.
-    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::After(at, step));
-        self
-    }
-
-    /// Internal work that runs within `d` from now.
-    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Within(d, step));
-        self
-    }
-
-    /// Internal work that may run, or never.
-    pub fn maybe(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Maybe(step));
+        self.work.push(Sched::Timer(at, step));
         self
     }
 }
@@ -251,13 +236,13 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 /// [`Checker::receive`]).
 pub struct InternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
-    pub spawn: Vec<Sched<M::Internal>>,
+    pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> InternalOutcome<M> {
     pub fn new(next: M::State) -> Self {
-        InternalOutcome { next, spawn: Vec::new(), send: Vec::new() }
+        InternalOutcome { next, work: Vec::new(), send: Vec::new() }
     }
 
     /// A message to a client. It may be received once, at any time after, or never.
@@ -273,31 +258,13 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
 
     /// Internal work that runs later.
     pub fn later(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Later(step));
+        self.work.push(Sched::Later(step));
         self
     }
 
     /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Timer(at, step));
-        self
-    }
-
-    /// Internal work that runs any time after `at`, eventually.
-    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::After(at, step));
-        self
-    }
-
-    /// Internal work that runs within `d` from now.
-    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Within(d, step));
-        self
-    }
-
-    /// Internal work that may run, or never.
-    pub fn maybe(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Maybe(step));
+        self.work.push(Sched::Timer(at, step));
         self
     }
 }

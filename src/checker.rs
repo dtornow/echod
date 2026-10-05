@@ -27,9 +27,10 @@ pub enum Pending<O, R, T, G> {
     /// A message the server sent and the client has not received yet, `count`
     /// times over. It may be received later, or never.
     Sent { msg: G, count: u32 },
-    /// Background work, due from `after` on the model's clock. `must`: owed by
-    /// `by`, or by the next `Quiesce` if `by` is `None`.
-    Step { step: T, after: Time, by: Option<Time>, must: bool },
+    /// Background work, due from `after` on the model's clock, `count` times
+    /// over: started twice, it runs twice. `must`: owed by `by`, or by the next
+    /// `Quiesce` if `by` is `None`.
+    Step { step: T, after: Time, by: Option<Time>, must: bool, count: u32 },
 }
 
 type P<S> = Pending<Ex<S>, Re<S>, In<S>, Ms<S>>;
@@ -298,7 +299,7 @@ pub struct Checker<S: Engine> {
     /// Every partition a factor has held.
     known: BTreeSet<S::Part>,
     /// Calls the history says never return: they may take effect at any point,
-    /// or never, like `Maybe` work.
+    /// or never.
     orphans: HashSet<CallId>,
     /// In a complete history, the response each call gets, so a depth-first
     /// search takes only effects that answer it (Porcupine's pruning). Empty
@@ -355,7 +356,7 @@ impl<M: Partitioned> Checker<Grouped<M>> {
 impl<S: Engine> Checker<S> {
     pub fn with_engine(engine: S, init: St<S>, cfg: Config) -> Self {
         let recording = cfg.certify;
-        Checker {
+        let mut c = Checker {
             engine,
             cfg,
             rest: init.clone(),
@@ -374,7 +375,22 @@ impl<S: Engine> Checker<S> {
             recording,
             observed: Vec::new(),
             stats: Stats { max_width: 1, ..Stats::default() },
+        };
+        // Work the model starts with is pending from the start, in one factor
+        // that holds everything; it splits once the partitions are independent.
+        if !c.engine.model().start(&c.init).is_empty() {
+            let node = c.started(c.init.clone());
+            c.factors.push(Factor { parts: None, nodes: vec![node] });
         }
+        c
+    }
+
+    /// The node the system starts in: `state`, with the work the model starts
+    /// with pending.
+    fn started(&self, state: St<S>) -> Node<S> {
+        let mut pending = HashedSet::new();
+        self.spawn(&mut pending, self.engine.model().start(&state), &state);
+        Node { state: self.states.intern(state), pending, trail: Default::default() }
     }
 
     pub fn factors(&self) -> &[Factor<S>] {
@@ -646,7 +662,7 @@ impl<S: Engine> Checker<S> {
                 Event::Receive { msg } => Ev::Receive(msg),
             })
             .collect();
-        let start = Node { state: self.states.intern(init), pending: HashedSet::new(), trail: Default::default() };
+        let start = self.started(init);
         let mut run = Dfs { evs, stack: Vec::new(), seen: HashSet::new(), deepest: 0, found: None };
         if run.evs.is_empty() {
             run.found = Some(start);
@@ -766,12 +782,12 @@ impl<S: Engine> Checker<S> {
             .external(op, &m.state)
             .into_iter()
             .enumerate()
-            .filter(|(_, o)| self.answers.get(call).is_none_or(|r| self.engine.model().admits(&o.res, r)))
+            .filter(|(_, o)| self.answers.get(call).is_none_or(|r| self.engine.model().admits(&o.resp, r)))
             .map(|(j, o)| {
                 let mut p = m.pending.clone();
                 p.remove(item);
-                p.insert(Pending::Responded { call: *call, resp: o.res });
-                self.spawn(&mut p, o.spawn, &o.next);
+                p.insert(Pending::Responded { call: *call, resp: o.resp });
+                self.spawn(&mut p, o.work, &o.next);
                 for msg in o.send {
                     add_sent(&mut p, msg);
                 }
@@ -976,8 +992,8 @@ impl<S: Engine> Checker<S> {
                 // Partitions no factor holds take the request as well.
                 let model = self.engine.model();
                 let rest = match model.external(&op, &self.rest).as_slice() {
-                    [o] if o.spawn.is_empty() && o.send.is_empty() => {
-                        if !model.admits(&o.res, res) {
+                    [o] if o.work.is_empty() && o.send.is_empty() => {
+                        if !model.admits(&o.resp, res) {
                             return Err(self.violation(index, &e, "no candidate state explains this event".into()));
                         }
                         o.next.clone()
@@ -1548,7 +1564,7 @@ impl<S: Engine> Checker<S> {
         let model = self.engine.model();
         let tick = |s: &St<S>| -> Option<St<S>> {
             match model.external(clock, s).as_slice() {
-                [o] if o.spawn.is_empty() && o.send.is_empty() => Some(o.next.clone()),
+                [o] if o.work.is_empty() && o.send.is_empty() => Some(o.next.clone()),
                 _ => None,
             }
         };
@@ -1559,10 +1575,10 @@ impl<S: Engine> Checker<S> {
                 Pending::InFlight { op, .. } => model
                     .external(op, s)
                     .into_iter()
-                    .map(|o| o.spawn.is_empty().then_some((o.next, Some(o.res), o.send)))
+                    .map(|o| o.work.is_empty().then_some((o.next, Some(o.resp), o.send)))
                     .collect(),
                 Pending::Step { step, .. } => {
-                    model.internal(step, s).into_iter().map(|o| o.spawn.is_empty().then_some((o.next, None, o.send))).collect()
+                    model.internal(step, s).into_iter().map(|o| o.work.is_empty().then_some((o.next, None, o.send))).collect()
                 }
                 _ => None,
             }
@@ -1600,8 +1616,8 @@ impl<S: Engine> Checker<S> {
         // no more is started.
         type Led<S> = (St<S>, Vec<Sched<In<S>>>, Vec<Ms<S>>, usize);
         let mut todo: Vec<Led<S>> = match item {
-            Pending::InFlight { op, .. } => model.external(op, &n.state).into_iter().map(|o| (o.next, o.spawn, o.send, 0)).collect(),
-            Pending::Step { step, .. } => model.internal(step, &n.state).into_iter().map(|o| (o.next, o.spawn, o.send, 0)).collect(),
+            Pending::InFlight { op, .. } => model.external(op, &n.state).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
+            Pending::Step { step, .. } => model.internal(step, &n.state).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
             _ => return Touches::Only(keys),
         };
         while let Some((state, spawn, send, depth)) = todo.pop() {
@@ -1613,7 +1629,7 @@ impl<S: Engine> Checker<S> {
             }
             for w in spawn {
                 let step = match w {
-                    Sched::Later(r) | Sched::Timer(_, r) | Sched::After(_, r) | Sched::Within(_, r) | Sched::Maybe(r) => r,
+                    Sched::Later(r) | Sched::Timer(_, r) => r,
                 };
                 match self.engine.internal_keys(&step) {
                     Touches::Everything => return Touches::Everything,
@@ -1623,8 +1639,8 @@ impl<S: Engine> Checker<S> {
                     return Touches::Everything;
                 }
                 for o in model.internal(&step, &state) {
-                    if !o.spawn.is_empty() || !o.send.is_empty() {
-                        todo.push((o.next, o.spawn, o.send, depth + 1));
+                    if !o.work.is_empty() || !o.send.is_empty() {
+                        todo.push((o.next, o.work, o.send, depth + 1));
                     }
                 }
             }
@@ -1657,8 +1673,8 @@ impl<S: Engine> Checker<S> {
                         .enumerate()
                         .map(|(j, o)| {
                             let mut p = without();
-                            p.insert(Pending::Responded { call: *call, resp: o.res });
-                            self.spawn(&mut p, o.spawn, &o.next);
+                            p.insert(Pending::Responded { call: *call, resp: o.resp });
+                            self.spawn(&mut p, o.work, &o.next);
                             for msg in o.send {
                                 add_sent(&mut p, msg);
                             }
@@ -1672,16 +1688,16 @@ impl<S: Engine> Checker<S> {
                 let mut seen = early.clone();
                 let mut trail = m.trail.clone();
                 for (j, o) in outs.into_iter().enumerate() {
-                    if !seen.contains(&o.res) {
-                        trail = self.record(&trail, || Record::Early { call: *call, j, res: o.res.clone() });
-                        seen.insert(o.res);
+                    if !seen.contains(&o.resp) {
+                        trail = self.record(&trail, || Record::Early { call: *call, j, res: o.resp.clone() });
+                        seen.insert(o.resp);
                     }
                 }
                 let mut p = without();
                 p.insert(Pending::InFlight { call: *call, op: op.clone(), early: seen });
                 vec![Node { state: m.state.clone(), pending: p, trail }]
             }
-            Pending::Step { step, after, by, must } if self.can_fire(item, &m.state) => {
+            Pending::Step { step, after, by, must, count } if self.can_fire(item, &m.state) => {
                 self.engine
                     .model()
                     .internal(step, &m.state)
@@ -1689,7 +1705,11 @@ impl<S: Engine> Checker<S> {
                     .enumerate()
                     .map(|(j, s)| {
                         let mut p = without();
-                        self.spawn(&mut p, s.spawn, &s.next);
+                        if *count > 1 {
+                            // One copy runs; the others stay.
+                            p.insert(Pending::Step { step: step.clone(), after: *after, by: *by, must: *must, count: count - 1 });
+                        }
+                        self.spawn(&mut p, s.work, &s.next);
                         for msg in s.send {
                             add_sent(&mut p, msg);
                         }
@@ -1709,15 +1729,9 @@ impl<S: Engine> Checker<S> {
     fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>, next: &St<S>) {
         let now = self.engine.model().now(next);
         for sched in steps {
-            let (step, item) = match sched {
-                Sched::Later(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: true }),
-                Sched::Timer(at, step) => {
-                    let at = at.max(now);
-                    (step.clone(), Pending::Step { step, after: at, by: Some(at), must: true })
-                }
-                Sched::After(at, step) => (step.clone(), Pending::Step { step, after: at.max(now), by: None, must: true }),
-                Sched::Within(d, step) => (step.clone(), Pending::Step { step, after: now, by: Some(now.saturating_add(d)), must: true }),
-                Sched::Maybe(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: false }),
+            let (step, after, by) = match sched {
+                Sched::Later(step) => (step, now, None),
+                Sched::Timer(at, step) => (step, at.max(now), Some(at.max(now))),
             };
             if let Some(Some(parts)) = &self.scope {
                 let escaped = match self.engine.internal_keys(&step) {
@@ -1728,7 +1742,7 @@ impl<S: Engine> Checker<S> {
                     self.escaped.borrow_mut().get_or_insert_with(|| format!("{step:?}"));
                 }
             }
-            pending.insert(item);
+            add_step(pending, step, after, by);
         }
     }
 
@@ -1845,7 +1859,7 @@ struct Frame<S: Engine> {
 
 /// A call whose every outcome leaves the state as it is and starts nothing.
 fn read_only<S: Engine>(outs: &[crate::ExternalOutcome<S::M>], state: &St<S>) -> bool {
-    outs.iter().all(|o| o.spawn.is_empty() && o.send.is_empty() && o.next == *state)
+    outs.iter().all(|o| o.work.is_empty() && o.send.is_empty() && o.next == *state)
 }
 
 fn intersects<K: Ord>(a: &Touches<K>, b: &Touches<K>) -> bool {
@@ -1866,6 +1880,18 @@ fn add_sent<O: Data, R: Data, T: Data, G: Data>(p: &mut HashedSet<Pending<O, R, 
         p.remove(&Pending::Sent { msg: msg.clone(), count: n });
     }
     p.insert(Pending::Sent { msg, count: have.unwrap_or(0) + 1 });
+}
+
+/// Starts work that must run: one more copy if the same work is pending.
+fn add_step<O: Data, R: Data, T: Data, G: Data>(p: &mut HashedSet<Pending<O, R, T, G>>, step: T, after: Time, by: Option<Time>) {
+    let have = p.iter().find_map(|i| match i {
+        Pending::Step { step: s, after: a, by: b, must: true, count } if *s == step && *a == after && *b == by => Some(*count),
+        _ => None,
+    });
+    if let Some(n) = have {
+        p.remove(&Pending::Step { step: step.clone(), after, by, must: true, count: n });
+    }
+    p.insert(Pending::Step { step, after, by, must: true, count: have.unwrap_or(0) + 1 });
 }
 
 /// Work a node may simply never do, and messages it may never deliver: dropping
