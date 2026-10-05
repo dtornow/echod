@@ -2,14 +2,16 @@
 //!
 //! In one sentence:
 //!
-//! > If the checker accepts a trace, then some execution of the system,
-//! > projected onto what clients observe, is exactly that trace.
+//! > OK means some execution of the system, projected onto what clients
+//! > observe, is exactly the trace; KO means no execution is; UNKNOWN means
+//! > the checker can't tell.
 //!
 //! In Verus, at the bottom of this file, as the contract of the Rust function:
 //!
 //! ```text
-//! fn check(m, init, trace) -> (accepted: bool)
-//!     ensures accepted ==> valid(m, init, trace)
+//! fn check(m, init, trace) -> (v: Verdict)
+//!     ensures v is Ok ==> valid(m, init, trace),
+//!             v is Ko ==> !valid(m, init, trace)
 //!
 //! valid(m, init, trace) :=
 //!     exists steps. legal(m, initial(init), steps) && project(steps) == trace
@@ -20,11 +22,11 @@
 //! system evolves; each step observed or silent), `legal` (steps the system can
 //! actually take), `project` (what an execution shows a client).
 //!
-//! `check` stands for the checker with certificates,
-//! `Checker::new(m, init, Config::default()).check_certified(trace).is_ok()`.
-//! It is `external_body`: Verus takes the contract on trust. The proof is in
+//! `check` stands for the Rust checker with certificates. It is
+//! `external_body`: Verus takes the contract on trust. For OK, the proof is in
 //! `lean/Accordant.lean`: a certificate that `certify` accepts is valid, so the
-//! contract holds as long as `src/certificate.rs` matches the Lean `certify`.
+//! first line holds as long as `src/certificate.rs` matches the Lean `certify`.
+//! KO is not proved anywhere: it rests on the search being exhaustive.
 
 use vstd::prelude::*;
 
@@ -294,14 +296,25 @@ pub open spec fn valid<M: Model>(m: M, init: M::State, trace: Seq<Ev<M>>) -> boo
 
 // ------------------------------------------------------------------ theorem
 
-/// Soundness, as the contract of the Rust checker: if it accepts a trace, the
-/// trace is valid. Stated, not proved.
-///
-/// `Checker::new(m, init, Config::default()).check_certified(trace).is_ok()`
+/// What the checker answers about a trace.
+pub enum Verdict {
+    /// Some execution of the system shows exactly the trace.
+    Ok,
+    /// No execution of the system shows the trace.
+    Ko,
+    /// The checker can't say (it gave up).
+    Unknown,
+}
+
+/// What the trace checker is supposed to do, as the contract of the Rust
+/// function: OK only for valid traces, KO only for invalid ones, and UNKNOWN
+/// whenever it can't tell. Stated, not proved: `external_body` makes Verus take
+/// the contract on trust.
 #[verifier::external_body]
-pub fn check<M: Model>(m: &M, init: Ghost<M::State>, trace: &Vec<Ev<M>>) -> (accepted: bool)
+pub fn check<M: Model>(m: &M, init: Ghost<M::State>, trace: &Vec<Ev<M>>) -> (v: Verdict)
     ensures
-        accepted ==> valid(*m, init@, trace@),
+        v is Ok ==> valid(*m, init@, trace@),
+        v is Ko ==> !valid(*m, init@, trace@),
 {
     unimplemented!()
 }
