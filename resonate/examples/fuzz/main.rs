@@ -1,6 +1,5 @@
 //! A fuzz driver for Resonate, with the spec as server, oracle and guide, and
-//! choices from a seeded generator. `tests/hegel.rs` is the same driver with
-//! choices from Hegel, which shrinks what it finds.
+//! choices from a seeded generator.
 //!
 //! * Server: `accordant::Sim` runs a model as a server, choosing at random
 //!   among everything the model allows (outcomes, when work runs, delivery
@@ -21,14 +20,13 @@
 //! CROSS=1 ...   # also check every trace with the partitioned and depth-first checkers
 //! ```
 
-#[path = "../tests/common/driver.rs"]
 mod driver;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
 use accordant::{Marks, Time};
-use driver::{run, Bug, Choices, Outcome, Server};
+use driver::{run, show, Bug, Choices, Outcome, Server};
 use resonate::*;
 
 struct Seeded<'t> {
@@ -88,14 +86,14 @@ fn main() {
                         table.get_mut(m).expect("a declared mark")[k] += 1;
                     }
                 }
-                Outcome::Ko(v, _) => {
+                Outcome::Ko(v, t) => {
                     ko += 1;
                     first_ko.get_or_insert(seed);
-                    example.get_or_insert(format!("{v}"));
+                    example.get_or_insert(format!("{}\n{}", v.reason, show(&t, v.index)));
                 }
-                Outcome::Unknown(v, _) => {
+                Outcome::Unknown(v, t) => {
                     unknown += 1;
-                    eprintln!("unknown: {v}");
+                    eprintln!("unknown: {v}\n{}", show(&t, v.index));
                 }
             }
         }
@@ -104,7 +102,7 @@ fn main() {
         let first = first_ko.map_or("-".to_string(), |s| s.to_string());
         println!("{mode:<8} {ok:>4} {ko:>4} {unknown:>8} {:>9} {first:>13}", format!("{covered}/{}", all.len()));
         if let Some(v) = example {
-            println!("         first KO: {}", v.lines().next().unwrap_or(""));
+            println!("\nfirst KO ({mode}), up to the event no execution explains:\n{v}");
         }
     }
     println!("\n{:<40} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");

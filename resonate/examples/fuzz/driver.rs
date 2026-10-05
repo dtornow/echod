@@ -1,13 +1,12 @@
-//! The fuzz driver, shared by `examples/fuzz.rs` (choices from a seeded
-//! generator) and `tests/hegel.rs` (choices from Hegel, which records them so
-//! it can replay and shrink a failure).
+//! The fuzz driver. Every decision of a run (whether the client sends a
+//! request now, which request, which move the server makes) comes from a
+//! `Choices`: a seeded generator today; a recorded list of choices is what a
+//! shrinker would replay and cut down.
 //!
 //! A client sends requests to a simulated server, the spec or the spec with a
 //! bug planted; a checker follows what the client observes. A run ends with the
 //! server idle and a client reading every object. An accepted run comes with a
 //! certificate, and the marks along it are what the run covered.
-
-#![allow(dead_code)]
 
 use std::collections::BTreeSet;
 use std::fmt::Write;

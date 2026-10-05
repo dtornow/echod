@@ -164,7 +164,7 @@ The model that checks a trace can also produce one and steer it.
   replay behind `certify`, so a simulator trace is valid by construction.
   `quiesce` runs work until none can run (before `assert_idle`).
 
-`resonate/examples/fuzz.rs` puts them together: a client sends requests to a
+`resonate/examples/fuzz/` puts them together: a client sends requests to a
 `Sim` of the spec (or of the spec with a bug planted), a checker follows,
 and an accepted run's certificate gives its marks. In `guided` mode, three in
 four requests come from the checker's suggestions, the least tried reason
@@ -190,70 +190,19 @@ cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-
 chain (a task released, re-acquired with a short lease, the clock past its end
 before the promise's deadline) that random requests rarely assemble.
 
-### With Hegel: shrinking
-
-The driver (`resonate/tests/common/driver.rs`) takes every decision from a
-`Choices`: whether the client sends a request now, which request, and which
-move the simulated server makes. `examples/fuzz.rs` answers from a seeded
-generator. `resonate/tests/hegel.rs` answers from
-[Hegel](https://github.com/hegeldev/hegel-rust) (`hegeltest`, Antithesis's
-Rust port of Hypothesis), which records each decision as a draw, each request
-as a span of its own.
-
-When the checker says KO, Hegel shrinks the run: it deletes requests, lowers
-values, and replays, keeping a candidate only if the checker still says KO.
-The checker is the oracle; Hegel brings the search and the shrinking. Each
-accepted run also reports its marks to Hegel, as events (`HEGEL_STATISTICS=1`
-prints how often each was reached) and as a target (the number reached), which
-Hegel hill-climbs on.
-
-The tests: 200 runs against the spec that every checker must accept, and each
-planted bug found and shrunk (13 s for all three). A Hegel search is
-deterministic for its seed. Over seeds 1 to 20, 1000 test cases each, it finds
-the stale fence from all 20 and shrinks it to 4–14 events, and finds the lease
-that never expires from 7 (`how_often_hegel_finds_each_bug`, ignored by
-default). From seed 2 the stale fence shrinks to the minimum, 4 events:
-
-```text
-  0  call  1 → CreateTask { id: "a:2", timeout_at: 1, .. }
-  1  call  2 → FenceTask { id: "a:2", version: 0, action: Create(Create { id: "a:1", timeout_at: 0, .. }) }
-  2  call  1 ← Created(.., TaskRec { id: "a:2", state: Acquired, version: 1, .. })
-  3  call  2 ← Promise(PromiseRec { id: "a:1", state: TimedOut, .. })     ← the spec says 409
-```
-
-From seed 11 the lease that never expires shrinks to 18 events: create a task,
-release it, a poll claims it with a 1 ms lease, the clock moves to 1, the
-server goes idle, and `GetTask` still says `Acquired`. Shrinking does not always
-reach the minimum: three redundant `CreatePromise` calls stay in.
-
-**Guidance inside Hegel.** `examples/fuzz.rs` takes the suggestion whose
-reason was taken least *across runs*. Hegel can't use that: it replays a run to
-shrink it, and counts that changed in between would make the replay diverge.
-The policies it can use depend only on the run's own draws: `Uniform` (any
-suggestion), `ByReason` (a reason first, then a suggestion with it) and
-`LeastTried` (a reason taken least so far in this run). Over seeds 1–20, 1000
-test cases each:
-
-| bug | guide | found from | first failing case (median) |
-|---|---|---|---|
-| stale fence | Uniform | 20/20 | 28 |
-| stale fence | ByReason | 20/20 | 6 |
-| stale fence | LeastTried | 20/20 | 10 |
-| lease never expires | Uniform | 7/20 | 539 |
-| lease never expires | ByReason | 4/20 | 304 |
-| lease never expires | LeastTried | 8/20 | 510 |
-
-Choosing a reason first finds the easy bug about 4× sooner. Nothing confined to
-one run helps much with the hard one: what helps the seeded fuzzer is memory
-across runs. The tests keep `Uniform`, the guide their pinned seeds were chosen for.
-
-Under Antithesis (`ANTITHESIS_OUTPUT_DIR` set), Hegel reads every draw from
-`/dev/urandom`, which the Antithesis fuzzer controls, so it steers each
-decision of the run, server moves included.
+Every decision of a run comes from a `Choices` (`examples/fuzz/driver.rs`):
+whether the client sends a request now, which request, which move the server
+makes. Today a seeded generator answers, so a seed reproduces a run. Not done
+yet: shrinking. A KO trace is reported as found (30–60 events); a shrinker would
+record a failing run's choices, delete and lower them, and rerun, keeping any
+change the checker still rejects. (We tried Hegel, Antithesis's Rust port of
+Hypothesis, for this: it shrank the stale fence to the minimal 4 events, but
+its replay rules rule out the memory across runs that makes our guidance find
+the expiring lease, so we kept our own driver.)
 
 **The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
-is a checker bug. `CROSS=1` (and the Hegel test, always) also checks every trace with the
-partitioned and depth-first checkers. The first runs found three false KOs, all fixed and
+is a checker bug. `CROSS=1` also checks every trace with the partitioned and depth-first
+checkers. The first runs found three false KOs, all fixed and
 covered by `resonate/tests/sim.rs`:
 
 1. A call in flight reads the clock (`created_at`), so it doesn't commute with a
