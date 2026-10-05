@@ -1,8 +1,11 @@
 name = "accordant"
-defaultTargets = ["Accordant", "TigerBeetle"]
+defaultTargets = ["Accordant", "TigerBeetle", "TigerBeetleProofs"]
 
 [[lean_lib]]
 name = "Accordant"
 
 [[lean_lib]]
 name = "TigerBeetle"
+
+[[lean_lib]]
+name = "TigerBeetleProofs"

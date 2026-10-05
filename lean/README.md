@@ -34,3 +34,9 @@ scenarios with `#guard`. It imports `Accordant`, so it builds with Lake:
 ```
 cd lean && lake build
 ```
+
+`TigerBeetleProofs.lean` proves, without `sorry`, that `debits_must_not_exceed_credits`
+holds in every state TigerBeetle can reach from an empty cluster: for every
+execution of `model lim` the accordant semantics allows, every account keeps the
+rule. The proof carries a stronger invariant: each account's `debits_pending`
+covers its still-pending debit transfers.
