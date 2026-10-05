@@ -6,6 +6,8 @@
 //!   helpers).
 //! * `model`: plain-Rust glue to the checker's `Model`, `Footprint` and
 //!   `Partitioned` traits.
+//! * `explore`: plain-Rust glue for testing: marks (what a step did) and
+//!   suggestions (requests worth trying next).
 //!
 //! `cargo build` compiles it as ordinary Rust (the proofs erased);
 //! `cargo verus verify -p resonate` verifies it.
@@ -23,9 +25,11 @@
 )]
 
 pub mod collections;
+mod explore;
 mod model;
 pub mod spec;
 
 pub use collections::{PMap, PSet};
+pub use explore::{arbitrary, IDS};
 pub use model::{on, Internal};
 pub use spec::*;

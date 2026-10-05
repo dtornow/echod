@@ -76,7 +76,8 @@ impl Model for JobModel {
                 n.jobs.insert(j, Job { status: Status::Pending, deadline });
                 let o = ExternalOutcome::new(Response::Accepted, n);
                 let o = match self.run_within {
-                    Some(d) => o.within(d, j),
+                    // Run by `now + d`: any time from now, and a timer then.
+                    Some(d) => o.later(j).timer(s.now + d, j),
                     None => o.later(j),
                 };
                 o.timer(deadline, j)

@@ -285,22 +285,21 @@ fn trec(id: &Id, t: &Task) -> TaskRec {
 pub enum Work {
     Later(Vec<Id>),
     Timer(Time, Vec<Id>),
-    After(Time, Vec<Id>),
 }
 
 /// One possible effect of a request: the response, the next state, the work it
 /// starts, the dispatches it sends. As `accordant::ExternalOutcome`.
 pub struct Out {
-    pub res: Response,
+    pub resp: Response,
     pub next: Server,
-    pub spawn: Vec<Work>,
+    pub work: Vec<Work>,
     pub send: Vec<Dispatch>,
 }
 
 /// The effect of internal work. As `accordant::InternalOutcome`.
 pub struct InOut {
     pub next: Server,
-    pub spawn: Vec<Work>,
+    pub work: Vec<Work>,
     pub send: Vec<Dispatch>,
 }
 
@@ -319,23 +318,23 @@ fn one(o: Out) -> (r: Vec<Out>)
 fn status(code: u16, s: &Server) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
-        r[0].res == Response::Status(code),
+        r[0].resp == Response::Status(code),
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
         r[0].next.now == s.now,
 {
-    one(Out { res: Response::Status(code), next: copy_server(s), spawn: Vec::new(), send: Vec::new() })
+    one(Out { resp: Response::Status(code), next: copy_server(s), work: Vec::new(), send: Vec::new() })
 }
 
 fn echo(res: Response, s: &Server) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
-        r[0].res == res,
+        r[0].resp == res,
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
         r[0].next.now == s.now,
 {
-    one(Out { res, next: copy_server(s), spawn: Vec::new(), send: Vec::new() })
+    one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new() })
 }
 
 fn ids1(a: &Id) -> Vec<Id> {
@@ -463,7 +462,7 @@ impl Resonate {
             forall|i: int|
                 0 <= i < outs.len() ==> {
                     &&& (server_ok(*s) ==> server_ok(#[trigger] outs[i].next))
-                    &&& (server_ok(*s) ==> response_ok(outs[i].res))
+                    &&& (server_ok(*s) ==> response_ok(outs[i].resp))
                     &&& (!s.promises@.contains_key(req.id@) && outs[i].next.promises@.contains_key(req.id@)
                         ==> promise_ok(outs[i].next.promises@[req.id@]))
                     // the frame
@@ -538,11 +537,11 @@ impl Resonate {
         if live && req.target {
             send.push(Dispatch::Execute { id: req.id.clone(), version: 0 });
         }
-        let mut spawn = Vec::new();
+        let mut work = Vec::new();
         if live {
-            spawn.push(Work::Timer(req.timeout_at, ids1(&req.id)));
+            work.push(Work::Timer(req.timeout_at, ids1(&req.id)));
         }
-        one(Out { res: Response::Promise(rec), next: n, spawn, send })
+        one(Out { resp: Response::Promise(rec), next: n, work, send })
     }
 
     fn promise_settle(&self, req: &Settle, s: &Server) -> Vec<Out> {
@@ -558,14 +557,14 @@ impl Resonate {
         if !p.live() {
             return echo(Response::Promise(prec(&req.id, p)), s);  // P-03: not settleable
         }
-        let spawn = resumes(p, &req.id);
+        let work = resumes(p, &req.id);
         let mut n = copy_server(s);
         settle(&mut n, &req.id, state, copy(&req.data), now);
         let res = match n.promises.get(&req.id) {
             Some(q) => Response::Promise(prec(&req.id, q)),
             None => Response::Status(500),  // unreachable: the promise exists
         };
-        one(Out { res, next: n, spawn, send: Vec::new() })
+        one(Out { resp: res, next: n, work, send: Vec::new() })
     }
 
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
@@ -607,9 +606,9 @@ impl Resonate {
                         u.acquire(t.version.saturating_add(1), worker_self(), TASK_CREATE_TTL, now);
                         let rec = trec(id, &u);
                         n.tasks.insert(id.clone(), u);
-                        let mut spawn = Vec::new();
-                        spawn.push(Work::After(now.saturating_add(TASK_CREATE_TTL), ids1(id)));
-                        one(Out { res: Response::Task(rec), next: n, spawn, send: Vec::new() })
+                        let mut work = Vec::new();
+                        work.push(Work::Timer(now.saturating_add(TASK_CREATE_TTL), ids1(id)));
+                        one(Out { resp: Response::Task(rec), next: n, work, send: Vec::new() })
                     },
                     _ => status(409, s),
                 };
@@ -635,10 +634,10 @@ impl Resonate {
         let mut n = copy_server(s);
         n.promises.insert(id.clone(), p);
         n.tasks.insert(id.clone(), t);
-        let mut spawn = Vec::new();
-        spawn.push(Work::Timer(timeout_at, ids1(id)));
-        spawn.push(Work::After(now.saturating_add(TASK_CREATE_TTL), ids1(id)));
-        one(Out { res, next: n, spawn, send: Vec::new() })
+        let mut work = Vec::new();
+        work.push(Work::Timer(timeout_at, ids1(id)));
+        work.push(Work::Timer(now.saturating_add(TASK_CREATE_TTL), ids1(id)));
+        one(Out { resp: res, next: n, work, send: Vec::new() })
     }
 
     fn task_suspend(&self, id: &Id, version: u32, ids: &Vec<Id>, s: &Server) -> Vec<Out> {
@@ -719,7 +718,7 @@ impl Resonate {
             }
             i += 1;
         }
-        one(Out { res: Response::Status(200), next: n, spawn: Vec::new(), send: Vec::new() })
+        one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new() })
     }
 
     /// Some promise holds a callback for `id` and has settled.
@@ -787,7 +786,7 @@ impl Resonate {
             let claim = &claims[c];
             let mut n = copy_server(s);
             let mut recs = Vec::new();
-            let mut spawn = Vec::new();
+            let mut work = Vec::new();
             let mut i = 0;
             while i < claim.len()
                 invariant
@@ -804,7 +803,7 @@ impl Resonate {
                     },
                     None => {},
                 }
-                spawn.push(Work::After(now.saturating_add(ttl), ids1(id)));
+                work.push(Work::Timer(now.saturating_add(ttl), ids1(id)));
                 let holders = n.promises.keys();
                 let mut h = 0;
                 while h < holders.len()
@@ -826,7 +825,7 @@ impl Resonate {
                 }
                 i += 1;
             }
-            outs.push(Out { res: Response::Claimed(recs), next: n, spawn, send: Vec::new() });
+            outs.push(Out { resp: Response::Claimed(recs), next: n, work, send: Vec::new() });
             c += 1;
         }
         outs
@@ -839,7 +838,7 @@ impl Resonate {
             Request::AdvanceClock(t) => {
                 let mut n = copy_server(s);
                 n.now = if *t > now { *t } else { now };
-                one(Out { res: Response::Status(200), next: n, spawn: Vec::new(), send: Vec::new() })
+                one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new() })
             },
             Request::CreatePromise(c) => self.promise_create(c, s),
             Request::GetPromise(id) => match s.promises.get(id) {
@@ -870,7 +869,7 @@ impl Resonate {
                 let mut q = copy(p);
                 q.callbacks.insert(awaiter.clone());
                 n.promises.insert(awaited.clone(), q);
-                one(Out { res, next: n, spawn: Vec::new(), send: Vec::new() })
+                one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new() })
             },
             Request::RegisterListener { awaited, address } => {
                 if !address_valid(address) {
@@ -909,9 +908,9 @@ impl Resonate {
                 u.acquire(t.version.saturating_add(1), pid.clone(), *ttl, now);
                 let rec = trec(id, &u);
                 n.tasks.insert(id.clone(), u);
-                let mut spawn = Vec::new();
-                spawn.push(Work::After(now.saturating_add(*ttl), ids1(id)));
-                one(Out { res: Response::Task(rec), next: n, spawn, send: Vec::new() })
+                let mut work = Vec::new();
+                work.push(Work::Timer(now.saturating_add(*ttl), ids1(id)));
+                one(Out { resp: Response::Task(rec), next: n, work, send: Vec::new() })
             },
             Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
                 Err(code) => status(code, s),
@@ -925,7 +924,7 @@ impl Resonate {
                     n.tasks.insert(id.clone(), u);
                     let mut send = Vec::new();
                     send.push(Dispatch::Execute { id: id.clone(), version });
-                    one(Out { res: Response::Status(200), next: n, spawn: Vec::new(), send })
+                    one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send })
                 },
             },
             Request::FulfillTask { id, version, state, data } => {
@@ -937,7 +936,7 @@ impl Resonate {
                     Err(code) => return status(code, s),
                     Ok(_) => {},
                 }
-                let spawn = match s.promises.get(id) {
+                let work = match s.promises.get(id) {
                     Some(p) => resumes(p, id),
                     None => Vec::new(),
                 };
@@ -947,7 +946,7 @@ impl Resonate {
                     Some(q) => Response::Promise(prec(id, q)),
                     None => Response::Status(500),  // unreachable: held checked the promise
                 };
-                one(Out { res, next: n, spawn, send: Vec::new() })
+                one(Out { resp: res, next: n, work, send: Vec::new() })
             },
             Request::HeartbeatTask { id, version, pid } => {
                 let extends = match self.held(s, id, *version) {
@@ -967,9 +966,9 @@ impl Resonate {
                         u.acquired_at = now;
                         let expires = u.lease_expires();
                         n.tasks.insert(id.clone(), u);
-                        let mut spawn = Vec::new();
-                        spawn.push(Work::After(expires, ids1(id)));
-                        one(Out { res: Response::Status(200), next: n, spawn, send: Vec::new() })
+                        let mut work = Vec::new();
+                        work.push(Work::Timer(expires, ids1(id)));
+                        one(Out { resp: Response::Status(200), next: n, work, send: Vec::new() })
                     },
                     None => status(200, s),
                 }
@@ -1004,7 +1003,7 @@ impl Resonate {
     pub fn internal(&self, ids: &Vec<Id>, s: &Server) -> InOut {
         let now = s.now;
         let mut n = copy_server(s);
-        let mut spawn = Vec::new();
+        let mut work = Vec::new();
         let mut send = Vec::new();
         let mut i = 0;
         while i < ids.len()
@@ -1026,7 +1025,7 @@ impl Resonate {
                                 j <= r.len(),
                             decreases r.len() - j,
                         {
-                            spawn.push(r[j].clone());
+                            work.push(r[j].clone());
                             j += 1;
                         }
                     }
@@ -1094,7 +1093,7 @@ impl Resonate {
             }
             a += 1;
         }
-        InOut { next: n, spawn, send }
+        InOut { next: n, work, send }
     }
 }
 

@@ -44,10 +44,14 @@ pub trait Model {
     type Internal: Data;   // work the system does on its own (a timeout, a resume)
     type Dispatch: Data;    // what the system sends to clients on its own (`()` if nothing)
 
-    fn external(&self, req: &Self::External, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>>;
-    fn internal(&self, req: &Self::Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
-    fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
+    // Each defaults to "nothing": a model writes only what it has.
+    fn external(&self, req: &Self::External, s: &Self::State) -> Vec<ExternalOutcome<Self>>;  // [] = can't take effect
+    fn internal(&self, req: &Self::Internal, s: &Self::State) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
+    fn now(&self, s: &Self::State) -> Time;                                                    // default: 0
 }
+
+pub struct ExternalOutcome<M> { next: M::State, resp: M::Response, work: Vec<Sched<M::Internal>>, send: Vec<M::Dispatch> }
+pub struct InternalOutcome<M> { next: M::State,                     work: Vec<Sched<M::Internal>>, send: Vec<M::Dispatch> }
 
 /// Optional, for speed: which keys a step touches.
 pub trait Footprint: Model {
@@ -92,7 +96,8 @@ Mapping from Accordant:
   immutable once the checker has them; see [State representation](#state-representation).
 - `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `ExternalOutcome::new(resp, next).later(t)`.
   The response is a value, not a predicate, so it can be stored in a node and
-  hashed. Wildcards (server ids, timestamps) go in `admits`.
+  hashed, and a client must see exactly it. Wildcards (server ids, timestamps)
+  are not supported yet.
 - `Expect.OneOf` → returning several outcomes.
 - `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → returning `vec![InternalOutcome::same(state)]`.
 - `StateProfile` → `Checker::profile()`, a `Vec<Node>`.
@@ -127,6 +132,102 @@ observations, or the first `Violation`, whose `index` is that observation's
 position in the trace. The checker keeps its state afterwards, so a long trace can be fed in pieces.
 `check_calls` is the shape of a request/response log, like
 resonate-specification's NDJSON traces.
+
+### Three answers: OK, KO, UNKNOWN
+
+A rejection is not always a refutation. The checker gives up when a search
+exceeds `max_explore`, when the profile exceeds `max_width`, when the spec breaks
+a rule the checker relies on (work escaping its partitions), or when a
+certificate can't be produced. Those `Violation`s carry `unknown: true` and a
+reason starting with "gave up". `Verdict::from(result)` sorts a result into
+three:
+
+- `Ok(_)`: an execution of the model produces the trace (with certificates:
+  one is in hand, and `certify` replays it).
+- `Ko(v)`: no execution does. Every search was exhaustive.
+- `Unknown(v)`: the checker gave up; `v.reason` says why.
+
+`tests/verdict.rs` shows all three on one model.
+
+## Testing with the model: marks, suggestions, a simulator, a fuzzer
+
+The model that checks a trace can also produce one and steer it.
+
+- **`Marks`** (optional trait): names for interesting things a step did, read
+  from its request, the state before and the outcome (`"lease expired"`,
+  `"task.fence 409"`). `accordant::marks(m, init, certificate)` replays a
+  certificate and collects the marks of the execution it describes. That is
+  coverage of the spec, not of the server's code: which behaviors this trace
+  is explained by. `all_marks` lists every mark so a report can show the ones
+  nothing reached.
+- **`Explore`** (optional trait): `suggest(state)`, requests worth trying from a
+  state, each with why. `Checker::suggestions(limit)` asks for every state the
+  system may be in, so a driver gets hints from what the checker knows.
+- **`Sim`**: the model run as a server. It takes requests and, at random, makes
+  any move the model allows: a call takes effect with any of its outcomes,
+  work runs, a response or dispatch is delivered. Every move goes through the
+  replay behind `certify`, so a simulator trace is valid by construction.
+  `quiesce` runs work until none can run (before `assert_idle`).
+
+`resonate/examples/fuzz/` puts them together: a client sends requests to a
+`Sim` of the spec (or of the spec with a bug planted), a checker follows,
+and an accepted run's certificate gives its marks. In `guided` mode, three in
+four requests come from the checker's suggestions, the least tried reason
+first. Every run ends with the server idle and a client reading every object,
+so work the spec lets the server put off (a resume) must have happened.
+
+```text
+cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-fence|lease-forever]
+```
+
+300 runs of 30 requests (about 0.3 s per mode):
+
+| server | mode | runs KO | marks reached |
+|---|---|---|---|
+| spec | random | 0 | 52/65 |
+| spec | guided | 0 | 54/65 |
+| fence ignores the version | random | 42 | |
+| fence ignores the version | guided | 72 | |
+| a lease never expires | random | 1 | |
+| a lease never expires | guided | 25 | |
+
+"Lease expired" is reached in 1 random run and 50 guided ones. It takes a
+chain (a task released, re-acquired with a short lease, the clock past its end
+before the promise's deadline) that random requests rarely assemble.
+
+Every decision of a run comes from a `Choices` (`examples/fuzz/driver.rs`):
+whether the client sends a request now, which request, which move the server
+makes. Today a seeded generator answers, so a seed reproduces a run. Not done
+yet: shrinking. A KO trace is reported as found (30–60 events); a shrinker would
+record a failing run's choices, delete and lower them, and rerun, keeping any
+change the checker still rejects. (We tried Hegel, Antithesis's Rust port of
+Hypothesis, for this: it shrank the stale fence to the minimal 4 events, but
+its replay rules rule out the memory across runs that makes our guidance find
+the expiring lease, so we kept our own driver.)
+
+**The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
+is a checker bug. `CROSS=1` also checks every trace with the partitioned and depth-first
+checkers. The first runs found three false KOs, all fixed and
+covered by `resonate/tests/sim.rs`:
+
+1. A call in flight reads the clock (`created_at`), so it doesn't commute with a
+   clock move. The clock's footprint was only the work falling due. Now it also
+   includes every call in flight and runnable step that comes out differently
+   when the clock moves first (checked directly: fire then tick versus tick
+   then fire).
+2. Settling a promise starts the resume of the task that awaits it, and the
+   resume sends the dispatch observed. A static footprint (`{promise}`) can't
+   name the awaiter, which is in the state. Footprints now include the keys of
+   the work an item's outcomes start, followed transitively, and of the
+   dispatches they send.
+3. A clock move is broadcast to every factor, but partitions no factor held yet
+   never saw its invoke. It is now held until the next event. If that event is
+   its return, it is explained per partition; otherwise, in one factor, with the
+   invoke replayed first.
+
+The price of the first two: a footprint now runs the model. On
+`resonate_bench length 400`, where about 400 stale lease checks stay pending,
+the check takes 3.1 s instead of 1.1 s. The Porcupine benchmarks are unchanged.
 
 ## Soundness and certificates
 
@@ -184,7 +285,7 @@ enum Event<Op, Resp> { Invoke(CallId, Op), Return(CallId, Resp), Tick(Time), Qui
   triggers exploration.
 - The checker places each call's linearization point: firing `InFlight` runs
   `apply` and leaves `Responded { resp }`.
-- `Return` must match a `Responded` via `admits`.
+- `Return` must equal a `Responded`.
 - **A call that never returns is not an event.** The client can't distinguish a
   lost request from a lost reply from a slow server, so the model doesn't either.
   The call stays `InFlight`: it may take effect at any later point, including
@@ -218,14 +319,14 @@ are on the model's clock, and the checker enforces them.
   pub enum Sched<T> {
       Later(T),         // from now on; must happen by the next assert_idle
       Timer(Time, T),   // at the given time
-      After(Time, T),   // not before the given time; must happen by the next assert_idle
-      Within(Time, T),  // from now on; must happen within the given duration
-      Maybe(T),         // may happen, may never
   }
   ```
 
   "Now" is the clock of the state the starting step leads to. Each has a builder
-  of the same name on both outcomes (`.later(..)`, `.timer(..)`, ...).
+  of the same name on both outcomes (`.later(..)`, `.timer(..)`). Work that must
+  run by a deadline but may run earlier is both: `.later(w).timer(deadline, w)`,
+  with `w` doing nothing once it has run. (There used to be `After`, `Within`
+  and `Maybe` as well; they are gone for now.)
 - **Overdue work goes first.** Work whose deadline has come on the model's clock,
   and that can run, runs before anything else: no call takes effect and nothing
   is observed until it has. Work that can't run owes nothing until it can.
@@ -246,7 +347,6 @@ are on the model's clock, and the checker enforces them.
 - **`assert_idle`** asserts the system is idle: every obligation that can run
   has run. Future timers are untouched, and so are calls still waiting for a
   response. It replaces the poll-until-terminal loop as the liveness check.
-- `Sched::Maybe` is work that is allowed but not owed: daemons, optional retries.
 - **Partitions and the clock.** A clock step touches every partition. A request
   that `Partitioned::broadcast` marks (it acts on every partition alike, starts
   nothing, sends nothing) is explained in each partition on its own when it is
@@ -264,7 +364,7 @@ explains it. There are five sources of choice.
 | **Interleaving**: the order of concurrent calls and background work | implicit: every pending item is a possible next move | the search, pruned by footprints |
 | **Timing**: when due work fires inside its window | the `Sched` each piece of work was started with | the search, bounded by deadlines |
 | **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads |
-| **Unknown values**: server-chosen ids, timestamps | `admits` with a pattern; see below | the `Return` |
+| **Unknown values**: server-chosen ids, timestamps | not supported yet; see below | the `Return` |
 
 Every choice is lazy. A branch exists only when something forces the move:
 - An outcome splits when its call linearizes, which happens when its response,
@@ -297,9 +397,9 @@ mechanisms keep it small, and all eight are in the prototype.
    1 and 32 nodes explored with footprints, versus width 128 and 2,458 nodes without.*
 3. **Deadlines.** Obligations have a `by` on the model's clock. When the clock
    passes it, the uncertainty is resolved once and then gone. Nothing stays pending forever unless the spec says so.
-4. **Subsumption (antichains).** `Maybe` work can always be skipped, so a node
-   simulates any node with the same state and owed work but a subset of its `Maybe`
-   work. Likewise for early answers (next item). The weaker node is discarded.
+4. **Subsumption (antichains).** Optional work (a call the history says never
+   returns) can always be skipped, so a node simulates any node with the same
+   state and owed work but a subset of its optional work. Likewise for early answers (next item). The weaker node is discarded.
 5. **Reads don't branch.** Linearizing a call whose outcomes leave the state
    unchanged only decides its answer. So instead of splitting the profile into
    "answered early" and "not yet", the call keeps the set of answers it could
@@ -329,6 +429,10 @@ mechanisms keep it small, and all eight are in the prototype.
    origins through both modes and asserts identical verdicts.
 7. **Structural step identity.** Steps are values, so identical work spawned on
    different branches converges to the same node. Accordant's GUIDs prevent this.
+   Pending work is still a multiset: identical work started twice is one item
+   with a count of 2, and runs twice (`tests/work.rs`). An earlier version kept a
+   set, which merged two identical lease timers into one; the fuzzer caught it
+   as certificates that did not replay.
 8. **Hard limits.** `max_width` and `max_explore` turn a blowup into an error that
    names the event. Exceeding them usually means the spec is missing a footprint
    or has unbounded non-determinism.
@@ -502,7 +606,8 @@ Porting also found three checker bugs, all fixed:
 
 - `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`, recording certificates.
-- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's.
+- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's. Below it, outside `certify`: legal-move enumeration and `marks`.
+- `src/sim.rs`: `Sim`, the model run as a server, on the same replay; its choices from a seed or from a testing library.
 - `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
 - `verus/accordant.rs`: the same statement, as the contract of the Rust function.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
@@ -510,5 +615,5 @@ Porting also found three checker bugs, all fixed:
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
-- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark in `resonate/examples/`.
+- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark and fuzz driver in `resonate/examples/`.
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

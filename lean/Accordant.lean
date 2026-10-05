@@ -65,22 +65,19 @@ inductive Event (X R D : Type) where
 inductive Sched (I : Type) where
   | later (req : I)                  -- from now on; must happen eventually
   | timer (at_ : Time) (req : I)     -- at the given time
-  | after (at_ : Time) (req : I)     -- not before the given time; must happen eventually
-  | within (d : Time) (req : I)      -- from now on; within the given duration
-  | maybe (req : I)                  -- from now on, or never
 
 /-- One possible effect of a request. -/
 structure ExternalOutcome (S R I D : Type) where
-  next  : S
-  res   : R
-  spawn : List (Sched I)
-  send  : List D
+  next : S
+  resp : R
+  work : List (Sched I)
+  send : List D
 
 /-- One possible effect of internal work. -/
 structure InternalOutcome (S I D : Type) where
-  next  : S
-  spawn : List (Sched I)
-  send  : List D
+  next : S
+  work : List (Sched I)
+  send : List D
 
 /-- The system: requests from clients, work it does on its own, and its clock. -/
 structure Model where
@@ -93,10 +90,10 @@ structure Model where
   external : External → State → List (ExternalOutcome State Response Internal Dispatch)
   /-- Internal work runs: every possible outcome. Empty: it can't run now. -/
   internal : Internal → State → List (InternalOutcome State Internal Dispatch)
-  /-- Whether a client seeing `observed` matches the `expected` response. -/
-  admits   : Response → Response → Bool
   /-- The model's clock in a state. -/
   now      : State → Time
+  /-- Responses can be compared: a client sees exactly the predicted one. -/
+  decEq    : DecidableEq Response := by infer_instance
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
@@ -124,9 +121,6 @@ structure Config (m : Model) where
 def schedule {I : Type} (now : Time) : Sched I → Work I
   | .later r    => ⟨r, now, none, true⟩
   | .timer t r  => ⟨r, max t now, some (max t now), true⟩
-  | .after t r  => ⟨r, max t now, none, true⟩
-  | .within d r => ⟨r, now, some (now + d), true⟩
-  | .maybe r    => ⟨r, now, none, false⟩
 
 def update {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : α → β :=
   fun x => if x = a then b else f x
@@ -160,8 +154,8 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       Step m c (.obs (.invoke call req))
         { c with calls := update c.calls call (some (.inFlight req)) }
   /-- A client receives the response its call took effect with. Observed. -/
-  | ret {c : Config m} {call expected res} :
-      c.calls call = some (.done expected) → m.admits expected res = true → ¬ c.overdue →
+  | ret {c : Config m} {call res} :
+      c.calls call = some (.done res) → ¬ c.overdue →
       Step m c (.obs (.ret call res)) { c with calls := update c.calls call none }
   /-- A client receives a dispatch that was sent and not yet received. Observed. -/
   | receive {c : Config m} {pre post msg} :
@@ -173,8 +167,8 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       c.calls call = some (.inFlight req) → o ∈ m.external req c.state → ¬ c.overdue →
       Step m c .silent
         { c with state := o.next
-                 calls := update c.calls call (some (.done o.res))
-                 work  := c.work ++ o.spawn.map (schedule (m.now o.next))
+                 calls := update c.calls call (some (.done o.resp))
+                 work  := c.work ++ o.work.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
   /-- Pending internal work runs with one of its outcomes; while some work is
       overdue, only overdue work with the earliest deadline runs. Silent. -/
@@ -183,7 +177,7 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       (c.overdue → c.First w) →
       Step m c .silent
         { c with state := o.next
-                 work  := pre ++ post ++ o.spawn.map (schedule (m.now o.next))
+                 work  := pre ++ post ++ o.work.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
 
 /-! ## Executions, and what they show a client -/
@@ -258,7 +252,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
   | .ret call res =>
       match c.calls call with
       | some (.done expected) =>
-          if m.admits expected res && !c.isOverdue then
+          if @decide (expected = res) (m.decEq expected res) && !c.isOverdue then
             some (.obs (.ret call res), { c with calls := update c.calls call none })
           else none
       | _ => none
@@ -276,8 +270,8 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
           | some o =>
               if !c.isOverdue then
                 some (.silent, { c with state := o.next
-                                        calls := update c.calls call (some (.done o.res))
-                                        work  := c.work ++ o.spawn.map (schedule (m.now o.next))
+                                        calls := update c.calls call (some (.done o.resp))
+                                        work  := c.work ++ o.work.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
@@ -290,7 +284,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
               if decide (w.after ≤ m.now c.state) && c.mayRun w then
                 some (.silent, { c with state := o.next
                                         work  := c.work.take i ++ c.work.drop (i + 1) ++
-                                                   o.spawn.map (schedule (m.now o.next))
+                                                   o.work.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
@@ -360,7 +354,8 @@ theorem move_step {c c' : Config m} {mv : Move m} {l : Label m}
     split at h <;> try simp at h
     rename_i expected hcall
     obtain ⟨⟨ha, ho⟩, rfl, rfl⟩ := h
-    exact .ret hcall ha (not_overdue ho)
+    subst ha
+    exact .ret hcall (not_overdue ho)
   | receive i =>
     simp only [Config.move] at h
     split at h <;> try simp at h
@@ -436,7 +431,6 @@ abbrev counter : Model where
   Dispatch := Empty
   external := fun _ n => [⟨n + 1, n + 1, [], []⟩]
   internal := fun e _ => nomatch e
-  admits   := fun expected observed => expected == observed
   now      := fun _ => 0
 
 abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
@@ -446,7 +440,7 @@ abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
 example : Valid counter (0 : Nat) [.invoke 7 (), .ret 7 1] := by
   refine ⟨[(.obs (.invoke 7 ()), _), (.silent, _), (.obs (.ret 7 1), _)],
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
-     .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
+     .ret ?_ ?_, trivial⟩, rfl⟩
   all_goals simp [initial, update, Config.overdue, counter]
 
 end Accordant

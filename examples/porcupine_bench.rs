@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use accordant::{Checker, Config, Engine, Event, ExternalOutcome, Footprint, HashedMap, Model, Partitioned, Touches};
+use accordant::{Checker, Config, Engine, Event, Verdict, ExternalOutcome, Footprint, HashedMap, Model, Partitioned, Touches};
 
 const DATA: &str = "bench/porcupine/porcupine/test_data";
 
@@ -272,10 +272,10 @@ where
         (false, true) => c.check_certified(events.iter().cloned()).map(|_| ()),
         (true, certify) => c.check_complete(events).map(|_| ()).and_then(|_| if certify { c.certified().map(|_| ()) } else { Ok(()) }),
     };
-    match r {
-        Ok(()) => (true, None),
-        Err(v) if v.reason.contains("exceeds") || v.reason.contains("explored") => (false, Some(format!("event {}: {}", v.index, v.reason))),
-        Err(_) => (false, None),
+    match Verdict::from(r) {
+        Verdict::Ok(()) => (true, None),
+        Verdict::Unknown(v) => (false, Some(format!("event {}: {}", v.index, v.reason))),
+        Verdict::Ko(_) => (false, None),
     }
 }
 

@@ -19,9 +19,8 @@
 //!   enforces them.
 //! * **Internal work is data, not closures,** so two explanations that start the
 //!   same work converge.
-//! * **When internal work runs is part of starting it** ([`Sched`]): later,
-//!   at a timer, after a time, within a window, or maybe never. Deadlines are
-//!   what keep the search small.
+//! * **When internal work runs is part of starting it** ([`Sched`]): later
+//!   or at a timer. Deadlines are what keep the search small.
 //!
 //! A model is checked as it is. Two optional traits make checking faster:
 //! [`Footprint`] says which keys a step touches, and [`Partitioned`] groups
@@ -30,12 +29,14 @@
 
 mod certificate;
 mod checker;
+mod sim;
 mod hashed_map;
 mod hashed_set;
 mod intern;
 
-pub use certificate::{certify, Move};
-pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Violation};
+pub use certificate::{certify, marks, Move};
+pub use sim::Sim;
+pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Verdict, Violation};
 pub use hashed_map::HashedMap;
 pub use hashed_set::HashedSet;
 pub use intern::{Interned, Interner};
@@ -69,7 +70,9 @@ pub trait Model {
 
     /// A request takes effect in `state`: every allowed outcome. An empty list
     /// means it cannot take effect here.
-    fn external(&self, req: &Self::External, state: &Self::State) -> Vec<ExternalOutcome<Self>>;
+    fn external(&self, _req: &Self::External, _state: &Self::State) -> Vec<ExternalOutcome<Self>> {
+        Vec::new()
+    }
 
     /// Internal work runs in `state`: every possible successor. An empty list
     /// means it can't run yet and stays pending; `InternalOutcome::same(state)`
@@ -89,13 +92,31 @@ pub trait Model {
     fn now(&self, _state: &Self::State) -> Time {
         0
     }
+}
 
+/// Optional, for testing: names for interesting things a step did ("lease
+/// expired, task re-dispatched"). The checker reads them off the execution a
+/// certificate describes ([`marks`]), so a test knows which behaviors a trace
+/// exercised: coverage of the spec rather than of the code.
+pub trait Marks: Model {
+    /// Every mark the model can produce, so coverage can report the ones no
+    /// trace reached.
+    fn all_marks(&self) -> Vec<&'static str>;
 
-    /// Whether an observed response matches the one the model predicts.
-    /// Override for wildcards (server-chosen ids, timestamps).
-    fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool {
-        expected == observed
+    /// The marks of a request taking effect in `before` with outcome `out`.
+    fn external_marks(&self, req: &Self::External, before: &Self::State, out: &ExternalOutcome<Self>) -> Vec<&'static str>;
+
+    /// The marks of internal work running in `before` with outcome `out`.
+    fn internal_marks(&self, _req: &Self::Internal, _before: &Self::State, _out: &InternalOutcome<Self>) -> Vec<&'static str> {
+        Vec::new()
     }
+}
+
+/// Optional, for testing: requests worth trying next from a state, each with
+/// why. A fuzz driver asks the checker, which asks the model for every state
+/// the system may be in ([`Checker::suggestions`]).
+pub trait Explore: Model {
+    fn suggest(&self, state: &Self::State) -> Vec<(Self::External, &'static str)>;
 }
 
 /// Optional, for speed: which keys a request or internal step touches. To
@@ -118,8 +139,9 @@ pub trait Footprint: Model {
     /// Whether the request only moves the clock (`AdvanceClock`): it has one
     /// outcome, which changes nothing but [`Model::now`], starts no work and
     /// sends nothing. Its footprint is everything, but what it affects is the
-    /// work that falls due by the new time, so the checker looks at that work,
-    /// and the calls in flight on its keys, instead of all of it. With
+    /// work that falls due by the new time and whatever could happen before it
+    /// (calls in flight and work that can run, which read the clock), so the
+    /// checker looks at those instead of all of it. With
     /// partitions, it is explained in each partition on its own when it is
     /// answered before anything else is observed.
     fn moves_clock(&self, _req: &Self::External) -> bool {
@@ -153,31 +175,25 @@ pub enum Sched<T> {
     Later(T),
     /// A timer: runs exactly at the given time.
     Timer(Time, T),
-    /// Runs any time after the given time; must have happened by the next `assert_idle`.
-    After(Time, T),
-    /// Runs any time from now on; must have happened within the given duration.
-    Within(Time, T),
-    /// May run any time from now on, or never.
-    Maybe(T),
 }
 
 /// One possible effect of a request: the next state, the response, the
 /// internal work it starts, and the dispatches it sends.
 pub struct ExternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
-    pub res: M::Response,
-    pub spawn: Vec<Sched<M::Internal>>,
+    pub resp: M::Response,
+    pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> ExternalOutcome<M> {
-    pub fn new(res: M::Response, next: M::State) -> Self {
-        ExternalOutcome { next, res, spawn: Vec::new(), send: Vec::new() }
+    pub fn new(resp: M::Response, next: M::State) -> Self {
+        ExternalOutcome { next, resp, work: Vec::new(), send: Vec::new() }
     }
 
     /// The response, with the state unchanged.
-    pub fn same(res: M::Response, state: &M::State) -> Self {
-        ExternalOutcome::new(res, state.clone())
+    pub fn same(resp: M::Response, state: &M::State) -> Self {
+        ExternalOutcome::new(resp, state.clone())
     }
 
     /// A dispatch to a client, sent when the request takes effect. It may be
@@ -189,31 +205,13 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 
     /// Internal work that runs later.
     pub fn later(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Later(step));
+        self.work.push(Sched::Later(step));
         self
     }
 
     /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Timer(at, step));
-        self
-    }
-
-    /// Internal work that runs any time after `at`, eventually.
-    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::After(at, step));
-        self
-    }
-
-    /// Internal work that runs within `d` from now.
-    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Within(d, step));
-        self
-    }
-
-    /// Internal work that may run, or never.
-    pub fn maybe(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Maybe(step));
+        self.work.push(Sched::Timer(at, step));
         self
     }
 }
@@ -223,13 +221,13 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 /// [`Checker::receive`]).
 pub struct InternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
-    pub spawn: Vec<Sched<M::Internal>>,
+    pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> InternalOutcome<M> {
     pub fn new(next: M::State) -> Self {
-        InternalOutcome { next, spawn: Vec::new(), send: Vec::new() }
+        InternalOutcome { next, work: Vec::new(), send: Vec::new() }
     }
 
     /// A message to a client. It may be received once, at any time after, or never.
@@ -245,31 +243,13 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
 
     /// Internal work that runs later.
     pub fn later(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Later(step));
+        self.work.push(Sched::Later(step));
         self
     }
 
     /// Internal work that runs exactly at `at`.
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Timer(at, step));
-        self
-    }
-
-    /// Internal work that runs any time after `at`, eventually.
-    pub fn after(mut self, at: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::After(at, step));
-        self
-    }
-
-    /// Internal work that runs within `d` from now.
-    pub fn within(mut self, d: Time, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Within(d, step));
-        self
-    }
-
-    /// Internal work that may run, or never.
-    pub fn maybe(mut self, step: M::Internal) -> Self {
-        self.spawn.push(Sched::Maybe(step));
+        self.work.push(Sched::Timer(at, step));
         self
     }
 }
