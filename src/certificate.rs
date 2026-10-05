@@ -85,7 +85,7 @@ impl<'m, M: Model> Config<'m, M> {
         w.must && w.after <= now && w.due.is_some_and(|d| d <= now) && !self.m.internal(&w.req, &self.state).is_empty()
     }
 
-    fn overdue(&self) -> bool {
+    pub(crate) fn overdue(&self) -> bool {
         self.work.iter().any(|w| self.work_overdue(w))
     }
 
@@ -158,6 +158,103 @@ impl<'m, M: Model> Config<'m, M> {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------------
+// Not part of `certify`: helpers built on it, for the simulator and coverage.
+
+impl<X: Clone, R: Clone> Clone for Call<X, R> {
+    fn clone(&self) -> Self {
+        match self {
+            Call::InFlight(x) => Call::InFlight(x.clone()),
+            Call::Done(r) => Call::Done(r.clone()),
+        }
+    }
+}
+
+impl<M: Model> Clone for Config<'_, M> {
+    fn clone(&self) -> Self {
+        Config { m: self.m, state: self.state.clone(), calls: self.calls.clone(), work: self.work.clone(), sent: self.sent.clone() }
+    }
+}
+
+impl<M: Model> Config<'_, M> {
+    pub(crate) fn state(&self) -> &M::State {
+        &self.state
+    }
+
+    /// Calls in flight or answered and not yet returned.
+    pub(crate) fn open_calls(&self) -> usize {
+        self.calls.len()
+    }
+
+    /// Every move that could come next except a new request: `apply` decides
+    /// which are legal.
+    pub(crate) fn candidates(&self) -> Vec<MoveOf<M>> {
+        let mut out = Vec::new();
+        let mut calls: Vec<_> = self.calls.iter().collect();
+        calls.sort_by_key(|(c, _)| **c);
+        for (call, c) in calls {
+            match c {
+                Call::InFlight(req) => {
+                    let n = self.m.external(req, &self.state).len();
+                    out.extend((0..n).map(|j| Move::Effect { call: *call, j }));
+                }
+                Call::Done(res) => out.push(Move::Return { call: *call, res: res.clone() }),
+            }
+        }
+        for (i, w) in self.work.iter().enumerate() {
+            let n = self.m.internal(&w.req, &self.state).len();
+            out.extend((0..n).map(|j| Move::Run { i, j }));
+        }
+        out.extend((0..self.sent.len()).map(|i| Move::Receive { i }));
+        out
+    }
+
+    pub(crate) fn legal(&self, mv: &MoveOf<M>) -> bool {
+        self.clone().apply(mv.clone()).is_ok()
+    }
+
+    /// The marks of a move, in the configuration it is made from.
+    fn marks_of(&self, mv: &MoveOf<M>) -> Vec<&'static str>
+    where
+        M: crate::Marks,
+    {
+        match mv {
+            Move::Effect { call, j } => match self.calls.get(call) {
+                Some(Call::InFlight(req)) => {
+                    let outs = self.m.external(req, &self.state);
+                    outs.get(*j).map(|o| self.m.external_marks(req, &self.state, o)).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
+            Move::Run { i, j } => match self.work.get(*i) {
+                Some(w) => {
+                    let outs = self.m.internal(&w.req, &self.state);
+                    outs.get(*j).map(|o| self.m.internal_marks(&w.req, &self.state, o)).unwrap_or_default()
+                }
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The marks the execution a certificate describes passes through: coverage,
+/// from one concrete explanation of a trace. `Err`: the position of the first
+/// illegal move.
+pub fn marks<M: crate::Marks>(
+    m: &M,
+    init: M::State,
+    moves: impl IntoIterator<Item = MoveOf<M>>,
+) -> Result<std::collections::BTreeSet<&'static str>, usize> {
+    let mut c = Config::initial(m, init);
+    let mut seen = std::collections::BTreeSet::new();
+    for (k, mv) in moves.into_iter().enumerate() {
+        seen.extend(c.marks_of(&mv));
+        c.apply(mv).map_err(|()| k)?;
+    }
+    Ok(seen)
 }
 
 /// What a certificate shows a client, if every move in it is legal; otherwise

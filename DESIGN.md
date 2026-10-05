@@ -128,6 +128,92 @@ position in the trace. The checker keeps its state afterwards, so a long trace c
 `check_calls` is the shape of a request/response log, like
 resonate-specification's NDJSON traces.
 
+### Three answers: OK, KO, UNKNOWN
+
+A rejection is not always a refutation. The checker gives up when a search
+exceeds `max_explore`, when the profile exceeds `max_width`, when the spec breaks
+a rule the checker relies on (work escaping its partitions), or when a
+certificate can't be produced. Those `Violation`s carry `unknown: true` and a
+reason starting with "gave up". `Verdict::from(result)` sorts a result into
+three:
+
+- `Ok(_)`: an execution of the model produces the trace (with certificates:
+  one is in hand, and `certify` replays it).
+- `Ko(v)`: no execution does. Every search was exhaustive.
+- `Unknown(v)`: the checker gave up; `v.reason` says why.
+
+`tests/verdict.rs` shows all three on one model.
+
+## Testing with the model: marks, suggestions, a simulator, a fuzzer
+
+The model that checks a trace can also produce one and steer it.
+
+- **`Marks`** (optional trait): names for interesting things a step did, read
+  from its request, the state before and the outcome (`"lease expired"`,
+  `"task.fence 409"`). `accordant::marks(m, init, certificate)` replays a
+  certificate and collects the marks of the execution it describes. That is
+  coverage of the spec, not of the server's code: which behaviors this trace
+  is explained by. `all_marks` lists every mark so a report can show the ones
+  nothing reached.
+- **`Explore`** (optional trait): `suggest(state)`, requests worth trying from a
+  state, each with why. `Checker::suggestions(limit)` asks for every state the
+  system may be in, so a driver gets hints from what the checker knows.
+- **`Sim`**: the model run as a server. It takes requests and, at random, makes
+  any move the model allows: a call takes effect with any of its outcomes,
+  work runs, a response or dispatch is delivered. Every move goes through the
+  replay behind `certify`, so a simulator trace is valid by construction.
+  `quiesce` runs work until none can run (before `assert_idle`).
+
+`resonate/examples/fuzz.rs` puts them together: a client sends requests to a
+`Sim` of the spec (or of the spec with a bug planted), a checker follows,
+and an accepted run's certificate gives its marks. In `guided` mode, three in
+four requests come from the checker's suggestions, the least tried reason
+first. Every run ends with the server idle and a client reading every object,
+so work the spec lets the server put off (a lease expiring) must have happened.
+
+```text
+cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-fence|lease-forever]
+```
+
+300 runs of 30 requests (about 0.3 s per mode):
+
+| server | mode | runs KO | marks reached |
+|---|---|---|---|
+| spec | random | 0 | 51/65 |
+| spec | guided | 0 | 54/65 |
+| fence ignores the version | random | 30 | |
+| fence ignores the version | guided | 70 | |
+| a lease never expires | random | 2 | |
+| a lease never expires | guided | 17 | |
+
+"Lease expired" is reached in 3 random runs and 47 guided ones. It takes a
+chain (a task released, re-acquired with a short lease, the clock past its end
+before the promise's deadline) that random requests rarely assemble.
+
+**The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
+is a checker bug. `CROSS=1` also checks every trace with the partitioned and
+depth-first checkers. The first runs found three false KOs, all fixed and
+covered by `resonate/tests/sim.rs`:
+
+1. A call in flight reads the clock (`created_at`), so it doesn't commute with a
+   clock move. The clock's footprint was only the work falling due. Now it also
+   includes every call in flight and runnable step that comes out differently
+   when the clock moves first (checked directly: fire then tick versus tick
+   then fire).
+2. Settling a promise starts the resume of the task that awaits it, and the
+   resume sends the dispatch observed. A static footprint (`{promise}`) can't
+   name the awaiter, which is in the state. Footprints now include the keys of
+   the work an item's outcomes start, followed transitively, and of the
+   dispatches they send.
+3. A clock move is broadcast to every factor, but partitions no factor held yet
+   never saw its invoke. It is now held until the next event. If that event is
+   its return, it is explained per partition; otherwise, in one factor, with the
+   invoke replayed first.
+
+The price of the first two: a footprint now runs the model. On
+`resonate_bench length 400`, where about 400 stale lease checks stay pending,
+the check takes 3.1 s instead of 1.1 s. The Porcupine benchmarks are unchanged.
+
 ## Soundness and certificates
 
 What the checker promises, in one sentence: if it accepts a trace, then some
@@ -502,7 +588,8 @@ Porting also found three checker bugs, all fixed:
 
 - `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`, recording certificates.
-- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's.
+- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's. Below it, outside `certify`: legal-move enumeration and `marks`.
+- `src/sim.rs`: `Sim`, the model run as a server, on the same replay.
 - `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
 - `verus/accordant.rs`: the same statement, as the contract of the Rust function.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
@@ -510,5 +597,5 @@ Porting also found three checker bugs, all fixed:
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
-- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark in `resonate/examples/`.
+- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark and fuzz driver in `resonate/examples/`.
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

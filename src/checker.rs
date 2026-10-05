@@ -204,6 +204,10 @@ pub struct Stats {
     pub subsumed: usize,
 }
 
+/// Why a trace was not accepted. Either the checker showed no execution of the
+/// model produces it ([`Verdict::Ko`]), or it gave up before deciding
+/// ([`Verdict::Unknown`]): a budget ran out, the checker was misused, or a
+/// certificate failed to replay (a checker bug, never a verdict on the trace).
 #[derive(Clone, Debug)]
 pub struct Violation {
     pub index: usize,
@@ -211,11 +215,57 @@ pub struct Violation {
     pub reason: String,
     /// The profile the event could not be explained from.
     pub profile: Vec<String>,
+    /// The checker gave up: the trace may or may not be valid.
+    pub unknown: bool,
+}
+
+/// Reasons that are not verdicts start with this.
+const GAVE_UP: &str = "gave up: ";
+
+fn gave_up(reason: &str) -> bool {
+    reason.starts_with(GAVE_UP)
+}
+
+/// The checker's answer about a trace.
+#[derive(Debug)]
+pub enum Verdict<T> {
+    /// Some execution of the model produces the trace (with a certificate,
+    /// when one was asked for).
+    Ok(T),
+    /// No execution of the model produces the trace.
+    Ko(Violation),
+    /// The checker gave up before deciding.
+    Unknown(Violation),
+}
+
+impl<T> From<Result<T, Violation>> for Verdict<T> {
+    fn from(r: Result<T, Violation>) -> Self {
+        match r {
+            Ok(t) => Verdict::Ok(t),
+            Err(v) if v.unknown => Verdict::Unknown(v),
+            Err(v) => Verdict::Ko(v),
+        }
+    }
+}
+
+impl<T> Verdict<T> {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Verdict::Ok(_))
+    }
+
+    pub fn is_ko(&self) -> bool {
+        matches!(self, Verdict::Ko(_))
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Verdict::Unknown(_))
+    }
 }
 
 impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "event #{} {} : {}", self.index, self.event, self.reason)?;
+        let what = if self.unknown { "unknown" } else { "violation" };
+        writeln!(f, "{what} at event #{} {} : {}", self.index, self.event, self.reason)?;
         for n in &self.profile {
             writeln!(f, "  candidate {n}")?;
         }
@@ -255,7 +305,7 @@ pub struct Checker<S: Engine> {
     /// when call ids repeat.
     answers: HashMap<CallId, Re<S>>,
     /// A clock move in flight, explained in every factor on its own.
-    broadcasting: Option<(CallId, Ex<S>)>,
+    broadcasting: Option<(CallId, Ex<S>, usize)>,
     factors: Vec<Factor<S>>,
     /// The factor an event is being explained in.
     profile: Vec<Node<S>>,
@@ -351,6 +401,27 @@ impl<S: Engine> Checker<S> {
 
     pub fn states(&self) -> impl Iterator<Item = St<S>> {
         self.profile().into_iter().map(|n| (*n.state).clone())
+    }
+
+    /// Requests worth trying next, with why: the model's suggestions for every
+    /// state the system may be in (at most `limit` states), each once. For a
+    /// fuzz driver: the checker knows what the server may have done; the model
+    /// knows what is interesting to ask then.
+    pub fn suggestions(&self, limit: usize) -> Vec<(Ex<S>, &'static str)>
+    where
+        S::M: crate::Explore,
+        Ex<S>: PartialEq,
+    {
+        use crate::Explore;
+        let mut out: Vec<(Ex<S>, &'static str)> = Vec::new();
+        for s in self.states().take(limit) {
+            for x in self.engine.model().suggest(&s) {
+                if !out.contains(&x) {
+                    out.push(x);
+                }
+            }
+        }
+        out
     }
 
     /// True if `pred` holds in every candidate state: Accordant's "all terminal" poll check.
@@ -461,7 +532,7 @@ impl<S: Engine> Checker<S> {
     /// Needs a fresh checker, and leaves it fit only for [`Checker::certified`].
     pub fn check_complete(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<&Stats, Violation> {
         if self.stats.events > 0 {
-            return Err(Violation { index: 0, event: "check_complete".into(), reason: "needs a fresh checker".into(), profile: Vec::new() });
+            return Err(Violation { index: 0, event: "check_complete".into(), reason: "gave up: needs a fresh checker".into(), profile: Vec::new(), unknown: true });
         }
         self.mark_orphans(trace);
         self.answers = answers(trace);
@@ -487,8 +558,8 @@ impl<S: Engine> Checker<S> {
                         let r = self.dfs_resume(&mut run, budget);
                         self.scope = None;
                         if let Some(step) = self.escaped.borrow_mut().take() {
-                            let reason = "spec error: work reaches outside the partitions of the request or step that spawned it";
-                            return Err(Violation { index: 0, event: step, reason: reason.into(), profile: Vec::new() });
+                            let reason = "gave up: spec error: work reaches outside the partitions of the request or step that spawned it";
+                            return Err(Violation { index: 0, event: step, reason: reason.into(), profile: Vec::new(), unknown: true });
                         }
                         match r {
                             Some(Ok(_)) => {}
@@ -500,8 +571,8 @@ impl<S: Engine> Checker<S> {
                     if spent > self.cfg.max_explore {
                         let (_, sub, run) = &still[0];
                         let j = run.stack.last().map_or(0, |f| f.i);
-                        let reason = format!("explored more than {} nodes", self.cfg.max_explore);
-                        return Err(Violation { index: sub[j].0, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new() });
+                        let reason = format!("{GAVE_UP}explored more than {} nodes", self.cfg.max_explore);
+                        return Err(Violation { index: sub[j].0, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new(), unknown: true });
                     }
                     open = still;
                     budget = budget.saturating_mul(2);
@@ -561,8 +632,8 @@ impl<S: Engine> Checker<S> {
         let budget = self.cfg.max_explore;
         self.dfs_resume(&mut run, budget).unwrap_or_else(|| {
             let j = run.stack.last().map_or(0, |f| f.i);
-            let reason = format!("explored more than {budget} nodes");
-            Err(Violation { index: j, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new() })
+            let reason = format!("{GAVE_UP}explored more than {budget} nodes");
+            Err(Violation { index: j, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new(), unknown: true })
         })
     }
 
@@ -625,14 +696,14 @@ impl<S: Engine> Checker<S> {
         self.stats.explored += explored;
         let d = run.deepest;
         let reason = "no execution of the model explains the history past this event".into();
-        Some(Err(Violation { index: d, event: format!("{:?}", run.evs[d]), reason, profile: Vec::new() }))
+        Some(Err(Violation { index: d, event: format!("{:?}", run.evs[d]), reason, profile: Vec::new(), unknown: false }))
     }
 
     /// The branches from `n` before event `e`: the event consumed, if nothing
     /// is owed before it; otherwise each single move on the keys of what is
     /// owed, in invocation order. Each says whether it consumed the event.
     fn children(&self, n: &Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<Vec<(bool, Node<S>)>, Violation> {
-        let at = |v: String| Violation { index: 0, event: format!("{e:?}"), reason: v, profile: Vec::new() };
+        let at = |v: String| Violation { index: 0, event: format!("{e:?}"), unknown: gave_up(&v), reason: v, profile: Vec::new() };
         let unsent = matches!(e, Ev::Receive(msg) if !self.has_sent(n, msg));
         if !self.owes(n, e) && !unsent {
             return Ok(self.consume(n, e).map_err(at)?.into_iter().map(|m| (true, m)).collect());
@@ -748,7 +819,13 @@ impl<S: Engine> Checker<S> {
     /// [`Checker::new`] or [`Checker::with_footprints`].
     pub fn certified(&self) -> Result<Vec<MoveOf<S::M>>, Violation> {
         let n = self.observed.len();
-        let fail = |reason: String| Violation { index: n, event: "certificate".into(), reason, profile: Vec::new() };
+        let fail = |reason: String| Violation {
+            index: n,
+            event: "certificate".into(),
+            reason: format!("{GAVE_UP}{reason}"),
+            profile: Vec::new(),
+            unknown: true,
+        };
         if !self.recording {
             return Err(fail("a certificate needs Config::certify from the start".into()));
         }
@@ -872,12 +949,15 @@ impl<S: Engine> Checker<S> {
     fn apply_ev(&mut self, e: Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
         let index = self.stats.events;
         self.stats.events += 1;
-        if let Some((b, _)) = &self.broadcasting {
+        if let Some((b, _, _)) = &self.broadcasting {
             if !matches!(&e, Ev::Return(call, _) if call == b) {
                 // Something else is observed while the broadcast is in flight:
-                // from here on it is explained in one factor that holds everything.
-                self.broadcasting = None;
-                self.gather(Scope::All);
+                // from here on it is explained in one factor that holds
+                // everything, which sees its invoke first. Nothing was observed
+                // in between, so the order is the observed one.
+                let (b, op, at) = self.broadcasting.take().expect("checked");
+                let i = self.gather(Scope::All);
+                self.within(i, |c| c.observe_in(at, &Ev::Invoke(b, op)))?;
             }
         }
         match &e {
@@ -886,12 +966,13 @@ impl<S: Engine> Checker<S> {
                     && self.engine.moves_clock(op)
                     && !self.factors.iter().any(|f| f.parts.is_none()) =>
             {
-                self.each_factor(index, &e)?;
-                self.broadcasting = Some((*call, op.clone()));
+                // Held until the next event: its return (explained in each
+                // partition on its own) or anything else (in one factor).
+                self.broadcasting = Some((*call, op.clone(), index));
                 Ok(())
             }
-            Ev::Return(call, res) if self.broadcasting.as_ref().is_some_and(|(b, _)| b == call) => {
-                let (_, op) = self.broadcasting.take().expect("checked");
+            Ev::Return(call, res) if self.broadcasting.as_ref().is_some_and(|(b, _, _)| b == call) => {
+                let (_, op, at) = self.broadcasting.take().expect("checked");
                 // Partitions no factor holds take the request as well.
                 let model = self.engine.model();
                 let rest = match model.external(&op, &self.rest).as_slice() {
@@ -902,11 +983,16 @@ impl<S: Engine> Checker<S> {
                         o.next.clone()
                     }
                     _ => {
-                        let reason = "spec error: a broadcast request must have one outcome that starts no work and sends nothing";
+                        let reason = "gave up: spec error: a broadcast request must have one outcome that starts no work and sends nothing";
                         return Err(self.violation(index, &e, reason.into()));
                     }
                 };
-                self.each_factor(index, &e)?;
+                let saved = self.factors.clone();
+                self.each_factor(at, &Ev::Invoke(*call, op))?;
+                if let Err(v) = self.each_factor(index, &e) {
+                    self.factors = saved;
+                    return Err(v);
+                }
                 self.rest = rest;
                 Ok(())
             }
@@ -968,8 +1054,9 @@ impl<S: Engine> Checker<S> {
             return Err(Violation {
                 index: self.stats.events - 1,
                 event: step,
-                reason: "spec error: work reaches outside the partitions of the request or step that spawned it".into(),
+                reason: "gave up: spec error: work reaches outside the partitions of the request or step that spawned it".into(),
                 profile: Vec::new(),
+                unknown: true,
             });
         }
         self.split(i);
@@ -1166,7 +1253,7 @@ impl<S: Engine> Checker<S> {
             return Err(self.violation(index, e, "no candidate state explains this event".into()));
         }
         if next.len() > self.cfg.max_width {
-            return Err(self.violation(index, e, format!("profile width {} exceeds max_width", next.len())));
+            return Err(self.violation(index, e, format!("{GAVE_UP}profile width {} exceeds max_width", next.len())));
         }
         self.profile = next;
         self.states.collect();
@@ -1175,6 +1262,7 @@ impl<S: Engine> Checker<S> {
 
     fn violation(&self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>, reason: String) -> Violation {
         Violation {
+            unknown: gave_up(&reason),
             index,
             event: format!("{e:?}"),
             reason,
@@ -1232,7 +1320,7 @@ impl<S: Engine> Checker<S> {
         while let Some(m) = queue.pop_front() {
             *explored += 1;
             if *explored > self.cfg.max_explore {
-                return Err(format!("explored more than {} nodes", self.cfg.max_explore));
+                return Err(format!("{GAVE_UP}explored more than {} nodes", self.cfg.max_explore));
             }
             let first = self.earliest_overdue(&m);
             let m = if first.is_none() { self.saturate(m, relevant) } else { m };
@@ -1382,18 +1470,23 @@ impl<S: Engine> Checker<S> {
                 Touches::Only(ks) => keys.extend(ks),
             }
         }
+        let mut prints = Vec::new();
+        for item in n.pending.iter().filter(|i| self.can_fire(i, &n.state)) {
+            match self.footprint(item, n) {
+                Touches::Everything => return Touches::Everything,
+                Touches::Only(ks) => prints.push(ks),
+            }
+        }
         loop {
             let before = keys.len();
-            for item in n.pending.iter().filter(|i| self.can_fire(i, &n.state)) {
-                match self.footprint(item, n) {
-                    Touches::Everything => return Touches::Everything,
-                    Touches::Only(ks) => {
-                        if ks.iter().any(|k| keys.contains(k)) {
-                            keys.extend(ks);
-                        }
-                    }
+            prints.retain(|ks| {
+                if ks.iter().any(|k| keys.contains(k)) {
+                    keys.extend(ks.iter().cloned());
+                    false
+                } else {
+                    true
                 }
-            }
+            });
             if keys.len() == before {
                 return Touches::Only(keys.into_iter().collect());
             }
@@ -1415,14 +1508,23 @@ impl<S: Engine> Checker<S> {
     }
 
     /// What firing `item` in node `n` may affect. A clock move affects the
-    /// work that falls due by the time it moves to; anything else, its keys.
+    /// work that falls due by the time it moves to, and whatever could happen
+    /// before it and would come out differently after it (a call in flight
+    /// that reads the clock). Anything else affects its keys.
     fn footprint(&self, item: &P<S>, n: &Node<S>) -> Touches<S::Key> {
-        let Pending::InFlight { op, .. } = item else { return self.keys(item) };
+        let Pending::InFlight { op, .. } = item else { return self.reach(item, n) };
         if !self.engine.moves_clock(op) {
-            return self.keys(item);
+            return self.reach(item, n);
         }
         let model = self.engine.model();
         let mut keys = Vec::new();
+        let others = n.pending.iter().filter(|i| *i != item && !self.is_clock(i) && self.can_fire(i, &n.state));
+        for other in others.filter(|i| !self.commutes_with_clock(i, op, &n.state)) {
+            match self.keys(other) {
+                Touches::Everything => return Touches::Everything,
+                Touches::Only(ks) => keys.extend(ks),
+            }
+        }
         for o in model.external(op, &n.state) {
             let to = model.now(&o.next);
             for work in &n.pending {
@@ -1432,6 +1534,97 @@ impl<S: Engine> Checker<S> {
                             Touches::Everything => return Touches::Everything,
                             Touches::Only(ks) => keys.extend(ks),
                         }
+                    }
+                }
+            }
+        }
+        Touches::Only(keys)
+    }
+
+    /// Whether firing `item` and then moving the clock with `clock` comes out as
+    /// moving it first and then firing `item`, outcome for outcome. Work started
+    /// counts as not commuting: it is timed by the clock it starts on.
+    fn commutes_with_clock(&self, item: &P<S>, clock: &Ex<S>, state: &St<S>) -> bool {
+        let model = self.engine.model();
+        let tick = |s: &St<S>| -> Option<St<S>> {
+            match model.external(clock, s).as_slice() {
+                [o] if o.spawn.is_empty() && o.send.is_empty() => Some(o.next.clone()),
+                _ => None,
+            }
+        };
+        let Some(later) = tick(state) else { return false };
+        type Seen<S> = Vec<(St<S>, Option<Re<S>>, Vec<Ms<S>>)>;
+        let outcomes = |s: &St<S>| -> Option<Seen<S>> {
+            match item {
+                Pending::InFlight { op, .. } => model
+                    .external(op, s)
+                    .into_iter()
+                    .map(|o| o.spawn.is_empty().then_some((o.next, Some(o.res), o.send)))
+                    .collect(),
+                Pending::Step { step, .. } => {
+                    model.internal(step, s).into_iter().map(|o| o.spawn.is_empty().then_some((o.next, None, o.send))).collect()
+                }
+                _ => None,
+            }
+        };
+        let (Some(first), Some(mut second)) = (outcomes(state), outcomes(&later)) else { return false };
+        let Some(mut first) = first.into_iter().map(|(n, r, m)| Some((tick(&n)?, r, m))).collect::<Option<Seen<S>>>() else {
+            return false;
+        };
+        if first.len() != second.len() {
+            return false;
+        }
+        // The same outcomes, in any order.
+        for o in first.drain(..) {
+            match second.iter().position(|x| *x == o) {
+                Some(k) => {
+                    second.swap_remove(k);
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// The keys `item` touches, and those of what firing it in `n` leads to:
+    /// the work its outcomes start (and the work that starts, in the state it
+    /// starts in) and the dispatches they send. A static footprint can't say
+    /// these: settling a promise resumes whichever tasks await it in the state.
+    fn reach(&self, item: &P<S>, n: &Node<S>) -> Touches<S::Key> {
+        let model = self.engine.model();
+        let mut keys = match self.keys(item) {
+            Touches::Everything => return Touches::Everything,
+            Touches::Only(ks) => ks,
+        };
+        // (state, work started in it, dispatches sent, depth), followed until
+        // no more is started.
+        type Led<S> = (St<S>, Vec<Sched<In<S>>>, Vec<Ms<S>>, usize);
+        let mut todo: Vec<Led<S>> = match item {
+            Pending::InFlight { op, .. } => model.external(op, &n.state).into_iter().map(|o| (o.next, o.spawn, o.send, 0)).collect(),
+            Pending::Step { step, .. } => model.internal(step, &n.state).into_iter().map(|o| (o.next, o.spawn, o.send, 0)).collect(),
+            _ => return Touches::Only(keys),
+        };
+        while let Some((state, spawn, send, depth)) = todo.pop() {
+            for msg in &send {
+                match self.engine.dispatch_keys(msg) {
+                    Touches::Everything => return Touches::Everything,
+                    Touches::Only(ks) => keys.extend(ks),
+                }
+            }
+            for w in spawn {
+                let step = match w {
+                    Sched::Later(r) | Sched::Timer(_, r) | Sched::After(_, r) | Sched::Within(_, r) | Sched::Maybe(r) => r,
+                };
+                match self.engine.internal_keys(&step) {
+                    Touches::Everything => return Touches::Everything,
+                    Touches::Only(ks) => keys.extend(ks),
+                }
+                if depth >= 8 {
+                    return Touches::Everything;
+                }
+                for o in model.internal(&step, &state) {
+                    if !o.spawn.is_empty() || !o.send.is_empty() {
+                        todo.push((o.next, o.spawn, o.send, depth + 1));
                     }
                 }
             }

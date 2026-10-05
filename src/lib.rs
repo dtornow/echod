@@ -30,12 +30,14 @@
 
 mod certificate;
 mod checker;
+mod sim;
 mod hashed_map;
 mod hashed_set;
 mod intern;
 
-pub use certificate::{certify, Move};
-pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Violation};
+pub use certificate::{certify, marks, Move};
+pub use sim::Sim;
+pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Verdict, Violation};
 pub use hashed_map::HashedMap;
 pub use hashed_set::HashedSet;
 pub use intern::{Interned, Interner};
@@ -98,6 +100,31 @@ pub trait Model {
     }
 }
 
+/// Optional, for testing: names for interesting things a step did ("lease
+/// expired, task re-dispatched"). The checker reads them off the execution a
+/// certificate describes ([`marks`]), so a test knows which behaviors a trace
+/// exercised: coverage of the spec rather than of the code.
+pub trait Marks: Model {
+    /// Every mark the model can produce, so coverage can report the ones no
+    /// trace reached.
+    fn all_marks(&self) -> Vec<&'static str>;
+
+    /// The marks of a request taking effect in `before` with outcome `out`.
+    fn external_marks(&self, req: &Self::External, before: &Self::State, out: &ExternalOutcome<Self>) -> Vec<&'static str>;
+
+    /// The marks of internal work running in `before` with outcome `out`.
+    fn internal_marks(&self, _req: &Self::Internal, _before: &Self::State, _out: &InternalOutcome<Self>) -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
+/// Optional, for testing: requests worth trying next from a state, each with
+/// why. A fuzz driver asks the checker, which asks the model for every state
+/// the system may be in ([`Checker::suggestions`]).
+pub trait Explore: Model {
+    fn suggest(&self, state: &Self::State) -> Vec<(Self::External, &'static str)>;
+}
+
 /// Optional, for speed: which keys a request or internal step touches. To
 /// explain a response, the checker then only considers work on the same keys.
 /// A footprint must include everything the step reads or writes.
@@ -118,8 +145,9 @@ pub trait Footprint: Model {
     /// Whether the request only moves the clock (`AdvanceClock`): it has one
     /// outcome, which changes nothing but [`Model::now`], starts no work and
     /// sends nothing. Its footprint is everything, but what it affects is the
-    /// work that falls due by the new time, so the checker looks at that work,
-    /// and the calls in flight on its keys, instead of all of it. With
+    /// work that falls due by the new time and whatever could happen before it
+    /// (calls in flight and work that can run, which read the clock), so the
+    /// checker looks at those instead of all of it. With
     /// partitions, it is explained in each partition on its own when it is
     /// answered before anything else is observed.
     fn moves_clock(&self, _req: &Self::External) -> bool {
