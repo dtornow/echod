@@ -28,8 +28,8 @@ pub enum Pending<O, R, T, G> {
     /// times over. It may be received later, or never.
     Sent { msg: G, count: u32 },
     /// Background work, due from `after` on the model's clock, `count` times
-    /// over: started twice, it runs twice. `must`: owed by `by`, or by the next
-    /// `Quiesce` if `by` is `None`.
+    /// over: started twice, it runs twice. `must`: owed by `by`; with no `by`,
+    /// it runs when an observation needs it, or never.
     Step { step: T, after: Time, by: Option<Time>, must: bool, count: u32 },
 }
 
@@ -149,16 +149,13 @@ pub enum Event<X, R, D> {
     Receive { msg: D },
 }
 
-/// What the checker steps on internally: observations, plus the idle assertion.
+/// What the checker steps on internally: the observations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ev<O, R, G> {
     Invoke(CallId, O),
     Return(CallId, R),
     /// The client received a message the server sent on its own.
     Receive(G),
-    /// The system is idle: every obligation that is due has fired. Calls still
-    /// awaiting a response are untouched.
-    Quiesce,
 }
 
 #[derive(Clone, Debug)]
@@ -452,13 +449,6 @@ impl<S: Engine> Checker<S> {
     /// A dispatch received now.
     pub fn receive(&mut self, msg: Ms<S>) -> Result<(), Violation> {
         self.apply(Ev::Receive(msg))
-    }
-
-    /// Asserts the system is idle now: all internal work that must happen has
-    /// happened, whether or not it had a deadline. Not an observation: an
-    /// assumption the tester adds, for example after waiting long enough.
-    pub fn assert_idle(&mut self) -> Result<(), Violation> {
-        self.apply(Ev::Quiesce)
     }
 
     /// A call whose request and response are observed now.
@@ -913,7 +903,7 @@ impl<S: Engine> Checker<S> {
         for n in nodes {
             let mut m = n.clone();
             m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), early: BTreeSet::new() });
-            let owed = self.owed_for(&m, Some((probe, None)), false);
+            let owed = self.owed_for(&m, Some((probe, None)));
             let relevant = if self.cfg.footprints { self.relevant(&m, &owed, Touches::Only(Vec::new())) } else { Touches::Everything };
             let _ = self.search(m, &relevant, &mut explored, |x| {
                 for i in &x.pending {
@@ -1020,7 +1010,6 @@ impl<S: Engine> Checker<S> {
                 }
                 None => Err(self.violation(index, &e, format!("call {call} is not outstanding"))),
             },
-            Ev::Quiesce => self.each_factor(index, &e),
         }
     }
 
@@ -1280,7 +1269,7 @@ impl<S: Engine> Checker<S> {
         if owed.is_empty() && !unsent(&n) {
             return self.consume(&n, e);
         }
-        let relevant = if matches!(e, Ev::Quiesce) || !self.cfg.footprints {
+        let relevant = if !self.cfg.footprints {
             Touches::Everything
         } else {
             let seed = match e {
@@ -1410,7 +1399,7 @@ impl<S: Engine> Checker<S> {
             Ev::Return(c, r) => Some((*c, Some(r))),
             _ => None,
         };
-        self.owed_for(m, returning, matches!(e, Ev::Quiesce))
+        self.owed_for(m, returning)
     }
 
     /// Whether anything is owed before `e`: [`Checker::owed`], without
@@ -1426,10 +1415,7 @@ impl<S: Engine> Checker<S> {
             }
             _ => false,
         });
-        call_owed
-            || self.earliest_overdue(m).is_some()
-            || (matches!(e, Ev::Quiesce)
-                && m.pending.iter().any(|i| matches!(i, Pending::Step { step, must: true, .. } if self.enabled(i, step, &m.state))))
+        call_owed || self.earliest_overdue(m).is_some()
     }
 
     /// `returning`: the call being answered, and the answer if known. A call whose
@@ -1438,7 +1424,6 @@ impl<S: Engine> Checker<S> {
         &self,
         m: &'a Node<S>,
         returning: Option<(CallId, Option<&Re<S>>)>,
-        quiesce: bool,
     ) -> Vec<&'a P<S>> {
         m.pending
             .iter()
@@ -1447,9 +1432,7 @@ impl<S: Engine> Checker<S> {
                     Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| r == o)),
                     _ => false,
                 },
-                Pending::Step { step, must: true, .. } => {
-                    self.is_overdue(item, &m.state) || (quiesce && self.enabled(item, step, &m.state))
-                }
+                Pending::Step { must: true, .. } => self.is_overdue(item, &m.state),
                 _ => false,
             })
             .collect()
@@ -1779,7 +1762,6 @@ impl<S: Engine> Checker<S> {
                     })
                     .collect());
             }
-            Ev::Quiesce => {}
         }
         let trail = match e {
             Ev::Invoke(call, req) => self.record(&m.trail, || Record::Obs(Event::Invoke { call: *call, req: req.clone() })),

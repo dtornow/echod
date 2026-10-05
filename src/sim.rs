@@ -84,19 +84,6 @@ impl<'m, M: Model> Sim<'m, M> {
         self.c.apply(moves[k].clone()).expect("legal")
     }
 
-    /// Runs internal work until none can run: what a tester waits for before
-    /// asserting the system idle. Answers and dispatches stay undelivered.
-    pub fn quiesce(&mut self) {
-        loop {
-            let moves: Vec<_> = self.legal().into_iter().filter(|m| matches!(m, Move::Run { .. })).collect();
-            if moves.is_empty() {
-                return;
-            }
-            let k = self.next(moves.len());
-            self.c.apply(moves[k].clone()).expect("legal");
-        }
-    }
-
     /// Steps until every call has been answered; the events clients observe.
     /// Bounded, in case the model allows a call to never take effect.
     pub fn settle(&mut self) -> Vec<EventOf<M>> {

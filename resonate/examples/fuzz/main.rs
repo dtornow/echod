@@ -10,8 +10,8 @@
 //!   for the states the checker thinks the server may be in (fence at the held
 //!   version, clock to a lease end, ...), the least tried reason first; the
 //!   rest are random.
-//! * Each run ends with the server idle and a client reading every object, so
-//!   work the spec lets the server put off has to have happened.
+//! * Each run ends with the clock moved past every deadline and a client
+//!   reading every object, so every timer has to have fired.
 //! * Coverage: each accepted run comes with a certificate, an execution that
 //!   explains it; the marks along that execution are what the run covered.
 //!

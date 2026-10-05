@@ -5,7 +5,7 @@
 //!
 //! A client sends requests to a simulated server, the spec or the spec with a
 //! bug planted; a checker follows what the client observes. A run ends with the
-//! server idle and a client reading every object. An accepted run comes with a
+//! clock moved past every deadline and a client reading every object. An accepted run comes with a
 //! certificate, and the marks along it are what the run covered.
 
 use std::collections::BTreeSet;
@@ -94,7 +94,7 @@ pub enum Outcome {
 }
 
 /// One run: a client sends `steps` requests, at most three in flight, while the
-/// server makes its own moves; then the server goes idle and a client reads
+/// server makes its own moves; then the clock moves past every deadline and a client reads
 /// everything. `cross`: also check the trace with the partitioned and
 /// depth-first checkers (only meaningful against the spec itself, where every
 /// trace is valid).
@@ -127,17 +127,23 @@ pub fn run(server: &Server, choices: &dyn Choices, steps: usize, cross: bool) ->
         for e in sim.settle() {
             observe(&mut c, e)?;
         }
-        // The server goes idle; then a client reads everything. A step the spec
-        // may put off (a lease expiring) can't be put off past this.
-        sim.quiesce();
-        c.assert_idle()?;
-        for id in IDS {
-            for req in [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())] {
+        // Finally a client reads everything, the clock moves past every
+        // deadline (the longest is a task.create lease) so every timer must have
+        // fired, and the client reads everything again.
+        for phase in 0..2 {
+            if phase == 1 {
                 call += 1;
-                let e = sim.invoke(call, req);
+                let e = sim.invoke(call, Request::AdvanceClock(clock + TASK_CREATE_TTL + 1));
                 observe(&mut c, e)?;
-                for e in sim.settle() {
+            }
+            for id in IDS {
+                for req in [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())] {
+                    call += 1;
+                    let e = sim.invoke(call, req);
                     observe(&mut c, e)?;
+                    for e in sim.settle() {
+                        observe(&mut c, e)?;
+                    }
                 }
             }
         }

@@ -25,8 +25,6 @@
 //! It is `external_body`: Verus takes the contract on trust. The proof is in
 //! `lean/Accordant.lean`: a certificate that `certify` accepts is valid, so the
 //! contract holds as long as `src/certificate.rs` matches the Lean `certify`.
-//!
-//! Not covered: `assert_idle`.
 
 use vstd::prelude::*;
 
@@ -53,7 +51,7 @@ pub enum Event<X, R, D> {
 
 /// Internal work to start, and when it runs.
 pub enum Sched<I> {
-    /// From now on; must have happened by the time the system is idle.
+    /// From now on, when an observation needs it, or never.
     Later(I),
     /// Exactly at the given time.
     Timer(Time, I),

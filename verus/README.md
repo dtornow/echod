@@ -20,7 +20,7 @@ Proved: the empty trace is valid for every model, and for a one-call counter
 "sent `incr`, got 1" is valid via invoke (seen), effect (silent), return (seen).
 Changing the response to 2 makes that proof fail, as it should.
 
-Not modeled yet: request lifetimes and `assert_idle`.
+Not modeled yet: request lifetimes.
 
 ## Running it
 

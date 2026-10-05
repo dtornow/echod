@@ -57,15 +57,15 @@ fn keyed() -> Certified<Keyed<Twice>> {
 
 #[test]
 fn work_started_twice_runs_twice() {
+    // Both increments may have run by the read, and no more than both.
     let mut c = plain();
     c.call(1, Req::Bump, 0).unwrap();
-    c.assert_idle().unwrap();
-    assert!(c.call(2, Req::Read, 1).is_err(), "both increments have run");
+    assert!(c.call(2, Req::Read, 3).is_err(), "only two increments were started");
     c.call(3, Req::Read, 2).unwrap();
 
     let mut c = keyed();
     c.call(1, Req::Bump, 0).unwrap();
     c.call(2, Req::Read, 1).unwrap(); // one has run, one is pending
-    c.assert_idle().unwrap();
     c.call(3, Req::Read, 2).unwrap();
+    assert!(c.call(4, Req::Read, 3).is_err());
 }

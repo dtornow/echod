@@ -167,14 +167,14 @@ The model that checks a trace can also produce one and steer it.
   any move the model allows: a call takes effect with any of its outcomes,
   work runs, a response or dispatch is delivered. Every move goes through the
   replay behind `certify`, so a simulator trace is valid by construction.
-  `quiesce` runs work until none can run (before `assert_idle`).
 
 `resonate/examples/fuzz/` puts them together: a client sends requests to a
 `Sim` of the spec (or of the spec with a bug planted), a checker follows,
 and an accepted run's certificate gives its marks. In `guided` mode, three in
 four requests come from the checker's suggestions, the least tried reason
-first. Every run ends with the server idle and a client reading every object,
-so work the spec lets the server put off (a resume) must have happened.
+first. Every run ends with a client reading every object, the clock moving past
+every deadline, and the client reading everything again, so every timer must
+have fired.
 
 ```text
 cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-fence|lease-forever]
@@ -275,10 +275,14 @@ Limits:
 
 ## Separating request from response
 
-The history is a sequence of events, each at the checker's current time:
+The history is a sequence of events, in the order one observer saw them:
 
 ```rust
-enum Event<Op, Resp> { Invoke(CallId, Op), Return(CallId, Resp), Tick(Time), Quiesce }
+enum Event<X, R, D> {
+    Invoke { call: CallId, req: X },   // a client sent a request
+    Return { call: CallId, res: R },   // the client got the response to that call
+    Receive { msg: D },                // a client got a dispatch the server sent on its own
+}
 ```
 
 - `Invoke` adds `InFlight`. It changes no state and observes nothing, so it never
@@ -317,7 +321,7 @@ are on the model's clock, and the checker enforces them.
 
   ```rust
   pub enum Sched<T> {
-      Later(T),         // from now on; must happen by the next assert_idle
+      Later(T),         // from now on, when an observation needs it, or never
       Timer(Time, T),   // at the given time
   }
   ```
@@ -344,9 +348,10 @@ are on the model's clock, and the checker enforces them.
 - **Requests in flight** may take effect before or after a clock step, like
   any other concurrent call. That's how a read that spans a timeout may still
   see the promise pending.
-- **`assert_idle`** asserts the system is idle: every obligation that can run
-  has run. Future timers are untouched, and so are calls still waiting for a
-  response. It replaces the poll-until-terminal loop as the liveness check.
+- **Only safety.** The checker asks whether some execution explains what was
+  observed. `Later` work happens when an observation needs it, or never; there
+  is no "the system is idle now" assertion. Work that must happen by some time
+  gets a timer, and the tester moves the clock past it.
 - **Partitions and the clock.** A clock step touches every partition. A request
   that `Partitioned::broadcast` marks (it acts on every partition alike, starts
   nothing, sends nothing) is explained in each partition on its own when it is
@@ -495,9 +500,9 @@ still walks every entry. The incremental hash is what fixes time.
 | internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
 | `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `.later(on(&[awaited, awaiter]))` when the awaited promise settles |
-| `LeaseTriggers`, `RetryTriggers` | `.after(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
+| `LeaseTriggers`, `RetryTriggers` | `.timer(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe" |
-| `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
+| `PollLiveness(terminal)` | the poll that sees the terminal state is a read like any other; no idle bound |
 | `debug.messages` (execute/unblock) | `execute` is a server-sent `Dispatch::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
 | footprint | promise id plus awaiter ids for callbacks; `AdvanceClock` touches everything |
 
@@ -614,6 +619,6 @@ Porting also found three checker bugs, all fixed:
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
-- `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
+- `tests/jobs.rs`: background completion, run deadlines, timeout timers, deferred independent jobs.
 - `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark and fuzz driver in `resonate/examples/`.
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

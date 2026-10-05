@@ -218,24 +218,6 @@ fn a_run_that_beats_the_timer_wins() {
 }
 
 #[test]
-fn quiesce_discharges_unbounded_eventually() {
-    let mut c = checker(None);
-    c.call(1, Request::Submit(7, NEVER), Response::Accepted).unwrap();
-    c.call(2, Request::Get(7), Response::Is(Status::Pending)).unwrap();
-    c.assert_idle().unwrap();
-    assert!(c.all(|s| s.jobs[&7].status != Status::Pending));
-    assert!(c.call(3, Request::Get(7), Response::Is(Status::Pending)).is_err());
-}
-
-#[test]
-fn quiesce_does_not_fire_future_timers() {
-    let mut c = checker(Some(10_000));
-    c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.assert_idle().unwrap(); // the run must be done; the timeout is not due yet
-    assert!(c.all(|s| matches!(s.jobs[&7].status, Status::Completed | Status::Failed)));
-}
-
-#[test]
 fn a_get_in_flight_across_completion_may_see_either() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, NEVER), Response::Accepted).unwrap();

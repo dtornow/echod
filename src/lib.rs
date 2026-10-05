@@ -171,7 +171,7 @@ pub trait Partitioned: Footprint {
 /// the work runs right after the jump, earliest deadline first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sched<T> {
-    /// Runs later: any time from now on; must have happened by the next `assert_idle`.
+    /// Runs later: any time from now on, when an observation needs it, or never.
     Later(T),
     /// A timer: runs exactly at the given time.
     Timer(Time, T),

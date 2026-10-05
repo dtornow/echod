@@ -23,7 +23,7 @@ lean lean/Accordant.lean
 ```
 
 It mirrors `verus/accordant.rs`, written as a relation rather than a replay
-function. Not modeled yet: request lifetimes and `assert_idle`.
+function. Not modeled yet: request lifetimes.
 
 `TigerBeetle.lean` is TigerBeetle's state machine as a `Model`: accounts,
 transfers, two-phase transfers, linked chains, expiry by pulse, lookups and

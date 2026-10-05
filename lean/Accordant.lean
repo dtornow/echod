@@ -40,8 +40,6 @@ show exactly the trace. The second part of the file defines `certify` and proves
 one assumption, that the Rust `certify` (`src/certificate.rs`) computes what the
 Lean one does. Lean can't see Rust code, so that one assumption stays. The
 search itself needs no proof.
-
-Not covered: `assert_idle`.
 -/
 
 namespace Accordant
@@ -63,7 +61,7 @@ inductive Event (X R D : Type) where
 
 /-- Internal work to start, and when it runs, on the model's clock. -/
 inductive Sched (I : Type) where
-  | later (req : I)                  -- from now on; must happen eventually
+  | later (req : I)                  -- from now on, or never
   | timer (at_ : Time) (req : I)     -- at the given time
 
 /-- One possible effect of a request. -/

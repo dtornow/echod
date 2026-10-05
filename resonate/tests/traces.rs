@@ -43,12 +43,6 @@ impl Trace {
         self.shadow.ret(call, res).unwrap();
     }
 
-    #[track_caller]
-    fn idle(&mut self) {
-        self.c.assert_idle().unwrap();
-        self.shadow.assert_idle().unwrap();
-    }
-
     fn id(&mut self) -> CallId {
         self.next += 1;
         self.next
@@ -267,9 +261,8 @@ fn callback_layer() {
     t.step("task.get root → suspended", get_task("ex:root"), task(TState::Suspended, 1));
     t.step("suspend foreign → 400", suspend("ex:root", 1, &["other:x"]), st(400));
     t.step("settle awaited → arms resume", Request::SettlePromise(settle("ex:awaited", "resolved", "v")), st(200));
-    // C# polls until the resume lands; here Quiesce says the server is idle.
-    t.idle();
-    assert!(t.c.all(|s| s.tasks["ex:root"].state == TState::Pending));
+    // C# polls until the resume lands; this is the poll that sees it.
+    t.step("task.get root → pending (resumed)", get_task("ex:root"), task(TState::Pending, 1));
     t.step("re-acquire root v1 → v2", acquire("ex:root", 1, "worker-1"), task(TState::Acquired, 2));
 
     t.step("create done", create("ex:done", now + 100_000, "d").external().op(), st(200));
@@ -569,7 +562,6 @@ fn partitioning_never_changes_a_verdict() {
                 assert_eq!(a, b, "seed {seed}: partitioned={a} unpartitioned={b} on {e:?}");
             }
         }
-        assert_eq!(on.assert_idle().is_ok(), off.assert_idle().is_ok(), "seed {seed}: quiesce");
         // The whole history (bogus responses make it invalid), online and depth
         // first: the same verdict.
         let online = Checker::with_footprints(Resonate, Server::default(), Config::default()).check_history(&all).is_ok();
@@ -617,7 +609,7 @@ fn a_message_nobody_sent_is_rejected() {
 fn a_message_may_never_arrive() {
     let mut t = Trace::new(1_000_000);
     t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
-    t.idle(); // the execute was sent; nobody has to receive it
+    // The execute was sent; nobody has to receive it.
     t.step("acquire t", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
 }
 
