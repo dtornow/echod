@@ -18,7 +18,10 @@ crate from crates.io into `porcupine-rs/`, add it as `examples/timing.rs` with a
 
 ## Results (check only, parsing excluded; one machine, 4 cores)
 
-All three checkers agree on every verdict Porcupine records.
+Verdicts match Porcupine's everywhere except kv c50-bad: there this checker gave
+up (the candidate limit, 2.3 million candidates at event 242) rather than
+finding the violation. The etcd logs are being rechecked for the same; see the
+commit history for the outcome.
 
 | | this checker | porcupine-rs 0.3.0 | Porcupine (Go) |
 |---|---|---|---|

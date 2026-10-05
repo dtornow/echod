@@ -264,13 +264,22 @@ fn etcd(certify: bool) {
     for n in 0..=102u32 {
         let events = parse_etcd(&std::fs::read_to_string(format!("{DATA}/jepsen/etcd_{n:03}.log")).unwrap());
         let mut width = 0;
+        let mut gave_up = None;
         let (ok, dt) = time(|| {
             let mut c = Checker::new(Etcd, None, cfg(certify));
-            let ok = if certify { c.check_certified(events.iter().cloned()).is_ok() } else { c.check_history(&events).is_ok() };
+            let r = if certify { c.check_certified(events.iter().cloned()).map(|_| ()) } else { c.check_history(&events).map(|_| ()) };
+            if let Err(v) = &r {
+                if v.reason.contains("exceeds") || v.reason.contains("explored") {
+                    gave_up = Some(v.reason.clone());
+                }
+            }
             width = c.stats.max_width;
-            ok
+            r.is_ok()
         });
         let want = expected.get(&n);
+        if let Some(reason) = &gave_up {
+            println!("  etcd_{n:03} gave up: {reason}");
+        }
         let mark = match want {
             Some(w) if *w == ok => "",
             Some(_) => {
