@@ -280,3 +280,61 @@ fn check_calls_streams_a_generated_trace() {
     // Each call: invoke, effect, return.
     assert_eq!(c.certified().unwrap().len(), 3 * 10_001);
 }
+
+/// Random concurrent histories on three accounts, from a real run with some
+/// responses corrupted and some never delivered: the online checker and the
+/// depth-first one must agree, and every depth-first acceptance must certify.
+#[test]
+fn depth_first_agrees_with_the_online_checker() {
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n
+        }
+    }
+    let names = ["a", "b", "c"];
+    let (mut valid, mut invalid) = (0, 0);
+    for seed in 1..=300 {
+        let mut rng = Lcg(seed);
+        let mut bank = Bank::default();
+        let mut trace = vec![];
+        let mut open: Vec<(u64, Request)> = vec![];
+        for (i, n) in names.iter().enumerate() {
+            let call = 1000 + i as u64;
+            trace.extend([inv(call, Request::Open(n)), ret(call, Response::Ok(0))]);
+            bank.accounts.insert(n, 0);
+        }
+        for call in 0..14u64 {
+            let n = names[rng.next(3) as usize];
+            let req = match rng.next(3) {
+                0 => Request::Deposit(n, 1 + rng.next(5) as i64),
+                1 => Request::Withdraw(n, 1 + rng.next(5) as i64),
+                _ => Request::Balance(n),
+            };
+            trace.push(inv(call, req.clone()));
+            open.push((call, req));
+            // Some open call takes effect now, in the real system, and answers.
+            while !open.is_empty() && rng.next(3) != 0 {
+                let (c, req) = open.remove(rng.next(open.len() as u64) as usize);
+                let out = BankModel.external(&req, &bank).remove(0);
+                bank = out.next;
+                let res = if rng.next(12) == 0 { Response::Ok(-7) } else { out.res };
+                if rng.next(10) != 0 {
+                    trace.push(ret(c, res)); // else: never delivered
+                }
+            }
+        }
+        let online = model().check_history(&trace).is_ok();
+        let mut c = model();
+        let dfs = c.check_complete(&trace).is_ok();
+        assert_eq!(online, dfs, "seed {seed}: online={online} depth-first={dfs}\n{trace:?}");
+        if dfs {
+            c.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+            valid += 1;
+        } else {
+            invalid += 1;
+        }
+    }
+    assert!(valid > 50 && invalid > 50, "{valid} valid, {invalid} invalid");
+}

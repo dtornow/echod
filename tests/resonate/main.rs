@@ -500,6 +500,8 @@ fn partitioning_never_changes_a_verdict() {
         let tick = |t| [Event::Invoke { call: 900_000 + t, req: Request::AdvanceClock(t) }, Event::Return { call: 900_000 + t, res: Response::Status(200) }];
         let mut open: Vec<(CallId, Request)> = Vec::new();
         let mut clock = now;
+        let mut all = Vec::new();
+        let mut kept = Vec::new();
         for call in 0..60u64 {
             let id = ids[rng.next(ids.len() as u64) as usize].to_string();
             let other = ids[rng.next(ids.len() as u64) as usize].to_string();
@@ -540,14 +542,36 @@ fn partitioning_never_changes_a_verdict() {
                 let resp = off.allowed(&op).first().cloned().unwrap_or(Response::Status(404));
                 events.push(Event::Return { call: c, res: resp });
             }
+            all.extend(events.iter().cloned());
             for e in events {
                 // A rejected event leaves both checkers as they were, so they stay comparable.
                 let a = on.observe(e.clone()).is_ok();
                 let b = off.observe(e.clone()).is_ok();
+                if b {
+                    kept.push(e.clone());
+                }
                 assert_eq!(a, b, "seed {seed}: partitioned={a} unpartitioned={b} on {e:?}");
             }
         }
         assert_eq!(on.assert_idle().is_ok(), off.assert_idle().is_ok(), "seed {seed}: quiesce");
+        // The whole history (bogus responses make it invalid), online and depth
+        // first: the same verdict.
+        let online = Checker::with_footprints(Resonate, Server::default(), Config::default()).check_history(&all).is_ok();
+        let mut dfs = Checker::with_footprints(Resonate, Server::default(), Config { certify: true, ..Config::default() });
+        let deep = dfs.check_complete(&all).is_ok();
+        assert_eq!(online, deep, "seed {seed}: online={online} depth-first={deep}");
+        if deep {
+            dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        }
+        let mut split = Checker::with_partitions(Resonate, Server::default(), Config::default());
+        assert_eq!(split.check_complete(&all).is_ok(), deep, "seed {seed}: depth first by partition");
+        // What the online checker accepted, event by event, is a valid history:
+        // depth first must accept it too, and certify it.
+        let mut dfs = Checker::with_footprints(Resonate, Server::default(), Config { certify: true, ..Config::default() });
+        dfs.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: accepted events rejected depth first: {v}"));
+        dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        let mut split = Checker::with_partitions(Resonate, Server::default(), Config::default());
+        split.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: by partition: {v}"));
     }
 }
 

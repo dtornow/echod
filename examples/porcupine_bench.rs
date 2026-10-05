@@ -367,9 +367,20 @@ fn main() {
 
 #[allow(dead_code)]
 fn probe(name: &str) {
+    if let Some(n) = name.strip_prefix("etcd_") {
+        let events = parse_etcd(&std::fs::read_to_string(format!("{DATA}/jepsen/etcd_{n}.log")).unwrap());
+        let explore = std::env::var("EXPLORE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
+        let mut c = Checker::new(Etcd, None, Config { max_explore: explore, ..cfg(false) });
+        let t0 = Instant::now();
+        let r = c.check_complete(&events).map(|_| ());
+        let orphans = events.iter().filter(|e| matches!(e, Event::Invoke { .. })).count() - events.iter().filter(|e| matches!(e, Event::Return { .. })).count();
+        println!("{name}: {:?} in {:?}, {} events, {orphans} never answered, {:?}", r.err().map(|v| (v.index, v.reason)), t0.elapsed(), events.len(), c.stats);
+        return;
+    }
     let events = parse_kv(&std::fs::read_to_string(format!("{DATA}/kv/{name}.txt")).unwrap());
     let explore = std::env::var("EXPLORE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
-    let mut c = Checker::with_partitions(Kv, HashedMap::new(), Config { max_explore: explore, ..cfg(false) });
+    let fp = std::env::var("NOFP").is_err();
+    let mut c = Checker::with_partitions(Kv, HashedMap::new(), Config { max_explore: explore, footprints: fp, ..cfg(false) });
     let t0 = Instant::now();
     let r = c.check_complete(&events).map(|_| ());
     println!("{name}: {:?} in {:?}, {:?}", r.err().map(|v| (v.index, v.reason)), t0.elapsed(), c.stats);

@@ -467,17 +467,44 @@ impl<S: Engine> Checker<S> {
         self.answers = answers(trace);
         if !self.recording && self.engine.partitioned() {
             if let Some(parts) = self.split_by_part(trace) {
+                // Round robin, each partition's search resumed with a doubling
+                // budget: one hard partition must not hold up a refutation
+                // another finds quickly (Porcupine checks partitions in
+                // parallel for the same reason).
+                let mut open = Vec::new();
                 for (part, sub) in parts {
                     let init = self.engine.restrict(&self.rest, &|p| *p == part);
                     let events: Vec<_> = sub.iter().map(|(_, e)| e.clone()).collect();
-                    self.scope = Some(Some(BTreeSet::from([part])));
-                    let r = self.dfs(init, &events);
-                    self.scope = None;
-                    if let Some(step) = self.escaped.borrow_mut().take() {
-                        let reason = "spec error: work reaches outside the partitions of the request or step that spawned it";
-                        return Err(Violation { index: 0, event: step, reason: reason.into(), profile: Vec::new() });
+                    let run = self.dfs_start(init, &events).map_err(|v| Violation { index: sub[v.index].0, ..v })?;
+                    open.push((part, sub, run));
+                }
+                let mut budget = 1_000;
+                let mut spent = 0usize;
+                while !open.is_empty() {
+                    let mut still = Vec::new();
+                    for (part, sub, mut run) in open {
+                        self.scope = Some(Some(BTreeSet::from([part.clone()])));
+                        let r = self.dfs_resume(&mut run, budget);
+                        self.scope = None;
+                        if let Some(step) = self.escaped.borrow_mut().take() {
+                            let reason = "spec error: work reaches outside the partitions of the request or step that spawned it";
+                            return Err(Violation { index: 0, event: step, reason: reason.into(), profile: Vec::new() });
+                        }
+                        match r {
+                            Some(Ok(_)) => {}
+                            Some(Err(v)) => return Err(Violation { index: sub[v.index].0, ..v }),
+                            None => still.push((part, sub, run)),
+                        }
                     }
-                    r.map_err(|v| Violation { index: sub[v.index].0, ..v })?;
+                    spent += budget * still.len();
+                    if spent > self.cfg.max_explore {
+                        let (_, sub, run) = &still[0];
+                        let j = run.stack.last().map_or(0, |f| f.i);
+                        let reason = format!("explored more than {} nodes", self.cfg.max_explore);
+                        return Err(Violation { index: sub[j].0, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new() });
+                    }
+                    open = still;
+                    budget = budget.saturating_mul(2);
                 }
                 self.stats.events += trace.len();
                 return Ok(&self.stats);
@@ -530,12 +557,16 @@ impl<S: Engine> Checker<S> {
     /// the keys of what is owed is a branch, calls in the order they were
     /// invoked. A (position, candidate) pair is explored once.
     fn dfs(&mut self, init: St<S>, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<Node<S>, Violation> {
-        struct Frame<S: Engine> {
-            i: usize,
-            /// Branches: whether each consumes event `i`, and where it leads.
-            children: Vec<(bool, Node<S>)>,
-            tried: usize,
-        }
+        let mut run = self.dfs_start(init, trace)?;
+        let budget = self.cfg.max_explore;
+        self.dfs_resume(&mut run, budget).unwrap_or_else(|| {
+            let j = run.stack.last().map_or(0, |f| f.i);
+            let reason = format!("explored more than {budget} nodes");
+            Err(Violation { index: j, event: format!("{:?}", run.evs[j]), reason, profile: Vec::new() })
+        })
+    }
+
+    fn dfs_start(&mut self, init: St<S>, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<Dfs<S>, Violation> {
         let evs: Vec<Ev<Ex<S>, Re<S>, Ms<S>>> = trace
             .iter()
             .map(|e| match e.clone() {
@@ -545,42 +576,56 @@ impl<S: Engine> Checker<S> {
             })
             .collect();
         let start = Node { state: self.states.intern(init), pending: HashedSet::new(), trail: Default::default() };
-        if evs.is_empty() {
-            return Ok(start);
+        let mut run = Dfs { evs, stack: Vec::new(), seen: HashSet::new(), deepest: 0, found: None };
+        if run.evs.is_empty() {
+            run.found = Some(start);
+            return Ok(run);
         }
-        let mut seen: HashSet<(usize, Node<S>)> = HashSet::new();
+        run.seen.insert((0, start.clone()));
+        let children = self.children(&start, &run.evs[0])?;
+        run.stack.push(Frame { i: 0, children, tried: 0 });
+        Ok(run)
+    }
+
+    /// Continues `run` for up to `budget` more candidates: `None` if the budget
+    /// ran out first.
+    fn dfs_resume(&mut self, run: &mut Dfs<S>, budget: usize) -> Option<Result<Node<S>, Violation>> {
+        if let Some(n) = &run.found {
+            return Some(Ok(n.clone()));
+        }
         let mut explored = 0usize;
-        let mut deepest = 0;
-        seen.insert((0, start.clone()));
-        let mut stack = vec![Frame { i: 0, children: self.children(&start, &evs[0])?, tried: 0 }];
-        while let Some(top) = stack.last_mut() {
+        while let Some(top) = run.stack.last_mut() {
             if top.tried == top.children.len() {
-                stack.pop();
+                run.stack.pop();
                 continue;
             }
             let (advance, n) = top.children[top.tried].clone();
             top.tried += 1;
             let j = if advance { top.i + 1 } else { top.i };
-            if j == evs.len() {
+            if j == run.evs.len() {
                 self.stats.explored += explored;
-                return Ok(n);
+                run.found = Some(n.clone());
+                return Some(Ok(n));
             }
-            if !seen.insert((j, n.clone())) {
+            if !run.seen.insert((j, n.clone())) {
                 continue;
             }
             explored += 1;
-            if explored > self.cfg.max_explore {
+            run.deepest = run.deepest.max(j);
+            let children = match self.children(&n, &run.evs[j]) {
+                Ok(c) => c,
+                Err(v) => return Some(Err(Violation { index: j, ..v })),
+            };
+            run.stack.push(Frame { i: j, children, tried: 0 });
+            if explored >= budget {
                 self.stats.explored += explored;
-                let reason = format!("explored more than {} nodes", self.cfg.max_explore);
-                return Err(Violation { index: j, event: format!("{:?}", evs[j]), reason, profile: Vec::new() });
+                return None;
             }
-            deepest = deepest.max(j);
-            let children = self.children(&n, &evs[j]).map_err(|v| Violation { index: j, ..v })?;
-            stack.push(Frame { i: j, children, tried: 0 });
         }
         self.stats.explored += explored;
+        let d = run.deepest;
         let reason = "no execution of the model explains the history past this event".into();
-        Err(Violation { index: deepest, event: format!("{:?}", evs[deepest]), reason, profile: Vec::new() })
+        Some(Err(Violation { index: d, event: format!("{:?}", run.evs[d]), reason, profile: Vec::new() }))
     }
 
     /// The branches from `n` before event `e`: the event consumed, if nothing
@@ -623,6 +668,13 @@ impl<S: Engine> Checker<S> {
         });
         let mut out = Vec::new();
         for item in items {
+            // A call that never returns and would change nothing need never
+            // take effect: applying it only doubles the candidates.
+            if let Pending::InFlight { call, op, .. } = item {
+                if self.orphans.contains(call) && read_only::<S>(&self.engine.model().external(op, &n.state), &n.state) {
+                    continue;
+                }
+            }
             for m in self.fire_exact(n, item) {
                 if m != *n {
                     out.push((false, m));
@@ -1577,6 +1629,25 @@ fn answers<X, R: Clone, D>(trace: &[Event<X, R, D>]) -> HashMap<CallId, R> {
         }
     }
     out
+}
+
+/// A depth-first search in progress, resumable.
+struct Dfs<S: Engine> {
+    evs: Vec<Ev<Ex<S>, Re<S>, Ms<S>>>,
+    stack: Vec<Frame<S>>,
+    /// Every (position, candidate) explored; success returns at once, so all
+    /// of them failed or are on the stack.
+    seen: HashSet<(usize, Node<S>)>,
+    deepest: usize,
+    found: Option<Node<S>>,
+}
+
+struct Frame<S: Engine> {
+    /// The event the candidates here are before.
+    i: usize,
+    /// Branches: whether each consumes event `i`, and where it leads.
+    children: Vec<(bool, Node<S>)>,
+    tried: usize,
 }
 
 /// A call whose every outcome leaves the state as it is and starts nothing.
