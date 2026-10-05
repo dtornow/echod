@@ -9,4 +9,4 @@ license = "MIT"
 imbl = "7.0.2"
 
 [workspace]
-members = [".", "resonate"]
+members = [".", "resonate", "tigerbeetle"]
