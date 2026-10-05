@@ -1,176 +1,82 @@
-//! Testing glue, outside Verus: names for what a step did (marks) and requests
-//! worth trying next (suggestions). Neither decides what the server does: marks
-//! are read off a step's request, response and state change; suggestions are
+//! Testing glue, outside Verus: the list of the spec's marks, and requests
+//! worth trying next (suggestions). Neither decides what the server does: the
+//! spec marks its own branches (`mk` in `spec.rs`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
-use accordant::{Explore, ExternalOutcome, InternalOutcome, Marks, Time};
+use accordant::{Explore, Time};
 
 use crate::model::origin;
 use crate::spec::*;
 
-/// What a request got back: its kind and status.
-const STATUS: &[&str] = &[
-    "clock 200",
-    "promise.create 200",
-    "promise.create 400",
-    "promise.get 200",
-    "promise.get 404",
-    "promise.settle 200",
-    "promise.settle 400",
-    "promise.settle 404",
-    "promise.callback 200",
-    "promise.callback 400",
-    "promise.callback 404",
-    "promise.callback 422",
-    "promise.listener 200",
-    "promise.listener 400",
-    "promise.listener 404",
-    "promise.listener 422",
-    "task.get 200",
-    "task.get 404",
-    "task.create 200",
-    "task.create 400",
-    "task.create 409",
-    "task.create 422",
-    "task.acquire 200",
-    "task.acquire 404",
-    "task.acquire 409",
-    "task.release 200",
-    "task.release 404",
-    "task.release 409",
-    "task.fulfill 200",
-    "task.fulfill 400",
-    "task.fulfill 404",
-    "task.fulfill 409",
-    "task.heartbeat 200",
-    "task.suspend 200",
-    "task.suspend 300",
-    "task.suspend 400",
-    "task.suspend 404",
-    "task.suspend 409",
-    "task.suspend 422",
-    "task.fence 200",
-    "task.fence 400",
-    "task.fence 404",
-    "task.fence 409",
-];
-
-/// What a step did to the state.
-const EFFECT: &[&str] = &[
-    "promise created",
-    "promise created by a fence (detached)",
-    "promise settled by a client",
-    "promise settled by a fence",
-    "promise timed out",
-    "timer promise resolved",
+/// Every mark the spec can put on an outcome, so a coverage report can show
+/// the ones no run reached. `tests/marks.rs` checks it against `spec.rs`.
+pub const MARKS: &[&str] = &[
+    "acquire: no such task (404)",
+    "acquire: not pending, or stale version (409)",
     "callback registered",
-    "task created",
-    "task created already acquired",
-    "task acquired",
-    "task released",
-    "task fulfilled",
-    "task suspended",
-    "task resumed",
-    "lease extended",
-    "lease expired",
-    "task dispatched",
+    "callback: awaiter no task, or awaited not external (422)",
+    "callback: itself or another origin (400)",
+    "callback: no awaited promise (404)",
+    "callback: no awaiter promise (422)",
+    "callback: one of them settled (echo)",
     "clock moved",
+    "clock unchanged",
+    "create: id exists (echo)",
+    "create: timer with target (400)",
+    "fence: no such task (404)",
+    "fence: not held, or stale version (409)",
+    "fence: promise created",
+    "fence: promise created past its deadline",
+    "fence: promise settled",
+    "fence: settle in another origin (400)",
+    "fence: targets its own task (400)",
+    "fulfill: no such task (404)",
+    "fulfill: not a settled state (400)",
+    "fulfill: not held (409)",
+    "get promise",
+    "get promise: none (404)",
+    "get task",
+    "get task: none (404)",
+    "heartbeat: not held by this worker",
+    "lease expired",
+    "lease extended",
+    "listener registered",
+    "listener: bad address (400)",
+    "listener: no such promise (404)",
+    "listener: promise not external (422)",
+    "promise created",
+    "promise created past its deadline",
+    "promise settled",
+    "promise timed out",
+    "release: no such task (404)",
+    "release: not held (409)",
+    "resume armed",
+    "settle: already settled (echo)",
+    "settle: no such promise (404)",
+    "settle: not a settled state (400)",
+    "suspend: awaited already settled (300)",
+    "suspend: awaited in another origin (400)",
+    "suspend: awaited missing (422)",
+    "suspend: awaited not external (422)",
+    "suspend: awaited twice (400)",
+    "suspend: no awaited, or itself (400)",
+    "suspend: no such task (404)",
+    "suspend: not held (409)",
+    "task acquired",
+    "task created",
+    "task dispatched",
+    "task fulfilled",
+    "task released",
+    "task resumed",
+    "task suspended",
+    "task.create: not a target (400)",
+    "task.create: pending task acquired",
+    "task.create: promise exists, not a target (422)",
+    "task.create: target without a task (500)",
+    "task.create: task done (echo)",
+    "task.create: task held (409)",
+    "timer promise resolved",
 ];
-
-fn kind(req: &Request) -> &'static str {
-    match req {
-        Request::AdvanceClock(_) => "clock",
-        Request::CreatePromise(_) => "promise.create",
-        Request::GetPromise(_) => "promise.get",
-        Request::SettlePromise(_) => "promise.settle",
-        Request::RegisterCallback { .. } => "promise.callback",
-        Request::RegisterListener { .. } => "promise.listener",
-        Request::GetTask(_) => "task.get",
-        Request::CreateTask { .. } => "task.create",
-        Request::AcquireTask { .. } => "task.acquire",
-        Request::ReleaseTask { .. } => "task.release",
-        Request::FulfillTask { .. } => "task.fulfill",
-        Request::HeartbeatTask { .. } => "task.heartbeat",
-        Request::SuspendTask { .. } => "task.suspend",
-        Request::FenceTask { .. } => "task.fence",
-    }
-}
-
-fn named(table: &'static [&'static str], name: &str) -> Option<&'static str> {
-    table.iter().copied().find(|m| *m == name)
-}
-
-/// The marks of a state change; `fenced`: the change came through a fence.
-fn effects(before: &Server, after: &Server, fenced: bool, out: &mut Vec<&'static str>) {
-    if after.now > before.now {
-        out.push("clock moved");
-    }
-    for (id, q) in after.promises.iter() {
-        match before.promises.get(id) {
-            None if fenced => out.push("promise created by a fence (detached)"),
-            None => out.push("promise created"),
-            Some(p) => {
-                if p.state == PState::Pending && q.state != PState::Pending {
-                    out.push(match q.state {
-                        PState::TimedOut => "promise timed out",
-                        PState::Resolved if p.timer_tag && q.settled_at == Some(p.timeout_at) => "timer promise resolved",
-                        _ if fenced => "promise settled by a fence",
-                        _ => "promise settled by a client",
-                    });
-                }
-                if q.callbacks.iter().any(|c| !p.callbacks.contains(c)) {
-                    out.push("callback registered");
-                }
-            }
-        }
-    }
-    for (id, u) in after.tasks.iter() {
-        let Some(t) = before.tasks.get(id) else {
-            out.push(if u.state == TState::Acquired { "task created already acquired" } else { "task created" });
-            continue;
-        };
-        use TState::*;
-        match (t.state, u.state) {
-            (Pending, Acquired) => out.push("task acquired"),
-            (Acquired, Pending) if after.now >= t.lease_expires() && before.now == after.now => out.push("lease expired"),
-            (Acquired, Pending) => out.push("task released"),
-            (Acquired, Suspended) => out.push("task suspended"),
-            (Suspended, Pending) => out.push("task resumed"),
-            (Acquired, Acquired) if u.acquired_at != t.acquired_at || u.version != t.version => out.push("lease extended"),
-            (a, Fulfilled) if a != Fulfilled => out.push("task fulfilled"),
-            _ => {}
-        }
-    }
-}
-
-impl Marks for Resonate {
-    fn all_marks(&self) -> Vec<&'static str> {
-        STATUS.iter().chain(EFFECT).copied().collect()
-    }
-
-    fn external_marks(&self, req: &Request, before: &Server, out: &ExternalOutcome<Self>) -> Vec<&'static str> {
-        let mut m = Vec::new();
-        m.extend(named(STATUS, &format!("{} {}", kind(req), out.resp.status())));
-        effects(before, &out.next, matches!(req, Request::FenceTask { .. }), &mut m);
-        if !out.send.is_empty() {
-            m.push("task dispatched");
-        }
-        m.sort();
-        m.dedup();
-        m
-    }
-
-    fn internal_marks(&self, _ids: &crate::Internal, before: &Server, out: &InternalOutcome<Self>) -> Vec<&'static str> {
-        let mut m = Vec::new();
-        effects(before, &out.next, false, &mut m);
-        if !out.send.is_empty() {
-            m.push("task dispatched");
-        }
-        m.sort();
-        m.dedup();
-        m
-    }
-}
 
 /// A promise the suggestions settle or create with.
 fn create(id: &Id, timeout_at: Time) -> Create {

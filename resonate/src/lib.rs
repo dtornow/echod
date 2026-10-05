@@ -30,6 +30,6 @@ mod model;
 pub mod spec;
 
 pub use collections::{PMap, PSet};
-pub use explore::{arbitrary, IDS};
+pub use explore::{arbitrary, IDS, MARKS};
 pub use model::{on, Internal};
 pub use spec::*;

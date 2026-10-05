@@ -90,21 +90,24 @@ pub enum Sched<T> {
 }
 
 /// One possible effect of a request: the next state, the response, the
-/// internal work it starts, and the dispatches it sends.
+/// internal work it starts, and the dispatches it sends. `marks`: names for
+/// what this outcome does ("lease expired"), for coverage; they change nothing.
 pub struct ExternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
     pub resp: M::Response,
     pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
+    pub marks: Vec<&'static str>,
 }
 
 /// One possible effect of internal work: the next state, the internal work it
 /// starts, and the messages it sends to clients (server-sent, observed with
-/// [`Checker::receive`]).
+/// [`Checker::receive`]). `marks` as for [`ExternalOutcome`].
 pub struct InternalOutcome<M: Model + ?Sized> {
     pub next: M::State,
     pub work: Vec<Sched<M::Internal>>,
     pub send: Vec<M::Dispatch>,
+    pub marks: Vec<&'static str>,
 }
 
 /// The system, as a state machine: external requests from clients, internal
@@ -184,24 +187,6 @@ pub trait Model {
 
 } // verus!
 
-/// Optional, for testing: names for interesting things a step did ("lease
-/// expired, task re-dispatched"). The checker reads them off the execution a
-/// certificate describes ([`marks`]), so a test knows which behaviors a trace
-/// exercised: coverage of the spec rather than of the code.
-pub trait Marks: Model {
-    /// Every mark the model can produce, so coverage can report the ones no
-    /// trace reached.
-    fn all_marks(&self) -> Vec<&'static str>;
-
-    /// The marks of a request taking effect in `before` with outcome `out`.
-    fn external_marks(&self, req: &Self::External, before: &Self::State, out: &ExternalOutcome<Self>) -> Vec<&'static str>;
-
-    /// The marks of internal work running in `before` with outcome `out`.
-    fn internal_marks(&self, _req: &Self::Internal, _before: &Self::State, _out: &InternalOutcome<Self>) -> Vec<&'static str> {
-        Vec::new()
-    }
-}
-
 /// Optional, for testing: requests worth trying next from a state, each with
 /// why. A fuzz driver asks the checker, which asks the model for every state
 /// the system may be in ([`Checker::suggestions`]).
@@ -257,7 +242,15 @@ pub trait Partitioned: Footprint {
 
 impl<M: Model + ?Sized> ExternalOutcome<M> {
     pub fn new(resp: M::Response, next: M::State) -> Self {
-        ExternalOutcome { next, resp, work: Vec::new(), send: Vec::new() }
+        ExternalOutcome { next, resp, work: Vec::new(), send: Vec::new(), marks: Vec::new() }
+    }
+
+    /// A name for what this outcome does, for coverage: the marks along the
+    /// execution a certificate describes are what a trace exercised
+    /// ([`marks`]). Changes nothing.
+    pub fn mark(mut self, name: &'static str) -> Self {
+        self.marks.push(name);
+        self
     }
 
     /// The response, with the state unchanged.
@@ -287,7 +280,13 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
 
 impl<M: Model + ?Sized> InternalOutcome<M> {
     pub fn new(next: M::State) -> Self {
-        InternalOutcome { next, work: Vec::new(), send: Vec::new() }
+        InternalOutcome { next, work: Vec::new(), send: Vec::new(), marks: Vec::new() }
+    }
+
+    /// A name for what this outcome does, for coverage. Changes nothing.
+    pub fn mark(mut self, name: &'static str) -> Self {
+        self.marks.push(name);
+        self
     }
 
     /// A message to a client. It may be received once, at any time after, or never.

@@ -153,13 +153,15 @@ three:
 
 The model that checks a trace can also produce one and steer it.
 
-- **`Marks`** (optional trait): names for interesting things a step did, read
-  from its request, the state before and the outcome (`"lease expired"`,
-  `"task.fence 409"`). `accordant::marks(m, init, certificate)` replays a
-  certificate and collects the marks of the execution it describes. That is
-  coverage of the spec, not of the server's code: which behaviors this trace
-  is explained by. `all_marks` lists every mark so a report can show the ones
-  nothing reached.
+- **Marks**: names for what an outcome does, set by the model where it decides
+  it (`.mark("lease expired")` on an outcome; `marks` is a field of both
+  outcome types, empty by default). They change nothing.
+  `accordant::marks(m, init, &trace, &cert)` replays a certificate and collects
+  the marks on the outcomes it takes. That is coverage of the spec, not of the
+  server's code: which behaviors this trace is explained by. The Resonate spec
+  marks every branch (`mk("...")`, 65 in all); `resonate::MARKS` lists them so
+  a report can show the ones nothing reached, and a test keeps the list in step
+  with the spec.
 - **`Explore`** (optional trait): `suggest(state)`, requests worth trying from a
   state, each with why. `Checker::suggestions(limit)` asks for every state the
   system may be in, so a driver gets hints from what the checker knows.
@@ -184,8 +186,8 @@ cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-
 
 | server | mode | runs KO | marks reached |
 |---|---|---|---|
-| spec | random | 0 | 43/61 |
-| spec | guided | 0 | 51/61 |
+| spec | random | 0 | 45/65 |
+| spec | guided | 0 | 53/65 |
 | fence ignores the version | random | 43 | |
 | fence ignores the version | guided | 73 | |
 | a lease never expires | random | 0 | |

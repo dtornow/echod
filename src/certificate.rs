@@ -426,33 +426,26 @@ impl<M: Model> Config<'_, M> {
         self.clone().take(next).is_ok()
     }
 
-    /// The marks of a silent step, in the configuration it is taken from.
-    fn marks_of(&self, s: Silent) -> Vec<&'static str>
-    where
-        M: crate::Marks,
-    {
+    /// The marks on the outcome a silent step takes, in the configuration it
+    /// is taken from.
+    fn marks_of(&self, s: Silent) -> Vec<&'static str> {
         match s {
             Silent::Effect { call, j } => match self.calls.get(&call) {
-                Some(Call::InFlight(req)) => {
-                    let outs = self.m.external(req, &self.state);
-                    outs.get(j).map(|o| self.m.external_marks(req, &self.state, o)).unwrap_or_default()
-                }
+                Some(Call::InFlight(req)) => self.m.external(req, &self.state).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 _ => Vec::new(),
             },
             Silent::Run { i, j } => match self.work.get(i) {
-                Some(w) => {
-                    let outs = self.m.internal(&w.req, &self.state);
-                    outs.get(j).map(|o| self.m.internal_marks(&w.req, &self.state, o)).unwrap_or_default()
-                }
+                Some(w) => self.m.internal(&w.req, &self.state).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 None => Vec::new(),
             },
         }
     }
 }
 
-/// The marks the execution a certificate describes passes through: coverage,
-/// from one concrete explanation of a trace. `Err(k)` as for [`certify`].
-pub fn marks<M: crate::Marks>(
+/// The marks on the outcomes the execution a certificate describes takes:
+/// coverage, from one concrete explanation of a trace. `Err(k)` as for
+/// [`certify`].
+pub fn marks<M: Model>(
     m: &M,
     init: M::State,
     trace: &[EventOf<M>],

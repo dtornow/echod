@@ -25,7 +25,7 @@ mod driver;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
-use accordant::{Marks, Time};
+use accordant::Time;
 use driver::{run, show, Bug, Choices, Outcome, Server};
 use resonate::*;
 
@@ -69,7 +69,7 @@ fn main() {
     let bug = flag("--bug").map_or(Bug::None, |b| Bug::parse(&b));
     let cross = bug == Bug::None && std::env::var("CROSS").is_ok();
     let server = Server { bug };
-    let all = Resonate.all_marks();
+    let all = MARKS;
     let mut table: BTreeMap<&str, [usize; 2]> = all.iter().map(|m| (*m, [0, 0])).collect();
     println!("{runs} runs of {steps} requests each, server bug: {bug:?}\n");
     println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>13}", "mode", "ok", "ko", "unknown", "marks", "first ko (run)");

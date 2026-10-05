@@ -55,14 +55,14 @@ impl Model for Resonate {
     fn external(&self, op: &Request, s: &Server) -> Vec<ExternalOutcome<Self>> {
         Resonate::external(self, op, s)
             .into_iter()
-            .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send })
+            .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
             .collect()
     }
 
     fn internal(&self, ids: &Internal, s: &Server) -> Vec<InternalOutcome<Self>> {
         let ids: Vec<Id> = ids.iter().cloned().collect();
         let o = Resonate::internal(self, &ids, s);
-        vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send }]
+        vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
     }
 
     fn now(&self, s: &Server) -> Time {
