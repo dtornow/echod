@@ -160,7 +160,7 @@ pub fn run(server: &Server, choices: &dyn Choices, steps: usize, cross: bool) ->
         }
     }
     match Verdict::from(verdict) {
-        Verdict::Ok(moves) => Outcome::Ok(marks(&Resonate, resonate::Server::default(), moves).expect("the certificate replays")),
+        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate, resonate::Server::default(), &events, &cert).expect("the certificate replays")),
         Verdict::Ko(v) => Outcome::Ko(v, events),
         Verdict::Unknown(v) => Outcome::Unknown(v, events),
     }

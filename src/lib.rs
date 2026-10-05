@@ -34,7 +34,7 @@ mod hashed_map;
 mod hashed_set;
 mod intern;
 
-pub use certificate::{certify, marks, Move};
+pub use certificate::{certify, marks, Certificate, Silent};
 pub use sim::Sim;
 pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Verdict, Violation};
 pub use hashed_map::HashedMap;

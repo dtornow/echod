@@ -7,7 +7,7 @@
 //! can't do anything the model doesn't allow. Run a different model (one with a
 //! bug planted) to give a fuzz driver a server to catch.
 
-use crate::certificate::{Config, EventOf, Move, MoveOf};
+use crate::certificate::{Config, EventOf, Next, Silent};
 use crate::{CallId, Model};
 
 pub struct Sim<'m, M: Model> {
@@ -50,26 +50,28 @@ impl<'m, M: Model> Sim<'m, M> {
         k
     }
 
-    fn legal(&self) -> Vec<MoveOf<M>> {
+    fn legal(&self) -> Vec<Next<M>> {
         self.c.candidates().into_iter().filter(|mv| self.c.legal(mv)).collect()
     }
 
     /// Runs work until nothing is overdue.
     fn catch_up(&mut self) {
         while self.c.overdue() {
-            let moves: Vec<_> = self.legal().into_iter().filter(|m| matches!(m, Move::Run { .. })).collect();
-            if moves.is_empty() {
+            let runs: Vec<_> = self.legal().into_iter().filter(|n| matches!(n, Next::Silent(Silent::Run { .. }))).collect();
+            if runs.is_empty() {
                 return;
             }
-            let k = self.next(moves.len());
-            self.c.apply(moves[k].clone()).expect("legal");
+            let k = self.next(runs.len());
+            self.c.take(&runs[k]).expect("legal");
         }
     }
 
     /// A client sends a request. Overdue work runs first.
     pub fn invoke(&mut self, call: CallId, req: M::External) -> EventOf<M> {
         self.catch_up();
-        self.c.apply(Move::Invoke { call, req }).expect("a fresh call id").expect("an invoke is observed")
+        let e = crate::Event::Invoke { call, req };
+        self.c.observe(&e).expect("a fresh call id");
+        e
     }
 
     /// One thing the server does next, at random: a call takes effect, work
@@ -81,7 +83,11 @@ impl<'m, M: Model> Sim<'m, M> {
             return None;
         }
         let k = self.next(moves.len());
-        self.c.apply(moves[k].clone()).expect("legal")
+        self.c.take(&moves[k]).expect("legal");
+        match &moves[k] {
+            Next::Deliver(e) => Some(e.clone()),
+            Next::Silent(_) => None,
+        }
     }
 
     /// Steps until every call has been answered; the events clients observe.

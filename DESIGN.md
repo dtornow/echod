@@ -243,21 +243,30 @@ shows its work:
 
 ```rust
 let mut c = Checker::new(model, init, Config::default());
-let moves = c.check_certified(trace)?;   // or Config { certify: true, .. } and c.certified()
+let cert = c.check_certified(trace)?;   // or Config { certify: true, .. } and c.certified()
 ```
 
-A certificate is the execution the search found, as a list of moves: each
-observation, each call taking effect (with which outcome), each piece of work
-running, each time the clock moves. `certify` (`src/certificate.rs`, about 100
-lines) replays the moves one by one, refuses the first one the system can't
-make, and returns what the execution shows a client, which must be exactly the
-trace. `certify` is a copy of Lean's `certify`, for which `accepted_valid` is
+A certificate is the execution the search found, minus what the trace already
+says. The trace has the observed steps; the certificate has the silent ones,
+for each event the steps just before it:
+
+```rust
+pub enum Silent {
+    Effect { call: CallId, j: usize },   // the call took effect with its outcome j
+    Run { i: usize, j: usize },          // pending work i ran with its outcome j
+}
+pub type Certificate = Vec<Vec<Silent>>; // cert[k]: the silent steps just before trace[k]
+```
+
+`certify(model, init, &trace, &cert)` (`src/certificate.rs`) walks the trace:
+for each event it takes the silent steps, then the event, and refuses the first
+step the system can't make. `certify` is a copy of Lean's `certify`, for which `accepted_valid` is
 proved: whatever it accepts is valid. So the guarantee rests on those 100 lines
 matching their Lean copy, not on the search.
 
 With the deadline bug put back, `check` accepted a trace in which the work ran
-late. `check_certified` refused it: "move 5 is not legal: Advance { to: 10 }",
-because time can't skip a deadline whose work could run.
+late. `check_certified` refused it, because time can't skip a deadline whose
+work could run.
 
 Limits:
 

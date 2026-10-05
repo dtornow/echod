@@ -92,6 +92,8 @@ structure Model where
   now      : State → Time
   /-- Responses can be compared: a client sees exactly the predicted one. -/
   decEq    : DecidableEq Response := by infer_instance
+  /-- Dispatches can be compared: a client receives one by its value. -/
+  decEqDispatch : DecidableEq Dispatch := by infer_instance
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
@@ -208,20 +210,30 @@ def Valid (m : Model) (init : m.State) (trace : List m.Ev) : Prop :=
 /-! ## Certificates: checking an execution someone found
 
 Finding an execution is hard: the checker searches. Checking one is easy: walk
-it, one step at a time. A certificate is the list of moves the checker found,
-each naming which call, work, dispatch or outcome it takes; `replay` rebuilds
-the configurations and fails on the first move the system can't make. -/
+it, one step at a time. The trace already has the observed steps; a
+certificate adds the silent ones the checker found, each naming which call or
+work and which outcome. `replay` rebuilds the configurations and fails on the
+first step the system can't make. -/
 
-/-- One move of an execution, as the checker reports it. -/
-inductive Move (m : Model) where
-  | invoke (call : CallId) (req : m.External)
-  | ret (call : CallId) (res : m.Response)
-  /-- Receive the `i`-th dispatch sent and not yet received. -/
-  | receive (i : Nat)
+/-- A silent step, as a certificate names it. -/
+inductive Silent where
   /-- The call takes effect with the `j`-th of its outcomes. -/
   | effect (call : CallId) (j : Nat)
   /-- The `i`-th pending work runs with the `j`-th of its outcomes. -/
   | run (i j : Nat)
+
+/-- A certificate: for each event of the trace, the silent steps just before it. -/
+abbrev Certificate := List (List Silent)
+
+/-- One step of the replay: an event of the trace, or a silent step. -/
+inductive Move (m : Model) where
+  | obs (e : m.Ev)
+  | silent (s : Silent)
+
+/-- `l` without the first `x` in it, if there is one. -/
+def removeFirst {D : Type} [DecidableEq D] (x : D) : List D → Option (List D)
+  | [] => none
+  | y :: ys => if x = y then some ys else (removeFirst x ys).map (y :: ·)
 
 /-- `Overdue`, `overdue` and `First`, computed. -/
 def Work.isOverdue (c : Config m) (w : Work m.Internal) : Bool :=
@@ -243,25 +255,25 @@ def Config.mayRun (c : Config m) (w : Work m.Internal) : Bool :=
 
 /-- One move from `c`: the step's label and where it leads, if the system can make it. -/
 def Config.move (c : Config m) : Move m → Option (Label m × Config m)
-  | .invoke call req =>
+  | .obs (.invoke call req) =>
       if (c.calls call).isNone && !c.isOverdue then
         some (.obs (.invoke call req), { c with calls := update c.calls call (some (.inFlight req)) })
       else none
-  | .ret call res =>
+  | .obs (.ret call res) =>
       match c.calls call with
       | some (.done expected) =>
           if @decide (expected = res) (m.decEq expected res) && !c.isOverdue then
             some (.obs (.ret call res), { c with calls := update c.calls call none })
           else none
       | _ => none
-  | .receive i =>
-      match c.sent[i]? with
-      | some msg =>
+  | .obs (.receive msg) =>
+      match @removeFirst _ m.decEqDispatch msg c.sent with
+      | some rest =>
           if !c.isOverdue then
-            some (.obs (.receive msg), { c with sent := c.sent.take i ++ c.sent.drop (i + 1) })
+            some (.obs (.receive msg), { c with sent := rest })
           else none
       | none => none
-  | .effect call j =>
+  | .silent (.effect call j) =>
       match c.calls call with
       | some (.inFlight req) =>
           match (m.external req c.state)[j]? with
@@ -274,7 +286,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
               else none
           | none => none
       | _ => none
-  | .run i j =>
+  | .silent (.run i j) =>
       match c.work[i]? with
       | some w =>
           match (m.internal w.req c.state)[j]? with
@@ -296,13 +308,19 @@ def replay (c : Config m) : List (Move m) → Option (Execution m)
       | none => none
       | some (l, c') => (replay c' rest).map ((l, c') :: ·)
 
-/-- What a certificate shows a client, if every move in it is legal. -/
-def certify (m : Model) (init : m.State) (moves : List (Move m)) : Option (List m.Ev) :=
-  (replay (initial init) moves).map project
+/-- The trace and a certificate as one list of steps: each event after the
+    silent steps the certificate puts before it. -/
+def moves : List m.Ev → Certificate → List (Move m)
+  | e :: es, ss :: rest => ss.map .silent ++ .obs e :: moves es rest
+  | _, _ => []
 
-/-- A trace is accepted when some certificate shows exactly it. -/
+/-- What a trace with a certificate shows a client, if every step is legal. -/
+def certify (m : Model) (init : m.State) (trace : List m.Ev) (cert : Certificate) : Option (List m.Ev) :=
+  (replay (initial init) (moves trace cert)).map project
+
+/-- A trace is accepted when it has a certificate that shows exactly it. -/
 def Accepted (m : Model) (init : m.State) (trace : List m.Ev) : Prop :=
-  ∃ moves, certify m init moves = some trace
+  ∃ cert, certify m init trace cert = some trace
 
 theorem isOverdue_iff {c : Config m} {w : Work m.Internal} :
     w.isOverdue c = true ↔ c.Overdue w := by
@@ -337,46 +355,66 @@ theorem split_at {α : Type} {l : List α} {i : Nat} {a : α} (h : l[i]? = some 
   obtain ⟨hi, rfl⟩ := List.getElem?_eq_some_iff.mp h
   rw [← List.drop_eq_getElem_cons hi, List.take_append_drop]
 
+theorem removeFirst_split {D : Type} [DecidableEq D] {x : D} {l l' : List D}
+    (h : removeFirst x l = some l') : ∃ pre post, l = pre ++ x :: post ∧ l' = pre ++ post := by
+  induction l generalizing l' with
+  | nil => simp [removeFirst] at h
+  | cons y ys ih =>
+    simp only [removeFirst] at h
+    split at h
+    · rename_i hxy
+      subst hxy
+      exact ⟨[], ys, rfl, by simpa using h.symm⟩
+    · obtain ⟨z, hz, rfl⟩ := Option.map_eq_some_iff.mp h
+      obtain ⟨pre, post, h1, h2⟩ := ih hz
+      exact ⟨y :: pre, post, by simp [h1], by simp [h2]⟩
+
 theorem move_step {c c' : Config m} {mv : Move m} {l : Label m}
     (h : c.move mv = some (l, c')) : Step m c l c' := by
   cases mv with
-  | invoke call req =>
-    simp only [Config.move] at h
-    split at h <;> simp only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    rename_i hc
-    simp only [Bool.and_eq_true, Option.isNone_iff_eq_none, Bool.not_eq_true'] at hc
-    exact .invoke hc.1 (not_overdue hc.2)
-  | ret call res =>
-    simp only [Config.move] at h
-    split at h <;> try simp at h
-    rename_i expected hcall
-    obtain ⟨⟨ha, ho⟩, rfl, rfl⟩ := h
-    subst ha
-    exact .ret hcall (not_overdue ho)
-  | receive i =>
-    simp only [Config.move] at h
-    split at h <;> try simp at h
-    rename_i msg hmsg
-    obtain ⟨ho, rfl, rfl⟩ := h
-    exact .receive (split_at hmsg) (not_overdue ho)
-  | effect call j =>
-    simp only [Config.move] at h
-    split at h <;> try simp at h
-    rename_i req hcall
-    split at h <;> try simp at h
-    rename_i o hout
-    obtain ⟨ho, rfl, rfl⟩ := h
-    exact .effect hcall (List.mem_of_getElem? hout) (not_overdue ho)
-  | run i j =>
-    simp only [Config.move] at h
-    split at h <;> try simp at h
-    rename_i w hw
-    split at h <;> try simp at h
-    rename_i o hout
-    obtain ⟨⟨ha, hc⟩, rfl, rfl⟩ := h
-    rw [← List.append_assoc]
-    exact .run (split_at hw) ha (List.mem_of_getElem? hout) (may_run hc)
+  | obs e =>
+    cases e with
+      | invoke call req =>
+        simp only [Config.move] at h
+        split at h <;> simp only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        rename_i hc
+        simp only [Bool.and_eq_true, Option.isNone_iff_eq_none, Bool.not_eq_true'] at hc
+        exact .invoke hc.1 (not_overdue hc.2)
+      | ret call res =>
+        simp only [Config.move] at h
+        split at h <;> try simp at h
+        rename_i expected hcall
+        obtain ⟨⟨ha, ho⟩, rfl, rfl⟩ := h
+        subst ha
+        exact .ret hcall (not_overdue ho)
+      | receive msg =>
+        simp only [Config.move] at h
+        split at h <;> try simp at h
+        rename_i rest hrest
+        obtain ⟨ho, rfl, rfl⟩ := h
+        obtain ⟨pre, post, h1, h2⟩ := @removeFirst_split _ m.decEqDispatch _ _ _ hrest
+        rw [h2]
+        exact .receive h1 (not_overdue ho)
+  | silent s =>
+    cases s with
+      | effect call j =>
+        simp only [Config.move] at h
+        split at h <;> try simp at h
+        rename_i req hcall
+        split at h <;> try simp at h
+        rename_i o hout
+        obtain ⟨ho, rfl, rfl⟩ := h
+        exact .effect hcall (List.mem_of_getElem? hout) (not_overdue ho)
+      | run i j =>
+        simp only [Config.move] at h
+        split at h <;> try simp at h
+        rename_i w hw
+        split at h <;> try simp at h
+        rename_i o hout
+        obtain ⟨⟨ha, hc⟩, rfl, rfl⟩ := h
+        rw [← List.append_assoc]
+        exact .run (split_at hw) ha (List.mem_of_getElem? hout) (may_run hc)
 
 theorem replay_legal {c : Config m} {moves : List (Move m)} {x : Execution m}
     (h : replay c moves = some x) : Legal m c x := by
@@ -393,7 +431,7 @@ theorem replay_legal {c : Config m} {moves : List (Move m)} {x : Execution m}
 /-- Checking a certificate is enough: whatever it shows is valid. Proved. -/
 theorem accepted_valid {m : Model} {init : m.State} {trace : List m.Ev}
     (h : Accepted m init trace) : Valid m init trace := by
-  obtain ⟨moves, hm⟩ := h
+  obtain ⟨cert, hm⟩ := h
   obtain ⟨x, hx, rfl⟩ := Option.map_eq_some_iff.mp hm
   exact ⟨x, replay_legal hx, rfl⟩
 

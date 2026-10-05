@@ -277,8 +277,10 @@ fn check_calls_streams_a_generated_trace() {
     c.check_calls([(Request::Open("alice"), Response::Ok(0))]).unwrap();
     let stats = c.check_calls(deposits).unwrap();
     assert_eq!(stats.max_width, 1);
-    // Each call: invoke, effect, return.
-    assert_eq!(c.certified().unwrap().len(), 3 * 10_001);
+    // An entry per event (invoke, return), and one silent step per call: its effect.
+    let cert = c.certified().unwrap();
+    assert_eq!(cert.len(), 2 * 10_001);
+    assert_eq!(cert.iter().map(Vec::len).sum::<usize>(), 10_001);
 }
 
 /// Random concurrent histories on three accounts, from a real run with some

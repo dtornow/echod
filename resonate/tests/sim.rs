@@ -55,7 +55,7 @@ fn every_mode_accepts_what_the_simulator_does() {
         ok(c.check_complete(&t).map(|_| ()), "depth-first");
         let mut c = Checker::with_footprints(Resonate, Server::default(), Config { certify: true, ..Config::default() });
         match c.check_certified(t.clone()) {
-            Ok(moves) => assert_eq!(certify(&Resonate, Server::default(), moves).expect("replays"), t, "seed {seed}"),
+            Ok(cert) => assert_eq!(certify(&Resonate, Server::default(), &t, &cert), Ok(()), "seed {seed}"),
             Err(v) => panic!("seed {seed}: certified rejects a valid trace: {v}"),
         }
     }

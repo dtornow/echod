@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use crate::certificate::{self, Move, MoveOf, Work};
+use crate::certificate::{self, Certificate, Silent, Work};
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
 use crate::{CallId, Data, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
@@ -789,7 +789,7 @@ impl<S: Engine> Checker<S> {
 
     /// Checks a whole trace, as [`Checker::check`] does, and backs an acceptance
     /// with a certificate, as [`Checker::certified`] does.
-    pub fn check_certified<I>(&mut self, trace: I) -> Result<Vec<MoveOf<S::M>>, Violation>
+    pub fn check_certified<I>(&mut self, trace: I) -> Result<Certificate, Violation>
     where
         I: IntoIterator<Item = Event<Ex<S>, Re<S>, Ms<S>>>,
     {
@@ -800,15 +800,15 @@ impl<S: Engine> Checker<S> {
         self.certified()
     }
 
-    /// A certificate for the history so far: the execution the search found, as
-    /// moves. Before answering, [`certify`](crate::certify) replays the moves,
-    /// which must show exactly what was observed. Whatever passes is valid as
-    /// long as `certify` is right (proved for its Lean copy in
-    /// `lean/Accordant.lean`); the search needs no proof.
+    /// A certificate for the history so far: the silent steps of the execution
+    /// the search found, before each observed event. Before answering,
+    /// [`certify`](crate::certify) replays them with the history. Whatever
+    /// passes is valid as long as `certify` is right (proved for its Lean copy
+    /// in `lean/Accordant.lean`); the search needs no proof.
     ///
     /// Needs [`Config::certify`] from the start, and one factor:
     /// [`Checker::new`] or [`Checker::with_footprints`].
-    pub fn certified(&self) -> Result<Vec<MoveOf<S::M>>, Violation> {
+    pub fn certified(&self) -> Result<Certificate, Violation> {
         let n = self.observed.len();
         let fail = |reason: String| Violation {
             index: n,
@@ -820,17 +820,17 @@ impl<S: Engine> Checker<S> {
         if !self.recording {
             return Err(fail("a certificate needs Config::certify from the start".into()));
         }
-        let moves = self.certificate().map_err(fail)?;
-        match certificate::certify(self.engine.model(), self.init.clone(), moves.iter().cloned()) {
-            Ok(shown) if shown == self.observed => Ok(moves),
-            Ok(_) => Err(fail("the certificate shows a different history".into())),
-            Err(k) => Err(fail(format!("certify rejects move {k}: {:?}", moves[k]))),
+        let cert = self.certificate().map_err(fail)?;
+        match certificate::certify(self.engine.model(), self.init.clone(), &self.observed, &cert) {
+            Ok(()) => Ok(cert),
+            Err(k) => Err(fail(format!("certify rejects the steps up to event {k}: {:?}", cert.get(k)))),
         }
     }
 
-    /// The moves of one candidate: what it recorded, with work and dispatches
-    /// named by position and each read-only call placed where it took effect.
-    fn certificate(&self) -> Result<Vec<MoveOf<S::M>>, String> {
+    /// The silent steps of one candidate, grouped by the event they precede:
+    /// what it recorded, with work named by position and each read-only call
+    /// placed where it took effect.
+    fn certificate(&self) -> Result<Certificate, String> {
         let node = match self.factors.as_slice() {
             [] => return Ok(Vec::new()), // nothing observed yet
             [f] if f.parts.is_none() => &f.nodes[0],
@@ -863,25 +863,26 @@ impl<S: Engine> Checker<S> {
             }
         }
         let mut c = certificate::Config::initial(model, self.init.clone());
-        let mut moves = Vec::new();
+        let mut cert: Certificate = Vec::new();
+        let mut before: Vec<Silent> = Vec::new();
         for (k, r) in recs.into_iter().enumerate() {
-            let mv = match r {
-                Record::Obs(Event::Invoke { call, req }) => Move::Invoke { call, req },
-                Record::Obs(Event::Return { call, res }) => Move::Return { call, res },
-                Record::Obs(Event::Receive { msg }) => {
-                    Move::Receive { i: c.sent.iter().position(|m| *m == msg).ok_or(format!("{msg:?} was not sent"))? }
+            let s = match r {
+                Record::Obs(e) => {
+                    c.observe(&e).map_err(|()| format!("event {} can't happen here: {e:?}", cert.len()))?;
+                    cert.push(std::mem::take(&mut before));
+                    continue;
                 }
-                Record::Effect { call, j } => Move::Effect { call, j },
-                Record::Early { call, j, .. } if chosen.contains(&k) => Move::Effect { call, j },
+                Record::Effect { call, j } => Silent::Effect { call, j },
+                Record::Early { call, j, .. } if chosen.contains(&k) => Silent::Effect { call, j },
                 Record::Early { .. } => continue,
                 Record::Run { work, j } => {
-                    Move::Run { i: c.work.iter().position(|w| *w == work).ok_or(format!("{work:?} is not pending"))?, j }
+                    Silent::Run { i: c.work.iter().position(|w| *w == work).ok_or(format!("{work:?} is not pending"))?, j }
                 }
             };
-            c.apply(mv.clone()).map_err(|()| format!("move {} is not legal: {mv:?}", moves.len()))?;
-            moves.push(mv);
+            c.silent(s).map_err(|()| format!("before event {}, the step can't be taken: {s:?}", cert.len()))?;
+            before.push(s);
         }
-        Ok(moves)
+        Ok(cert)
     }
 
     /// Every response `op` may get if it is called now and answered now. Does not

@@ -1,7 +1,8 @@
-//! `certify` on its own: it replays a certificate and fails on the first move
+//! `certify` on its own: it replays a trace with the silent steps a
+//! certificate puts before each event, and fails at the first event whose steps
 //! the system can't make.
 
-use accordant::{certify, Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Move, Time};
+use accordant::{certify, Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Silent, Time};
 
 /// `Incr` adds one and answers the new value; `Arm` sets a timer at 5 that
 /// resets the counter; `Advance` moves the clock. The state is (clock, count).
@@ -38,51 +39,53 @@ impl Model for Counter {
     }
 }
 
-fn incr(call: u64, res: u64) -> Vec<Move<Req, u64>> {
-    vec![Move::Invoke { call, req: Req::Incr }, Move::Effect { call, j: 0 }, Move::Return { call, res }]
+type Ev = Event<Req, u64, ()>;
+
+fn call(call: u64, req: Req, res: u64) -> [Ev; 2] {
+    [Event::Invoke { call, req }, Event::Return { call, res }]
 }
 
-fn advance(call: u64, t: Time, res: u64) -> Vec<Move<Req, u64>> {
-    vec![Move::Invoke { call, req: Req::Advance(t) }, Move::Effect { call, j: 0 }, Move::Return { call, res }]
-}
-
-#[test]
-fn a_certificate_shows_its_trace() {
-    let shown = certify(&Counter, (0, 0), incr(7, 1)).unwrap();
-    assert_eq!(shown, vec![Event::Invoke { call: 7, req: Req::Incr }, Event::Return { call: 7, res: 1 }]);
+/// The call takes effect (its only outcome) just before its return.
+fn effect(call: u64) -> [Vec<Silent>; 2] {
+    [vec![], vec![Silent::Effect { call, j: 0 }]]
 }
 
 #[test]
-fn certify_rejects_illegal_moves() {
+fn a_certificate_explains_its_trace() {
+    assert_eq!(certify(&Counter, (0, 0), &call(7, Req::Incr, 1), &effect(7)), Ok(()));
+}
+
+#[test]
+fn certify_rejects_steps_the_system_cant_make() {
     // The response must match the outcome.
-    let mut wrong = incr(7, 1);
-    wrong[2] = Move::Return { call: 7, res: 2 };
-    assert_eq!(certify(&Counter, (0, 0), wrong), Err(2));
+    assert_eq!(certify(&Counter, (0, 0), &call(7, Req::Incr, 2), &effect(7)), Err(1));
     // A call must take effect before it is answered.
-    assert_eq!(certify(&Counter, (0, 0), vec![Move::Invoke { call: 7, req: Req::Incr }, Move::Return { call: 7, res: 1 }]), Err(1));
+    assert_eq!(certify(&Counter, (0, 0), &call(7, Req::Incr, 1), &[vec![], vec![]]), Err(1));
     // There is no second outcome.
-    assert_eq!(certify(&Counter, (0, 0), vec![Move::Invoke { call: 7, req: Req::Incr }, Move::Effect { call: 7, j: 1 }]), Err(1));
+    assert_eq!(certify(&Counter, (0, 0), &call(7, Req::Incr, 1), &[vec![], vec![Silent::Effect { call: 7, j: 1 }]]), Err(1));
     // A call id is in use until its response.
-    assert_eq!(certify(&Counter, (0, 0), vec![Move::Invoke { call: 7, req: Req::Incr }, Move::Invoke { call: 7, req: Req::Incr }]), Err(1));
+    let twice = [Event::Invoke { call: 7, req: Req::Incr }, Event::Invoke { call: 7, req: Req::Incr }];
+    assert_eq!(certify(&Counter, (0, 0), &twice, &[vec![], vec![]]), Err(1));
+    // Every event needs its entry, even an empty one.
+    assert_eq!(certify(&Counter, (0, 0), &call(7, Req::Incr, 1), &[vec![]]), Err(1));
 }
 
 #[test]
 fn certify_keeps_timers_on_time() {
-    let arm = vec![Move::Invoke { call: 1, req: Req::Arm }, Move::Effect { call: 1, j: 0 }, Move::Return { call: 1, res: 0 }];
+    let trace = [call(1, Req::Arm, 0), call(2, Req::Advance(6), 0)].concat();
+    let run = Silent::Run { i: 0, j: 0 };
+    let effect2 = Silent::Effect { call: 2, j: 0 };
     // Before 5 the timer can't run.
-    let early = [arm.clone(), vec![Move::Run { i: 0, j: 0 }]].concat();
-    assert_eq!(certify(&Counter, (0, 0), early), Err(3));
+    assert_eq!(certify(&Counter, (0, 0), &trace, &[vec![], vec![Silent::Effect { call: 1, j: 0 }, run], vec![], vec![]]), Err(1));
     // Past 5 it is overdue: it runs before anything else, even the clock
     // request's response.
-    let mut late = [arm.clone(), advance(2, 6, 0)].concat();
-    assert_eq!(certify(&Counter, (0, 0), late.clone()), Err(5));
-    late.insert(5, Move::Run { i: 0, j: 0 });
-    assert!(certify(&Counter, (0, 0), late).is_ok());
+    let late = |before_return: Vec<Silent>| [effect(1).to_vec(), vec![vec![], before_return]].concat();
+    assert_eq!(certify(&Counter, (0, 0), &trace, &late(vec![effect2])), Err(3));
+    assert_eq!(certify(&Counter, (0, 0), &trace, &late(vec![effect2, run])), Ok(()));
 }
 
 #[test]
 fn the_checker_certifies_what_it_accepts() {
-    let call = |call, req, res| [Event::Invoke { call, req }, Event::Return { call, res }];
     let trace: Vec<_> = [
         call(1, Req::Arm, 0),
         call(2, Req::Incr, 1),
@@ -90,7 +93,8 @@ fn the_checker_certifies_what_it_accepts() {
         call(4, Req::Incr, 1), // the timer reset the counter at 5
     ]
     .concat();
-    let moves = Checker::new(Counter, (0, 0), Config::default()).check_certified(trace.clone()).unwrap();
-    assert!(moves.contains(&Move::Run { i: 0, j: 0 }));
-    assert_eq!(certify(&Counter, (0, 0), moves).unwrap(), trace);
+    let cert = Checker::new(Counter, (0, 0), Config::default()).check_certified(trace.clone()).unwrap();
+    assert_eq!(cert.len(), trace.len(), "one entry per event");
+    assert!(cert.iter().flatten().any(|s| *s == Silent::Run { i: 0, j: 0 }));
+    assert_eq!(certify(&Counter, (0, 0), &trace, &cert), Ok(()));
 }

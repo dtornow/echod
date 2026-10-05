@@ -1,37 +1,50 @@
 //! Certificates: checking an execution someone found.
 //!
 //! Finding an execution is hard: the checker searches. Checking one is easy:
-//! walk it, one step at a time. A certificate is the list of moves the checker
-//! found; [`certify`] rebuilds the configurations, fails on the first move the
-//! system can't make, and returns what the execution shows a client.
+//! walk it, one step at a time. The trace already has the observed steps; a
+//! certificate adds the silent ones the checker found: for each event, which
+//! calls took effect and which work ran just before it, with which outcomes.
+//! [`certify`] rebuilds the configurations and fails on the first step the
+//! system can't make.
 //!
 //! This file is the Rust copy of `replay` and `certify` in `lean/Accordant.lean`,
-//! where `certify m init moves = some trace` is proved to imply that the trace is
-//! valid. Keep the two in step: the soundness of the checker rests on this file
-//! alone, not on the search.
+//! where an accepted certificate is proved to make the trace valid. Keep the two
+//! in step: the soundness of the checker rests on this file alone, not on the
+//! search.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::checker::Event;
 use crate::{CallId, Model, Sched, Time};
 
-/// One move of an execution, as the checker reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Move<X, R> {
-    /// A client sends a request. Observed.
-    Invoke { call: CallId, req: X },
-    /// A client receives the response to its call. Observed.
-    Return { call: CallId, res: R },
-    /// A client receives the `i`-th dispatch sent and not yet received. Observed.
-    Receive { i: usize },
-    /// The call takes effect with the `j`-th of its outcomes. Silent.
+/// A silent step, as a certificate names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Silent {
+    /// The call takes effect with the `j`-th of its outcomes.
     Effect { call: CallId, j: usize },
-    /// The `i`-th pending work runs with the `j`-th of its outcomes. Silent.
+    /// The `i`-th pending work runs with the `j`-th of its outcomes.
     Run { i: usize, j: usize },
 }
 
-pub type MoveOf<M> = Move<<M as Model>::External, <M as Model>::Response>;
+/// A certificate: for each event of the trace, the silent steps just before it.
+pub type Certificate = Vec<Vec<Silent>>;
+
 pub type EventOf<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Model>::Dispatch>;
+
+/// Whether `cert` explains `trace`: from `init`, each event's silent steps and
+/// then the event itself are steps the system can make. `Err(k)`: the steps up
+/// to event `k` can't be made (or the certificate stops before it).
+pub fn certify<M: Model>(m: &M, init: M::State, trace: &[EventOf<M>], cert: &[Vec<Silent>]) -> Result<(), usize> {
+    let mut c = Config::initial(m, init);
+    for (k, e) in trace.iter().enumerate() {
+        let Some(silent) = cert.get(k) else { return Err(k) };
+        for s in silent {
+            c.silent(*s).map_err(|()| k)?;
+        }
+        c.observe(e).map_err(|()| k)?;
+    }
+    Ok(())
+}
 
 enum Call<X, R> {
     InFlight(X),
@@ -97,33 +110,39 @@ impl<'m, M: Model> Config<'m, M> {
         self.work.extend(work.into_iter().map(|s| schedule(now, s)));
     }
 
-    /// One move: the event it shows a client, if any. `Err(())`: the system
-    /// can't make this move here.
-    pub fn apply(&mut self, mv: MoveOf<M>) -> Result<Option<EventOf<M>>, ()> {
-        match mv {
-            Move::Invoke { call, req } => {
-                if self.calls.contains_key(&call) || self.overdue() {
+    /// An observed step: the event happens here. `Err(())`: the system can't
+    /// show this event now.
+    pub fn observe(&mut self, e: &EventOf<M>) -> Result<(), ()> {
+        if self.overdue() {
+            return Err(());
+        }
+        match e {
+            Event::Invoke { call, req } => {
+                if self.calls.contains_key(call) {
                     return Err(());
                 }
-                self.calls.insert(call, Call::InFlight(req.clone()));
-                Ok(Some(Event::Invoke { call, req }))
+                self.calls.insert(*call, Call::InFlight(req.clone()));
             }
-            Move::Return { call, res } => {
-                let Some(Call::Done(expected)) = self.calls.get(&call) else { return Err(()) };
-                if *expected != res || self.overdue() {
+            Event::Return { call, res } => {
+                let Some(Call::Done(expected)) = self.calls.get(call) else { return Err(()) };
+                if expected != res {
                     return Err(());
                 }
-                self.calls.remove(&call);
-                Ok(Some(Event::Return { call, res }))
+                self.calls.remove(call);
             }
-            Move::Receive { i } => {
-                if i >= self.sent.len() || self.overdue() {
-                    return Err(());
-                }
-                let msg = self.sent.remove(i);
-                Ok(Some(Event::Receive { msg }))
+            Event::Receive { msg } => {
+                // The first copy sent: any copy would do, they are equal.
+                let Some(i) = self.sent.iter().position(|m| m == msg) else { return Err(()) };
+                self.sent.remove(i);
             }
-            Move::Effect { call, j } => {
+        }
+        Ok(())
+    }
+
+    /// A silent step. `Err(())`: the system can't take it now.
+    pub fn silent(&mut self, s: Silent) -> Result<(), ()> {
+        match s {
+            Silent::Effect { call, j } => {
                 let Some(Call::InFlight(req)) = self.calls.get(&call) else { return Err(()) };
                 let mut outs = self.m.external(req, &self.state);
                 if j >= outs.len() || self.overdue() {
@@ -134,9 +153,8 @@ impl<'m, M: Model> Config<'m, M> {
                 self.calls.insert(call, Call::Done(o.resp));
                 self.start(o.work);
                 self.sent.extend(o.send);
-                Ok(None)
             }
-            Move::Run { i, j } => {
+            Silent::Run { i, j } => {
                 let Some(w) = self.work.get(i) else { return Err(()) };
                 let mut outs = self.m.internal(&w.req, &self.state);
                 if j >= outs.len() || w.after > self.m.now(&self.state) || !self.may_run(w) {
@@ -147,14 +165,22 @@ impl<'m, M: Model> Config<'m, M> {
                 self.state = o.next;
                 self.start(o.work);
                 self.sent.extend(o.send);
-                Ok(None)
             }
         }
+        Ok(())
     }
 }
 
 // ------------------------------------------------------------------------
 // Not part of `certify`: helpers built on it, for the simulator and coverage.
+
+/// A step the system can take next, other than a new request.
+#[derive(Clone, Debug)]
+pub(crate) enum Next<M: Model> {
+    Silent(Silent),
+    /// A response or dispatch delivered to a client.
+    Deliver(EventOf<M>),
+}
 
 impl<X: Clone, R: Clone> Clone for Call<X, R> {
     fn clone(&self) -> Self {
@@ -181,9 +207,9 @@ impl<M: Model> Config<'_, M> {
         self.calls.len()
     }
 
-    /// Every move that could come next except a new request: `apply` decides
-    /// which are legal.
-    pub(crate) fn candidates(&self) -> Vec<MoveOf<M>> {
+    /// Every step that could come next except a new request; [`Config::take`]
+    /// decides which are legal.
+    pub(crate) fn candidates(&self) -> Vec<Next<M>> {
         let mut out = Vec::new();
         let mut calls: Vec<_> = self.calls.iter().collect();
         calls.sort_by_key(|(c, _)| **c);
@@ -191,72 +217,71 @@ impl<M: Model> Config<'_, M> {
             match c {
                 Call::InFlight(req) => {
                     let n = self.m.external(req, &self.state).len();
-                    out.extend((0..n).map(|j| Move::Effect { call: *call, j }));
+                    out.extend((0..n).map(|j| Next::Silent(Silent::Effect { call: *call, j })));
                 }
-                Call::Done(res) => out.push(Move::Return { call: *call, res: res.clone() }),
+                Call::Done(res) => out.push(Next::Deliver(Event::Return { call: *call, res: res.clone() })),
             }
         }
         for (i, w) in self.work.iter().enumerate() {
             let n = self.m.internal(&w.req, &self.state).len();
-            out.extend((0..n).map(|j| Move::Run { i, j }));
+            out.extend((0..n).map(|j| Next::Silent(Silent::Run { i, j })));
         }
-        out.extend((0..self.sent.len()).map(|i| Move::Receive { i }));
+        out.extend(self.sent.iter().map(|msg| Next::Deliver(Event::Receive { msg: msg.clone() })));
         out
     }
 
-    pub(crate) fn legal(&self, mv: &MoveOf<M>) -> bool {
-        self.clone().apply(mv.clone()).is_ok()
+    pub(crate) fn take(&mut self, next: &Next<M>) -> Result<(), ()> {
+        match next {
+            Next::Silent(s) => self.silent(*s),
+            Next::Deliver(e) => self.observe(e),
+        }
     }
 
-    /// The marks of a move, in the configuration it is made from.
-    fn marks_of(&self, mv: &MoveOf<M>) -> Vec<&'static str>
+    pub(crate) fn legal(&self, next: &Next<M>) -> bool {
+        self.clone().take(next).is_ok()
+    }
+
+    /// The marks of a silent step, in the configuration it is taken from.
+    fn marks_of(&self, s: Silent) -> Vec<&'static str>
     where
         M: crate::Marks,
     {
-        match mv {
-            Move::Effect { call, j } => match self.calls.get(call) {
+        match s {
+            Silent::Effect { call, j } => match self.calls.get(&call) {
                 Some(Call::InFlight(req)) => {
                     let outs = self.m.external(req, &self.state);
-                    outs.get(*j).map(|o| self.m.external_marks(req, &self.state, o)).unwrap_or_default()
+                    outs.get(j).map(|o| self.m.external_marks(req, &self.state, o)).unwrap_or_default()
                 }
                 _ => Vec::new(),
             },
-            Move::Run { i, j } => match self.work.get(*i) {
+            Silent::Run { i, j } => match self.work.get(i) {
                 Some(w) => {
                     let outs = self.m.internal(&w.req, &self.state);
-                    outs.get(*j).map(|o| self.m.internal_marks(&w.req, &self.state, o)).unwrap_or_default()
+                    outs.get(j).map(|o| self.m.internal_marks(&w.req, &self.state, o)).unwrap_or_default()
                 }
                 None => Vec::new(),
             },
-            _ => Vec::new(),
         }
     }
 }
 
 /// The marks the execution a certificate describes passes through: coverage,
-/// from one concrete explanation of a trace. `Err`: the position of the first
-/// illegal move.
+/// from one concrete explanation of a trace. `Err(k)` as for [`certify`].
 pub fn marks<M: crate::Marks>(
     m: &M,
     init: M::State,
-    moves: impl IntoIterator<Item = MoveOf<M>>,
-) -> Result<std::collections::BTreeSet<&'static str>, usize> {
+    trace: &[EventOf<M>],
+    cert: &[Vec<Silent>],
+) -> Result<BTreeSet<&'static str>, usize> {
     let mut c = Config::initial(m, init);
-    let mut seen = std::collections::BTreeSet::new();
-    for (k, mv) in moves.into_iter().enumerate() {
-        seen.extend(c.marks_of(&mv));
-        c.apply(mv).map_err(|()| k)?;
+    let mut seen = BTreeSet::new();
+    for (k, e) in trace.iter().enumerate() {
+        let Some(silent) = cert.get(k) else { return Err(k) };
+        for s in silent {
+            seen.extend(c.marks_of(*s));
+            c.silent(*s).map_err(|()| k)?;
+        }
+        c.observe(e).map_err(|()| k)?;
     }
     Ok(seen)
-}
-
-/// What a certificate shows a client, if every move in it is legal; otherwise
-/// the position of the first illegal move.
-pub fn certify<M: Model>(m: &M, init: M::State, moves: impl IntoIterator<Item = MoveOf<M>>) -> Result<Vec<EventOf<M>>, usize> {
-    let mut c = Config::initial(m, init);
-    let mut shown = Vec::new();
-    for (k, mv) in moves.into_iter().enumerate() {
-        shown.extend(c.apply(mv).map_err(|()| k)?);
-    }
-    Ok(shown)
 }
