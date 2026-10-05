@@ -7,9 +7,9 @@ put, append on 10 keys, with 1, 10 and 50 clients). `expected_etcd.txt` holds
 Porcupine's expected verdicts (etcd_095 is an empty file and has none).
 
 ```sh
-bench/porcupine/fetch.sh                                   # the Go repo, pinned
-cargo run --release --example porcupine_bench -- all [--dfs] # this checker
-(cd bench/porcupine/porcupine && go test -bench 'EtcdJepsen|Kv' -run '^$' -benchtime 2x)
+examples/porcupine/fetch.sh                                   # the Go repo, pinned
+cargo run --release --example porcupine -- all [--dfs] # this checker
+(cd examples/porcupine/porcupine && go test -bench 'EtcdJepsen|Kv' -run '^$' -benchtime 2x)
 ```
 
 `porcupine_rs_timing.rs` times the Rust port, porcupine-rs 0.3.0: unpack the

@@ -13,4 +13,4 @@ vstd = "=0.0.0-2026-10-04-0306"
 verify = true
 
 [workspace]
-members = [".", "resonate", "tigerbeetle"]
+members = [".", "examples/resonate", "examples/tigerbeetle"]

@@ -3,7 +3,7 @@
 //! `BTreeMap`, a persistent `imbl::OrdMap`, and `HashedMap` (persistent, with an
 //! incrementally maintained hash).
 //!
-//! cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]
+//! cargo run --release --example bank -- [accounts] [rounds] [concurrency]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;

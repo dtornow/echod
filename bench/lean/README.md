@@ -3,7 +3,7 @@
 `bench.lean` runs the `length` and `fanout` workloads of
 `resonatehq/resonate-specification` `valid/lean/experiments.lean` on that
 repository's trace checker, one workload and size per process, so peak memory
-is per case. `resonate/examples/resonate_bench.rs` runs the same workloads on the Rust
+is per case. `examples/resonate/examples/resonate_bench.rs` runs the same workloads on the Rust
 checker.
 
 To use it, copy it into a checkout of resonate-specification and add to its

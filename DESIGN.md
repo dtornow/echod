@@ -170,7 +170,7 @@ The model that checks a trace can also produce one and steer it.
   work runs, a response or dispatch is delivered. Every move goes through the
   replay behind `certify`, so a simulator trace is valid by construction.
 
-`resonate/examples/fuzz/` puts them together: a client sends requests to a
+`examples/resonate/examples/fuzz/` puts them together: a client sends requests to a
 `Sim` of the spec (or of the spec with a bug planted), a checker follows,
 and an accepted run's certificate gives its marks. In `guided` mode, three in
 four requests come from the checker's suggestions, the least tried reason
@@ -210,7 +210,7 @@ the expiring lease, so we kept our own driver.)
 **The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
 is a checker bug. `CROSS=1` also checks every trace with the partitioned and depth-first
 checkers. The first runs found three false KOs, all fixed and
-covered by `resonate/tests/sim.rs`:
+covered by `examples/resonate/tests/sim.rs`:
 
 1. A call in flight reads the clock (`created_at`), so it doesn't commute with a
    clock move. The clock's footprint was only the work falling due. Now it also
@@ -478,7 +478,7 @@ mechanisms keep it small, and all eight are in the prototype.
    linearization. Without this, the profile is the *product* of independent
    per-key choices: footprints keep each search small, but 50 reads in flight
    across 50 promise deadlines made 2^50 candidates. With it, width stays 1
-   (`resonate/tests/traces.rs`, `independent_promises_keep_the_profile_narrow`: failed
+   (`examples/resonate/tests/traces.rs`, `independent_promises_keep_the_profile_narrow`: failed
    after 47 s before, 400 nodes and 0.02 s after). Writes in flight across
    independent keys still multiply; partitions (next item) handle that.
 6. **Partitioned profiles.** A spec that defines `part(key)`, `restrict` and
@@ -539,7 +539,7 @@ States are immutable and shared. Two pieces make that cheap:
 Use `HashedMap` for every map-shaped part of the state. A field outside a map
 still hashes in full, which is fine when it is small, like `now`.
 
-`examples/bank_bench.rs` runs rounds of 8 concurrent deposits with footprints
+`examples/bank/` runs rounds of 8 concurrent deposits with footprints
 off, so the profile fans out to 128 nodes. 48,840 nodes are explored either way.
 These times are with the interner on.
 
@@ -579,7 +579,7 @@ the ids alone, so their footprint stays in one origin and doesn't merge
 anything. The C# spec and the server allow cross-origin fence-settles. The Lean
 spec refuses every cross-origin fence, the detached create included.
 
-The port is the `resonate` crate (`resonate/src/spec.rs`, written in Verus; traces in `resonate/tests/traces.rs`, from
+The port is the `resonate` crate (`examples/resonate/src/spec.rs`, written in Verus; traces in `examples/resonate/tests/traces.rs`, from
 `ExampleTraces.cs` and `LeaseAndTimeoutTests.cs`). Not ported: the
 `egress` capability (retry timeouts) and `debug.messages`.
 
@@ -683,8 +683,10 @@ Porting also found three checker bugs, all fixed:
 - `verus/README.md`: where the Verus statement and proof live, and how to run them.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
-- `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
+- `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, deferred independent jobs.
-- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark and fuzz driver in `resonate/examples/`.
+- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
+- `examples/tigerbeetle/`: TigerBeetle's state machine. `lean/` has it as a Lean `Model`, with a proof that debits never exceed credits (built by `lean/lakefile.toml`); `src/` has its data model in Rust, not yet a `Model`.
+- `examples/porcupine/`: Porcupine's etcd and key-value histories, checked against its Go checker's verdicts (`cargo run --release --example porcupine -- all [--dfs] [--certify]`; `fetch.sh` gets the histories).
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

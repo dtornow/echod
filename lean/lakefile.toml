@@ -4,8 +4,11 @@ defaultTargets = ["Accordant", "TigerBeetle", "TigerBeetleProofs"]
 [[lean_lib]]
 name = "Accordant"
 
+# TigerBeetle, an example model, lives with its Rust crate.
 [[lean_lib]]
 name = "TigerBeetle"
+srcDir = "../examples/tigerbeetle/lean"
 
 [[lean_lib]]
 name = "TigerBeetleProofs"
+srcDir = "../examples/tigerbeetle/lean"

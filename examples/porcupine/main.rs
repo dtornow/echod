@@ -2,8 +2,8 @@
 //! (a single register with read, write and compare-and-set) and the key-value
 //! logs (get, put and append on many keys), with Porcupine's models.
 //!
-//! bench/porcupine/fetch.sh, then
-//! cargo run --release --example porcupine_bench -- [etcd|kv|all] [--dfs] [--certify]
+//! examples/porcupine/fetch.sh, then
+//! cargo run --release --example porcupine -- [etcd|kv|all] [--dfs] [--certify]
 //!
 //! Porcupine gives a call that never answered (Jepsen's `:info`, or a log that
 //! ends first) a made-up "unknown" response at the end of the history that its
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use accordant::{Checker, Config, Engine, Event, Verdict, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Model, Partitioned, Time, Touches};
 
-const DATA: &str = "bench/porcupine/porcupine/test_data";
+const DATA: &str = "examples/porcupine/porcupine/test_data";
 
 // ------------------------------------------------------------------- etcd
 
@@ -296,7 +296,7 @@ where
 }
 
 fn etcd(mode: Mode) {
-    let expected: HashMap<u32, bool> = std::fs::read_to_string("bench/porcupine/expected_etcd.txt")
+    let expected: HashMap<u32, bool> = std::fs::read_to_string("examples/porcupine/expected_etcd.txt")
         .unwrap()
         .lines()
         .map(|l| {
