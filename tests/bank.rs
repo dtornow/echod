@@ -219,6 +219,10 @@ fn check_accepts_a_valid_trace_of_events() {
     ];
     model().check(trace).unwrap();
     model().check_certified(trace_again()).unwrap();
+    // Depth first, with a certificate for the path it found.
+    let mut c = model();
+    c.check_complete(&trace_again()).unwrap();
+    c.certified().unwrap();
 }
 
 #[test]

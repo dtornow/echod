@@ -3,7 +3,7 @@
 //! logs (get, put and append on many keys), with Porcupine's models.
 //!
 //! bench/porcupine/fetch.sh, then
-//! cargo run --release --example porcupine_bench -- [etcd|kv|all] [--certify]
+//! cargo run --release --example porcupine_bench -- [etcd|kv|all] [--dfs] [--certify]
 //!
 //! Porcupine gives a call that never answered (Jepsen's `:info`, or a log that
 //! ends first) a made-up "unknown" response at the end of the history that its
@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use accordant::{Checker, Config, Event, ExternalOutcome, Footprint, HashedMap, Model, Partitioned, Touches};
+use accordant::{Checker, Config, Engine, Event, ExternalOutcome, Footprint, HashedMap, Model, Partitioned, Touches};
 
 const DATA: &str = "bench/porcupine/porcupine/test_data";
 
@@ -251,7 +251,35 @@ fn time(mut check: impl FnMut() -> bool) -> (bool, Duration) {
     (ok, t0.elapsed() / runs)
 }
 
-fn etcd(certify: bool) {
+#[derive(Clone, Copy)]
+struct Mode {
+    /// Depth first, for complete histories (`check_complete`), instead of every
+    /// candidate at once (`check_history`).
+    dfs: bool,
+    /// Back the verdict with a certificate that `certify` replays.
+    certify: bool,
+}
+
+/// Checks `events` in `mode`; the reason if the checker gave up instead of
+/// deciding.
+#[allow(clippy::type_complexity)]
+fn run<S: Engine>(c: &mut Checker<S>, events: &[Event<<S::M as Model>::External, <S::M as Model>::Response, ()>], mode: Mode) -> (bool, Option<String>)
+where
+    S::M: Model<Dispatch = ()>,
+{
+    let r = match (mode.dfs, mode.certify) {
+        (false, false) => c.check_history(events).map(|_| ()),
+        (false, true) => c.check_certified(events.iter().cloned()).map(|_| ()),
+        (true, certify) => c.check_complete(events).map(|_| ()).and_then(|_| if certify { c.certified().map(|_| ()) } else { Ok(()) }),
+    };
+    match r {
+        Ok(()) => (true, None),
+        Err(v) if v.reason.contains("exceeds") || v.reason.contains("explored") => (false, Some(format!("event {}: {}", v.index, v.reason))),
+        Err(_) => (false, None),
+    }
+}
+
+fn etcd(mode: Mode) {
     let expected: HashMap<u32, bool> = std::fs::read_to_string("bench/porcupine/expected_etcd.txt")
         .unwrap()
         .lines()
@@ -260,79 +288,89 @@ fn etcd(certify: bool) {
             (n.parse().unwrap(), v == "true")
         })
         .collect();
-    let (mut total, mut wrong) = (Duration::ZERO, 0);
+    let (mut total, mut wrong, mut gave) = (Duration::ZERO, 0, 0);
     for n in 0..=102u32 {
         let events = parse_etcd(&std::fs::read_to_string(format!("{DATA}/jepsen/etcd_{n:03}.log")).unwrap());
         let mut width = 0;
         let mut gave_up = None;
         let (ok, dt) = time(|| {
-            let mut c = Checker::new(Etcd, None, cfg(certify));
-            let r = if certify { c.check_certified(events.iter().cloned()).map(|_| ()) } else { c.check_history(&events).map(|_| ()) };
-            if let Err(v) = &r {
-                if v.reason.contains("exceeds") || v.reason.contains("explored") {
-                    gave_up = Some(v.reason.clone());
-                }
-            }
+            let mut c = Checker::new(Etcd, None, cfg(mode.certify));
+            let (ok, why) = run(&mut c, &events, mode);
+            gave_up = why;
             width = c.stats.max_width;
-            r.is_ok()
+            ok
         });
-        let want = expected.get(&n);
-        if let Some(reason) = &gave_up {
-            println!("  etcd_{n:03} gave up: {reason}");
-        }
-        let mark = match want {
-            Some(w) if *w == ok => "",
-            Some(_) => {
-                wrong += 1;
-                "  MISMATCH"
+        let mark = match (&gave_up, expected.get(&n)) {
+            (Some(why), _) => {
+                gave += 1;
+                format!("  GAVE UP at {why}")
             }
-            None => "  (Porcupine has no expected verdict)",
+            (None, Some(w)) if *w == ok => String::new(),
+            (None, Some(_)) => {
+                wrong += 1;
+                "  MISMATCH".into()
+            }
+            (None, None) => "  (Porcupine has no expected verdict)".into(),
         };
         total += dt;
         println!("etcd_{n:03}  events={:<5} {:<5} {:>10.3}ms  width={width}{mark}", events.len(), ok, dt.as_secs_f64() * 1e3);
     }
-    println!("etcd: 103 histories, {:.1}ms in total, {wrong} verdicts differ from Porcupine's", total.as_secs_f64() * 1e3);
+    println!(
+        "etcd: 103 histories, {:.1}ms in total, {wrong} verdicts differ from Porcupine's, gave up on {gave}",
+        total.as_secs_f64() * 1e3
+    );
 }
 
-fn kv(certify: bool) {
+fn kv(mode: Mode) {
     for (name, want) in [("c01-ok", true), ("c01-bad", false), ("c10-ok", true), ("c10-bad", false), ("c50-ok", true), ("c50-bad", false)] {
         let events = parse_kv(&std::fs::read_to_string(format!("{DATA}/kv/{name}.txt")).unwrap());
         let mut width = 0;
-        let (ok, dt) = if certify {
-            time(|| {
+        let mut gave_up = None;
+        let (ok, dt) = time(|| {
+            // Certificates need one factor; otherwise partitions, by key.
+            let (ok, why) = if mode.certify {
                 let mut c = Checker::with_footprints(Kv, HashedMap::new(), cfg(true));
-                let ok = c.check_certified(events.iter().cloned()).is_ok();
+                let r = run(&mut c, &events, mode);
                 width = c.stats.max_width;
-                ok
-            })
-        } else {
-            time(|| {
+                r
+            } else {
                 let mut c = Checker::with_partitions(Kv, HashedMap::new(), cfg(false));
-                let r = c.check_history(&events);
-                let ok = r.is_ok();
-                if let Err(v) = r {
-                    if v.reason.contains("exceeds") || v.reason.contains("explored") {
-                        println!("  gave up at event {}: {}", v.index, v.reason);
-                    }
-                }
+                let r = run(&mut c, &events, mode);
                 width = c.stats.max_width;
-                ok
-            })
+                r
+            };
+            gave_up = why;
+            ok
+        });
+        let mark = match &gave_up {
+            Some(why) => format!("  GAVE UP at {why}"),
+            None if ok == want => String::new(),
+            None => "  MISMATCH".into(),
         };
-        let mark = if ok == want { "" } else { "  MISMATCH" };
         println!("kv {name:<8} events={:<5} {:<5} {:>10.3}ms  width={width}{mark}", events.len(), ok, dt.as_secs_f64() * 1e3);
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let certify = args.iter().any(|a| a == "--certify");
+    if args.first().map(String::as_str) == Some("probe") { probe(&args[1]); return; }
+    let mode = Mode { dfs: args.iter().any(|a| a == "--dfs"), certify: args.iter().any(|a| a == "--certify") };
     let which = args.iter().find(|a| !a.starts_with("--")).map(String::as_str).unwrap_or("all");
     if which == "etcd" || which == "all" {
-        etcd(certify);
+        etcd(mode);
     }
     if which == "kv" || which == "all" {
-        kv(certify);
+        kv(mode);
     }
 }
 
+
+#[allow(dead_code)]
+fn probe(name: &str) {
+    let events = parse_kv(&std::fs::read_to_string(format!("{DATA}/kv/{name}.txt")).unwrap());
+    let explore = std::env::var("EXPLORE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
+    let mut c = Checker::with_partitions(Kv, HashedMap::new(), Config { max_explore: explore, ..cfg(false) });
+    let t0 = Instant::now();
+    let r = c.check_complete(&events).map(|_| ());
+    println!("{name}: {:?} in {:?}, {:?}", r.err().map(|v| (v.index, v.reason)), t0.elapsed(), c.stats);
+}

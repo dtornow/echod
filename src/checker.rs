@@ -250,6 +250,10 @@ pub struct Checker<S: Engine> {
     /// Calls the history says never return: they may take effect at any point,
     /// or never, like `Maybe` work.
     orphans: HashSet<CallId>,
+    /// In a complete history, the response each call gets, so a depth-first
+    /// search takes only effects that answer it (Porcupine's pruning). Empty
+    /// when call ids repeat.
+    answers: HashMap<CallId, Re<S>>,
     /// A clock move in flight, explained in every factor on its own.
     broadcasting: Option<(CallId, Ex<S>)>,
     factors: Vec<Factor<S>>,
@@ -308,6 +312,7 @@ impl<S: Engine> Checker<S> {
             known: BTreeSet::new(),
             broadcasting: None,
             orphans: HashSet::new(),
+            answers: HashMap::new(),
             init,
             factors: Vec::new(),
             profile: Vec::new(),
@@ -418,11 +423,17 @@ impl<S: Engine> Checker<S> {
     /// checker keeps only the first. A Jepsen history with many `:info`
     /// operations needs this.
     pub fn check_history(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<&Stats, Violation> {
-        let mut open = HashMap::new();
-        for (i, e) in trace.iter().enumerate() {
+        self.mark_orphans(trace);
+        self.check(trace.iter().cloned())
+    }
+
+    /// Calls the history invokes and never answers.
+    fn mark_orphans(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) {
+        let mut open = HashSet::new();
+        for e in trace {
             match e {
                 Event::Invoke { call, .. } => {
-                    open.insert(*call, i);
+                    open.insert(*call);
                 }
                 Event::Return { call, .. } => {
                     open.remove(call);
@@ -430,8 +441,221 @@ impl<S: Engine> Checker<S> {
                 Event::Receive { .. } => {}
             }
         }
-        self.orphans.extend(open.into_keys());
-        self.check(trace.iter().cloned())
+        self.orphans.extend(open);
+    }
+
+    /// Checks a complete history depth first, like Porcupine: instead of
+    /// keeping every explanation alive, it commits to one way of explaining
+    /// each event and backtracks when a later event can't be explained,
+    /// remembering which (position, candidate) pairs already failed. On a
+    /// valid history it rarely pays for the alternatives; an invalid one it
+    /// still has to search exhaustively.
+    ///
+    /// Each event is explained as [`Checker::check`] explains it, so the
+    /// verdict is the same. On success, the path found is the history's
+    /// explanation: [`Checker::certified`] turns it into a certificate.
+    /// With partitions (and without certificates), a history whose events each
+    /// stay in one partition is split by partition first, and each part is
+    /// checked on its own.
+    ///
+    /// Needs a fresh checker, and leaves it fit only for [`Checker::certified`].
+    pub fn check_complete(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<&Stats, Violation> {
+        if self.stats.events > 0 {
+            return Err(Violation { index: 0, event: "check_complete".into(), reason: "needs a fresh checker".into(), profile: Vec::new() });
+        }
+        self.mark_orphans(trace);
+        self.answers = answers(trace);
+        if !self.recording && self.engine.partitioned() {
+            if let Some(parts) = self.split_by_part(trace) {
+                for (part, sub) in parts {
+                    let init = self.engine.restrict(&self.rest, &|p| *p == part);
+                    let events: Vec<_> = sub.iter().map(|(_, e)| e.clone()).collect();
+                    self.scope = Some(Some(BTreeSet::from([part])));
+                    let r = self.dfs(init, &events);
+                    self.scope = None;
+                    if let Some(step) = self.escaped.borrow_mut().take() {
+                        let reason = "spec error: work reaches outside the partitions of the request or step that spawned it";
+                        return Err(Violation { index: 0, event: step, reason: reason.into(), profile: Vec::new() });
+                    }
+                    r.map_err(|v| Violation { index: sub[v.index].0, ..v })?;
+                }
+                self.stats.events += trace.len();
+                return Ok(&self.stats);
+            }
+        }
+        let node = self.dfs(self.init.clone(), trace)?;
+        self.factors = vec![Factor { parts: None, nodes: vec![node] }];
+        if self.recording {
+            self.observed = trace.to_vec();
+        }
+        self.stats.events += trace.len();
+        Ok(&self.stats)
+    }
+
+    /// The history's events grouped by the one partition each stays in, with
+    /// their positions; `None` if some event spans partitions or moves the clock.
+    #[allow(clippy::type_complexity)]
+    fn split_by_part(&self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Option<Vec<(S::Part, Vec<(usize, Event<Ex<S>, Re<S>, Ms<S>>)>)>> {
+        let one = |keys| match self.scope(keys) {
+            Scope::Parts(ps) if ps.len() == 1 => ps.into_iter().next(),
+            _ => None,
+        };
+        let mut of_call = HashMap::new();
+        let mut groups: std::collections::BTreeMap<S::Part, Vec<_>> = Default::default();
+        for (i, e) in trace.iter().enumerate() {
+            let part = match e {
+                Event::Invoke { call, req } => {
+                    if self.engine.moves_clock(req) {
+                        return None;
+                    }
+                    let p = one(self.engine.external_keys(req))?;
+                    of_call.insert(*call, p.clone());
+                    p
+                }
+                Event::Return { call, .. } => of_call.get(call)?.clone(),
+                Event::Receive { msg } => one(self.engine.dispatch_keys(msg))?,
+            };
+            groups.entry(part).or_default().push((i, e.clone()));
+        }
+        Some(groups.into_iter().collect())
+    }
+
+    /// Depth first through `trace` from `init`, one move at a time: a
+    /// candidate after the last event, or the violation at the deepest event
+    /// reached.
+    ///
+    /// From a candidate before event `i`: if nothing is owed before the event,
+    /// the event is consumed (it commutes with any move made after it, so
+    /// nothing is lost by consuming it first). Otherwise each single move on
+    /// the keys of what is owed is a branch, calls in the order they were
+    /// invoked. A (position, candidate) pair is explored once.
+    fn dfs(&mut self, init: St<S>, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<Node<S>, Violation> {
+        struct Frame<S: Engine> {
+            i: usize,
+            /// Branches: whether each consumes event `i`, and where it leads.
+            children: Vec<(bool, Node<S>)>,
+            tried: usize,
+        }
+        let evs: Vec<Ev<Ex<S>, Re<S>, Ms<S>>> = trace
+            .iter()
+            .map(|e| match e.clone() {
+                Event::Invoke { call, req } => Ev::Invoke(call, req),
+                Event::Return { call, res } => Ev::Return(call, res),
+                Event::Receive { msg } => Ev::Receive(msg),
+            })
+            .collect();
+        let start = Node { state: self.states.intern(init), pending: HashedSet::new(), trail: Default::default() };
+        if evs.is_empty() {
+            return Ok(start);
+        }
+        let mut seen: HashSet<(usize, Node<S>)> = HashSet::new();
+        let mut explored = 0usize;
+        let mut deepest = 0;
+        seen.insert((0, start.clone()));
+        let mut stack = vec![Frame { i: 0, children: self.children(&start, &evs[0])?, tried: 0 }];
+        while let Some(top) = stack.last_mut() {
+            if top.tried == top.children.len() {
+                stack.pop();
+                continue;
+            }
+            let (advance, n) = top.children[top.tried].clone();
+            top.tried += 1;
+            let j = if advance { top.i + 1 } else { top.i };
+            if j == evs.len() {
+                self.stats.explored += explored;
+                return Ok(n);
+            }
+            if !seen.insert((j, n.clone())) {
+                continue;
+            }
+            explored += 1;
+            if explored > self.cfg.max_explore {
+                self.stats.explored += explored;
+                let reason = format!("explored more than {} nodes", self.cfg.max_explore);
+                return Err(Violation { index: j, event: format!("{:?}", evs[j]), reason, profile: Vec::new() });
+            }
+            deepest = deepest.max(j);
+            let children = self.children(&n, &evs[j]).map_err(|v| Violation { index: j, ..v })?;
+            stack.push(Frame { i: j, children, tried: 0 });
+        }
+        self.stats.explored += explored;
+        let reason = "no execution of the model explains the history past this event".into();
+        Err(Violation { index: deepest, event: format!("{:?}", evs[deepest]), reason, profile: Vec::new() })
+    }
+
+    /// The branches from `n` before event `e`: the event consumed, if nothing
+    /// is owed before it; otherwise each single move on the keys of what is
+    /// owed, in invocation order. Each says whether it consumed the event.
+    fn children(&self, n: &Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<Vec<(bool, Node<S>)>, Violation> {
+        let at = |v: String| Violation { index: 0, event: format!("{e:?}"), reason: v, profile: Vec::new() };
+        let unsent = matches!(e, Ev::Receive(msg) if !self.has_sent(n, msg));
+        if !self.owes(n, e) && !unsent {
+            return Ok(self.consume(n, e).map_err(at)?.into_iter().map(|m| (true, m)).collect());
+        }
+        let owed: Vec<P<S>> = self.owed(n, e).into_iter().cloned().collect();
+        let first = self.earliest_overdue(n);
+        let relevant = if !self.cfg.footprints {
+            Touches::Everything
+        } else {
+            let seed = match e {
+                Ev::Receive(msg) => self.engine.dispatch_keys(msg),
+                _ => Touches::Only(Vec::new()),
+            };
+            let owed_refs: Vec<&P<S>> = owed.iter().collect();
+            self.relevant(n, &owed_refs, seed)
+        };
+        let mut items: Vec<&P<S>> = n
+            .pending
+            .iter()
+            .filter(|item| self.can_fire(item, &n.state))
+            .filter(|item| match first {
+                Some(d) => matches!(item, Pending::Step { must: true, by: Some(by), .. } if *by == d) && self.is_overdue(item, &n.state),
+                None => self.is_clock(item) || intersects(&relevant, &self.footprint(item, n)),
+            })
+            .collect();
+        // Calls in the order they were invoked (call ids rise), as Porcupine
+        // tries them: the call made first most often took effect first.
+        // Internal work after them, earliest deadline first.
+        items.sort_by_key(|item| match item {
+            Pending::InFlight { call, .. } => (0, *call, 0),
+            Pending::Step { by, .. } => (1, 0, by.unwrap_or(Time::MAX)),
+            _ => (2, 0, 0),
+        });
+        let mut out = Vec::new();
+        for item in items {
+            for m in self.fire_exact(n, item) {
+                if m != *n {
+                    out.push((false, m));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Checker::fire`], except that a read takes effect like any call, with
+    /// the answer it gets here: depth first, where it takes effect is a branch,
+    /// and remembering every answer it could have had would make the same
+    /// candidate look different on every path.
+    fn fire_exact(&self, m: &Node<S>, item: &P<S>) -> Vec<Node<S>> {
+        let Pending::InFlight { call, op, .. } = item else { return self.fire(m, item) };
+        self.engine
+            .model()
+            .external(op, &m.state)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, o)| self.answers.get(call).is_none_or(|r| self.engine.model().admits(&o.res, r)))
+            .map(|(j, o)| {
+                let mut p = m.pending.clone();
+                p.remove(item);
+                p.insert(Pending::Responded { call: *call, resp: o.res });
+                self.spawn(&mut p, o.spawn, &o.next);
+                for msg in o.send {
+                    add_sent(&mut p, msg);
+                }
+                let trail = self.record(&m.trail, || Record::Effect { call: *call, j });
+                Node { state: self.states.intern(o.next), pending: p, trail }
+            })
+            .collect()
     }
 
     /// Checks the simplest trace: calls made one after another, each answered
@@ -1337,6 +1561,22 @@ impl<S: Engine> Checker<S> {
             trail.clone()
         }
     }
+}
+
+/// The response each call in `trace` gets; empty if a call id is invoked twice.
+fn answers<X, R: Clone, D>(trace: &[Event<X, R, D>]) -> HashMap<CallId, R> {
+    let mut invoked = HashSet::new();
+    let mut out = HashMap::new();
+    for e in trace {
+        match e {
+            Event::Invoke { call, .. } if !invoked.insert(*call) => return HashMap::new(),
+            Event::Return { call, res } => {
+                out.insert(*call, res.clone());
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A call whose every outcome leaves the state as it is and starts nothing.
