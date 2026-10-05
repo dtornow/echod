@@ -12,12 +12,26 @@ use crate::{CallId, Model};
 
 pub struct Sim<'m, M: Model> {
     c: Config<'m, M>,
-    rng: u64,
+    /// Chooses among `n` alternatives: a seeded generator, or a testing
+    /// library that records the choices so it can replay and shrink them.
+    pick: Box<dyn FnMut(usize) -> usize + 'm>,
 }
 
 impl<'m, M: Model> Sim<'m, M> {
+    /// Choices from a generator seeded with `seed`.
     pub fn new(m: &'m M, init: M::State, seed: u64) -> Self {
-        Sim { c: Config::initial(m, init), rng: seed | 1 }
+        let mut rng = seed | 1;
+        Self::with_choices(m, init, move |n| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as usize
+        })
+    }
+
+    /// Choices from `pick(n)`, which must return a number below `n`.
+    pub fn with_choices(m: &'m M, init: M::State, pick: impl FnMut(usize) -> usize + 'm) -> Self {
+        Sim { c: Config::initial(m, init), pick: Box::new(pick) }
     }
 
     /// The server's state.
@@ -31,10 +45,9 @@ impl<'m, M: Model> Sim<'m, M> {
     }
 
     fn next(&mut self, n: usize) -> usize {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 7;
-        self.rng ^= self.rng << 17;
-        (self.rng % n as u64) as usize
+        let k = (self.pick)(n);
+        assert!(k < n, "a choice among {n} must be below {n}, not {k}");
+        k
     }
 
     fn legal(&self) -> Vec<MoveOf<M>> {
