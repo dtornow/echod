@@ -80,7 +80,7 @@ impl<M: Accounts> Model for Bank<M> {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, op: &Request, s: &M, _now: accordant::Time) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, op: &Request, s: &M) -> Vec<ExternalOutcome<Self>> {
         let Request::Deposit(a, x) = *op;
         let b = s.get(a).unwrap_or(0) + x;
         let mut n = s.clone();

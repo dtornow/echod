@@ -54,15 +54,24 @@ fn fanout(n: u64) -> Vec<(Request, Time)> {
 fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Dispatch>> {
     let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
     let mut trace = Vec::new();
-    for (call, (op, t)) in script.iter().enumerate() {
-        if *t > c.now() {
-            c.tick(*t).unwrap();
+    let mut now = 0;
+    let mut call = 0u64;
+    let mut ops = Vec::new();
+    for (op, t) in script {
+        if *t > now {
+            // The driver moves the server's clock first.
+            ops.push(Request::AdvanceClock(*t));
+            now = *t;
         }
-        let allowed = c.allowed(op);
+        ops.push(op.clone());
+    }
+    for op in ops {
+        let allowed = c.allowed(&op);
         let res = allowed.iter().find(|r| r.status() == 200).unwrap_or(&allowed[0]).clone();
-        c.call(call as u64, op.clone(), res.clone()).unwrap();
-        trace.push(Event::Invoke { at: *t, call: call as u64, req: op.clone() });
-        trace.push(Event::Return { at: *t, call: call as u64, res });
+        c.call(call, op.clone(), res.clone()).unwrap();
+        trace.push(Event::Invoke { call, req: op });
+        trace.push(Event::Return { call, res });
+        call += 1;
     }
     trace
 }
@@ -117,3 +126,4 @@ fn main() {
         );
     }
 }
+

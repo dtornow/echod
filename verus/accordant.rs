@@ -26,7 +26,7 @@
 //! `lean/Accordant.lean`: a certificate that `certify` accepts is valid, so the
 //! contract holds as long as `src/certificate.rs` matches the Lean `certify`.
 //!
-//! Not covered: `assert_idle`, and request lifetimes (off by default).
+//! Not covered: `assert_idle`.
 
 use vstd::prelude::*;
 
@@ -39,24 +39,14 @@ pub type CallId = u64;
 
 // ------------------------------------------------------------- observations
 
-/// What a client observes, and when.
+/// What a client observes. No time: a trace's order is the order one observer saw.
 pub enum Event<X, R, D> {
     /// The client sent a request.
-    Invoke { at: Time, call: CallId, req: X },
+    Invoke { call: CallId, req: X },
     /// The client got the response to that call.
-    Return { at: Time, call: CallId, res: R },
+    Return { call: CallId, res: R },
     /// The client got a dispatch the server sent on its own.
-    Receive { at: Time, msg: D },
-}
-
-impl<X, R, D> Event<X, R, D> {
-    pub open spec fn at(self) -> Time {
-        match self {
-            Event::Invoke { at, .. } => at,
-            Event::Return { at, .. } => at,
-            Event::Receive { at, .. } => at,
-        }
-    }
+    Receive { msg: D },
 }
 
 // -------------------------------------------------------------------- model
@@ -99,17 +89,20 @@ pub trait Model {
     type Dispatch;
 
     /// A request takes effect: every allowed outcome.
-    spec fn external(&self, req: Self::External, state: Self::State, now: Time) -> Seq<
+    spec fn external(&self, req: Self::External, state: Self::State) -> Seq<
         ExternalOutcome<Self::State, Self::Response, Self::Internal, Self::Dispatch>,
     >;
 
     /// Internal work runs: every possible outcome. Empty: it can't run yet.
-    spec fn internal(&self, req: Self::Internal, state: Self::State, now: Time) -> Seq<
+    spec fn internal(&self, req: Self::Internal, state: Self::State) -> Seq<
         InternalOutcome<Self::State, Self::Internal, Self::Dispatch>,
     >;
 
     /// Whether a client seeing `observed` matches the `expected` response.
     spec fn admits(&self, expected: Self::Response, observed: Self::Response) -> bool;
+
+    /// The model's clock in a state. Deadlines are on this clock.
+    spec fn now(&self, state: Self::State) -> Time;
 }
 
 pub type Ev<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Model>::Dispatch>;
@@ -138,8 +131,6 @@ pub struct Work<I> {
 /// Everything about a run at one point, seen or not.
 pub struct Config<S, X, R, I, D> {
     pub state: S,
-    /// Unbounded, so deadlines never wrap around.
-    pub now: nat,
     pub calls: Map<CallId, Call<X, R>>,
     pub work: Seq<Work<I>>,
     /// Dispatches sent and not yet received.
@@ -180,11 +171,15 @@ pub open spec fn start_all<I>(work: Seq<Work<I>>, spawn: Seq<Sched<I>>, now: nat
     work + spawn.map_values(|s: Sched<I>| schedule(s, now))
 }
 
-/// Work that can run now and whose deadline has come: it runs before anything
-/// else happens. Work that can't run owes nothing.
+pub open spec fn clock<M: Model>(m: M, c: Cfg<M>) -> nat {
+    m.now(c.state) as nat
+}
+
+/// Work whose deadline has come on the model's clock, and that can run: it runs
+/// before anything else happens.
 pub open spec fn is_overdue<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    0 <= i < c.work.len() && c.work[i].must && c.work[i].after <= c.now && match c.work[i].by {
-        Some(by) => by <= c.now && m.internal(c.work[i].req, c.state, c.now as Time).len() > 0,
+    0 <= i < c.work.len() && c.work[i].must && c.work[i].after <= clock(m, c) && match c.work[i].by {
+        Some(by) => by <= clock(m, c) && m.internal(c.work[i].req, c.state).len() > 0,
         None => false,
     }
 }
@@ -193,16 +188,10 @@ pub open spec fn overdue<M: Model>(m: M, c: Cfg<M>) -> bool {
     exists|i: int| #[trigger] is_overdue(m, c, i)
 }
 
-/// Time may move to `to` only if it doesn't skip a deadline. Work whose
-/// deadline has come and that can't run then owes nothing.
-pub open spec fn may_advance<M: Model>(m: M, c: Cfg<M>, to: nat) -> bool {
-    to > c.now && forall|i: int|
-        0 <= i < c.work.len() && c.work[i].must && #[trigger] c.work[i].by.is_some() ==> to
-            <= c.work[i].by.unwrap() || (c.work[i].by.unwrap() <= c.now && m.internal(
-            c.work[i].req,
-            c.state,
-            c.now as Time,
-        ).len() == 0)
+/// Work `i` is overdue with the earliest deadline: when the clock jumped past
+/// several deadlines, their work runs in deadline order.
+pub open spec fn is_first<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
+    is_overdue(m, c, i) && forall|k: int| #[trigger] is_overdue(m, c, k) ==> c.work[i].by.unwrap() <= c.work[k].by.unwrap()
 }
 
 // -------------------------------------------- steps: how the system evolves
@@ -210,7 +199,7 @@ pub open spec fn may_advance<M: Model>(m: M, c: Cfg<M>, to: nat) -> bool {
 /// A client sends a request. Observed.
 pub open spec fn invoke<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
-        Label::Obs(Event::Invoke { at, call, req }) => at as nat == c.now && !c.calls.contains_key(call)
+        Label::Obs(Event::Invoke { call, req }) => !c.calls.contains_key(call)
             && !overdue(m, c) && d == Config { calls: c.calls.insert(call, Call::InFlight(req)), ..c },
         _ => false,
     }
@@ -219,7 +208,7 @@ pub open spec fn invoke<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
 /// A client receives the response its call took effect with. Observed.
 pub open spec fn ret<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
-        Label::Obs(Event::Return { at, call, res }) => at as nat == c.now && c.calls.contains_key(call)
+        Label::Obs(Event::Return { call, res }) => c.calls.contains_key(call)
             && c.calls[call] is Done && m.admits(c.calls[call]->Done_0, res) && !overdue(m, c)
             && d == Config { calls: c.calls.remove(call), ..c },
         _ => false,
@@ -229,7 +218,7 @@ pub open spec fn ret<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
 /// A client receives a dispatch that was sent and not yet received. Observed.
 pub open spec fn receive<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
-        Label::Obs(Event::Receive { at, msg }) => at as nat == c.now && !overdue(m, c) && exists|i: int|
+        Label::Obs(Event::Receive { msg }) => !overdue(m, c) && exists|i: int|
             0 <= i < c.sent.len() && #[trigger] c.sent[i] == msg && d == Config { sent: c.sent.remove(i), ..c },
         _ => false,
     }
@@ -238,13 +227,13 @@ pub open spec fn receive<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> boo
 /// A call in flight takes effect with one of its allowed outcomes. Silent.
 pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && !overdue(m, c) && exists|call: CallId, j: int|
-        #![trigger c.calls[call], m.external(c.calls[call]->InFlight_0, c.state, c.now as Time)[j]]
+        #![trigger c.calls[call], m.external(c.calls[call]->InFlight_0, c.state)[j]]
         c.calls.contains_key(call) && c.calls[call] is InFlight && {
-            let outs = m.external(c.calls[call]->InFlight_0, c.state, c.now as Time);
+            let outs = m.external(c.calls[call]->InFlight_0, c.state);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
                 calls: c.calls.insert(call, Call::Done(outs[j].res)),
-                work: start_all(c.work, outs[j].spawn, c.now),
+                work: start_all(c.work, outs[j].spawn, m.now(outs[j].next) as nat),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -255,27 +244,21 @@ pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
 /// overdue, only overdue work runs. Silent.
 pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && exists|i: int, j: int|
-        #![trigger c.work[i], m.internal(c.work[i].req, c.state, c.now as Time)[j]]
-        0 <= i < c.work.len() && c.work[i].after <= c.now && (overdue(m, c) ==> is_overdue(m, c, i)) && {
-            let outs = m.internal(c.work[i].req, c.state, c.now as Time);
+        #![trigger c.work[i], m.internal(c.work[i].req, c.state)[j]]
+        0 <= i < c.work.len() && c.work[i].after <= clock(m, c) && (overdue(m, c) ==> is_first(m, c, i)) && {
+            let outs = m.internal(c.work[i].req, c.state);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                work: start_all(c.work.remove(i), outs[j].spawn, c.now),
+                work: start_all(c.work.remove(i), outs[j].spawn, m.now(outs[j].next) as nat),
                 sent: c.sent + outs[j].send,
                 ..c
             }
         }
 }
 
-/// Time passes. Silent.
-pub open spec fn advance<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
-    l is Silent && exists|t: nat| #[trigger] may_advance(m, c, t) && d == Config { now: t, ..c }
-}
-
 /// The transition relation: from `c`, a step labeled `l` reaches `d`.
 pub open spec fn step<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || effect(m, c, l, d) || run(m, c, l, d)
-        || advance(m, c, l, d)
 }
 
 // ------------------------------------- executions, and what they show a client
@@ -310,11 +293,9 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-/// The system starts in `init` at time 0, with nothing in flight. Starting at 0
-/// loses nothing: time passing is a silent step, so an execution moves the
-/// clock to the first event's time on its own.
+/// The system starts in `init`, with nothing in flight.
 pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
-    Config { state: init, now: 0, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
+    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
 }
 
 /// The trace is valid: some execution of the system, from `initial(init)`,
@@ -361,20 +342,24 @@ impl Model for Counter {
     type Internal = ();
     type Dispatch = ();
 
-    open spec fn external(&self, req: (), n: nat, now: Time) -> Seq<ExternalOutcome<nat, nat, (), ()>> {
+    open spec fn external(&self, req: (), n: nat) -> Seq<ExternalOutcome<nat, nat, (), ()>> {
         seq![ExternalOutcome { next: n + 1, res: n + 1, spawn: Seq::empty(), send: Seq::empty() }]
     }
 
-    open spec fn internal(&self, req: (), n: nat, now: Time) -> Seq<InternalOutcome<nat, (), ()>> {
+    open spec fn internal(&self, req: (), n: nat) -> Seq<InternalOutcome<nat, (), ()>> {
         Seq::empty()
     }
 
     open spec fn admits(&self, expected: nat, observed: nat) -> bool {
         expected == observed
     }
+
+    open spec fn now(&self, n: nat) -> Time {
+        0
+    }
 }
 
-/// Sent at 0, answered 1 at 0: valid. The execution is invoke (observed),
+/// Sent, then answered 1: valid. The execution is invoke (observed),
 /// effect (silent), return (observed).
 pub proof fn counter_trace_valid()
     ensures
@@ -382,19 +367,19 @@ pub proof fn counter_trace_valid()
             Counter,
             0nat,
             seq![
-                Event::Invoke { at: 0, call: 7, req: () },
-                Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat },
+                Event::Invoke { call: 7, req: () },
+                Event::<(), nat, ()>::Return { call: 7, res: 1nat },
             ],
         ),
 {
     let m = Counter;
     let c0 = initial::<Counter>(0nat);
     let c1 = Config { calls: c0.calls.insert(7, Call::InFlight(())), ..c0 };
-    let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0), sent: c1.sent + Seq::empty(), ..c1 };
+    let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0nat), sent: c1.sent + Seq::empty(), ..c1 };
     let c3 = Config { calls: c2.calls.remove(7), ..c2 };
-    let l0 = Label::Obs(Event::Invoke { at: 0, call: 7, req: () });
+    let l0 = Label::Obs(Event::Invoke { call: 7, req: () });
     let l1 = Label::<(), nat, ()>::Silent;
-    let l2 = Label::Obs(Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat });
+    let l2 = Label::Obs(Event::<(), nat, ()>::Return { call: 7, res: 1nat });
     let steps: Execution<Counter> = seq![(l0, c1), (l1, c2), (l2, c3)];
     // Nothing is ever overdue: there is no internal work.
     assert(!overdue(m, c0));
@@ -403,11 +388,11 @@ pub proof fn counter_trace_valid()
     assert(invoke(m, c0, l0, c1));
     assert(effect(m, c1, l1, c2)) by {
         assert(c1.calls[7] is InFlight);
-        let outs = m.external(c1.calls[7]->InFlight_0, c1.state, c1.now as Time);
+        let outs = m.external(c1.calls[7]->InFlight_0, c1.state);
         assert(outs[0].next == 1nat && outs[0].res == 1nat);
-        assert(start_all(c1.work, outs[0].spawn, c1.now) =~= c1.work);
+        assert(start_all(c1.work, outs[0].spawn, m.now(outs[0].next) as nat) =~= c1.work);
         assert(c2 == Config { state: outs[0].next, calls: c1.calls.insert(7, Call::Done(outs[0].res)),
-            work: start_all(c1.work, outs[0].spawn, c1.now), sent: c1.sent + outs[0].send, ..c1 });
+            work: start_all(c1.work, outs[0].spawn, m.now(outs[0].next) as nat), sent: c1.sent + outs[0].send, ..c1 });
     }
     assert(ret(m, c2, l2, c3));
     assert(before::<Counter>(c0, steps, 0) == c0);
@@ -415,8 +400,8 @@ pub proof fn counter_trace_valid()
     assert(before::<Counter>(c0, steps, 2) == c2);
     assert(legal(m, c0, steps));
     assert(project::<Counter>(steps) =~= seq![
-        Event::Invoke { at: 0, call: 7, req: () },
-        Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat },
+        Event::Invoke { call: 7, req: () },
+        Event::<(), nat, ()>::Return { call: 7, res: 1nat },
     ]) by {
         reveal_with_fuel(project, 4);
     }

@@ -18,8 +18,11 @@ def Valid m init trace :=
 
 The first part of the file defines the words:
 
-* `Event`: what a client observes.
-* `Model`: the system.
+* `Event`: what a client observes. No time: a trace's order is the order one
+  observer saw.
+* `Model`: the system. Time is the model's own: its state has a clock (`now`),
+  moved by its own steps (a request like `AdvanceClock`), and deadlines are on
+  that clock.
 * `Step`: how the system evolves; each step is observed or silent.
 * `Legal`: a sequence of steps the system can actually take.
 * `project`: what an execution shows a client.
@@ -38,7 +41,7 @@ one assumption, that the Rust `certify` (`src/certificate.rs`) computes what the
 Lean one does. Lean can't see Rust code, so that one assumption stays. The
 search itself needs no proof.
 
-Not covered: `assert_idle`, and request lifetimes (off by default).
+Not covered: `assert_idle`.
 -/
 
 namespace Accordant
@@ -50,18 +53,18 @@ abbrev CallId := Nat
 
 inductive Event (X R D : Type) where
   /-- The client sent a request. -/
-  | invoke (time : Time) (call : CallId) (req : X)
+  | invoke (call : CallId) (req : X)
   /-- The client got the response to that call. -/
-  | ret (time : Time) (call : CallId) (res : R)
+  | ret (call : CallId) (res : R)
   /-- The client got a dispatch the server sent on its own. -/
-  | receive (time : Time) (msg : D)
+  | receive (msg : D)
 
 /-! ## The system -/
 
-/-- Internal work to start, and when it runs. -/
+/-- Internal work to start, and when it runs, on the model's clock. -/
 inductive Sched (I : Type) where
   | later (req : I)                  -- from now on; must happen eventually
-  | timer (at_ : Time) (req : I)     -- exactly at the given time
+  | timer (at_ : Time) (req : I)     -- at the given time
   | after (at_ : Time) (req : I)     -- not before the given time; must happen eventually
   | within (d : Time) (req : I)      -- from now on; within the given duration
   | maybe (req : I)                  -- from now on, or never
@@ -79,7 +82,7 @@ structure InternalOutcome (S I D : Type) where
   spawn : List (Sched I)
   send  : List D
 
-/-- The system: requests from clients, work it does on its own. -/
+/-- The system: requests from clients, work it does on its own, and its clock. -/
 structure Model where
   State    : Type
   External : Type
@@ -87,11 +90,13 @@ structure Model where
   Internal : Type
   Dispatch : Type
   /-- A request takes effect: every allowed outcome. -/
-  external : External → State → Time → List (ExternalOutcome State Response Internal Dispatch)
+  external : External → State → List (ExternalOutcome State Response Internal Dispatch)
   /-- Internal work runs: every possible outcome. Empty: it can't run now. -/
-  internal : Internal → State → Time → List (InternalOutcome State Internal Dispatch)
+  internal : Internal → State → List (InternalOutcome State Internal Dispatch)
   /-- Whether a client seeing `observed` matches the `expected` response. -/
   admits   : Response → Response → Bool
+  /-- The model's clock in a state. -/
+  now      : State → Time
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
@@ -102,7 +107,7 @@ inductive Call (X R : Type) where
   | inFlight (req : X)   -- not yet taken effect
   | done (res : R)       -- taken effect; the client will see this response
 
-/-- Internal work started and not yet run. -/
+/-- Internal work started and not yet run. Times are on the model's clock. -/
 structure Work (I : Type) where
   req   : I
   after : Time          -- can't run before this
@@ -111,11 +116,11 @@ structure Work (I : Type) where
 
 structure Config (m : Model) where
   state : m.State
-  now   : Time
   calls : CallId → Option (Call m.External m.Response)
   work  : List (Work m.Internal)
   sent  : List m.Dispatch   -- dispatches sent, not yet received
 
+/-- Work started at time `now`. -/
 def schedule {I : Type} (now : Time) : Sched I → Work I
   | .later r    => ⟨r, now, none, true⟩
   | .timer t r  => ⟨r, max t now, some (max t now), true⟩
@@ -128,16 +133,18 @@ def update {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : �
 
 variable {m : Model}
 
-/-- Work whose deadline has come and that can run: it runs before anything else. -/
-def Config.overdue (c : Config m) : Prop :=
-  ∃ w ∈ c.work, w.must = true ∧ w.after ≤ c.now ∧
-    (∃ d, w.due = some d ∧ d ≤ c.now) ∧ m.internal w.req c.state c.now ≠ []
+/-- Work whose deadline has come on the model's clock, and that can run. -/
+def Config.Overdue (c : Config m) (w : Work m.Internal) : Prop :=
+  w.must = true ∧ w.after ≤ m.now c.state ∧
+    (∃ d, w.due = some d ∧ d ≤ m.now c.state) ∧ m.internal w.req c.state ≠ []
 
-/-- Time may move to `t` only if it doesn't skip a deadline. Work whose deadline
-    has come and that can't run then owes nothing. -/
-def Config.mayAdvance (c : Config m) (t : Time) : Prop :=
-  c.now < t ∧ ∀ w ∈ c.work, w.must = true → ∀ d, w.due = some d →
-    t ≤ d ∨ (d ≤ c.now ∧ m.internal w.req c.state c.now = [])
+/-- Some work is overdue: it runs before anything else happens. -/
+def Config.overdue (c : Config m) : Prop := ∃ w ∈ c.work, c.Overdue w
+
+/-- `w` is overdue with the earliest deadline: when the clock jumped past
+    several deadlines, their work runs in deadline order. -/
+def Config.First (c : Config m) (w : Work m.Internal) : Prop :=
+  c.Overdue w ∧ ∀ v ∈ c.work, c.Overdue v → ∃ d e, w.due = some d ∧ v.due = some e ∧ d ≤ e
 
 /-! ## Steps: how the system evolves, and what each step shows a client -/
 
@@ -150,36 +157,34 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
   /-- A client sends a request. Observed. -/
   | invoke {c : Config m} {call req} :
       c.calls call = none → ¬ c.overdue →
-      Step m c (.obs (.invoke c.now call req))
+      Step m c (.obs (.invoke call req))
         { c with calls := update c.calls call (some (.inFlight req)) }
   /-- A client receives the response its call took effect with. Observed. -/
   | ret {c : Config m} {call expected res} :
       c.calls call = some (.done expected) → m.admits expected res = true → ¬ c.overdue →
-      Step m c (.obs (.ret c.now call res)) { c with calls := update c.calls call none }
+      Step m c (.obs (.ret call res)) { c with calls := update c.calls call none }
   /-- A client receives a dispatch that was sent and not yet received. Observed. -/
   | receive {c : Config m} {pre post msg} :
       c.sent = pre ++ msg :: post → ¬ c.overdue →
-      Step m c (.obs (.receive c.now msg)) { c with sent := pre ++ post }
-  /-- A call in flight takes effect with one of its allowed outcomes. Silent. -/
+      Step m c (.obs (.receive msg)) { c with sent := pre ++ post }
+  /-- A call in flight takes effect with one of its allowed outcomes. The work
+      it starts is on the clock of the state it leads to. Silent. -/
   | effect {c : Config m} {call req o} :
-      c.calls call = some (.inFlight req) → o ∈ m.external req c.state c.now → ¬ c.overdue →
+      c.calls call = some (.inFlight req) → o ∈ m.external req c.state → ¬ c.overdue →
       Step m c .silent
         { c with state := o.next
                  calls := update c.calls call (some (.done o.res))
-                 work  := c.work ++ o.spawn.map (schedule c.now)
+                 work  := c.work ++ o.spawn.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
   /-- Pending internal work runs with one of its outcomes; while some work is
-      overdue, only overdue work runs. Silent. -/
+      overdue, only overdue work with the earliest deadline runs. Silent. -/
   | run {c : Config m} {pre post w o} :
-      c.work = pre ++ w :: post → w.after ≤ c.now → o ∈ m.internal w.req c.state c.now →
-      (c.overdue → w.must = true ∧ ∃ d, w.due = some d ∧ d ≤ c.now) →
+      c.work = pre ++ w :: post → w.after ≤ m.now c.state → o ∈ m.internal w.req c.state →
+      (c.overdue → c.First w) →
       Step m c .silent
         { c with state := o.next
-                 work  := pre ++ post ++ o.spawn.map (schedule c.now)
+                 work  := pre ++ post ++ o.spawn.map (schedule (m.now o.next))
                  sent  := c.sent ++ o.send }
-  /-- Time passes. Silent. -/
-  | advance {c : Config m} {t} :
-      c.mayAdvance t → Step m c .silent { c with now := t }
 
 /-! ## Executions, and what they show a client -/
 
@@ -199,11 +204,9 @@ def project : Execution m → List m.Ev
   | (.obs e, _) :: rest => e :: project rest
   | (.silent, _) :: rest => project rest
 
-/-- The system starts in `init` at time 0, with nothing in flight. Starting at 0
-    loses nothing: time passing is a silent step, so an execution moves the
-    clock to the first event's time on its own. -/
+/-- The system starts in `init`, with nothing in flight. -/
 def initial (init : m.State) : Config m :=
-  ⟨init, 0, fun _ => none, [], []⟩
+  ⟨init, fun _ => none, [], []⟩
 
 /-- The trace is valid: some execution of the system, from `initial init`,
     projected onto what clients observe, is exactly the trace. -/
@@ -227,51 +230,54 @@ inductive Move (m : Model) where
   | effect (call : CallId) (j : Nat)
   /-- The `i`-th pending work runs with the `j`-th of its outcomes. -/
   | run (i j : Nat)
-  | advance (t : Time)
 
-/-- `overdue` and `mayAdvance`, computed. -/
+/-- `Overdue`, `overdue` and `First`, computed. -/
 def Work.isOverdue (c : Config m) (w : Work m.Internal) : Bool :=
-  w.must && decide (w.after ≤ c.now) &&
-    (match w.due with | some d => decide (d ≤ c.now) | none => false) &&
-    !(m.internal w.req c.state c.now).isEmpty
+  w.must && decide (w.after ≤ m.now c.state) &&
+    (match w.due with | some d => decide (d ≤ m.now c.state) | none => false) &&
+    !(m.internal w.req c.state).isEmpty
 
 def Config.isOverdue (c : Config m) : Bool := c.work.any (Work.isOverdue c)
 
-def Config.canAdvance (c : Config m) (t : Time) : Bool :=
-  decide (c.now < t) && c.work.all fun w =>
-    !w.must || match w.due with
-      | none => true
-      | some d => decide (t ≤ d) || (decide (d ≤ c.now) && (m.internal w.req c.state c.now).isEmpty)
+def dueLe {I : Type} (w v : Work I) : Bool :=
+  match w.due, v.due with
+  | some d, some e => decide (d ≤ e)
+  | _, _ => false
+
+/-- Whether `w` may run: nothing is overdue, or `w` is overdue with the
+    earliest deadline. -/
+def Config.mayRun (c : Config m) (w : Work m.Internal) : Bool :=
+  !c.isOverdue || (w.isOverdue c && c.work.all fun v => !v.isOverdue c || dueLe w v)
 
 /-- One move from `c`: the step's label and where it leads, if the system can make it. -/
 def Config.move (c : Config m) : Move m → Option (Label m × Config m)
   | .invoke call req =>
       if (c.calls call).isNone && !c.isOverdue then
-        some (.obs (.invoke c.now call req), { c with calls := update c.calls call (some (.inFlight req)) })
+        some (.obs (.invoke call req), { c with calls := update c.calls call (some (.inFlight req)) })
       else none
   | .ret call res =>
       match c.calls call with
       | some (.done expected) =>
           if m.admits expected res && !c.isOverdue then
-            some (.obs (.ret c.now call res), { c with calls := update c.calls call none })
+            some (.obs (.ret call res), { c with calls := update c.calls call none })
           else none
       | _ => none
   | .receive i =>
       match c.sent[i]? with
       | some msg =>
           if !c.isOverdue then
-            some (.obs (.receive c.now msg), { c with sent := c.sent.take i ++ c.sent.drop (i + 1) })
+            some (.obs (.receive msg), { c with sent := c.sent.take i ++ c.sent.drop (i + 1) })
           else none
       | none => none
   | .effect call j =>
       match c.calls call with
       | some (.inFlight req) =>
-          match (m.external req c.state c.now)[j]? with
+          match (m.external req c.state)[j]? with
           | some o =>
               if !c.isOverdue then
                 some (.silent, { c with state := o.next
                                         calls := update c.calls call (some (.done o.res))
-                                        work  := c.work ++ o.spawn.map (schedule c.now)
+                                        work  := c.work ++ o.spawn.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
@@ -279,16 +285,16 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
   | .run i j =>
       match c.work[i]? with
       | some w =>
-          match (m.internal w.req c.state c.now)[j]? with
+          match (m.internal w.req c.state)[j]? with
           | some o =>
-              if decide (w.after ≤ c.now) && (!c.isOverdue || w.isOverdue c) then
+              if decide (w.after ≤ m.now c.state) && c.mayRun w then
                 some (.silent, { c with state := o.next
-                                        work  := c.work.take i ++ c.work.drop (i + 1) ++ o.spawn.map (schedule c.now)
+                                        work  := c.work.take i ++ c.work.drop (i + 1) ++
+                                                   o.spawn.map (schedule (m.now o.next))
                                         sent  := c.sent ++ o.send })
               else none
           | none => none
       | none => none
-  | .advance t => if c.canAdvance t then some (.silent, { c with now := t }) else none
 
 /-- Replays moves from `c`: the execution they make, if every move is legal. -/
 def replay (c : Config m) : List (Move m) → Option (Execution m)
@@ -306,27 +312,33 @@ def certify (m : Model) (init : m.State) (moves : List (Move m)) : Option (List 
 def Accepted (m : Model) (init : m.State) (trace : List m.Ev) : Prop :=
   ∃ moves, certify m init moves = some trace
 
+theorem isOverdue_iff {c : Config m} {w : Work m.Internal} :
+    w.isOverdue c = true ↔ c.Overdue w := by
+  unfold Work.isOverdue Config.Overdue
+  cases w.due <;> simp [and_assoc]
+
 theorem not_overdue {c : Config m} (h : c.isOverdue = false) : ¬ c.overdue := by
-  rintro ⟨w, hw, hm, ha, ⟨d, hd, hdn⟩, hi⟩
-  have : c.isOverdue = true := List.any_eq_true.mpr ⟨w, hw, by
-    simp [Work.isOverdue, hm, ha, hd, hdn, hi]⟩
+  rintro ⟨w, hw, hov⟩
+  have : c.isOverdue = true := List.any_eq_true.mpr ⟨w, hw, isOverdue_iff.mpr hov⟩
   simp_all
 
-theorem overdue_work {c : Config m} {w : Work m.Internal} (h : w.isOverdue c = true) :
-    w.must = true ∧ ∃ d, w.due = some d ∧ d ≤ c.now := by
-  simp only [Work.isOverdue, Bool.and_eq_true, decide_eq_true_eq] at h
-  obtain ⟨⟨⟨hm, _⟩, hd⟩, _⟩ := h
-  refine ⟨hm, ?_⟩
-  cases hdue : w.due with
-  | none => simp [hdue] at hd
-  | some d => exact ⟨d, rfl, by simpa [hdue] using hd⟩
-
-theorem may_advance {c : Config m} {t : Time} (h : c.canAdvance t = true) : c.mayAdvance t := by
-  simp only [Config.canAdvance, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
-  refine ⟨h.1, fun w hw hm d hd => ?_⟩
-  have := h.2 w hw
-  simp [hm, hd, List.isEmpty_iff] at this
-  omega
+theorem may_run {c : Config m} {w : Work m.Internal} (h : c.mayRun w = true) :
+    c.overdue → c.First w := by
+  intro hov
+  simp only [Config.mayRun, Bool.or_eq_true, Bool.not_eq_true', Bool.and_eq_true,
+    List.all_eq_true] at h
+  rcases h with hno | ⟨hw, hall⟩
+  · exact absurd hov (not_overdue hno)
+  · refine ⟨isOverdue_iff.mp hw, fun v hv hvo => ?_⟩
+    have hle := hall v hv
+    try simp only [Bool.or_eq_true, Bool.not_eq_true'] at hle
+    rcases hle with hf | hle
+    · rw [isOverdue_iff.mpr hvo] at hf; contradiction
+    · unfold dueLe at hle
+      split at hle
+      · rename_i d e hd he
+        exact ⟨d, e, hd, he, by simpa using hle⟩
+      · contradiction
 
 theorem split_at {α : Type} {l : List α} {i : Nat} {a : α} (h : l[i]? = some a) :
     l = l.take i ++ a :: l.drop (i + 1) := by
@@ -371,16 +383,7 @@ theorem move_step {c c' : Config m} {mv : Move m} {l : Label m}
     rename_i o hout
     obtain ⟨⟨ha, hc⟩, rfl, rfl⟩ := h
     rw [← List.append_assoc]
-    refine .run (split_at hw) ha (List.mem_of_getElem? hout) fun hov => ?_
-    rcases hc with hno | hyes
-    · exact absurd hov (not_overdue hno)
-    · exact overdue_work hyes
-  | advance t =>
-    simp only [Config.move] at h
-    split at h <;> simp only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    rename_i hc
-    exact .advance (may_advance hc)
+    exact .run (split_at hw) ha (List.mem_of_getElem? hout) (may_run hc)
 
 theorem replay_legal {c : Config m} {moves : List (Move m)} {x : Execution m}
     (h : replay c moves = some x) : Legal m c x := by
@@ -424,23 +427,24 @@ theorem empty_trace_valid (m : Model) (init : m.State) :
     Valid m init [] :=
   ⟨[], trivial, rfl⟩
 
-/-- A counter: `incr` takes effect and answers the new value. -/
+/-- A counter: `incr` takes effect and answers the new value. No clock. -/
 abbrev counter : Model where
   State    := Nat
   External := Unit
   Response := Nat
   Internal := Empty
   Dispatch := Empty
-  external := fun _ n _ => [⟨n + 1, n + 1, [], []⟩]
-  internal := fun e _ _ => nomatch e
+  external := fun _ n => [⟨n + 1, n + 1, [], []⟩]
+  internal := fun e _ => nomatch e
   admits   := fun expected observed => expected == observed
+  now      := fun _ => 0
 
 abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
 
-/-- Sent at 0, answered 1 at 0: valid. The execution is invoke (observed),
-    effect (silent), return (observed). -/
-example : Valid counter (0 : Nat) [.invoke 0 7 (), .ret 0 7 1] := by
-  refine ⟨[(.obs (.invoke 0 7 ()), _), (.silent, _), (.obs (.ret 0 7 1), _)],
+/-- Sent, then answered 1: valid. The execution is invoke (observed), effect
+    (silent), return (observed). -/
+example : Valid counter (0 : Nat) [.invoke 7 (), .ret 7 1] := by
+  refine ⟨[(.obs (.invoke 7 ()), _), (.silent, _), (.obs (.ret 7 1), _)],
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
      .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
   all_goals simp [initial, update, Config.overdue, counter]

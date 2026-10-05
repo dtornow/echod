@@ -2,7 +2,8 @@
 //! (`Spec/State.cs`, `Spec/ExternalSteps.cs`, `Spec/InternalSteps.cs`, `Spec/Harness.cs`).
 //!
 //! Differences from the C# spec, all deliberate:
-//! - Time is the checker's clock, not `ServerState.Now`; `AdvanceClock` is `tick`.
+//! - Time is `Server::now`, as `ServerState.Now`, moved only by `AdvanceClock`
+//!   (the C# driver also sets it on every request, with `resonate:debug_time`).
 //! - A promise's deadline is a timer step that settles it, so there is no
 //!   `Project(now)` read-time projection anywhere.
 //! - A lease expiry is scheduled when the lease starts (`after` its end), not a
@@ -114,6 +115,8 @@ impl Task {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Server {
+    /// The server's clock.
+    pub now: Time,
     pub promises: HashedMap<Id, Promise>,
     pub tasks: HashedMap<Id, Task>,
 }
@@ -154,6 +157,9 @@ impl Fenced {
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Request {
+    /// The driver moves the server's clock (`debug.tick`). Due timers and lease
+    /// expiries run right after, before anything else.
+    AdvanceClock(Time),
     CreatePromise(Create),
     GetPromise(Id),
     SettlePromise(Settle),
@@ -530,8 +536,10 @@ impl Model for Resonate {
     type Internal = Internal;
     type Dispatch = Dispatch;
 
-    fn external(&self, op: &Request, s: &Server, now: Time) -> Outcomes {
+    fn external(&self, op: &Request, s: &Server) -> Outcomes {
+        let now = s.now;
         match op {
+            Request::AdvanceClock(t) => vec![ExternalOutcome::new(Response::Status(200), Server { now: now.max(*t), ..s.clone() })],
             Request::CreatePromise(c) => self.promise_create(c, s, now),
             Request::GetPromise(id) => match s.promises.get(id) {
                 None => status(404, s),
@@ -648,7 +656,8 @@ impl Model for Resonate {
         }
     }
 
-    fn internal(&self, ids: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, ids: &Internal, s: &Server) -> Vec<InternalOutcome<Self>> {
+        let now = s.now;
         let mut n = s.clone();
         let mut spawn = Vec::new();
         let mut send = Vec::new();
@@ -690,6 +699,10 @@ impl Model for Resonate {
         }
         vec![out]
     }
+
+    fn now(&self, s: &Server) -> Time {
+        s.now
+    }
 }
 
 impl Footprint for Resonate {
@@ -721,7 +734,7 @@ impl Footprint for Resonate {
             Request::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
             // A detached create: the one request that spans two origins.
             Request::FenceTask { id, action, .. } => ks(&[id, action.target()]),
-            Request::PollTask { .. } => Touches::Everything,
+            Request::PollTask { .. } | Request::AdvanceClock(_) => Touches::Everything,
         }
     }
 
@@ -733,6 +746,10 @@ impl Footprint for Resonate {
         match msg {
             Dispatch::Execute { id, .. } => Touches::one(id.clone()),
         }
+    }
+
+    fn moves_clock(&self, op: &Request) -> bool {
+        matches!(op, Request::AdvanceClock(_))
     }
 }
 
@@ -750,13 +767,16 @@ impl Partitioned for Resonate {
     fn restrict(&self, s: &Server, keep: &dyn Fn(&Id) -> bool) -> Server {
         let mine = |k: &Id| keep(&origin(k).to_string());
         Server {
+            now: s.now,
             promises: s.promises.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
             tasks: s.tasks.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
 
+    /// Every part carries the clock; joined, it is the later one.
     fn join(&self, a: &Server, b: &Server) -> Server {
         let mut n = a.clone();
+        n.now = a.now.max(b.now);
         for (k, v) in b.promises.iter() {
             n.promises.insert(k.clone(), v.clone());
         }

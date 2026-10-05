@@ -20,13 +20,16 @@ struct Trace {
 }
 
 impl Trace {
+    /// Starts with the server's clock at `now`.
     fn new(now: Time) -> Self {
-        let shadow = Config { start: now, certify: true, ..Config::default() };
-        Trace {
-            c: Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() }),
+        let shadow = Config { certify: true, ..Config::default() };
+        let mut t = Trace {
+            c: Checker::with_partitions(Resonate, Server::default(), Config::default()),
             shadow: Certified(Checker::with_footprints(Resonate, Server::default(), shadow)),
             next: 0,
-        }
+        };
+        t.tick(now);
+        t
     }
 
     #[track_caller]
@@ -73,10 +76,10 @@ impl Trace {
         assert!(self.shadow.call(id, op, resp).is_err(), "{label}: model accepted a bogus response in one factor");
     }
 
+    /// The driver moves the server's clock.
     #[track_caller]
     fn tick(&mut self, t: Time) {
-        self.c.tick(t).unwrap_or_else(|v| panic!("tick {t}: {v}"));
-        self.shadow.tick(t).unwrap_or_else(|v| panic!("tick {t}, in one factor: {v}"));
+        self.step(&format!("tick {t}"), Request::AdvanceClock(t), st(200));
     }
 }
 
@@ -396,7 +399,7 @@ fn show_a_violation() {
 /// Across the deadline each origin has two explanations (the settle landed in
 /// time, or the promise timed out). Kept together that is 2^origins candidates.
 fn settles_cfg() -> Config {
-    Config { start: 1_000_000, max_width: 1 << 16, max_explore: 5_000, ..Config::default() }
+    Config { max_width: 1 << 16, max_explore: 5_000, ..Config::default() }
 }
 
 fn unanswered_settles<E: Engine<M = Resonate>>(
@@ -404,6 +407,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
     origins: u64,
 ) -> Result<Checker<E>, accordant::Violation> {
     let now = 1_000_000;
+    c.call(900_000, Request::AdvanceClock(now), Response::Status(200))?;
     for o in 0..origins {
         let id = format!("o{o}:p");
         let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, external: false, target: false, timer: false };
@@ -411,7 +415,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
         c.call(o, Request::CreatePromise(p), r)?;
         c.invoke(1_000 + o, Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
     }
-    c.tick(now + 2_000)?;
+    c.call(900_001, Request::AdvanceClock(now + 2_000), Response::Status(200))?;
     Ok(c)
 }
 
@@ -491,9 +495,9 @@ fn partitioning_never_changes_a_verdict() {
     for seed in 1..=40 {
         let mut rng = Lcg(seed);
         let now = 1_000_000;
-        let cfg = || Config { start: now, ..Config::default() };
-        let mut on = Checker::with_partitions(Resonate, Server::default(), cfg());
-        let mut off = Checker::with_footprints(Resonate, Server::default(), cfg());
+        let mut on = Checker::with_partitions(Resonate, Server::default(), Config::default());
+        let mut off = Checker::with_footprints(Resonate, Server::default(), Config::default());
+        let tick = |t| [Event::Invoke { call: 900_000 + t, req: Request::AdvanceClock(t) }, Event::Return { call: 900_000 + t, res: Response::Status(200) }];
         let mut open: Vec<(CallId, Request)> = Vec::new();
         let mut clock = now;
         for call in 0..60u64 {
@@ -511,7 +515,8 @@ fn partitioning_never_changes_a_verdict() {
                 7 => Request::GetTask(id),
                 _ => Request::GetPromise(id),
             };
-            let mut events = vec![Event::Invoke { at: clock, call, req: op.clone() }];
+            let mut events = if call == 0 { tick(now).to_vec() } else { Vec::new() };
+            events.push(Event::Invoke { call, req: op.clone() });
             match rng.next(4) {
                 0 => open.push((call, op.clone())), // answered later, or never
                 _ => {
@@ -521,18 +526,19 @@ fn partitioning_never_changes_a_verdict() {
                     } else {
                         allowed[rng.next(allowed.len() as u64) as usize].clone()
                     };
-                    events.push(Event::Return { at: clock, call, res: resp });
+                    events.push(Event::Return { call, res: resp });
                 }
             }
             if rng.next(5) == 0 {
-                clock += rng.next(2_000); // the next observation is later
+                clock += 1 + rng.next(2_000); // the driver moves the clock
+                events.extend(tick(clock));
             }
             if !open.is_empty() && rng.next(4) == 0 {
                 // A late answer: whatever the op would get if called now. Valid or
                 // not, both checkers must agree.
                 let (c, op) = open.swap_remove(rng.next(open.len() as u64) as usize);
                 let resp = off.allowed(&op).first().cloned().unwrap_or(Response::Status(404));
-                events.push(Event::Return { at: clock, call: c, res: resp });
+                events.push(Event::Return { call: c, res: resp });
             }
             for e in events {
                 // A rejected event leaves both checkers as they were, so they stay comparable.
@@ -600,22 +606,28 @@ fn a_reclaimed_lease_dispatches_again() {
 }
 
 #[test]
-fn check_takes_calls_and_dispatches_at_their_times() {
+fn check_takes_calls_dispatches_and_clock_moves() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     let create_r = create("ex:r", now + 10_000, "r").target().op();
     let created = t.c.allowed(&create_r).remove(0); // the pending record
-    let mut c = Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() });
-    let trace = vec![
-        Event::Invoke { at: now, call: 1, req: create_r },
-        Event::Return { at: now, call: 1, res: created.clone() },
-        Event::Receive { at: now + 5, msg: execute("ex:r", 0) },
-        Event::Invoke { at: now + 20_000, call: 2, req: get("ex:r") },
-    ];
+    let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
+    let tick = |call, t| [Event::Invoke { call, req: Request::AdvanceClock(t) }, Event::Return { call, res: Response::Status(200) }];
+    let trace = [
+        tick(10, now).to_vec(),
+        vec![
+            Event::Invoke { call: 1, req: create_r },
+            Event::Return { call: 1, res: created.clone() },
+            Event::Receive { msg: execute("ex:r", 0) },
+        ],
+        tick(11, now + 20_000).to_vec(),
+        vec![Event::Invoke { call: 2, req: get("ex:r") }],
+    ]
+    .concat();
     c.check(trace).unwrap();
     // The read was sent after the deadline: it can only see the promise timed out.
     let stale = created; // pending, as of before the deadline
-    let v = c.check(vec![Event::Return { at: now + 20_000, call: 2, res: stale }]).unwrap_err();
+    let v = c.check(vec![Event::Return { call: 2, res: stale }]).unwrap_err();
     assert_eq!(v.index, 0);
 }
 

@@ -118,14 +118,13 @@ at a time and never holds the whole trace.
 ```rust
 let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
 
-c.check(events)?;        // Event::Invoke / Return / Receive, each with its time
-c.check_calls(calls)?;   // (Time, External, Response): sequential calls, each answered before the next
+c.check(events)?;        // Event::Invoke / Return / Receive, in the order observed
+c.check_calls(calls)?;   // (External, Response): sequential calls, each answered before the next
 ```
 
 Each returns `Ok(&Stats)` if some run of the model produces exactly these
 observations, or the first `Violation`, whose `index` is that observation's
-position in the trace. The clock advances to each observation's time first. The
-checker keeps its state afterwards, so a long trace can be fed in pieces.
+position in the trace. The checker keeps its state afterwards, so a long trace can be fed in pieces.
 `check_calls` is the shape of a request/response log, like
 resonate-specification's NDJSON traces.
 
@@ -192,77 +191,67 @@ enum Event<Op, Resp> { Invoke(CallId, Op), Return(CallId, Resp), Tick(Time), Qui
   after reads that missed it, or never. Accordant's `OneOf(no effect, effect)` at
   the moment of the timeout is a special case that is too strict, because it
   forbids the late effect.
-- What bounds that uncertainty is a time assumption about the server:
-  `Config::request_lifetime = Some(d)` means a request takes effect within `d` of
-  its invoke or never. When the clock passes `since + d`, each branch commits
-  once: either it took effect by then (it must linearize at that instant at the
-  latest) or it never will (the `InFlight` is dropped, and a later `Return` is a
-  violation). A response that arrives late is still fine if the effect happened in
-  time.
+- Nothing bounds that uncertainty but later observations: a read that saw the
+  effect, or one that missed it. (An earlier version had a request lifetime on
+  the checker's clock; it went with the checker's clock.)
 - `call(id, op, resp)` is `Invoke` + `Return`, so Accordant-style coupled checking
   is the special case.
 
 This is linearizability checking in the style of Wing & Gong / Lowe's
-just-in-time linearization, with time, background steps and request lifetimes added.
+just-in-time linearization, with background steps, deadlines on the model's
+clock, and server-sent messages added.
 
 ## Time
 
-The checker owns the clock. Every event happens at `now`. `tick(t)` advances it,
-and the spec reads it in `apply` and `step`.
+Observations carry no time. A trace is a sequence of `Invoke`, `Return` and
+`Receive`, and its order is the real-time order, as one observer saw it. A
+client's clock says nothing about the server's, so it isn't part of the input.
 
-- **Timers.** An outcome or step successor can install one:
-  `ExternalOutcome::new(resp, next).timer(at, on(&[id]))`. A timer is a step that
-  is not enabled before `at`.
+Time is the model's. Its state has a clock, read by `Model::now(&State)`, and the
+model moves it with a step of its own: Resonate's `AdvanceClock(t)`, the
+driver's `debug.tick`. To the checker that request is an ordinary call. Deadlines
+are on the model's clock, and the checker enforces them.
+
 - **When internal work runs is part of starting it**, not part of the work:
 
   ```rust
   pub enum Sched<T> {
-      Later(T),         // from now on; must happen by the next Quiesce
-      Timer(Time, T),   // exactly at the given time
-      After(Time, T),   // not before the given time; must happen by the next Quiesce
+      Later(T),         // from now on; must happen by the next assert_idle
+      Timer(Time, T),   // at the given time
+      After(Time, T),   // not before the given time; must happen by the next assert_idle
       Within(Time, T),  // from now on; must happen within the given duration
       Maybe(T),         // may happen, may never
   }
   ```
 
-  Each has a builder of the same name on both outcomes (`.later(..)`,
-  `.timer(..)`, ...). So the same internal step can be scheduled twice with
-  different timing: the job queue schedules "job `j` steps" once `later` and once
-  as a `timer` at the deadline, and the job's state and the clock decide what
-  the step does.
-- **Deadlines are inclusive.** Work due by a time has happened for anything
-  observed at that instant. A timer fires at its time, unless the work has
-  nothing left to do by then (a job that completed before its timeout). This
+  "Now" is the clock of the state the starting step leads to. Each has a builder
+  of the same name on both outcomes (`.later(..)`, `.timer(..)`, ...).
+- **Overdue work goes first.** Work whose deadline has come on the model's clock,
+  and that can run, runs before anything else: no call takes effect and nothing
+  is observed until it has. Work that can't run owes nothing until it can.
+- **Time moves in jumps.** When a clock step passes several deadlines, their
+  work runs right after it, earliest deadline first, all reading the new time.
+  The clock never reads the times in between, so a timer due at 5 that fires
+  after a jump from 0 to 10 sees 10. Use the deadline itself (`timeout_at`) for
+  anything that should record when it was due.
+- **A clock step should do nothing else.** Requests that also carry the time
+  (Resonate's `resonate:debug_time` header) are modeled as a clock step followed
+  by the request. Moving the clock and acting in one step would let the action
+  run before the timers due at the new time.
+- **Deadlines are inclusive.** At clock `t`, work due by `t` has run. This
   matches servers that test `now >= deadline`, like Resonate.
-- **Overdue work goes first.** While a node has an enabled overdue step, nothing
-  else may fire or linearize, so a call at the deadline instant can't sneak in
-  ahead of the timer.
-- **Stepping through time.** `tick(t)` doesn't jump. It stops at every instant in
-  `(now, t]` where some candidate's timer becomes due, a deadline passes, or a
-  request lifetime ends. Before moving the clock to an instant, calls in flight
-  and lazy work on the keys of what falls due there may still happen at the old
-  time. That's how a read that spans a timeout may have seen the promise still
-  pending. Then the overdue work fires *at its deadline*, so a step that reads
-  `now` (for example to set `settled_at`) sees the right time. Work that is
-  merely due stays lazy: it fires when an observation needs it, or when its
-  deadline passes.
-- **Lazy work fires late.** A step that fires lazily runs at the time of the
-  observation that needed it, not at the earliest time it could have. That is
-  sound only for steps whose effect doesn't depend on `now`; a step that records
-  a timestamp should be a timer.
-- **Weak fairness.** An overdue obligation that is disabled owes nothing. It
-  fires as soon as it is enabled again, before time moves on.
-- **`Quiesce`** asserts the system is idle at `now`: every obligation that is
-  already due must have fired. Future timers are untouched, and so are calls
-  still waiting for a response. It replaces the poll-until-terminal loop as the
-  liveness check.
+- **Requests in flight** may take effect before or after a clock step, like
+  any other concurrent call. That's how a read that spans a timeout may still
+  see the promise pending.
+- **`assert_idle`** asserts the system is idle: every obligation that can run
+  has run. Future timers are untouched, and so are calls still waiting for a
+  response. It replaces the poll-until-terminal loop as the liveness check.
 - `Sched::Maybe` is work that is allowed but not owed: daemons, optional retries.
-
-The clock is logical and test-driven. That matches a server with a controllable
-clock, like Resonate's `AdvanceClock`/debug time: test time *is* server time, so
-timeouts are exact. A wall-clock system needs one more thing, and it isn't built
-yet: events with timestamp intervals, and linearization points chosen among the
-timer instants inside a call's interval.
+- **Partitions and the clock.** A clock step touches every partition. A request
+  that `Partitioned::broadcast` marks (it acts on every partition alike, starts
+  nothing, sends nothing) is explained in each partition on its own when it is
+  answered before anything else is observed, which is how a driver moves the
+  clock. Otherwise the partitions merge for it and split again afterwards.
 
 ## Non-determinism
 
@@ -274,7 +263,7 @@ explains it. There are five sources of choice.
 | **ExternalOutcome**: the server may answer or act in several ways | `apply` / `step` return several outcomes or successors (Accordant's `OneOf`) | the observations that follow |
 | **Interleaving**: the order of concurrent calls and background work | implicit: every pending item is a possible next move | the search, pruned by footprints |
 | **Timing**: when due work fires inside its window | the `Sched` each piece of work was started with | the search, bounded by deadlines |
-| **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads; `request_lifetime` bounds it |
+| **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads |
 | **Unknown values**: server-chosen ids, timestamps | `admits` with a pattern; see below | the `Return` |
 
 Every choice is lazy. A branch exists only when something forces the move:
@@ -306,9 +295,8 @@ mechanisms keep it small, and all eight are in the prototype.
    keys commutes and stays pending. `Keys::All` is the sound default.
    *Measured (`tests/bank.rs`): 8 concurrent deposits on 8 accounts → profile width
    1 and 32 nodes explored with footprints, versus width 128 and 2,458 nodes without.*
-3. **Deadlines.** Obligations have a `by`, and unanswered requests have a lifetime.
-   When the clock passes a deadline, the uncertainty is resolved once and then
-   gone. Nothing stays pending forever unless the spec says so.
+3. **Deadlines.** Obligations have a `by` on the model's clock. When the clock
+   passes it, the uncertainty is resolved once and then gone. Nothing stays pending forever unless the spec says so.
 4. **Subsumption (antichains).** `Maybe` work can always be skipped, so a node
    simulates any node with the same state and owed work but a subset of its `Maybe`
    work. Likewise for early answers (next item). The weaker node is discarded.
@@ -397,17 +385,17 @@ still walks every entry. The incremental hash is what fixes time.
 
 | Resonate (C#) | Rust |
 |---|---|
-| `ServerState { Promises, Tasks, Now }` | `State` with `HashedMap<Id, PromiseState>` and `HashedMap<Id, TaskState>`; `Now` moves to the checker's clock |
-| `AdvanceClock` request | `checker.tick(t)` alongside the call that advances the server's debug clock |
+| `ServerState { Promises, Tasks, Now }` | `Server { now, promises, tasks }`; `Model::now` reads `now` |
+| `AdvanceClock` request | `Request::AdvanceClock(t)`, a `broadcast` request: it touches every origin, alike |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
 | `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `.later(on(&[awaited, awaiter]))` when the awaited promise settles |
 | `LeaseTriggers`, `RetryTriggers` | `.after(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
-| `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe", bounded by `request_lifetime` |
+| `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe" |
 | `PollLiveness(terminal)` | `checker.all(terminal)` while polling; `Quiesce` as the bound |
 | `debug.messages` (execute/unblock) | `execute` is a server-sent `Dispatch::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
-| footprint | promise id plus awaiter ids for callbacks; ticks touch only what has a timer due |
+| footprint | promise id plus awaiter ids for callbacks; `AdvanceClock` touches everything |
 
 Origins: the only request that may cross origins is a fence that creates a
 promise in another origin, which starts a detached workflow. A cross-origin
@@ -481,7 +469,8 @@ What got better:
 Porting also found three checker bugs, all fixed:
 - **Exclusive deadlines:** a read at the exact deadline could miss the timer.
 - **Reads spanning a tick:** an in-flight read couldn't have linearized before
-  a timeout the tick passed.
+  a timeout the tick passed. (Now the clock step is a call, and a read in flight
+  takes effect before or after it like any concurrent call.)
 - **Product blowup:** independent reads multiplied the profile (pruning item 5).
 
 ## Files
@@ -494,7 +483,7 @@ Porting also found three checker bugs, all fixed:
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
-- `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, request lifetime, pruning measurement.
+- `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
 - `tests/resonate/`: the Resonate port and its traces.
-- `tests/certificate.rs`, `tests/time.rs`: `certify` on its own, and deadlines of work spawned mid-tick.
+- `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

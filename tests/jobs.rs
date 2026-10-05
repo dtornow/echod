@@ -27,6 +27,7 @@ struct Job {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Queue {
+    now: Time,
     jobs: HashedMap<u32, Job>,
 }
 
@@ -35,6 +36,8 @@ enum Request {
     /// Submit a job that times out at an absolute time.
     Submit(u32, Time),
     Get(u32),
+    /// The driver moves the queue's clock.
+    Advance(Time),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -43,6 +46,7 @@ enum Response {
     Duplicate,
     NotFound,
     Is(Status),
+    Now(Time),
 }
 
 /// `run_within`: how long after submission a job may run before it must be done.
@@ -60,8 +64,12 @@ impl Model for JobModel {
     type Internal = u32;
     type Dispatch = ();
 
-    fn external(&self, req: &Request, s: &Queue, _now: Time) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Request, s: &Queue) -> Vec<ExternalOutcome<Self>> {
         vec![match *req {
+            Request::Advance(t) => {
+                let now = s.now.max(t);
+                ExternalOutcome::new(Response::Now(now), Queue { now, ..s.clone() })
+            }
             Request::Submit(j, _) if s.jobs.contains_key(&j) => ExternalOutcome::same(Response::Duplicate, s),
             Request::Submit(j, deadline) => {
                 let mut n = s.clone();
@@ -80,7 +88,8 @@ impl Model for JobModel {
         }]
     }
 
-    fn internal(&self, j: &u32, s: &Queue, now: Time) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, j: &u32, s: &Queue) -> Vec<InternalOutcome<Self>> {
+        let now = s.now;
         let job = &s.jobs[j];
         let to = |status| {
             let mut n = s.clone();
@@ -93,6 +102,10 @@ impl Model for JobModel {
             _ => vec![InternalOutcome::same(s)], // finished: nothing to do
         }
     }
+
+    fn now(&self, s: &Queue) -> Time {
+        s.now
+    }
 }
 
 impl Footprint for JobModel {
@@ -101,7 +114,12 @@ impl Footprint for JobModel {
     fn external_touches(&self, req: &Request) -> Touches<u32> {
         match *req {
             Request::Submit(j, _) | Request::Get(j) => Touches::one(j),
+            Request::Advance(_) => Touches::Everything,
         }
+    }
+
+    fn moves_clock(&self, req: &Request) -> bool {
+        matches!(req, Request::Advance(_))
     }
 
     fn internal_touches(&self, j: &u32) -> Touches<u32> {
@@ -111,6 +129,12 @@ impl Footprint for JobModel {
 
 fn checker(run_within: Option<Time>) -> Certified<Keyed<JobModel>> {
     Certified(Checker::with_footprints(JobModel { run_within }, Queue::default(), Config { certify: true, ..Config::default() }))
+}
+
+/// The driver moves the clock: a call like any other.
+#[track_caller]
+fn tick(c: &mut Checker<Keyed<JobModel>>, t: Time) {
+    c.call(1_000_000 + t, Request::Advance(t), Response::Now(t)).unwrap();
 }
 
 #[test]
@@ -128,9 +152,9 @@ fn completion_is_observed_and_the_profile_collapses() {
 fn run_deadline_rejects_a_stuck_job() {
     let mut c = checker(Some(1_000));
     c.call(1, Request::Submit(7, NEVER), Response::Accepted).unwrap();
-    c.tick(999).unwrap();
+    tick(&mut c, 999);
     c.call(2, Request::Get(7), Response::Is(Status::Pending)).unwrap(); // before the deadline: allowed
-    c.tick(1_000).unwrap(); // at the deadline the run has happened
+    tick(&mut c, 1_000); // at the deadline the run has happened
     let v = c.call(3, Request::Get(7), Response::Is(Status::Pending)).unwrap_err();
     println!("{v}");
 }
@@ -139,9 +163,9 @@ fn run_deadline_rejects_a_stuck_job() {
 fn timer_times_out_a_job_at_its_deadline() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(499).unwrap();
+    tick(&mut c, 499);
     c.call(2, Request::Get(7), Response::Is(Status::Pending)).unwrap();
-    c.tick(2_000).unwrap(); // passes 500 on the way: the timer fires unless the run beat it
+    tick(&mut c, 2_000); // passes 500 on the way: the timer fires unless the run beat it
     assert!(c.call(3, Request::Get(7), Response::Is(Status::Pending)).is_err());
     c.call(4, Request::Get(7), Response::Is(Status::TimedOut)).unwrap();
 }
@@ -150,7 +174,7 @@ fn timer_times_out_a_job_at_its_deadline() {
 fn timer_does_not_fire_early() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(499).unwrap();
+    tick(&mut c, 499);
     assert!(c.call(2, Request::Get(7), Response::Is(Status::TimedOut)).is_err());
 }
 
@@ -158,9 +182,9 @@ fn timer_does_not_fire_early() {
 fn a_get_in_flight_across_the_timeout_may_see_pending() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(100).unwrap();
+    tick(&mut c, 100);
     c.invoke(2, Request::Get(7)).unwrap();
-    c.tick(2_000).unwrap();
+    tick(&mut c, 2_000);
     c.ret(2, Response::Is(Status::Pending)).unwrap(); // it linearized before 500
     c.call(3, Request::Get(7), Response::Is(Status::TimedOut)).unwrap();
 }
@@ -169,7 +193,7 @@ fn a_get_in_flight_across_the_timeout_may_see_pending() {
 fn a_get_invoked_after_the_timeout_cannot_see_pending() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(500).unwrap();
+    tick(&mut c, 500);
     assert!(c.call(2, Request::Get(7), Response::Is(Status::Pending)).is_err());
 }
 
@@ -177,7 +201,7 @@ fn a_get_invoked_after_the_timeout_cannot_see_pending() {
 fn a_run_may_beat_the_timer_unobserved() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(2_000).unwrap();
+    tick(&mut c, 2_000);
     c.call(2, Request::Get(7), Response::Is(Status::Completed)).unwrap();
 }
 
@@ -185,9 +209,9 @@ fn a_run_may_beat_the_timer_unobserved() {
 fn a_run_that_beats_the_timer_wins() {
     let mut c = checker(None);
     c.call(1, Request::Submit(7, 500), Response::Accepted).unwrap();
-    c.tick(300).unwrap();
+    tick(&mut c, 300);
     c.call(2, Request::Get(7), Response::Is(Status::Completed)).unwrap();
-    c.tick(2_000).unwrap();
+    tick(&mut c, 2_000);
     c.call(3, Request::Get(7), Response::Is(Status::Completed)).unwrap();
     assert!(c.profile().iter().all(|n| n.pending.is_empty()), "the timer discharged");
 }
@@ -229,11 +253,4 @@ fn independent_jobs_stay_deferred() {
     c.call(100, Request::Get(3), Response::Is(Status::Completed)).unwrap();
     // Twelve runs, each with two outcomes, but only job 3 was ever expanded.
     assert_eq!(c.stats.max_width, 1, "{:?}", c.stats);
-}
-
-#[test]
-fn time_cannot_go_backwards() {
-    let mut c = checker(None);
-    c.tick(10).unwrap();
-    assert!(c.tick(5).is_err());
 }

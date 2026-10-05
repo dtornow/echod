@@ -16,20 +16,19 @@ type Ms<S> = <<S as Engine>::M as Model>::Dispatch;
 /// Work a node still carries. Sorted, so a node's identity is canonical.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Pending<O, R, T, G> {
-    /// Invoked at `since`, not yet linearized. It may take effect at any point
-    /// until its `Return`, or never if no `Return` comes. `must`: this branch has
-    /// committed to it taking effect before its request lifetime ends.
-    /// `early`: answers it could already have gotten by linearizing at an earlier
-    /// point where it would not have changed the state. Reads accumulate here
-    /// instead of branching the profile.
-    InFlight { call: CallId, op: O, since: Time, must: bool, early: BTreeSet<R> },
+    /// Invoked, not yet linearized. It may take effect at any point until its
+    /// `Return`, or never if no `Return` comes. `early`: answers it could
+    /// already have gotten by linearizing at an earlier point where it would
+    /// not have changed the state. Reads accumulate here instead of branching
+    /// the profile.
+    InFlight { call: CallId, op: O, early: BTreeSet<R> },
     /// Linearized; the spec predicted `resp`, which the `Return` must match.
     Responded { call: CallId, resp: R },
     /// A message the server sent and the client has not received yet, `count`
     /// times over. It may be received later, or never.
     Sent { msg: G, count: u32 },
-    /// Background work, due from `after`. `must`: owed by `by`, or by the next
-    /// `Quiesce` if `by` is `None`.
+    /// Background work, due from `after` on the model's clock. `must`: owed by
+    /// `by`, or by the next `Quiesce` if `by` is `None`.
     Step { step: T, after: Time, by: Option<Time>, must: bool },
 }
 
@@ -44,10 +43,7 @@ enum Record<O, R, T, G> {
     Effect { call: CallId, j: usize },
     /// A read-only call could take effect here with outcome `j`, answering `res`.
     Early { call: CallId, j: usize, res: R },
-    /// The call took effect with an early answer `res`, at the point it was found.
-    Commit { call: CallId, res: R },
     Run { work: Work<T>, j: usize },
-    Advance(Time),
 }
 
 struct Link<O, R, T, G> {
@@ -140,36 +136,25 @@ impl<S: Engine> fmt::Debug for Node<S> {
     }
 }
 
-/// What a client observes, and when.
+/// What a client observes. No time: the order of a trace is the order one
+/// observer saw, and time is the model's own ([`Model::now`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event<X, R, D> {
     /// The client sent a request.
-    Invoke { at: Time, call: CallId, req: X },
+    Invoke { call: CallId, req: X },
     /// The client got the response to that call.
-    Return { at: Time, call: CallId, res: R },
+    Return { call: CallId, res: R },
     /// The client got a dispatch the server sent on its own.
-    Receive { at: Time, msg: D },
+    Receive { msg: D },
 }
 
-impl<X, R, D> Event<X, R, D> {
-    pub fn at(&self) -> Time {
-        match self {
-            Event::Invoke { at, .. } | Event::Return { at, .. } | Event::Receive { at, .. } => *at,
-        }
-    }
-}
-
-/// What the checker steps on internally: observations at the current time,
-/// plus time passing and the idle assertion.
+/// What the checker steps on internally: observations, plus the idle assertion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ev<O, R, G> {
     Invoke(CallId, O),
     Return(CallId, R),
     /// The client received a message the server sent on its own.
     Receive(G),
-    /// Time advances to the given instant. The checker stops at every timer and
-    /// deadline on the way, so work fires at the instant it is due.
-    Tick(Time),
     /// The system is idle: every obligation that is due has fired. Calls still
     /// awaiting a response are untouched.
     Quiesce,
@@ -177,9 +162,6 @@ pub(crate) enum Ev<O, R, G> {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// An unanswered request takes effect within this long of its invoke, or never.
-    /// `None`: it may take effect at any time.
-    pub request_lifetime: Option<Time>,
     /// Prune work whose footprint is disjoint from what an observation needs.
     pub footprints: bool,
     /// Drop nodes another node can simulate (it carries a superset of optional work).
@@ -188,8 +170,6 @@ pub struct Config {
     pub max_width: usize,
     /// Fail rather than explore more nodes than this for one event.
     pub max_explore: usize,
-    /// The time the history starts at.
-    pub start: Time,
     /// Record each candidate's moves, so [`Checker::certified`] can back the
     /// verdict with a certificate. Costs memory proportional to the history.
     pub certify: bool,
@@ -198,12 +178,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            request_lifetime: None,
             footprints: true,
             subsume: true,
             max_width: 10_000,
             max_explore: 1_000_000,
-            start: 0,
             certify: false,
         }
     }
@@ -229,7 +207,6 @@ pub struct Stats {
 #[derive(Clone, Debug)]
 pub struct Violation {
     pub index: usize,
-    pub now: Time,
     pub event: String,
     pub reason: String,
     /// The profile the event could not be explained from.
@@ -238,7 +215,7 @@ pub struct Violation {
 
 impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "event #{} at t={} {} : {}", self.index, self.now, self.event, self.reason)?;
+        writeln!(f, "event #{} {} : {}", self.index, self.event, self.reason)?;
         for n in &self.profile {
             writeln!(f, "  candidate {n}")?;
         }
@@ -263,13 +240,19 @@ impl<S: Engine> Clone for Factor<S> {
 pub struct Checker<S: Engine> {
     engine: S,
     cfg: Config,
-    /// Partitions never touched are still in their initial state, here.
+    /// The initial state, for certificates.
     init: St<S>,
+    /// The state of partitions no factor holds: initial, except for what steps
+    /// that touched everything did to it (moved the clock).
+    rest: St<S>,
+    /// Every partition a factor has held.
+    known: BTreeSet<S::Part>,
+    /// A clock move in flight, explained in every factor on its own.
+    broadcasting: Option<(CallId, Ex<S>)>,
     factors: Vec<Factor<S>>,
     /// The factor an event is being explained in.
     profile: Vec<Node<S>>,
     states: Interner<St<S>>,
-    now: Time,
     /// While an event is explained in a factor: the partitions it owns.
     scope: Option<Option<BTreeSet<S::Part>>>,
     /// The first spawned step that left `scope`, if any.
@@ -314,16 +297,17 @@ impl<M: Partitioned> Checker<Grouped<M>> {
 
 impl<S: Engine> Checker<S> {
     pub fn with_engine(engine: S, init: St<S>, cfg: Config) -> Self {
-        let now = cfg.start;
         let recording = cfg.certify;
         Checker {
             engine,
             cfg,
+            rest: init.clone(),
+            known: BTreeSet::new(),
+            broadcasting: None,
             init,
             factors: Vec::new(),
             profile: Vec::new(),
             states: Interner::new(),
-            now,
             scope: None,
             escaped: Default::default(),
             calls: HashMap::new(),
@@ -332,10 +316,6 @@ impl<S: Engine> Checker<S> {
             observed: Vec::new(),
             stats: Stats { max_width: 1, ..Stats::default() },
         }
-    }
-
-    pub fn now(&self) -> Time {
-        self.now
     }
 
     pub fn factors(&self) -> &[Factor<S>] {
@@ -352,7 +332,7 @@ impl<S: Engine> Checker<S> {
                 Some(a) => self.product(&a, &f.nodes),
             });
         }
-        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: HashedSet::new(), trail: Default::default() }])
+        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.rest.clone()), pending: HashedSet::new(), trail: Default::default() }])
     }
 
     /// The number of candidates: the product of the factor widths.
@@ -369,21 +349,12 @@ impl<S: Engine> Checker<S> {
         self.states().all(|s| pred(&s))
     }
 
-    /// One observation. The clock first advances to the observation's time;
-    /// times must not go backwards.
+    /// One observation.
     pub fn observe(&mut self, e: Event<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
-        let at = e.at();
-        if at < self.now {
-            let index = self.stats.events;
-            return Err(self.violation(index, &Ev::Tick(at), format!("observed at {at}, after time {}", self.now)));
-        }
-        if at > self.now {
-            self.tick(at)?;
-        }
         self.apply(match e {
-            Event::Invoke { call, req, .. } => Ev::Invoke(call, req),
-            Event::Return { call, res, .. } => Ev::Return(call, res),
-            Event::Receive { msg, .. } => Ev::Receive(msg),
+            Event::Invoke { call, req } => Ev::Invoke(call, req),
+            Event::Return { call, res } => Ev::Return(call, res),
+            Event::Receive { msg } => Ev::Receive(msg),
         })
     }
 
@@ -402,11 +373,6 @@ impl<S: Engine> Checker<S> {
         self.apply(Ev::Receive(msg))
     }
 
-    /// Advances the clock without an observation.
-    pub fn tick(&mut self, to: Time) -> Result<(), Violation> {
-        self.apply(Ev::Tick(to))
-    }
-
     /// Asserts the system is idle now: all internal work that must happen has
     /// happened, whether or not it had a deadline. Not an observation: an
     /// assumption the tester adds, for example after waiting long enough.
@@ -417,11 +383,11 @@ impl<S: Engine> Checker<S> {
     /// A call whose request and response are observed now.
     /// Atomic: if the response is rejected, the checker is left as it was.
     pub fn call(&mut self, call: CallId, req: Ex<S>, res: Re<S>) -> Result<(), Violation> {
-        let saved = (self.factors.clone(), self.now, self.observed.len());
+        let saved = (self.factors.clone(), self.rest.clone(), self.broadcasting.clone(), self.observed.len());
         let r = self.invoke(call, req).and_then(|_| self.ret(call, res));
         if r.is_err() {
-            (self.factors, self.now) = (saved.0, saved.1);
-            self.observed.truncate(saved.2);
+            (self.factors, self.rest, self.broadcasting) = (saved.0, saved.1, saved.2);
+            self.observed.truncate(saved.3);
         }
         r
     }
@@ -442,22 +408,16 @@ impl<S: Engine> Checker<S> {
     }
 
     /// Checks the simplest trace: calls made one after another, each answered
-    /// before the next is sent, with the time of each. This is the shape of a
-    /// log of request/response pairs, such as resonate-specification's NDJSON.
+    /// before the next is sent. This is the shape of a log of request/response
+    /// pairs, such as resonate-specification's NDJSON.
     pub fn check_calls<I>(&mut self, trace: I) -> Result<&Stats, Violation>
     where
-        I: IntoIterator<Item = (Time, Ex<S>, Re<S>)>,
+        I: IntoIterator<Item = (Ex<S>, Re<S>)>,
     {
-        for (i, (at, req, res)) in trace.into_iter().enumerate() {
+        for (i, (req, res)) in trace.into_iter().enumerate() {
             let call = self.next_call;
             self.next_call += 1;
-            let one = [Event::Invoke { at, call, req }, Event::Return { at, call, res }];
-            let saved = (self.factors.clone(), self.now, self.observed.len());
-            if let Err(v) = one.into_iter().try_for_each(|e| self.observe(e)) {
-                (self.factors, self.now) = (saved.0, saved.1);
-                self.observed.truncate(saved.2);
-                return Err(Violation { index: i, ..v });
-            }
+            self.call(call, req, res).map_err(|v| Violation { index: i, ..v })?;
         }
         Ok(&self.stats)
     }
@@ -485,7 +445,7 @@ impl<S: Engine> Checker<S> {
     /// [`Checker::new`] or [`Checker::with_footprints`].
     pub fn certified(&self) -> Result<Vec<MoveOf<S::M>>, Violation> {
         let n = self.observed.len();
-        let fail = |reason: String| Violation { index: n, now: self.now, event: "certificate".into(), reason, profile: Vec::new() };
+        let fail = |reason: String| Violation { index: n, event: "certificate".into(), reason, profile: Vec::new() };
         if !self.recording {
             return Err(fail("a certificate needs Config::certify from the start".into()));
         }
@@ -525,10 +485,6 @@ impl<S: Engine> Checker<S> {
                     placed.insert(*call);
                 }
                 Record::Early { call, res, .. } => early.entry(*call).or_default().push((k, res.clone())),
-                Record::Commit { call, res } => {
-                    chosen.insert(pick(call, &|r| r == res).ok_or(format!("call {call}: no early answer {res:?}"))?);
-                    placed.insert(*call);
-                }
                 Record::Obs(Event::Return { call, res, .. }) if !placed.contains(call) => {
                     chosen.insert(pick(call, &|r| model.admits(r, res)).ok_or(format!("call {call}: no early answer admits {res:?}"))?);
                 }
@@ -539,18 +495,17 @@ impl<S: Engine> Checker<S> {
         let mut moves = Vec::new();
         for (k, r) in recs.into_iter().enumerate() {
             let mv = match r {
-                Record::Obs(Event::Invoke { call, req, .. }) => Move::Invoke { call, req },
-                Record::Obs(Event::Return { call, res, .. }) => Move::Return { call, res },
-                Record::Obs(Event::Receive { msg, .. }) => {
+                Record::Obs(Event::Invoke { call, req }) => Move::Invoke { call, req },
+                Record::Obs(Event::Return { call, res }) => Move::Return { call, res },
+                Record::Obs(Event::Receive { msg }) => {
                     Move::Receive { i: c.sent.iter().position(|m| *m == msg).ok_or(format!("{msg:?} was not sent"))? }
                 }
                 Record::Effect { call, j } => Move::Effect { call, j },
                 Record::Early { call, j, .. } if chosen.contains(&k) => Move::Effect { call, j },
-                Record::Early { .. } | Record::Commit { .. } => continue,
+                Record::Early { .. } => continue,
                 Record::Run { work, j } => {
                     Move::Run { i: c.work.iter().position(|w| *w == work).ok_or(format!("{work:?} is not pending"))?, j }
                 }
-                Record::Advance(to) => Move::Advance { to },
             };
             c.apply(mv.clone()).map_err(|()| format!("move {} is not legal: {mv:?}", moves.len()))?;
             moves.push(mv);
@@ -576,7 +531,7 @@ impl<S: Engine> Checker<S> {
         let mut explored = 0;
         for n in nodes {
             let mut m = n.clone();
-            m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
+            m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)), false);
             let relevant = if self.cfg.footprints { self.relevant(&m, &owed, Touches::Only(Vec::new())) } else { Touches::Everything };
             let _ = self.search(m, &relevant, &mut explored, |x| {
@@ -601,9 +556,9 @@ impl<S: Engine> Checker<S> {
 
     fn apply(&mut self, e: Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
         let seen = match (&e, self.recording) {
-            (Ev::Invoke(call, req), true) => Some(Event::Invoke { at: self.now, call: *call, req: req.clone() }),
-            (Ev::Return(call, res), true) => Some(Event::Return { at: self.now, call: *call, res: res.clone() }),
-            (Ev::Receive(msg), true) => Some(Event::Receive { at: self.now, msg: msg.clone() }),
+            (Ev::Invoke(call, req), true) => Some(Event::Invoke { call: *call, req: req.clone() }),
+            (Ev::Return(call, res), true) => Some(Event::Return { call: *call, res: res.clone() }),
+            (Ev::Receive(msg), true) => Some(Event::Receive { msg: msg.clone() }),
             _ => None,
         };
         self.apply_ev(e)?;
@@ -614,7 +569,44 @@ impl<S: Engine> Checker<S> {
     fn apply_ev(&mut self, e: Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
         let index = self.stats.events;
         self.stats.events += 1;
+        if let Some((b, _)) = &self.broadcasting {
+            if !matches!(&e, Ev::Return(call, _) if call == b) {
+                // Something else is observed while the broadcast is in flight:
+                // from here on it is explained in one factor that holds everything.
+                self.broadcasting = None;
+                self.gather(Scope::All);
+            }
+        }
         match &e {
+            Ev::Invoke(call, op)
+                if self.engine.partitioned()
+                    && self.engine.moves_clock(op)
+                    && !self.factors.iter().any(|f| f.parts.is_none()) =>
+            {
+                self.each_factor(index, &e)?;
+                self.broadcasting = Some((*call, op.clone()));
+                Ok(())
+            }
+            Ev::Return(call, res) if self.broadcasting.as_ref().is_some_and(|(b, _)| b == call) => {
+                let (_, op) = self.broadcasting.take().expect("checked");
+                // Partitions no factor holds take the request as well.
+                let model = self.engine.model();
+                let rest = match model.external(&op, &self.rest).as_slice() {
+                    [o] if o.spawn.is_empty() && o.send.is_empty() => {
+                        if !model.admits(&o.res, res) {
+                            return Err(self.violation(index, &e, "no candidate state explains this event".into()));
+                        }
+                        o.next.clone()
+                    }
+                    _ => {
+                        let reason = "spec error: a broadcast request must have one outcome that starts no work and sends nothing";
+                        return Err(self.violation(index, &e, reason.into()));
+                    }
+                };
+                self.each_factor(index, &e)?;
+                self.rest = rest;
+                Ok(())
+            }
             Ev::Invoke(call, op) => {
                 let scope = self.scope(self.engine.external_keys(op));
                 if let Scope::Parts(ps) = &scope {
@@ -638,32 +630,25 @@ impl<S: Engine> Checker<S> {
                 }
                 None => Err(self.violation(index, &e, format!("call {call} is not outstanding"))),
             },
-            Ev::Tick(to) => {
-                if *to < self.now {
-                    return Err(self.violation(index, &e, format!("time went backwards from {}", self.now)));
-                }
-                let (start, saved) = (self.now, self.factors.clone());
-                for i in 0..self.factors.len() {
-                    self.now = start;
-                    if let Err(v) = self.within(i, |c| c.observe_in(index, &e)) {
-                        (self.factors, self.now) = (saved, start);
-                        return Err(v);
-                    }
-                }
-                self.now = *to;
-                Ok(())
-            }
-            Ev::Quiesce => {
-                let saved = self.factors.clone();
-                for i in 0..self.factors.len() {
-                    if let Err(v) = self.within(i, |c| c.observe_in(index, &e)) {
-                        self.factors = saved;
-                        return Err(v);
-                    }
-                }
-                Ok(())
-            }
+            Ev::Quiesce => self.each_factor(index, &e),
         }
+    }
+
+    /// Explains `e` in every factor on its own. All or nothing: on a violation
+    /// the factors are left as they were.
+    fn each_factor(&mut self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
+        let saved = self.factors.clone();
+        let mut done = Vec::new();
+        for f in std::mem::take(&mut self.factors) {
+            self.factors = vec![f];
+            if let Err(v) = self.within(0, |c| c.observe_in(index, e)) {
+                self.factors = saved;
+                return Err(v);
+            }
+            done.append(&mut self.factors);
+        }
+        self.factors = done;
+        Ok(())
     }
 
     /// Runs `f` with factor `i` as the working profile, then checks that no work
@@ -679,7 +664,6 @@ impl<S: Engine> Checker<S> {
         if let Some(step) = self.escaped.borrow_mut().take() {
             return Err(Violation {
                 index: self.stats.events - 1,
-                now: self.now,
                 event: step,
                 reason: "spec error: work reaches outside the partitions of the request or step that spawned it".into(),
                 profile: Vec::new(),
@@ -693,11 +677,18 @@ impl<S: Engine> Checker<S> {
     /// partitions: no pending work spans them, and its candidates are exactly the
     /// product of their projections. A merge for one request (a detached create)
     /// then lasts only as long as that request does.
+    ///
+    /// A factor that holds everything (after a step that touched everything,
+    /// like moving the clock) splits into the partitions known so far, and the
+    /// rest, which must then be the same in every candidate.
     fn split(&mut self, i: usize) {
-        let Some(parts) = &self.factors[i].parts else { return };
-        if parts.len() < 2 {
-            return;
-        }
+        let global = self.factors[i].parts.is_none();
+        let parts = match &self.factors[i].parts {
+            Some(ps) if ps.len() >= 2 => ps.clone(),
+            Some(_) => return,
+            None if self.known.is_empty() => return, // no partitions at all
+            None => self.known.clone(),
+        };
         let nodes = &self.factors[i].nodes;
         let mut groups: Vec<BTreeSet<S::Part>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
         for n in nodes {
@@ -706,13 +697,16 @@ impl<S: Engine> Checker<S> {
                     return; // answered by the spec, not yet returned: its footprint is gone
                 }
                 let Touches::Only(ks) = self.keys(item) else { return };
+                if ks.iter().any(|k| self.engine.part(k).is_none_or(|p| !parts.contains(&p))) {
+                    return; // work outside the known partitions
+                }
                 let touched: BTreeSet<S::Part> = ks.iter().filter_map(|k| self.engine.part(k)).collect();
                 let (linked, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| !g.is_disjoint(&touched));
                 groups = rest;
                 groups.push(linked.into_iter().flatten().collect());
             }
         }
-        if groups.len() < 2 {
+        if groups.len() < 2 && !global {
             return;
         }
         let item_part = |item: &P<S>| match self.keys(item) {
@@ -734,8 +728,19 @@ impl<S: Engine> Checker<S> {
             factors.push(Factor { parts: Some(g.clone()), nodes: proj });
         }
         let product: u128 = factors.iter().map(|f| f.nodes.len() as u128).product();
+        let mut rest = None;
+        if global {
+            let states: HashSet<St<S>> = nodes.iter().map(|n| self.engine.restrict(&n.state, &|p| !parts.contains(p))).collect();
+            if states.len() != 1 {
+                return; // the candidates disagree about partitions nobody touched
+            }
+            rest = states.into_iter().next();
+        }
         if product != nodes.len() as u128 {
             return; // the candidates correlate across the groups
+        }
+        if let Some(r) = rest {
+            self.rest = r;
         }
         self.stats.splits += factors.len() - 1;
         self.factors.splice(i..=i, factors);
@@ -765,16 +770,11 @@ impl<S: Engine> Checker<S> {
                 let claimed: BTreeSet<S::Part> =
                     self.factors.iter().flat_map(|f| f.parts.iter().flatten().cloned()).collect();
                 let rest = if self.factors.is_empty() {
-                    self.init.clone()
+                    self.rest.clone()
                 } else {
-                    self.engine.restrict(&self.init, &|p| !claimed.contains(p))
+                    self.engine.restrict(&self.rest, &|p| !claimed.contains(p))
                 };
-                // Created at the first event: the clock may have moved since 0.
-                let trail = match self.now {
-                    0 => Trail::default(),
-                    now => self.record(&Trail::default(), || Record::Advance(now)),
-                };
-                let node = Node { state: self.states.intern(rest), pending: HashedSet::new(), trail };
+                let node = Node { state: self.states.intern(rest), pending: HashedSet::new(), trail: Default::default() };
                 ((0..self.factors.len()).collect(), Factor { parts: None, nodes: vec![node] })
             }
             Scope::Parts(parts) => {
@@ -783,7 +783,8 @@ impl<S: Engine> Checker<S> {
                     .collect();
                 let claimed: BTreeSet<S::Part> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
                 let new: BTreeSet<S::Part> = parts.difference(&claimed).cloned().collect();
-                let state = self.engine.restrict(&self.init, &|p| new.contains(p));
+                self.known.extend(new.iter().cloned());
+                let state = self.engine.restrict(&self.rest, &|p| new.contains(p));
                 let node = Node { state: self.states.intern(state), pending: HashedSet::new(), trail: Default::default() };
                 (hit, Factor { parts: Some(new), nodes: vec![node] })
             }
@@ -840,38 +841,7 @@ impl<S: Engine> Checker<S> {
 
     /// One event, explained within the working profile.
     fn observe_in(&mut self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
-        let Ev::Tick(to) = *e else {
-            return self.instant(index, e);
-        };
-        let saved = (self.profile.clone(), self.now);
-        // One stop at a time: work that fires at a stop can set a deadline
-        // before the next one.
-        while self.now < to {
-            let t = self.next_instant(to);
-            if let Err(v) = self.instant(index, &Ev::Tick(t)) {
-                (self.profile, self.now) = saved;
-                return Err(v);
-            }
-        }
-        Ok(())
-    }
-
-    /// The first instant in `(now, to]` at which some candidate's work becomes
-    /// due or its deadline passes, or `to`.
-    fn next_instant(&self, to: Time) -> Time {
-        let mut ts = BTreeSet::from([to]);
-        for n in &self.profile {
-            for item in &n.pending {
-                match item {
-                    Pending::Step { after, by, .. } => ts.extend([Some(*after), *by].into_iter().flatten()),
-                    Pending::InFlight { since, must: false, .. } => {
-                        ts.extend(self.cfg.request_lifetime.map(|l| since + l));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        ts.into_iter().find(|t| *t > self.now).unwrap_or(to)
+        self.instant(index, e)
     }
 
     fn instant(&mut self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
@@ -879,33 +849,11 @@ impl<S: Engine> Checker<S> {
         let mut next = Vec::new();
         let mut seen = HashSet::new();
         for n in &self.profile {
-            for p in self.prepare(n, e) {
-                let found = match e {
-                    Ev::Tick(t) => self.before_tick(p, *t, &mut explored),
-                    _ => self.explain(p, e, &mut explored),
-                }
-                .map_err(|reason| self.violation(index, e, reason))?;
-                next.extend(found.into_iter().filter(|m| seen.insert(m.clone())));
-            }
-        }
-        if let Ev::Tick(t) = *e {
-            // The clock moves; whatever is now overdue fires at the new instant, first.
-            let old = std::mem::replace(&mut self.now, t);
-            let mut after = Vec::new();
-            let mut seen = HashSet::new();
-            for n in next {
-                let n = Node { trail: self.record(&n.trail, || Record::Advance(t)), ..n };
-                match self.explain(n, e, &mut explored) {
-                    Ok(found) => after.extend(found.into_iter().filter(|m| seen.insert(m.clone()))),
-                    Err(reason) => {
-                        self.now = old;
-                        return Err(self.violation(index, e, reason));
-                    }
-                }
-            }
-            next = after;
+            let found = self.explain(n.clone(), e, &mut explored).map_err(|reason| self.violation(index, e, reason))?;
+            next.extend(found.into_iter().filter(|m| seen.insert(m.clone())));
         }
         self.stats.explored += explored;
+
         if self.cfg.subsume {
             let before = next.len();
             next = subsume::<S>(next);
@@ -925,40 +873,10 @@ impl<S: Engine> Checker<S> {
     fn violation(&self, index: usize, e: &Ev<Ex<S>, Re<S>, Ms<S>>, reason: String) -> Violation {
         Violation {
             index,
-            now: self.now,
             event: format!("{e:?}"),
             reason,
             profile: self.profile.iter().map(|n| format!("{n:?}")).collect(),
         }
-    }
-
-    /// Before time passes a request's lifetime, each branch decides: it took effect
-    /// in time (and must linearize before the clock moves on), or it never will.
-    fn prepare(&self, n: &Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Vec<Node<S>> {
-        let (Ev::Tick(t), Some(life)) = (e, self.cfg.request_lifetime) else {
-            return vec![n.clone()];
-        };
-        let expiring: Vec<_> = n
-            .pending
-            .iter()
-            .filter(|i| matches!(i, Pending::InFlight { since, must: false, .. } if since + life < *t))
-            .cloned()
-            .collect();
-        let mut out = Vec::with_capacity(1 << expiring.len());
-        for mask in 0u64..(1u64 << expiring.len()) {
-            let mut pending = n.pending.clone();
-            for (i, item) in expiring.iter().enumerate() {
-                pending.remove(item);
-                if mask & (1 << i) != 0 {
-                    if let Pending::InFlight { call, op, since, early, .. } = item {
-                        let early = early.clone();
-                        pending.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: true, early });
-                    }
-                }
-            }
-            out.push(Node { state: n.state.clone(), pending, trail: n.trail.clone() });
-        }
-        out
     }
 
     /// Explores the fewest internal moves that let `e` be consumed from `n`: moves
@@ -982,7 +900,7 @@ impl<S: Engine> Checker<S> {
         let mut out = Vec::new();
         self.search(n, &relevant, explored, |m| {
             // Keep firing while something is owed, or the message isn't sent yet.
-            if !self.owed(m, e).is_empty() || unsent(m) {
+            if self.owes(m, e) || unsent(m) {
                 return Ok(true);
             }
             out.extend(self.consume(m, e)?);
@@ -995,40 +913,10 @@ impl<S: Engine> Checker<S> {
         m.pending.iter().any(|i| matches!(i, Pending::Sent { msg: sent, .. } if sent == msg))
     }
 
-    /// Before the clock moves to `t`, anything that may happen at the current
-    /// instant and could change what happens at `t` gets its chance: in-flight
-    /// calls may linearize and lazy work may fire, on the keys of the work that
-    /// falls due by `t`. Every point along the way is a candidate. A call whose
-    /// request lifetime ends here and that this branch says took effect must have.
-    fn before_tick(&self, n: Node<S>, t: Time, explored: &mut usize) -> Result<Vec<Node<S>>, String> {
-        let forced: Vec<&P<S>> = n
-            .pending
-            .iter()
-            .filter(|i| match i {
-                Pending::InFlight { must, .. } => *must,
-                Pending::Step { must: true, by: Some(by), .. } => *by <= t,
-                _ => false,
-            })
-            .collect();
-        if forced.is_empty() {
-            return Ok(vec![n]);
-        }
-        let relevant = if self.cfg.footprints { self.relevant(&n, &forced, Touches::Only(Vec::new())) } else { Touches::Everything };
-        let mut out = Vec::new();
-        self.search(n, &relevant, explored, |m| {
-            let ready = !m.pending.iter().any(|i| matches!(i, Pending::InFlight { must: true, .. }))
-                && !self.has_overdue(m);
-            if ready {
-                out.push(m.clone());
-            }
-            Ok(true)
-        })?;
-        Ok(out)
-    }
-
     /// Breadth-first over moves on `relevant` keys. `visit` returns whether to keep
-    /// expanding a node. Overdue work has priority: while a node has some, nothing
-    /// else may fire, so an overdue timer is never overtaken.
+    /// expanding a node. Overdue work has priority: while a node has some, only
+    /// the overdue work with the earliest deadline may fire, so an overdue timer
+    /// is never overtaken.
     fn search(
         &self,
         n: Node<S>,
@@ -1043,19 +931,27 @@ impl<S: Engine> Checker<S> {
             if *explored > self.cfg.max_explore {
                 return Err(format!("explored more than {} nodes", self.cfg.max_explore));
             }
+            let first = self.earliest_overdue(&m);
+            let m = if first.is_none() { self.saturate(m, relevant) } else { m };
             if !visit(&m)? {
                 continue;
             }
-            let urgent = self.has_overdue(&m);
             for item in &m.pending {
-                if !self.can_fire(item) {
+                if !self.can_fire(item, &m.state) {
                     continue;
                 }
-                if urgent && !self.is_overdue(item, &m.state) {
-                    continue;
-                }
-                if !urgent && !intersects(relevant, &self.keys(item)) {
-                    continue;
+                match first {
+                    Some(d) => {
+                        let at_d = matches!(item, Pending::Step { must: true, by: Some(by), .. } if *by == d);
+                        if !(at_d && self.is_overdue(item, &m.state)) {
+                            continue;
+                        }
+                    }
+                    None => {
+                        if !self.is_clock(item) && !intersects(relevant, &self.footprint(item, &m)) {
+                            continue;
+                        }
+                    }
                 }
                 for m2 in self.fire(&m, item) {
                     if visited.insert(m2.clone()) {
@@ -1067,17 +963,53 @@ impl<S: Engine> Checker<S> {
         Ok(())
     }
 
-    /// An obligation whose deadline is now or past and that can fire: it must fire
-    /// before anything else is observed or happens at this instant.
+    /// Fires every relevant read-only call in flight: each only adds answers it
+    /// could give, so the result can do everything `m` can, and the orders in
+    /// which reads could fire need not be explored one by one.
+    fn saturate(&self, mut m: Node<S>, relevant: &Touches<S::Key>) -> Node<S> {
+        let reads: Vec<P<S>> = m
+            .pending
+            .iter()
+            .filter(|i| matches!(i, Pending::InFlight { .. }) && intersects(relevant, &self.keys(i)))
+            .cloned()
+            .collect();
+        for item in reads {
+            let Pending::InFlight { op, .. } = &item else { continue };
+            let outs = self.engine.model().external(op, &m.state);
+            if read_only::<S>(&outs, &m.state) {
+                if let Some(next) = self.fire(&m, &item).pop() {
+                    m = next;
+                }
+            }
+        }
+        m
+    }
+
+    /// An obligation whose deadline is now or past on the model's clock and
+    /// that can fire: it must fire before anything else happens.
     fn is_overdue(&self, item: &P<S>, state: &St<S>) -> bool {
         match item {
-            Pending::Step { step, must: true, by: Some(by), .. } => *by <= self.now && self.enabled(item, step, state),
+            Pending::Step { step, must: true, by: Some(by), .. } => {
+                *by <= self.engine.model().now(state) && self.enabled(item, step, state)
+            }
             _ => false,
         }
     }
 
-    fn has_overdue(&self, m: &Node<S>) -> bool {
-        m.pending.iter().any(|i| self.is_overdue(i, &m.state))
+    /// The earliest deadline among `m`'s overdue work, if it has any. Asks the
+    /// model whether work can run only in deadline order, until one can.
+    fn earliest_overdue(&self, m: &Node<S>) -> Option<Time> {
+        let now = self.engine.model().now(&m.state);
+        let mut due: Vec<(Time, &P<S>)> = m
+            .pending
+            .iter()
+            .filter_map(|i| match i {
+                Pending::Step { must: true, by: Some(by), after, .. } if *by <= now && *after <= now => Some((*by, i)),
+                _ => None,
+            })
+            .collect();
+        due.sort_by_key(|(by, _)| *by);
+        due.into_iter().find(|(_, i)| self.is_overdue(i, &m.state)).map(|(by, _)| by)
     }
 
     /// What must happen, at the current time, before `e` can be consumed from `m`.
@@ -1087,6 +1019,25 @@ impl<S: Engine> Checker<S> {
             _ => None,
         };
         self.owed_for(m, returning, matches!(e, Ev::Quiesce))
+    }
+
+    /// Whether anything is owed before `e`: [`Checker::owed`], without
+    /// collecting it.
+    fn owes(&self, m: &Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> bool {
+        let returning = match e {
+            Ev::Return(c, r) => Some((*c, r)),
+            _ => None,
+        };
+        let call_owed = m.pending.iter().any(|item| match (item, returning) {
+            (Pending::InFlight { call, early, .. }, Some((c, o))) if *call == c => {
+                !early.iter().any(|r| self.engine.model().admits(r, o))
+            }
+            _ => false,
+        });
+        call_owed
+            || self.earliest_overdue(m).is_some()
+            || (matches!(e, Ev::Quiesce)
+                && m.pending.iter().any(|i| matches!(i, Pending::Step { step, must: true, .. } if self.enabled(i, step, &m.state))))
     }
 
     /// `returning`: the call being answered, and the answer if known. A call whose
@@ -1100,7 +1051,6 @@ impl<S: Engine> Checker<S> {
         m.pending
             .iter()
             .filter(|item| match item {
-                Pending::InFlight { must: true, .. } => true,
                 Pending::InFlight { call, early, .. } => match returning {
                     Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| self.engine.model().admits(r, o))),
                     _ => false,
@@ -1114,8 +1064,7 @@ impl<S: Engine> Checker<S> {
     }
 
     fn enabled(&self, item: &P<S>, step: &In<S>, state: &St<S>) -> bool {
-        matches!(item, Pending::Step { after, .. } if *after <= self.now)
-            && !self.engine.model().internal(step, state, self.now).is_empty()
+        self.can_fire(item, state) && !self.engine.model().internal(step, state).is_empty()
     }
 
     /// The footprint of what is owed, closed over pending work that shares keys with it.
@@ -1125,15 +1074,15 @@ impl<S: Engine> Checker<S> {
             Touches::Only(ks) => ks.into_iter().collect(),
         };
         for item in owed {
-            match self.keys(item) {
+            match self.footprint(item, n) {
                 Touches::Everything => return Touches::Everything,
                 Touches::Only(ks) => keys.extend(ks),
             }
         }
         loop {
             let before = keys.len();
-            for item in n.pending.iter().filter(|i| self.can_fire(i)) {
-                match self.keys(item) {
+            for item in n.pending.iter().filter(|i| self.can_fire(i, &n.state)) {
+                match self.footprint(item, n) {
                     Touches::Everything => return Touches::Everything,
                     Touches::Only(ks) => {
                         if ks.iter().any(|k| keys.contains(k)) {
@@ -1148,14 +1097,43 @@ impl<S: Engine> Checker<S> {
         }
     }
 
-    /// Whether `item` could fire at the current time at all: a call in flight, or
-    /// a step whose time has come. Cheap, so it filters before footprints are built.
-    fn can_fire(&self, item: &P<S>) -> bool {
+    /// Whether `item` could fire in `state` at all: a call in flight, or a step
+    /// whose time has come. Cheap, so it filters before footprints are built.
+    fn can_fire(&self, item: &P<S>, state: &St<S>) -> bool {
         match item {
             Pending::InFlight { .. } => true,
-            Pending::Step { after, .. } => *after <= self.now,
+            Pending::Step { after, .. } => *after <= self.engine.model().now(state),
             Pending::Responded { .. } | Pending::Sent { .. } => false,
         }
+    }
+
+    fn is_clock(&self, item: &P<S>) -> bool {
+        matches!(item, Pending::InFlight { op, .. } if self.engine.moves_clock(op))
+    }
+
+    /// What firing `item` in node `n` may affect. A clock move affects the
+    /// work that falls due by the time it moves to; anything else, its keys.
+    fn footprint(&self, item: &P<S>, n: &Node<S>) -> Touches<S::Key> {
+        let Pending::InFlight { op, .. } = item else { return self.keys(item) };
+        if !self.engine.moves_clock(op) {
+            return self.keys(item);
+        }
+        let model = self.engine.model();
+        let mut keys = Vec::new();
+        for o in model.external(op, &n.state) {
+            let to = model.now(&o.next);
+            for work in &n.pending {
+                if let Pending::Step { step, must: true, by: Some(by), .. } = work {
+                    if *by <= to {
+                        match self.engine.internal_keys(step) {
+                            Touches::Everything => return Touches::Everything,
+                            Touches::Only(ks) => keys.extend(ks),
+                        }
+                    }
+                }
+            }
+        }
+        Touches::Only(keys)
     }
 
     fn keys(&self, item: &P<S>) -> Touches<S::Key> {
@@ -1167,7 +1145,7 @@ impl<S: Engine> Checker<S> {
         }
     }
 
-    /// Every node reachable from `m` by firing `item` once, at the current time.
+    /// Every node reachable from `m` by firing `item` once.
     fn fire(&self, m: &Node<S>, item: &P<S>) -> Vec<Node<S>> {
         let without = || {
             let mut p = m.pending.clone();
@@ -1175,17 +1153,16 @@ impl<S: Engine> Checker<S> {
             p
         };
         match item {
-            Pending::InFlight { call, op, since, must, early } => {
-                let outs = self.engine.model().external(op, &m.state, self.now);
-                let read_only = outs.iter().all(|o| o.spawn.is_empty() && o.send.is_empty() && o.next == *m.state);
-                if !read_only {
+            Pending::InFlight { call, op, early } => {
+                let outs = self.engine.model().external(op, &m.state);
+                if !read_only::<S>(&outs, &m.state) {
                     return outs
                         .into_iter()
                         .enumerate()
                         .map(|(j, o)| {
                             let mut p = without();
                             p.insert(Pending::Responded { call: *call, resp: o.res });
-                            self.spawn(&mut p, o.spawn);
+                            self.spawn(&mut p, o.spawn, &o.next);
                             for msg in o.send {
                                 add_sent(&mut p, msg);
                             }
@@ -1204,30 +1181,19 @@ impl<S: Engine> Checker<S> {
                         seen.insert(o.res);
                     }
                 }
-                if *must {
-                    return seen
-                        .into_iter()
-                        .map(|resp| {
-                            let mut p = without();
-                            let trail = self.record(&trail, || Record::Commit { call: *call, res: resp.clone() });
-                            p.insert(Pending::Responded { call: *call, resp });
-                            Node { state: m.state.clone(), pending: p, trail }
-                        })
-                        .collect();
-                }
                 let mut p = without();
-                p.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: false, early: seen });
+                p.insert(Pending::InFlight { call: *call, op: op.clone(), early: seen });
                 vec![Node { state: m.state.clone(), pending: p, trail }]
             }
-            Pending::Step { step, after, by, must } if *after <= self.now => {
+            Pending::Step { step, after, by, must } if self.can_fire(item, &m.state) => {
                 self.engine
                     .model()
-                    .internal(step, &m.state, self.now)
+                    .internal(step, &m.state)
                     .into_iter()
                     .enumerate()
                     .map(|(j, s)| {
                         let mut p = without();
-                        self.spawn(&mut p, s.spawn);
+                        self.spawn(&mut p, s.spawn, &s.next);
                         for msg in s.send {
                             add_sent(&mut p, msg);
                         }
@@ -1243,9 +1209,10 @@ impl<S: Engine> Checker<S> {
         }
     }
 
-    fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
+    /// Starts work, on the clock of `next`, the state the starting step leads to.
+    fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>, next: &St<S>) {
+        let now = self.engine.model().now(next);
         for sched in steps {
-            let now = self.now;
             let (step, item) = match sched {
                 Sched::Later(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: true }),
                 Sched::Timer(at, step) => {
@@ -1253,7 +1220,7 @@ impl<S: Engine> Checker<S> {
                     (step.clone(), Pending::Step { step, after: at, by: Some(at), must: true })
                 }
                 Sched::After(at, step) => (step.clone(), Pending::Step { step, after: at.max(now), by: None, must: true }),
-                Sched::Within(d, step) => (step.clone(), Pending::Step { step, after: now, by: Some(now + d), must: true }),
+                Sched::Within(d, step) => (step.clone(), Pending::Step { step, after: now, by: Some(now.saturating_add(d)), must: true }),
                 Sched::Maybe(step) => (step.clone(), Pending::Step { step, after: now, by: None, must: false }),
             };
             if let Some(Some(parts)) = &self.scope {
@@ -1280,7 +1247,7 @@ impl<S: Engine> Checker<S> {
                 if reused {
                     return Err(format!("call {call} invoked while still outstanding"));
                 }
-                p.insert(Pending::InFlight { call: *call, op: op.clone(), since: self.now, must: false, early: BTreeSet::new() });
+                p.insert(Pending::InFlight { call: *call, op: op.clone(), early: BTreeSet::new() });
             }
             Ev::Return(call, observed) => {
                 let hit = p.iter().find_map(|i| match i {
@@ -1310,20 +1277,18 @@ impl<S: Engine> Checker<S> {
                             if *count > 1 {
                                 q.insert(Pending::Sent { msg: msg.clone(), count: count - 1 });
                             }
-                            let at = self.now;
-                            let trail = self.record(&m.trail, || Record::Obs(Event::Receive { at, msg: msg.clone() }));
+                            let trail = self.record(&m.trail, || Record::Obs(Event::Receive { msg: msg.clone() }));
                             Some(Node { state: m.state.clone(), pending: q, trail })
                         }
                         _ => None,
                     })
                     .collect());
             }
-            Ev::Tick(_) | Ev::Quiesce => {}
+            Ev::Quiesce => {}
         }
-        let at = self.now;
         let trail = match e {
-            Ev::Invoke(call, req) => self.record(&m.trail, || Record::Obs(Event::Invoke { at, call: *call, req: req.clone() })),
-            Ev::Return(call, res) => self.record(&m.trail, || Record::Obs(Event::Return { at, call: *call, res: res.clone() })),
+            Ev::Invoke(call, req) => self.record(&m.trail, || Record::Obs(Event::Invoke { call: *call, req: req.clone() })),
+            Ev::Return(call, res) => self.record(&m.trail, || Record::Obs(Event::Return { call: *call, res: res.clone() })),
             _ => m.trail.clone(),
         };
         Ok(vec![Node { state: m.state.clone(), pending: p, trail }])
@@ -1336,6 +1301,11 @@ impl<S: Engine> Checker<S> {
             trail.clone()
         }
     }
+}
+
+/// A call whose every outcome leaves the state as it is and starts nothing.
+fn read_only<S: Engine>(outs: &[crate::ExternalOutcome<S::M>], state: &St<S>) -> bool {
+    outs.iter().all(|o| o.spawn.is_empty() && o.send.is_empty() && o.next == *state)
 }
 
 fn intersects<K: Ord>(a: &Touches<K>, b: &Touches<K>) -> bool {
@@ -1367,9 +1337,7 @@ fn optional<O, R, T, G>(item: &Pending<O, R, T, G>) -> bool {
 /// An item with its early answers cleared, so calls compare by identity alone.
 fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) -> Pending<O, R, T, G> {
     match item {
-        Pending::InFlight { call, op, since, must, .. } => {
-            Pending::InFlight { call: *call, op: op.clone(), since: *since, must: *must, early: BTreeSet::new() }
-        }
+        Pending::InFlight { call, op, .. } => Pending::InFlight { call: *call, op: op.clone(), early: BTreeSet::new() },
         _ => item.clone(),
     }
 }
