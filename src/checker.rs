@@ -247,6 +247,9 @@ pub struct Checker<S: Engine> {
     rest: St<S>,
     /// Every partition a factor has held.
     known: BTreeSet<S::Part>,
+    /// Calls the history says never return: they may take effect at any point,
+    /// or never, like `Maybe` work.
+    orphans: HashSet<CallId>,
     /// A clock move in flight, explained in every factor on its own.
     broadcasting: Option<(CallId, Ex<S>)>,
     factors: Vec<Factor<S>>,
@@ -304,6 +307,7 @@ impl<S: Engine> Checker<S> {
             rest: init.clone(),
             known: BTreeSet::new(),
             broadcasting: None,
+            orphans: HashSet::new(),
             init,
             factors: Vec::new(),
             profile: Vec::new(),
@@ -405,6 +409,29 @@ impl<S: Engine> Checker<S> {
             self.observe(e).map_err(|v| Violation { index: i, ..v })?;
         }
         Ok(&self.stats)
+    }
+
+    /// Checks a complete history, as [`Checker::check`] does, using what only the
+    /// whole history tells: which calls never return. Such a call may take
+    /// effect at any point or never, so a candidate that still has it in flight
+    /// can do everything one that applied it can, given the same state, and the
+    /// checker keeps only the first. A Jepsen history with many `:info`
+    /// operations needs this.
+    pub fn check_history(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) -> Result<&Stats, Violation> {
+        let mut open = HashMap::new();
+        for (i, e) in trace.iter().enumerate() {
+            match e {
+                Event::Invoke { call, .. } => {
+                    open.insert(*call, i);
+                }
+                Event::Return { call, .. } => {
+                    open.remove(call);
+                }
+                Event::Receive { .. } => {}
+            }
+        }
+        self.orphans.extend(open.into_keys());
+        self.check(trace.iter().cloned())
     }
 
     /// Checks the simplest trace: calls made one after another, each answered
@@ -856,7 +883,7 @@ impl<S: Engine> Checker<S> {
 
         if self.cfg.subsume {
             let before = next.len();
-            next = subsume::<S>(next);
+            next = subsume::<S>(next, &|x| self.optional(x));
             self.stats.subsumed += before - next.len();
         }
         if next.is_empty() {
@@ -1294,6 +1321,15 @@ impl<S: Engine> Checker<S> {
         Ok(vec![Node { state: m.state.clone(), pending: p, trail }])
     }
 
+    /// Work a node may simply never do, messages it may never deliver, and
+    /// calls that never return: dropping them cannot add behaviors.
+    fn optional(&self, item: &P<S>) -> bool {
+        match item {
+            Pending::InFlight { call, .. } => self.orphans.contains(call),
+            _ => optional(item),
+        }
+    }
+
     fn record(&self, trail: &Tr<S>, rec: impl FnOnce() -> Rec<S>) -> Tr<S> {
         if self.recording {
             trail.push(rec())
@@ -1344,7 +1380,7 @@ fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) 
 
 /// Whether node `b` can do everything node `a` can: same state and same owed
 /// work, at least `a`'s optional work, and at least `a`'s early answers per call.
-fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>) -> bool {
+fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>, optional: &dyn Fn(&P<S>) -> bool) -> bool {
     a.pending.iter().all(|x| match x {
         Pending::InFlight { call, early, .. } => b.pending.iter().any(|y| {
             matches!(y, Pending::InFlight { call: c, early: e, .. } if c == call && early.is_subset(e))
@@ -1355,18 +1391,18 @@ fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>) -> bool {
 }
 
 /// Keeps only nodes no other node simulates.
-fn subsume<S: Engine>(nodes: Vec<Node<S>>) -> Vec<Node<S>> {
+fn subsume<S: Engine>(nodes: Vec<Node<S>>, optional: &dyn Fn(&P<S>) -> bool) -> Vec<Node<S>> {
     type Group<S> = (Interned<St<S>>, Vec<P<S>>);
     let mut groups: HashMap<Group<S>, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
-        let owed: Vec<_> = n.pending.iter().filter(|x| !optional(*x)).map(skeleton).collect();
+        let owed: Vec<_> = n.pending.iter().filter(|x| !optional(x)).map(skeleton).collect();
         groups.entry((n.state.clone(), owed)).or_default().push(i);
     }
     let mut keep = vec![true; nodes.len()];
     for idx in groups.values().filter(|g| g.len() > 1) {
         for &a in idx {
             for &b in idx {
-                if a != b && keep[b] && simulates(&nodes[b], &nodes[a]) {
+                if a != b && keep[b] && simulates(&nodes[b], &nodes[a], optional) {
                     keep[a] = false;
                     break;
                 }
