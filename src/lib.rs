@@ -101,7 +101,6 @@ pub trait Model {
         Vec::new()
     }
 
-
     /// Whether an observed response matches the one the model predicts.
     /// Override for wildcards (server-chosen ids, timestamps).
     fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool {
