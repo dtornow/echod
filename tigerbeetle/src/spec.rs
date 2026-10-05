@@ -63,6 +63,36 @@ pub struct Account {
     pub timestamp: Time,
 }
 
+impl Account {
+    /// Whether debiting `amount` more would break `debits_must_not_exceed_credits`.
+    /// Pending debits count, pending credits do not.
+    pub fn debits_exceed_credits(&self, amount: Amount) -> bool {
+        self.flags.debits_must_not_exceed_credits
+            && self.debits_pending.checked_add(self.debits_posted).and_then(|d| d.checked_add(amount))
+                .is_none_or(|d| d > self.credits_posted)
+    }
+
+    /// Whether crediting `amount` more would break `credits_must_not_exceed_debits`.
+    /// Pending credits count, pending debits do not.
+    pub fn credits_exceed_debits(&self, amount: Amount) -> bool {
+        self.flags.credits_must_not_exceed_debits
+            && self.credits_pending.checked_add(self.credits_posted).and_then(|c| c.checked_add(amount))
+                .is_none_or(|c| c > self.debits_posted)
+    }
+
+    /// The rule `debits_must_not_exceed_credits` holds: true in every state,
+    /// trivially so without the flag.
+    pub fn debits_must_not_exceed_credits(&self) -> bool {
+        !self.debits_exceed_credits(0)
+    }
+
+    /// The rule `credits_must_not_exceed_debits` holds: true in every state,
+    /// trivially so without the flag.
+    pub fn credits_must_not_exceed_debits(&self) -> bool {
+        !self.credits_exceed_debits(0)
+    }
+}
+
 // ----------------------------------------------------------------- transfers
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
