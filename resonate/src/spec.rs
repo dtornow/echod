@@ -321,6 +321,7 @@ fn status(code: u16, s: &Server) -> (r: Vec<Out>)
         r.len() == 1,
         r[0].res == Response::Status(code),
         r[0].next.promises@ == s.promises@,
+        r[0].next.tasks@ == s.tasks@,
         r[0].next.now == s.now,
 {
     one(Out { res: Response::Status(code), next: copy_server(s), spawn: Vec::new(), send: Vec::new() })
@@ -331,6 +332,7 @@ fn echo(res: Response, s: &Server) -> (r: Vec<Out>)
         r.len() == 1,
         r[0].res == res,
         r[0].next.promises@ == s.promises@,
+        r[0].next.tasks@ == s.tasks@,
         r[0].next.now == s.now,
 {
     one(Out { res, next: copy_server(s), spawn: Vec::new(), send: Vec::new() })
@@ -452,6 +454,10 @@ pub open spec fn response_ok(r: Response) -> bool {
 impl Resonate {
     /// Property 1: every promise `promise_create` creates has it, every
     /// response has it if the state had it, and every promise that had it keeps it.
+    ///
+    /// Frame: it touches only the promise and task it creates. Every other
+    /// promise and task is as it was, an existing id changes nothing, and the
+    /// clock doesn't move.
     pub fn promise_create(&self, req: &Create, s: &Server) -> (outs: Vec<Out>)
         ensures
             forall|i: int|
@@ -460,6 +466,12 @@ impl Resonate {
                     &&& (server_ok(*s) ==> response_ok(outs[i].res))
                     &&& (!s.promises@.contains_key(req.id@) && outs[i].next.promises@.contains_key(req.id@)
                         ==> promise_ok(outs[i].next.promises@[req.id@]))
+                    // the frame
+                    &&& outs[i].next.promises@.remove(req.id@) == s.promises@.remove(req.id@)
+                    &&& outs[i].next.tasks@.remove(req.id@) == s.tasks@.remove(req.id@)
+                    &&& (s.promises@.contains_key(req.id@) ==> outs[i].next.promises@ == s.promises@
+                        && outs[i].next.tasks@ == s.tasks@)
+                    &&& outs[i].next.now == s.now
                 },
     {
         let now = s.now;
@@ -516,6 +528,10 @@ impl Resonate {
                     }
                 }
             }
+        }
+        proof {
+            assert(n.promises@.remove(req.id@) =~= s.promises@.remove(req.id@));
+            assert(n.tasks@.remove(req.id@) =~= s.tasks@.remove(req.id@));
         }
         let mut send = Vec::new();
         // A live targeted promise's task is runnable: the server dispatches it.
