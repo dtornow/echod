@@ -184,14 +184,14 @@ cargo run --release -p resonate --example fuzz -- 300 [--steps 30] [--bug stale-
 
 | server | mode | runs KO | marks reached |
 |---|---|---|---|
-| spec | random | 0 | 52/65 |
-| spec | guided | 0 | 54/65 |
-| fence ignores the version | random | 42 | |
-| fence ignores the version | guided | 72 | |
-| a lease never expires | random | 1 | |
-| a lease never expires | guided | 25 | |
+| spec | random | 0 | 43/61 |
+| spec | guided | 0 | 51/61 |
+| fence ignores the version | random | 43 | |
+| fence ignores the version | guided | 73 | |
+| a lease never expires | random | 0 | |
+| a lease never expires | guided | 48 | |
 
-"Lease expired" is reached in 1 random run and 50 guided ones. It takes a
+"Lease expired" is reached in no random run and 44 guided ones. It takes a
 chain (a task released, re-acquired with a short lease, the clock past its end
 before the promise's deadline) that random requests rarely assemble.
 
@@ -637,8 +637,8 @@ Ranked by how much each one hurt.
    cheap `enabled(step, state)` on the spec, defaulting to calling `step()`,
    would fix it.
 5. **Footprints can be wrong silently.** They are a function of the request
-   alone, which fits Resonate except `PollTask`, which has to be `Keys::All`. A
-   missing key doesn't fail; it hides interleavings. Needed: a debug mode that
+   alone, which fits Resonate. A missing key doesn't fail; it hides
+   interleavings. Needed: a debug mode that
    re-checks events with footprints off and reports any difference.
 6. **Panics in the spec lose context.** `s.promises[id]` on a missing key panics
    with a bare index error. Accordant wraps spec exceptions with the event and
@@ -646,9 +646,9 @@ Ranked by how much each one hurt.
    a violation that names the event and candidate.
 7. **String ids are noisy.** `.clone()`, `.to_string()` and `.into()` everywhere, and
    footprints need owned keys. An interned, `Copy` id type would remove most of it.
-8. **Choices have to be enumerated by hand.** `PollTask` past its limit needs a
-   `combinations` helper. Accordant has `Choose.Each`; a small set of choice
-   helpers belongs in the crate.
+8. **Choices have to be enumerated by hand.** A request that may pick any k of
+   n items needs its own subset helper. Accordant has `Choose.Each`; a small set
+   of choice helpers belongs in the crate.
 9. **Builder chaining in loops.** `ExternalOutcome::spawn`/`timer` take `self`, so a loop
    needs `o = o.timer(…)`. `spawn_all` and `timers` that take iterators fix it.
 

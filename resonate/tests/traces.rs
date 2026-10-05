@@ -340,19 +340,6 @@ fn unanswered_settle_may_land_late() {
 }
 
 #[test]
-fn poll_past_its_limit_claims_some_subset() {
-    let now = 1_000_000;
-    let mut t = Trace::new(now);
-    for id in ["a", "b", "c"] {
-        t.step("create +target", create(id, FAR, "w").target().op(), st(200));
-    }
-    let poll = Request::PollTask { pid: "w".into(), ttl: 60_000, limit: 2 };
-    assert_eq!(t.c.allowed(&poll).len(), 3, "one outcome per 2-subset");
-    t.step("poll claims a and c", poll, |r| matches!(r, Response::Claimed(v) if v.iter().map(|t| t.id.as_str()).eq(["a", "c"])));
-    t.step("b was not claimed", get_task("b"), task(TState::Pending, 0));
-}
-
-#[test]
 fn independent_promises_keep_the_profile_narrow() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
@@ -473,9 +460,6 @@ fn only_a_detached_create_crosses_origins() {
     t.next += 1;
     t.step("e:root exists, so the create landed", get("e:root"), promise(PState::Pending, None));
     assert_eq!(t.c.factors().len(), 4, "the unanswered fence still links a and e");
-
-    t.step("poll touches every origin", Request::PollTask { pid: "w".into(), ttl: 1_000, limit: 10 }, |_| true);
-    assert_eq!(t.c.factors().len(), 1);
 }
 
 /// A small deterministic generator, so the differential test needs no crates.

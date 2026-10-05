@@ -99,7 +99,7 @@ impl Footprint for Resonate {
             Request::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
             // A detached create: the one request that spans two origins.
             Request::FenceTask { id, action, .. } => ks(&[id, action.target()]),
-            Request::PollTask { .. } | Request::AdvanceClock(_) => Touches::Everything,
+            Request::AdvanceClock(_) => Touches::Everything,
         }
     }
 
@@ -122,9 +122,9 @@ impl Partitioned for Resonate {
     type Group = String;
 
     /// Ids of different origins never interact, except through a detached create
-    /// (`FenceTask` creating in another origin) and `PollTask`. Their footprints
-    /// span origins and merge the partitions; the checker splits them again once
-    /// the candidates are independent.
+    /// (`FenceTask` creating in another origin). Its footprint spans origins and
+    /// merges the partitions; the checker splits them again once the candidates
+    /// are independent.
     fn group(&self, id: &Id) -> String {
         origin(id).to_string()
     }

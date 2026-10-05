@@ -14,8 +14,8 @@
 //!   due on them comes from the state and the clock.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
 //!   already "maybe".
-//! - `PollTask` past its limit claims some subset of size `limit` (the C# spec
-//!   checks only the count and keeps the state unchanged).
+//! - Not ported: `task.poll`, an optional capability in the C# spec (off unless
+//!   `RESONATE_CAPS` declares `poll`).
 //! - The only request that may cross origins is a fence that creates a promise
 //!   in another origin: a detached workflow. A cross-origin fence-settle is 400
 //!   (the C# spec and the server allow it; the Lean spec refuses every
@@ -193,7 +193,6 @@ pub enum Request {
     HeartbeatTask { id: Id, version: u32, pid: String },
     SuspendTask { id: Id, version: u32, awaited: Vec<Id> },
     FenceTask { id: Id, version: u32, action: Fenced },
-    PollTask { pid: String, ttl: Time, limit: usize },
 }
 
 // --------------------------------------------------------------- responses
@@ -234,8 +233,6 @@ pub enum Response {
     Task(TaskRec),
     /// `task.create` on a fresh id: both records.
     Created(PromiseRec, TaskRec),
-    /// `task.poll`: claimed tasks, ordered by id.
-    Claimed(Vec<TaskRec>),
 }
 
 /// What the server sends on its own.
@@ -721,116 +718,6 @@ impl Resonate {
         one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new() })
     }
 
-    /// Some promise holds a callback for `id` and has settled.
-    fn awaited_settled(&self, s: &Server, id: &Id) -> bool {
-        let keys = s.promises.keys();
-        let mut i = 0;
-        while i < keys.len()
-            invariant
-                i <= keys.len(),
-            decreases keys.len() - i,
-        {
-            match s.promises.get(&keys[i]) {
-                Some(q) => {
-                    if q.callbacks.contains(id) && !q.live() {
-                        return true;
-                    }
-                },
-                None => {},
-            }
-            i += 1;
-        }
-        false
-    }
-
-    fn claimable(&self, s: &Server) -> Vec<Id> {
-        let now = s.now;
-        let keys = s.tasks.keys();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < keys.len()
-            invariant
-                i <= keys.len(),
-            decreases keys.len() - i,
-        {
-            let id = &keys[i];
-            let ok = match (s.tasks.get(id), s.promises.get(id)) {
-                (Some(t), Some(p)) => p.target && p.live() && match t.state {
-                    TState::Pending => true,
-                    TState::Acquired => now >= t.lease_expires(),
-                    TState::Suspended => self.awaited_settled(s, id),
-                    TState::Fulfilled => false,
-                },
-                _ => false,
-            };
-            if ok {
-                out.push(id.clone());
-            }
-            i += 1;
-        }
-        out
-    }
-
-    fn task_poll(&self, pid: &String, ttl: Time, limit: usize, s: &Server) -> Vec<Out> {
-        let now = s.now;
-        let claimable = self.claimable(s);
-        let k = if limit < claimable.len() { limit } else { claimable.len() };
-        let claims = combinations(&claimable, 0, k);
-        let mut outs = Vec::new();
-        let mut c = 0;
-        while c < claims.len()
-            invariant
-                c <= claims.len(),
-            decreases claims.len() - c,
-        {
-            let claim = &claims[c];
-            let mut n = copy_server(s);
-            let mut recs = Vec::new();
-            let mut work = Vec::new();
-            let mut i = 0;
-            while i < claim.len()
-                invariant
-                    i <= claim.len(),
-                decreases claim.len() - i,
-            {
-                let id = &claim[i];
-                match n.tasks.get(id) {
-                    Some(t) => {
-                        let mut u = copy(t);
-                        u.acquire(t.version.saturating_add(1), pid.clone(), ttl, now);
-                        recs.push(trec(id, &u));
-                        n.tasks.insert(id.clone(), u);
-                    },
-                    None => {},
-                }
-                work.push(Work::Timer(now.saturating_add(ttl), ids1(id)));
-                let holders = n.promises.keys();
-                let mut h = 0;
-                while h < holders.len()
-                    invariant
-                        h <= holders.len(),
-                    decreases holders.len() - h,
-                {
-                    match n.promises.get(&holders[h]) {
-                        Some(p) => {
-                            if p.callbacks.contains(id) {
-                                let mut q = copy(p);
-                                q.callbacks.remove(id);
-                                n.promises.insert(holders[h].clone(), q);
-                            }
-                        },
-                        None => {},
-                    }
-                    h += 1;
-                }
-                i += 1;
-            }
-            outs.push(Out { resp: Response::Claimed(recs), next: n, work, send: Vec::new() });
-            c += 1;
-        }
-        outs
-    }
-
     /// A request takes effect in `s`: every allowed outcome.
     pub fn external(&self, op: &Request, s: &Server) -> Vec<Out> {
         let now = s.now;
@@ -995,7 +882,6 @@ impl Resonate {
                     Fenced::Settle(st) => self.promise_settle(st, s),
                 }
             },
-            Request::PollTask { pid, ttl, limit } => self.task_poll(pid, *ttl, *limit, s),
         }
     }
 
@@ -1095,49 +981,6 @@ impl Resonate {
         }
         InOut { next: n, work, send }
     }
-}
-
-/// Every way to choose `k` of `items[start..]`, in order.
-fn combinations(items: &Vec<Id>, start: usize, k: usize) -> Vec<Vec<Id>>
-    decreases k,
-{
-    let mut out = Vec::new();
-    if k == 0 {
-        out.push(Vec::new());
-        return out;
-    }
-    let mut i = start;
-    while i < items.len()
-        invariant
-            k > 0,
-        decreases items.len() - i,
-    {
-        let rests = combinations(items, i + 1, k - 1);
-        let mut r = 0;
-        while r < rests.len()
-            invariant
-                i < items.len(),
-                r <= rests.len(),
-            decreases rests.len() - r,
-        {
-            let mut c = Vec::new();
-            c.push(items[i].clone());
-            let rest = &rests[r];
-            let mut j = 0;
-            while j < rest.len()
-                invariant
-                    j <= rest.len(),
-                decreases rest.len() - j,
-            {
-                c.push(rest[j].clone());
-                j += 1;
-            }
-            out.push(c);
-            r += 1;
-        }
-        i += 1;
-    }
-    out
 }
 
 } // verus!

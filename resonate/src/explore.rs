@@ -53,7 +53,6 @@ const STATUS: &[&str] = &[
     "task.fence 400",
     "task.fence 404",
     "task.fence 409",
-    "task.poll 200",
 ];
 
 /// What a step did to the state.
@@ -72,12 +71,9 @@ const EFFECT: &[&str] = &[
     "task fulfilled",
     "task suspended",
     "task resumed",
-    "suspended task claimed by poll",
-    "pending task claimed by poll",
     "lease extended",
     "lease expired",
     "task dispatched",
-    "poll claimed nothing",
     "clock moved",
 ];
 
@@ -97,7 +93,6 @@ fn kind(req: &Request) -> &'static str {
         Request::HeartbeatTask { .. } => "task.heartbeat",
         Request::SuspendTask { .. } => "task.suspend",
         Request::FenceTask { .. } => "task.fence",
-        Request::PollTask { .. } => "task.poll",
     }
 }
 
@@ -141,7 +136,6 @@ fn effects(before: &Server, after: &Server, fenced: bool, out: &mut Vec<&'static
             (Acquired, Pending) => out.push("task released"),
             (Acquired, Suspended) => out.push("task suspended"),
             (Suspended, Pending) => out.push("task resumed"),
-            (Suspended, Acquired) => out.push("suspended task claimed by poll"),
             (Acquired, Acquired) if u.acquired_at != t.acquired_at || u.version != t.version => out.push("lease extended"),
             (a, Fulfilled) if a != Fulfilled => out.push("task fulfilled"),
             _ => {}
@@ -158,20 +152,6 @@ impl Marks for Resonate {
         let mut m = Vec::new();
         m.extend(named(STATUS, &format!("{} {}", kind(req), out.resp.status())));
         effects(before, &out.next, matches!(req, Request::FenceTask { .. }), &mut m);
-        if let Request::PollTask { .. } = req {
-            match &out.resp {
-                Response::Claimed(ts) if ts.is_empty() => m.push("poll claimed nothing"),
-                Response::Claimed(ts) => {
-                    if ts.iter().any(|t| before.tasks.get(&t.id).is_some_and(|b| b.state == TState::Pending)) {
-                        m.push("pending task claimed by poll");
-                    }
-                }
-                _ => {}
-            }
-            // A poll that claims a pending task goes through `task acquired`;
-            // name it once, as the poll.
-            m.retain(|x| *x != "task acquired");
-        }
         if !out.send.is_empty() {
             m.push("task dispatched");
         }
@@ -241,10 +221,8 @@ impl Explore for Resonate {
                 TState::Pending => {
                     push(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }, "acquire a pending task");
                     push(Request::AcquireTask { id: id.clone(), version: v.wrapping_sub(1), pid: "w1".into(), ttl: 10 }, "acquire at a stale version");
-                    push(Request::PollTask { pid: "w2".into(), ttl: 10, limit: 1 }, "poll while a task is pending");
                 }
                 TState::Suspended => {
-                    push(Request::PollTask { pid: "w2".into(), ttl: 10, limit: 1 }, "poll while a task is suspended");
                     push(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }, "acquire a suspended task");
                 }
                 TState::Fulfilled => {
@@ -284,7 +262,7 @@ pub fn arbitrary(pick: &mut impl FnMut(usize) -> usize, clock: Time) -> Request 
     let ttl = 1 + pick(20) as Time;
     let create = |id: Id| Create { id, timeout_at: t, data: None, external: false, target: false, timer: false };
     let settle = |id: Id| Settle { id, state: "resolved".into(), data: None };
-    match pick(15) {
+    match pick(14) {
         0 => Request::AdvanceClock(clock + pick(30) as Time),
         1 => Request::CreatePromise(create(id)),
         2 => Request::SettlePromise(settle(id)),
@@ -298,7 +276,6 @@ pub fn arbitrary(pick: &mut impl FnMut(usize) -> usize, clock: Time) -> Request 
         10 => Request::FenceTask { id, version, action: Fenced::Create(create(other)) },
         11 => Request::FenceTask { id, version, action: Fenced::Settle(settle(other)) },
         12 => Request::GetTask(id),
-        13 => Request::GetPromise(id),
-        _ => Request::PollTask { pid: "w2".into(), ttl, limit: 2 },
+        _ => Request::GetPromise(id),
     }
 }
