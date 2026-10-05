@@ -1,7 +1,7 @@
 //! The checker's three answers: a valid trace is `Ok`, an invalid one `Ko`, and
 //! one it couldn't decide within its budget `Unknown`.
 
-use accordant::{Checker, Config, Event, ExternalOutcome, Model, Verdict};
+use accordant::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time, Verdict};
 
 /// A register: `Write(v)` sets it, `Read` answers it.
 struct Register;
@@ -24,6 +24,14 @@ impl Model for Register {
             Req::Write(v) => vec![ExternalOutcome::new(*v, *v)],
             Req::Read => vec![ExternalOutcome::same(*s, s)],
         }
+    }
+
+    fn internal(&self, _: &(), _: &u8) -> Vec<InternalOutcome<Self>> {
+        Vec::new()
+    }
+
+    fn now(&self, _: &u8) -> Time {
+        0
     }
 }
 

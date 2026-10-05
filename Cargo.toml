@@ -7,6 +7,10 @@ license = "MIT"
 
 [dependencies]
 imbl = "7.0.2"
+vstd = "=0.0.0-2026-10-04-0306"
+
+[package.metadata.verus]
+verify = true
 
 [workspace]
 members = [".", "resonate", "tigerbeetle"]
