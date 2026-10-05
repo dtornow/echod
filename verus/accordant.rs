@@ -8,11 +8,11 @@
 //! In Verus, at the bottom of this file, as the contract of the Rust function:
 //!
 //! ```text
-//! fn check(m, init, start, trace) -> (accepted: bool)
-//!     ensures accepted ==> valid(m, init, start, trace)
+//! fn check(m, init, trace) -> (accepted: bool)
+//!     ensures accepted ==> valid(m, init, trace)
 //!
-//! valid(m, init, start, trace) :=
-//!     exists steps. legal(m, initial(init, start), steps) && project(steps) == trace
+//! valid(m, init, trace) :=
+//!     exists steps. legal(m, initial(init), steps) && project(steps) == trace
 //! ```
 //!
 //! Everything above defines its words, as in `lean/Accordant.lean`:
@@ -21,7 +21,7 @@
 //! actually take), `project` (what an execution shows a client).
 //!
 //! `check` stands for the checker with its default configuration,
-//! `Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()`.
+//! `Checker::new(m, init, Config::default()).check(trace).is_ok()`.
 //! It is `external_body`: Verus takes the contract on trust; nothing proves it yet.
 //!
 //! Not covered: `assert_idle`, and request lifetimes (off by default). Known to
@@ -310,16 +310,19 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-pub open spec fn initial<M: Model>(init: M::State, start: Time) -> Cfg<M> {
-    Config { state: init, now: start as nat, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
+/// The system starts in `init` at time 0, with nothing in flight. Starting at 0
+/// loses nothing: time passing is a silent step, so an execution moves the
+/// clock to the first event's time on its own.
+pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
+    Config { state: init, now: 0, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
 }
 
-/// The trace is valid: some execution of the system, from `init` at `start`,
+/// The trace is valid: some execution of the system, from `initial(init)`,
 /// projected onto what clients observe, is exactly the trace.
-pub open spec fn valid<M: Model>(m: M, init: M::State, start: Time, trace: Seq<Ev<M>>) -> bool {
+pub open spec fn valid<M: Model>(m: M, init: M::State, trace: Seq<Ev<M>>) -> bool {
     exists|steps: Execution<M>|
-        #![trigger legal(m, initial::<M>(init, start), steps), project::<M>(steps)]
-        legal(m, initial::<M>(init, start), steps) && project::<M>(steps) == trace
+        #![trigger legal(m, initial::<M>(init), steps), project::<M>(steps)]
+        legal(m, initial::<M>(init), steps) && project::<M>(steps) == trace
 }
 
 // ------------------------------------------------------------------ theorem
@@ -327,11 +330,11 @@ pub open spec fn valid<M: Model>(m: M, init: M::State, start: Time, trace: Seq<E
 /// Soundness, as the contract of the Rust checker: if it accepts a trace, the
 /// trace is valid. Stated, not proved.
 ///
-/// `Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()`
+/// `Checker::new(m, init, Config::default()).check(trace).is_ok()`
 #[verifier::external_body]
-pub fn check<M: Model>(m: &M, init: Ghost<M::State>, start: Time, trace: &Vec<Ev<M>>) -> (accepted: bool)
+pub fn check<M: Model>(m: &M, init: Ghost<M::State>, trace: &Vec<Ev<M>>) -> (accepted: bool)
     ensures
-        accepted ==> valid(*m, init@, start, trace@),
+        accepted ==> valid(*m, init@, trace@),
 {
     unimplemented!()
 }
@@ -339,12 +342,12 @@ pub fn check<M: Model>(m: &M, init: Ghost<M::State>, start: Time, trace: &Vec<Ev
 // --------------------------------------------------------- examples, proved
 
 /// For every model, the empty trace is valid: the execution with no steps.
-pub proof fn empty_trace_valid<M: Model>(m: M, init: M::State, start: Time)
+pub proof fn empty_trace_valid<M: Model>(m: M, init: M::State)
     ensures
-        valid(m, init, start, Seq::<Ev<M>>::empty()),
+        valid(m, init, Seq::<Ev<M>>::empty()),
 {
     let steps = Execution::<M>::empty();
-    assert(legal(m, initial::<M>(init, start), steps));
+    assert(legal(m, initial::<M>(init), steps));
     assert(project::<M>(steps) =~= Seq::<Ev<M>>::empty());
 }
 
@@ -378,7 +381,6 @@ pub proof fn counter_trace_valid()
         valid(
             Counter,
             0nat,
-            0,
             seq![
                 Event::Invoke { at: 0, call: 7, req: () },
                 Event::<(), nat, ()>::Return { at: 0, call: 7, res: 1nat },
@@ -386,7 +388,7 @@ pub proof fn counter_trace_valid()
         ),
 {
     let m = Counter;
-    let c0 = initial::<Counter>(0nat, 0);
+    let c0 = initial::<Counter>(0nat);
     let c1 = Config { calls: c0.calls.insert(7, Call::InFlight(())), ..c0 };
     let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0), sent: c1.sent + Seq::empty(), ..c1 };
     let c3 = Config { calls: c2.calls.remove(7), ..c2 };

@@ -10,10 +10,10 @@ In Lean, at the bottom of this file:
 
 ```
 theorem soundness :
-    check m init start trace = true → Valid m init start trace
+    check m init trace = true → Valid m init trace
 
-def Valid m init start trace :=
-  ∃ steps, Legal m (initial init start) steps ∧ project steps = trace
+def Valid m init trace :=
+  ∃ steps, Legal m (initial init) steps ∧ project steps = trace
 ```
 
 Everything above the theorem defines its words:
@@ -27,7 +27,7 @@ Everything above the theorem defines its words:
 `check` is the Rust checker with its default configuration:
 
 ```rust
-Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()
+Checker::new(m, init, Config::default()).check(trace).is_ok()
 ```
 
 Lean can't see Rust code, so `check` is a name standing for that function and
@@ -197,30 +197,33 @@ def project : Execution m → List m.Ev
   | (.obs e, _) :: rest => e :: project rest
   | (.silent, _) :: rest => project rest
 
-def initial (init : m.State) (start : Time) : Config m :=
-  ⟨init, start, fun _ => none, [], []⟩
+/-- The system starts in `init` at time 0, with nothing in flight. Starting at 0
+    loses nothing: time passing is a silent step, so an execution moves the
+    clock to the first event's time on its own. -/
+def initial (init : m.State) : Config m :=
+  ⟨init, 0, fun _ => none, [], []⟩
 
-/-- The trace is valid: some execution of the system, from `init` at `start`,
+/-- The trace is valid: some execution of the system, from `initial init`,
     projected onto what clients observe, is exactly the trace. -/
-def Valid (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) : Prop :=
-  ∃ steps, Legal m (initial init start) steps ∧ project steps = trace
+def Valid (m : Model) (init : m.State) (trace : List m.Ev) : Prop :=
+  ∃ steps, Legal m (initial init) steps ∧ project steps = trace
 
 /-! ## The theorem -/
 
 /-- The Rust checker:
-    `Checker::new(m, init, Config { start, ..Config::default() }).check(trace).is_ok()`. -/
-opaque check (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) : Bool
+    `Checker::new(m, init, Config::default()).check(trace).is_ok()`. -/
+opaque check (m : Model) (init : m.State) (trace : List m.Ev) : Bool
 
 /-- Soundness: if the checker accepts a trace, the trace is valid. Stated, not proved. -/
-theorem soundness (m : Model) (init : m.State) (start : Time) (trace : List m.Ev) :
-    check m init start trace = true → Valid m init start trace := by
+theorem soundness (m : Model) (init : m.State) (trace : List m.Ev) :
+    check m init trace = true → Valid m init trace := by
   sorry
 
 /-! ## Examples, proved -/
 
 /-- For every model, the empty trace is valid: the execution with no steps. -/
-theorem empty_trace_valid (m : Model) (init : m.State) (start : Time) :
-    Valid m init start [] :=
+theorem empty_trace_valid (m : Model) (init : m.State) :
+    Valid m init [] :=
   ⟨[], trivial, rfl⟩
 
 /-- A counter: `incr` takes effect and answers the new value. -/
@@ -238,7 +241,7 @@ abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
 
 /-- Sent at 0, answered 1 at 0: valid. The execution is invoke (observed),
     effect (silent), return (observed). -/
-example : Valid counter (0 : Nat) 0 [.invoke 0 7 (), .ret 0 7 1] := by
+example : Valid counter (0 : Nat) [.invoke 0 7 (), .ret 0 7 1] := by
   refine ⟨[(.obs (.invoke 0 7 ()), _), (.silent, _), (.obs (.ret 0 7 1), _)],
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
      .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
