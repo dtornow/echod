@@ -33,16 +33,25 @@ mod sim;
 mod hashed_map;
 mod hashed_set;
 mod intern;
+pub mod semantics;
 
 pub use certificate::{certify, marks, Certificate, Silent};
 pub use sim::Sim;
-pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Verdict, Violation};
+pub use checker::{Checker, Config, Factor, Node, Pending, Stats, Verdict, Violation};
 pub use hashed_map::HashedMap;
 pub use hashed_set::HashedSet;
 pub use intern::{Interned, Interner};
 
 use std::fmt::Debug;
 use std::hash::Hash;
+
+use vstd::prelude::*;
+
+// What the proofs talk about is written in Verus: the model's interface and
+// what a client observes. `cargo build` compiles it as ordinary Rust, the
+// specifications erased; `cargo verus verify -p accordant` checks the proofs
+// (`semantics`, `certificate`).
+verus! {
 
 /// Values the checker stores and compares: cloned, hashed, and kept in sorted sets.
 pub trait Data: Clone + Eq + Hash + Ord + Debug {}
@@ -54,8 +63,58 @@ pub type CallId = u64;
 /// Time is part of the model's state ([`Model::now`]); observations carry none.
 pub type Time = u64;
 
+/// What a client observes. No time: the order of a trace is the order one
+/// observer saw, and time is the model's own ([`Model::now`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum Event<X, R, D> {
+    /// The client sent a request.
+    Invoke { call: CallId, req: X },
+    /// The client got the response to that call.
+    Return { call: CallId, res: R },
+    /// The client got a dispatch the server sent on its own.
+    Receive { msg: D },
+}
+
+/// Internal work to start, and when it runs, on the model's clock ([`Model::now`]),
+/// from the state the starting step leads to. Work that must happen and hasn't
+/// by its deadline is a violation. When the clock jumps past several deadlines,
+/// the work runs right after the jump, earliest deadline first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum Sched<T> {
+    /// Runs later: any time from now on, when an observation needs it, or never.
+    Later(T),
+    /// A timer: runs exactly at the given time.
+    Timer(Time, T),
+}
+
+/// One possible effect of a request: the next state, the response, the
+/// internal work it starts, and the dispatches it sends.
+pub struct ExternalOutcome<M: Model + ?Sized> {
+    pub next: M::State,
+    pub resp: M::Response,
+    pub work: Vec<Sched<M::Internal>>,
+    pub send: Vec<M::Dispatch>,
+}
+
+/// One possible effect of internal work: the next state, the internal work it
+/// starts, and the messages it sends to clients (server-sent, observed with
+/// [`Checker::receive`]).
+pub struct InternalOutcome<M: Model + ?Sized> {
+    pub next: M::State,
+    pub work: Vec<Sched<M::Internal>>,
+    pub send: Vec<M::Dispatch>,
+}
+
 /// The system, as a state machine: external requests from clients, internal
 /// work it does on its own.
+///
+/// Each method has a `spec` twin the proofs use ([`semantics`]), and must
+/// compute what its twin says (its `ensures`). A model written outside
+/// `verus!` keeps the default twins, which then stand for whatever the methods
+/// compute: they must be pure, and nothing checks that. A model written in
+/// Verus overrides the twins and has its methods verified against them.
 pub trait Model {
     type State: Clone + Eq + Hash + Debug;
     /// External: a request a client sends.
@@ -70,16 +129,26 @@ pub trait Model {
 
     /// A request takes effect in `state`: every allowed outcome. An empty list
     /// means it cannot take effect here.
-    fn external(&self, _req: &Self::External, _state: &Self::State) -> Vec<ExternalOutcome<Self>> {
-        Vec::new()
-    }
+    fn external(&self, req: &Self::External, state: &Self::State) -> (r: Vec<ExternalOutcome<Self>>)
+        ensures
+            r@.len() == self.spec_external(*req, *state).len(),
+            forall|i: int| 0 <= i < r@.len() ==> {
+                let o = #[trigger] r@[i];
+                semantics::ExternalOutcomeV { next: o.next, resp: o.resp, work: o.work@, send: o.send@ }
+                    == self.spec_external(*req, *state)[i]
+            };
 
     /// Internal work runs in `state`: every possible successor. An empty list
     /// means it can't run yet and stays pending; `InternalOutcome::same(state)`
     /// means it has nothing left to do and is removed.
-    fn internal(&self, _req: &Self::Internal, _state: &Self::State) -> Vec<InternalOutcome<Self>> {
-        Vec::new()
-    }
+    fn internal(&self, req: &Self::Internal, state: &Self::State) -> (r: Vec<InternalOutcome<Self>>)
+        ensures
+            r@.len() == self.spec_internal(*req, *state).len(),
+            forall|i: int| 0 <= i < r@.len() ==> {
+                let o = #[trigger] r@[i];
+                semantics::InternalOutcomeV { next: o.next, work: o.work@, send: o.send@ }
+                    == self.spec_internal(*req, *state)[i]
+            };
 
     /// The model's clock in `state`. Deadlines ([`Sched`]) are on this clock,
     /// and the checker enforces them: work whose deadline has come runs before
@@ -88,11 +157,32 @@ pub trait Model {
     /// Time moves only by a step that changes the state's clock, typically an
     /// external request that does nothing else (Accordant's `AdvanceClock`).
     /// A step that also did other work would do it before the timers due at
-    /// the new time fire. A model without time keeps the default, 0.
-    fn now(&self, _state: &Self::State) -> Time {
-        0
+    /// the new time fire. A model without time answers 0.
+    fn now(&self, state: &Self::State) -> (r: Time)
+        ensures
+            r == self.spec_now(*state);
+
+    /// What [`Model::external`] computes, for the proofs.
+    open spec fn spec_external(&self, req: Self::External, state: Self::State) -> Seq<
+        semantics::ExternalOutcomeV<Self::State, Self::Response, Self::Internal, Self::Dispatch>,
+    > {
+        arbitrary()
+    }
+
+    /// What [`Model::internal`] computes, for the proofs.
+    open spec fn spec_internal(&self, req: Self::Internal, state: Self::State) -> Seq<
+        semantics::InternalOutcomeV<Self::State, Self::Internal, Self::Dispatch>,
+    > {
+        arbitrary()
+    }
+
+    /// What [`Model::now`] computes, for the proofs.
+    open spec fn spec_now(&self, state: Self::State) -> Time {
+        arbitrary()
     }
 }
+
+} // verus!
 
 /// Optional, for testing: names for interesting things a step did ("lease
 /// expired, task re-dispatched"). The checker reads them off the execution a
@@ -165,27 +255,6 @@ pub trait Partitioned: Footprint {
     fn join(&self, a: &Self::State, b: &Self::State) -> Self::State;
 }
 
-/// Internal work to start, and when it runs, on the model's clock ([`Model::now`]),
-/// from the state the starting step leads to. Work that must happen and hasn't
-/// by its deadline is a violation. When the clock jumps past several deadlines,
-/// the work runs right after the jump, earliest deadline first.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Sched<T> {
-    /// Runs later: any time from now on, when an observation needs it, or never.
-    Later(T),
-    /// A timer: runs exactly at the given time.
-    Timer(Time, T),
-}
-
-/// One possible effect of a request: the next state, the response, the
-/// internal work it starts, and the dispatches it sends.
-pub struct ExternalOutcome<M: Model + ?Sized> {
-    pub next: M::State,
-    pub resp: M::Response,
-    pub work: Vec<Sched<M::Internal>>,
-    pub send: Vec<M::Dispatch>,
-}
-
 impl<M: Model + ?Sized> ExternalOutcome<M> {
     pub fn new(resp: M::Response, next: M::State) -> Self {
         ExternalOutcome { next, resp, work: Vec::new(), send: Vec::new() }
@@ -214,15 +283,6 @@ impl<M: Model + ?Sized> ExternalOutcome<M> {
         self.work.push(Sched::Timer(at, step));
         self
     }
-}
-
-/// One possible effect of internal work: the next state, the internal work it
-/// starts, and the messages it sends to clients (server-sent, observed with
-/// [`Checker::receive`]).
-pub struct InternalOutcome<M: Model + ?Sized> {
-    pub next: M::State,
-    pub work: Vec<Sched<M::Internal>>,
-    pub send: Vec<M::Dispatch>,
 }
 
 impl<M: Model + ?Sized> InternalOutcome<M> {

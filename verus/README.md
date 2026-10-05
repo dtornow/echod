@@ -1,26 +1,20 @@
-# The soundness statement, in Verus
+# The soundness statement and proof, in Verus
 
-`accordant.rs` says the same thing as `lean/Accordant.lean`, in the same shape:
-how a system's evolution maps to what clients observe, and that the checker
-only accepts traces some run could produce.
+They live in the crate now, next to the code they are about:
 
-- `step(m, c, label, d)` is the transition relation: the cases `invoke`,
-  `ret`, `receive` (observed: the label is the observation) and `effect`,
-  `run`, `advance` (silent). Lean's `Step` constructors, one predicate each.
-- `is_run(m, configs, labels)`: every consecutive pair of configurations is a
-  step with that label. Lean's `Steps`, unfolded into sequences.
-- `visible(labels)`: the run's observations in order; silent steps show nothing.
-- `valid(m, init, start, trace)`: some run from `initial(init, start)` has
-  `visible(labels) == trace`.
-- `check` carries the contract `accepted ==> valid(...)`, and
-  `accepted_implies_valid` states it as a lemma. Not proved (`external_body`,
-  `admit()`).
+- `src/semantics.rs`: what the checker promises. `step(m, c, label, d)` is the
+  transition relation (`invoke`, `ret`, `receive` observed; `effect`, `run`
+  silent), `legal` an execution the system can take, `project` what it shows a
+  client, `valid(m, init, trace)` "some legal execution from `initial(init)`
+  projects to the trace". `check` carries the checker's contract:
+  `Ok ==> valid`, `Ko ==> !valid` (`external_body`).
+- `src/certificate.rs`: the replay `certify`, verified: it ensures
+  `Ok(()) ==> valid(m, init, trace)`. This is the code that runs.
+- `src/certificate/proof.rs`: the lemmas. `src/certificate/trusted.rs`: the two
+  trusted helpers (`copy`, `same`).
 
-Proved: the empty trace is valid for every model, and for a one-call counter
-"sent `incr`, got 1" is valid via invoke (seen), effect (silent), return (seen).
-Changing the response to 2 makes that proof fail, as it should.
-
-Not modeled yet: request lifetimes.
+The model's interface (`Model`, with `spec` twins of `external`, `internal`
+and `now`) is in `src/lib.rs`, inside `verus!`.
 
 ## Running it
 
@@ -28,7 +22,6 @@ Checked with Verus `0.2026.10.04.fc7d32e` (a rolling release from
 github.com/verus-lang/verus), which needs Rust toolchain 1.98.1:
 
 ```
-rustup install 1.98.1-x86_64-unknown-linux-gnu
-verus --crate-type=lib verus/accordant.rs
-# verification results:: 4 verified, 0 errors
+cargo verus verify -p accordant
+# verification results:: 30 verified, 0 errors
 ```

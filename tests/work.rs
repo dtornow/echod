@@ -5,7 +5,7 @@
 mod certified;
 use certified::Certified;
 
-use accordant::{Checker, Config, ExternalOutcome, InternalOutcome, Keyed, Model, Plain};
+use accordant::{Checker, Config, ExternalOutcome, InternalOutcome, Keyed, Model, Plain, Time};
 
 /// `Bump` starts the same increment twice; `Read` answers the counter.
 struct Twice;
@@ -32,6 +32,10 @@ impl Model for Twice {
 
     fn internal(&self, _: &(), n: &u32) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::new(n + 1)]
+    }
+
+    fn now(&self, _: &u32) -> Time {
+        0
     }
 }
 

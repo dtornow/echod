@@ -2,10 +2,11 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use crate::certificate::{self, Certificate, Silent, Work};
+use crate::certificate::{self, Certificate, Silent};
+use crate::semantics::Work;
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
-use crate::{CallId, Data, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
+use crate::{CallId, Data, Engine, Event, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
 
 type St<S> = <<S as Engine>::M as Model>::State;
 type Ex<S> = <<S as Engine>::M as Model>::External;
@@ -135,18 +136,6 @@ impl<S: Engine> fmt::Debug for Node<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node").field("state", &self.state).field("pending", &self.pending).finish()
     }
-}
-
-/// What a client observes. No time: the order of a trace is the order one
-/// observer saw, and time is the model's own ([`Model::now`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event<X, R, D> {
-    /// The client sent a request.
-    Invoke { call: CallId, req: X },
-    /// The client got the response to that call.
-    Return { call: CallId, res: R },
-    /// The client got a dispatch the server sent on its own.
-    Receive { msg: D },
 }
 
 /// What the checker steps on internally: the observations.
@@ -803,8 +792,8 @@ impl<S: Engine> Checker<S> {
     /// A certificate for the history so far: the silent steps of the execution
     /// the search found, before each observed event. Before answering,
     /// [`certify`](crate::certify) replays them with the history. Whatever
-    /// passes is valid as long as `certify` is right (proved for its Lean copy
-    /// in `lean/Accordant.lean`); the search needs no proof.
+    /// passes is valid: `certify` is verified (`src/certificate.rs`, against
+    /// `src/semantics.rs`); the search needs no proof.
     ///
     /// Needs [`Config::certify`] from the start, and one factor:
     /// [`Checker::new`] or [`Checker::with_footprints`].

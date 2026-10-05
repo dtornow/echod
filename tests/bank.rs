@@ -1,6 +1,6 @@
 //! The BankAccount sample from Accordant, with calls split into request and response.
 
-use accordant::{Checker, Config, Footprint, HashedMap, Keyed, Model, ExternalOutcome, Touches};
+use accordant::{Checker, Config, Footprint, HashedMap, InternalOutcome, Keyed, Model, ExternalOutcome, Time, Touches};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
@@ -58,6 +58,13 @@ impl Model for BankModel {
         vec![out]
     }
 
+    fn internal(&self, _: &(), _: &Bank) -> Vec<InternalOutcome<Self>> {
+        Vec::new()
+    }
+
+    fn now(&self, _: &Bank) -> Time {
+        0
+    }
 }
 
 impl Footprint for BankModel {

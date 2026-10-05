@@ -7,15 +7,28 @@
 //! [`certify`] rebuilds the configurations and fails on the first step the
 //! system can't make.
 //!
-//! This file is the Rust copy of `replay` and `certify` in `lean/Accordant.lean`,
-//! where an accepted certificate is proved to make the trace valid. Keep the two
-//! in step: the soundness of the checker rests on this file alone, not on the
-//! search.
+//! The soundness of the checker rests on this file alone, not on the search,
+//! and this file is verified: `certify` ensures that a certificate it accepts
+//! makes the trace valid ([`semantics::valid`]), because each step of the
+//! replay ensures it is a step the system can take ([`semantics::step`]). The
+//! lemmas are in `proof.rs`; what is trusted beyond vstd, in `trusted.rs`.
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::checker::Event;
-use crate::{CallId, Model, Sched, Time};
+use vstd::prelude::*;
+
+#[allow(unused_imports)] // some only name specifications, erased in a plain build
+use crate::semantics::{self, Call, Cfg, Execution, Label, Work};
+use crate::{CallId, Event, Model, Sched, Time};
+
+mod proof;
+mod trusted;
+
+use trusted::{copy, same};
+
+verus! {
+
+broadcast use vstd::std_specs::hash::group_hash_axioms;
 
 /// A silent step, as a certificate names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -34,85 +47,230 @@ pub type EventOf<M> = Event<<M as Model>::External, <M as Model>::Response, <M a
 /// Whether `cert` explains `trace`: from `init`, each event's silent steps and
 /// then the event itself are steps the system can make. `Err(k)`: the steps up
 /// to event `k` can't be made (or the certificate stops before it).
-pub fn certify<M: Model>(m: &M, init: M::State, trace: &[EventOf<M>], cert: &[Vec<Silent>]) -> Result<(), usize> {
+///
+/// Verified: `Ok(())` means the trace is valid.
+#[allow(clippy::needless_range_loop)] // index loops, for Verus
+pub fn certify<M: Model>(m: &M, init: M::State, trace: &[EventOf<M>], cert: &[Vec<Silent>]) -> (r: Result<(), usize>)
+    ensures
+        r is Ok ==> semantics::valid(*m, init, trace@),
+{
     let mut c = Config::initial(m, init);
-    for (k, e) in trace.iter().enumerate() {
-        let Some(silent) = cert.get(k) else { return Err(k) };
-        for s in silent {
-            c.silent(*s).map_err(|()| k)?;
+    // For the proof: the execution replayed so far.
+    let ghost mut steps: Execution<M> = Seq::empty();
+    for k in 0..trace.len()
+        invariant
+            c.m == m,
+            semantics::legal(*m, semantics::initial::<M>(init), steps),
+            semantics::before::<M>(semantics::initial::<M>(init), steps, steps.len() as int) == c@,
+            semantics::project::<M>(steps) == trace@.subrange(0, k as int),
+    {
+        if k >= cert.len() {
+            return Err(k);
         }
-        c.observe(e).map_err(|()| k)?;
+        let silent = &cert[k];
+        for s in 0..silent.len()
+            invariant
+                c.m == m,
+                semantics::legal(*m, semantics::initial::<M>(init), steps),
+                semantics::before::<M>(semantics::initial::<M>(init), steps, steps.len() as int) == c@,
+                semantics::project::<M>(steps) == trace@.subrange(0, k as int),
+        {
+            if let Err(()) = c.silent(silent[s]) {
+                return Err(k);
+            }
+            proof {
+                proof::silent_step(*m, semantics::initial::<M>(init), steps, c@);
+                steps = steps.push((Label::Silent, c@));
+            }
+        }
+        if let Err(()) = c.observe(&trace[k]) {
+            return Err(k);
+        }
+        proof {
+            proof::observed_step(*m, semantics::initial::<M>(init), steps, trace@, k as int, c@);
+            steps = steps.push((Label::Obs(trace@[k as int]), c@));
+        }
+    }
+    proof {
+        assert(trace@.subrange(0, trace@.len() as int) =~= trace@);
+        proof::accepted_valid(*m, init, steps, trace@);
     }
     Ok(())
 }
 
-enum Call<X, R> {
-    InFlight(X),
-    Done(R),
-}
-
-/// Internal work started and not yet run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Work<I> {
-    pub req: I,
-    pub after: Time,
-    pub due: Option<Time>,
-    pub must: bool,
-}
-
-/// Everything about the system at one point, seen or not.
+/// Everything about the system at one point, seen or not. Its view (`@`) is
+/// the [`semantics::Config`] the proofs talk about.
 pub(crate) struct Config<'m, M: Model> {
-    m: &'m M,
-    state: M::State,
-    calls: HashMap<CallId, Call<M::External, M::Response>>,
-    pub work: Vec<Work<M::Internal>>,
-    pub sent: Vec<M::Dispatch>,
+    pub(crate) m: &'m M,
+    pub(crate) state: M::State,
+    pub(crate) calls: HashMap<CallId, Call<M::External, M::Response>>,
+    pub(crate) work: Vec<Work<M::Internal>>,
+    pub(crate) sent: Vec<M::Dispatch>,
 }
 
-fn due_le<I>(w: &Work<I>, v: &Work<I>) -> bool {
+impl<'m, M: Model> View for Config<'m, M> {
+    type V = Cfg<M>;
+
+    open(crate) spec fn view(&self) -> Cfg<M> {
+        semantics::Config { state: self.state, calls: self.calls@, work: self.work@, sent: self.sent@ }
+    }
+}
+
+fn due_le<I>(w: &Work<I>, v: &Work<I>) -> (r: bool)
+    ensures
+        r == semantics::due_le(*w, *v),
+{
     match (w.due, v.due) {
         (Some(d), Some(e)) => d <= e,
         _ => false,
     }
 }
 
-fn schedule<I>(now: Time, s: Sched<I>) -> Work<I> {
+fn max(a: Time, b: Time) -> (r: Time)
+    ensures
+        r == semantics::max(a, b),
+{
+    if a >= b { a } else { b }
+}
+
+fn schedule<I>(now: Time, s: Sched<I>) -> (w: Work<I>)
+    ensures
+        w == semantics::schedule(now, s),
+{
     match s {
         Sched::Later(req) => Work { req, after: now, due: None, must: true },
-        Sched::Timer(t, req) => Work { req, after: t.max(now), due: Some(t.max(now)), must: true },
+        Sched::Timer(t, req) => Work { req, after: max(t, now), due: Some(max(t, now)), must: true },
     }
 }
 
 impl<'m, M: Model> Config<'m, M> {
-    pub fn initial(m: &'m M, init: M::State) -> Self {
+    pub(crate) fn initial(m: &'m M, init: M::State) -> (c: Self)
+        ensures
+            c@ == semantics::initial::<M>(init),
+            c.m == m,
+    {
         Config { m, state: init, calls: HashMap::new(), work: Vec::new(), sent: Vec::new() }
     }
 
-    /// Work whose deadline has come on the model's clock and that can run.
-    fn work_overdue(&self, w: &Work<M::Internal>) -> bool {
+    /// Work `i`'s deadline has come on the model's clock and it can run.
+    fn work_overdue(&self, i: usize) -> (r: bool)
+        requires
+            i < self.work.len(),
+        ensures
+            r == semantics::is_overdue(*self.m, self@, i as int),
+    {
+        let w = &self.work[i];
         let now = self.m.now(&self.state);
-        w.must && w.after <= now && w.due.is_some_and(|d| d <= now) && !self.m.internal(&w.req, &self.state).is_empty()
+        let due = match w.due {
+            Some(d) => d <= now,
+            None => false,
+        };
+        w.must && w.after <= now && due && !self.m.internal(&w.req, &self.state).is_empty()
     }
 
-    pub(crate) fn overdue(&self) -> bool {
-        self.work.iter().any(|w| self.work_overdue(w))
+    pub(crate) fn overdue(&self) -> (r: bool)
+        ensures
+            r == semantics::overdue(*self.m, self@),
+    {
+        for i in 0..self.work.len()
+            invariant
+                forall|k: int| 0 <= k < i ==> !semantics::is_overdue(*self.m, self@, k),
+        {
+            if self.work_overdue(i) {
+                return true;
+            }
+        }
+        false
     }
 
-    /// Whether `w` may run: nothing is overdue, or `w` is overdue with the
+    /// Whether work `i` may run: nothing is overdue, or `i` is overdue with the
     /// earliest deadline.
-    fn may_run(&self, w: &Work<M::Internal>) -> bool {
-        !self.overdue() || (self.work_overdue(w) && self.work.iter().all(|v| !self.work_overdue(v) || due_le(w, v)))
+    fn may_run(&self, i: usize) -> (r: bool)
+        requires
+            i < self.work.len(),
+        ensures
+            r == (!semantics::overdue(*self.m, self@) || semantics::is_first(*self.m, self@, i as int)),
+    {
+        if !self.overdue() {
+            return true;
+        }
+        if !self.work_overdue(i) {
+            return false;
+        }
+        for v in 0..self.work.len()
+            invariant
+                i < self.work.len(),
+                forall|k: int| 0 <= k < v && #[trigger] semantics::is_overdue(*self.m, self@, k)
+                    ==> semantics::due_le(self@.work[i as int], self@.work[k]),
+        {
+            if self.work_overdue(v) && !due_le(&self.work[i], &self.work[v]) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Starts work on the clock of the state the step led to.
-    fn start(&mut self, work: Vec<Sched<M::Internal>>) {
+    fn start(&mut self, work: Vec<Sched<M::Internal>>)
+        ensures
+            final(self)@ == (semantics::Config {
+                work: semantics::start_all(old(self)@.work, work@, old(self).m.spec_now(old(self)@.state)),
+                ..old(self)@
+            }),
+            final(self).m == old(self).m,
+    {
         let now = self.m.now(&self.state);
-        self.work.extend(work.into_iter().map(|s| schedule(now, s)));
+        let ghost (was, all) = (self.work@, work@);
+        let mut work = work;
+        while !work.is_empty()
+            invariant
+                self.m == old(self).m,
+                now == self.m.spec_now(self.state),
+                work@.len() <= all.len(),
+                work@ == all.subrange(all.len() - work@.len(), all.len() as int),
+                self@ == (semantics::Config {
+                    work: was + all.subrange(0, all.len() - work@.len()).map_values(
+                        |s: Sched<M::Internal>| semantics::schedule(now, s),
+                    ),
+                    ..old(self)@
+                }),
+            decreases work.len(),
+        {
+            self.work.push(schedule(now, work.remove(0)));
+            proof {
+                assert(work@ =~= all.subrange(all.len() - work@.len(), all.len() as int));
+                assert(self.work@ =~= was + all.subrange(0, all.len() - work@.len()).map_values(
+                    |s: Sched<M::Internal>| semantics::schedule(now, s),
+                ));
+            }
+        }
+        proof {
+            assert(self.work@ =~= semantics::start_all(was, all, now));
+        }
+    }
+
+    /// The first copy of `msg` sent and not yet received: any copy would do,
+    /// they are equal.
+    #[allow(clippy::manual_find)] // a loop, for Verus
+    fn first_sent(&self, msg: &M::Dispatch) -> (r: Option<usize>)
+        ensures
+            r matches Some(i) ==> i < self.sent.len() && self@.sent[i as int] == *msg,
+    {
+        for i in 0..self.sent.len() {
+            if same(&self.sent[i], msg) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// An observed step: the event happens here. `Err(())`: the system can't
     /// show this event now.
-    pub fn observe(&mut self, e: &EventOf<M>) -> Result<(), ()> {
+    pub(crate) fn observe(&mut self, e: &EventOf<M>) -> (r: Result<(), ()>)
+        ensures
+            r is Ok ==> semantics::step(*old(self).m, old(self)@, Label::Obs(*e), final(self)@),
+            final(self).m == old(self).m,
+    {
         if self.overdue() {
             return Err(());
         }
@@ -121,26 +279,39 @@ impl<'m, M: Model> Config<'m, M> {
                 if self.calls.contains_key(call) {
                     return Err(());
                 }
-                self.calls.insert(*call, Call::InFlight(req.clone()));
+                self.calls.insert(*call, Call::InFlight(copy(req)));
+                proof {
+                    assert(semantics::invoke(*self.m, old(self)@, Label::Obs(*e), self@));
+                }
             }
             Event::Return { call, res } => {
                 let Some(Call::Done(expected)) = self.calls.get(call) else { return Err(()) };
-                if expected != res {
+                if !same(expected, res) {
                     return Err(());
                 }
                 self.calls.remove(call);
+                proof {
+                    assert(semantics::ret(*self.m, old(self)@, Label::Obs(*e), self@));
+                }
             }
             Event::Receive { msg } => {
-                // The first copy sent: any copy would do, they are equal.
-                let Some(i) = self.sent.iter().position(|m| m == msg) else { return Err(()) };
+                let Some(i) = self.first_sent(msg) else { return Err(()) };
                 self.sent.remove(i);
+                proof {
+                    assert(old(self)@.sent[i as int] == *msg);
+                    assert(semantics::receive(*self.m, old(self)@, Label::Obs(*e), self@));
+                }
             }
         }
         Ok(())
     }
 
     /// A silent step. `Err(())`: the system can't take it now.
-    pub fn silent(&mut self, s: Silent) -> Result<(), ()> {
+    pub(crate) fn silent(&mut self, s: Silent) -> (r: Result<(), ()>)
+        ensures
+            r is Ok ==> semantics::step(*old(self).m, old(self)@, Label::Silent, final(self)@),
+            final(self).m == old(self).m,
+    {
         match s {
             Silent::Effect { call, j } => {
                 let Some(Call::InFlight(req)) = self.calls.get(&call) else { return Err(()) };
@@ -149,30 +320,44 @@ impl<'m, M: Model> Config<'m, M> {
                     return Err(());
                 }
                 let o = outs.swap_remove(j);
+                let mut send = o.send;
                 self.state = o.next;
                 self.calls.insert(call, Call::Done(o.resp));
                 self.start(o.work);
-                self.sent.extend(o.send);
+                self.sent.append(&mut send);
+                proof {
+                    proof::effect_step(*self.m, old(self)@, self@, call, j as int);
+                }
             }
             Silent::Run { i, j } => {
-                let Some(w) = self.work.get(i) else { return Err(()) };
+                if i >= self.work.len() {
+                    return Err(());
+                }
+                let w = &self.work[i];
                 let mut outs = self.m.internal(&w.req, &self.state);
-                if j >= outs.len() || w.after > self.m.now(&self.state) || !self.may_run(w) {
+                if j >= outs.len() || w.after > self.m.now(&self.state) || !self.may_run(i) {
                     return Err(());
                 }
                 let o = outs.swap_remove(j);
+                let mut send = o.send;
                 self.work.remove(i);
                 self.state = o.next;
                 self.start(o.work);
-                self.sent.extend(o.send);
+                self.sent.append(&mut send);
+                proof {
+                    proof::run_step(*self.m, old(self)@, self@, i as int, j as int);
+                }
             }
         }
         Ok(())
     }
 }
 
+} // verus!
+
 // ------------------------------------------------------------------------
 // Not part of `certify`: helpers built on it, for the simulator and coverage.
+// Plain Rust, outside Verus.
 
 /// A step the system can take next, other than a new request.
 #[derive(Clone, Debug)]

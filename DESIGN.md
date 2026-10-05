@@ -233,8 +233,9 @@ the check takes 3.1 s instead of 1.1 s. The Porcupine benchmarks are unchanged.
 
 What the checker promises, in one sentence: if it accepts a trace, then some
 execution of the system, projected onto what clients observe, is exactly that
-trace. `lean/Accordant.lean` says this formally (`Valid` is "some execution
-projects to the trace") and proves it, from one assumption.
+trace. `src/semantics.rs` says this formally, in Verus (`valid` is "some legal
+execution projects to the trace"), and `src/certificate.rs` proves it about
+the code that runs.
 
 The search is not what is proved. It is large and clever (lazy firing,
 footprints, early answers, subsumption, partitions), and it had a real bug: work
@@ -260,9 +261,63 @@ pub type Certificate = Vec<Vec<Silent>>; // cert[k]: the silent steps just befor
 
 `certify(model, init, &trace, &cert)` (`src/certificate.rs`) walks the trace:
 for each event it takes the silent steps, then the event, and refuses the first
-step the system can't make. `certify` is a copy of Lean's `certify`, for which `accepted_valid` is
-proved: whatever it accepts is valid. So the guarantee rests on those 100 lines
-matching their Lean copy, not on the search.
+step the system can't make. So the guarantee rests on those 150 lines, not on
+the search, and they are verified.
+
+### What is proved, where, and what is trusted
+
+The statement, in `src/semantics.rs` (specification only; nothing in it runs):
+
+- `Config`: the system at one point, seen or not: the state, the calls in
+  flight or answered, the work pending (with `after`, `due`, `must`), the
+  dispatches sent and not received.
+- `step(m, c, label, d)`: the transition relation. Observed: `invoke`, `ret`,
+  `receive`, each labeled with its event and allowed only when no work is
+  overdue. Silent: `effect` (a call in flight takes effect with one of
+  `m.spec_external`'s outcomes) and `run` (pending work runs with one of
+  `m.spec_internal`'s outcomes, once its `after` has come; while work is
+  overdue, only the overdue work with the earliest deadline).
+- `legal(m, first, steps)`: every step follows from the configuration before it.
+  `project(steps)`: the observed events, in order.
+- `valid(m, init, trace) := exists steps. legal(m, initial(init), steps) &&
+  project(steps) == trace`.
+- `check`: the checker's contract, `Ok ==> valid` and `Ko ==> !valid`, taken
+  on trust (`external_body`) around `Checker::check_certified`.
+
+The theorem, as the contract of the function that runs (`src/certificate.rs`):
+
+```text
+fn certify(m, init, trace, cert) -> (r: Result<(), usize>)
+    ensures r is Ok ==> valid(m, init, trace@)
+```
+
+`certify` keeps a ghost execution and extends it at each step; each exec step
+of the replay (`Config::silent`, `Config::observe`) ensures it is a `step` from
+the view of the configuration before to the view after. The lemmas
+(`src/certificate/proof.rs`): the computed silent steps are `effect` and `run`
+steps; a legal execution extended by a step stays legal; a silent step shows
+nothing and an observed step shows its event; a legal execution that shows the
+trace is the witness `valid` asks for. `cargo verus verify -p accordant`
+checks all of it: 30 verified, 0 errors, no `assume` or `admit`.
+
+The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
+(`spec_external`, `spec_internal`, `spec_now`) and the method's `ensures` ties
+the two: `external` returns the vector whose sequence `spec_external` says. The
+semantics are stated over the twins.
+
+Trusted, besides Verus and vstd (the specifications of `HashMap` and `Vec`):
+
+- `src/certificate/trusted.rs`: `copy<T: Clone>(t) ensures r == *t` and
+  `same<T: PartialEq>(a, b) ensures r == (*a == *b)`, for a model's own types.
+  Both `external_body`.
+- A model written outside `verus!` (every model so far, Resonate's glue
+  included) keeps the default twins, which stand for whatever its methods
+  compute. The theorem then says: `certify` accepts only traces valid for the
+  functions the model's methods compute, provided they are pure. Nothing
+  checks the purity. A model written in Verus overrides the twins and has its
+  methods verified against them.
+- `check`'s KO line: not proved anywhere; it rests on the search being
+  exhaustive.
 
 With the deadline bug put back, `check` accepted a trace in which the work ran
 late. `check_certified` refused it, because time can't skip a deadline whose
@@ -618,12 +673,12 @@ Porting also found three checker bugs, all fixed:
 
 ## Files
 
-- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`.
+- `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `Event`, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`. `Model` and the types the proofs mention are inside `verus!`.
 - `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`, recording certificates.
-- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's. Below it, outside `certify`: legal-move enumeration and `marks`.
+- `src/certificate.rs`: `certify`, the replay that backs every certified verdict, verified: `Ok(()) ==> valid`. Below it, outside Verus: legal-move enumeration and `marks`. `src/certificate/proof.rs`: the lemmas; `src/certificate/trusted.rs`: `copy` and `same`, trusted.
+- `src/semantics.rs`: what the checker promises (`valid`), as Verus specifications: configurations, the step relation, executions and their projection, and the checker's contract `check`.
 - `src/sim.rs`: `Sim`, the model run as a server, on the same replay; its choices from a seed or from a testing library.
-- `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
-- `verus/accordant.rs`: the same statement, as the contract of the Rust function.
+- `verus/README.md`: where the Verus statement and proof live, and how to run them.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).

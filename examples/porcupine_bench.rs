@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use accordant::{Checker, Config, Engine, Event, Verdict, ExternalOutcome, Footprint, HashedMap, Model, Partitioned, Touches};
+use accordant::{Checker, Config, Engine, Event, Verdict, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Model, Partitioned, Time, Touches};
 
 const DATA: &str = "bench/porcupine/porcupine/test_data";
 
@@ -51,6 +51,14 @@ impl Model for Etcd {
             EtcdReq::Cas(from, to) if *s == Some(from) => ExternalOutcome::new(EtcdRes::Cas(true), Some(to)),
             EtcdReq::Cas(..) => ExternalOutcome::same(EtcdRes::Cas(false), s),
         }]
+    }
+
+    fn internal(&self, _: &(), _: &Option<i64>) -> Vec<InternalOutcome<Self>> {
+        Vec::new()
+    }
+
+    fn now(&self, _: &Option<i64>) -> Time {
+        0
     }
 }
 
@@ -147,6 +155,14 @@ impl Model for Kv {
                 ExternalOutcome::new(KvRes::Ok, n)
             }
         }]
+    }
+
+    fn internal(&self, _: &(), _: &Self::State) -> Vec<InternalOutcome<Self>> {
+        Vec::new()
+    }
+
+    fn now(&self, _: &Self::State) -> Time {
+        0
     }
 }
 

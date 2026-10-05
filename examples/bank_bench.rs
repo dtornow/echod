@@ -12,7 +12,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use accordant::{Checker, Config, Footprint, Model, ExternalOutcome, Touches};
+use accordant::{Checker, Config, Footprint, InternalOutcome, Model, ExternalOutcome, Time, Touches};
 
 struct Counting;
 
@@ -88,6 +88,13 @@ impl<M: Accounts> Model for Bank<M> {
         vec![ExternalOutcome::new(b, n)]
     }
 
+    fn internal(&self, _: &(), _: &M) -> Vec<InternalOutcome<Self>> {
+        Vec::new()
+    }
+
+    fn now(&self, _: &M) -> Time {
+        0
+    }
 }
 
 impl<M: Accounts> Footprint for Bank<M> {
