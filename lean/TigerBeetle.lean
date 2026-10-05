@@ -550,40 +550,6 @@ def Server.create_transfer_exists (s : Server) (t : NewTransfer) (e : Transfer) 
   if t.code ≠ e.code then return .exists_with_different_code
   return .exists
 
-/-- Posts or voids the pending transfer `p`, as the checks above allow. -/
-def Server.insert_post_or_void (s : Server) (ts : Time) (t : NewTransfer) (p : Transfer)
-    (dr cr : Account) (amount : Amount) : Server × CreateResult CreateTransferStatus :=
-  let post := t.flags.post_pending_transfer
-  let void := t.flags.void_pending_transfer
-  let ud (x px : Nat) := if x = 0 then px else x
-  let transfer : Transfer :=
-    { debit_account_id := p.debit_account_id, credit_account_id := p.credit_account_id,
-      amount, pending_id := t.pending_id,
-      user_data_128 := ud t.user_data_128 p.user_data_128,
-      user_data_64 := ud t.user_data_64 p.user_data_64,
-      user_data_32 := ud t.user_data_32 p.user_data_32,
-      timeout := 0, ledger := p.ledger, code := p.code, flags := t.flags, timestamp := ts }
-  let dr' : Account :=
-    { dr with
-      debits_pending := dr.debits_pending - p.amount,
-      debits_posted := if post then dr.debits_posted + amount else dr.debits_posted,
-      flags := if void && p.flags.closing_debit then { dr.flags with closed := false } else dr.flags }
-  let cr' : Account :=
-    { cr with
-      credits_pending := cr.credits_pending - p.amount,
-      credits_posted := if post then cr.credits_posted + amount else cr.credits_posted,
-      flags := if void && p.flags.closing_credit then { cr.flags with closed := false } else cr.flags }
-  let status : TransferPendingStatus := if post then .posted else .voided
-  ({ s with
-      transfers := s.transfers ++ [(t.id, transfer)],
-      transfers_pending := put s.transfers_pending t.pending_id status,
-      accounts := put (put s.accounts p.debit_account_id dr') p.credit_account_id cr',
-      account_events := s.account_events ++
-        [{ timestamp := ts, transfer_id := t.id, transfer_pending_status := status,
-           dr_account_id := p.debit_account_id, dr_account := dr',
-           cr_account_id := p.credit_account_id, cr_account := cr' }] },
-    ⟨ts, .created⟩)
-
 /-- The second phase of a two-phase transfer (`post_or_void_pending_transfer`). -/
 def Server.post_or_void_pending_transfer (s : Server) (ts : Time) (t : NewTransfer) :
     Server × CreateResult CreateTransferStatus :=
@@ -627,45 +593,33 @@ def Server.post_or_void_pending_transfer (s : Server) (ts : Time) (t : NewTransf
   if p.expires_at.any (· ≤ ts) then fail .pending_transfer_expired else
   if dr.flags.closed && !void then fail .debit_account_already_closed else
   if cr.flags.closed && !void then fail .credit_account_already_closed else
-  s.insert_post_or_void ts t p dr cr amount
-
-/-- What a transfer moves: a balancing transfer at most what the account has
-    available (`-` on `Nat` saturates at 0, as Zig's `-|`). -/
-def balanced_amount (t : NewTransfer) (dr cr : Account) : Amount :=
-  let amount := if t.flags.balancing_debit then
-      min t.amount (dr.credits_posted - (dr.debits_posted + dr.debits_pending)) else t.amount
-  if t.flags.balancing_credit then
-    min amount (cr.debits_posted - (cr.credits_posted + cr.credits_pending)) else amount
-
-/-- Stores a single-phase or pending transfer, as the checks below allow. -/
-def Server.insert_transfer (s : Server) (ts : Time) (t : NewTransfer) (dr cr : Account)
-    (amount : Amount) : Server × CreateResult CreateTransferStatus :=
+  let ud (x px : Nat) := if x = 0 then px else x
   let transfer : Transfer :=
-    { debit_account_id := t.debit_account_id, credit_account_id := t.credit_account_id,
-      amount, pending_id := 0, user_data_128 := t.user_data_128,
-      user_data_64 := t.user_data_64, user_data_32 := t.user_data_32, timeout := t.timeout,
-      ledger := t.ledger, code := t.code, flags := t.flags, timestamp := ts }
-  let pending := t.flags.pending
+    { debit_account_id := p.debit_account_id, credit_account_id := p.credit_account_id,
+      amount, pending_id := t.pending_id,
+      user_data_128 := ud t.user_data_128 p.user_data_128,
+      user_data_64 := ud t.user_data_64 p.user_data_64,
+      user_data_32 := ud t.user_data_32 p.user_data_32,
+      timeout := 0, ledger := p.ledger, code := p.code, flags := t.flags, timestamp := ts }
   let dr' : Account :=
     { dr with
-      debits_pending := if pending then dr.debits_pending + amount else dr.debits_pending,
-      debits_posted := if pending then dr.debits_posted else dr.debits_posted + amount,
-      flags := if t.flags.closing_debit then { dr.flags with closed := true } else dr.flags }
+      debits_pending := dr.debits_pending - p.amount,
+      debits_posted := if post then dr.debits_posted + amount else dr.debits_posted,
+      flags := if void && p.flags.closing_debit then { dr.flags with closed := false } else dr.flags }
   let cr' : Account :=
     { cr with
-      credits_pending := if pending then cr.credits_pending + amount else cr.credits_pending,
-      credits_posted := if pending then cr.credits_posted else cr.credits_posted + amount,
-      flags := if t.flags.closing_credit then { cr.flags with closed := true } else cr.flags }
+      credits_pending := cr.credits_pending - p.amount,
+      credits_posted := if post then cr.credits_posted + amount else cr.credits_posted,
+      flags := if void && p.flags.closing_credit then { cr.flags with closed := false } else cr.flags }
+  let status : TransferPendingStatus := if post then .posted else .voided
   ({ s with
       transfers := s.transfers ++ [(t.id, transfer)],
-      transfers_pending :=
-        if pending then s.transfers_pending ++ [(t.id, .pending)] else s.transfers_pending,
-      accounts := put (put s.accounts t.debit_account_id dr') t.credit_account_id cr',
+      transfers_pending := put s.transfers_pending t.pending_id status,
+      accounts := put (put s.accounts p.debit_account_id dr') p.credit_account_id cr',
       account_events := s.account_events ++
-        [{ timestamp := ts, transfer_id := t.id,
-           transfer_pending_status := if pending then .pending else .none,
-           dr_account_id := t.debit_account_id, dr_account := dr',
-           cr_account_id := t.credit_account_id, cr_account := cr' }] },
+        [{ timestamp := ts, transfer_id := t.id, transfer_pending_status := status,
+           dr_account_id := p.debit_account_id, dr_account := dr',
+           cr_account_id := p.credit_account_id, cr_account := cr' }] },
     ⟨ts, .created⟩)
 
 def Server.create_transfer (s : Server) (ts : Time) (t : NewTransfer) :
@@ -700,7 +654,12 @@ def Server.create_transfer (s : Server) (ts : Time) (t : NewTransfer) :
   if t.ledger ≠ dr.ledger then fail .transfer_must_have_the_same_ledger_as_accounts else
   if dr.flags.closed then fail .debit_account_already_closed else
   if cr.flags.closed then fail .credit_account_already_closed else
-  let amount := balanced_amount t dr cr
+  -- A balancing transfer moves at most what the account has available (`-` on
+  -- `Nat` saturates at 0, as Zig's `-|`).
+  let amount := if t.flags.balancing_debit then
+      min t.amount (dr.credits_posted - (dr.debits_posted + dr.debits_pending)) else t.amount
+  let amount := if t.flags.balancing_credit then
+      min amount (cr.debits_posted - (cr.credits_posted + cr.credits_pending)) else amount
   if t.flags.pending && amount + dr.debits_pending > u128_max then
     fail .overflows_debits_pending else
   if t.flags.pending && amount + cr.credits_pending > u128_max then
@@ -712,7 +671,33 @@ def Server.create_transfer (s : Server) (ts : Time) (t : NewTransfer) :
   if ts + t.timeout * ns_per_s > timestamp_max then fail .overflows_timeout else
   if dr.debits_exceed_credits amount then fail .exceeds_credits else
   if cr.credits_exceed_debits amount then fail .exceeds_debits else
-  s.insert_transfer ts t dr cr amount
+  let transfer : Transfer :=
+    { debit_account_id := t.debit_account_id, credit_account_id := t.credit_account_id,
+      amount, pending_id := 0, user_data_128 := t.user_data_128,
+      user_data_64 := t.user_data_64, user_data_32 := t.user_data_32, timeout := t.timeout,
+      ledger := t.ledger, code := t.code, flags := t.flags, timestamp := ts }
+  let pending := t.flags.pending
+  let dr' : Account :=
+    { dr with
+      debits_pending := if pending then dr.debits_pending + amount else dr.debits_pending,
+      debits_posted := if pending then dr.debits_posted else dr.debits_posted + amount,
+      flags := if t.flags.closing_debit then { dr.flags with closed := true } else dr.flags }
+  let cr' : Account :=
+    { cr with
+      credits_pending := if pending then cr.credits_pending + amount else cr.credits_pending,
+      credits_posted := if pending then cr.credits_posted else cr.credits_posted + amount,
+      flags := if t.flags.closing_credit then { cr.flags with closed := true } else cr.flags }
+  ({ s with
+      transfers := s.transfers ++ [(t.id, transfer)],
+      transfers_pending :=
+        if pending then s.transfers_pending ++ [(t.id, .pending)] else s.transfers_pending,
+      accounts := put (put s.accounts t.debit_account_id dr') t.credit_account_id cr',
+      account_events := s.account_events ++
+        [{ timestamp := ts, transfer_id := t.id,
+           transfer_pending_status := if pending then .pending else .none,
+           dr_account_id := t.debit_account_id, dr_account := dr',
+           cr_account_id := t.credit_account_id, cr_account := cr' }] },
+    ⟨ts, .created⟩)
 
 /-! ## Batches and linked chains (`execute_create`)
 
