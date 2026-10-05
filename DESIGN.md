@@ -226,6 +226,27 @@ release it, a poll claims it with a 1 ms lease, the clock moves to 1, the
 server goes idle, and `GetTask` still says `Acquired`. Shrinking does not always
 reach the minimum: three redundant `CreatePromise` calls stay in.
 
+**Guidance inside Hegel.** `examples/fuzz.rs` takes the suggestion whose
+reason was taken least *across runs*. Hegel can't use that: it replays a run to
+shrink it, and counts that changed in between would make the replay diverge.
+The policies it can use depend only on the run's own draws: `Uniform` (any
+suggestion), `ByReason` (a reason first, then a suggestion with it) and
+`LeastTried` (a reason taken least so far in this run). Over seeds 1–20, 1000
+test cases each:
+
+| bug | guide | found from | first failing case (median) |
+|---|---|---|---|
+| stale fence | Uniform | 20/20 | 28 |
+| stale fence | ByReason | 20/20 | 6 |
+| stale fence | LeastTried | 20/20 | 10 |
+| lease never expires | Uniform | 7/20 | 539 |
+| lease never expires | ByReason | 4/20 | 304 |
+| lease never expires | LeastTried | 8/20 | 510 |
+
+Choosing a reason first finds the easy bug about 4× sooner. Nothing confined to
+one run helps much with the hard one: what helps the seeded fuzzer is memory
+across runs. The tests keep `Uniform`, the guide their pinned seeds were chosen for.
+
 Under Antithesis (`ANTITHESIS_OUTPUT_DIR` set), Hegel reads every draw from
 `/dev/urandom`, which the Antithesis fuzzer controls, so it steers each
 decision of the run, server moves included.
