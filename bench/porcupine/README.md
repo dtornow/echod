@@ -4,7 +4,7 @@ Porcupine (github.com/anishathalye/porcupine, MIT) ships two sets of histories
 with its tests and benchmarks: 103 etcd Jepsen logs (one register: read, write,
 compare-and-set; many `:info` calls that never answer) and 6 key-value logs (get,
 put, append on 10 keys, with 1, 10 and 50 clients). `expected_etcd.txt` holds
-Porcupine's expected verdicts (etcd_095 has none).
+Porcupine's expected verdicts (etcd_095 is an empty file and has none).
 
 ```sh
 bench/porcupine/fetch.sh                                   # the Go repo, pinned
@@ -20,19 +20,20 @@ crate from crates.io into `porcupine-rs/`, add it as `examples/timing.rs` with a
 
 Verdicts match Porcupine's everywhere except kv c50-bad: there this checker gave
 up (the candidate limit, 2.3 million candidates at event 242) rather than
-finding the violation. The etcd logs are being rechecked for the same; see the
-commit history for the outcome.
+finding the violation. All 102 etcd verdicts are genuine: no etcd log hit a
+limit.
 
 | | this checker | porcupine-rs 0.3.0 | Porcupine (Go) |
 |---|---|---|---|
-| etcd, all 103 logs | 475 s | 0.36 s | 0.31 s |
-| etcd, median log | 0.14 ms | 0.03 ms | 0.09 ms |
-| etcd_007 (slowest) | 297 s | 89 ms | 79 ms |
+| etcd, all 103 logs | 674 s | 0.36 s | 0.31 s |
+| etcd, median log | 0.18 ms | 0.03 ms | 0.09 ms |
+| etcd_007 (slowest) | 316 s | 89 ms | 79 ms |
 | kv, 1 client ok / bad | 0.20 / 0.10 ms | 0.80 / 0.39 ms | 0.10 / 0.04 ms |
 | kv, 10 clients ok / bad | 5.7 / 1.2 ms | 0.80 / 0.83 ms | 0.50 / 0.23 ms |
-| kv, 50 clients ok / bad | 119 s / 414 s | 284 / 18 ms | 148 / 23 ms |
+| kv, 50 clients ok / bad | 119 s / gave up after 414 s | 284 / 18 ms | 148 / 23 ms |
 
-76 of the 103 etcd logs take under 1 ms here; 16 take over 100 ms.
+73 of the 103 etcd logs take under 1 ms here; 18 take over 100 ms, three over
+100 s (etcd_002, etcd_102, etcd_007).
 
 ## Why
 
