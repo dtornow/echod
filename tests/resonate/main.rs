@@ -550,6 +550,15 @@ fn partitioning_never_changes_a_verdict() {
                 if b {
                     kept.push(e.clone());
                 }
+                // Property 1 (proved for promise_create in verus/resonate_promises.rs),
+                // checked here on the Rust spec itself, for every candidate state.
+                for s in off.states() {
+                    for (id, p) in s.promises.iter() {
+                        let ok = p.created_at <= p.timeout_at
+                            && p.settled_at.is_none_or(|t| p.created_at <= t && t <= p.timeout_at);
+                        assert!(ok, "seed {seed}: promise {id} breaks created_at <= settled_at <= timeout_at: {p:?}");
+                    }
+                }
                 assert_eq!(a, b, "seed {seed}: partitioned={a} unpartitioned={b} on {e:?}");
             }
         }

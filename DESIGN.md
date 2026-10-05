@@ -480,6 +480,7 @@ Porting also found three checker bugs, all fixed:
 - `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's.
 - `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
 - `verus/accordant.rs`: the same statement, as the contract of the Rust function.
+- `verus/resonate_promises.rs`: safety properties of the Resonate spec's promises, proved on a Verus transcription of the spec (so far: `created_at <= settled_at <= timeout_at`, for `promise_create`).
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
