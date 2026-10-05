@@ -118,16 +118,60 @@ at a time and never holds the whole trace.
 ```rust
 let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
 
-c.check(events)?;        // Event::Invoke / Return / Receive / Tick / Quiesce
-c.check_timed(events)?;  // (Time, Event): the clock advances to each time first
+c.check(events)?;        // Event::Invoke / Return / Receive, each with its time
 c.check_calls(calls)?;   // (Time, External, Response): sequential calls, each answered before the next
 ```
 
 Each returns `Ok(&Stats)` if some run of the model produces exactly these
 observations, or the first `Violation`, whose `index` is that observation's
-position in the trace. The checker keeps its state afterwards, so a long trace
-can be fed in pieces. `check_calls` is the shape of a request/response log, like
+position in the trace. The clock advances to each observation's time first. The
+checker keeps its state afterwards, so a long trace can be fed in pieces.
+`check_calls` is the shape of a request/response log, like
 resonate-specification's NDJSON traces.
+
+## Soundness and certificates
+
+What the checker promises, in one sentence: if it accepts a trace, then some
+execution of the system, projected onto what clients observe, is exactly that
+trace. `lean/Accordant.lean` says this formally (`Valid` is "some execution
+projects to the trace") and proves it, from one assumption.
+
+The search is not what is proved. It is large and clever (lazy firing,
+footprints, early answers, subsumption, partitions), and it had a real bug: work
+spawned while the clock moved could run after its deadline. Instead, the checker
+shows its work:
+
+```rust
+let mut c = Checker::new(model, init, Config::default());
+let moves = c.check_certified(trace)?;   // or Config { certify: true, .. } and c.certified()
+```
+
+A certificate is the execution the search found, as a list of moves: each
+observation, each call taking effect (with which outcome), each piece of work
+running, each time the clock moves. `certify` (`src/certificate.rs`, about 100
+lines) replays the moves one by one, refuses the first one the system can't
+make, and returns what the execution shows a client, which must be exactly the
+trace. `certify` is a copy of Lean's `certify`, for which `accepted_valid` is
+proved: whatever it accepts is valid. So the guarantee rests on those 100 lines
+matching their Lean copy, not on the search.
+
+With the deadline bug put back, `check` accepted a trace in which the work ran
+late. `check_certified` refused it: "move 5 is not legal: Advance { to: 10 }",
+because time can't skip a deadline whose work could run.
+
+Limits:
+
+- **One factor.** Certificates need `Checker::new` or `Checker::with_footprints`.
+  With partitions, candidates in different factors would have to be merged into
+  one execution, and that isn't built yet. The Resonate tests check every trace a
+  second time in one factor, with certificates.
+- **Soundness only.** A certificate shows an accepted trace is valid. Nothing
+  shows that a rejected trace is invalid. For example, the checker only stops the
+  clock where something is due or observed, so it never tries work at the
+  moments in between. A model whose outcome depends on the exact `now` between
+  stops can see valid traces rejected (`tests/time.rs`).
+- **Cost.** About 5% time and twice the memory on the Resonate workload:
+  every candidate keeps its history, shared with its parent's.
 
 ## Separating request from response
 
@@ -443,10 +487,14 @@ Porting also found three checker bugs, all fixed:
 ## Files
 
 - `src/lib.rs`: the `Model`, `Footprint` and `Partitioned` traits, `ExternalOutcome`, `InternalOutcome`, `Sched`, `Touches`, `Time`.
-- `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`.
+- `src/checker.rs`: profile, events, clock, deadlines, footprint-pruned search, subsumption, `allowed`, recording certificates.
+- `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's.
+- `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
+- `verus/accordant.rs`: the same statement, as the contract of the Rust function.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, request lifetime, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
 - `tests/resonate/`: the Resonate port and its traces.
+- `tests/certificate.rs`, `tests/time.rs`: `certify` on its own, and deadlines of work spawned mid-tick.

@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::certificate::{self, Move, MoveOf, Work};
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
 use crate::{CallId, Data, Engine, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
@@ -34,15 +35,87 @@ pub enum Pending<O, R, T, G> {
 
 type P<S> = Pending<Ex<S>, Re<S>, In<S>, Ms<S>>;
 
+/// What a candidate did, recorded while certificates are on. The checker's
+/// own view of a move: by value, before positions and early answers are
+/// resolved into [`Move`]s.
+#[derive(Clone, Debug)]
+enum Record<O, R, T, G> {
+    Obs(Event<O, R, G>),
+    Effect { call: CallId, j: usize },
+    /// A read-only call could take effect here with outcome `j`, answering `res`.
+    Early { call: CallId, j: usize, res: R },
+    /// The call took effect with an early answer `res`, at the point it was found.
+    Commit { call: CallId, res: R },
+    Run { work: Work<T>, j: usize },
+    Advance(Time),
+}
+
+struct Link<O, R, T, G> {
+    rec: Record<O, R, T, G>,
+    prev: Trail<O, R, T, G>,
+}
+
+/// A candidate's history, newest first, sharing its prefix with its parent's.
+pub struct Trail<O, R, T, G>(Option<std::rc::Rc<Link<O, R, T, G>>>);
+
+impl<O, R, T, G> Clone for Trail<O, R, T, G> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+/// Unlinks iteratively: a long history would overflow the stack dropping
+/// recursively.
+impl<O, R, T, G> Drop for Trail<O, R, T, G> {
+    fn drop(&mut self) {
+        let mut at = self.0.take();
+        while let Some(rc) = at {
+            match std::rc::Rc::try_unwrap(rc) {
+                Ok(mut link) => at = link.prev.0.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl<O, R, T, G> Default for Trail<O, R, T, G> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<O: Clone, R: Clone, T: Clone, G: Clone> Trail<O, R, T, G> {
+    fn push(&self, rec: Record<O, R, T, G>) -> Self {
+        Self(Some(std::rc::Rc::new(Link { rec, prev: self.clone() })))
+    }
+
+    /// Oldest first.
+    fn records(&self) -> Vec<Record<O, R, T, G>> {
+        let mut out = Vec::new();
+        let mut at = &self.0;
+        while let Some(link) = at {
+            out.push(link.rec.clone());
+            at = &link.prev.0;
+        }
+        out.reverse();
+        out
+    }
+}
+
+type Tr<S> = Trail<Ex<S>, Re<S>, In<S>, Ms<S>>;
+type Rec<S> = Record<Ex<S>, Re<S>, In<S>, Ms<S>>;
+
 /// One explanation of the history so far.
 pub struct Node<S: Engine> {
     pub state: Interned<St<S>>,
     pub pending: HashedSet<P<S>>,
+    /// How this candidate got here. Not part of its identity.
+    trail: Tr<S>,
 }
 
 impl<S: Engine> Clone for Node<S> {
     fn clone(&self) -> Self {
-        Node { state: self.state.clone(), pending: self.pending.clone() }
+        Node { state: self.state.clone(), pending: self.pending.clone(), trail: self.trail.clone() }
     }
 }
 
@@ -117,6 +190,9 @@ pub struct Config {
     pub max_explore: usize,
     /// The time the history starts at.
     pub start: Time,
+    /// Record each candidate's moves, so [`Checker::certified`] can back the
+    /// verdict with a certificate. Costs memory proportional to the history.
+    pub certify: bool,
 }
 
 impl Default for Config {
@@ -128,6 +204,7 @@ impl Default for Config {
             max_width: 10_000,
             max_explore: 1_000_000,
             start: 0,
+            certify: false,
         }
     }
 }
@@ -201,6 +278,10 @@ pub struct Checker<S: Engine> {
     calls: HashMap<CallId, S::Part>,
     /// Call ids `check_calls` hands out; far from the ids callers pick themselves.
     next_call: CallId,
+    /// Record each candidate's moves, for a certificate.
+    recording: bool,
+    /// While recording: the observations so far, which the certificate must show.
+    observed: Vec<Event<Ex<S>, Re<S>, Ms<S>>>,
     pub stats: Stats,
 }
 
@@ -234,6 +315,7 @@ impl<M: Partitioned> Checker<Grouped<M>> {
 impl<S: Engine> Checker<S> {
     pub fn with_engine(engine: S, init: St<S>, cfg: Config) -> Self {
         let now = cfg.start;
+        let recording = cfg.certify;
         Checker {
             engine,
             cfg,
@@ -246,6 +328,8 @@ impl<S: Engine> Checker<S> {
             escaped: Default::default(),
             calls: HashMap::new(),
             next_call: 1 << 62,
+            recording,
+            observed: Vec::new(),
             stats: Stats { max_width: 1, ..Stats::default() },
         }
     }
@@ -268,7 +352,7 @@ impl<S: Engine> Checker<S> {
                 Some(a) => self.product(&a, &f.nodes),
             });
         }
-        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: HashedSet::new() }])
+        acc.unwrap_or_else(|| vec![Node { state: self.states.intern(self.init.clone()), pending: HashedSet::new(), trail: Default::default() }])
     }
 
     /// The number of candidates: the product of the factor widths.
@@ -333,10 +417,11 @@ impl<S: Engine> Checker<S> {
     /// A call whose request and response are observed now.
     /// Atomic: if the response is rejected, the checker is left as it was.
     pub fn call(&mut self, call: CallId, req: Ex<S>, res: Re<S>) -> Result<(), Violation> {
-        let saved = (self.factors.clone(), self.now);
+        let saved = (self.factors.clone(), self.now, self.observed.len());
         let r = self.invoke(call, req).and_then(|_| self.ret(call, res));
         if r.is_err() {
-            (self.factors, self.now) = saved;
+            (self.factors, self.now) = (saved.0, saved.1);
+            self.observed.truncate(saved.2);
         }
         r
     }
@@ -367,13 +452,110 @@ impl<S: Engine> Checker<S> {
             let call = self.next_call;
             self.next_call += 1;
             let one = [Event::Invoke { at, call, req }, Event::Return { at, call, res }];
-            let saved = (self.factors.clone(), self.now);
+            let saved = (self.factors.clone(), self.now, self.observed.len());
             if let Err(v) = one.into_iter().try_for_each(|e| self.observe(e)) {
-                (self.factors, self.now) = saved;
+                (self.factors, self.now) = (saved.0, saved.1);
+                self.observed.truncate(saved.2);
                 return Err(Violation { index: i, ..v });
             }
         }
         Ok(&self.stats)
+    }
+
+    /// Checks a whole trace, as [`Checker::check`] does, and backs an acceptance
+    /// with a certificate, as [`Checker::certified`] does.
+    pub fn check_certified<I>(&mut self, trace: I) -> Result<Vec<MoveOf<S::M>>, Violation>
+    where
+        I: IntoIterator<Item = Event<Ex<S>, Re<S>, Ms<S>>>,
+    {
+        if self.stats.events == 0 {
+            self.recording = true;
+        }
+        self.check(trace)?;
+        self.certified()
+    }
+
+    /// A certificate for the history so far: the execution the search found, as
+    /// moves. Before answering, [`certify`](crate::certify) replays the moves,
+    /// which must show exactly what was observed. Whatever passes is valid as
+    /// long as `certify` is right (proved for its Lean copy in
+    /// `lean/Accordant.lean`); the search needs no proof.
+    ///
+    /// Needs [`Config::certify`] from the start, and one factor:
+    /// [`Checker::new`] or [`Checker::with_footprints`].
+    pub fn certified(&self) -> Result<Vec<MoveOf<S::M>>, Violation> {
+        let n = self.observed.len();
+        let fail = |reason: String| Violation { index: n, now: self.now, event: "certificate".into(), reason, profile: Vec::new() };
+        if !self.recording {
+            return Err(fail("a certificate needs Config::certify from the start".into()));
+        }
+        let moves = self.certificate().map_err(fail)?;
+        match certificate::certify(self.engine.model(), self.init.clone(), moves.iter().cloned()) {
+            Ok(shown) if shown == self.observed => Ok(moves),
+            Ok(_) => Err(fail("the certificate shows a different history".into())),
+            Err(k) => Err(fail(format!("certify rejects move {k}: {:?}", moves[k]))),
+        }
+    }
+
+    /// The moves of one candidate: what it recorded, with work and dispatches
+    /// named by position and each read-only call placed where it took effect.
+    fn certificate(&self) -> Result<Vec<MoveOf<S::M>>, String> {
+        let node = match self.factors.as_slice() {
+            [] => return Ok(Vec::new()), // nothing observed yet
+            [f] if f.parts.is_none() => &f.nodes[0],
+            _ => return Err("a certificate needs one factor: use Checker::new or Checker::with_footprints".into()),
+        };
+        let model = self.engine.model();
+        let recs = node.trail.records();
+        // A read-only call takes effect at the first point it could have
+        // answered what it answered.
+        let mut chosen = HashSet::new();
+        let mut early: HashMap<CallId, Vec<(usize, Re<S>)>> = HashMap::new();
+        let mut placed = HashSet::new();
+        for (k, r) in recs.iter().enumerate() {
+            let pick = |call: &CallId, ok: &dyn Fn(&Re<S>) -> bool| {
+                early.get(call).and_then(|v| v.iter().find(|(_, r)| ok(r))).map(|(at, _)| *at)
+            };
+            match r {
+                Record::Obs(Event::Invoke { call, .. }) => {
+                    early.remove(call);
+                    placed.remove(call);
+                }
+                Record::Effect { call, .. } => {
+                    placed.insert(*call);
+                }
+                Record::Early { call, res, .. } => early.entry(*call).or_default().push((k, res.clone())),
+                Record::Commit { call, res } => {
+                    chosen.insert(pick(call, &|r| r == res).ok_or(format!("call {call}: no early answer {res:?}"))?);
+                    placed.insert(*call);
+                }
+                Record::Obs(Event::Return { call, res, .. }) if !placed.contains(call) => {
+                    chosen.insert(pick(call, &|r| model.admits(r, res)).ok_or(format!("call {call}: no early answer admits {res:?}"))?);
+                }
+                _ => {}
+            }
+        }
+        let mut c = certificate::Config::initial(model, self.init.clone());
+        let mut moves = Vec::new();
+        for (k, r) in recs.into_iter().enumerate() {
+            let mv = match r {
+                Record::Obs(Event::Invoke { call, req, .. }) => Move::Invoke { call, req },
+                Record::Obs(Event::Return { call, res, .. }) => Move::Return { call, res },
+                Record::Obs(Event::Receive { msg, .. }) => {
+                    Move::Receive { i: c.sent.iter().position(|m| *m == msg).ok_or(format!("{msg:?} was not sent"))? }
+                }
+                Record::Effect { call, j } => Move::Effect { call, j },
+                Record::Early { call, j, .. } if chosen.contains(&k) => Move::Effect { call, j },
+                Record::Early { .. } | Record::Commit { .. } => continue,
+                Record::Run { work, j } => {
+                    Move::Run { i: c.work.iter().position(|w| *w == work).ok_or(format!("{work:?} is not pending"))?, j }
+                }
+                Record::Advance(to) => Move::Advance { to },
+            };
+            c.apply(mv.clone()).map_err(|()| format!("move {} is not legal: {mv:?}", moves.len()))?;
+            moves.push(mv);
+        }
+        Ok(moves)
     }
 
     /// Every response `op` may get if it is called now and answered now. Does not
@@ -418,6 +600,18 @@ impl<S: Engine> Checker<S> {
     }
 
     fn apply(&mut self, e: Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
+        let seen = match (&e, self.recording) {
+            (Ev::Invoke(call, req), true) => Some(Event::Invoke { at: self.now, call: *call, req: req.clone() }),
+            (Ev::Return(call, res), true) => Some(Event::Return { at: self.now, call: *call, res: res.clone() }),
+            (Ev::Receive(msg), true) => Some(Event::Receive { at: self.now, msg: msg.clone() }),
+            _ => None,
+        };
+        self.apply_ev(e)?;
+        self.observed.extend(seen);
+        Ok(())
+    }
+
+    fn apply_ev(&mut self, e: Ev<Ex<S>, Re<S>, Ms<S>>) -> Result<(), Violation> {
         let index = self.stats.events;
         self.stats.events += 1;
         match &e {
@@ -532,7 +726,7 @@ impl<S: Engine> Checker<S> {
             for n in nodes {
                 let state = self.states.intern(self.engine.restrict(&n.state, &|p| g.contains(p)));
                 let pending = n.pending.iter().filter(|x| item_part(x).is_some_and(|p| g.contains(&p))).cloned().collect();
-                let m = Node { state, pending };
+                let m = Node { state, pending, trail: n.trail.clone() };
                 if seen.insert(m.clone()) {
                     proj.push(m);
                 }
@@ -575,7 +769,12 @@ impl<S: Engine> Checker<S> {
                 } else {
                     self.engine.restrict(&self.init, &|p| !claimed.contains(p))
                 };
-                let node = Node { state: self.states.intern(rest), pending: HashedSet::new() };
+                // Created at the first event: the clock may have moved since 0.
+                let trail = match self.now {
+                    0 => Trail::default(),
+                    now => self.record(&Trail::default(), || Record::Advance(now)),
+                };
+                let node = Node { state: self.states.intern(rest), pending: HashedSet::new(), trail };
                 ((0..self.factors.len()).collect(), Factor { parts: None, nodes: vec![node] })
             }
             Scope::Parts(parts) => {
@@ -585,7 +784,7 @@ impl<S: Engine> Checker<S> {
                 let claimed: BTreeSet<S::Part> = hit.iter().flat_map(|&i| self.factors[i].parts.iter().flatten().cloned()).collect();
                 let new: BTreeSet<S::Part> = parts.difference(&claimed).cloned().collect();
                 let state = self.engine.restrict(&self.init, &|p| new.contains(p));
-                let node = Node { state: self.states.intern(state), pending: HashedSet::new() };
+                let node = Node { state: self.states.intern(state), pending: HashedSet::new(), trail: Default::default() };
                 (hit, Factor { parts: Some(new), nodes: vec![node] })
             }
         };
@@ -615,7 +814,7 @@ impl<S: Engine> Checker<S> {
             for y in b {
                 let state = self.engine.join(&x.state, &y.state);
                 let pending = x.pending.union(&y.pending);
-                out.push(Node { state: self.states.intern(state), pending });
+                out.push(Node { state: self.states.intern(state), pending, trail: x.trail.clone() });
             }
         }
         out
@@ -695,6 +894,7 @@ impl<S: Engine> Checker<S> {
             let mut after = Vec::new();
             let mut seen = HashSet::new();
             for n in next {
+                let n = Node { trail: self.record(&n.trail, || Record::Advance(t)), ..n };
                 match self.explain(n, e, &mut explored) {
                     Ok(found) => after.extend(found.into_iter().filter(|m| seen.insert(m.clone()))),
                     Err(reason) => {
@@ -756,7 +956,7 @@ impl<S: Engine> Checker<S> {
                     }
                 }
             }
-            out.push(Node { state: n.state.clone(), pending });
+            out.push(Node { state: n.state.clone(), pending, trail: n.trail.clone() });
         }
         out
     }
@@ -981,47 +1181,61 @@ impl<S: Engine> Checker<S> {
                 if !read_only {
                     return outs
                         .into_iter()
-                        .map(|o| {
+                        .enumerate()
+                        .map(|(j, o)| {
                             let mut p = without();
                             p.insert(Pending::Responded { call: *call, resp: o.res });
                             self.spawn(&mut p, o.spawn);
                             for msg in o.send {
                                 add_sent(&mut p, msg);
                             }
-                            Node { state: self.states.intern(o.next), pending: p }
+                            let trail = self.record(&m.trail, || Record::Effect { call: *call, j });
+                            Node { state: self.states.intern(o.next), pending: p, trail }
                         })
                         .collect();
                 }
                 // Linearizing here changes nothing but the answer: remember the
                 // answer instead of placing the call.
                 let mut seen = early.clone();
-                seen.extend(outs.into_iter().map(|o| o.res));
+                let mut trail = m.trail.clone();
+                for (j, o) in outs.into_iter().enumerate() {
+                    if !seen.contains(&o.res) {
+                        trail = self.record(&trail, || Record::Early { call: *call, j, res: o.res.clone() });
+                        seen.insert(o.res);
+                    }
+                }
                 if *must {
                     return seen
                         .into_iter()
                         .map(|resp| {
                             let mut p = without();
+                            let trail = self.record(&trail, || Record::Commit { call: *call, res: resp.clone() });
                             p.insert(Pending::Responded { call: *call, resp });
-                            Node { state: m.state.clone(), pending: p }
+                            Node { state: m.state.clone(), pending: p, trail }
                         })
                         .collect();
                 }
                 let mut p = without();
                 p.insert(Pending::InFlight { call: *call, op: op.clone(), since: *since, must: false, early: seen });
-                vec![Node { state: m.state.clone(), pending: p }]
+                vec![Node { state: m.state.clone(), pending: p, trail }]
             }
-            Pending::Step { step, after, .. } if *after <= self.now => {
+            Pending::Step { step, after, by, must } if *after <= self.now => {
                 self.engine
                     .model()
                     .internal(step, &m.state, self.now)
                     .into_iter()
-                    .map(|s| {
+                    .enumerate()
+                    .map(|(j, s)| {
                         let mut p = without();
                         self.spawn(&mut p, s.spawn);
                         for msg in s.send {
                             add_sent(&mut p, msg);
                         }
-                        Node { state: self.states.intern(s.next), pending: p }
+                        let trail = self.record(&m.trail, || Record::Run {
+                            work: Work { req: step.clone(), after: *after, due: *by, must: *must },
+                            j,
+                        });
+                        Node { state: self.states.intern(s.next), pending: p, trail }
                     })
                     .collect()
             }
@@ -1096,7 +1310,9 @@ impl<S: Engine> Checker<S> {
                             if *count > 1 {
                                 q.insert(Pending::Sent { msg: msg.clone(), count: count - 1 });
                             }
-                            Some(Node { state: m.state.clone(), pending: q })
+                            let at = self.now;
+                            let trail = self.record(&m.trail, || Record::Obs(Event::Receive { at, msg: msg.clone() }));
+                            Some(Node { state: m.state.clone(), pending: q, trail })
                         }
                         _ => None,
                     })
@@ -1104,7 +1320,21 @@ impl<S: Engine> Checker<S> {
             }
             Ev::Tick(_) | Ev::Quiesce => {}
         }
-        Ok(vec![Node { state: m.state.clone(), pending: p }])
+        let at = self.now;
+        let trail = match e {
+            Ev::Invoke(call, req) => self.record(&m.trail, || Record::Obs(Event::Invoke { at, call: *call, req: req.clone() })),
+            Ev::Return(call, res) => self.record(&m.trail, || Record::Obs(Event::Return { at, call: *call, res: res.clone() })),
+            _ => m.trail.clone(),
+        };
+        Ok(vec![Node { state: m.state.clone(), pending: p, trail }])
+    }
+
+    fn record(&self, trail: &Tr<S>, rec: impl FnOnce() -> Rec<S>) -> Tr<S> {
+        if self.recording {
+            trail.push(rec())
+        } else {
+            trail.clone()
+        }
     }
 }
 

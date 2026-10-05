@@ -75,7 +75,7 @@ impl Footprint for BankModel {
 }
 
 fn checker() -> Checker<Keyed<BankModel>> {
-    let mut c = Checker::with_footprints(BankModel, Bank::default(), Config::default());
+    let mut c = Checker::with_footprints(BankModel, Bank::default(), Config { certify: true, ..Config::default() });
     c.call(0, Request::Open("alice"), Response::Ok(0)).unwrap();
     c.call(1, Request::Deposit("alice", 100), Response::Ok(100)).unwrap();
     c
@@ -89,6 +89,7 @@ fn overlapping_withdrawals_linearize() {
     c.ret(3, Response::Ok(40)).unwrap();
     c.ret(2, Response::Insufficient).unwrap();
     assert!(c.all(|s| s.accounts[&"alice"] == 40));
+    c.certified().unwrap();
 }
 
 #[test]
@@ -107,6 +108,7 @@ fn real_time_order_is_respected() {
     let mut c = checker();
     c.call(2, Request::Withdraw("alice", 150), Response::Insufficient).unwrap();
     c.call(3, Request::Deposit("alice", 100), Response::Ok(200)).unwrap();
+    c.certified().unwrap();
     let mut c = checker();
     c.call(2, Request::Deposit("alice", 100), Response::Ok(200)).unwrap();
     assert!(c.call(3, Request::Withdraw("alice", 150), Response::Insufficient).is_err());
@@ -122,6 +124,7 @@ fn unanswered_request_may_take_effect_late() {
     c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
     c.call(4, Request::Balance("alice"), Response::Ok(150)).unwrap();
     assert!(c.all(|s| s.accounts[&"alice"] == 150));
+    c.certified().unwrap();
 }
 
 #[test]
@@ -133,10 +136,11 @@ fn unanswered_request_may_never_take_effect() {
     }
     // Both explanations remain: it may still land.
     assert!(c.states().any(|s| s.accounts[&"alice"] == 100));
+    c.certified().unwrap();
 }
 
 fn with_lifetime(life: Time) -> Checker<Keyed<BankModel>> {
-    let cfg = Config { request_lifetime: Some(life), ..Config::default() };
+    let cfg = Config { request_lifetime: Some(life), certify: true, ..Config::default() };
     let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
     c.call(0, Request::Open("alice"), Response::Ok(0)).unwrap();
     c.call(1, Request::Deposit("alice", 100), Response::Ok(100)).unwrap();
@@ -152,6 +156,7 @@ fn request_lifetime_bounds_a_late_effect() {
     c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
     c.tick(900).unwrap();
     c.call(4, Request::Balance("alice"), Response::Ok(150)).unwrap(); // landed between 500 and 900
+    c.certified().unwrap();
     let mut c = with_lifetime(1_000);
     c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     c.tick(1_500).unwrap();
@@ -178,6 +183,7 @@ fn late_response_after_effect_is_still_accepted() {
     c.call(3, Request::Balance("alice"), Response::Ok(150)).unwrap(); // it took effect
     c.tick(5_000).unwrap();
     c.ret(2, Response::Ok(150)).unwrap(); // the response arrives much later
+    c.certified().unwrap();
 }
 
 #[test]
@@ -204,7 +210,7 @@ fn effect_seen_then_undone_is_rejected() {
 fn footprints_keep_the_cone_small() {
     let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
     let run = |footprints: bool| {
-        let cfg = Config { footprints, ..Config::default() };
+        let cfg = Config { footprints, certify: true, ..Config::default() };
         let mut c = Checker::with_footprints(BankModel, Bank::default(), cfg);
         for (i, n) in names.iter().enumerate() {
             c.call(i as u64, Request::Open(n), Response::Ok(0)).unwrap();
@@ -215,6 +221,7 @@ fn footprints_keep_the_cone_small() {
         for (i, _) in names.iter().enumerate() {
             c.ret(100 + i as u64, Response::Ok(10)).unwrap();
         }
+        c.certified().unwrap();
         c.stats.clone()
     };
     let with = run(true);
@@ -230,7 +237,7 @@ fn footprints_keep_the_cone_small() {
 use accordant::Event;
 
 fn model() -> Checker<Keyed<BankModel>> {
-    Checker::with_footprints(BankModel, Bank::default(), Config::default())
+    Checker::with_footprints(BankModel, Bank::default(), Config { certify: true, ..Config::default() })
 }
 
 fn inv(at: Time, call: u64, req: Request) -> Event<Request, Response, ()> {
@@ -239,6 +246,19 @@ fn inv(at: Time, call: u64, req: Request) -> Event<Request, Response, ()> {
 
 fn ret(at: Time, call: u64, res: Response) -> Event<Request, Response, ()> {
     Event::Return { at, call, res }
+}
+
+fn trace_again() -> Vec<Event<Request, Response, ()>> {
+    vec![
+        inv(0, 0, Request::Open("alice")),
+        ret(0, 0, Response::Ok(0)),
+        inv(1, 1, Request::Deposit("alice", 100)),
+        ret(1, 1, Response::Ok(100)),
+        inv(2, 2, Request::Withdraw("alice", 60)),
+        inv(2, 3, Request::Withdraw("alice", 60)),
+        ret(3, 3, Response::Ok(40)),
+        ret(4, 2, Response::Insufficient),
+    ]
 }
 
 #[test]
@@ -254,6 +274,7 @@ fn check_accepts_a_valid_trace_of_events() {
         ret(4, 2, Response::Insufficient),
     ];
     model().check(trace).unwrap();
+    model().check_certified(trace_again()).unwrap();
 }
 
 #[test]
@@ -281,7 +302,7 @@ fn check_rejects_time_going_backwards() {
 
 #[test]
 fn check_advances_the_clock_to_each_observation() {
-    let cfg = Config { request_lifetime: Some(1_000), ..Config::default() };
+    let cfg = Config { request_lifetime: Some(1_000), certify: true, ..Config::default() };
     let open = vec![
         inv(0, 0, Request::Open("alice")),
         ret(0, 0, Response::Ok(0)),
@@ -307,7 +328,9 @@ fn check_calls_takes_a_log_of_request_response_pairs() {
         (3, Request::Withdraw("alice", 100), Response::Insufficient),
         (4, Request::Balance("alice"), Response::Ok(70)),
     ];
-    model().check_calls(log.clone()).unwrap();
+    let mut c = model();
+    c.check_calls(log.clone()).unwrap();
+    c.certified().unwrap();
 
     let mut bad = log;
     bad[3].2 = Response::Ok(-30);
@@ -331,4 +354,6 @@ fn check_calls_streams_a_generated_trace() {
     c.check_calls([(0, Request::Open("alice"), Response::Ok(0))]).unwrap();
     let stats = c.check_calls(deposits).unwrap();
     assert_eq!(stats.max_width, 1);
+    // Each call: invoke, effect, return; each but the first also advances the clock.
+    assert_eq!(c.certified().unwrap().len(), 3 * 10_001 + 10_000);
 }

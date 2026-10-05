@@ -25,11 +25,13 @@
 //! keys into independent parts. Pick the constructor that matches:
 //! [`Checker::new`], [`Checker::with_footprints`] or [`Checker::with_partitions`].
 
+mod certificate;
 mod checker;
 mod hashed_map;
 mod hashed_set;
 mod intern;
 
+pub use certificate::{certify, Move};
 pub use checker::{Checker, Config, Event, Factor, Node, Pending, Stats, Violation};
 pub use hashed_map::HashedMap;
 pub use hashed_set::HashedSet;

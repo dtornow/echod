@@ -47,7 +47,7 @@ fn read_at_10(ran: Time) -> bool {
         Event::Invoke { at: 10, call: 2, req: Req::Read },
         Event::Return { at: 10, call: 2, res: Some(ran) },
     ];
-    Checker::new(Chain, None, Config::default()).check(trace).is_ok()
+    Checker::new(Chain, None, Config::default()).check_certified(trace).is_ok()
 }
 
 #[test]
@@ -63,4 +63,5 @@ fn work_spawned_mid_tick_meets_its_deadline() {
     // observed (5, 7, 10), so it never tries B at 6. Incomplete, not unsound.
     assert!(!read_at_10(6));
 }
+
 

@@ -20,9 +20,11 @@
 //! system evolves; each step observed or silent), `legal` (steps the system can
 //! actually take), `project` (what an execution shows a client).
 //!
-//! `check` stands for the checker with its default configuration,
-//! `Checker::new(m, init, Config::default()).check(trace).is_ok()`.
-//! It is `external_body`: Verus takes the contract on trust; nothing proves it yet.
+//! `check` stands for the checker with certificates,
+//! `Checker::new(m, init, Config::default()).check_certified(trace).is_ok()`.
+//! It is `external_body`: Verus takes the contract on trust. The proof is in
+//! `lean/Accordant.lean`: a certificate that `certify` accepts is valid, so the
+//! contract holds as long as `src/certificate.rs` matches the Lean `certify`.
 //!
 //! Not covered: `assert_idle`, and request lifetimes (off by default).
 
@@ -328,7 +330,7 @@ pub open spec fn valid<M: Model>(m: M, init: M::State, trace: Seq<Ev<M>>) -> boo
 /// Soundness, as the contract of the Rust checker: if it accepts a trace, the
 /// trace is valid. Stated, not proved.
 ///
-/// `Checker::new(m, init, Config::default()).check(trace).is_ok()`
+/// `Checker::new(m, init, Config::default()).check_certified(trace).is_ok()`
 #[verifier::external_body]
 pub fn check<M: Model>(m: &M, init: Ghost<M::State>, trace: &Vec<Ev<M>>) -> (accepted: bool)
     ensures

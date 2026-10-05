@@ -4,6 +4,10 @@
 //! model itself, as Lean's `recordFrom` does, and only the check is timed.
 //!
 //! cargo run --release --example resonate_bench -- [length|fanout|fanout-nocone] n...
+//!
+//! `-flat` and `-certified` variants (`length-flat`, `length-certified`) check in
+//! one factor, without partitions; `-certified` also backs the verdict with a
+//! certificate.
 
 #[path = "../tests/resonate/spec.rs"]
 #[allow(dead_code)]
@@ -63,11 +67,26 @@ fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Dispatch>>
     trace
 }
 
-fn check(trace: &[Event<Request, Response, Dispatch>], footprints: bool) -> (bool, std::time::Duration, accordant::Stats) {
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Partitioned,
+    Flat,
+    Certified,
+}
+
+fn check(trace: &[Event<Request, Response, Dispatch>], footprints: bool, mode: Mode) -> (bool, std::time::Duration, accordant::Stats) {
     let t0 = Instant::now();
     let cfg = Config { footprints, max_explore: 10_000_000, max_width: 1 << 20, ..Config::default() };
-    let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);
-    let ok = c.check(trace.iter().cloned()).is_ok();
+    if mode == Mode::Partitioned {
+        let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);
+        let ok = c.check(trace.iter().cloned()).is_ok();
+        return (ok, t0.elapsed(), c.stats.clone());
+    }
+    let mut c = Checker::with_footprints(Resonate, Server::default(), cfg);
+    let ok = match mode {
+        Mode::Certified => c.check_certified(trace.iter().cloned()).map_err(|v| eprintln!("{v}")).is_ok(),
+        _ => c.check(trace.iter().cloned()).is_ok(),
+    };
     (ok, t0.elapsed(), c.stats.clone())
 }
 
@@ -75,14 +94,19 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (kind, sizes) = args.split_first().expect("usage: [length|fanout|fanout-nocone] n...");
     for n in sizes.iter().map(|s| s.parse::<u64>().unwrap()) {
-        let (script, footprints) = match kind.as_str() {
+        let (base, mode) = match kind.split_once('-') {
+            Some((b, "flat")) => (b, Mode::Flat),
+            Some((b, "certified")) => (b, Mode::Certified),
+            _ => (kind.as_str(), Mode::Partitioned),
+        };
+        let (script, footprints) = match base {
             "length" => (length(n), true),
             "fanout" => (fanout(n), true),
             "fanout-nocone" => (fanout(n), false),
             _ => panic!("unknown workload {kind}"),
         };
         let trace = record(&script);
-        let (ok, dt, st) = check(&trace, footprints);
+        let (ok, dt, st) = check(&trace, footprints, mode);
         println!(
             "{kind:<14} n={n:<6} events={:<6} {}  {:>9.3}ms  explored={} width={}",
             script.len(),

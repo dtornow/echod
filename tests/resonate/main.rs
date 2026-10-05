@@ -4,18 +4,47 @@
 //! among them, and feeds it back as the observation.
 
 mod spec;
+#[path = "../common/certified.rs"]
+mod certified;
 
-use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Time};
+use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
+use certified::Certified;
 use spec::*;
 
+/// Checked twice: with partitions, and in one factor with certificates, which
+/// must back everything it accepts.
 struct Trace {
     c: Checker<Grouped<Resonate>>,
+    shadow: Certified<Keyed<Resonate>>,
     next: CallId,
 }
 
 impl Trace {
     fn new(now: Time) -> Self {
-        Trace { c: Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() }), next: 0 }
+        let shadow = Config { start: now, certify: true, ..Config::default() };
+        Trace {
+            c: Checker::with_partitions(Resonate, Server::default(), Config { start: now, ..Config::default() }),
+            shadow: Certified(Checker::with_footprints(Resonate, Server::default(), shadow)),
+            next: 0,
+        }
+    }
+
+    #[track_caller]
+    fn invoke(&mut self, call: CallId, op: Request) {
+        self.c.invoke(call, op.clone()).unwrap();
+        self.shadow.invoke(call, op).unwrap();
+    }
+
+    #[track_caller]
+    fn ret(&mut self, call: CallId, res: Response) {
+        self.c.ret(call, res.clone()).unwrap();
+        self.shadow.ret(call, res).unwrap();
+    }
+
+    #[track_caller]
+    fn idle(&mut self) {
+        self.c.assert_idle().unwrap();
+        self.shadow.assert_idle().unwrap();
     }
 
     fn id(&mut self) -> CallId {
@@ -31,7 +60,8 @@ impl Trace {
             panic!("{label}: no allowed response matches; spec allows {allowed:#?}");
         };
         let id = self.id();
-        self.c.call(id, op, r.clone()).unwrap_or_else(|v| panic!("{label}: {v}"));
+        self.c.call(id, op.clone(), r.clone()).unwrap_or_else(|v| panic!("{label}: {v}"));
+        self.shadow.call(id, op, r.clone()).unwrap_or_else(|v| panic!("{label}, in one factor: {v}"));
         r
     }
 
@@ -39,12 +69,14 @@ impl Trace {
     #[track_caller]
     fn rejects(&mut self, label: &str, op: Request, resp: Response) {
         let id = self.id();
-        assert!(self.c.call(id, op, resp).is_err(), "{label}: model accepted a bogus response");
+        assert!(self.c.call(id, op.clone(), resp.clone()).is_err(), "{label}: model accepted a bogus response");
+        assert!(self.shadow.call(id, op, resp).is_err(), "{label}: model accepted a bogus response in one factor");
     }
 
     #[track_caller]
     fn tick(&mut self, t: Time) {
         self.c.tick(t).unwrap_or_else(|v| panic!("tick {t}: {v}"));
+        self.shadow.tick(t).unwrap_or_else(|v| panic!("tick {t}, in one factor: {v}"));
     }
 }
 
@@ -227,7 +259,7 @@ fn callback_layer() {
     t.step("suspend foreign → 400", suspend("ex:root", 1, &["other:x"]), st(400));
     t.step("settle awaited → arms resume", Request::SettlePromise(settle("ex:awaited", "resolved", "v")), st(200));
     // C# polls until the resume lands; here Quiesce says the server is idle.
-    t.c.assert_idle().unwrap();
+    t.idle();
     assert!(t.c.all(|s| s.tasks["ex:root"].state == TState::Pending));
     t.step("re-acquire root v1 → v2", acquire("ex:root", 1, "worker-1"), task(TState::Acquired, 2));
 
@@ -288,9 +320,9 @@ fn get_in_flight_across_a_deadline_may_see_pending() {
     let mut t = Trace::new(now);
     t.step("create p", create("p", now + 1_000, "x").op(), st(200));
     let Response::Promise(pending) = t.c.allowed(&get("p")).remove(0) else { panic!() };
-    t.c.invoke(100, get("p")).unwrap();
+    t.invoke(100, get("p"));
     t.tick(now + 5_000);
-    t.c.ret(100, Response::Promise(pending)).unwrap(); // linearized before the deadline
+    t.ret(100, Response::Promise(pending)); // linearized before the deadline
     t.step("now it is timed out", get("p"), promise(PState::TimedOut, None));
 }
 
@@ -299,7 +331,7 @@ fn unanswered_settle_may_land_late() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     t.step("create p", create("p", FAR, "x").op(), st(200));
-    t.c.invoke(100, Request::SettlePromise(settle("p", "resolved", "v"))).unwrap(); // never answered
+    t.invoke(100, Request::SettlePromise(settle("p", "resolved", "v"))); // never answered
     t.step("read misses it", get("p"), promise(PState::Pending, None));
     t.step("read sees it", get("p"), promise(PState::Resolved, Some("v")));
 }
@@ -327,7 +359,7 @@ fn independent_promises_keep_the_profile_narrow() {
     let mut pending = Vec::new();
     for i in 0..50 {
         pending.push(t.c.allowed(&get(&format!("p{i}"))).remove(0));
-        t.c.invoke(1_000 + i, get(&format!("p{i}"))).unwrap();
+        t.invoke(1_000 + i, get(&format!("p{i}")));
     }
     t.tick(now + 2_000); // passes 50 deadlines with 50 reads in flight
     assert_eq!(t.c.profile().len(), 1);
@@ -340,7 +372,7 @@ fn independent_promises_keep_the_profile_narrow() {
             let Response::Promise(p) = before else { panic!() };
             Response::Promise(PromiseRec { state: PState::TimedOut, settled_at: Some(p.timeout_at), ..p })
         };
-        t.c.ret(1_000 + i, resp).unwrap();
+        t.ret(1_000 + i, resp);
     }
     println!("{:?}", t.c.stats);
     assert_eq!(t.c.stats.max_width, 1);
@@ -432,7 +464,7 @@ fn only_a_detached_create_crosses_origins() {
 
     // Unanswered, the detached create keeps the two origins together until it is resolved.
     let calls = t.next;
-    t.c.invoke(calls + 1, fence("a:t", 1, Fenced::Create(create("e:root", FAR, "w")))).unwrap();
+    t.invoke(calls + 1, fence("a:t", 1, Fenced::Create(create("e:root", FAR, "w"))));
     assert_eq!(t.c.factors().len(), 4, "a and e merged");
     t.next += 1;
     t.step("e:root exists, so the create landed", get("e:root"), promise(PState::Pending, None));
@@ -539,7 +571,7 @@ fn a_message_nobody_sent_is_rejected() {
 fn a_message_may_never_arrive() {
     let mut t = Trace::new(1_000_000);
     t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
-    t.c.assert_idle().unwrap(); // the execute was sent; nobody has to receive it
+    t.idle(); // the execute was sent; nobody has to receive it
     t.step("acquire t", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
 }
 

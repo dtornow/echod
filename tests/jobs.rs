@@ -5,6 +5,10 @@
 //! run later and once as a timer at the deadline. What the step does is decided
 //! by the job's state and the clock.
 
+#[path = "common/certified.rs"]
+mod certified;
+use certified::Certified;
+
 use accordant::{Checker, Config, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Keyed, Model, Time, Touches};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -105,8 +109,8 @@ impl Footprint for JobModel {
     }
 }
 
-fn checker(run_within: Option<Time>) -> Checker<Keyed<JobModel>> {
-    Checker::with_footprints(JobModel { run_within }, Queue::default(), Config::default())
+fn checker(run_within: Option<Time>) -> Certified<Keyed<JobModel>> {
+    Certified(Checker::with_footprints(JobModel { run_within }, Queue::default(), Config { certify: true, ..Config::default() }))
 }
 
 #[test]
