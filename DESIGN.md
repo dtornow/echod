@@ -48,8 +48,6 @@ pub trait Model {
     fn external(&self, req: &Self::External, s: &Self::State) -> Vec<ExternalOutcome<Self>>;  // [] = can't take effect
     fn internal(&self, req: &Self::Internal, s: &Self::State) -> Vec<InternalOutcome<Self>>;  // [] = can't run yet; [InternalOutcome::same(s)] = done
     fn now(&self, s: &Self::State) -> Time;                                                    // default: 0
-    fn start(&self, s: &Self::State) -> Vec<Sched<Self::Internal>>;                            // work it starts with
-    fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool;          // default: ==
 }
 
 pub struct ExternalOutcome<M> { next: M::State, resp: M::Response, work: Vec<Sched<M::Internal>>, send: Vec<M::Dispatch> }
@@ -98,7 +96,8 @@ Mapping from Accordant:
   immutable once the checker has them; see [State representation](#state-representation).
 - `Operation(req, state)` → `Model::external`; `Expect.That(pred).ThenState(f).Triggers(t)` → `ExternalOutcome::new(resp, next).later(t)`.
   The response is a value, not a predicate, so it can be stored in a node and
-  hashed. Wildcards (server ids, timestamps) go in `admits`.
+  hashed, and a client must see exactly it. Wildcards (server ids, timestamps)
+  are not supported yet.
 - `Expect.OneOf` → returning several outcomes.
 - `IStepFunction` / `AsyncOperation` → a `Model::Internal` value, run by `Model::internal`. `IsTerminalState` → returning `vec![InternalOutcome::same(state)]`.
 - `StateProfile` → `Checker::profile()`, a `Vec<Node>`.
@@ -286,7 +285,7 @@ enum Event<Op, Resp> { Invoke(CallId, Op), Return(CallId, Resp), Tick(Time), Qui
   triggers exploration.
 - The checker places each call's linearization point: firing `InFlight` runs
   `apply` and leaves `Responded { resp }`.
-- `Return` must match a `Responded` via `admits`.
+- `Return` must equal a `Responded`.
 - **A call that never returns is not an event.** The client can't distinguish a
   lost request from a lost reply from a slow server, so the model doesn't either.
   The call stays `InFlight`: it may take effect at any later point, including
@@ -328,9 +327,6 @@ are on the model's clock, and the checker enforces them.
   run by a deadline but may run earlier is both: `.later(w).timer(deadline, w)`,
   with `w` doing nothing once it has run. (There used to be `After`, `Within`
   and `Maybe` as well; they are gone for now.)
-- **A model can start with work** (`Model::start`): scheduled in the initial
-  state, on its clock. A component that sends a message periodically starts its
-  first timer there, and each tick starts the next (`tests/start.rs`).
 - **Overdue work goes first.** Work whose deadline has come on the model's clock,
   and that can run, runs before anything else: no call takes effect and nothing
   is observed until it has. Work that can't run owes nothing until it can.
@@ -368,7 +364,7 @@ explains it. There are five sources of choice.
 | **Interleaving**: the order of concurrent calls and background work | implicit: every pending item is a possible next move | the search, pruned by footprints |
 | **Timing**: when due work fires inside its window | the `Sched` each piece of work was started with | the search, bounded by deadlines |
 | **Unknown fate**: whether an unanswered request took effect | implicit for every call without a `Return` | later reads |
-| **Unknown values**: server-chosen ids, timestamps | `admits` with a pattern; see below | the `Return` |
+| **Unknown values**: server-chosen ids, timestamps | not supported yet; see below | the `Return` |
 
 Every choice is lazy. A branch exists only when something forces the move:
 - An outcome splits when its call linearizes, which happens when its response,

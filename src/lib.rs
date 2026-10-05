@@ -69,8 +69,7 @@ pub trait Model {
     type Dispatch: Data;
 
     /// A request takes effect in `state`: every allowed outcome. An empty list
-    /// means it cannot take effect here. A model that takes no requests (a
-    /// component that only sends messages on its own) keeps the default.
+    /// means it cannot take effect here.
     fn external(&self, _req: &Self::External, _state: &Self::State) -> Vec<ExternalOutcome<Self>> {
         Vec::new()
     }
@@ -94,18 +93,6 @@ pub trait Model {
         0
     }
 
-    /// The work the system starts with, in the initial state, on its clock: a
-    /// component that sends a message periodically starts its first timer
-    /// here, and each run of it starts the next.
-    fn start(&self, _state: &Self::State) -> Vec<Sched<Self::Internal>> {
-        Vec::new()
-    }
-
-    /// Whether an observed response matches the one the model predicts.
-    /// Override for wildcards (server-chosen ids, timestamps).
-    fn admits(&self, expected: &Self::Response, observed: &Self::Response) -> bool {
-        expected == observed
-    }
 }
 
 /// Optional, for testing: names for interesting things a step did ("lease

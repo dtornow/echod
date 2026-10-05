@@ -356,7 +356,7 @@ impl<M: Partitioned> Checker<Grouped<M>> {
 impl<S: Engine> Checker<S> {
     pub fn with_engine(engine: S, init: St<S>, cfg: Config) -> Self {
         let recording = cfg.certify;
-        let mut c = Checker {
+        Checker {
             engine,
             cfg,
             rest: init.clone(),
@@ -375,22 +375,7 @@ impl<S: Engine> Checker<S> {
             recording,
             observed: Vec::new(),
             stats: Stats { max_width: 1, ..Stats::default() },
-        };
-        // Work the model starts with is pending from the start, in one factor
-        // that holds everything; it splits once the partitions are independent.
-        if !c.engine.model().start(&c.init).is_empty() {
-            let node = c.started(c.init.clone());
-            c.factors.push(Factor { parts: None, nodes: vec![node] });
         }
-        c
-    }
-
-    /// The node the system starts in: `state`, with the work the model starts
-    /// with pending.
-    fn started(&self, state: St<S>) -> Node<S> {
-        let mut pending = HashedSet::new();
-        self.spawn(&mut pending, self.engine.model().start(&state), &state);
-        Node { state: self.states.intern(state), pending, trail: Default::default() }
     }
 
     pub fn factors(&self) -> &[Factor<S>] {
@@ -662,7 +647,7 @@ impl<S: Engine> Checker<S> {
                 Event::Receive { msg } => Ev::Receive(msg),
             })
             .collect();
-        let start = self.started(init);
+        let start = Node { state: self.states.intern(init), pending: HashedSet::new(), trail: Default::default() };
         let mut run = Dfs { evs, stack: Vec::new(), seen: HashSet::new(), deepest: 0, found: None };
         if run.evs.is_empty() {
             run.found = Some(start);
@@ -782,7 +767,7 @@ impl<S: Engine> Checker<S> {
             .external(op, &m.state)
             .into_iter()
             .enumerate()
-            .filter(|(_, o)| self.answers.get(call).is_none_or(|r| self.engine.model().admits(&o.resp, r)))
+            .filter(|(_, o)| self.answers.get(call).is_none_or(|r| &o.resp == r))
             .map(|(j, o)| {
                 let mut p = m.pending.clone();
                 p.remove(item);
@@ -882,7 +867,7 @@ impl<S: Engine> Checker<S> {
                 }
                 Record::Early { call, res, .. } => early.entry(*call).or_default().push((k, res.clone())),
                 Record::Obs(Event::Return { call, res, .. }) if !placed.contains(call) => {
-                    chosen.insert(pick(call, &|r| model.admits(r, res)).ok_or(format!("call {call}: no early answer admits {res:?}"))?);
+                    chosen.insert(pick(call, &|r| r == res).ok_or(format!("call {call}: no early answer is {res:?}"))?);
                 }
                 _ => {}
             }
@@ -993,7 +978,7 @@ impl<S: Engine> Checker<S> {
                 let model = self.engine.model();
                 let rest = match model.external(&op, &self.rest).as_slice() {
                     [o] if o.work.is_empty() && o.send.is_empty() => {
-                        if !model.admits(&o.resp, res) {
+                        if o.resp != *res {
                             return Err(self.violation(index, &e, "no candidate state explains this event".into()));
                         }
                         o.next.clone()
@@ -1437,7 +1422,7 @@ impl<S: Engine> Checker<S> {
         };
         let call_owed = m.pending.iter().any(|item| match (item, returning) {
             (Pending::InFlight { call, early, .. }, Some((c, o))) if *call == c => {
-                !early.iter().any(|r| self.engine.model().admits(r, o))
+                !early.iter().any(|r| r == o)
             }
             _ => false,
         });
@@ -1459,7 +1444,7 @@ impl<S: Engine> Checker<S> {
             .iter()
             .filter(|item| match item {
                 Pending::InFlight { call, early, .. } => match returning {
-                    Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| self.engine.model().admits(r, o))),
+                    Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| r == o)),
                     _ => false,
                 },
                 Pending::Step { step, must: true, .. } => {
@@ -1762,10 +1747,10 @@ impl<S: Engine> Checker<S> {
             Ev::Return(call, observed) => {
                 let hit = p.iter().find_map(|i| match i {
                     Pending::Responded { call: c, resp } if c == call => {
-                        self.engine.model().admits(resp, observed).then(|| i.clone())
+                        (resp == observed).then(|| i.clone())
                     }
                     Pending::InFlight { call: c, early, .. } if c == call => {
-                        early.iter().any(|r| self.engine.model().admits(r, observed)).then(|| i.clone())
+                        early.iter().any(|r| r == observed).then(|| i.clone())
                     }
                     _ => None,
                 });

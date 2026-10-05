@@ -12,7 +12,7 @@
 //!     ensures accepted ==> valid(m, init, trace)
 //!
 //! valid(m, init, trace) :=
-//!     exists steps. legal(m, initial(m, init), steps) && project(steps) == trace
+//!     exists steps. legal(m, initial(init), steps) && project(steps) == trace
 //! ```
 //!
 //! Everything above defines its words, as in `lean/Accordant.lean`:
@@ -92,14 +92,8 @@ pub trait Model {
         InternalOutcome<Self::State, Self::Internal, Self::Dispatch>,
     >;
 
-    /// Whether a client seeing `observed` matches the `expected` response.
-    spec fn admits(&self, expected: Self::Response, observed: Self::Response) -> bool;
-
     /// The model's clock in a state. Deadlines are on this clock.
     spec fn now(&self, state: Self::State) -> Time;
-
-    /// The work the system starts with, in the initial state.
-    spec fn start(&self, state: Self::State) -> Seq<Sched<Self::Internal>>;
 }
 
 pub type Ev<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Model>::Dispatch>;
@@ -203,7 +197,7 @@ pub open spec fn invoke<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
 pub open spec fn ret<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
         Label::Obs(Event::Return { call, res }) => c.calls.contains_key(call)
-            && c.calls[call] is Done && m.admits(c.calls[call]->Done_0, res) && !overdue(m, c)
+            && c.calls[call] is Done && c.calls[call]->Done_0 == res && !overdue(m, c)
             && d == Config { calls: c.calls.remove(call), ..c },
         _ => false,
     }
@@ -287,18 +281,17 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-/// The system starts in `init`, with no calls in flight and the work the model
-/// starts with scheduled on the initial clock.
-pub open spec fn initial<M: Model>(m: M, init: M::State) -> Cfg<M> {
-    Config { state: init, calls: Map::empty(), work: start_all(Seq::empty(), m.start(init), m.now(init) as nat), sent: Seq::empty() }
+/// The system starts in `init`, with nothing in flight.
+pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
+    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
 }
 
-/// The trace is valid: some execution of the system, from `initial(m, init)`,
+/// The trace is valid: some execution of the system, from `initial(init)`,
 /// projected onto what clients observe, is exactly the trace.
 pub open spec fn valid<M: Model>(m: M, init: M::State, trace: Seq<Ev<M>>) -> bool {
     exists|steps: Execution<M>|
-        #![trigger legal(m, initial::<M>(m, init), steps), project::<M>(steps)]
-        legal(m, initial::<M>(m, init), steps) && project::<M>(steps) == trace
+        #![trigger legal(m, initial::<M>(init), steps), project::<M>(steps)]
+        legal(m, initial::<M>(init), steps) && project::<M>(steps) == trace
 }
 
 // ------------------------------------------------------------------ theorem
@@ -323,7 +316,7 @@ pub proof fn empty_trace_valid<M: Model>(m: M, init: M::State)
         valid(m, init, Seq::<Ev<M>>::empty()),
 {
     let steps = Execution::<M>::empty();
-    assert(legal(m, initial::<M>(m, init), steps));
+    assert(legal(m, initial::<M>(init), steps));
     assert(project::<M>(steps) =~= Seq::<Ev<M>>::empty());
 }
 
@@ -345,16 +338,8 @@ impl Model for Counter {
         Seq::empty()
     }
 
-    open spec fn admits(&self, expected: nat, observed: nat) -> bool {
-        expected == observed
-    }
-
     open spec fn now(&self, n: nat) -> Time {
         0
-    }
-
-    open spec fn start(&self, n: nat) -> Seq<Sched<()>> {
-        Seq::empty()
     }
 }
 
@@ -372,7 +357,7 @@ pub proof fn counter_trace_valid()
         ),
 {
     let m = Counter;
-    let c0 = initial::<Counter>(m, 0nat);
+    let c0 = initial::<Counter>(0nat);
     let c1 = Config { calls: c0.calls.insert(7, Call::InFlight(())), ..c0 };
     let c2 = Config { state: 1nat, calls: c1.calls.insert(7, Call::Done(1nat)), work: start_all(c1.work, Seq::empty(), 0nat), sent: c1.sent + Seq::empty(), ..c1 };
     let c3 = Config { calls: c2.calls.remove(7), ..c2 };

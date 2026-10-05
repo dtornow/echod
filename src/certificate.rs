@@ -71,12 +71,8 @@ fn schedule<I>(now: Time, s: Sched<I>) -> Work<I> {
 }
 
 impl<'m, M: Model> Config<'m, M> {
-    /// The system starts in `init`, with no calls in flight and the work the
-    /// model starts with scheduled on the initial clock.
     pub fn initial(m: &'m M, init: M::State) -> Self {
-        let now = m.now(&init);
-        let work = m.start(&init).into_iter().map(|s| schedule(now, s)).collect();
-        Config { m, state: init, calls: HashMap::new(), work, sent: Vec::new() }
+        Config { m, state: init, calls: HashMap::new(), work: Vec::new(), sent: Vec::new() }
     }
 
     /// Work whose deadline has come on the model's clock and that can run.
@@ -114,7 +110,7 @@ impl<'m, M: Model> Config<'m, M> {
             }
             Move::Return { call, res } => {
                 let Some(Call::Done(expected)) = self.calls.get(&call) else { return Err(()) };
-                if !self.m.admits(expected, &res) || self.overdue() {
+                if *expected != res || self.overdue() {
                     return Err(());
                 }
                 self.calls.remove(&call);

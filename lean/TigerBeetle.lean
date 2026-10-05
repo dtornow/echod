@@ -969,7 +969,6 @@ def model (lim : Limits) : Accordant.Model where
   Dispatch := Empty
   external := fun req s => [s.external lim req]
   internal := fun w s => [s.internal lim w]
-  admits   := fun expected observed => decide (expected = observed)
   now      := (·.now)
 
 /-! ## Scenarios, run -/

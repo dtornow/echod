@@ -90,13 +90,10 @@ structure Model where
   external : External → State → List (ExternalOutcome State Response Internal Dispatch)
   /-- Internal work runs: every possible outcome. Empty: it can't run now. -/
   internal : Internal → State → List (InternalOutcome State Internal Dispatch)
-  /-- Whether a client seeing `observed` matches the `expected` response. -/
-  admits   : Response → Response → Bool
   /-- The model's clock in a state. -/
   now      : State → Time
-  /-- The work the system starts with, in the initial state (a component that
-      sends a message periodically starts its first timer here). -/
-  start    : State → List (Sched Internal) := fun _ => []
+  /-- Responses can be compared: a client sees exactly the predicted one. -/
+  decEq    : DecidableEq Response := by infer_instance
 
 abbrev Model.Ev (m : Model) := Event m.External m.Response m.Dispatch
 
@@ -157,8 +154,8 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
       Step m c (.obs (.invoke call req))
         { c with calls := update c.calls call (some (.inFlight req)) }
   /-- A client receives the response its call took effect with. Observed. -/
-  | ret {c : Config m} {call expected res} :
-      c.calls call = some (.done expected) → m.admits expected res = true → ¬ c.overdue →
+  | ret {c : Config m} {call res} :
+      c.calls call = some (.done res) → ¬ c.overdue →
       Step m c (.obs (.ret call res)) { c with calls := update c.calls call none }
   /-- A client receives a dispatch that was sent and not yet received. Observed. -/
   | receive {c : Config m} {pre post msg} :
@@ -201,10 +198,9 @@ def project : Execution m → List m.Ev
   | (.obs e, _) :: rest => e :: project rest
   | (.silent, _) :: rest => project rest
 
-/-- The system starts in `init`, with no calls in flight and the work the model
-    starts with scheduled on the initial clock. -/
+/-- The system starts in `init`, with nothing in flight. -/
 def initial (init : m.State) : Config m :=
-  ⟨init, fun _ => none, (m.start init).map (schedule (m.now init)), []⟩
+  ⟨init, fun _ => none, [], []⟩
 
 /-- The trace is valid: some execution of the system, from `initial init`,
     projected onto what clients observe, is exactly the trace. -/
@@ -256,7 +252,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
   | .ret call res =>
       match c.calls call with
       | some (.done expected) =>
-          if m.admits expected res && !c.isOverdue then
+          if @decide (expected = res) (m.decEq expected res) && !c.isOverdue then
             some (.obs (.ret call res), { c with calls := update c.calls call none })
           else none
       | _ => none
@@ -358,7 +354,8 @@ theorem move_step {c c' : Config m} {mv : Move m} {l : Label m}
     split at h <;> try simp at h
     rename_i expected hcall
     obtain ⟨⟨ha, ho⟩, rfl, rfl⟩ := h
-    exact .ret hcall ha (not_overdue ho)
+    subst ha
+    exact .ret hcall (not_overdue ho)
   | receive i =>
     simp only [Config.move] at h
     split at h <;> try simp at h
@@ -434,7 +431,6 @@ abbrev counter : Model where
   Dispatch := Empty
   external := fun _ n => [⟨n + 1, n + 1, [], []⟩]
   internal := fun e _ => nomatch e
-  admits   := fun expected observed => expected == observed
   now      := fun _ => 0
 
 abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
@@ -444,29 +440,7 @@ abbrev incr : ExternalOutcome Nat Nat Empty Empty := ⟨1, 1, [], []⟩
 example : Valid counter (0 : Nat) [.invoke 7 (), .ret 7 1] := by
   refine ⟨[(.obs (.invoke 7 ()), _), (.silent, _), (.obs (.ret 7 1), _)],
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
-     .ret (expected := (1 : Nat)) ?_ ?_ ?_, trivial⟩, rfl⟩
+     .ret ?_ ?_, trivial⟩, rfl⟩
   all_goals simp [initial, update, Config.overdue, counter]
-
-/-- A pinger: no requests at all; it starts with one piece of work, which sends
-    a ping. Its only behavior comes from `start`. -/
-abbrev pinger : Model where
-  State    := Unit
-  External := Empty
-  Response := Empty
-  Internal := Unit
-  Dispatch := Unit
-  external := fun e _ => nomatch e
-  internal := fun _ _ => [⟨(), [], [()]⟩]
-  admits   := fun _ _ => true
-  now      := fun _ => 0
-  start    := fun _ => [.later ()]
-
-/-- A client receives the ping: valid. The work it started with runs (silent),
-    then the client receives what it sent (observed). -/
-example : Valid pinger () [.receive ()] := by
-  refine ⟨[(.silent, _), (.obs (.receive ()), _)],
-    ⟨.run (pre := []) (post := []) (w := ⟨(), 0, none, true⟩) (o := ⟨(), [], [()]⟩) ?_ ?_ ?_ ?_,
-     .receive (pre := []) (post := []) ?_ ?_, trivial⟩, rfl⟩
-  all_goals simp [initial, schedule, Config.overdue, Config.Overdue, pinger]
 
 end Accordant
