@@ -307,7 +307,7 @@ mechanisms keep it small, and all eight are in the prototype.
    linearization. Without this, the profile is the *product* of independent
    per-key choices: footprints keep each search small, but 50 reads in flight
    across 50 promise deadlines made 2^50 candidates. With it, width stays 1
-   (`tests/resonate`, `independent_promises_keep_the_profile_narrow`: failed
+   (`resonate/tests/traces.rs`, `independent_promises_keep_the_profile_narrow`: failed
    after 47 s before, 400 nodes and 0.02 s after). Writes in flight across
    independent keys still multiply; partitions (next item) handle that.
 6. **Partitioned profiles.** A spec that defines `part(key)`, `restrict` and
@@ -386,7 +386,7 @@ still walks every entry. The incremental hash is what fixes time.
 | Resonate (C#) | Rust |
 |---|---|
 | `ServerState { Promises, Tasks, Now }` | `Server { now, promises, tasks }`; `Model::now` reads `now` |
-| `AdvanceClock` request | `Request::AdvanceClock(t)`, a `broadcast` request: it touches every origin, alike |
+| `AdvanceClock` request | `Request::AdvanceClock(t)`, marked `moves_clock`: it touches every origin, alike |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
@@ -404,9 +404,34 @@ the ids alone, so their footprint stays in one origin and doesn't merge
 anything. The C# spec and the server allow cross-origin fence-settles. The Lean
 spec refuses every cross-origin fence, the detached create included.
 
-The port is in `tests/resonate/` (`spec.rs`, plus traces from
-`ExampleTraces.cs` and `LeaseAndTimeoutTests.cs` in `main.rs`). Not ported: the
+The port is the `resonate` crate (`resonate/src/spec.rs`, written in Verus; traces in `resonate/tests/traces.rs`, from
+`ExampleTraces.cs` and `LeaseAndTimeoutTests.cs`). Not ported: the
 `egress` capability (retry timeouts) and `debug.messages`.
+
+## Resonate in Verus
+
+The spec is written in Verus, so the code the checker runs is the code the
+proofs are about: there is no second copy. `cargo build` compiles `verus!{}`
+blocks as ordinary Rust with the proofs erased; `cargo verus verify -p resonate`
+verifies them (vstd from crates.io, matching the Verus release).
+
+Verus checks every function for panics, overflow and out-of-bounds indexing,
+and checks the properties stated as `ensures`. So far: every promise
+`promise_create` creates has `created_at <= settled_at <= timeout_at`, every
+promise record it answers with has it, and every promise that had it keeps it.
+Planting a bug (an expired promise created at `now`) fails verification.
+
+What it trusts is in `collections.rs`: persistent maps and sets seen as Verus
+maps and sets (wrappers over the checker's own `HashedMap` and a `BTreeSet`, so
+the checker is as fast as before), a derived `Clone` being a copy, and three
+string helpers (an id's origin, URL validation, settle-state names). The glue to
+the checker (`model.rs`) is plain Rust; it converts outcomes and computes
+footprints and partitions, and decides nothing about what the server does.
+
+What writing it in Verus changed: closures and iterator chains became loops;
+internal work is a `Vec` of ids inside the spec (a set at the checker); clock and
+version arithmetic saturates instead of overflowing; where the old code indexed
+a map it knew had the key, the new code matches and handles the impossible case.
 
 ## Porting Resonate: developer experience
 
@@ -480,11 +505,10 @@ Porting also found three checker bugs, all fixed:
 - `src/certificate.rs`: `certify`, the replay that backs every certified verdict; a copy of Lean's.
 - `lean/Accordant.lean`: what the checker promises (`Valid`), and the proof that a certificate `certify` accepts is valid.
 - `verus/accordant.rs`: the same statement, as the contract of the Rust function.
-- `verus/resonate_promises.rs`: safety properties of the Resonate spec's promises, proved on a Verus transcription of the spec (so far: `created_at <= settled_at <= timeout_at`, for `promise_create`).
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank_bench.rs`: the large-bank benchmark (`cargo run --release --example bank_bench -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, `Quiesce`, deferred independent jobs.
-- `tests/resonate/`: the Resonate port and its traces.
+- `resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in `resonate/tests/`, its benchmark in `resonate/examples/`.
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.

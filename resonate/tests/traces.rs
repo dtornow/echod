@@ -3,13 +3,12 @@
 //! spec which responses it allows, checks that the one the C# trace expects is
 //! among them, and feeds it back as the observation.
 
-mod spec;
-#[path = "../common/certified.rs"]
+#[path = "common/certified.rs"]
 mod certified;
 
 use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
 use certified::Certified;
-use spec::*;
+use resonate::*;
 
 /// Checked twice: with partitions, and in one factor with certificates, which
 /// must back everything it accepts.
@@ -89,7 +88,14 @@ fn create(id: &str, timeout_at: Time, data: &str) -> Create {
     Create { id: id.into(), timeout_at, data: Some(data.into()), external: false, target: false, timer: false }
 }
 
-impl Create {
+/// Builders for a create request.
+trait CreateExt {
+    fn external(self) -> Self;
+    fn target(self) -> Self;
+    fn op(self) -> Request;
+}
+
+impl CreateExt for Create {
     fn external(mut self) -> Self {
         self.external = true;
         self
@@ -550,7 +556,7 @@ fn partitioning_never_changes_a_verdict() {
                 if b {
                     kept.push(e.clone());
                 }
-                // Property 1 (proved for promise_create in verus/resonate_promises.rs),
+                // Property 1 (proved for promise_create in src/spec.rs),
                 // checked here on the Rust spec itself, for every candidate state.
                 for s in off.states() {
                     for (id, p) in s.promises.iter() {

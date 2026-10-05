@@ -3,20 +3,16 @@
 //! armed to expire before one final read). Responses are recorded first from the
 //! model itself, as Lean's `recordFrom` does, and only the check is timed.
 //!
-//! cargo run --release --example resonate_bench -- [length|fanout|fanout-nocone] n...
+//! cargo run --release -p resonate --example resonate_bench -- [length|fanout|fanout-nocone] n...
 //!
 //! `-flat` and `-certified` variants (`length-flat`, `length-certified`) check in
 //! one factor, without partitions; `-certified` also backs the verdict with a
 //! certificate.
 
-#[path = "../tests/resonate/spec.rs"]
-#[allow(dead_code)]
-mod spec;
-
 use std::time::Instant;
 
 use accordant::{Checker, Config, Event, Time};
-use spec::*;
+use resonate::*;
 
 const FAR: Time = 1_000_000_000;
 

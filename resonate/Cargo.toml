@@ -1,0 +1,12 @@
+[package]
+name = "resonate"
+version = "0.1.0"
+edition = "2021"
+description = "The Resonate server protocol as an accordant model, written in Verus"
+
+[dependencies]
+accordant = { path = ".." }
+vstd = "=0.0.0-2026-10-04-0306"
+
+[package.metadata.verus]
+verify = true

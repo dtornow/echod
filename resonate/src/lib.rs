@@ -1,0 +1,31 @@
+//! The Resonate server protocol as an accordant model, written in Verus.
+//!
+//! * `spec`: the server, verified: what each request and each piece of internal
+//!   work does, and the safety properties proved about it.
+//! * `collections`: what the spec trusts (persistent maps and sets, string
+//!   helpers).
+//! * `model`: plain-Rust glue to the checker's `Model`, `Footprint` and
+//!   `Partitioned` traits.
+//!
+//! `cargo build` compiles it as ordinary Rust (the proofs erased);
+//! `cargo verus verify -p resonate` verifies it.
+
+// Verus specifies `String` (its contents as a sequence), so ids are `&String`;
+// and it verifies explicit matches, loops and pushes more readily than the
+// idioms these lints suggest.
+#![allow(
+    clippy::ptr_arg,
+    clippy::single_match,
+    clippy::collapsible_match,
+    clippy::match_like_matches_macro,
+    clippy::vec_init_then_push,
+    clippy::len_zero
+)]
+
+pub mod collections;
+mod model;
+pub mod spec;
+
+pub use collections::{PMap, PSet};
+pub use model::{on, Internal};
+pub use spec::*;
