@@ -6,10 +6,13 @@ They live in the crate now, next to the code they are about:
   transition relation (`invoke`, `ret`, `receive` observed; `effect`, `run`
   silent), `legal` an execution the system can take, `project` what it shows a
   client, `valid(m, init, trace)` "some legal execution from `initial(init)`
-  projects to the trace". `check` carries the checker's contract:
-  `Ok ==> valid`, `Ko ==> !valid` (`external_body`).
+  projects to the trace". `check` carries the checker's contract,
+  `Ok ==> valid` and `Ko ==> !valid`, verified: the search only proposes, and
+  `check` confirms with `certify` or `refute`.
 - `src/certificate.rs`: the replay `certify`, verified: it ensures
   `Ok(()) ==> valid(m, init, trace)`. This is the code that runs.
+- `src/certificate/refute.rs`: the refutation `refute`, verified: it ensures
+  `Some(_) ==> !valid(m, init, trace)`, by enumerating every execution.
 - `src/certificate/proof.rs`: the lemmas. `src/certificate/trusted.rs`: the two
   trusted helpers (`copy`, `same`).
 
@@ -23,5 +26,5 @@ github.com/verus-lang/verus), which needs Rust toolchain 1.98.1:
 
 ```
 cargo verus verify -p accordant
-# verification results:: 30 verified, 0 errors
+# verification results:: 68 verified, 0 errors
 ```

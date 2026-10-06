@@ -295,9 +295,10 @@ the check takes 3.1 s instead of 1.1 s. The Porcupine benchmarks are unchanged.
 
 What the checker promises, in one sentence: if it accepts a trace, then some
 execution of the system, projected onto what clients observe, is exactly that
-trace. `src/semantics.rs` says this formally, in Verus (`valid` is "some legal
-execution projects to the trace"), and `src/certificate.rs` proves it about
-the code that runs.
+trace; if it rejects one, no execution is. `src/semantics.rs` says this
+formally, in Verus (`valid` is "some legal execution projects to the trace"),
+`src/certificate.rs` proves the first half and `src/certificate/refute.rs`
+the second, about the code that runs.
 
 The search is not what is proved. It is large and clever (lazy firing,
 footprints, early answers, subsumption, partitions), and it had a real bug: work
@@ -343,8 +344,10 @@ The statement, in `src/semantics.rs` (specification only; nothing in it runs):
   `project(steps)`: the observed events, in order.
 - `valid(m, init, trace) := exists steps. legal(m, initial(init), steps) &&
   project(steps) == trace`.
-- `check`: the checker's contract, `Ok ==> valid` and `Ko ==> !valid`, taken
-  on trust (`external_body`) around `Checker::check_certified`.
+- `check`: the checker's contract, `Ok ==> valid` and `Ko ==> !valid`,
+  verified. The search (`search`, `external_body` with no `ensures`) only
+  proposes: `check` answers OK once `certify` accepts the execution it found,
+  KO once `refute` refutes the trace, and UNKNOWN otherwise.
 
 The theorem, as the contract of the function that runs (`src/certificate.rs`):
 
@@ -360,7 +363,39 @@ the view of the configuration before to the view after. The lemmas
 steps; a legal execution extended by a step stays legal; a silent step shows
 nothing and an observed step shows its event; a legal execution that shows the
 trace is the witness `valid` asks for. `cargo verus verify -p accordant`
-checks all of it: 30 verified, 0 errors, no `assume` or `admit`.
+checks all of it: 68 verified, 0 errors, no `assume` or `admit`.
+
+The other half, as the contract of `refute` (`src/certificate/refute.rs`):
+
+```text
+fn refute(m, init, trace, limit) -> (r: Option<usize>)
+    ensures r is Some ==> !valid(m, init, trace@)
+```
+
+A rejection can't be shown by one execution; `refute` accounts for all of
+them. It doesn't search, it enumerates: from the initial configuration it takes
+every silent step there is until the set of configurations is closed under
+them, maps every configuration through every way the next event can be
+observed, closes again, and so on. If no configuration can show event `k`, it
+answers `Some(k)`. The invariant: after `k` events the set holds every
+configuration a legal execution showing those `k` events can end in. The
+lemmas: a silent step is an `effect` or a `run` with named witnesses, and the
+replay's `Config::silent` takes exactly the steps the semantics allow, to
+exactly where they say (its `ensures`, strengthened for this); an execution
+showing `k + 1` events splits at the step that shows the last one; prefixes of
+legal executions are legal; a reachable configuration's calls are all calls
+the trace invokes (so trying those finds every call in flight); a valid trace
+has an execution prefix that shows event `k` from a configuration reachable
+after `k`. Nothing in it is about a particular model, and it never uses
+footprints or partitions: a step it left out would break the proof, so a
+wrong footprint can't make it wrong.
+
+It is exhaustive, so it costs what the search avoids: a set holds every
+interleaving of the work in flight. `limit` bounds a set; past it, `refute`
+answers `None` and `check` UNKNOWN. A hash of each configuration suggests where
+an equal one may already be in the set; the suggestion is checked, so it is
+not trusted. It stops at the first event no configuration can show, so a
+long trace costs only the events up to the rejection.
 
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
 (`spec_external`, `spec_internal`, `spec_now`) and the method's `ensures` ties
@@ -370,16 +405,15 @@ semantics are stated over the twins.
 Trusted, besides Verus and vstd (the specifications of `HashMap` and `Vec`):
 
 - `src/certificate/trusted.rs`: `copy<T: Clone>(t) ensures r == *t` and
-  `same<T: PartialEq>(a, b) ensures r == (*a == *b)`, for a model's own types.
-  Both `external_body`.
+  `same<T: PartialEq>(a, b) ensures r == (*a == *b)`, for a model's own types,
+  and (in `refute`) for the `HashMap` and `Vec`s of a configuration. Both
+  `external_body`.
 - A model written outside `verus!` (every model so far, Resonate's glue
   included) keeps the default twins, which stand for whatever its methods
   compute. The theorem then says: `certify` accepts only traces valid for the
   functions the model's methods compute, provided they are pure. Nothing
   checks the purity. A model written in Verus overrides the twins and has its
   methods verified against them.
-- `check`'s KO line: not proved anywhere; it rests on the search being
-  exhaustive.
 
 With the deadline bug put back, `check` accepted a trace in which the work ran
 late. `check_certified` refused it, because time can't skip a deadline whose
@@ -391,11 +425,13 @@ Limits:
   With partitions, candidates in different factors would have to be merged into
   one execution, and that isn't built yet. The Resonate tests check every trace a
   second time in one factor, with certificates.
-- **Soundness only.** A certificate shows an accepted trace is valid. Nothing
-  shows that a rejected trace is invalid. For example, the checker only stops the
-  clock where something is due or observed, so it never tries work at the
-  moments in between. A model whose outcome depends on the exact `now` between
-  stops can see valid traces rejected (`tests/time.rs`).
+- **Proved rejections cost.** `Checker::check` and `check_complete` still
+  answer KO from the search alone; `check` (in `semantics.rs`) and
+  `refute` prove it. The search has rejected valid traces (four fixed so far,
+  see the fuzzer above); `refute` would not have confirmed any of them
+  (`examples/resonate/tests/sim.rs` checks it on the fourth). It is
+  exhaustive, so traces with much work in flight at once can outgrow its
+  limit: then the answer is UNKNOWN, never a wrong KO.
 - **Cost.** About 5% time and twice the memory on the Resonate workload:
   every candidate keeps its history, shared with its parent's.
 

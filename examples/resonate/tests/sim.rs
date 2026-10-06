@@ -10,7 +10,7 @@
 //! * a call in flight that reads the clock only once other work in flight on
 //!   its keys has happened (an acquire after a release), while the clock moves.
 
-use accordant::{certify, drive, Checker, Choices, Config, Drive, Event};
+use accordant::{certify, drive, refute, Checker, Choices, Config, Drive, Event};
 use resonate::*;
 
 /// A run of the spec, driven at random and recorded.
@@ -78,4 +78,6 @@ fn a_call_that_reads_the_clock_once_another_has_happened() {
     assert!(c.check(t.clone()).is_ok(), "partitioned");
     let mut c = Checker::with_footprints(Resonate, Server::default(), Config::default());
     assert!(c.check_complete(&t).is_ok(), "depth-first");
+    // The proof of a rejection would not have gone through: the trace is valid.
+    assert_eq!(refute(&Resonate, Server::default(), &t, 100_000), None);
 }

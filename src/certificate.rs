@@ -22,9 +22,14 @@ use crate::semantics::{self, Call, Cfg, Execution, Label, Work};
 use crate::{CallId, Event, Model, Sched, Time};
 
 mod proof;
+mod refute;
 mod trusted;
 
+pub use refute::refute;
+
 use trusted::{copy, same};
+
+pub(crate) use trusted::copy as trusted_copy;
 
 verus! {
 
@@ -306,11 +311,21 @@ impl<'m, M: Model> Config<'m, M> {
         Ok(())
     }
 
-    /// A silent step. `Err(())`: the system can't take it now.
+    /// A silent step. `Err(())`: the system can't take it now. Exactly when
+    /// the semantics allow this step, it is taken, to exactly where the
+    /// semantics say: [`certify`] needs the first half, the refutation both.
     pub(crate) fn silent(&mut self, s: Silent) -> (r: Result<(), ()>)
         ensures
             r is Ok ==> semantics::step(*old(self).m, old(self)@, Label::Silent, final(self)@),
             final(self).m == old(self).m,
+            s matches Silent::Effect { call, j } ==> {
+                &&& r is Ok <==> semantics::effect_ok(*old(self).m, old(self)@, call, j as int)
+                &&& r is Ok ==> final(self)@ == semantics::effect_next(*old(self).m, old(self)@, call, j as int)
+            },
+            s matches Silent::Run { i, j } ==> {
+                &&& r is Ok <==> semantics::run_ok(*old(self).m, old(self)@, i as int, j as int)
+                &&& r is Ok ==> final(self)@ == semantics::run_next(*old(self).m, old(self)@, i as int, j as int)
+            },
     {
         match s {
             Silent::Effect { call, j } => {

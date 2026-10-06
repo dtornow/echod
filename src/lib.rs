@@ -36,7 +36,7 @@ mod hashed_set;
 mod intern;
 pub mod semantics;
 
-pub use certificate::{certify, marks, Certificate, Silent};
+pub use certificate::{certify, marks, refute, Certificate, Silent};
 pub use drive::{drive, Choice, Choices, Drive, Run, Tried};
 pub use sim::Sim;
 pub use checker::{Checker, Config, Factor, Node, Pending, Stats, Verdict, Violation};

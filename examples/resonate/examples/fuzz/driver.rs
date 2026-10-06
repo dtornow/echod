@@ -166,3 +166,11 @@ pub fn show(trace: &Trace, upto: usize) -> String {
     }
     out
 }
+
+/// A rejection, proved: [`accordant::refute`], whose answer is verified to
+/// mean no execution shows the trace. It stops at the first event no
+/// execution can show, so it costs the events up to there. `Some(n)`: proved,
+/// at event `n`. `None`: its exhaustive search outgrew `limit`.
+pub fn prove(trace: &Trace, limit: usize) -> Option<usize> {
+    accordant::refute(&Resonate, resonate::Server::default(), trace, limit).map(|k| k + 1)
+}

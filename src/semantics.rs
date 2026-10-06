@@ -24,10 +24,11 @@
 //! runs. [`Model`] is the system, with its `spec` twins of `external`,
 //! `internal` and `now`.
 //!
-//! The OK line is proved: `certify` (`certificate.rs`) ensures that a
-//! certificate it accepts makes the trace valid, and `Checker::check_certified`
-//! answers OK only after `certify` accepts. The KO line is not proved anywhere:
-//! it rests on the search being exhaustive.
+//! Both lines are proved, and `check` is verified code. The search proposes
+//! and is not trusted: OK stands once `certify` (`certificate.rs`) replays the
+//! execution it found, KO once `refute` (`certificate/refute.rs`) has
+//! enumerated every execution and found none that shows the trace. Each is
+//! verified against the definitions below.
 
 use vstd::prelude::*;
 
@@ -57,6 +58,7 @@ pub type Ev<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Mod
 // ------------------------------------------------------------ configurations
 
 /// A call the client has sent and not yet seen answered.
+#[derive(PartialEq, Eq)]
 pub enum Call<X, R> {
     /// Not yet taken effect.
     InFlight(X),
@@ -212,6 +214,45 @@ pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
         }
 }
 
+// Names for the parts of `effect` and `run`, for the refutation: when a given
+// call (outcome `j`) or a given piece of work (`i`, outcome `j`) can take its
+// step, and the configuration that step leads to. `effect` and `run` above are
+// what is trusted; `refute`'s proof shows these say the same.
+
+/// Call `call` can take effect with its `j`-th outcome.
+pub open spec fn effect_ok<M: Model>(m: M, c: Cfg<M>, call: CallId, j: int) -> bool {
+    !overdue(m, c) && c.calls.contains_key(call) && c.calls[call] is InFlight
+        && 0 <= j < m.spec_external(c.calls[call]->InFlight_0, c.state).len()
+}
+
+/// Where call `call` taking effect with its `j`-th outcome leads.
+pub open spec fn effect_next<M: Model>(m: M, c: Cfg<M>, call: CallId, j: int) -> Cfg<M> {
+    let o = m.spec_external(c.calls[call]->InFlight_0, c.state)[j];
+    Config {
+        state: o.next,
+        calls: c.calls.insert(call, Call::Done(o.resp)),
+        work: start_all(c.work, o.work, m.spec_now(o.next)),
+        sent: c.sent + o.send,
+    }
+}
+
+/// Work `i` can run with its `j`-th outcome.
+pub open spec fn run_ok<M: Model>(m: M, c: Cfg<M>, i: int, j: int) -> bool {
+    0 <= i < c.work.len() && c.work[i].after <= clock(m, c) && (overdue(m, c) ==> is_first(m, c, i))
+        && 0 <= j < m.spec_internal(c.work[i].req, c.state).len()
+}
+
+/// Where work `i` running with its `j`-th outcome leads.
+pub open spec fn run_next<M: Model>(m: M, c: Cfg<M>, i: int, j: int) -> Cfg<M> {
+    let o = m.spec_internal(c.work[i].req, c.state)[j];
+    Config {
+        state: o.next,
+        calls: c.calls,
+        work: start_all(c.work.remove(i), o.work, m.spec_now(o.next)),
+        sent: c.sent + o.send,
+    }
+}
+
 /// The transition relation: from `c`, a step labeled `l` reaches `d`.
 pub open spec fn step<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || effect(m, c, l, d) || run(m, c, l, d)
@@ -275,24 +316,56 @@ pub enum Verdict {
     Unknown,
 }
 
-/// The trace checker, with certificates, under the contract it is held to:
-/// OK only for valid traces, KO only for invalid ones, and UNKNOWN whenever it
-/// can't tell. Verus takes the contract on trust (`external_body`). OK is
-/// justified: `check_certified` answers OK only after [`crate::certify`]
-/// accepts a certificate, and `certify` is proved to accept only valid
-/// traces. KO rests on the search.
-#[verifier::external_body]
+/// The trace checker, under the contract it is held to: OK only for valid
+/// traces, KO only for invalid ones, and UNKNOWN whenever it can't tell.
+///
+/// Verified, both lines. The search ([`search`]) is not trusted: it only
+/// proposes. An acceptance stands once [`crate::certify`] replays the
+/// execution the search found, a rejection once [`crate::refute`] has
+/// accounted for every execution; both are verified against this file. If
+/// either doesn't go through, the answer is UNKNOWN.
 pub fn check<M: Model + Clone>(m: &M, init: M::State, trace: &[Ev<M>]) -> (v: Verdict)
     ensures
         v is Ok ==> valid(*m, init, trace@),
         v is Ko ==> !valid(*m, init, trace@),
 {
+    match search(m, crate::certificate::trusted_copy(&init), trace) {
+        Found::Explained(cert) => match crate::certify(m, init, trace, &cert) {
+            Ok(()) => Verdict::Ok,
+            Err(_) => Verdict::Unknown,
+        },
+        Found::Rejected => match crate::refute(m, init, trace, REFUTE_LIMIT) {
+            Some(_) => Verdict::Ko,
+            None => Verdict::Unknown,
+        },
+        Found::GaveUp => Verdict::Unknown,
+    }
+}
+
+/// How many configurations [`crate::refute`] may hold for one event before
+/// [`check`] answers UNKNOWN instead.
+pub const REFUTE_LIMIT: usize = 1_000_000;
+
+/// What the search proposes.
+pub enum Found {
+    /// An execution showing the trace, as a certificate.
+    Explained(crate::Certificate),
+    /// That no execution shows it.
+    Rejected,
+    /// Nothing: it gave up.
+    GaveUp,
+}
+
+/// The checker's search, with certificates. Nothing about it is trusted: it
+/// has no `ensures`, and [`check`] confirms whatever it proposes.
+#[verifier::external_body]
+pub fn search<M: Model + Clone>(m: &M, init: M::State, trace: &[Ev<M>]) -> Found {
     let cfg = crate::Config { certify: true, ..crate::Config::default() };
     let mut checker = crate::Checker::new(m.clone(), init, cfg);
     match checker.check_certified(trace.iter().cloned()) {
-        Ok(_) => Verdict::Ok,
-        Err(v) if v.unknown => Verdict::Unknown,
-        Err(_) => Verdict::Ko,
+        Ok(cert) => Found::Explained(cert),
+        Err(v) if v.unknown => Found::GaveUp,
+        Err(_) => Found::Rejected,
     }
 }
 
