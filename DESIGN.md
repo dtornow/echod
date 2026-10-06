@@ -197,33 +197,55 @@ the clock past every deadline, and reads everything again, so every timer must
 have fired.
 
 ```text
-cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever|stale-acquire]
+cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever|stale-acquire] [--check complete|online] [--seed N]
 ```
 
-300 runs of 30 requests. "Both" is guided and informed together.
+A run is checked once it is over, so the whole trace is known: by default
+the example checks it offline, depth first (`check_complete`), and backs an
+acceptance with a certificate, whose marks are the coverage. `--check online`
+keeps every explanation instead (`check_certified`). On 300 runs of 1,000
+requests the verdicts are the same and offline is about 6× faster; at 10,000
+requests the online profile outgrows `max_width` on informed runs (12,288
+candidates) and only the offline search decides them. Partitions don't
+rescue the online check: while a clock move is in flight, any request that
+reads the clock may go before or after it, so it merges every partition into
+one factor, and informed runs nearly always have a clock move in flight.
+`--seed N` checks run N alone, after driving the runs before it unchecked
+(their memory steers its choices), so it reproduces that run of a campaign.
 
-| server | random | guided | informed | both |
-|---|---|---|---|---|
-| spec: runs KO | 0 | 0 | 0 | 0 |
-| spec: marks reached | 45/65 | 53/65 | 64/65 | 64/65 |
-| fence ignores the version: runs KO | 43 | 91 | 42 | 98 |
-| a lease never expires: runs KO | 0 | 29 | 1 | 32 |
-| acquire ignores the version: runs KO | 0 | 60 | 7 | 86 |
+300 runs each. "Both" is guided and informed together. Marks reached with no
+bug; runs that catch a planted bug (KO) otherwise.
+
+| requests | server | random | guided | informed | both |
+|---|---|---|---|---|---|
+| 30 | spec: marks reached | 45/65 | 52/65 | 64/65 | 64/65 |
+| 30 | fence ignores the version | 43 | 91 | 29 | 100 |
+| 30 | a lease never expires | 0 | 29 | 2 | 35 |
+| 30 | acquire ignores the version | 0 | 60 | 5 | 93 |
+| 1,000 | spec: marks reached | 50/65 | 53/65 | 64/65 | 64/65 |
+| 1,000 | fence ignores the version | 102 | 224 | 286 | 300 |
+| 1,000 | a lease never expires | 0 | 117 | 173 | 296 |
+| 1,000 | acquire ignores the version | 5 | 217 | 128 | 300 |
+
+No run of the spec is rejected. 300 runs of 30 take 2–3 s for all four modes;
+of 1,000, about 2 minutes (0.1 s a run); of 10,000, about 4 s a run. At 10,000
+(30 runs a mode), "both" catches every planted bug in every run, and informed
+runs catch all but 8, on which the depth-first search gives up (`max_explore`):
+refuting a trace means trying every explanation.
 
 Informed requests reach what neither of the others builds: timers and
 external promises, listeners, callbacks on a promise a task can await, and
 settle states the server refuses. The one mark no mode reaches,
 `task.create: target without a task (500)`, is unreachable. Suspension takes
 an acquired task and an external promise in its origin, which random
-requests rarely line up: "task suspended" is reached in 1 guided run and 19
-informed ones. Suggestions are better at the edges of time (a clock moved
-to exactly a lease end) and the planted bugs live there, so the two
-together find the most. Acting on the inbox makes acquires look like a
-worker's (at the version an `execute` offered), but on this spec it adds
-little: acquires refused as stale come up in 93 informed runs with the
-inbox and 58 without, but informed runs catch the stale acquire less often
-with it (7 runs) than without (14): taking a current offer replaces an
-acquire at a skewed version, which is what finds the bug.
+requests rarely line up: at 1,000 requests "task suspended" is reached in 4
+guided runs and 154 informed ones. Suggestions are better at the edges of
+time (a clock moved to exactly a lease end) and short runs find the planted
+bugs there; longer runs give informed requests the chains they need, and
+the two together find the most. Acting on the inbox makes acquires look like
+a worker's (at the version an `execute` offered), but on this spec it does
+not help catch the stale acquire: taking a current offer replaces an acquire
+at a skewed version, which is what finds it.
 
 "Lease expired" is reached in no random run and 44 guided ones. It takes a
 chain (a task released, re-acquired with a short lease, the clock past its end
@@ -238,7 +260,7 @@ the minimal 4 events, but its replay rules rule out memory across runs.)
 
 **The fuzzer tests the checker too.** With no bug, every trace is valid, so a KO
 is a checker bug. `CROSS=1` also checks every trace with the partitioned and depth-first
-checkers. The first runs found three false KOs, all fixed and
+checkers. The fuzz runs found four false KOs, all fixed and
 covered by `examples/resonate/tests/sim.rs`:
 
 1. A call in flight reads the clock (`created_at`), so it doesn't commute with a
@@ -255,6 +277,15 @@ covered by `examples/resonate/tests/sim.rs`:
    never saw its invoke. It is now held until the next event. If that event is
    its return, it is explained per partition; otherwise, in one factor, with the
    invoke replayed first.
+4. A call can commute with a clock move in the current state and stop
+   commuting once other work in flight on its keys has happened: an acquire
+   of a held task fails either way, but after a release in flight takes
+   effect it leases the task, and a move past the lease reclaims it and sends
+   a dispatch. Item 1 judged each item alone, so no explanation tried release,
+   acquire, move, and a valid trace was rejected in every mode (a 10,000-request
+   run; the regression test is 8 events). An item is now also checked in the
+   states other runnable work on its keys leads to, up to three steps, and
+   assumed not to commute beyond that.
 
 The price of the first two: a footprint now runs the model. On
 `resonate_bench length 400`, where about 400 stale lease checks stay pending,
