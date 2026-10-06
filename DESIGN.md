@@ -363,7 +363,24 @@ the view of the configuration before to the view after. The lemmas
 steps; a legal execution extended by a step stays legal; a silent step shows
 nothing and an observed step shows its event; a legal execution that shows the
 trace is the witness `valid` asks for. `cargo verus verify -p accordant`
-checks all of it: 68 verified, 0 errors, no `assume` or `admit`.
+checks all of it: 85 verified, 0 errors, no `assume` or `admit`.
+
+What `valid` means is itself a theorem for the core of the semantics
+(`src/linearizable.rs`): for a model that starts no internal work and sends
+nothing, and a trace that invokes each call id once, `valid` is exactly
+Herlihy and Wing's linearizability, stated on its own terms (some order of the
+calls, each with the response it returned, is a legal sequential run of the
+model and respects real time):
+
+```text
+proof fn valid_is_linearizable(m, init, t)
+    requires plain(m), invoked_once(t)
+    ensures valid(m, init, t) <==> linearizable(m, init, t)
+```
+
+So for that fragment the step rules need no review of their own. What remains
+to review are the rules that go beyond it: internal work (`run`, deadlines and
+the overdue rule) and dispatches (`receive`).
 
 The other half, as the contract of `refute` (`src/certificate/refute.rs`):
 

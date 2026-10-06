@@ -34,6 +34,7 @@ mod sim;
 mod hashed_map;
 mod hashed_set;
 mod intern;
+pub mod linearizable;
 pub mod semantics;
 
 pub use certificate::{certify, marks, refute, Certificate, Silent};
