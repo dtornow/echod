@@ -270,10 +270,18 @@ fn informed_request(s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(
     let task_ids: Vec<Id> = tasks.iter().map(|(id, _)| (*id).clone()).collect();
     // Promises in the same origin as `id`, other than it.
     let siblings = |id: &Id| -> Vec<Id> { all.iter().filter(|p| *p != id && origin(p) == origin(id)).cloned().collect() };
-    let origins: Vec<&str> = {
-        let mut o: Vec<&str> = IDS.iter().map(|id| origin(id)).collect();
+    // The origins in use. A new one stands for a new root workflow: what it
+    // creates stays in it, so the checker's partitions stay small however
+    // long the run.
+    let origins: Vec<String> = {
+        let mut o: Vec<String> = IDS.iter().copied().chain(all.iter().map(|id| id.as_str())).map(|id| origin(id).to_string()).collect();
+        o.sort();
         o.dedup();
         o
+    };
+    let new_origin = format!("o{}", origins.len());
+    let root = |pick: &mut dyn FnMut(usize) -> usize| -> String {
+        if pick(2) == 0 { new_origin.clone() } else { origins[pick(origins.len())].clone() }
     };
 
     let mut ops = vec!["clock", "create", "task.create"];
@@ -302,12 +310,12 @@ fn informed_request(s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(
             }
         }
         "create" => {
-            let o = origins[pick(origins.len())];
-            Request::CreatePromise(creation(s, o, &all, pick))
+            let o = root(pick);
+            Request::CreatePromise(creation(s, &o, &all, pick))
         }
         "task.create" => {
-            let o = origins[pick(origins.len())];
-            let id = if pick(3) == 0 { one_of(pick, &all).unwrap_or_else(|| fresh(s, o)) } else { fresh(s, o) };
+            let o = root(pick);
+            let id = if pick(3) == 0 { one_of(pick, &all).unwrap_or_else(|| fresh(s, &o)) } else { fresh(s, &o) };
             Request::CreateTask { id, timeout_at: s.now + 1 + pick(60) as Time, data: None, target: pick(8) != 0 }
         }
         "get" => Request::GetPromise(one_of(pick, &all).expect("eligible")),
@@ -320,7 +328,7 @@ fn informed_request(s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(
         "listener" => {
             // Now and then a bad address, or a promise that doesn't exist.
             let address = if pick(8) == 0 { "not an address".into() } else { "http://w1".into() };
-            let awaited = if pick(8) == 0 { fresh(s, origins[pick(origins.len())]) } else { one_of(pick, &all).expect("eligible") };
+            let awaited = if pick(8) == 0 { fresh(s, &root(pick)) } else { one_of(pick, &all).expect("eligible") };
             Request::RegisterListener { awaited, address }
         }
         "callback" => {
@@ -388,8 +396,8 @@ fn informed_request(s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(
                     let action = match one_of(pick, &sib) {
                         Some(p) if pick(3) == 0 => Fenced::Settle(Settle { id: p, state: settle_state(pick), data: Some("v".into()) }),
                         _ => {
-                            let o = if pick(5) == 0 { origins[pick(origins.len())] } else { origin(&id) };
-                            let mut c = creation(s, o, &siblings(&id), pick);
+                            let o = if pick(5) == 0 { root(pick) } else { origin(&id).to_string() };
+                            let mut c = creation(s, &o, &siblings(&id), pick);
                             c.target = false;
                             Fenced::Create(c)
                         }

@@ -97,6 +97,29 @@ impl Explore for Server {
 
 pub type Trace = Vec<Event<Request, Response, Dispatch>>;
 
+/// How a recorded trace is checked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Check {
+    /// One event at a time, every explanation kept, as a monitor would
+    /// ([`Checker::check`]).
+    Online,
+    /// The run is over, so the whole trace is known: depth first, committing
+    /// to one explanation and backtracking ([`Checker::check_complete`]).
+    /// Long runs need it: at 10,000 requests the online profile outgrows
+    /// `max_width`.
+    Complete,
+}
+
+impl Check {
+    pub fn parse(s: &str) -> Check {
+        match s {
+            "online" => Check::Online,
+            "complete" => Check::Complete,
+            _ => panic!("unknown check {s}: online or complete"),
+        }
+    }
+}
+
 pub enum Outcome {
     /// Accepted, with the marks of the execution that explains it.
     Ok(BTreeSet<&'static str>),
@@ -107,9 +130,12 @@ pub enum Outcome {
 /// Checks a recorded trace against the spec. `cross`: also with the
 /// partitioned and depth-first checkers (only meaningful when the trace came
 /// from the spec itself, where every trace is valid).
-pub fn check(trace: &Trace, cross: bool) -> Outcome {
+pub fn check(trace: &Trace, how: Check, cross: bool) -> Outcome {
     let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(Resonate, resonate::Server::default(), Config { certify: true, ..Config::default() });
-    let verdict = c.check_certified(trace.clone());
+    let verdict = match how {
+        Check::Online => c.check_certified(trace.clone()),
+        Check::Complete => c.check_complete(trace).map(|_| ()).and_then(|()| c.certified()),
+    };
     if cross {
         let mut g = Checker::with_partitions(Resonate, resonate::Server::default(), Config::default());
         let mut d = Checker::with_footprints(Resonate, resonate::Server::default(), Config::default());

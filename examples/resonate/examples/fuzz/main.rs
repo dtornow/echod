@@ -4,7 +4,7 @@
 //! each accepted trace.
 //!
 //! ```text
-//! cargo run --release -p resonate --example fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever|stale-acquire]
+//! cargo run --release -p resonate --example fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever|stale-acquire] [--check complete|online] [--seed N]
 //! CROSS=1 ...   # also check every trace with the partitioned and depth-first checkers
 //! ```
 
@@ -13,7 +13,7 @@ mod driver;
 use std::collections::BTreeMap;
 
 use accordant::{drive, Choices, Drive, Tried};
-use driver::{check, show, Bug, Outcome, Server};
+use driver::{check, show, Bug, Check, Outcome, Server};
 use resonate::*;
 
 fn main() {
@@ -23,10 +23,11 @@ fn main() {
     let requests: usize = flag("--requests").map_or(30, |s| s.parse().expect("--requests N"));
     let bug = flag("--bug").map_or(Bug::None, |b| Bug::parse(&b));
     let cross = bug == Bug::None && std::env::var("CROSS").is_ok();
+    let how = flag("--check").map_or(Check::Complete, |c| Check::parse(&c));
     let server = Server { bug };
     const MODES: [(&str, bool, bool); 4] = [("random", false, false), ("guided", true, false), ("informed", false, true), ("both", true, true)];
     let mut table: BTreeMap<&str, [usize; 4]> = MARKS.iter().map(|m| (*m, [0; 4])).collect();
-    println!("{runs} runs of {requests} requests each, server bug: {bug:?}\n");
+    println!("{runs} runs of {requests} requests each, server bug: {bug:?}, checked {how:?}\n");
     println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>13}", "mode", "ok", "ko", "unknown", "marks", "first ko (run)");
     for (k, (mode, guided, informed)) in MODES.into_iter().enumerate() {
         let cfg = Drive { requests, concurrency: 3, guided, informed };
@@ -34,9 +35,15 @@ fn main() {
         let mut example = None;
         // Across runs: which suggestions were taken least, so rare ones get their turn.
         let tried = Tried::default();
-        for seed in 1..=runs {
+        // `--seed N` checks run N alone. Earlier runs are still driven, unchecked:
+        // what they tried steers run N's choices.
+        let only: Option<u64> = flag("--seed").map(|s| s.parse().expect("--seed N"));
+        for seed in 1..=only.unwrap_or(runs) {
             let run = drive(&server, resonate::Server::default(), &cfg, Choices::random(seed).learning(&tried));
-            match check(&run.trace, cross) {
+            if only.is_some_and(|n| seed < n) {
+                continue;
+            }
+            match check(&run.trace, how, cross) {
                 Outcome::Ok(seen) => {
                     ok += 1;
                     for m in seen {
