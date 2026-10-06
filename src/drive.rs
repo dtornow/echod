@@ -136,11 +136,14 @@ pub struct Drive {
     /// Take most requests from [`Explore::suggest`] rather than
     /// [`Explore::arbitrary`].
     pub guided: bool,
+    /// Take most of the rest from [`Explore::informed`], with the dispatches
+    /// clients have received and not yet acted on.
+    pub informed: bool,
 }
 
 impl Default for Drive {
     fn default() -> Self {
-        Drive { requests: 30, concurrency: 3, guided: true }
+        Drive { requests: 30, concurrency: 3, guided: true, informed: false }
     }
 }
 
@@ -162,15 +165,20 @@ pub fn drive<M: Explore>(model: &M, init: M::State, cfg: &Drive, choices: Choice
     let mut trace = Vec::new();
     let mut call: CallId = 0;
     let mut sent = 0;
+    // Dispatches delivered to clients, not yet acted on: [`Explore::informed`]'s inbox.
+    let mut inbox = Vec::new();
     // The system can always make a move while a call is open, so this ends.
     while sent < cfg.requests || sim.open_calls() > 0 {
         let send = sent < cfg.requests && sim.open_calls() < cfg.concurrency.max(1) && pick(2) == 0;
         if send {
-            let req = request(model, sim.state(), cfg.guided, &pick, &pick_labeled);
+            let req = request(model, sim.state(), cfg, &mut inbox, &pick, &pick_labeled);
             call += 1;
             sent += 1;
             trace.push(sim.invoke(call, req));
         } else if let Some(e) = sim.step() {
+            if let crate::Event::Receive { msg } = &e {
+                inbox.push(msg.clone());
+            }
             trace.push(e);
         } else if sent >= cfg.requests {
             break;
@@ -190,15 +198,21 @@ pub fn drive<M: Explore>(model: &M, init: M::State, cfg: &Drive, choices: Choice
 fn request<M: Explore>(
     model: &M,
     state: &M::State,
-    guided: bool,
+    cfg: &Drive,
+    inbox: &mut Vec<M::Dispatch>,
     pick: &impl Fn(usize) -> usize,
     pick_labeled: &impl Fn(&[&'static str]) -> usize,
 ) -> M::External {
-    if guided {
+    if cfg.guided {
         let suggestions = model.suggest(state);
         if !suggestions.is_empty() && pick(4) != 0 {
             let labels: Vec<&'static str> = suggestions.iter().map(|(_, why)| *why).collect();
             return suggestions[pick_labeled(&labels)].0.clone();
+        }
+    }
+    if cfg.informed && pick(4) != 0 {
+        if let Some(req) = model.informed(state, inbox, &mut |n| pick(n)) {
+            return req;
         }
     }
     model.arbitrary(state, &mut |n| pick(n))

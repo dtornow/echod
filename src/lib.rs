@@ -199,6 +199,23 @@ pub trait Explore: Model {
     /// (recorded, so a run can be replayed).
     fn arbitrary(&self, state: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Self::External;
 
+    /// A request a client would send, built from what exists in `state` and
+    /// from what the server has sent it: an operation picked only if its
+    /// operands exist, the operands read out of the state. `inbox` holds the
+    /// dispatches delivered to clients and not yet acted on, oldest first; a
+    /// request that acts on one removes it. What a dispatch names may have
+    /// changed since it was sent, so a request built from it can be stale, as
+    /// a real client's would be. `None` (the default) leaves the request to
+    /// [`Explore::arbitrary`].
+    fn informed(
+        &self,
+        _state: &Self::State,
+        _inbox: &mut Vec<Self::Dispatch>,
+        _pick: &mut dyn FnMut(usize) -> usize,
+    ) -> Option<Self::External> {
+        None
+    }
+
     /// Requests to send at the end of a run, one at a time (reads that show
     /// the final state, say). None by default.
     fn finish(&self, _state: &Self::State) -> Vec<Self::External> {

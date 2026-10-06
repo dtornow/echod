@@ -20,6 +20,9 @@ pub enum Bug {
     StaleFence,
     /// A lease never expires: an abandoned task is never handed out again.
     LeaseForever,
+    /// An acquire at a stale version goes through: a worker acting on an
+    /// old offer runs a task someone else already ran.
+    StaleAcquire,
 }
 
 impl Bug {
@@ -28,7 +31,8 @@ impl Bug {
             "none" => Bug::None,
             "stale-fence" => Bug::StaleFence,
             "lease-forever" => Bug::LeaseForever,
-            _ => panic!("unknown bug {s}: none, stale-fence or lease-forever"),
+            "stale-acquire" => Bug::StaleAcquire,
+            _ => panic!("unknown bug {s}: none, stale-fence, lease-forever or stale-acquire"),
         }
     }
 }
@@ -44,6 +48,10 @@ impl Model for Server {
         let op = match (self.bug, op) {
             (Bug::StaleFence, Request::FenceTask { id, version: _, action }) => match s.tasks.get(id) {
                 Some(t) => Request::FenceTask { id: id.clone(), version: t.version, action: action.clone() },
+                None => op.clone(),
+            },
+            (Bug::StaleAcquire, Request::AcquireTask { id, version: _, pid, ttl }) => match s.tasks.get(id) {
+                Some(t) => Request::AcquireTask { id: id.clone(), version: t.version, pid: pid.clone(), ttl: *ttl },
                 None => op.clone(),
             },
             _ => op.clone(),
@@ -76,6 +84,10 @@ impl Explore for Server {
 
     fn arbitrary(&self, s: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Request {
         Resonate.arbitrary(s, pick)
+    }
+
+    fn informed(&self, s: &Self::State, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(usize) -> usize) -> Option<Request> {
+        Resonate.informed(s, inbox, pick)
     }
 
     fn finish(&self, s: &Self::State) -> Vec<Request> {

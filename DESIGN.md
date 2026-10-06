@@ -170,6 +170,14 @@ The model that checks a trace can also produce one.
   requests that reach the edges of what the state allows, each with why;
   `arbitrary(state, pick)`: any request; `finish(state)`: requests for the end
   of a run. The driver knows the model's exact state, so it asks directly.
+- **Informed requests**: `informed(state, inbox, pick)` (on `Explore`,
+  `None` by default) builds a request the way a client would: an operation
+  only if its operands exist, the operands read from the state. `inbox` holds
+  the dispatches delivered to clients and not yet acted on; a request that
+  acts on one removes it, and what it names may have changed since it was
+  sent, so the request can be stale, as a real client's would be. With
+  `Drive { informed: true }`, three in four of the requests not taken from
+  suggestions come from it (when it returns one), the rest from `arbitrary`.
 - **Guidance**: with `Drive { guided: true }`, three in four requests are
   suggestions. With `Choices::random(seed).learning(&tried)`, a suggestion is
   picked among the reasons taken least so far, across the runs that share
@@ -189,19 +197,33 @@ the clock past every deadline, and reads everything again, so every timer must
 have fired.
 
 ```text
-cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever]
+cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever|stale-acquire]
 ```
 
-300 runs of 30 requests:
+300 runs of 30 requests. "Both" is guided and informed together.
 
-| server | mode | runs KO | marks reached |
-|---|---|---|---|
-| spec | random | 0 | 45/65 |
-| spec | guided | 0 | 53/65 |
-| fence ignores the version | random | 43 | |
-| fence ignores the version | guided | 91 | |
-| a lease never expires | random | 0 | |
-| a lease never expires | guided | 29 | |
+| server | random | guided | informed | both |
+|---|---|---|---|---|
+| spec: runs KO | 0 | 0 | 0 | 0 |
+| spec: marks reached | 45/65 | 53/65 | 64/65 | 64/65 |
+| fence ignores the version: runs KO | 43 | 91 | 42 | 98 |
+| a lease never expires: runs KO | 0 | 29 | 1 | 32 |
+| acquire ignores the version: runs KO | 0 | 60 | 7 | 86 |
+
+Informed requests reach what neither of the others builds: timers and
+external promises, listeners, callbacks on a promise a task can await, and
+settle states the server refuses. The one mark no mode reaches,
+`task.create: target without a task (500)`, is unreachable. Suspension takes
+an acquired task and an external promise in its origin, which random
+requests rarely line up: "task suspended" is reached in 1 guided run and 19
+informed ones. Suggestions are better at the edges of time (a clock moved
+to exactly a lease end) and the planted bugs live there, so the two
+together find the most. Acting on the inbox makes acquires look like a
+worker's (at the version an `execute` offered), but on this spec it adds
+little: acquires refused as stale come up in 93 informed runs with the
+inbox and 58 without, but informed runs catch the stale acquire less often
+with it (7 runs) than without (14): taking a current offer replaces an
+acquire at a skewed version, which is what finds the bug.
 
 "Lease expired" is reached in no random run and 44 guided ones. It takes a
 chain (a task released, re-acquired with a short lease, the clock past its end

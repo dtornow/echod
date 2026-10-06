@@ -157,6 +157,13 @@ impl Explore for Resonate {
         random_request(pick, s.now)
     }
 
+    /// What a worker and its clients would send: an operation only if its
+    /// operands exist, the operands read from the state, and a task acquired
+    /// at the version an `execute` offered it, which may have gone stale.
+    fn informed(&self, s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(usize) -> usize) -> Option<Request> {
+        Some(informed_request(s, inbox, pick))
+    }
+
     /// Read everything, move the clock past every deadline (the longest is a
     /// task.create lease), so every timer must have fired, and read again.
     fn finish(&self, s: &Server) -> Vec<Request> {
@@ -193,5 +200,203 @@ fn random_request(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Request 
         11 => Request::FenceTask { id, version, action: Fenced::Settle(settle(other)) },
         12 => Request::GetTask(id),
         _ => Request::GetPromise(id),
+    }
+}
+
+/// One of `v`, or `None` if it is empty.
+fn one_of<T: Clone>(pick: &mut dyn FnMut(usize) -> usize, v: &[T]) -> Option<T> {
+    (!v.is_empty()).then(|| v[pick(v.len())].clone())
+}
+
+/// `v`, or one beside it a fifth of the time: a stale or future version, which
+/// the server must refuse.
+fn skew(pick: &mut dyn FnMut(usize) -> usize, v: u32) -> u32 {
+    match pick(10) {
+        0 => v.wrapping_sub(1),
+        1 => v.wrapping_add(1),
+        _ => v,
+    }
+}
+
+/// A settle state: the three the protocol has, and now and then one it refuses.
+fn settle_state(pick: &mut dyn FnMut(usize) -> usize) -> String {
+    ["resolved", "rejected", "rejected_canceled", "resolved", "rejected", "pending"][pick(6)].into()
+}
+
+/// An id in `origin` no promise has yet: the next of the pool, then numbered.
+fn fresh(s: &Server, origin: &str) -> Id {
+    let taken = |id: &str| s.promises.get(&id.to_string()).is_some();
+    IDS.iter()
+        .map(|id| id.to_string())
+        .filter(|id| crate::model::origin(id) == origin)
+        .chain((1..).map(|n| format!("{origin}:{n}")))
+        .find(|id| !taken(id))
+        .expect("numbered ids never run out")
+}
+
+/// A promise to create in `origin`: new two times in three, internal,
+/// external, a timer or a task's target, with its deadline a little ahead (now
+/// and then already past).
+fn creation(s: &Server, origin: &str, existing: &[Id], pick: &mut dyn FnMut(usize) -> usize) -> Create {
+    let id = match pick(3) {
+        0 => one_of(pick, existing).unwrap_or_else(|| fresh(s, origin)),
+        _ => fresh(s, origin),
+    };
+    let timeout_at = if pick(8) == 0 { s.now } else { s.now + 1 + pick(60) as Time };
+    let (external, timer, target) = match pick(8) {
+        0 | 1 => (true, false, false),
+        2 | 3 => (false, true, false),
+        4 => (false, false, true),
+        5 => (false, true, true),
+        _ => (false, false, false),
+    };
+    Create { id, timeout_at, data: None, external, target, timer }
+}
+
+/// The request [`Explore::informed`] sends: an eligible operation, picked
+/// uniformly, with operands from the state.
+fn informed_request(s: &Server, inbox: &mut Vec<Dispatch>, pick: &mut dyn FnMut(usize) -> usize) -> Request {
+    let mut promises: Vec<(&Id, &Promise)> = s.promises.iter().collect();
+    promises.sort_by(|a, b| a.0.cmp(b.0));
+    let mut tasks: Vec<(&Id, &Task)> = s.tasks.iter().collect();
+    tasks.sort_by(|a, b| a.0.cmp(b.0));
+    let all: Vec<Id> = promises.iter().map(|(id, _)| (*id).clone()).collect();
+    let pending: Vec<Id> = promises.iter().filter(|(_, p)| p.live()).map(|(id, _)| (*id).clone()).collect();
+    let in_state = |st: TState| -> Vec<(Id, u32, Option<String>)> {
+        tasks.iter().filter(|(_, t)| t.state == st).map(|(id, t)| ((*id).clone(), t.version, t.pid.clone())).collect()
+    };
+    let acquired = in_state(TState::Acquired);
+    let waiting: Vec<_> = in_state(TState::Pending).into_iter().chain(in_state(TState::Suspended)).collect();
+    let task_ids: Vec<Id> = tasks.iter().map(|(id, _)| (*id).clone()).collect();
+    // Promises in the same origin as `id`, other than it.
+    let siblings = |id: &Id| -> Vec<Id> { all.iter().filter(|p| *p != id && origin(p) == origin(id)).cloned().collect() };
+    let origins: Vec<&str> = {
+        let mut o: Vec<&str> = IDS.iter().map(|id| origin(id)).collect();
+        o.dedup();
+        o
+    };
+
+    let mut ops = vec!["clock", "create", "task.create"];
+    if !all.is_empty() {
+        ops.extend(["get", "settle", "listener"]);
+    }
+    if !task_ids.is_empty() {
+        ops.extend(["get task", "callback"]);
+    }
+    if !waiting.is_empty() || !inbox.is_empty() {
+        ops.push("acquire");
+    }
+    if !acquired.is_empty() {
+        ops.extend(["release", "fulfill", "heartbeat", "suspend", "fence"]);
+    }
+    match ops[pick(ops.len())] {
+        "clock" => {
+            // To a deadline or a lease end, where something falls due, or a
+            // little ahead.
+            let mut due: Vec<Time> = promises.iter().filter(|(_, p)| p.live()).map(|(_, p)| p.timeout_at).collect();
+            due.extend(tasks.iter().filter(|(_, t)| t.state == TState::Acquired).map(|(_, t)| t.lease_expires()));
+            due.retain(|&t| t >= s.now);
+            match one_of(pick, &due) {
+                Some(t) if pick(2) == 0 => Request::AdvanceClock(t),
+                _ => Request::AdvanceClock(s.now + pick(30) as Time),
+            }
+        }
+        "create" => {
+            let o = origins[pick(origins.len())];
+            Request::CreatePromise(creation(s, o, &all, pick))
+        }
+        "task.create" => {
+            let o = origins[pick(origins.len())];
+            let id = if pick(3) == 0 { one_of(pick, &all).unwrap_or_else(|| fresh(s, o)) } else { fresh(s, o) };
+            Request::CreateTask { id, timeout_at: s.now + 1 + pick(60) as Time, data: None, target: pick(8) != 0 }
+        }
+        "get" => Request::GetPromise(one_of(pick, &all).expect("eligible")),
+        "get task" => Request::GetTask(one_of(pick, &task_ids).expect("eligible")),
+        "settle" => {
+            // A pending promise mostly; a settled one must answer the same.
+            let id = if pick(4) != 0 { one_of(pick, &pending) } else { None }.unwrap_or_else(|| one_of(pick, &all).expect("eligible"));
+            Request::SettlePromise(Settle { id, state: settle_state(pick), data: Some("v".into()) })
+        }
+        "listener" => {
+            // Now and then a bad address, or a promise that doesn't exist.
+            let address = if pick(8) == 0 { "not an address".into() } else { "http://w1".into() };
+            let awaited = if pick(8) == 0 { fresh(s, origins[pick(origins.len())]) } else { one_of(pick, &all).expect("eligible") };
+            Request::RegisterListener { awaited, address }
+        }
+        "callback" => {
+            // A task awaits a promise in its origin; one a task could await
+            // (external, pending) when there is one.
+            let awaiter = one_of(pick, &task_ids).expect("eligible");
+            let sib = siblings(&awaiter);
+            let live_external: Vec<Id> =
+                sib.iter().filter(|p| s.promises.get(p).is_some_and(|q| q.live() && q.external())).cloned().collect();
+            let awaited = if pick(4) != 0 { one_of(pick, &live_external) } else { None }
+                .or_else(|| one_of(pick, &sib))
+                .unwrap_or_else(|| fresh(s, origin(&awaiter)));
+            Request::RegisterCallback { awaited, awaiter }
+        }
+        "acquire" => {
+            // What a worker does: take an offer it was sent, at the version
+            // offered. An offer still current is the worker doing its job; one
+            // gone stale the server must refuse.
+            let current = |d: &Dispatch| match d {
+                Dispatch::Execute { id, version } => waiting.iter().any(|(w, v, _)| w == id && v == version),
+            };
+            let fresh_offer = inbox.iter().position(current);
+            let offer = match fresh_offer {
+                Some(i) if pick(3) != 0 => Some(inbox.remove(i)),
+                _ if !inbox.is_empty() && (waiting.is_empty() || pick(2) == 0) => Some(inbox.remove(pick(inbox.len()))),
+                _ => None,
+            };
+            let (id, version) = match offer {
+                Some(Dispatch::Execute { id, version }) => (id, version),
+                None => {
+                    let (id, v, _) = one_of(pick, &waiting).expect("eligible");
+                    (id, skew(pick, v))
+                }
+            };
+            Request::AcquireTask { id, version, pid: "w1".into(), ttl: 1 + pick(20) as Time }
+        }
+        op => {
+            let (id, v, pid) = one_of(pick, &acquired).expect("eligible");
+            let version = skew(pick, v);
+            match op {
+                "release" => Request::ReleaseTask { id, version },
+                "fulfill" => Request::FulfillTask { id, version, state: settle_state(pick), data: None },
+                "heartbeat" => {
+                    let pid = if pick(5) == 0 { "intruder".into() } else { pid.unwrap_or_default() };
+                    Request::HeartbeatTask { id, version, pid }
+                }
+                "suspend" => {
+                    // One or two promises in its origin, pending or settled
+                    // (which the server answers with a redirect), now and then
+                    // the same one twice.
+                    let sib = siblings(&id);
+                    let first = one_of(pick, &sib).unwrap_or_else(|| fresh(s, origin(&id)));
+                    let mut awaited = vec![first.clone()];
+                    match pick(4) {
+                        0 => awaited.push(first),
+                        1 => awaited.extend(one_of(pick, &sib).filter(|p| *p != first)),
+                        _ => {}
+                    }
+                    Request::SuspendTask { id, version, awaited }
+                }
+                _ => {
+                    // A child in its origin, a detached one elsewhere, or a
+                    // settle of a sibling.
+                    let sib: Vec<Id> = siblings(&id).into_iter().filter(|p| pending.contains(p)).collect();
+                    let action = match one_of(pick, &sib) {
+                        Some(p) if pick(3) == 0 => Fenced::Settle(Settle { id: p, state: settle_state(pick), data: Some("v".into()) }),
+                        _ => {
+                            let o = if pick(5) == 0 { origins[pick(origins.len())] } else { origin(&id) };
+                            let mut c = creation(s, o, &siblings(&id), pick);
+                            c.target = false;
+                            Fenced::Create(c)
+                        }
+                    };
+                    Request::FenceTask { id, version, action }
+                }
+            }
+        }
     }
 }

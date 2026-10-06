@@ -13,7 +13,7 @@ use resonate::*;
 
 /// A run of the spec, driven at random and recorded.
 fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> {
-    drive(&Resonate, Server::default(), &Drive { requests, concurrency: 3, guided: seed.is_multiple_of(2) }, Choices::random(seed)).trace
+    drive(&Resonate, Server::default(), &Drive { requests, concurrency: 3, guided: seed.is_multiple_of(2), informed: seed % 3 == 0 }, Choices::random(seed)).trace
 }
 
 #[test]

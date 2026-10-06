@@ -4,7 +4,7 @@
 //! each accepted trace.
 //!
 //! ```text
-//! cargo run --release -p resonate --example fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever]
+//! cargo run --release -p resonate --example fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever|stale-acquire]
 //! CROSS=1 ...   # also check every trace with the partitioned and depth-first checkers
 //! ```
 
@@ -24,11 +24,12 @@ fn main() {
     let bug = flag("--bug").map_or(Bug::None, |b| Bug::parse(&b));
     let cross = bug == Bug::None && std::env::var("CROSS").is_ok();
     let server = Server { bug };
-    let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();
+    const MODES: [(&str, bool, bool); 4] = [("random", false, false), ("guided", true, false), ("informed", false, true), ("both", true, true)];
+    let mut table: BTreeMap<&str, [usize; 4]> = MARKS.iter().map(|m| (*m, [0; 4])).collect();
     println!("{runs} runs of {requests} requests each, server bug: {bug:?}\n");
     println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>13}", "mode", "ok", "ko", "unknown", "marks", "first ko (run)");
-    for (k, guided) in [false, true].into_iter().enumerate() {
-        let cfg = Drive { requests, concurrency: 3, guided };
+    for (k, (mode, guided, informed)) in MODES.into_iter().enumerate() {
+        let cfg = Drive { requests, concurrency: 3, guided, informed };
         let (mut ok, mut ko, mut unknown, mut first_ko) = (0, 0, 0, None);
         let mut example = None;
         // Across runs: which suggestions were taken least, so rare ones get their turn.
@@ -59,15 +60,14 @@ fn main() {
             }
         }
         let covered = table.values().filter(|n| n[k] > 0).count();
-        let mode = if guided { "guided" } else { "random" };
         let first = first_ko.map_or("-".to_string(), |s| s.to_string());
         println!("{mode:<8} {ok:>4} {ko:>4} {unknown:>8} {:>9} {first:>13}", format!("{covered}/{}", MARKS.len()));
         if let Some(v) = example {
             println!("\nfirst KO ({mode}), up to the event no execution explains:\n{v}");
         }
     }
-    println!("\n{:<45} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");
-    for (m, [a, b]) in &table {
-        println!("{m:<45} {a:>7} {b:>7}");
+    println!("\n{:<45} {:>7} {:>7} {:>8} {:>7}", "mark (runs that reached it)", "random", "guided", "informed", "both");
+    for (m, [a, b, c, d]) in &table {
+        println!("{m:<45} {a:>7} {b:>7} {c:>8} {d:>7}");
     }
 }
