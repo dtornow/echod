@@ -1484,7 +1484,9 @@ impl<S: Engine> Checker<S> {
     /// What firing `item` in node `n` may affect. A clock move affects the
     /// work that falls due by the time it moves to, and whatever could happen
     /// before it and would come out differently after it (a call in flight
-    /// that reads the clock). Anything else affects its keys.
+    /// that reads the clock), now or once other work on its keys has happened
+    /// (an acquire that fails now, but leases the task once a release in
+    /// flight takes effect). Anything else affects its keys.
     fn footprint(&self, item: &P<S>, n: &Node<S>) -> Touches<S::Key> {
         let Pending::InFlight { op, .. } = item else { return self.reach(item, n) };
         if !self.engine.moves_clock(op) {
@@ -1492,8 +1494,8 @@ impl<S: Engine> Checker<S> {
         }
         let model = self.engine.model();
         let mut keys = Vec::new();
-        let others = n.pending.iter().filter(|i| *i != item && !self.is_clock(i) && self.can_fire(i, &n.state));
-        for other in others.filter(|i| !self.commutes_with_clock(i, op, &n.state)) {
+        let others: Vec<&P<S>> = n.pending.iter().filter(|i| *i != item && !self.is_clock(i) && self.can_fire(i, &n.state)).collect();
+        for other in others.iter().filter(|i| self.clock_sensitive(i, op, &n.state, &others, CLOCK_DEPTH)) {
             match self.keys(other) {
                 Touches::Everything => return Touches::Everything,
                 Touches::Only(ks) => keys.extend(ks),
@@ -1513,6 +1515,36 @@ impl<S: Engine> Checker<S> {
             }
         }
         Touches::Only(keys)
+    }
+
+    /// Whether `item` may come out differently before and after the clock
+    /// move `clock`: from `state`, or from a state other work in `others` on
+    /// the same keys leads to, up to `depth` steps of it. Past `depth`, it is
+    /// assumed to: that only adds to what the search tries.
+    fn clock_sensitive(&self, item: &P<S>, clock: &Ex<S>, state: &St<S>, others: &[&P<S>], depth: usize) -> bool {
+        if !self.commutes_with_clock(item, clock, state) {
+            return true;
+        }
+        let model = self.engine.model();
+        let keys = self.keys(item);
+        for (k, other) in others.iter().enumerate() {
+            if *other == item || !intersects(&self.keys(other), &keys) {
+                continue;
+            }
+            if depth == 0 {
+                return true;
+            }
+            let nexts: Vec<St<S>> = match other {
+                Pending::InFlight { op, .. } => model.external(op, state).into_iter().map(|o| o.next).collect(),
+                Pending::Step { step, .. } if self.can_fire(other, state) => model.internal(step, state).into_iter().map(|o| o.next).collect(),
+                _ => Vec::new(),
+            };
+            let rest: Vec<&P<S>> = others.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, o)| *o).collect();
+            if nexts.iter().any(|next| self.clock_sensitive(item, clock, next, &rest, depth - 1)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether firing `item` and then moving the clock with `clock` comes out as
@@ -1778,6 +1810,10 @@ impl<S: Engine> Checker<S> {
         }
     }
 }
+
+/// How many steps of other work on its keys [`Checker::clock_sensitive`]
+/// follows before assuming a call or step may not commute with a clock move.
+const CLOCK_DEPTH: usize = 3;
 
 /// The response each call in `trace` gets; empty if a call id is invoked twice.
 fn answers<X, R: Clone, D>(trace: &[Event<X, R, D>]) -> HashMap<CallId, R> {
