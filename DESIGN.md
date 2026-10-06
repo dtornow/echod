@@ -397,6 +397,16 @@ an equal one may already be in the set; the suggestion is checked, so it is
 not trusted. It stops at the first event no configuration can show, so a
 long trace costs only the events up to the rejection.
 
+Measured with the Resonate fuzz example (`--prove 100000`: at most 100,000
+configurations per event). At 30 requests it proves all 487 KOs of the three
+planted bugs, in milliseconds each (rejections at events 19 to 79). At 1,000
+requests it proved 1,245 of 1,248 KOs it got to (all of "fence ignores the
+version", and the random and guided runs of the other two): rejections as late
+as event 1,960, most in a few milliseconds. Informed runs cost the most: they
+keep more work in flight at once, 286 of them took 24 minutes, and 3 KOs
+outgrew the limit (UNKNOWN, not proved). The run hit a two-hour budget before
+the informed and "both" runs of the other two bugs.
+
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
 (`spec_external`, `spec_internal`, `spec_now`) and the method's `ensures` ties
 the two: `external` returns the vector whose sequence `spec_external` says. The
