@@ -77,6 +77,13 @@ structure InternalOutcome (S I D : Type) where
   work : List (Sched I)
   send : List D
 
+/-- At least one. Nondeterminism is a list of alternatives; this is a list
+    that can't be empty, so a request can't be refused. -/
+abbrev Some (α : Type) := { xs : List α // xs ≠ [] }
+
+/-- Exactly one. -/
+def Some.one {α : Type} (x : α) : Some α := ⟨[x], by simp⟩
+
 /-- The system: requests from clients, work it does on its own, and its clock. -/
 structure Model where
   State    : Type
@@ -84,8 +91,9 @@ structure Model where
   Response : Type
   Internal : Type
   Dispatch : Type
-  /-- A request takes effect: every allowed outcome. -/
-  external : External → State → List (ExternalOutcome State Response Internal Dispatch)
+  /-- A request takes effect: every allowed outcome. At least one: every
+      request is accepted in every state (input-enabled). -/
+  external : External → State → Some (ExternalOutcome State Response Internal Dispatch)
   /-- Internal work runs: every possible outcome. Empty: it can't run now. -/
   internal : Internal → State → List (InternalOutcome State Internal Dispatch)
   /-- The model's clock in a state. -/
@@ -164,7 +172,7 @@ inductive Step (m : Model) : Config m → Label m → Config m → Prop where
   /-- A call in flight takes effect with one of its allowed outcomes. The work
       it starts is on the clock of the state it leads to. Silent. -/
   | effect {c : Config m} {call req o} :
-      c.calls call = some (.inFlight req) → o ∈ m.external req c.state → ¬ c.overdue →
+      c.calls call = some (.inFlight req) → o ∈ (m.external req c.state).val → ¬ c.overdue →
       Step m c .silent
         { c with state := o.next
                  calls := update c.calls call (some (.done o.resp))
@@ -276,7 +284,7 @@ def Config.move (c : Config m) : Move m → Option (Label m × Config m)
   | .silent (.effect call j) =>
       match c.calls call with
       | some (.inFlight req) =>
-          match (m.external req c.state)[j]? with
+          match (m.external req c.state).val[j]? with
           | some o =>
               if !c.isOverdue then
                 some (.silent, { c with state := o.next
@@ -465,7 +473,7 @@ abbrev counter : Model where
   Response := Nat
   Internal := Empty
   Dispatch := Empty
-  external := fun _ n => [⟨n + 1, n + 1, [], []⟩]
+  external := fun _ n => .one ⟨n + 1, n + 1, [], []⟩
   internal := fun e _ => nomatch e
   now      := fun _ => 0
 
@@ -477,6 +485,6 @@ example : Valid counter (0 : Nat) [.invoke 7 (), .ret 7 1] := by
   refine ⟨[(.obs (.invoke 7 ()), _), (.silent, _), (.obs (.ret 7 1), _)],
     ⟨.invoke ?_ ?_, .effect (call := 7) (req := ()) (o := incr) ?_ ?_ ?_,
      .ret ?_ ?_, trivial⟩, rfl⟩
-  all_goals simp [initial, update, Config.overdue, counter]
+  all_goals simp [initial, update, Config.overdue, counter, Some.one]
 
 end Accordant

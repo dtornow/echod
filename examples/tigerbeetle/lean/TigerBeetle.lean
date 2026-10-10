@@ -952,7 +952,7 @@ def model (lim : Limits) : Accordant.Model where
   Response := Response
   Internal := Internal
   Dispatch := Empty
-  external := fun req s => [s.external lim req]
+  external := fun req s => .one (s.external lim req)
   internal := fun w s => [s.internal lim w]
   now      := (·.now)
 

@@ -827,7 +827,8 @@ theorem Server.Inv.internal {s : Server} (h : s.Inv) (lim : Limits) (w : Interna
 
 theorem Server.Inv.external_mem {lim : Limits} {s : Server} {r : Request}
     {o : Accordant.ExternalOutcome Server Response Internal Empty}
-    (h : s.Inv) (ho : o ∈ (model lim).external r s) : Server.Inv o.next := by
+    (h : s.Inv) (ho : o ∈ ((model lim).external r s).val) : Server.Inv o.next := by
+  change o ∈ [s.external lim r] at ho
   have ho := List.mem_singleton.mp ho; subst ho; exact h.external lim r
 
 theorem Server.Inv.internal_mem {lim : Limits} {s : Server} {r : Internal}
