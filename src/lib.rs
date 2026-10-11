@@ -87,7 +87,7 @@ pub enum Event<X, R, D> {
 /// when the starting step is taken. Work that must happen and hasn't by its
 /// deadline is a violation. When the clock jumps past several deadlines,
 /// the work runs right after the jump, earliest deadline first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Sched<T> {
     /// Runs later: any time from now on, when an observation needs it, or never.
@@ -311,6 +311,39 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
     pub fn timer(mut self, at: Time, step: M::Internal) -> Self {
         self.work.push(Sched::Timer(at, step));
         self
+    }
+}
+
+impl<T> Sched<T> {
+    /// The op.
+    pub fn req(&self) -> &T {
+        match self {
+            Sched::Later(r) | Sched::Timer(_, r) => r,
+        }
+    }
+
+    /// The time a timer is due; a `Later` has none.
+    pub fn due(&self) -> Option<Time> {
+        match self {
+            Sched::Later(_) => None,
+            Sched::Timer(t, _) => Some(*t),
+        }
+    }
+
+    /// Whether the op may run at `now`.
+    pub fn ready(&self, now: Time) -> bool {
+        match self {
+            Sched::Later(_) => true,
+            Sched::Timer(t, _) => *t <= now,
+        }
+    }
+
+    /// Started at `now`: a timer in the past fires now.
+    pub fn at(self, now: Time) -> Self {
+        match self {
+            Sched::Later(r) => Sched::Later(r),
+            Sched::Timer(t, r) => Sched::Timer(t.max(now), r),
+        }
     }
 }
 

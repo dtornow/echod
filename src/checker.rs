@@ -3,7 +3,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use crate::certificate::{self, Certificate, Silent};
-use crate::semantics::Work;
 use crate::hashed_set::HashedSet;
 use crate::intern::{Interned, Interner};
 use crate::{CallId, Data, Engine, Event, Footprint, Grouped, Keyed, Touches, Model, Partitioned, Plain, Sched, Time};
@@ -14,24 +13,24 @@ type Re<S> = <<S as Engine>::M as Model>::Response;
 type In<S> = <<S as Engine>::M as Model>::Internal;
 type Ms<S> = <<S as Engine>::M as Model>::Dispatch;
 
-/// Work a node still carries. Sorted, so a node's identity is canonical.
+/// What a node still carries. Sorted, so a node's identity is canonical.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Pending<O, R, T, G> {
-    /// Invoked, not yet linearized. It may take effect at any point until its
-    /// `Return`, or never if no `Return` comes. `early`: answers it could
-    /// already have gotten by linearizing at an earlier point where it would
-    /// not have changed the state. Reads accumulate here instead of branching
-    /// the profile.
-    InFlight { call: CallId, op: O, early: BTreeSet<R> },
-    /// Linearized; the spec predicted `resp`, which the `Return` must match.
-    Responded { call: CallId, resp: R },
+    /// An external op invoked, not yet settled. It may settle at any point
+    /// until its `Return`, or never if no `Return` comes. `early`: answers it
+    /// could already have gotten by settling at an earlier point where it
+    /// would not have changed the state. Reads accumulate here instead of
+    /// branching the profile.
+    External { call: CallId, req: O, early: BTreeSet<R> },
+    /// Settled; the spec predicted `resp`, which the `Return` must match.
+    Settled { call: CallId, resp: R },
     /// A message the server sent and the client has not received yet, `count`
     /// times over. It may be received later, or never.
     Sent { msg: G, count: u32 },
-    /// Background work, due from `after` on the clock, `count` times
-    /// over: started twice, it runs twice. `must`: owed by `by`; with no `by`,
-    /// it runs when an observation needs it, or never.
-    Step { step: T, after: Time, by: Option<Time>, must: bool, count: u32 },
+    /// An internal op scheduled, `count` times over: started twice, it runs
+    /// twice. A timer is owed at its time; a `Later` runs when an observation
+    /// needs it, or never.
+    Internal { sched: Sched<T>, count: u32 },
 }
 
 type P<S> = Pending<Ex<S>, Re<S>, In<S>, Ms<S>>;
@@ -43,9 +42,9 @@ type P<S> = Pending<Ex<S>, Re<S>, In<S>, Ms<S>>;
 enum Record<O, R, T, G> {
     Obs(Event<O, R, G>),
     Effect { call: CallId, j: usize },
-    /// A read-only call could take effect here with outcome `j`, answering `res`.
+    /// A read-only call could settle here with outcome `j`, answering `res`.
     Early { call: CallId, j: usize, res: R },
-    Run { work: Work<T>, j: usize },
+    Run { sched: Sched<T>, j: usize },
 }
 
 struct Link<O, R, T, G> {
@@ -737,7 +736,7 @@ impl<S: Engine> Checker<S> {
             .iter()
             .filter(|item| self.can_fire(item))
             .filter(|item| match first {
-                Some(d) => matches!(item, Pending::Step { must: true, by: Some(by), .. } if *by == d) && self.is_overdue(item, &n.state),
+                Some(d) => item_due(item) == Some(d) && self.is_overdue(item, &n.state),
                 None => intersects(&relevant, &self.footprint(item, n)),
             })
             .collect();
@@ -745,15 +744,15 @@ impl<S: Engine> Checker<S> {
         // tries them: the call made first most often took effect first.
         // Internal work after them, earliest deadline first.
         items.sort_by_key(|item| match item {
-            Pending::InFlight { call, .. } => (0, *call, 0),
-            Pending::Step { by, .. } => (1, 0, by.unwrap_or(Time::MAX)),
+            Pending::External { call, .. } => (0, *call, 0),
+            Pending::Internal { sched, .. } => (1, 0, sched.due().unwrap_or(Time::MAX)),
             _ => (2, 0, 0),
         });
         for item in items {
             // A call that never returns and would change nothing need never
             // take effect: applying it only doubles the candidates.
-            if let Pending::InFlight { call, op, .. } = item {
-                if self.orphans.contains(call) && read_only::<S>(&self.engine.model().external(op, &n.state, self.now), &n.state) {
+            if let Pending::External { call, req, .. } = item {
+                if self.orphans.contains(call) && read_only::<S>(&self.engine.model().external(req, &n.state, self.now), &n.state) {
                     continue;
                 }
             }
@@ -771,17 +770,17 @@ impl<S: Engine> Checker<S> {
     /// and remembering every answer it could have had would make the same
     /// candidate look different on every path.
     fn fire_exact(&self, m: &Node<S>, item: &P<S>) -> Vec<Node<S>> {
-        let Pending::InFlight { call, op, .. } = item else { return self.fire(m, item) };
+        let Pending::External { call, req, .. } = item else { return self.fire(m, item) };
         self.engine
             .model()
-            .external(op, &m.state, self.now)
+            .external(req, &m.state, self.now)
             .into_iter()
             .enumerate()
             .filter(|(_, o)| self.answers.get(call).is_none_or(|r| &o.resp == r))
             .map(|(j, o)| {
                 let mut p = m.pending.clone();
                 p.remove(item);
-                p.insert(Pending::Responded { call: *call, resp: o.resp });
+                p.insert(Pending::Settled { call: *call, resp: o.resp });
                 self.spawn(&mut p, o.work);
                 for msg in o.send {
                     add_sent(&mut p, msg);
@@ -895,8 +894,8 @@ impl<S: Engine> Checker<S> {
                 Record::Effect { call, j } => Silent::Effect { call, j },
                 Record::Early { call, j, .. } if chosen.contains(&k) => Silent::Effect { call, j },
                 Record::Early { .. } => continue,
-                Record::Run { work, j } => {
-                    Silent::Run { i: c.work.iter().position(|w| *w == work).ok_or(format!("{work:?} is not pending"))?, j }
+                Record::Run { sched, j } => {
+                    Silent::Run { i: c.internals.iter().position(|w| *w == sched).ok_or(format!("{sched:?} is not pending"))?, j }
                 }
             };
             c.silent(s).map_err(|()| format!("before event {}, the step can't be taken: {s:?}", cert.len()))?;
@@ -923,14 +922,14 @@ impl<S: Engine> Checker<S> {
         let mut explored = 0;
         for n in nodes {
             let mut m = n.clone();
-            m.pending.insert(Pending::InFlight { call: probe, op: op.clone(), early: BTreeSet::new() });
+            m.pending.insert(Pending::External { call: probe, req: op.clone(), early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)));
             let relevant = if self.cfg.footprints { self.relevant(&m, &owed, Touches::Only(Vec::new())) } else { Touches::Everything };
             let _ = self.search(m, &relevant, &mut explored, |x| {
                 for i in &x.pending {
                     let found: Vec<&Re<S>> = match i {
-                        Pending::Responded { call, resp } if *call == probe => vec![resp],
-                        Pending::InFlight { call, early, .. } if *call == probe => early.iter().collect(),
+                        Pending::Settled { call, resp } if *call == probe => vec![resp],
+                        Pending::External { call, early, .. } if *call == probe => early.iter().collect(),
                         _ => continue,
                     };
                     for r in found {
@@ -939,7 +938,7 @@ impl<S: Engine> Checker<S> {
                         }
                     }
                 }
-                Ok(x.pending.iter().any(|i| matches!(i, Pending::InFlight { call, .. } if *call == probe)))
+                Ok(x.pending.iter().any(|i| matches!(i, Pending::External { call, .. } if *call == probe)))
             });
         }
         out.sort();
@@ -1066,7 +1065,7 @@ impl<S: Engine> Checker<S> {
         let mut groups: Vec<BTreeSet<S::Part>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
         for n in nodes {
             for item in &n.pending {
-                if matches!(item, Pending::Responded { .. }) {
+                if matches!(item, Pending::Settled { .. }) {
                     return; // answered by the spec, not yet returned: its footprint is gone
                 }
                 let Touches::Only(ks) = self.keys(item) else { return };
@@ -1206,7 +1205,7 @@ impl<S: Engine> Checker<S> {
         self.factors.iter().position(|f| {
             f.nodes.iter().any(|n| {
                 n.pending.iter().any(|i| {
-                    matches!(i, Pending::InFlight { call: c, .. } | Pending::Responded { call: c, .. } if *c == call)
+                    matches!(i, Pending::External { call: c, .. } | Pending::Settled { call: c, .. } if *c == call)
                 })
             })
         })
@@ -1306,14 +1305,14 @@ impl<S: Engine> Checker<S> {
         let mut keys = Vec::new();
         for item in &n.pending {
             let differs = match item {
-                Pending::Step { must: true, by: Some(by), .. } if *by <= at => true,
-                Pending::InFlight { op, .. } => {
-                    let (a, b) = (model.external(op, &n.state, self.now), model.external(op, &n.state, at));
+                Pending::Internal { sched: Sched::Timer(t, _), .. } if *t <= at => true,
+                Pending::External { req, .. } => {
+                    let (a, b) = (model.external(req, &n.state, self.now), model.external(req, &n.state, at));
                     a.len() != b.len()
                         || a.iter().zip(&b).any(|(x, y)| !x.work.is_empty() || x.next != y.next || x.resp != y.resp || x.send != y.send)
                 }
-                Pending::Step { step, .. } if self.can_fire(item) => {
-                    let (a, b) = (model.internal(step, &n.state, self.now), model.internal(step, &n.state, at));
+                Pending::Internal { sched, .. } if self.can_fire(item) => {
+                    let (a, b) = (model.internal(sched.req(), &n.state, self.now), model.internal(sched.req(), &n.state, at));
                     a.len() != b.len() || a.iter().zip(&b).any(|(x, y)| !x.work.is_empty() || x.next != y.next || x.send != y.send)
                 }
                 _ => false,
@@ -1361,7 +1360,7 @@ impl<S: Engine> Checker<S> {
                 }
                 match first {
                     Some(d) => {
-                        let at_d = matches!(item, Pending::Step { must: true, by: Some(by), .. } if *by == d);
+                        let at_d = item_due(item) == Some(d);
                         if !(at_d && self.is_overdue(item, &m.state)) {
                             continue;
                         }
@@ -1389,12 +1388,12 @@ impl<S: Engine> Checker<S> {
         let reads: Vec<P<S>> = m
             .pending
             .iter()
-            .filter(|i| matches!(i, Pending::InFlight { .. }) && intersects(relevant, &self.keys(i)))
+            .filter(|i| matches!(i, Pending::External { .. }) && intersects(relevant, &self.keys(i)))
             .cloned()
             .collect();
         for item in reads {
-            let Pending::InFlight { op, .. } = &item else { continue };
-            let outs = self.engine.model().external(op, &m.state, self.now);
+            let Pending::External { req, .. } = &item else { continue };
+            let outs = self.engine.model().external(req, &m.state, self.now);
             if read_only::<S>(&outs, &m.state) {
                 if let Some(next) = self.fire(&m, &item).pop() {
                     m = next;
@@ -1408,9 +1407,7 @@ impl<S: Engine> Checker<S> {
     /// that can fire: it must fire before anything else happens.
     fn is_overdue(&self, item: &P<S>, state: &St<S>) -> bool {
         match item {
-            Pending::Step { step, must: true, by: Some(by), .. } => {
-                *by <= self.now && self.enabled(item, step, state)
-            }
+            Pending::Internal { sched: sched @ Sched::Timer(t, _), .. } => *t <= self.now && self.enabled(item, sched.req(), state),
             _ => false,
         }
     }
@@ -1423,7 +1420,7 @@ impl<S: Engine> Checker<S> {
             .pending
             .iter()
             .filter_map(|i| match i {
-                Pending::Step { must: true, by: Some(by), after, .. } if *by <= now && *after <= now => Some((*by, i)),
+                Pending::Internal { sched: Sched::Timer(t, _), .. } if *t <= now => Some((*t, i)),
                 _ => None,
             })
             .collect();
@@ -1448,7 +1445,7 @@ impl<S: Engine> Checker<S> {
             _ => None,
         };
         let call_owed = m.pending.iter().any(|item| match (item, returning) {
-            (Pending::InFlight { call, early, .. }, Some((c, o))) if *call == c => {
+            (Pending::External { call, early, .. }, Some((c, o))) if *call == c => {
                 !early.iter().any(|r| r == o)
             }
             _ => false,
@@ -1466,11 +1463,11 @@ impl<S: Engine> Checker<S> {
         m.pending
             .iter()
             .filter(|item| match item {
-                Pending::InFlight { call, early, .. } => match returning {
+                Pending::External { call, early, .. } => match returning {
                     Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| r == o)),
                     _ => false,
                 },
-                Pending::Step { must: true, .. } => self.is_overdue(item, &m.state),
+                Pending::Internal { .. } => self.is_overdue(item, &m.state),
                 _ => false,
             })
             .collect()
@@ -1519,9 +1516,9 @@ impl<S: Engine> Checker<S> {
     /// whose time has come. Cheap, so it filters before footprints are built.
     fn can_fire(&self, item: &P<S>) -> bool {
         match item {
-            Pending::InFlight { .. } => true,
-            Pending::Step { after, .. } => *after <= self.now,
-            Pending::Responded { .. } | Pending::Sent { .. } => false,
+            Pending::External { .. } => true,
+            Pending::Internal { sched, .. } => sched.ready(self.now),
+            Pending::Settled { .. } | Pending::Sent { .. } => false,
         }
     }
 
@@ -1544,8 +1541,8 @@ impl<S: Engine> Checker<S> {
         // no more is started.
         type Led<S> = (St<S>, Vec<Sched<In<S>>>, Vec<Ms<S>>, usize);
         let mut todo: Vec<Led<S>> = match item {
-            Pending::InFlight { op, .. } => model.external(op, &n.state, self.now).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
-            Pending::Step { step, .. } => model.internal(step, &n.state, self.now).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
+            Pending::External { req, .. } => model.external(req, &n.state, self.now).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
+            Pending::Internal { sched, .. } => model.internal(sched.req(), &n.state, self.now).into_iter().map(|o| (o.next, o.work, o.send, 0)).collect(),
             _ => return Touches::Only(keys),
         };
         while let Some((state, spawn, send, depth)) = todo.pop() {
@@ -1578,9 +1575,9 @@ impl<S: Engine> Checker<S> {
 
     fn keys(&self, item: &P<S>) -> Touches<S::Key> {
         match item {
-            Pending::InFlight { op, .. } => self.engine.external_keys(op),
-            Pending::Step { step, .. } => self.engine.internal_keys(step),
-            Pending::Responded { .. } => Touches::Only(Vec::new()),
+            Pending::External { req, .. } => self.engine.external_keys(req),
+            Pending::Internal { sched, .. } => self.engine.internal_keys(sched.req()),
+            Pending::Settled { .. } => Touches::Only(Vec::new()),
             Pending::Sent { msg, .. } => self.engine.dispatch_keys(msg),
         }
     }
@@ -1593,15 +1590,15 @@ impl<S: Engine> Checker<S> {
             p
         };
         match item {
-            Pending::InFlight { call, op, early } => {
-                let outs = self.engine.model().external(op, &m.state, self.now);
+            Pending::External { call, req, early } => {
+                let outs = self.engine.model().external(req, &m.state, self.now);
                 if !read_only::<S>(&outs, &m.state) {
                     return outs
                         .into_iter()
                         .enumerate()
                         .map(|(j, o)| {
                             let mut p = without();
-                            p.insert(Pending::Responded { call: *call, resp: o.resp });
+                            p.insert(Pending::Settled { call: *call, resp: o.resp });
                             self.spawn(&mut p, o.work);
                             for msg in o.send {
                                 add_sent(&mut p, msg);
@@ -1622,29 +1619,26 @@ impl<S: Engine> Checker<S> {
                     }
                 }
                 let mut p = without();
-                p.insert(Pending::InFlight { call: *call, op: op.clone(), early: seen });
+                p.insert(Pending::External { call: *call, req: req.clone(), early: seen });
                 vec![Node { state: m.state.clone(), pending: p, trail }]
             }
-            Pending::Step { step, after, by, must, count } if self.can_fire(item) => {
+            Pending::Internal { sched, count } if self.can_fire(item) => {
                 self.engine
                     .model()
-                    .internal(step, &m.state, self.now)
+                    .internal(sched.req(), &m.state, self.now)
                     .into_iter()
                     .enumerate()
                     .map(|(j, s)| {
                         let mut p = without();
                         if *count > 1 {
                             // One copy runs; the others stay.
-                            p.insert(Pending::Step { step: step.clone(), after: *after, by: *by, must: *must, count: count - 1 });
+                            p.insert(Pending::Internal { sched: sched.clone(), count: count - 1 });
                         }
                         self.spawn(&mut p, s.work);
                         for msg in s.send {
                             add_sent(&mut p, msg);
                         }
-                        let trail = self.record(&m.trail, || Record::Run {
-                            work: Work { req: step.clone(), after: *after, due: *by, must: *must },
-                            j,
-                        });
+                        let trail = self.record(&m.trail, || Record::Run { sched: sched.clone(), j });
                         Node { state: self.states.intern(s.next), pending: p, trail }
                     })
                     .collect()
@@ -1653,24 +1647,20 @@ impl<S: Engine> Checker<S> {
         }
     }
 
-    /// Starts work, on the clock as it reads now.
+    /// Starts internal ops, on the clock as it reads now.
     fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
-        let now = self.now;
         for sched in steps {
-            let (step, after, by) = match sched {
-                Sched::Later(step) => (step, now, None),
-                Sched::Timer(at, step) => (step, at.max(now), Some(at.max(now))),
-            };
+            let sched = sched.at(self.now);
             if let Some(Some(parts)) = &self.scope {
-                let escaped = match self.engine.internal_keys(&step) {
+                let escaped = match self.engine.internal_keys(sched.req()) {
                     Touches::Everything => true,
                     Touches::Only(ks) => ks.iter().any(|k| self.engine.part(k).is_none_or(|p| !parts.contains(&p))),
                 };
                 if escaped {
-                    self.escaped.borrow_mut().get_or_insert_with(|| format!("{step:?}"));
+                    self.escaped.borrow_mut().get_or_insert_with(|| format!("{:?}", sched.req()));
                 }
             }
-            add_step(pending, step, after, by);
+            add_internal(pending, sched);
         }
     }
 
@@ -1680,19 +1670,19 @@ impl<S: Engine> Checker<S> {
         match e {
             Ev::Invoke(call, op) => {
                 let reused = p.iter().any(|i| {
-                    matches!(i, Pending::InFlight { call: c, .. } | Pending::Responded { call: c, .. } if c == call)
+                    matches!(i, Pending::External { call: c, .. } | Pending::Settled { call: c, .. } if c == call)
                 });
                 if reused {
                     return Err(format!("call {call} invoked while still outstanding"));
                 }
-                p.insert(Pending::InFlight { call: *call, op: op.clone(), early: BTreeSet::new() });
+                p.insert(Pending::External { call: *call, req: op.clone(), early: BTreeSet::new() });
             }
             Ev::Return(call, observed) => {
                 let hit = p.iter().find_map(|i| match i {
-                    Pending::Responded { call: c, resp } if c == call => {
+                    Pending::Settled { call: c, resp } if c == call => {
                         (resp == observed).then(|| i.clone())
                     }
-                    Pending::InFlight { call: c, early, .. } if c == call => {
+                    Pending::External { call: c, early, .. } if c == call => {
                         early.iter().any(|r| r == observed).then(|| i.clone())
                     }
                     _ => None,
@@ -1733,11 +1723,10 @@ impl<S: Engine> Checker<S> {
         Ok(vec![Node { state: m.state.clone(), pending: p, trail }])
     }
 
-    /// Work a node may simply never do, messages it may never deliver, and
-    /// calls that never return: dropping them cannot add behaviors.
+    /// dropping them cannot add behaviors.
     fn optional(&self, item: &P<S>) -> bool {
         match item {
-            Pending::InFlight { call, .. } => self.orphans.contains(call),
+            Pending::External { call, .. } => self.orphans.contains(call),
             _ => optional(item),
         }
     }
@@ -1813,28 +1802,35 @@ fn add_sent<O: Data, R: Data, T: Data, G: Data>(p: &mut HashedSet<Pending<O, R, 
     p.insert(Pending::Sent { msg, count: have.unwrap_or(0) + 1 });
 }
 
-/// Starts work that must run: one more copy if the same work is pending.
-fn add_step<O: Data, R: Data, T: Data, G: Data>(p: &mut HashedSet<Pending<O, R, T, G>>, step: T, after: Time, by: Option<Time>) {
+/// Starts an internal op: one more copy if the same op is pending.
+fn add_internal<O: Data, R: Data, T: Data, G: Data>(p: &mut HashedSet<Pending<O, R, T, G>>, sched: Sched<T>) {
     let have = p.iter().find_map(|i| match i {
-        Pending::Step { step: s, after: a, by: b, must: true, count } if *s == step && *a == after && *b == by => Some(*count),
+        Pending::Internal { sched: s, count } if *s == sched => Some(*count),
         _ => None,
     });
     if let Some(n) = have {
-        p.remove(&Pending::Step { step: step.clone(), after, by, must: true, count: n });
+        p.remove(&Pending::Internal { sched: sched.clone(), count: n });
     }
-    p.insert(Pending::Step { step, after, by, must: true, count: have.unwrap_or(0) + 1 });
+    p.insert(Pending::Internal { sched, count: have.unwrap_or(0) + 1 });
 }
 
-/// Work a node may simply never do, and messages it may never deliver: dropping
-/// them cannot add behaviors.
+/// The time an item is owed by: a timer's. Nothing else is owed.
+fn item_due<O, R, T, G>(item: &Pending<O, R, T, G>) -> Option<Time> {
+    match item {
+        Pending::Internal { sched, .. } => sched.due(),
+        _ => None,
+    }
+}
+
+/// Messages a node may never deliver: dropping them cannot add behaviors.
 fn optional<O, R, T, G>(item: &Pending<O, R, T, G>) -> bool {
-    matches!(item, Pending::Step { must: false, .. } | Pending::Sent { .. })
+    matches!(item, Pending::Sent { .. })
 }
 
 /// An item with its early answers cleared, so calls compare by identity alone.
 fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) -> Pending<O, R, T, G> {
     match item {
-        Pending::InFlight { call, op, .. } => Pending::InFlight { call: *call, op: op.clone(), early: BTreeSet::new() },
+        Pending::External { call, req, .. } => Pending::External { call: *call, req: req.clone(), early: BTreeSet::new() },
         _ => item.clone(),
     }
 }
@@ -1843,8 +1839,8 @@ fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) 
 /// work, at least `a`'s optional work, and at least `a`'s early answers per call.
 fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>, optional: &dyn Fn(&P<S>) -> bool) -> bool {
     a.pending.iter().all(|x| match x {
-        Pending::InFlight { call, early, .. } => b.pending.iter().any(|y| {
-            matches!(y, Pending::InFlight { call: c, early: e, .. } if c == call && early.is_subset(e))
+        Pending::External { call, early, .. } => b.pending.iter().any(|y| {
+            matches!(y, Pending::External { call: c, early: e, .. } if c == call && early.is_subset(e))
         }),
         _ if optional(x) => b.pending.contains(x),
         _ => true,

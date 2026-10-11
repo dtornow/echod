@@ -29,30 +29,22 @@ variable {m : Model}
 
 /-! ## Candidates: the silent moves a configuration offers -/
 
-/-- Every call in flight, from the ids the trace invokes, with every outcome. -/
-def effects (ids : List CallId) (c : Config m) : List Silent :=
-  ids.flatMap fun call =>
-    match c.calls call with
-    | some (.inFlight req) => (List.range (m.external req c.state c.now).val.length).map (Silent.effect call)
-    | _ => []
+/-- Every pending external op, with every outcome. -/
+def effects (c : Config m) : List Silent :=
+  c.externals.flatMap fun o =>
+    match o.res with
+    | none => (List.range (m.external o.req c.state c.now).val.length).map (Silent.effect o.id)
+    | some _ => []
 
-/-- Every pending work, with every outcome. -/
+/-- Every internal op, with every outcome. -/
 def runs (c : Config m) : List Silent :=
-  (List.range c.work.length).flatMap fun i =>
-    match c.work[i]? with
+  (List.range c.internals.length).flatMap fun i =>
+    match c.internals[i]? with
     | some w => (List.range (m.internal w.req c.state c.now).length).map (Silent.run i)
     | none => []
 
-def silents (ids : List CallId) (c : Config m) : List Silent :=
-  effects ids c ++ runs c
-
-/-- The ids a trace invokes: the only calls that can ever be in flight. -/
-def invoked : List m.Ev → List CallId
-  | [] => []
-  | e :: es =>
-    match e with
-    | .invoke call _ => call :: invoked es
-    | _ => invoked es
+def silents (c : Config m) : List Silent :=
+  effects c ++ runs c
 
 /-! ## The search -/
 
@@ -60,15 +52,15 @@ def invoked : List m.Ev → List CallId
 abbrev Frontier (m : Model) := List (Config m × List (Move m))
 
 /-- One silent step from every configuration. -/
-def next (ids : List CallId) (fr : Frontier m) : Frontier m :=
+def next (fr : Frontier m) : Frontier m :=
   fr.flatMap fun dp =>
-    (silents ids dp.1).filterMap fun s =>
+    (silents dp.1).filterMap fun s =>
       (dp.1.move (.silent s)).map fun lc => (lc.2, .silent s :: dp.2)
 
 /-- Up to `k` silent steps from every configuration. -/
-def explore (ids : List CallId) : Nat → Frontier m → Frontier m
+def explore : Nat → Frontier m → Frontier m
   | 0, fr => fr
-  | k + 1, fr => fr ++ explore ids k (next ids fr)
+  | k + 1, fr => fr ++ explore k (next fr)
 
 /-- The observed event, from every configuration that can make it. -/
 def advance (e : m.Ev) (fr : Frontier m) : Frontier m :=
@@ -76,14 +68,14 @@ def advance (e : m.Ev) (fr : Frontier m) : Frontier m :=
     (dp.1.move (.obs e)).map fun lc => (lc.2, .obs e :: dp.2)
 
 /-- The trace, event by event: at most `k` silent steps, then the event. -/
-def run (ids : List CallId) (k : Nat) : List m.Ev → Frontier m → Frontier m
+def run (k : Nat) : List m.Ev → Frontier m → Frontier m
   | [], fr => fr
-  | e :: es, fr => run ids k es (advance e (explore ids k fr))
+  | e :: es, fr => run k es (advance e (explore k fr))
 
 /-- An execution explaining the trace, as moves to replay, if the search finds
     one with at most `k` silent steps between events. -/
 def search (m : Model) (init : m.State) (k : Nat) (trace : List m.Ev) : Option (List (Move m)) :=
-  (run (invoked trace) k trace [(initial init, [])]).head?.map fun dp => dp.2.reverse
+  (run k trace [(initial init, [])]).head?.map fun dp => dp.2.reverse
 
 /-! ## Soundness: what the search returns replays to the trace -/
 
@@ -143,8 +135,8 @@ def Good (init : m.State) (pre : List m.Ev) (fr : Frontier m) : Prop :=
   ∀ dp ∈ fr, ∃ ex, replay (initial init) dp.2.reverse = some ex ∧
     project ex = pre ∧ endOf (initial init) ex = dp.1
 
-theorem next_good {init : m.State} {pre : List m.Ev} {ids : List CallId} {fr : Frontier m}
-    (h : Good init pre fr) : Good init pre (next ids fr) := by
+theorem next_good {init : m.State} {pre : List m.Ev} {fr : Frontier m}
+    (h : Good init pre fr) : Good init pre (next fr) := by
   intro cp hcp
   simp only [next, List.mem_flatMap, List.mem_filterMap] at hcp
   obtain ⟨dp, hdp, s, _, hcp⟩ := hcp
@@ -157,8 +149,8 @@ theorem next_good {init : m.State} {pre : List m.Ev} {ids : List CallId} {fr : F
   · rw [project_append, hpr]; simp [project, Move.label]
   · exact endOf_snoc _ _ _
 
-theorem explore_good {init : m.State} {pre : List m.Ev} {ids : List CallId} {k : Nat}
-    {fr : Frontier m} (h : Good init pre fr) : Good init pre (explore ids k fr) := by
+theorem explore_good {init : m.State} {pre : List m.Ev} {k : Nat}
+    {fr : Frontier m} (h : Good init pre fr) : Good init pre (explore k fr) := by
   induction k generalizing fr with
   | zero => exact h
   | succ k ih =>
@@ -182,14 +174,14 @@ theorem advance_good {init : m.State} {pre : List m.Ev} {e : m.Ev}
   · rw [project_append, hpr]; simp [project, Move.label]
   · exact endOf_snoc _ _ _
 
-theorem run_good {init : m.State} {pre : List m.Ev} {ids : List CallId} {k : Nat}
+theorem run_good {init : m.State} {pre : List m.Ev} {k : Nat}
     {es : List m.Ev} {fr : Frontier m} (h : Good init pre fr) :
-    Good init (pre ++ es) (run ids k es fr) := by
+    Good init (pre ++ es) (run k es fr) := by
   induction es generalizing pre fr with
   | nil => simpa [run] using h
   | cons e es ih =>
     simp only [run]
-    have := ih (advance_good (e := e) (explore_good (ids := ids) (k := k) h))
+    have := ih (advance_good (e := e) (explore_good (k := k) h))
     simpa using this
 
 /-- What the search returns replays to exactly the trace. -/
@@ -198,14 +190,14 @@ theorem search_replays {init : m.State} {k : Nat} {trace : List m.Ev} {p : List 
     ∃ ex, replay (initial init) p = some ex ∧ project ex = trace := by
   simp only [search] at h
   obtain ⟨dp, hhead, rfl⟩ := Option.map_eq_some_iff.mp h
-  have hmem : dp ∈ run (invoked trace) k trace [(initial init, [])] :=
+  have hmem : dp ∈ run k trace [(initial init, [])] :=
     List.mem_of_mem_head? (Option.mem_def.mpr hhead)
   have hgood : Good init [] [(initial init, [])] := by
     intro dp hdp
     simp only [List.mem_singleton] at hdp
     subst hdp
     exact ⟨[], rfl, rfl, rfl⟩
-  obtain ⟨ex, hre, hpr, _⟩ := run_good (ids := invoked trace) (k := k) (es := trace) hgood dp hmem
+  obtain ⟨ex, hre, hpr, _⟩ := run_good (k := k) (es := trace) hgood dp hmem
   exact ⟨ex, hre, by simpa using hpr⟩
 
 /-- Soundness: whatever the search finds is valid. -/
@@ -275,8 +267,8 @@ theorem step_sim {c d c' : Config m} {l : Label m} (hs : Sim c d) (h : Step m c 
     ∃ d', Step m d l d' ∧ Sim c' d' := by
   obtain ⟨s, hperm, rfl⟩ := hs
   cases h with
-  | invoke hc hov => exact ⟨_, .invoke hc hov, s, hperm, rfl⟩
-  | ret hc hov => exact ⟨_, .ret hc hov, s, hperm, rfl⟩
+  | invoke hf hov => exact ⟨_, .invoke hf hov, s, hperm, rfl⟩
+  | ret hsplit hov => exact ⟨_, .ret hsplit hov, s, hperm, rfl⟩
   | receive hsent hov =>
     rename_i pre post msg
     have hmem : msg ∈ s := hperm.mem_iff.mpr (by rw [hsent]; simp)
@@ -286,59 +278,73 @@ theorem step_sim {c d c' : Config m} {l : Label m} (hs : Sim c d) (h : Step m c 
       (List.perm_middle.symm.trans hperm).trans (hsent ▸ List.perm_middle)
     exact h1.cons_inv
   | clock ht hov => exact ⟨_, .clock ht hov, s, hperm, rfl⟩
-  | effect hc ho hov => exact ⟨_, .effect hc ho hov, _, hperm.append_right _, rfl⟩
+  | effect hsplit ho hov => exact ⟨_, .effect hsplit ho hov, _, hperm.append_right _, rfl⟩
   | run hw ha ho hf => exact ⟨_, .run hw ha ho hf, _, hperm.append_right _, rfl⟩
 
-/-- Every call in flight is one the trace invokes. -/
-def Inv (ids : List CallId) (c : Config m) : Prop :=
-  ∀ call req, c.calls call = some (.inFlight req) → call ∈ ids
+/-- Outstanding external ops have distinct ids: `invoke` only admits a fresh
+    one. With it, the first op with an id is the op with that id. -/
+def Uniq (c : Config m) : Prop := c.externals.Pairwise fun a b => a.id ≠ b.id
 
-theorem inv_sim {ids : List CallId} {c d : Config m} (hinv : Inv ids c) (hs : Sim c d) :
-    Inv ids d := by
+theorem uniq_sim {c d : Config m} (hu : Uniq c) (hs : Sim c d) : Uniq d := by
   obtain ⟨s, _, rfl⟩ := hs
-  exact hinv
+  exact hu
 
-theorem inv_step {ids : List CallId} {c c' : Config m} {l : Label m} (hinv : Inv ids c)
-    (h : Step m c l c') (hl : ∀ call req, l = .obs (.invoke call req) → call ∈ ids) :
-    Inv ids c' := by
+theorem uniq_step {c c' : Config m} {l : Label m} (hu : Uniq c) (h : Step m c l c') : Uniq c' := by
   cases h with
-  | invoke hc hov =>
-    intro call' req' h'
-    simp only [update] at h'
-    split at h'
-    · subst_vars; exact hl _ _ rfl
-    · exact hinv _ _ h'
-  | ret hc hov =>
-    intro call' req' h'
-    simp only [update] at h'
-    split at h'
-    · simp at h'
-    · exact hinv _ _ h'
-  | receive hsent hov => exact hinv
-  | clock ht hov => exact hinv
-  | effect hc ho hov =>
-    intro call' req' h'
-    simp only [update] at h'
-    split at h'
-    · simp at h'
-    · exact hinv _ _ h'
-  | run hw ha ho hf => exact hinv
+  | invoke hf hov =>
+    simp only [Uniq, List.pairwise_append, List.pairwise_cons, List.mem_singleton] at hu ⊢
+    exact ⟨hu, ⟨by simp, List.Pairwise.nil⟩, fun a ha b hb => hb ▸ hf a ha⟩
+  | ret hsplit hov =>
+    rename_i pre post id req res
+    simp only [Uniq, hsplit, List.pairwise_append, List.pairwise_cons] at hu ⊢
+    obtain ⟨h1, ⟨_, h2⟩, h3⟩ := hu
+    exact ⟨h1, h2, fun a ha b hb => h3 a ha b (List.mem_cons_of_mem _ hb)⟩
+  | receive hsent hov => exact hu
+  | clock ht hov => exact hu
+  | effect hsplit ho hov =>
+    rename_i pre post id req o
+    simp only [Uniq, hsplit, List.pairwise_append, List.pairwise_cons] at hu ⊢
+    obtain ⟨h1, ⟨h2, h3⟩, h4⟩ := hu
+    refine ⟨h1, ⟨h2, h3⟩, fun a ha b hb => ?_⟩
+    simp only [List.mem_cons] at hb
+    rcases hb with rfl | hb
+    · exact h4 a ha ⟨id, req, none⟩ List.mem_cons_self
+    · exact h4 a ha b (List.mem_cons_of_mem _ hb)
+  | run hw ha ho hf => exact hu
 
-theorem inv_path {ids : List CallId} {c c₁ : Config m} {n : Nat} (hinv : Inv ids c)
-    (h : SilentPath m c n c₁) : Inv ids c₁ := by
+theorem uniq_path {c c₁ : Config m} {n : Nat} (hu : Uniq c) (h : SilentPath m c n c₁) : Uniq c₁ := by
   induction h with
-  | refl => exact hinv
-  | step hs _ ih => exact ih (inv_step hinv hs (fun _ _ h => nomatch h))
+  | refl => exact hu
+  | step hs _ ih => exact ih (uniq_step hu hs)
 
-theorem invoked_mem {es : List m.Ev} {call : CallId} {req : m.External}
-    (h : (Event.invoke call req : m.Ev) ∈ es) : call ∈ invoked es := by
-  induction es with
-  | nil => simp at h
-  | cons e es ih =>
-    simp only [List.mem_cons] at h
-    rcases h with rfl | h
-    · simp [invoked]
-    · cases e <;> simp [invoked, ih h]
+/-- With distinct ids, the op before which nothing matches is the one found. -/
+theorem splitAt?_first {α : Type} {p : α → Bool} {pre post : List α} {x : α}
+    (hpre : ∀ y ∈ pre, p y = false) (hx : p x = true) :
+    splitAt? p (pre ++ x :: post) = some (pre, x, post) := by
+  induction pre with
+  | nil => simp [splitAt?, hx]
+  | cons y ys ih =>
+    have hy := hpre y (List.mem_cons_self)
+    simp only [List.cons_append, splitAt?, hy, Bool.false_eq_true, ↓reduceIte]
+    rw [ih (fun z hz => hpre z (List.mem_cons_of_mem _ hz))]
+    rfl
+
+theorem splitAt?_of_mem {α : Type} {p : α → Bool} {l : List α} {x : α}
+    (hmem : x ∈ l) (hx : p x = true) : ∃ r, splitAt? p l = some r := by
+  induction l with
+  | nil => simp at hmem
+  | cons y ys ih =>
+    simp only [splitAt?]
+    split
+    · exact ⟨_, rfl⟩
+    · rename_i hy
+      have : x ∈ ys := by
+        simp only [List.mem_cons] at hmem
+        rcases hmem with rfl | h
+        · exact absurd hx (by simpa using hy)
+        · exact h
+      obtain ⟨⟨pre, z, post⟩, hr⟩ := ih this
+      exact ⟨(y :: pre, z, post), by simp [hr]⟩
 
 theorem overdue_false {c : Config m} (h : ¬ c.overdue) : c.isOverdue = false := by
   cases hc : c.isOverdue with
@@ -347,7 +353,7 @@ theorem overdue_false {c : Config m} (h : ¬ c.overdue) : c.isOverdue = false :=
     obtain ⟨w, hw, hwo⟩ := List.any_eq_true.mp hc
     exact absurd ⟨w, hw, isOverdue_iff.mp hwo⟩ h
 
-theorem mayRun_of {c : Config m} {w : Work m.Internal} (h : c.overdue → c.First w) :
+theorem mayRun_of {c : Config m} {w : Sched m.Internal} (h : c.overdue → c.First w) :
     c.mayRun w = true := by
   unfold Config.mayRun
   by_cases hov : c.isOverdue = true
@@ -363,79 +369,91 @@ theorem mayRun_of {c : Config m} {w : Work m.Internal} (h : c.overdue → c.Firs
     · simp [hvo]
   · simp [hov]
 
+/-- Nothing before a pending op with a distinct id matches it. -/
+theorem pending_first {pre : List (ExternalOp m)} {id : CallId}
+    (h : ∀ y ∈ pre, y.id ≠ id) : ∀ y ∈ pre, pendingOp id y = false := by
+  intro y hy
+  simp [pendingOp, h y hy]
+
+theorem settled_first {pre : List (ExternalOp m)} {id : CallId} {res : m.Response}
+    (h : ∀ y ∈ pre, y.id ≠ id) : ∀ y ∈ pre, settledOp id res y = false := by
+  intro y hy
+  simp [settledOp, h y hy]
+
 /-- Every silent step is one of the candidates, and `move` makes it exactly. -/
-theorem silent_complete {ids : List CallId} {c c' : Config m} (hinv : Inv ids c)
-    (h : Step m c .silent c') :
-    ∃ s ∈ silents ids c, c.move (.silent s) = some (.silent, c') := by
+theorem silent_complete {c c' : Config m} (hu : Uniq c) (h : Step m c .silent c') :
+    ∃ s ∈ silents c, c.move (.silent s) = some (.silent, c') := by
   cases h with
-  | effect hc ho hov =>
-    rename_i call req o
+  | effect hsplit ho hov =>
+    rename_i pre post id req o
     obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp ho
-    refine ⟨.effect call j, ?_, ?_⟩
+    have hpre : ∀ y ∈ pre, y.id ≠ id := by
+      simp only [Uniq, hsplit, List.pairwise_append] at hu
+      exact fun y hy => hu.2.2 y hy _ List.mem_cons_self
+    have hsp : splitAt? (pendingOp id) c.externals = some (pre, ⟨id, req, none⟩, post) := by
+      rw [hsplit]; exact splitAt?_first (pending_first hpre) (by simp [pendingOp])
+    refine ⟨.effect id j, ?_, ?_⟩
     · apply List.mem_append_left
       simp only [effects, List.mem_flatMap]
-      refine ⟨call, hinv _ _ hc, ?_⟩
-      simp only [hc, List.mem_map, List.mem_range]
+      refine ⟨⟨id, req, none⟩, by rw [hsplit]; simp, ?_⟩
+      simp only [List.mem_map, List.mem_range]
       exact ⟨j, (List.getElem?_eq_some_iff.mp hj).1, rfl⟩
-    · simp [Config.move, hc, hj, overdue_false hov]
+    · simp [Config.move, hsp, hj, overdue_false hov]
   | run hw ha ho hf =>
     rename_i pre post w o
     obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp ho
-    have hi : c.work[pre.length]? = some w := by rw [hw]; simp
+    have hi : c.internals[pre.length]? = some w := by rw [hw]; simp
     refine ⟨.run pre.length j, ?_, ?_⟩
     · apply List.mem_append_right
       simp only [runs, List.mem_flatMap, List.mem_range]
       refine ⟨pre.length, by rw [hw]; simp, ?_⟩
       simp only [hi, List.mem_map, List.mem_range]
       exact ⟨j, (List.getElem?_eq_some_iff.mp hj).1, rfl⟩
-    · simp only [Config.move, hi, hj, ha, mayRun_of hf, decide_true, Bool.and_self, ↓reduceIte,
+    · simp only [Config.move, hi, hj, isReady_iff.mpr ha, mayRun_of hf, Bool.and_self, ↓reduceIte,
         Option.some.injEq, Prod.mk.injEq, true_and]
       rw [hw]
       simp [List.drop_append]
 
-theorem removeFirst_of_mem {D : Type} [DecidableEq D] {x : D} {l : List D} (h : x ∈ l) :
-    ∃ l', removeFirst x l = some l' := by
-  induction l with
-  | nil => simp at h
-  | cons y ys ih =>
-    simp only [removeFirst]
-    split
-    · exact ⟨ys, rfl⟩
-    · rename_i hne
-      have : x ∈ ys := by simpa [hne] using h
-      obtain ⟨r, hr⟩ := ih this
-      exact ⟨y :: r, by simp [hr]⟩
-
 /-- Every observed step is made by `move`, up to the order of dispatches. -/
-theorem obs_complete {c c' : Config m} {e : m.Ev} (h : Step m c (.obs e) c') :
+theorem obs_complete {c c' : Config m} {e : m.Ev} (hu : Uniq c) (h : Step m c (.obs e) c') :
     ∃ c'', c.move (.obs e) = some (.obs e, c'') ∧ Sim c' c'' := by
   cases h with
-  | invoke hc hov =>
-    exact ⟨_, by simp [Config.move, hc, overdue_false hov], Sim.refl _⟩
-  | ret hc hov =>
-    exact ⟨_, by simp [Config.move, hc, overdue_false hov], Sim.refl _⟩
-  | clock ht hov =>
-    exact ⟨_, by simp [Config.move, ht, overdue_false hov], Sim.refl _⟩
+  | invoke hf hov =>
+    have hall : c.externals.all (fun o => o.id != _) = true :=
+      List.all_eq_true.mpr fun o ho => bne_iff_ne.mpr (hf o ho)
+    exact ⟨_, by simp [Config.move, hall, overdue_false hov], Sim.refl _⟩
+  | ret hsplit hov =>
+    rename_i pre post id req res
+    have hpre : ∀ y ∈ pre, y.id ≠ id := by
+      simp only [Uniq, hsplit, List.pairwise_append] at hu
+      exact fun y hy => hu.2.2 y hy _ List.mem_cons_self
+    have hsp : splitAt? (settledOp id res) c.externals = some (pre, ⟨id, req, some res⟩, post) := by
+      rw [hsplit]; exact splitAt?_first (settled_first hpre) (by simp [settledOp])
+    exact ⟨_, by simp [Config.move, hsp, overdue_false hov], Sim.refl _⟩
   | receive hsent hov =>
     rename_i pre post msg
     have hmem : msg ∈ c.sent := by rw [hsent]; simp
-    obtain ⟨rest, hrest⟩ := @removeFirst_of_mem _ m.decEqDispatch _ _ hmem
-    refine ⟨_, by simp [Config.move, hrest, overdue_false hov], rest, ?_, rfl⟩
-    obtain ⟨pre', post', h1, h2⟩ := @removeFirst_split _ m.decEqDispatch _ _ _ hrest
-    subst h2
-    have : (msg :: (pre' ++ post')).Perm (msg :: (pre ++ post)) :=
+    obtain ⟨⟨pre', d, post'⟩, hsp⟩ :=
+      splitAt?_of_mem (p := fun d => @decide (d = msg) (m.decEqDispatch d msg)) hmem (by simp)
+    obtain ⟨h1, h2⟩ := splitAt?_spec hsp
+    have : d = msg := by simpa using h2
+    subst this
+    refine ⟨_, by simp [Config.move, hsp, overdue_false hov], pre' ++ post', ?_, rfl⟩
+    have : (d :: (pre' ++ post')).Perm (d :: (pre ++ post)) :=
       (List.perm_middle.symm.trans (h1 ▸ hsent ▸ List.Perm.refl _)).trans List.perm_middle
     exact this.cons_inv
+  | clock ht hov =>
+    exact ⟨_, by simp [Config.move, ht, overdue_false hov], Sim.refl _⟩
 
-theorem mem_explore_self {ids : List CallId} {k : Nat} {fr : Frontier m} {dp : Config m × List (Move m)}
-    (h : dp ∈ fr) : dp ∈ explore ids k fr := by
+theorem mem_explore_self {k : Nat} {fr : Frontier m} {dp : Config m × List (Move m)}
+    (h : dp ∈ fr) : dp ∈ explore k fr := by
   cases k with
   | zero => exact h
   | succ k => exact List.mem_append_left _ h
 
-theorem explore_complete {ids : List CallId} {c c₁ : Config m} {n k : Nat} {fr : Frontier m}
-    (hp : SilentPath m c n c₁) (hn : n ≤ k) (hinv : Inv ids c)
-    (hfr : ∃ dp ∈ fr, Sim c dp.1) : ∃ dp ∈ explore ids k fr, Sim c₁ dp.1 := by
+theorem explore_complete {c c₁ : Config m} {n k : Nat} {fr : Frontier m}
+    (hp : SilentPath m c n c₁) (hn : n ≤ k) (hu : Uniq c)
+    (hfr : ∃ dp ∈ fr, Sim c dp.1) : ∃ dp ∈ explore k fr, Sim c₁ dp.1 := by
   induction hp generalizing k fr with
   | refl =>
     obtain ⟨dp, hdp, hs⟩ := hfr
@@ -444,42 +462,37 @@ theorem explore_complete {ids : List CallId} {c c₁ : Config m} {n k : Nat} {fr
     obtain ⟨k', rfl⟩ : ∃ k', k = k' + 1 := ⟨k - 1, by omega⟩
     obtain ⟨dp, hdp, hs⟩ := hfr
     obtain ⟨d', hd', hs'⟩ := step_sim hs hstep
-    obtain ⟨s, hsm, hmv⟩ := silent_complete (inv_sim hinv hs) hd'
-    have hmem : (d', .silent s :: dp.2) ∈ next ids fr := by
+    obtain ⟨s, hsm, hmv⟩ := silent_complete (uniq_sim hu hs) hd'
+    have hmem : (d', .silent s :: dp.2) ∈ next fr := by
       simp only [next, List.mem_flatMap, List.mem_filterMap]
       exact ⟨dp, hdp, s, hsm, by simp [hmv]⟩
-    obtain ⟨dp₁, h1, h2⟩ :=
-      ih (k := k') (by omega) (inv_step hinv hstep (fun _ _ h => nomatch h)) ⟨_, hmem, hs'⟩
+    obtain ⟨dp₁, h1, h2⟩ := ih (k := k') (by omega) (uniq_step hu hstep) ⟨_, hmem, hs'⟩
     exact ⟨dp₁, List.mem_append_right _ h1, h2⟩
 
-theorem run_complete {ids : List CallId} {k : Nat} {c : Config m} {es : List m.Ev}
-    {fr : Frontier m} (hr : Runs m k c es)
-    (hids : ∀ call req, (Event.invoke call req : m.Ev) ∈ es → call ∈ ids)
-    (hinv : Inv ids c) (hfr : ∃ dp ∈ fr, Sim c dp.1) : run ids k es fr ≠ [] := by
+theorem run_complete {k : Nat} {c : Config m} {es : List m.Ev} {fr : Frontier m}
+    (hr : Runs m k c es) (hu : Uniq c) (hfr : ∃ dp ∈ fr, Sim c dp.1) : run k es fr ≠ [] := by
   induction hr generalizing fr with
   | nil =>
     obtain ⟨dp, hdp, _⟩ := hfr
     exact List.ne_nil_of_mem hdp
   | @step _ _ _ _ e _ hp hn hs _ ih =>
-    obtain ⟨dp, hdp, hsim⟩ := explore_complete hp hn hinv hfr
+    obtain ⟨dp, hdp, hsim⟩ := explore_complete hp hn hu hfr
+    have hu₁ := uniq_path hu hp
     obtain ⟨d₂, hd₂, hs₂⟩ := step_sim hsim hs
-    obtain ⟨d₂', hmv, hs₂'⟩ := obs_complete hd₂
-    have hinv₂ :=
-      inv_step (inv_path hinv hp) hs (fun call req h => by cases h; exact hids call req List.mem_cons_self)
-    have hmem : (d₂', .obs e :: dp.2) ∈ advance e (explore ids k fr) := by
+    obtain ⟨d₂', hmv, hs₂'⟩ := obs_complete (uniq_sim hu₁ hsim) hd₂
+    have hmem : (d₂', .obs e :: dp.2) ∈ advance e (explore k fr) := by
       simp only [advance, List.mem_filterMap]
       exact ⟨dp, hdp, by simp [hmv]⟩
-    exact ih (fun call req h => hids _ _ (List.mem_cons_of_mem _ h)) hinv₂
-      ⟨_, hmem, hs₂.trans hs₂'⟩
+    exact ih (uniq_step hu₁ hs) ⟨_, hmem, hs₂.trans hs₂'⟩
 
 /-- Completeness: every execution with at most `k` silent steps between events
     is found. -/
 theorem search_complete {init : m.State} {k : Nat} {trace : List m.Ev}
     (h : Runs m k (initial init) trace) : (search m init k trace).isSome := by
-  have hne := run_complete (ids := invoked trace) (fr := [(initial init, [])]) h
-    (fun _ _ h => invoked_mem h) (fun _ _ h => nomatch h) ⟨_, List.mem_singleton_self _, Sim.refl _⟩
+  have hne := run_complete (fr := [(initial init, [])]) h List.Pairwise.nil
+    ⟨_, List.mem_singleton_self _, Sim.refl _⟩
   simp only [search]
-  cases hrun : run (invoked trace) k trace [(initial init, [])] with
+  cases hrun : run k trace [(initial init, [])] with
   | nil => exact absurd hrun hne
   | cons dp rest => rfl
 
@@ -510,6 +523,8 @@ theorem search_iff {init : m.State} {trace : List m.Ev} :
 #guard !(search counter 0 2 [.invoke 1 (), .invoke 2 (), .ret 2 2, .ret 1 2]).isSome
 -- With no silent steps allowed, nothing can take effect.
 #guard !(search counter 0 0 [.invoke 7 (), .ret 7 1]).isSome
+-- A call id is in use until its return.
+#guard !(search counter 0 2 [.invoke 7 (), .invoke 7 ()]).isSome
 
 /-- A counter with a timer: `arm` sets a timer at 5 that resets the count. -/
 abbrev timed : Model where

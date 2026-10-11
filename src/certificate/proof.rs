@@ -14,19 +14,19 @@ verus! {
 
 // ------------------------------------------------- the silent steps, as steps
 
-/// A call takes effect: what `Config::silent` computes is an [`effect`] step.
+/// An external op settles: what `Config::silent` computes is an [`effect`] step.
 pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: CallId, j: int)
     requires
         !overdue(m, c),
-        c.calls.contains_key(call),
-        c.calls[call] is InFlight,
-        0 <= j < m.spec_external(c.calls[call]->InFlight_0, c.state, c.now).len(),
+        c.externals.contains_key(call),
+        c.externals[call].res is None,
+        0 <= j < m.spec_external(c.externals[call].req, c.state, c.now).len(),
         d == ({
-            let o = m.spec_external(c.calls[call]->InFlight_0, c.state, c.now)[j];
+            let o = m.spec_external(c.externals[call].req, c.state, c.now)[j];
             Config {
                 state: o.next,
-                calls: c.calls.insert(call, Call::Done(o.resp)),
-                work: start_all(c.work, o.work, c.now),
+                externals: c.externals.insert(call, ExternalOp { req: c.externals[call].req, res: Some(o.resp) }),
+                internals: start_all(c.internals, o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }
@@ -37,18 +37,18 @@ pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: Call
     assert(effect(m, c, Label::Silent, d));
 }
 
-/// Work runs: what `Config::silent` computes is a [`run`] step.
+/// An internal op runs: what `Config::silent` computes is a [`run`] step.
 pub(super) proof fn run_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, i: int, j: int)
     requires
-        0 <= i < c.work.len(),
-        c.work[i].after <= c.now,
+        0 <= i < c.internals.len(),
+        ready(c.now, c.internals[i]),
         overdue(m, c) ==> is_first(m, c, i),
-        0 <= j < m.spec_internal(c.work[i].req, c.state, c.now).len(),
+        0 <= j < m.spec_internal(req_of(c.internals[i]), c.state, c.now).len(),
         d == ({
-            let o = m.spec_internal(c.work[i].req, c.state, c.now)[j];
+            let o = m.spec_internal(req_of(c.internals[i]), c.state, c.now)[j];
             Config {
                 state: o.next,
-                work: start_all(c.work.remove(i), o.work, c.now),
+                internals: start_all(c.internals.remove(i), o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }

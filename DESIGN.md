@@ -107,10 +107,11 @@ Mapping from Accordant:
 A node is `(Interned<State>, BTreeSet<Pending>)`:
 
 ```rust
-enum Pending<Op, Resp, Step> {
-    InFlight  { call, op, since, must },   // invoked at `since`, not linearized
-    Responded { call, resp },              // linearized, awaiting Return
-    Step      { step, after, by, must },   // background work, due from `after`, owed by `by`
+enum Pending<Req, Resp, Internal, Dispatch> {
+    External { call, req, early },   // invoked, not yet settled
+    Settled  { call, resp },         // settled, awaiting Return
+    Internal { sched, count },       // an internal op scheduled: later, or at a time
+    Sent     { msg, count },         // a dispatch sent, not yet received
 }
 ```
 
@@ -277,15 +278,18 @@ the search, and they are verified.
 
 The statement, in `src/semantics.rs` (specification only; nothing in it runs):
 
-- `Config`: the system at one point, seen or not: the state, the calls in
-  flight or answered, the work pending (with `after`, `due`, `must`), the
-  dispatches sent and not received.
+- `Config`: the system at one point, seen or not: the model's state, and what
+  the model doesn't know about: `externals`, the external ops outstanding
+  (`{req, res}` by call id, `res` set once settled); `internals`, the internal
+  ops scheduled, each a `Sched` (`Later`, or `Timer` at a time) stamped on the
+  clock it started on; `sent`, the dispatches not yet received; `now`, the
+  clock.
 - `step(m, c, label, d)`: the transition relation. Observed: `invoke`, `ret`,
-  `receive`, each labeled with its event and allowed only when no work is
-  overdue. Silent: `effect` (a call in flight takes effect with one of
-  `m.spec_external`'s outcomes) and `run` (pending work runs with one of
-  `m.spec_internal`'s outcomes, once its `after` has come; while work is
-  overdue, only the overdue work with the earliest deadline).
+  `receive`, `tick`, each labeled with its event and allowed only when no
+  timer is overdue. Silent: `effect` (a pending external op settles with one
+  of `m.spec_external`'s outcomes) and `run` (an internal op whose time has
+  come runs with one of `m.spec_internal`'s outcomes; while some timer is
+  overdue, only an overdue one with the earliest time).
 - `legal(m, first, steps)`: every step follows from the configuration before it.
   `project(steps)`: the observed events, in order.
 - `valid(m, init, trace) := exists steps. legal(m, initial(init), steps) &&
@@ -366,14 +370,14 @@ enum Event<X, R, D> {
 }
 ```
 
-- `Invoke` adds `InFlight`. It changes no state and observes nothing, so it never
-  triggers exploration.
-- The checker places each call's linearization point: firing `InFlight` runs
-  `apply` and leaves `Responded { resp }`.
-- `Return` must equal a `Responded`.
+- `Invoke` adds a pending `External`. It changes no state and observes nothing,
+  so it never triggers exploration.
+- The checker places each call's linearization point: settling an `External`
+  runs `external` and leaves `Settled { resp }`.
+- `Return` must equal a `Settled`.
 - **A call that never returns is not an event.** The client can't distinguish a
   lost request from a lost reply from a slow server, so the model doesn't either.
-  The call stays `InFlight`: it may take effect at any later point, including
+  The call stays pending: it may settle at any later point, including
   after reads that missed it, or never. Accordant's `OneOf(no effect, effect)` at
   the moment of the timeout is a special case that is too strict, because it
   forbids the late effect.
