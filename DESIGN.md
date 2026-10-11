@@ -338,11 +338,19 @@ Limits:
   With partitions, candidates in different factors would have to be merged into
   one execution, and that isn't built yet. The Resonate tests check every trace a
   second time in one factor, with certificates.
-- **Soundness only.** A certificate shows an accepted trace is valid. Nothing
-  shows that a rejected trace is invalid. For example, the checker only stops the
-  clock where something is due or observed, so it never tries work at the
-  moments in between. A model whose outcome depends on the exact `now` between
-  stops can see valid traces rejected (`tests/time.rs`).
+- **Soundness only, in Rust.** A certificate shows an accepted trace is valid.
+  Nothing in Rust shows that a rejected trace is invalid. For example, the
+  checker only stops the clock where something is due or observed, so it never
+  tries work at the moments in between. A model whose outcome depends on the
+  exact `now` between stops can see valid traces rejected (`tests/time.rs`).
+  Lean has the other direction, for the plain search: `lean/Search.lean`
+  defines `search m init k trace`, one frontier, every interleaving of at most
+  `k` silent steps between events, and proves `search_sound` (what it returns
+  replays to the trace, so is valid), `search_complete` (every execution within
+  the bound is found) and `search_iff` (`Valid ↔ ∃ k, search finds it`). It
+  runs (`#guard` lines at the bottom) and is the reference the Rust engines
+  refine: footprints and partitions prune its frontier, and proving them is
+  proving the pruned frontier represents the full one.
 - **Cost.** About 5% time and twice the memory on the Resonate workload:
   every candidate keeps its history, shared with its parent's.
 
@@ -689,6 +697,7 @@ Porting also found three checker bugs, all fixed:
 - `src/sim.rs`: `Sim`, the model run as a server, on the same replay.
 - `src/drive.rs`: `drive`, `Choices` (recorded, replayable decisions), `Drive`, `Tried`.
 - `verus/README.md`: where the Verus statement and proof live, and how to run them.
+- `lean/Accordant.lean`: the semantics in Lean (`Model`, `Step`, `Valid`), the certificate replay and its soundness proof. `lean/Search.lean`: the plain search, proved sound and complete. `cd lean && lake build` checks both and the TigerBeetle model.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).

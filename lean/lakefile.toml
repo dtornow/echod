@@ -1,8 +1,11 @@
 name = "accordant"
-defaultTargets = ["Accordant", "TigerBeetle", "TigerBeetleProofs"]
+defaultTargets = ["Accordant", "Search", "TigerBeetle", "TigerBeetleProofs"]
 
 [[lean_lib]]
 name = "Accordant"
+
+[[lean_lib]]
+name = "Search"
 
 # TigerBeetle, an example model, lives with its Rust crate.
 [[lean_lib]]
