@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use accordant::{marks, Checker, Config, Event, Explore, ExternalOutcome, InternalOutcome, Keyed, Model, Time, Verdict, Violation};
+use accordant::{marks, Action, Checker, Config, Event, Explore, ExternalOutcome, InternalOutcome, Keyed, Model, Time, Verdict, Violation};
 use resonate::*;
 
 /// The spec with a bug planted, or not.
@@ -40,7 +40,7 @@ impl Model for Server {
     type Internal = Internal;
     type Dispatch = Dispatch;
 
-    fn external(&self, op: &Request, s: &Self::State) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, op: &Request, s: &Self::State, now: Time) -> Vec<ExternalOutcome<Self>> {
         let op = match (self.bug, op) {
             (Bug::StaleFence, Request::FenceTask { id, version: _, action }) => match s.tasks.get(id) {
                 Some(t) => Request::FenceTask { id: id.clone(), version: t.version, action: action.clone() },
@@ -48,38 +48,34 @@ impl Model for Server {
             },
             _ => op.clone(),
         };
-        Model::external(&Resonate, &op, s)
+        Model::external(&Resonate, &op, s, now)
             .into_iter()
             .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work, send: o.send, marks: o.marks })
             .collect()
     }
 
-    fn internal(&self, ids: &Internal, s: &Self::State) -> Vec<InternalOutcome<Self>> {
-        let outs = Model::internal(&Resonate, ids, s);
+    fn internal(&self, ids: &Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>> {
+        let outs = Model::internal(&Resonate, ids, s, now);
         if self.bug == Bug::LeaseForever && outs.iter().any(|o| !o.send.is_empty()) {
             return vec![InternalOutcome::same(s)];
         }
         outs.into_iter().map(|o| InternalOutcome { next: o.next, work: o.work, send: o.send, marks: o.marks }).collect()
     }
-
-    fn now(&self, s: &Self::State) -> Time {
-        s.now
-    }
 }
 
-/// The same requests as the spec: the bug is in what the server does, not in
+/// The same actions as the spec: the bug is in what the server does, not in
 /// what a client sends.
 impl Explore for Server {
-    fn suggest(&self, s: &Self::State) -> Vec<(Request, &'static str)> {
-        Resonate.suggest(s)
+    fn suggest(&self, s: &Self::State, now: Time) -> Vec<(Action<Request>, &'static str)> {
+        Resonate.suggest(s, now)
     }
 
-    fn arbitrary(&self, s: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Request {
-        Resonate.arbitrary(s, pick)
+    fn arbitrary(&self, s: &Self::State, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
+        Resonate.arbitrary(s, now, pick)
     }
 
-    fn finish(&self, s: &Self::State) -> Vec<Request> {
-        Resonate.finish(s)
+    fn finish(&self, s: &Self::State, now: Time) -> Vec<Action<Request>> {
+        Resonate.finish(s, now)
     }
 }
 
@@ -123,6 +119,7 @@ pub fn show(trace: &Trace, upto: usize) -> String {
             Event::Invoke { call, req } => format!("call {call:>2} → {req:?}"),
             Event::Return { call, res } => format!("call {call:>2} ← {res:?}"),
             Event::Receive { msg } => format!("        ⇐ {msg:?}"),
+            Event::Clock { at } => format!("        ⏲ clock {at}"),
         };
         let _ = writeln!(out, "{i:>3}  {line}");
     }

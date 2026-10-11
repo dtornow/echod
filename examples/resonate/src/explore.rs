@@ -3,7 +3,7 @@
 //! spec marks its own branches (`mk` in `spec.rs`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
-use accordant::{Explore, Time};
+use accordant::{Action, Explore, Time};
 
 use crate::model::origin;
 use crate::spec::*;
@@ -19,8 +19,6 @@ pub const MARKS: &[&str] = &[
     "callback: no awaited promise (404)",
     "callback: no awaiter promise (422)",
     "callback: one of them settled (echo)",
-    "clock moved",
-    "clock unchanged",
     "create: id exists (echo)",
     "create: timer with target (400)",
     "fence: no such task (404)",
@@ -88,14 +86,13 @@ fn settle(id: &Id) -> Settle {
 }
 
 impl Explore for Resonate {
-    /// Requests that reach the edges of what the state allows: fences and
+    /// Actions that reach the edges of what the state allows: fences and
     /// heartbeats at the current version and a stale one, the clock moved to
     /// just before and exactly at each deadline, promises settled while a task
     /// awaits them, settles and creates repeated.
-    fn suggest(&self, s: &Server) -> Vec<(Request, &'static str)> {
+    fn suggest(&self, s: &Server, now: Time) -> Vec<(Action<Request>, &'static str)> {
         let mut out = Vec::new();
-        let mut push = |r, why| out.push((r, why));
-        let now = s.now;
+        let mut push = |a, why| out.push((a, why));
         let siblings = |id: &Id| -> Vec<&Id> { s.promises.iter().map(|(k, _)| k).filter(|k| *k != id && origin(k) == origin(id)).collect() };
         for (id, t) in s.tasks.iter() {
             let v = t.version;
@@ -103,74 +100,74 @@ impl Explore for Resonate {
                 TState::Acquired => {
                     let pid = t.pid.clone().unwrap_or_default();
                     let fresh = format!("{}:child{}", origin(id), v);
-                    push(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Create(create(&fresh, now + 50)) }, "fence a create at the held version");
-                    push(Request::FenceTask { id: id.clone(), version: v.wrapping_sub(1), action: Fenced::Create(create(&fresh, now + 50)) }, "fence at a stale version");
-                    push(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Create(create(&format!("elsewhere:{id}"), now + 50)) }, "fence a detached create");
+                    push(Action::Request(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Create(create(&fresh, now + 50)) }), "fence a create at the held version");
+                    push(Action::Request(Request::FenceTask { id: id.clone(), version: v.wrapping_sub(1), action: Fenced::Create(create(&fresh, now + 50)) }), "fence at a stale version");
+                    push(Action::Request(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Create(create(&format!("elsewhere:{id}"), now + 50)) }), "fence a detached create");
                     for p in siblings(id) {
-                        push(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Settle(settle(p)) }, "fence a settle at the held version");
-                        push(Request::SuspendTask { id: id.clone(), version: v, awaited: vec![p.clone()] }, "suspend on a promise");
-                        push(Request::RegisterCallback { awaited: p.clone(), awaiter: id.clone() }, "register a callback");
+                        push(Action::Request(Request::FenceTask { id: id.clone(), version: v, action: Fenced::Settle(settle(p)) }), "fence a settle at the held version");
+                        push(Action::Request(Request::SuspendTask { id: id.clone(), version: v, awaited: vec![p.clone()] }), "suspend on a promise");
+                        push(Action::Request(Request::RegisterCallback { awaited: p.clone(), awaiter: id.clone() }), "register a callback");
                     }
-                    push(Request::HeartbeatTask { id: id.clone(), version: v, pid: pid.clone() }, "heartbeat the held task");
-                    push(Request::HeartbeatTask { id: id.clone(), version: v, pid: "intruder".into() }, "heartbeat as another worker");
-                    push(Request::FulfillTask { id: id.clone(), version: v, state: "resolved".into(), data: None }, "fulfill at the held version");
-                    push(Request::FulfillTask { id: id.clone(), version: v.wrapping_sub(1), state: "resolved".into(), data: None }, "fulfill at a stale version");
-                    push(Request::ReleaseTask { id: id.clone(), version: v }, "release the held task");
+                    push(Action::Request(Request::HeartbeatTask { id: id.clone(), version: v, pid: pid.clone() }), "heartbeat the held task");
+                    push(Action::Request(Request::HeartbeatTask { id: id.clone(), version: v, pid: "intruder".into() }), "heartbeat as another worker");
+                    push(Action::Request(Request::FulfillTask { id: id.clone(), version: v, state: "resolved".into(), data: None }), "fulfill at the held version");
+                    push(Action::Request(Request::FulfillTask { id: id.clone(), version: v.wrapping_sub(1), state: "resolved".into(), data: None }), "fulfill at a stale version");
+                    push(Action::Request(Request::ReleaseTask { id: id.clone(), version: v }), "release the held task");
                     // Only a lease that ends before its promise's deadline can
                     // expire: at the deadline the task is done.
                     let end = t.lease_expires();
                     if s.promises.get(id).is_some_and(|p| end < p.timeout_at) {
-                        push(Request::AdvanceClock(end.saturating_sub(1)), "clock to just before a lease ends");
-                        push(Request::AdvanceClock(end), "clock to a lease end");
+                        push(Action::Clock(end.saturating_sub(1)), "clock to just before a lease ends");
+                        push(Action::Clock(end), "clock to a lease end");
                     }
                 }
                 TState::Pending => {
-                    push(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }, "acquire a pending task");
-                    push(Request::AcquireTask { id: id.clone(), version: v.wrapping_sub(1), pid: "w1".into(), ttl: 10 }, "acquire at a stale version");
+                    push(Action::Request(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }), "acquire a pending task");
+                    push(Action::Request(Request::AcquireTask { id: id.clone(), version: v.wrapping_sub(1), pid: "w1".into(), ttl: 10 }), "acquire at a stale version");
                 }
                 TState::Suspended => {
-                    push(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }, "acquire a suspended task");
+                    push(Action::Request(Request::AcquireTask { id: id.clone(), version: v, pid: "w1".into(), ttl: 10 }), "acquire a suspended task");
                 }
                 TState::Fulfilled => {
-                    push(Request::FulfillTask { id: id.clone(), version: v, state: "resolved".into(), data: None }, "fulfill a fulfilled task");
+                    push(Action::Request(Request::FulfillTask { id: id.clone(), version: v, state: "resolved".into(), data: None }), "fulfill a fulfilled task");
                 }
             }
         }
         for (id, p) in s.promises.iter() {
             if p.state == PState::Pending {
                 if p.callbacks.iter().next().is_some() {
-                    push(Request::SettlePromise(settle(id)), "settle a promise a task awaits");
+                    push(Action::Request(Request::SettlePromise(settle(id))), "settle a promise a task awaits");
                 } else {
-                    push(Request::SettlePromise(settle(id)), "settle a pending promise");
+                    push(Action::Request(Request::SettlePromise(settle(id))), "settle a pending promise");
                 }
-                push(Request::AdvanceClock(p.timeout_at.saturating_sub(1)), "clock to just before a promise deadline");
-                push(Request::AdvanceClock(p.timeout_at), "clock to a promise deadline");
+                push(Action::Clock(p.timeout_at.saturating_sub(1)), "clock to just before a promise deadline");
+                push(Action::Clock(p.timeout_at), "clock to a promise deadline");
             } else {
-                push(Request::SettlePromise(settle(id)), "settle a settled promise");
-                push(Request::CreatePromise(create(id, p.timeout_at)), "create a settled promise again");
+                push(Action::Request(Request::SettlePromise(settle(id))), "settle a settled promise");
+                push(Action::Request(Request::CreatePromise(create(id, p.timeout_at))), "create a settled promise again");
             }
         }
         out
     }
 
-    fn arbitrary(&self, s: &Server, pick: &mut dyn FnMut(usize) -> usize) -> Request {
-        random_request(pick, s.now)
+    fn arbitrary(&self, _s: &Server, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
+        random_action(pick, now)
     }
 
     /// Read everything, move the clock past every deadline (the longest is a
     /// task.create lease), so every timer must have fired, and read again.
-    fn finish(&self, s: &Server) -> Vec<Request> {
-        let reads = || IDS.iter().flat_map(|id| [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())]);
-        reads().chain([Request::AdvanceClock(s.now + TASK_CREATE_TTL + 1)]).chain(reads()).collect()
+    fn finish(&self, _s: &Server, now: Time) -> Vec<Action<Request>> {
+        let reads = || IDS.iter().flat_map(|id| [Request::GetTask(id.to_string()), Request::GetPromise(id.to_string())]).map(Action::Request);
+        reads().chain([Action::Clock(now + TASK_CREATE_TTL + 1)]).chain(reads()).collect()
     }
 }
 
 /// The ids random requests use.
 pub const IDS: &[&str] = &["a:1", "a:2", "a:3", "b:1", "b:2"];
 
-/// A request from a small pool of ids, versions and times; `pick(n)` chooses
-/// among `n`. `clock`: the server's clock.
-fn random_request(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Request {
+/// A clock move, or a request from a small pool of ids, versions and times;
+/// `pick(n)` chooses among `n`. `clock`: the system's clock.
+fn random_action(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Action<Request> {
     let id = IDS[pick(IDS.len())].to_string();
     let other = IDS[pick(IDS.len())].to_string();
     let version = pick(3) as u32;
@@ -178,8 +175,8 @@ fn random_request(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Request 
     let ttl = 1 + pick(20) as Time;
     let create = |id: Id| Create { id, timeout_at: t, data: None, external: false, target: false, timer: false };
     let settle = |id: Id| Settle { id, state: "resolved".into(), data: None };
-    match pick(14) {
-        0 => Request::AdvanceClock(clock + pick(30) as Time),
+    let req = match pick(14) {
+        0 => return Action::Clock(clock + pick(30) as Time),
         1 => Request::CreatePromise(create(id)),
         2 => Request::SettlePromise(settle(id)),
         3 => Request::RegisterCallback { awaited: id, awaiter: other },
@@ -193,5 +190,6 @@ fn random_request(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Request 
         11 => Request::FenceTask { id, version, action: Fenced::Settle(settle(other)) },
         12 => Request::GetTask(id),
         _ => Request::GetPromise(id),
-    }
+    };
+    Action::Request(req)
 }

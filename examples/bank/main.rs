@@ -80,7 +80,7 @@ impl<M: Accounts> Model for Bank<M> {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, op: &Request, s: &M) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, op: &Request, s: &M, _: Time) -> Vec<ExternalOutcome<Self>> {
         let Request::Deposit(a, x) = *op;
         let b = s.get(a).unwrap_or(0) + x;
         let mut n = s.clone();
@@ -88,12 +88,8 @@ impl<M: Accounts> Model for Bank<M> {
         vec![ExternalOutcome::new(b, n)]
     }
 
-    fn internal(&self, _: &(), _: &M) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), _: &M, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
-    }
-
-    fn now(&self, _: &M) -> Time {
-        0
     }
 }
 

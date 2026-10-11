@@ -310,7 +310,7 @@ trace is the witness `valid` asks for. `cargo verus verify -p accordant`
 checks all of it: 30 verified, 0 errors, no `assume` or `admit`.
 
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
-(`spec_external`, `spec_internal`, `spec_now`) and the method's `ensures` ties
+(`spec_external`, `spec_internal`) and the method's `ensures` ties
 the two: `external` returns the vector whose sequence `spec_external` says. The
 semantics are stated over the twins.
 
@@ -384,19 +384,25 @@ enum Event<X, R, D> {
   is the special case.
 
 This is linearizability checking in the style of Wing & Gong / Lowe's
-just-in-time linearization, with background steps, deadlines on the model's
+just-in-time linearization, with background steps, deadlines on the system's
 clock, and server-sent messages added.
 
 ## Time
 
-Observations carry no time. A trace is a sequence of `Invoke`, `Return` and
-`Receive`, and its order is the real-time order, as one observer saw it. A
-client's clock says nothing about the server's, so it isn't part of the input.
+Observations carry no timestamps. A trace is a sequence of `Invoke`, `Return`,
+`Receive` and `Clock`, and its order is the real-time order, as one observer
+saw it. A client's clock says nothing about the server's, so it isn't part of
+the input.
 
-Time is the model's. Its state has a clock, read by `Model::now(&State)`, and the
-model moves it with a step of its own: Resonate's `AdvanceClock(t)`, the
-driver's `debug.tick`. To the checker that request is an ordinary call. Deadlines
-are on the model's clock, and the checker enforces them.
+Time is the system's clock, and the trace says when it moved: `Event::Clock {
+at }`. The checker keeps it in the configuration, the same for every candidate,
+since only an observation moves it. The model reads it, as the `now` argument
+of `external` and `internal`, and never moves it: a model is a state machine,
+and managing a clock is not part of modeling a system. (An earlier version kept
+the clock in the model's state, moved by a request like Resonate's
+`AdvanceClock`; every model with timers then had to model a clock, and the
+checker had to treat that request specially.) Deadlines are on this clock, and
+the checker enforces them.
 
 - **When internal work runs is part of starting it**, not part of the work:
 
@@ -407,28 +413,31 @@ are on the model's clock, and the checker enforces them.
   }
   ```
 
-  "Now" is the clock of the state the starting step leads to. Each has a builder
+  "Now" is the clock as it reads when the starting step is taken. Each has a builder
   of the same name on both outcomes (`.later(..)`, `.timer(..)`). Work that must
   run by a deadline but may run earlier is both: `.later(w).timer(deadline, w)`,
   with `w` doing nothing once it has run. (There used to be `After`, `Within`
   and `Maybe` as well; they are gone for now.)
-- **Overdue work goes first.** Work whose deadline has come on the model's clock,
+- **Overdue work goes first.** Work whose deadline has come on the clock,
   and that can run, runs before anything else: no call takes effect and nothing
   is observed until it has. Work that can't run owes nothing until it can.
-- **Time moves in jumps.** When a clock step passes several deadlines, their
+- **Time moves in jumps.** When a clock move passes several deadlines, their
   work runs right after it, earliest deadline first, all reading the new time.
   The clock never reads the times in between, so a timer due at 5 that fires
   after a jump from 0 to 10 sees 10. Use the deadline itself (`timeout_at`) for
   anything that should record when it was due.
-- **A clock step should do nothing else.** Requests that also carry the time
-  (Resonate's `resonate:debug_time` header) are modeled as a clock step followed
-  by the request. Moving the clock and acting in one step would let the action
-  run before the timers due at the new time.
+- **A clock move does nothing else.** Requests that also carry the time
+  (Resonate's `resonate:debug_time` header) are recorded as a clock move
+  followed by the request. Moving the clock and acting in one step would let
+  the action run before the timers due at the new time.
 - **Deadlines are inclusive.** At clock `t`, work due by `t` has run. This
   matches servers that test `now >= deadline`, like Resonate.
-- **Requests in flight** may take effect before or after a clock step, like
+- **Requests in flight** may take effect before or after a clock move, like
   any other concurrent call. That's how a read that spans a timeout may still
-  see the promise pending.
+  see the promise pending. A clock move is the one observation that doesn't
+  commute with pending work: work that runs before it is timed differently,
+  and the move makes timers overdue, so the checker explores the work the move
+  changes before consuming it (`clock_seed`).
 - **Only safety.** The checker asks whether some execution explains what was
   observed. `Later` work happens when an observation needs it, or never; there
   is no "the system is idle now" assertion. Work that must happen by some time
@@ -481,7 +490,7 @@ mechanisms keep it small, and all eight are in the prototype.
    keys commutes and stays pending. `Keys::All` is the sound default.
    *Measured (`tests/bank.rs`): 8 concurrent deposits on 8 accounts → profile width
    1 and 32 nodes explored with footprints, versus width 128 and 2,458 nodes without.*
-3. **Deadlines.** Obligations have a `by` on the model's clock. When the clock
+3. **Deadlines.** Obligations have a `by` on the clock. When the clock
    passes it, the uncertainty is resolved once and then gone. Nothing stays pending forever unless the spec says so.
 4. **Subsumption (antichains).** Optional work (a call the history says never
    returns) can always be skipped, so a node simulates any node with the same
@@ -575,8 +584,8 @@ still walks every entry. The incremental hash is what fixes time.
 
 | Resonate (C#) | Rust |
 |---|---|
-| `ServerState { Promises, Tasks, Now }` | `Server { now, promises, tasks }`; `Model::now` reads `now` |
-| `AdvanceClock` request | `Request::AdvanceClock(t)`, marked `moves_clock`: it touches every origin, alike |
+| `ServerState { Promises, Tasks, Now }` | `Server { promises, tasks }`; the clock is the checker's, passed in as `now` |
+| `AdvanceClock` request | `Event::Clock { at }` in the trace; no request |
 | `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
 | internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
 | promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
@@ -585,7 +594,7 @@ still walks every entry. The incremental hash is what fixes time.
 | `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe" |
 | `PollLiveness(terminal)` | the poll that sees the terminal state is a read like any other; no idle bound |
 | `debug.messages` (execute/unblock) | `execute` is a server-sent `Dispatch::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
-| footprint | promise id plus awaiter ids for callbacks; `AdvanceClock` touches everything |
+| footprint | promise id plus awaiter ids for callbacks |
 
 Origins: the only request that may cross origins is a fence that creates a
 promise in another origin, which starts a detached workflow. A cross-origin
@@ -706,4 +715,4 @@ Porting also found three checker bugs, all fixed:
 - `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
 - `examples/tigerbeetle/`: TigerBeetle's state machine. `lean/` has it as a Lean `Model`, with a proof that debits never exceed credits (built by `lean/lakefile.toml`); `src/` has its data model in Rust, not yet a `Model`.
 - `examples/porcupine/`: Porcupine's etcd and key-value histories, checked against its Go checker's verdicts (`cargo run --release --example porcupine -- all [--dfs] [--certify]`; `fetch.sh` gets the histories).
-- `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the model's clock, never early, in deadline order after a jump.
+- `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the clock, never early, in deadline order after a jump.

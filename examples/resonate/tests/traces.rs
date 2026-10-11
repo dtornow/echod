@@ -69,10 +69,11 @@ impl Trace {
         assert!(self.shadow.call(id, op, resp).is_err(), "{label}: model accepted a bogus response in one factor");
     }
 
-    /// The driver moves the server's clock.
+    /// The system's clock moves to `t`.
     #[track_caller]
     fn tick(&mut self, t: Time) {
-        self.step(&format!("tick {t}"), Request::AdvanceClock(t), st(200));
+        self.c.clock(t).unwrap_or_else(|v| panic!("tick {t}: {v}"));
+        self.shadow.clock(t).unwrap_or_else(|v| panic!("tick {t}, in one factor: {v}"));
     }
 }
 
@@ -137,6 +138,11 @@ fn suspend(id: &str, version: u32, awaited: &[&str]) -> Request {
 
 fn callback(awaited: &str, awaiter: &str) -> Request {
     Request::RegisterCallback { awaited: awaited.into(), awaiter: awaiter.into() }
+}
+
+/// The system's clock moved to `at`.
+fn clock(at: Time) -> Event<Request, Response, Dispatch> {
+    Event::Clock { at }
 }
 
 // ------------------------------------------------------------- predicates
@@ -394,7 +400,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
     origins: u64,
 ) -> Result<Checker<E>, accordant::Violation> {
     let now = 1_000_000;
-    c.call(900_000, Request::AdvanceClock(now), Response::Status(200))?;
+    c.clock(now)?;
     for o in 0..origins {
         let id = format!("o{o}:p");
         let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, external: false, target: false, timer: false };
@@ -402,7 +408,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
         c.call(o, Request::CreatePromise(p), r)?;
         c.invoke(1_000 + o, Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
     }
-    c.call(900_001, Request::AdvanceClock(now + 2_000), Response::Status(200))?;
+    c.clock(now + 2_000)?;
     Ok(c)
 }
 
@@ -481,27 +487,26 @@ fn partitioning_never_changes_a_verdict() {
         let now = 1_000_000;
         let mut on = Checker::with_partitions(Resonate, Server::default(), Config::default());
         let mut off = Checker::with_footprints(Resonate, Server::default(), Config::default());
-        let tick = |t| [Event::Invoke { call: 900_000 + t, req: Request::AdvanceClock(t) }, Event::Return { call: 900_000 + t, res: Response::Status(200) }];
         let mut open: Vec<(CallId, Request)> = Vec::new();
-        let mut clock = now;
+        let mut at = now;
         let mut all = Vec::new();
         let mut kept = Vec::new();
         for call in 0..60u64 {
             let id = ids[rng.next(ids.len() as u64) as usize].to_string();
             let other = ids[rng.next(ids.len() as u64) as usize].to_string();
             let op = match rng.next(9) {
-                0 => Request::CreatePromise(Create { id, timeout_at: clock + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
+                0 => Request::CreatePromise(Create { id, timeout_at: at + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
                 1 => Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }),
                 2 => Request::AcquireTask { id, version: rng.next(3) as u32, pid: "w".into(), ttl: 1_000 },
                 3 => Request::FulfillTask { id, version: rng.next(3) as u32, state: "resolved".into(), data: None },
                 4 => Request::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
                 5 => Request::RegisterCallback { awaited: id, awaiter: other },
                 6 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
-                7 if rng.next(2) == 0 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: clock + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
+                7 if rng.next(2) == 0 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: at + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
                 7 => Request::GetTask(id),
                 _ => Request::GetPromise(id),
             };
-            let mut events = if call == 0 { tick(now).to_vec() } else { Vec::new() };
+            let mut events = if call == 0 { vec![clock(now)] } else { Vec::new() };
             events.push(Event::Invoke { call, req: op.clone() });
             match rng.next(4) {
                 0 => open.push((call, op.clone())), // answered later, or never
@@ -516,8 +521,8 @@ fn partitioning_never_changes_a_verdict() {
                 }
             }
             if rng.next(5) == 0 {
-                clock += 1 + rng.next(2_000); // the driver moves the clock
-                events.extend(tick(clock));
+                at += 1 + rng.next(2_000); // the clock moves
+                events.push(clock(at));
             }
             if !open.is_empty() && rng.next(4) == 0 {
                 // A late answer: whatever the op would get if called now. Valid or
@@ -628,18 +633,14 @@ fn check_takes_calls_dispatches_and_clock_moves() {
     let create_r = create("ex:r", now + 10_000, "r").target().op();
     let created = t.c.allowed(&create_r).remove(0); // the pending record
     let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
-    let tick = |call, t| [Event::Invoke { call, req: Request::AdvanceClock(t) }, Event::Return { call, res: Response::Status(200) }];
-    let trace = [
-        tick(10, now).to_vec(),
-        vec![
-            Event::Invoke { call: 1, req: create_r },
-            Event::Return { call: 1, res: created.clone() },
-            Event::Receive { msg: execute("ex:r", 0) },
-        ],
-        tick(11, now + 20_000).to_vec(),
-        vec![Event::Invoke { call: 2, req: get("ex:r") }],
-    ]
-    .concat();
+    let trace = vec![
+        clock(now),
+        Event::Invoke { call: 1, req: create_r },
+        Event::Return { call: 1, res: created.clone() },
+        Event::Receive { msg: execute("ex:r", 0) },
+        clock(now + 20_000),
+        Event::Invoke { call: 2, req: get("ex:r") },
+    ];
     c.check(trace).unwrap();
     // The read was sent after the deadline: it can only see the promise timed out.
     let stale = created; // pending, as of before the deadline

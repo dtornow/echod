@@ -10,10 +10,11 @@ Names are TigerBeetle's, so the two read side by side.
 
 The parts of an accordant `Model` (see `Accordant.lean`):
 
-* `State`    = `Server`: the clock, accounts, transfers, pending statuses, spent
-  ids, and the account events (one per transfer or expiry).
+* `State`    = `Server`: accounts, transfers, pending statuses, spent ids, and
+  the account events (one per transfer or expiry). No clock: the system's clock
+  is the configuration's, passed to every request and pulse as `now`.
 * `External` = `Request`: create, look up and query accounts and transfers; read
-  change events; move the clock.
+  change events.
 * `Response` = `Response`: one result per created item; the items found.
 * `Internal` = `Internal`: the `pulse` that expires pending transfers.
 * `Dispatch` = `Empty`: TigerBeetle sends nothing on its own.
@@ -34,9 +35,10 @@ Differences from TigerBeetle, all deliberate:
   pending transfer's status is keyed by its id rather than its timestamp, and an
   account event holds the accounts after the event rather than their balances,
   so a change event is read off it without looking the accounts up again.
-- Time is `Server.now`, moved by `advance_clock`; TigerBeetle uses the cluster's
-  wall clock. A pulse that finds nothing to expire changes nothing here; in
-  TigerBeetle it still moves `prepare_timestamp` on, as if the clock had been later.
+- Time is the configuration's clock, passed in as `now`; the model reads it and
+  never moves it (TigerBeetle uses the cluster's wall clock). A pulse that finds
+  nothing to expire changes nothing here; in TigerBeetle it still moves
+  `prepare_timestamp` on, as if the clock had been later.
 
 Checked with Lean 4.31.0, core only: `cd lean && lake build`.
 -/
@@ -177,11 +179,9 @@ structure AccountEvent where
 /-! ## The server -/
 
 structure Server where
-  /-- The cluster's clock. -/
-  now               : Time := 0
-  /-- The last timestamp handed out. A batch of `n` events gets the timestamps
-      `max prepare_timestamp now + 1, ..., + n`, so timestamps never repeat, even
-      while the clock stands still. -/
+  /-- The last timestamp handed out. A batch of `n` events at time `now` gets the
+      timestamps `max prepare_timestamp now + 1, ..., + n`, so timestamps never
+      repeat, even while the clock stands still. -/
   prepare_timestamp : Time := 0
   /-- In timestamp order, as created. -/
   accounts          : List (Id × Account) := []
@@ -281,8 +281,6 @@ structure ChangeEventsFilter where
   deriving DecidableEq, Repr
 
 inductive Request where
-  /-- The driver moves the cluster's clock. -/
-  | advance_clock (to : Time)
   /-- One result per account, in order. Linked chains are all-or-nothing. -/
   | create_accounts (events : List NewAccount)
   /-- One result per transfer, in order. Linked chains are all-or-nothing. -/
@@ -416,8 +414,6 @@ structure ChangeEvent where
   deriving DecidableEq, Repr
 
 inductive Response where
-  /-- `advance_clock`. -/
-  | ok
   | create_accounts (results : List (CreateResult CreateAccountStatus))
   | create_transfers (results : List (CreateResult CreateTransferStatus))
   /-- The accounts found, in the order asked; ids not found are left out. -/
@@ -753,9 +749,9 @@ def run_batch {E S : Type} [DecidableEq S]
     run_batch step linked created failed chain_open on_fail base n (i + 1) rest
       (batch_step step linked created failed chain_open on_fail base n i b e)
 
-def Server.create_accounts (s : Server) (events : List NewAccount) :
+def Server.create_accounts (s : Server) (now : Time) (events : List NewAccount) :
     Server × List (CreateResult CreateAccountStatus) :=
-  let base := max s.prepare_timestamp s.now
+  let base := max s.prepare_timestamp now
   let n := events.length
   let b := run_batch (fun s ts a => s.create_account ts a) (·.flags.linked)
     .created .linked_event_failed .linked_event_chain_open (fun s _ _ => s) base n 0 events
@@ -768,9 +764,9 @@ def spend (s : Server) (t : NewTransfer) (st : CreateTransferStatus) : Server :=
 
 /-- Creates the transfers, and starts a pulse for each new pending transfer with a
     timeout, to run when it expires. -/
-def Server.create_transfers (s : Server) (events : List NewTransfer) :
+def Server.create_transfers (s : Server) (now : Time) (events : List NewTransfer) :
     Server × List (CreateResult CreateTransferStatus) × List (Sched Internal) :=
-  let base := max s.prepare_timestamp s.now
+  let base := max s.prepare_timestamp now
   let n := events.length
   let b := run_batch (fun s ts t => s.create_transfer ts t) (·.flags.linked)
     .created .linked_event_failed .linked_event_chain_open spend base n 0 events ⟨s, none, #[]⟩
@@ -811,8 +807,8 @@ def Server.expire_all : Server → Time → List (Id × Transfer) → Server
     pending transfers with `expires_at ≤ T`, earliest first, at most `batch_max`,
     the `k` of them at timestamps `T - k + 1, ..., T`. If more are due, another
     pulse follows. -/
-def Server.pulse (lim : Limits) (s : Server) : Server × List (Sched Internal) :=
-  let T := max s.prepare_timestamp s.now + lim.batch_max
+def Server.pulse (lim : Limits) (s : Server) (now : Time) : Server × List (Sched Internal) :=
+  let T := max s.prepare_timestamp now + lim.batch_max
   let due := s.transfers.filter fun (id, t) =>
     get s.transfers_pending id == some .pending && t.expires_at.any (· ≤ T)
   let due := due.mergeSort fun (_, a) (_, b) =>
@@ -821,8 +817,8 @@ def Server.pulse (lim : Limits) (s : Server) : Server × List (Sched Internal) :
     decide (x < y) || (x == y && decide (a.timestamp ≤ b.timestamp))
   if due.isEmpty then (s, [])
   else
-    let now := due.take lim.batch_max
-    let s' := s.expire_all (T - now.length + 1) now
+    let batch := due.take lim.batch_max
+    let s' := s.expire_all (T - batch.length + 1) batch
     ({ s' with prepare_timestamp := T },
      if due.length > lim.batch_max then [.later .pulse] else [])
 
@@ -922,14 +918,14 @@ def Server.get_change_events (lim : Limits) (s : Server) (f : ChangeEventsFilter
 
 /-! ## The model -/
 
-def Server.external (lim : Limits) (s : Server) :
+/-- A request takes effect at time `now`, the configuration's clock. -/
+def Server.external (lim : Limits) (s : Server) (now : Time) :
     Request → ExternalOutcome Server Response Internal Empty
-  | .advance_clock to => ⟨{ s with now := max s.now to }, .ok, [], []⟩
   | .create_accounts events =>
-    let (s', rs) := s.create_accounts events
+    let (s', rs) := s.create_accounts now events
     ⟨s', .create_accounts rs, [], []⟩
   | .create_transfers events =>
-    let (s', rs, pulses) := s.create_transfers events
+    let (s', rs, pulses) := s.create_transfers now events
     ⟨s', .create_transfers rs, pulses, []⟩
   | .lookup_accounts ids =>
     ⟨s, .lookup_accounts (ids.filterMap fun id => (get s.accounts id).map (id, ·)), [], []⟩
@@ -941,8 +937,9 @@ def Server.external (lim : Limits) (s : Server) :
   | .query_transfers f => ⟨s, .query_transfers (s.query_transfers lim f), [], []⟩
   | .get_change_events f => ⟨s, .get_change_events (s.get_change_events lim f), [], []⟩
 
-def Server.internal (lim : Limits) (s : Server) : Internal → InternalOutcome Server Internal Empty
-  | .pulse => let (s', more) := s.pulse lim; ⟨s', more, []⟩
+def Server.internal (lim : Limits) (s : Server) (now : Time) :
+    Internal → InternalOutcome Server Internal Empty
+  | .pulse => let (s', more) := s.pulse lim now; ⟨s', more, []⟩
 
 /-- TigerBeetle as an accordant model. Every request and every pulse has exactly
     one outcome: the state machine is deterministic. -/
@@ -952,9 +949,8 @@ def model (lim : Limits) : Accordant.Model where
   Response := Response
   Internal := Internal
   Dispatch := Empty
-  external := fun req s => .one (s.external lim req)
-  internal := fun w s => [s.internal lim w]
-  now      := (·.now)
+  external := fun req s now => .one (s.external lim now req)
+  internal := fun w s now => [s.internal lim now w]
 
 /-! ## Scenarios, run -/
 
@@ -967,9 +963,10 @@ def statuses {S : Type} (rs : List (CreateResult S)) : List S := rs.map (·.stat
 def balances (s : Server) (id : Id) : Option (Nat × Nat × Nat × Nat) :=
   (get s.accounts id).map fun a => (a.debits_pending, a.debits_posted, a.credits_pending, a.credits_posted)
 
-/-- Two accounts on ledger 1: 1 may not go negative, 2 is unrestricted. -/
+/-- Two accounts on ledger 1: 1 may not go negative, 2 is unrestricted. Every
+    scenario runs with the clock at 0 unless it says otherwise. -/
 def opened : Server :=
-  (Server.create_accounts {}
+  (Server.create_accounts {} 0
     [{ id := 1, ledger := 1, code := 1, flags := { debits_must_not_exceed_credits := true, history := true } },
      { id := 2, ledger := 1, code := 1 }]).1
 
@@ -977,50 +974,50 @@ def tr (id dr cr amount : Nat) (flags : TransferFlags := {}) (timeout := 0) : Ne
   { id, debit_account_id := dr, credit_account_id := cr, amount, ledger := 1, code := 1, flags, timeout }
 
 -- Funding 1 from 2, then 1 may spend what it has, not more.
-def funded : Server := (opened.create_transfers [tr 10 2 1 100]).1
-#guard statuses (funded.create_transfers [tr 11 1 2 150]).2.1 == [.exceeds_credits]
-#guard statuses (funded.create_transfers [tr 11 1 2 100]).2.1 == [.created]
+def funded : Server := (opened.create_transfers 0 [tr 10 2 1 100]).1
+#guard statuses (funded.create_transfers 0 [tr 11 1 2 150]).2.1 == [.exceeds_credits]
+#guard statuses (funded.create_transfers 0 [tr 11 1 2 100]).2.1 == [.created]
 
 -- A transient failure spends the id; the same transfer later is refused.
-#guard statuses (((funded.create_transfers [tr 11 1 2 150]).1.create_transfers
+#guard statuses (((funded.create_transfers 0 [tr 11 1 2 150]).1.create_transfers 0
   [tr 11 1 2 50]).2.1) == [.id_already_failed]
 
 -- The same transfer again: `exists`, with the original timestamp.
-#guard (funded.create_transfers [tr 10 2 1 100]).2.1 == [⟨3, .exists⟩]
+#guard (funded.create_transfers 0 [tr 10 2 1 100]).2.1 == [⟨3, .exists⟩]
 
 -- A linked chain is all-or-nothing.
-def chained := funded.create_transfers [tr 20 1 2 60 { linked := true }, tr 21 1 2 60]
+def chained := funded.create_transfers 0 [tr 20 1 2 60 { linked := true }, tr 21 1 2 60]
 #guard statuses chained.2.1 == [.linked_event_failed, .exceeds_credits]
 #guard balances chained.1 1 == balances funded 1
 
 -- A chain open at the end of the batch.
-#guard statuses (funded.create_transfers [tr 22 1 2 1 { linked := true }]).2.1 ==
+#guard statuses (funded.create_transfers 0 [tr 22 1 2 1 { linked := true }]).2.1 ==
   [.linked_event_chain_open]
 
 -- A balancing transfer moves what is available.
-#guard (get (funded.create_transfers [tr 23 1 2 500 { balancing_debit := true }]).1.transfers 23).map
+#guard (get (funded.create_transfers 0 [tr 23 1 2 500 { balancing_debit := true }]).1.transfers 23).map
   (·.amount) == some 100
 
 -- Two-phase: pending reserves, post moves part, the rest goes back.
-def held := funded.create_transfers [tr 30 1 2 70 { pending := true } (timeout := 1)]
+def held := funded.create_transfers 0 [tr 30 1 2 70 { pending := true } (timeout := 1)]
 #guard balances held.1 1 == some (70, 0, 0, 100)
 #guard held.2.2.length == 1
-#guard statuses (held.1.create_transfers [tr 31 1 2 40]).2.1 == [.exceeds_credits]
-def posted := held.1.create_transfers
+#guard statuses (held.1.create_transfers 0 [tr 31 1 2 40]).2.1 == [.exceeds_credits]
+def posted := held.1.create_transfers 0
   [{ id := 32, pending_id := 30, amount := 50, flags := { post_pending_transfer := true } }]
 #guard statuses posted.2.1 == [.created]
 #guard balances posted.1 1 == some (0, 50, 0, 100)
-#guard statuses (posted.1.create_transfers
+#guard statuses (posted.1.create_transfers 0
   [{ id := 33, pending_id := 30, flags := { void_pending_transfer := true } }]).2.1 ==
   [.pending_transfer_already_posted]
 
--- Expiry: past its timeout the transfer can't be posted, even before the pulse;
--- the pulse gives the amount back.
-def late : Server := (held.1.external lim (.advance_clock (ns_per_s + 10))).next
-#guard statuses (late.create_transfers
+-- Expiry: with the clock past its timeout the transfer can't be posted, even
+-- before the pulse; the pulse gives the amount back.
+def late : Time := ns_per_s + 10
+#guard statuses (held.1.create_transfers late
   [{ id := 34, pending_id := 30, flags := { post_pending_transfer := true }, amount := u128_max }]).2.1 ==
   [.pending_transfer_expired]
-def expired := (late.pulse lim).1
+def expired := (held.1.pulse lim late).1
 #guard balances expired 1 == some (0, 0, 0, 100)
 #guard get expired.transfers_pending 30 == some .expired
 

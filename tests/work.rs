@@ -23,19 +23,15 @@ impl Model for Twice {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, req: &Req, n: &u32) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Req, n: &u32, _: Time) -> Vec<ExternalOutcome<Self>> {
         match req {
             Req::Bump => vec![ExternalOutcome::same(0, n).later(()).later(())],
             Req::Read => vec![ExternalOutcome::same(*n, n)],
         }
     }
 
-    fn internal(&self, _: &(), n: &u32) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), n: &u32, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::new(n + 1)]
-    }
-
-    fn now(&self, _: &u32) -> Time {
-        0
     }
 }
 

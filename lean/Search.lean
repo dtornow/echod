@@ -33,14 +33,14 @@ variable {m : Model}
 def effects (ids : List CallId) (c : Config m) : List Silent :=
   ids.flatMap fun call =>
     match c.calls call with
-    | some (.inFlight req) => (List.range (m.external req c.state).val.length).map (Silent.effect call)
+    | some (.inFlight req) => (List.range (m.external req c.state c.now).val.length).map (Silent.effect call)
     | _ => []
 
 /-- Every pending work, with every outcome. -/
 def runs (c : Config m) : List Silent :=
   (List.range c.work.length).flatMap fun i =>
     match c.work[i]? with
-    | some w => (List.range (m.internal w.req c.state).length).map (Silent.run i)
+    | some w => (List.range (m.internal w.req c.state c.now).length).map (Silent.run i)
     | none => []
 
 def silents (ids : List CallId) (c : Config m) : List Silent :=
@@ -285,6 +285,7 @@ theorem step_sim {c d c' : Config m} {l : Label m} (hs : Sim c d) (h : Step m c 
     have h1 : (msg :: (pre' ++ post')).Perm (msg :: (pre ++ post)) :=
       (List.perm_middle.symm.trans hperm).trans (hsent ▸ List.perm_middle)
     exact h1.cons_inv
+  | clock ht hov => exact ⟨_, .clock ht hov, s, hperm, rfl⟩
   | effect hc ho hov => exact ⟨_, .effect hc ho hov, _, hperm.append_right _, rfl⟩
   | run hw ha ho hf => exact ⟨_, .run hw ha ho hf, _, hperm.append_right _, rfl⟩
 
@@ -314,6 +315,7 @@ theorem inv_step {ids : List CallId} {c c' : Config m} {l : Label m} (hinv : Inv
     · simp at h'
     · exact hinv _ _ h'
   | receive hsent hov => exact hinv
+  | clock ht hov => exact hinv
   | effect hc ho hov =>
     intro call' req' h'
     simp only [update] at h'
@@ -412,6 +414,8 @@ theorem obs_complete {c c' : Config m} {e : m.Ev} (h : Step m c (.obs e) c') :
     exact ⟨_, by simp [Config.move, hc, overdue_false hov], Sim.refl _⟩
   | ret hc hov =>
     exact ⟨_, by simp [Config.move, hc, overdue_false hov], Sim.refl _⟩
+  | clock ht hov =>
+    exact ⟨_, by simp [Config.move, ht, overdue_false hov], Sim.refl _⟩
   | receive hsent hov =>
     rename_i pre post msg
     have hmem : msg ∈ c.sent := by rw [hsent]; simp
@@ -506,5 +510,24 @@ theorem search_iff {init : m.State} {trace : List m.Ev} :
 #guard !(search counter 0 2 [.invoke 1 (), .invoke 2 (), .ret 2 2, .ret 1 2]).isSome
 -- With no silent steps allowed, nothing can take effect.
 #guard !(search counter 0 0 [.invoke 7 (), .ret 7 1]).isSome
+
+/-- A counter with a timer: `arm` sets a timer at 5 that resets the count. -/
+abbrev timed : Model where
+  State    := Nat
+  External := Bool          -- true: increment; false: arm the timer
+  Response := Nat
+  Internal := Unit
+  Dispatch := Empty
+  external := fun req n _ => if req then .one ⟨n + 1, n + 1, [], []⟩ else .one ⟨n, n, [.timer 5 ()], []⟩
+  internal := fun _ _ _ => [⟨0, [], []⟩]
+
+-- Arm, increment, the clock passes 5, increment: the timer reset the count.
+#guard (search timed 0 2 [.invoke 1 false, .ret 1 0, .invoke 2 true, .ret 2 1, .clock 9, .invoke 3 true, .ret 3 1]).isSome
+-- Without the reset the count would be 2: not explained.
+#guard !(search timed 0 2 [.invoke 1 false, .ret 1 0, .invoke 2 true, .ret 2 1, .clock 9, .invoke 3 true, .ret 3 2]).isSome
+-- The timer can't fire before 5.
+#guard !(search timed 0 2 [.invoke 1 false, .ret 1 0, .invoke 2 true, .ret 2 1, .clock 4, .invoke 3 true, .ret 3 1]).isSome
+-- The clock doesn't move back.
+#guard !(search timed 0 2 [.clock 9, .clock 4]).isSome
 
 end Accordant

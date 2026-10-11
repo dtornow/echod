@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::certificate::EventOf;
-use crate::{CallId, Explore, Sim};
+use crate::{Action, CallId, Explore, Sim};
 
 /// One decision: the `k`-th of `n` alternatives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -129,7 +129,8 @@ impl Choices {
 /// How a run goes.
 #[derive(Clone, Debug)]
 pub struct Drive {
-    /// Requests to send, besides the ones [`Explore::finish`] adds.
+    /// Actions to take (requests to send, clock moves), besides the ones
+    /// [`Explore::finish`] adds.
     pub requests: usize,
     /// At most this many calls in flight at once.
     pub concurrency: usize,
@@ -150,10 +151,11 @@ pub struct Run<M: Explore> {
     pub choices: Vec<Choice>,
 }
 
-/// Drives `model` from `init`: sends requests and lets the system move, every
-/// decision from `choices`, until the requests are sent and answered; then
-/// sends [`Explore::finish`]'s requests one at a time, each answered before the
-/// next. Returns what clients saw and the decisions taken.
+/// Drives `model` from `init`: sends requests, moves the clock and lets the
+/// system move, every decision from `choices`, until the actions are taken and
+/// every call answered; then takes [`Explore::finish`]'s actions one at a
+/// time, each settled before the next. Returns what clients saw and the
+/// decisions taken.
 pub fn drive<M: Explore>(model: &M, init: M::State, cfg: &Drive, choices: Choices) -> Run<M> {
     let choices = RefCell::new(choices);
     let pick = |n: usize| choices.borrow_mut().pick(n);
@@ -164,42 +166,51 @@ pub fn drive<M: Explore>(model: &M, init: M::State, cfg: &Drive, choices: Choice
     let mut sent = 0;
     // The system can always make a move while a call is open, so this ends.
     while sent < cfg.requests || sim.open_calls() > 0 {
-        let send = sent < cfg.requests && sim.open_calls() < cfg.concurrency.max(1) && pick(2) == 0;
-        if send {
-            let req = request(model, sim.state(), cfg.guided, &pick, &pick_labeled);
-            call += 1;
+        let act = sent < cfg.requests && sim.open_calls() < cfg.concurrency.max(1) && pick(2) == 0;
+        if act {
+            let a = action(model, sim.state(), sim.now(), cfg.guided, &pick, &pick_labeled);
             sent += 1;
-            trace.push(sim.invoke(call, req));
+            trace.push(take(&mut sim, &mut call, a));
         } else if let Some(e) = sim.step() {
             trace.push(e);
         } else if sent >= cfg.requests {
             break;
         }
     }
-    let mut last = model.finish(sim.state());
+    let mut last = model.finish(sim.state(), sim.now());
     last.reverse();
-    while let Some(req) = last.pop() {
-        call += 1;
-        trace.push(sim.invoke(call, req));
+    while let Some(a) = last.pop() {
+        trace.push(take(&mut sim, &mut call, a));
         trace.extend(sim.settle());
     }
     drop(sim);
     Run { trace, choices: choices.into_inner().recorded }
 }
 
-fn request<M: Explore>(
+fn take<M: Explore>(sim: &mut Sim<'_, M>, call: &mut CallId, a: Action<M::External>) -> EventOf<M> {
+    match a {
+        Action::Request(req) => {
+            *call += 1;
+            sim.invoke(*call, req)
+        }
+        Action::Clock(at) => sim.clock(at),
+    }
+}
+
+fn action<M: Explore>(
     model: &M,
     state: &M::State,
+    now: crate::Time,
     guided: bool,
     pick: &impl Fn(usize) -> usize,
     pick_labeled: &impl Fn(&[&'static str]) -> usize,
-) -> M::External {
+) -> Action<M::External> {
     if guided {
-        let suggestions = model.suggest(state);
+        let suggestions = model.suggest(state, now);
         if !suggestions.is_empty() && pick(4) != 0 {
             let labels: Vec<&'static str> = suggestions.iter().map(|(_, why)| *why).collect();
             return suggestions[pick_labeled(&labels)].0.clone();
         }
     }
-    model.arbitrary(state, &mut |n| pick(n))
+    model.arbitrary(state, now, &mut |n| pick(n))
 }

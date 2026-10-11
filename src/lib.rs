@@ -12,11 +12,12 @@
 //!   point where it takes effect that the checker places, then `Return`. A call
 //!   that never returns stays in flight: it may or may not have taken effect,
 //!   because the client cannot know.
-//! * **Observations carry no time.** Their order is the real-time order, as one
-//!   observer saw it. Time is the model's: its state has a clock
-//!   ([`Model::now`]), moved by requests like `AdvanceClock`. Models install
-//!   timers and give internal work deadlines on that clock, and the checker
-//!   enforces them.
+//! * **Time is the system's clock, recorded in the trace.** Observations carry
+//!   no timestamps; their order is the real-time order, as one observer saw it.
+//!   When the system's clock moves, the trace says so ([`Event::Clock`]). The
+//!   model reads the clock (`now` is an argument of [`Model::external`] and
+//!   [`Model::internal`]) and never moves it. Models install timers and give
+//!   internal work deadlines on that clock, and the checker enforces them.
 //! * **Internal work is data, not closures,** so two explanations that start the
 //!   same work converge.
 //! * **When internal work runs is part of starting it** ([`Sched`]): later
@@ -61,12 +62,13 @@ impl<T: Clone + Eq + Hash + Ord + Debug> Data for T {}
 
 pub type CallId = u64;
 
-/// The model's clock, in whatever unit it uses (milliseconds in the examples).
-/// Time is part of the model's state ([`Model::now`]); observations carry none.
+/// The system's clock, in whatever unit it uses (milliseconds in the examples).
+/// It is part of the configuration the checker keeps, moved only by
+/// [`Event::Clock`]; the model reads it and never moves it.
 pub type Time = u64;
 
-/// What a client observes. No time: the order of a trace is the order one
-/// observer saw, and time is the model's own ([`Model::now`]).
+/// What a client observes, and when the system's clock moved. Observations
+/// carry no timestamps: the order of a trace is the order one observer saw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Event<X, R, D> {
@@ -76,11 +78,14 @@ pub enum Event<X, R, D> {
     Return { call: CallId, res: R },
     /// The client got a dispatch the server sent on its own.
     Receive { msg: D },
+    /// The system's clock now reads `at`. Work due by then is overdue, and
+    /// runs before anything else is observed.
+    Clock { at: Time },
 }
 
-/// Internal work to start, and when it runs, on the model's clock ([`Model::now`]),
-/// from the state the starting step leads to. Work that must happen and hasn't
-/// by its deadline is a violation. When the clock jumps past several deadlines,
+/// Internal work to start, and when it runs, on the system's clock as it reads
+/// when the starting step is taken. Work that must happen and hasn't by its
+/// deadline is a violation. When the clock jumps past several deadlines,
 /// the work runs right after the jump, earliest deadline first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -113,7 +118,8 @@ pub struct InternalOutcome<M: Model + ?Sized> {
 }
 
 /// The system, as a state machine: external requests from clients, internal
-/// work it does on its own.
+/// work it does on its own. It reads the clock (`now`) and never moves it:
+/// the trace says when time moved ([`Event::Clock`]).
 ///
 /// Each method has a `spec` twin the proofs use ([`semantics`]), and must
 /// compute what its twin says (its `ensures`). A model written outside
@@ -132,76 +138,71 @@ pub trait Model {
     /// "execute this task" to a worker). `()` if it sends nothing.
     type Dispatch: Data;
 
-    /// A request takes effect in `state`: every allowed outcome. An empty list
-    /// means it cannot take effect here.
-    fn external(&self, req: &Self::External, state: &Self::State) -> (r: Vec<ExternalOutcome<Self>>)
+    /// A request takes effect in `state` at time `now`: every allowed outcome.
+    /// At least one: every request is accepted in every state. A system
+    /// always answers; refusing is a response.
+    fn external(&self, req: &Self::External, state: &Self::State, now: Time) -> (r: Vec<ExternalOutcome<Self>>)
         ensures
-            r@.len() == self.spec_external(*req, *state).len(),
+            r@.len() == self.spec_external(*req, *state, now).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let o = #[trigger] r@[i];
                 semantics::ExternalOutcomeV { next: o.next, resp: o.resp, work: o.work@, send: o.send@ }
-                    == self.spec_external(*req, *state)[i]
+                    == self.spec_external(*req, *state, now)[i]
             };
 
-    /// Internal work runs in `state`: every possible successor. An empty list
-    /// means it can't run yet and stays pending; `InternalOutcome::same(state)`
-    /// means it has nothing left to do and is removed.
-    fn internal(&self, req: &Self::Internal, state: &Self::State) -> (r: Vec<InternalOutcome<Self>>)
+    /// Internal work runs in `state` at time `now`: every possible successor.
+    /// An empty list means it can't run yet and stays pending;
+    /// `InternalOutcome::same(state)` means it has nothing left to do and is
+    /// removed.
+    fn internal(&self, req: &Self::Internal, state: &Self::State, now: Time) -> (r: Vec<InternalOutcome<Self>>)
         ensures
-            r@.len() == self.spec_internal(*req, *state).len(),
+            r@.len() == self.spec_internal(*req, *state, now).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let o = #[trigger] r@[i];
                 semantics::InternalOutcomeV { next: o.next, work: o.work@, send: o.send@ }
-                    == self.spec_internal(*req, *state)[i]
+                    == self.spec_internal(*req, *state, now)[i]
             };
 
-    /// The model's clock in `state`. Deadlines ([`Sched`]) are on this clock,
-    /// and the checker enforces them: work whose deadline has come runs before
-    /// anything else happens.
-    ///
-    /// Time moves only by a step that changes the state's clock, typically an
-    /// external request that does nothing else (Accordant's `AdvanceClock`).
-    /// A step that also did other work would do it before the timers due at
-    /// the new time fire. A model without time answers 0.
-    fn now(&self, state: &Self::State) -> (r: Time)
-        ensures
-            r == self.spec_now(*state);
-
     /// What [`Model::external`] computes, for the proofs.
-    open spec fn spec_external(&self, req: Self::External, state: Self::State) -> Seq<
+    open spec fn spec_external(&self, req: Self::External, state: Self::State, now: Time) -> Seq<
         semantics::ExternalOutcomeV<Self::State, Self::Response, Self::Internal, Self::Dispatch>,
     > {
         arbitrary()
     }
 
     /// What [`Model::internal`] computes, for the proofs.
-    open spec fn spec_internal(&self, req: Self::Internal, state: Self::State) -> Seq<
+    open spec fn spec_internal(&self, req: Self::Internal, state: Self::State, now: Time) -> Seq<
         semantics::InternalOutcomeV<Self::State, Self::Internal, Self::Dispatch>,
     > {
-        arbitrary()
-    }
-
-    /// What [`Model::now`] computes, for the proofs.
-    open spec fn spec_now(&self, state: Self::State) -> Time {
         arbitrary()
     }
 }
 
 } // verus!
 
-/// Optional, for driving a model ([`drive`]): which requests to send.
+/// What a driver can do to the system besides letting it run: send a request,
+/// or move its clock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action<X> {
+    Request(X),
+    /// The clock moves forward to this time ([`Event::Clock`]).
+    Clock(Time),
+}
+
+/// Optional, for driving a model ([`drive`]): what to do to it.
 pub trait Explore: Model {
-    /// Requests worth trying from `state`, each with why: the ones that reach
-    /// the edges of what the state allows.
-    fn suggest(&self, state: &Self::State) -> Vec<(Self::External, &'static str)>;
+    /// Actions worth trying from `state` at `now`, each with why: the ones
+    /// that reach the edges of what the state allows (a request that just
+    /// fits, a clock move to just past a deadline).
+    fn suggest(&self, state: &Self::State, now: Time) -> Vec<(Action<Self::External>, &'static str)>;
 
-    /// Any request, from `state`; `pick(n)` chooses among `n` alternatives
-    /// (recorded, so a run can be replayed).
-    fn arbitrary(&self, state: &Self::State, pick: &mut dyn FnMut(usize) -> usize) -> Self::External;
+    /// Any action, from `state` at `now`; `pick(n)` chooses among `n`
+    /// alternatives (recorded, so a run can be replayed).
+    fn arbitrary(&self, state: &Self::State, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Self::External>;
 
-    /// Requests to send at the end of a run, one at a time (reads that show
-    /// the final state, say). None by default.
-    fn finish(&self, _state: &Self::State) -> Vec<Self::External> {
+    /// Actions to take at the end of a run, one at a time, each settled before
+    /// the next (reads that show the final state, say). None by default.
+    fn finish(&self, _state: &Self::State, _now: Time) -> Vec<Action<Self::External>> {
         Vec::new()
     }
 }
@@ -221,18 +222,6 @@ pub trait Footprint: Model {
     /// explained by internal work on these keys.
     fn dispatch_touches(&self, _msg: &Self::Dispatch) -> Touches<Self::Key> {
         Touches::Everything
-    }
-
-    /// Whether the request only moves the clock (`AdvanceClock`): it has one
-    /// outcome, which changes nothing but [`Model::now`], starts no work and
-    /// sends nothing. Its footprint is everything, but what it affects is the
-    /// work that falls due by the new time and whatever could happen before it
-    /// (calls in flight and work that can run, which read the clock), so the
-    /// checker looks at those instead of all of it. With
-    /// partitions, it is explained in each partition on its own when it is
-    /// answered before anything else is observed.
-    fn moves_clock(&self, _req: &Self::External) -> bool {
-        false
     }
 }
 
@@ -377,10 +366,6 @@ pub trait Engine {
         unreachable!("only a partitioned engine joins")
     }
 
-    fn moves_clock(&self, _req: &<Self::M as Model>::External) -> bool {
-        false
-    }
-
     /// Whether the engine keeps partitions apart.
     fn partitioned(&self) -> bool {
         false
@@ -423,10 +408,6 @@ impl<M: Footprint> Engine for Keyed<M> {
     fn dispatch_keys(&self, msg: &M::Dispatch) -> Touches<M::Key> {
         self.0.dispatch_touches(msg)
     }
-
-    fn moves_clock(&self, req: &M::External) -> bool {
-        self.0.moves_clock(req)
-    }
 }
 
 /// A model checked with its footprints and partitions.
@@ -467,9 +448,5 @@ impl<M: Partitioned> Engine for Grouped<M> {
 
     fn join(&self, a: &M::State, b: &M::State) -> M::State {
         self.0.join(a, b)
-    }
-
-    fn moves_clock(&self, req: &M::External) -> bool {
-        self.0.moves_clock(req)
     }
 }

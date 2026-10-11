@@ -32,7 +32,7 @@ impl Model for BankModel {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, op: &Request, s: &Bank) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, op: &Request, s: &Bank, _: Time) -> Vec<ExternalOutcome<Self>> {
         let with = |a: &'static str, b: i64| {
             let mut n = s.clone();
             n.accounts.insert(a, b);
@@ -58,12 +58,8 @@ impl Model for BankModel {
         vec![out]
     }
 
-    fn internal(&self, _: &(), _: &Bank) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), _: &Bank, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
-    }
-
-    fn now(&self, _: &Bank) -> Time {
-        0
     }
 }
 
@@ -326,7 +322,7 @@ fn depth_first_agrees_with_the_online_checker() {
             // Some open call takes effect now, in the real system, and answers.
             while !open.is_empty() && rng.next(3) != 0 {
                 let (c, req) = open.remove(rng.next(open.len() as u64) as usize);
-                let out = BankModel.external(&req, &bank).remove(0);
+                let out = BankModel.external(&req, &bank, 0).remove(0);
                 bank = out.next;
                 let res = if rng.next(12) == 0 { Response::Ok(-7) } else { out.resp };
                 if rng.next(10) != 0 {

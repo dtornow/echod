@@ -106,13 +106,14 @@ pub(crate) struct Config<'m, M: Model> {
     pub(crate) calls: HashMap<CallId, Call<M::External, M::Response>>,
     pub(crate) work: Vec<Work<M::Internal>>,
     pub(crate) sent: Vec<M::Dispatch>,
+    pub(crate) now: Time,
 }
 
 impl<'m, M: Model> View for Config<'m, M> {
     type V = Cfg<M>;
 
     open(crate) spec fn view(&self) -> Cfg<M> {
-        semantics::Config { state: self.state, calls: self.calls@, work: self.work@, sent: self.sent@ }
+        semantics::Config { state: self.state, calls: self.calls@, work: self.work@, sent: self.sent@, now: self.now }
     }
 }
 
@@ -149,10 +150,10 @@ impl<'m, M: Model> Config<'m, M> {
             c@ == semantics::initial::<M>(init),
             c.m == m,
     {
-        Config { m, state: init, calls: HashMap::new(), work: Vec::new(), sent: Vec::new() }
+        Config { m, state: init, calls: HashMap::new(), work: Vec::new(), sent: Vec::new(), now: 0 }
     }
 
-    /// Work `i`'s deadline has come on the model's clock and it can run.
+    /// Work `i`'s deadline has come on the clock and it can run.
     fn work_overdue(&self, i: usize) -> (r: bool)
         requires
             i < self.work.len(),
@@ -160,12 +161,12 @@ impl<'m, M: Model> Config<'m, M> {
             r == semantics::is_overdue(*self.m, self@, i as int),
     {
         let w = &self.work[i];
-        let now = self.m.now(&self.state);
+        let now = self.now;
         let due = match w.due {
             Some(d) => d <= now,
             None => false,
         };
-        w.must && w.after <= now && due && !self.m.internal(&w.req, &self.state).is_empty()
+        w.must && w.after <= now && due && !self.m.internal(&w.req, &self.state, now).is_empty()
     }
 
     pub(crate) fn overdue(&self) -> (r: bool)
@@ -210,22 +211,22 @@ impl<'m, M: Model> Config<'m, M> {
         true
     }
 
-    /// Starts work on the clock of the state the step led to.
+    /// Starts work on the clock as it reads now.
     fn start(&mut self, work: Vec<Sched<M::Internal>>)
         ensures
             final(self)@ == (semantics::Config {
-                work: semantics::start_all(old(self)@.work, work@, old(self).m.spec_now(old(self)@.state)),
+                work: semantics::start_all(old(self)@.work, work@, old(self)@.now),
                 ..old(self)@
             }),
             final(self).m == old(self).m,
     {
-        let now = self.m.now(&self.state);
+        let now = self.now;
         let ghost (was, all) = (self.work@, work@);
         let mut work = work;
         while !work.is_empty()
             invariant
                 self.m == old(self).m,
-                now == self.m.spec_now(self.state),
+                now == old(self)@.now,
                 work@.len() <= all.len(),
                 work@ == all.subrange(all.len() - work@.len(), all.len() as int),
                 self@ == (semantics::Config {
@@ -302,6 +303,15 @@ impl<'m, M: Model> Config<'m, M> {
                     assert(semantics::receive(*self.m, old(self)@, Label::Obs(*e), self@));
                 }
             }
+            Event::Clock { at } => {
+                if *at < self.now {
+                    return Err(());
+                }
+                self.now = *at;
+                proof {
+                    assert(semantics::tick(*self.m, old(self)@, Label::Obs(*e), self@));
+                }
+            }
         }
         Ok(())
     }
@@ -315,7 +325,7 @@ impl<'m, M: Model> Config<'m, M> {
         match s {
             Silent::Effect { call, j } => {
                 let Some(Call::InFlight(req)) = self.calls.get(&call) else { return Err(()) };
-                let mut outs = self.m.external(req, &self.state);
+                let mut outs = self.m.external(req, &self.state, self.now);
                 if j >= outs.len() || self.overdue() {
                     return Err(());
                 }
@@ -334,8 +344,8 @@ impl<'m, M: Model> Config<'m, M> {
                     return Err(());
                 }
                 let w = &self.work[i];
-                let mut outs = self.m.internal(&w.req, &self.state);
-                if j >= outs.len() || w.after > self.m.now(&self.state) || !self.may_run(i) {
+                let mut outs = self.m.internal(&w.req, &self.state, self.now);
+                if j >= outs.len() || w.after > self.now || !self.may_run(i) {
                     return Err(());
                 }
                 let o = outs.swap_remove(j);
@@ -378,13 +388,17 @@ impl<X: Clone, R: Clone> Clone for Call<X, R> {
 
 impl<M: Model> Clone for Config<'_, M> {
     fn clone(&self) -> Self {
-        Config { m: self.m, state: self.state.clone(), calls: self.calls.clone(), work: self.work.clone(), sent: self.sent.clone() }
+        Config { m: self.m, state: self.state.clone(), calls: self.calls.clone(), work: self.work.clone(), sent: self.sent.clone(), now: self.now }
     }
 }
 
 impl<M: Model> Config<'_, M> {
     pub(crate) fn state(&self) -> &M::State {
         &self.state
+    }
+
+    pub(crate) fn now(&self) -> Time {
+        self.now
     }
 
     /// Calls in flight or answered and not yet returned.
@@ -401,14 +415,14 @@ impl<M: Model> Config<'_, M> {
         for (call, c) in calls {
             match c {
                 Call::InFlight(req) => {
-                    let n = self.m.external(req, &self.state).len();
+                    let n = self.m.external(req, &self.state, self.now).len();
                     out.extend((0..n).map(|j| Next::Silent(Silent::Effect { call: *call, j })));
                 }
                 Call::Done(res) => out.push(Next::Deliver(Event::Return { call: *call, res: res.clone() })),
             }
         }
         for (i, w) in self.work.iter().enumerate() {
-            let n = self.m.internal(&w.req, &self.state).len();
+            let n = self.m.internal(&w.req, &self.state, self.now).len();
             out.extend((0..n).map(|j| Next::Silent(Silent::Run { i, j })));
         }
         out.extend(self.sent.iter().map(|msg| Next::Deliver(Event::Receive { msg: msg.clone() })));
@@ -431,11 +445,11 @@ impl<M: Model> Config<'_, M> {
     fn marks_of(&self, s: Silent) -> Vec<&'static str> {
         match s {
             Silent::Effect { call, j } => match self.calls.get(&call) {
-                Some(Call::InFlight(req)) => self.m.external(req, &self.state).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
+                Some(Call::InFlight(req)) => self.m.external(req, &self.state, self.now).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 _ => Vec::new(),
             },
             Silent::Run { i, j } => match self.work.get(i) {
-                Some(w) => self.m.internal(&w.req, &self.state).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
+                Some(w) => self.m.internal(&w.req, &self.state, self.now).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 None => Vec::new(),
             },
         }

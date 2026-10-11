@@ -4,8 +4,9 @@
 //! the code the proofs are about.
 //!
 //! Differences from the C# spec, all deliberate:
-//! - Time is `Server::now`, as `ServerState.Now`, moved only by `AdvanceClock`
-//!   (the C# driver also sets it on every request, with `resonate:debug_time`).
+//! - Time is the system's clock, `now`, which the checker keeps and passes to
+//!   every step (as `ServerState.Now`; the C# driver sets it on every request,
+//!   with `resonate:debug_time`). The spec reads it and never moves it.
 //! - A promise's deadline is a timer step that settles it, so there is no
 //!   `Project(now)` read-time projection anywhere.
 //! - A lease expiry is scheduled when the lease starts (`after` its end), not a
@@ -126,19 +127,16 @@ impl Task {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Server {
-    /// The server's clock.
-    pub now: Time,
     pub promises: PMap<Promise>,
     pub tasks: PMap<Task>,
 }
 
 fn copy_server(s: &Server) -> (r: Server)
     ensures
-        r.now == s.now,
         r.promises@ == s.promises@,
         r.tasks@ == s.tasks@,
 {
-    Server { now: s.now, promises: s.promises.copy(), tasks: s.tasks.copy() }
+    Server { promises: s.promises.copy(), tasks: s.tasks.copy() }
 }
 
 // ---------------------------------------------------------------- requests
@@ -177,9 +175,6 @@ impl Fenced {
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Request {
-    /// The driver moves the server's clock (`debug.tick`). Due timers and lease
-    /// expiries run right after, before anything else.
-    AdvanceClock(Time),
     CreatePromise(Create),
     GetPromise(Id),
     SettlePromise(Settle),
@@ -333,7 +328,6 @@ fn status(code: u16, mark: &'static str, s: &Server) -> (r: Vec<Out>)
         r[0].resp == Response::Status(code),
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
-        r[0].next.now == s.now,
 {
     one(Out { resp: Response::Status(code), next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
@@ -344,7 +338,6 @@ fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
         r[0].resp == res,
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
-        r[0].next.now == s.now,
 {
     one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
@@ -467,9 +460,8 @@ impl Resonate {
     /// response has it if the state had it, and every promise that had it keeps it.
     ///
     /// Frame: it touches only the promise and task it creates. Every other
-    /// promise and task is as it was, an existing id changes nothing, and the
-    /// clock doesn't move.
-    pub fn promise_create(&self, req: &Create, fenced: bool, s: &Server) -> (outs: Vec<Out>)
+    /// promise and task is as it was, and an existing id changes nothing.
+    pub fn promise_create(&self, req: &Create, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
         ensures
             forall|i: int|
                 0 <= i < outs.len() ==> {
@@ -482,10 +474,8 @@ impl Resonate {
                     &&& outs[i].next.tasks@.remove(req.id@) == s.tasks@.remove(req.id@)
                     &&& (s.promises@.contains_key(req.id@) ==> outs[i].next.promises@ == s.promises@
                         && outs[i].next.tasks@ == s.tasks@)
-                    &&& outs[i].next.now == s.now
                 },
     {
-        let now = s.now;
         if req.timer && req.target {
             return status(400, mk("create: timer with target (400)"), s);  // P-02
         }
@@ -566,8 +556,7 @@ impl Resonate {
         one(Out { resp: Response::Promise(rec), next: n, work, send, marks })
     }
 
-    fn promise_settle(&self, req: &Settle, fenced: bool, s: &Server) -> Vec<Out> {
-        let now = s.now;
+    fn promise_settle(&self, req: &Settle, fenced: bool, s: &Server, now: Time) -> Vec<Out> {
         let state = match settable(&req.state) {
             Some(st) => st,
             None => return status(400, mk("settle: not a settled state (400)"), s),  // P-03
@@ -611,8 +600,7 @@ impl Resonate {
         Ok(t)
     }
 
-    fn task_create(&self, id: &Id, timeout_at: Time, data: &Option<String>, target: bool, s: &Server) -> Vec<Out> {
-        let now = s.now;
+    fn task_create(&self, id: &Id, timeout_at: Time, data: &Option<String>, target: bool, s: &Server, now: Time) -> Vec<Out> {
         if !target {
             return status(400, mk("task.create: not a target (400)"), s);  // T-02
         }
@@ -748,22 +736,15 @@ impl Resonate {
         one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task suspended")) })
     }
 
-    /// A request takes effect in `s`: every allowed outcome.
-    pub fn external(&self, op: &Request, s: &Server) -> Vec<Out> {
-        let now = s.now;
+    /// A request takes effect in `s` at time `now`: every allowed outcome.
+    pub fn external(&self, op: &Request, s: &Server, now: Time) -> Vec<Out> {
         match op {
-            Request::AdvanceClock(t) => {
-                let mut n = copy_server(s);
-                n.now = if *t > now { *t } else { now };
-                let mark = if *t > now { mk("clock moved") } else { mk("clock unchanged") };
-                one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
-            },
-            Request::CreatePromise(c) => self.promise_create(c, false, s),
+            Request::CreatePromise(c) => self.promise_create(c, false, s, now),
             Request::GetPromise(id) => match s.promises.get(id) {
                 None => status(404, mk("get promise: none (404)"), s),
                 Some(p) => echo(Response::Promise(prec(id, p)), mk("get promise"), s),
             },
-            Request::SettlePromise(st) => self.promise_settle(st, false, s),
+            Request::SettlePromise(st) => self.promise_settle(st, false, s, now),
             Request::RegisterCallback { awaited, awaiter } => {
                 if *awaited == *awaiter || !same_origin(awaited, awaiter) {
                     return status(400, mk("callback: itself or another origin (400)"), s);  // P-04
@@ -808,7 +789,7 @@ impl Resonate {
                 None => status(404, mk("get task: none (404)"), s),
                 Some(t) => echo(Response::Task(trec(id, t)), mk("get task"), s),
             },
-            Request::CreateTask { id, timeout_at, data, target } => self.task_create(id, *timeout_at, data, *target, s),
+            Request::CreateTask { id, timeout_at, data, target } => self.task_create(id, *timeout_at, data, *target, s, now),
             Request::AcquireTask { id, version, pid, ttl } => {
                 let t = match s.tasks.get(id) {
                     Some(t) => t,
@@ -912,16 +893,16 @@ impl Resonate {
                     Ok(_) => {},
                 }
                 match action {
-                    Fenced::Create(c) => self.promise_create(c, true, s),
-                    Fenced::Settle(st) => self.promise_settle(st, true, s),
+                    Fenced::Create(c) => self.promise_create(c, true, s, now),
+                    Fenced::Settle(st) => self.promise_settle(st, true, s, now),
                 }
             },
         }
     }
 
-    /// Internal work on `ids` runs in `s`: whatever is due on them happens.
-    pub fn internal(&self, ids: &Vec<Id>, s: &Server) -> InOut {
-        let now = s.now;
+    /// Internal work on `ids` runs in `s` at time `now`: whatever is due on
+    /// them happens.
+    pub fn internal(&self, ids: &Vec<Id>, s: &Server, now: Time) -> InOut {
         let mut n = copy_server(s);
         let mut work = Vec::new();
         let mut send = Vec::new();

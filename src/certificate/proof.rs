@@ -20,13 +20,13 @@ pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: Call
         !overdue(m, c),
         c.calls.contains_key(call),
         c.calls[call] is InFlight,
-        0 <= j < m.spec_external(c.calls[call]->InFlight_0, c.state).len(),
+        0 <= j < m.spec_external(c.calls[call]->InFlight_0, c.state, c.now).len(),
         d == ({
-            let o = m.spec_external(c.calls[call]->InFlight_0, c.state)[j];
+            let o = m.spec_external(c.calls[call]->InFlight_0, c.state, c.now)[j];
             Config {
                 state: o.next,
                 calls: c.calls.insert(call, Call::Done(o.resp)),
-                work: start_all(c.work, o.work, m.spec_now(o.next)),
+                work: start_all(c.work, o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }
@@ -41,14 +41,14 @@ pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: Call
 pub(super) proof fn run_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, i: int, j: int)
     requires
         0 <= i < c.work.len(),
-        c.work[i].after <= clock(m, c),
+        c.work[i].after <= c.now,
         overdue(m, c) ==> is_first(m, c, i),
-        0 <= j < m.spec_internal(c.work[i].req, c.state).len(),
+        0 <= j < m.spec_internal(c.work[i].req, c.state, c.now).len(),
         d == ({
-            let o = m.spec_internal(c.work[i].req, c.state)[j];
+            let o = m.spec_internal(c.work[i].req, c.state, c.now)[j];
             Config {
                 state: o.next,
-                work: start_all(c.work.remove(i), o.work, m.spec_now(o.next)),
+                work: start_all(c.work.remove(i), o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }

@@ -1,5 +1,5 @@
-//! Time is the model's: a clock in its state, moved by an `Advance` request.
-//! Deadlines are on that clock, and the checker enforces them.
+//! Time is the system's clock, recorded in the trace (`Event::Clock`). The
+//! model reads it; deadlines are on it, and the checker enforces them.
 
 use accordant::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time};
 
@@ -10,14 +10,12 @@ struct Chain;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 struct State {
-    now: Time,
     ran: Option<Time>,
     log: Vec<Work>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Req {
-    Advance(Time),
     Start,
     Order,
     Read,
@@ -46,9 +44,8 @@ impl Model for Chain {
     type Internal = Work;
     type Dispatch = ();
 
-    fn external(&self, req: &Req, s: &State) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Req, s: &State, _: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match req {
-            Req::Advance(t) => ExternalOutcome::new(Res::Ok, State { now: s.now.max(*t), ..s.clone() }),
             Req::Start => ExternalOutcome::same(Res::Ok, s).timer(5, Work::A),
             Req::Order => ExternalOutcome::same(Res::Ok, s).timer(4, Work::X).timer(3, Work::Y),
             Req::Read => ExternalOutcome::same(Res::Ran(s.ran), s),
@@ -56,10 +53,10 @@ impl Model for Chain {
         }]
     }
 
-    fn internal(&self, w: &Work, s: &State) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, w: &Work, s: &State, now: Time) -> Vec<InternalOutcome<Self>> {
         vec![match w {
-            Work::A => InternalOutcome::same(s).timer(s.now + 2, Work::B),
-            Work::B => InternalOutcome::new(State { ran: Some(s.now), ..s.clone() }),
+            Work::A => InternalOutcome::same(s).timer(now + 2, Work::B),
+            Work::B => InternalOutcome::new(State { ran: Some(now), ..s.clone() }),
             Work::X | Work::Y => {
                 let mut n = s.clone();
                 n.log.push(w.clone());
@@ -67,22 +64,30 @@ impl Model for Chain {
             }
         }]
     }
-
-    fn now(&self, s: &State) -> Time {
-        s.now
-    }
 }
 
-fn calls(script: &[(Req, Res)]) -> Vec<Event<Req, Res, ()>> {
+/// A call, answered before the next; or the clock moving.
+enum Step {
+    Call(Req, Res),
+    Clock(Time),
+}
+use Step::{Call, Clock};
+
+fn calls(script: &[Step]) -> Vec<Event<Req, Res, ()>> {
     let mut trace = Vec::new();
-    for (i, (req, res)) in script.iter().enumerate() {
-        trace.push(Event::Invoke { call: i as u64, req: req.clone() });
-        trace.push(Event::Return { call: i as u64, res: res.clone() });
+    for (i, step) in script.iter().enumerate() {
+        match step {
+            Call(req, res) => {
+                trace.push(Event::Invoke { call: i as u64, req: req.clone() });
+                trace.push(Event::Return { call: i as u64, res: res.clone() });
+            }
+            Clock(at) => trace.push(Event::Clock { at: *at }),
+        }
     }
     trace
 }
 
-fn accepts(script: &[(Req, Res)]) -> bool {
+fn accepts(script: &[Step]) -> bool {
     Checker::new(Chain, State::default(), Config::default()).check_certified(calls(script)).is_ok()
 }
 
@@ -90,7 +95,7 @@ fn accepts(script: &[(Req, Res)]) -> bool {
 fn a_timer_passed_in_a_jump_runs_right_after_it() {
     // A fires at 5 and sets B for 7. The clock then jumps to 10: B runs right
     // after the jump, at 10, before anything else.
-    let read = |ran| [(Req::Start, Res::Ok), (Req::Advance(5), Res::Ok), (Req::Advance(10), Res::Ok), (Req::Read, Res::Ran(ran))];
+    let read = |ran| [Call(Req::Start, Res::Ok), Clock(5), Clock(10), Call(Req::Read, Res::Ran(ran))];
     assert!(accepts(&read(Some(10))));
     assert!(!accepts(&read(Some(5))), "B is a timer at 7: it can't run at 5");
     assert!(!accepts(&read(None)), "B is overdue at 10: it ran before the read");
@@ -99,14 +104,14 @@ fn a_timer_passed_in_a_jump_runs_right_after_it() {
 
 #[test]
 fn a_timer_does_not_fire_early() {
-    let read = |ran| [(Req::Start, Res::Ok), (Req::Advance(4), Res::Ok), (Req::Read, Res::Ran(ran))];
+    let read = |ran| [Call(Req::Start, Res::Ok), Clock(4), Call(Req::Read, Res::Ran(ran))];
     assert!(accepts(&read(None)));
     assert!(!accepts(&read(Some(4))), "A fires at 5, so B can't have run");
 }
 
 #[test]
 fn timers_passed_in_one_jump_fire_in_deadline_order() {
-    let log = |l| [(Req::Order, Res::Ok), (Req::Advance(10), Res::Ok), (Req::Log, Res::Log(l))];
+    let log = |l| [Call(Req::Order, Res::Ok), Clock(10), Call(Req::Log, Res::Log(l))];
     assert!(accepts(&log(vec![Work::Y, Work::X])));
     assert!(!accepts(&log(vec![Work::X, Work::Y])));
 }

@@ -19,19 +19,15 @@ impl Model for Register {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, req: &Req, s: &u8) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Req, s: &u8, _: Time) -> Vec<ExternalOutcome<Self>> {
         match req {
             Req::Write(v) => vec![ExternalOutcome::new(*v, *v)],
             Req::Read => vec![ExternalOutcome::same(*s, s)],
         }
     }
 
-    fn internal(&self, _: &(), _: &u8) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), _: &u8, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
-    }
-
-    fn now(&self, _: &u8) -> Time {
-        0
     }
 }
 

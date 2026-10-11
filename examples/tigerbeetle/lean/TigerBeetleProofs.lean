@@ -729,13 +729,13 @@ theorem Batch.Inv.run {E S : Type} [DecidableEq S]
     unfold run_batch
     exact Batch.Inv.run hstep hfail rest (i + 1) _ (hb.step hstep hfail)
 
-theorem Server.Inv.create_accounts {s : Server} (h : s.Inv) (events : List NewAccount) :
-    (s.create_accounts events).1.Inv := by
+theorem Server.Inv.create_accounts {s : Server} (h : s.Inv) (now : Time)
+    (events : List NewAccount) : (s.create_accounts now events).1.Inv := by
   unfold Server.create_accounts
   dsimp only
   have := Batch.Inv.run (linked := (·.flags.linked)) (created := CreateAccountStatus.created)
     (failed := .linked_event_failed) (chain_open := .linked_event_chain_open)
-    (base := max s.prepare_timestamp s.now) (n := events.length)
+    (base := max s.prepare_timestamp now) (n := events.length)
     (fun s ts a h => h.create_account ts a) (fun _ _ _ h => h) events 0 ⟨s, none, #[]⟩
     ⟨h, by intro c hc; cases hc⟩
   exact this.1.congr rfl rfl rfl
@@ -746,13 +746,13 @@ theorem Server.Inv.spent {s : Server} (h : s.Inv) {t : NewTransfer} {st : Create
   · exact h.congr rfl rfl rfl
   · exact h
 
-theorem Server.Inv.create_transfers {s : Server} (h : s.Inv) (events : List NewTransfer) :
-    (s.create_transfers events).1.Inv := by
+theorem Server.Inv.create_transfers {s : Server} (h : s.Inv) (now : Time)
+    (events : List NewTransfer) : (s.create_transfers now events).1.Inv := by
   unfold Server.create_transfers
   dsimp only
   have := Batch.Inv.run (linked := (·.flags.linked)) (created := CreateTransferStatus.created)
     (failed := .linked_event_failed) (chain_open := .linked_event_chain_open)
-    (on_fail := TigerBeetle.spend) (base := max s.prepare_timestamp s.now) (n := events.length)
+    (on_fail := TigerBeetle.spend) (base := max s.prepare_timestamp now) (n := events.length)
     (fun s ts t h => h.create_transfer ts t) (fun _ _ _ h => h.spent)
     events 0 ⟨s, none, #[]⟩ ⟨h, by intro c hc; cases hc⟩
   exact this.1.congr rfl rfl rfl
@@ -796,7 +796,8 @@ theorem Server.Inv.expire_all :
     have hne : id ≠ x.1 := fun heq => hnd'.1 (by rw [heq]; exact hmem)
     exact ⟨by rw [expire_transfers]; exact hx1, by rw [expire_status _ _ _ _ _ hne]; exact hx2⟩
 
-theorem Server.Inv.pulse {s : Server} (h : s.Inv) (lim : Limits) : (s.pulse lim).1.Inv := by
+theorem Server.Inv.pulse {s : Server} (h : s.Inv) (lim : Limits) (now : Time) :
+    (s.pulse lim now).1.Inv := by
   unfold Server.pulse
   dsimp only
   split
@@ -813,28 +814,27 @@ theorem Server.Inv.pulse {s : Server} (h : s.Inv) (lim : Limits) : (s.pulse lim)
 
 /-! ## The model -/
 
-theorem Server.Inv.external {s : Server} (h : s.Inv) (lim : Limits) (req : Request) :
-    (s.external lim req).next.Inv := by
+theorem Server.Inv.external {s : Server} (h : s.Inv) (lim : Limits) (now : Time)
+    (req : Request) : (s.external lim now req).next.Inv := by
   cases req with
-  | advance_clock => exact h.congr rfl rfl rfl
-  | create_accounts events => exact h.create_accounts events
-  | create_transfers events => exact h.create_transfers events
+  | create_accounts events => exact h.create_accounts now events
+  | create_transfers events => exact h.create_transfers now events
   | _ => exact h
 
-theorem Server.Inv.internal {s : Server} (h : s.Inv) (lim : Limits) (w : Internal) :
-    (s.internal lim w).next.Inv := by
-  cases w; exact h.pulse lim
+theorem Server.Inv.internal {s : Server} (h : s.Inv) (lim : Limits) (now : Time)
+    (w : Internal) : (s.internal lim now w).next.Inv := by
+  cases w; exact h.pulse lim now
 
-theorem Server.Inv.external_mem {lim : Limits} {s : Server} {r : Request}
+theorem Server.Inv.external_mem {lim : Limits} {s : Server} {now : Time} {r : Request}
     {o : Accordant.ExternalOutcome Server Response Internal Empty}
-    (h : s.Inv) (ho : o ∈ ((model lim).external r s).val) : Server.Inv o.next := by
-  change o ∈ [s.external lim r] at ho
-  have ho := List.mem_singleton.mp ho; subst ho; exact h.external lim r
+    (h : s.Inv) (ho : o ∈ ((model lim).external r s now).val) : Server.Inv o.next := by
+  change o ∈ [s.external lim now r] at ho
+  have ho := List.mem_singleton.mp ho; subst ho; exact h.external lim now r
 
-theorem Server.Inv.internal_mem {lim : Limits} {s : Server} {r : Internal}
+theorem Server.Inv.internal_mem {lim : Limits} {s : Server} {now : Time} {r : Internal}
     {o : Accordant.InternalOutcome Server Internal Empty}
-    (h : s.Inv) (ho : o ∈ (model lim).internal r s) : Server.Inv o.next := by
-  have ho := List.mem_singleton.mp ho; subst ho; exact h.internal lim r
+    (h : s.Inv) (ho : o ∈ (model lim).internal r s now) : Server.Inv o.next := by
+  have ho := List.mem_singleton.mp ho; subst ho; exact h.internal lim now r
 
 theorem Server.Inv.step {lim : Limits} {c c' : Accordant.Config (model lim)}
     {l : Accordant.Label (model lim)} (hs : Accordant.Step (model lim) c l c')
@@ -843,6 +843,7 @@ theorem Server.Inv.step {lim : Limits} {c c' : Accordant.Config (model lim)}
   | invoke => exact h
   | ret => exact h
   | receive => exact h
+  | clock => exact h
   | effect _ ho _ => exact h.external_mem ho
   | run _ _ ho _ => exact h.internal_mem ho
 

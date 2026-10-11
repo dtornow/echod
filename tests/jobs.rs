@@ -27,7 +27,6 @@ struct Job {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Queue {
-    now: Time,
     jobs: HashedMap<u32, Job>,
 }
 
@@ -36,8 +35,6 @@ enum Request {
     /// Submit a job that times out at an absolute time.
     Submit(u32, Time),
     Get(u32),
-    /// The driver moves the queue's clock.
-    Advance(Time),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -46,7 +43,6 @@ enum Response {
     Duplicate,
     NotFound,
     Is(Status),
-    Now(Time),
 }
 
 /// `run_within`: how long after submission a job may run before it must be done.
@@ -64,12 +60,8 @@ impl Model for JobModel {
     type Internal = u32;
     type Dispatch = ();
 
-    fn external(&self, req: &Request, s: &Queue) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Request, s: &Queue, now: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match *req {
-            Request::Advance(t) => {
-                let now = s.now.max(t);
-                ExternalOutcome::new(Response::Now(now), Queue { now, ..s.clone() })
-            }
             Request::Submit(j, _) if s.jobs.contains_key(&j) => ExternalOutcome::same(Response::Duplicate, s),
             Request::Submit(j, deadline) => {
                 let mut n = s.clone();
@@ -77,7 +69,7 @@ impl Model for JobModel {
                 let o = ExternalOutcome::new(Response::Accepted, n);
                 let o = match self.run_within {
                     // Run by `now + d`: any time from now, and a timer then.
-                    Some(d) => o.later(j).timer(s.now + d, j),
+                    Some(d) => o.later(j).timer(now + d, j),
                     None => o.later(j),
                 };
                 o.timer(deadline, j)
@@ -89,8 +81,7 @@ impl Model for JobModel {
         }]
     }
 
-    fn internal(&self, j: &u32, s: &Queue) -> Vec<InternalOutcome<Self>> {
-        let now = s.now;
+    fn internal(&self, j: &u32, s: &Queue, now: Time) -> Vec<InternalOutcome<Self>> {
         let job = &s.jobs[j];
         let to = |status| {
             let mut n = s.clone();
@@ -103,10 +94,6 @@ impl Model for JobModel {
             _ => vec![InternalOutcome::same(s)], // finished: nothing to do
         }
     }
-
-    fn now(&self, s: &Queue) -> Time {
-        s.now
-    }
 }
 
 impl Footprint for JobModel {
@@ -115,12 +102,7 @@ impl Footprint for JobModel {
     fn external_touches(&self, req: &Request) -> Touches<u32> {
         match *req {
             Request::Submit(j, _) | Request::Get(j) => Touches::one(j),
-            Request::Advance(_) => Touches::Everything,
         }
-    }
-
-    fn moves_clock(&self, req: &Request) -> bool {
-        matches!(req, Request::Advance(_))
     }
 
     fn internal_touches(&self, j: &u32) -> Touches<u32> {
@@ -132,10 +114,10 @@ fn checker(run_within: Option<Time>) -> Certified<Keyed<JobModel>> {
     Certified(Checker::with_footprints(JobModel { run_within }, Queue::default(), Config { certify: true, ..Config::default() }))
 }
 
-/// The driver moves the clock: a call like any other.
+/// The clock moves.
 #[track_caller]
 fn tick(c: &mut Checker<Keyed<JobModel>>, t: Time) {
-    c.call(1_000_000 + t, Request::Advance(t), Response::Now(t)).unwrap();
+    c.clock(t).unwrap();
 }
 
 #[test]

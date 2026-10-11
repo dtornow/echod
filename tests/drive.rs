@@ -1,7 +1,7 @@
 //! Driving a model and recording the choices: a run is valid, and replaying
 //! its choices reproduces it.
 
-use accordant::{certify, drive, Checker, Choice, Choices, Config, Drive, Explore, ExternalOutcome, InternalOutcome, Model, Time, Tried};
+use accordant::{certify, drive, Action, Checker, Choice, Choices, Config, Drive, Explore, ExternalOutcome, InternalOutcome, Model, Time, Tried};
 
 /// A mailbox: `Put(v)` stores `v` and, later, sends it to a client; `Get`
 /// reads what is stored.
@@ -20,36 +20,36 @@ impl Model for Mailbox {
     type Internal = u8;
     type Dispatch = u8;
 
-    fn external(&self, req: &Req, s: &Option<u8>) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &Req, s: &Option<u8>, _: Time) -> Vec<ExternalOutcome<Self>> {
         match req {
             Req::Put(v) => vec![ExternalOutcome::new(*s, Some(*v)).later(*v).mark("put")],
             Req::Get => vec![ExternalOutcome::same(*s, s).mark("get")],
         }
     }
 
-    fn internal(&self, v: &u8, s: &Option<u8>) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, v: &u8, s: &Option<u8>, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::same(s).send(*v).mark("sent")]
-    }
-
-    fn now(&self, _: &Option<u8>) -> Time {
-        0
     }
 }
 
 impl Explore for Mailbox {
-    fn suggest(&self, s: &Option<u8>) -> Vec<(Req, &'static str)> {
+    fn suggest(&self, s: &Option<u8>, _: Time) -> Vec<(Action<Req>, &'static str)> {
         match s {
-            Some(v) => vec![(Req::Put(v.wrapping_add(1)), "put the next value")],
-            None => vec![(Req::Put(0), "put the first value")],
+            Some(v) => vec![(Action::Request(Req::Put(v.wrapping_add(1))), "put the next value")],
+            None => vec![(Action::Request(Req::Put(0)), "put the first value")],
         }
     }
 
-    fn arbitrary(&self, _: &Option<u8>, pick: &mut dyn FnMut(usize) -> usize) -> Req {
-        if pick(2) == 0 { Req::Get } else { Req::Put(pick(4) as u8) }
+    fn arbitrary(&self, _: &Option<u8>, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Req> {
+        match pick(3) {
+            0 => Action::Request(Req::Get),
+            1 => Action::Request(Req::Put(pick(4) as u8)),
+            _ => Action::Clock(now + pick(3) as Time),
+        }
     }
 
-    fn finish(&self, _: &Option<u8>) -> Vec<Req> {
-        vec![Req::Get]
+    fn finish(&self, _: &Option<u8>, _: Time) -> Vec<Action<Req>> {
+        vec![Action::Request(Req::Get)]
     }
 }
 

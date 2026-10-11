@@ -51,23 +51,18 @@ fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Dispatch>>
     let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
     let mut trace = Vec::new();
     let mut now = 0;
-    let mut call = 0u64;
-    let mut ops = Vec::new();
-    for (op, t) in script {
+    for (call, (op, t)) in (0u64..).zip(script) {
         if *t > now {
-            // The driver moves the server's clock first.
-            ops.push(Request::AdvanceClock(*t));
+            // The clock moves first.
+            c.clock(*t).unwrap();
+            trace.push(Event::Clock { at: *t });
             now = *t;
         }
-        ops.push(op.clone());
-    }
-    for op in ops {
-        let allowed = c.allowed(&op);
+        let allowed = c.allowed(op);
         let res = allowed.iter().find(|r| r.status() == 200).unwrap_or(&allowed[0]).clone();
         c.call(call, op.clone(), res.clone()).unwrap();
-        trace.push(Event::Invoke { call, req: op });
+        trace.push(Event::Invoke { call, req: op.clone() });
         trace.push(Event::Return { call, res });
-        call += 1;
     }
     trace
 }

@@ -21,8 +21,8 @@
 //! point, seen or not), [`step`] (how the system evolves, each step observed
 //! or silent), [`legal`] (steps the system can actually take), [`project`]
 //! (what an execution shows a client). It is specification only: nothing here
-//! runs. [`Model`] is the system, with its `spec` twins of `external`,
-//! `internal` and `now`.
+//! runs. [`Model`] is the system, with its `spec` twins of `external` and
+//! `internal`.
 //!
 //! The OK line is proved: `certify` (`certificate.rs`) ensures that a
 //! certificate it accepts makes the trace valid, and `Checker::check_certified`
@@ -84,6 +84,8 @@ pub struct Config<S, X, R, I, D> {
     pub work: Seq<Work<I>>,
     /// Dispatches sent and not yet received.
     pub sent: Seq<D>,
+    /// The system's clock. The model reads it; only [`tick`] moves it.
+    pub now: Time,
 }
 
 pub type Cfg<M> = Config<
@@ -119,15 +121,11 @@ pub open spec fn start_all<I>(work: Seq<Work<I>>, new: Seq<Sched<I>>, now: Time)
     work + new.map_values(|s: Sched<I>| schedule(now, s))
 }
 
-pub open spec fn clock<M: Model>(m: M, c: Cfg<M>) -> Time {
-    m.spec_now(c.state)
-}
-
-/// Work whose deadline has come on the model's clock, and that can run: it runs
+/// Work whose deadline has come on the clock, and that can run: it runs
 /// before anything else happens.
 pub open spec fn is_overdue<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    0 <= i < c.work.len() && c.work[i].must && c.work[i].after <= clock(m, c) && match c.work[i].due {
-        Some(due) => due <= clock(m, c) && m.spec_internal(c.work[i].req, c.state).len() > 0,
+    0 <= i < c.work.len() && c.work[i].must && c.work[i].after <= c.now && match c.work[i].due {
+        Some(due) => due <= c.now && m.spec_internal(c.work[i].req, c.state, c.now).len() > 0,
         None => false,
     }
 }
@@ -180,16 +178,25 @@ pub open spec fn receive<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> boo
     }
 }
 
+/// The clock moves forward. Observed: the trace records it. Work due by the
+/// new time is then overdue, and runs before anything else is observed.
+pub open spec fn tick<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    match l {
+        Label::Obs(Event::Clock { at }) => c.now <= at && !overdue(m, c) && d == Config { now: at, ..c },
+        _ => false,
+    }
+}
+
 /// A call in flight takes effect with one of its allowed outcomes. Silent.
 pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && !overdue(m, c) && exists|call: CallId, j: int|
-        #![trigger c.calls[call], m.spec_external(c.calls[call]->InFlight_0, c.state)[j]]
+        #![trigger c.calls[call], m.spec_external(c.calls[call]->InFlight_0, c.state, c.now)[j]]
         c.calls.contains_key(call) && c.calls[call] is InFlight && {
-            let outs = m.spec_external(c.calls[call]->InFlight_0, c.state);
+            let outs = m.spec_external(c.calls[call]->InFlight_0, c.state, c.now);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
                 calls: c.calls.insert(call, Call::Done(outs[j].resp)),
-                work: start_all(c.work, outs[j].work, m.spec_now(outs[j].next)),
+                work: start_all(c.work, outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -200,12 +207,12 @@ pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
 /// overdue, only the overdue work with the earliest deadline runs. Silent.
 pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && exists|i: int, j: int|
-        #![trigger c.work[i], m.spec_internal(c.work[i].req, c.state)[j]]
-        0 <= i < c.work.len() && c.work[i].after <= clock(m, c) && (overdue(m, c) ==> is_first(m, c, i)) && {
-            let outs = m.spec_internal(c.work[i].req, c.state);
+        #![trigger c.work[i], m.spec_internal(c.work[i].req, c.state, c.now)[j]]
+        0 <= i < c.work.len() && c.work[i].after <= c.now && (overdue(m, c) ==> is_first(m, c, i)) && {
+            let outs = m.spec_internal(c.work[i].req, c.state, c.now);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                work: start_all(c.work.remove(i), outs[j].work, m.spec_now(outs[j].next)),
+                work: start_all(c.work.remove(i), outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -214,7 +221,8 @@ pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
 
 /// The transition relation: from `c`, a step labeled `l` reaches `d`.
 pub open spec fn step<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
-    invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || effect(m, c, l, d) || run(m, c, l, d)
+    invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || tick(m, c, l, d)
+        || effect(m, c, l, d) || run(m, c, l, d)
 }
 
 // ------------------------------------- executions, and what they show a client
@@ -249,9 +257,9 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-/// The system starts in `init`, with nothing in flight.
+/// The system starts in `init`, with nothing in flight, at time 0.
 pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
-    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
+    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty(), now: 0 }
 }
 
 /// The trace is valid: some execution of the system, from `initial(init)`,

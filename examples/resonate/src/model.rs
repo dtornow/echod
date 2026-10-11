@@ -52,21 +52,17 @@ impl Model for Resonate {
     type Internal = Internal;
     type Dispatch = Dispatch;
 
-    fn external(&self, op: &Request, s: &Server) -> Vec<ExternalOutcome<Self>> {
-        Resonate::external(self, op, s)
+    fn external(&self, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Self>> {
+        Resonate::external(self, op, s, now)
             .into_iter()
             .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
             .collect()
     }
 
-    fn internal(&self, ids: &Internal, s: &Server) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, ids: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Self>> {
         let ids: Vec<Id> = ids.iter().cloned().collect();
-        let o = Resonate::internal(self, &ids, s);
+        let o = Resonate::internal(self, &ids, s, now);
         vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
-    }
-
-    fn now(&self, s: &Server) -> Time {
-        s.now
     }
 }
 
@@ -99,7 +95,6 @@ impl Footprint for Resonate {
             Request::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
             // A detached create: the one request that spans two origins.
             Request::FenceTask { id, action, .. } => ks(&[id, action.target()]),
-            Request::AdvanceClock(_) => Touches::Everything,
         }
     }
 
@@ -111,10 +106,6 @@ impl Footprint for Resonate {
         match msg {
             Dispatch::Execute { id, .. } => Touches::one(id.clone()),
         }
-    }
-
-    fn moves_clock(&self, op: &Request) -> bool {
-        matches!(op, Request::AdvanceClock(_))
     }
 }
 
@@ -132,16 +123,13 @@ impl Partitioned for Resonate {
     fn restrict(&self, s: &Server, keep: &dyn Fn(&Id) -> bool) -> Server {
         let mine = |k: &Id| keep(&origin(k).to_string());
         Server {
-            now: s.now,
             promises: s.promises.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
             tasks: s.tasks.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
 
-    /// Every part carries the clock; joined, it is the later one.
     fn join(&self, a: &Server, b: &Server) -> Server {
         let mut n = a.clone();
-        n.now = a.now.max(b.now);
         for (k, v) in b.promises.iter() {
             n.promises.insert(k.clone(), v.clone());
         }

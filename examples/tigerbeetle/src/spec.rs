@@ -17,7 +17,7 @@
 //!   for balances and `timestamp` cannot occur.
 //! - A pending transfer's status is keyed by the transfer's id, not by its
 //!   timestamp as in TigerBeetle's `transfers_pending` groove.
-//! - Time is `Server::now`, moved only by `AdvanceClock`. TigerBeetle's clock is
+//! - Time is the checker's clock, passed in as `now`. TigerBeetle's clock is
 //!   the cluster's wall clock; there is no debug clock to drive.
 //!
 //! Plain Rust for now; it moves into `verus!` with the steps, as `resonate`.
@@ -157,8 +157,6 @@ pub enum PendingStatus {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Server {
-    /// The cluster's clock.
-    pub now: Time,
     /// The last timestamp given to an event (`commit_timestamp`). The next
     /// batch's events get `max(commit, now) + 1, + 2, ...`, so timestamps never
     /// repeat, even when the clock stands still.
@@ -201,9 +199,6 @@ pub struct NewTransfer {
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Request {
-    /// The driver moves the cluster's clock. Expiries now due may run any time
-    /// after, not necessarily before the next request.
-    AdvanceClock(Time),
     /// One result per account, in order. Linked chains are all-or-nothing.
     CreateAccounts(Vec<NewAccount>),
     /// One result per transfer, in order. Linked chains are all-or-nothing.
@@ -323,8 +318,6 @@ pub struct Result<S> {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Response {
-    /// `AdvanceClock`.
-    Ok,
     AccountsCreated(Vec<Result<CreateAccountStatus>>),
     TransfersCreated(Vec<Result<CreateTransferStatus>>),
     /// The accounts found, in the order asked; ids not found are left out.

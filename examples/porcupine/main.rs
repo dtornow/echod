@@ -44,7 +44,7 @@ impl Model for Etcd {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, req: &EtcdReq, s: &Option<i64>) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &EtcdReq, s: &Option<i64>, _: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match *req {
             EtcdReq::Read => ExternalOutcome::same(EtcdRes::Read(*s), s),
             EtcdReq::Write(v) => ExternalOutcome::new(EtcdRes::Write, Some(v)),
@@ -53,12 +53,8 @@ impl Model for Etcd {
         }]
     }
 
-    fn internal(&self, _: &(), _: &Option<i64>) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), _: &Option<i64>, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
-    }
-
-    fn now(&self, _: &Option<i64>) -> Time {
-        0
     }
 }
 
@@ -140,7 +136,7 @@ impl Model for Kv {
     type Internal = ();
     type Dispatch = ();
 
-    fn external(&self, req: &KvReq, s: &Self::State) -> Vec<ExternalOutcome<Self>> {
+    fn external(&self, req: &KvReq, s: &Self::State, _: Time) -> Vec<ExternalOutcome<Self>> {
         vec![match req {
             KvReq::Get(k) => ExternalOutcome::same(KvRes::Value(s.get(k).cloned().unwrap_or_default()), s),
             KvReq::Put(k, v) => {
@@ -157,12 +153,8 @@ impl Model for Kv {
         }]
     }
 
-    fn internal(&self, _: &(), _: &Self::State) -> Vec<InternalOutcome<Self>> {
+    fn internal(&self, _: &(), _: &Self::State, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
-    }
-
-    fn now(&self, _: &Self::State) -> Time {
-        0
     }
 }
 

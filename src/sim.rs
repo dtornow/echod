@@ -8,7 +8,7 @@
 //! bug planted) to give a fuzz driver a server to catch.
 
 use crate::certificate::{Config, EventOf, Next, Silent};
-use crate::{CallId, Model};
+use crate::{CallId, Model, Time};
 
 pub struct Sim<'m, M: Model> {
     c: Config<'m, M>,
@@ -37,6 +37,11 @@ impl<'m, M: Model> Sim<'m, M> {
     /// The server's state.
     pub fn state(&self) -> &M::State {
         self.c.state()
+    }
+
+    /// The server's clock.
+    pub fn now(&self) -> Time {
+        self.c.now()
     }
 
     /// Calls sent and not yet answered.
@@ -71,6 +76,15 @@ impl<'m, M: Model> Sim<'m, M> {
         self.catch_up();
         let e = crate::Event::Invoke { call, req };
         self.c.observe(&e).expect("a fresh call id");
+        e
+    }
+
+    /// The clock moves forward to `at` (or stays, if `at` has passed). Overdue
+    /// work runs first.
+    pub fn clock(&mut self, at: Time) -> EventOf<M> {
+        self.catch_up();
+        let e = crate::Event::Clock { at: at.max(self.now()) };
+        self.c.observe(&e).expect("the clock moves forward");
         e
     }
 
