@@ -211,11 +211,15 @@ pub trait Explore: Model {
 /// explain a response, the checker then only considers ops on the same keys.
 ///
 /// A footprint must include everything the op reads or writes. What that
-/// means, precisely, is in `lean/Footprint.lean`: seen through a view of the
-/// state per key, an op's outcomes depend only on the views at its keys and
-/// change no other view. From those two facts, ops on disjoint keys commute
-/// (`Footprint.commute`, proved for every model). Nothing checks the two
-/// facts here; a model written in Lean proves them (`bankFootprint`).
+/// means, precisely, is in `lean/Footprint.lean`, where it is two sets per
+/// op, `r_set` and `w_set`, seen through a view of the state per key: the
+/// keys cover the state (`complete`), an op's outcomes depend only on the
+/// views at its read set (`r_only`), and change no view outside its write
+/// set (`w_only`). From those, ops that are independent (neither writes what
+/// the other reads or writes) commute: `Footprint.commute`, proved for every
+/// model. Nothing checks the conditions here; a model written in Lean proves
+/// them (`bankFootprint`). This trait has one set per op, reads and writes
+/// together; splitting it is the next step.
 pub trait Footprint: Model {
     /// The key of a thing in the state that steps touch: a promise id, an account name.
     type Key: Data;
