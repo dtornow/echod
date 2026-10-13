@@ -354,7 +354,11 @@ Limits:
   the bound is found) and `search_iff` (`Valid ↔ ∃ k, search finds it`). It
   runs (`#guard` lines at the bottom) and is the reference the Rust engines
   refine: footprints and partitions prune its frontier, and proving them is
-  proving the pruned frontier represents the full one.
+  proving the pruned frontier represents the full one. The first half of that
+  is done: `lean/Footprint.lean` says what a footprint claims (`frame`: an op
+  writes only its keys; `local_`: it reads only its keys) and proves that ops
+  on disjoint keys commute. The reduced search and its completeness are not
+  written yet.
 - **Cost.** About 5% time and twice the memory on the Resonate workload:
   every candidate keeps its history, shared with its parent's.
 
@@ -710,7 +714,7 @@ Porting also found three checker bugs, all fixed:
 - `src/sim.rs`: `Sim`, the model run as a server, on the same replay.
 - `src/drive.rs`: `drive`, `Choices` (recorded, replayable decisions), `Drive`, `Tried`.
 - `verus/README.md`: where the Verus statement and proof live, and how to run them.
-- `lean/Accordant.lean`: the semantics in Lean (`Model`, `Step`, `Valid`), the certificate replay and its soundness proof. `lean/Search.lean`: the plain search, proved sound and complete. `cd lean && lake build` checks both and the TigerBeetle model.
+- `lean/Accordant.lean`: the semantics in Lean (`Model`, `Step`, `Valid`), the certificate replay and its soundness proof. `lean/Search.lean`: the plain search, proved sound and complete. `lean/Footprint.lean`: what a footprint means (a view per key; an op reads and writes only its keys) and the theorem that ops on disjoint keys then commute, with the bank as an instance. `cd lean && lake build` checks all of it and the TigerBeetle model.
 - `src/hashed_map.rs`: persistent map with an incrementally maintained hash.
 - `src/intern.rs`: hash-consing of states.
 - `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).

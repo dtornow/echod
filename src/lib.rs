@@ -207,9 +207,15 @@ pub trait Explore: Model {
     }
 }
 
-/// Optional, for speed: which keys a request or internal step touches. To
-/// explain a response, the checker then only considers work on the same keys.
-/// A footprint must include everything the step reads or writes.
+/// Optional, for speed: which keys a request or internal op touches. To
+/// explain a response, the checker then only considers ops on the same keys.
+///
+/// A footprint must include everything the op reads or writes. What that
+/// means, precisely, is in `lean/Footprint.lean`: seen through a view of the
+/// state per key, an op's outcomes depend only on the views at its keys and
+/// change no other view. From those two facts, ops on disjoint keys commute
+/// (`Footprint.commute`, proved for every model). Nothing checks the two
+/// facts here; a model written in Lean proves them (`bankFootprint`).
 pub trait Footprint: Model {
     /// The key of a thing in the state that steps touch: a promise id, an account name.
     type Key: Data;
