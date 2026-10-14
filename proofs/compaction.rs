@@ -5,7 +5,7 @@
 //! object as one row per id. This proves that any such rewrite, in any row
 //! order, folds to the document the log folded to.
 //!
-//! Check with `verus proofs/compaction.rs`.
+//! Check with `verus proofs/compaction.rs` (Verus 0.2026.10.13, z3 4.16.0).
 
 use vstd::prelude::*;
 
@@ -30,9 +30,9 @@ pub open spec fn fold(log: Seq<Row>) -> Doc
     }
 }
 
-/// The ids a log mentions.
-pub open spec fn ids(log: Seq<Row>) -> Set<int> {
-    Set::new(|x: int| exists|i: int| 0 <= i < log.len() && #[trigger] log[i].id == x)
+/// `x` is an id some row of the log carries.
+pub open spec fn mentions(log: Seq<Row>, x: int) -> bool {
+    exists|i: int| 0 <= i < log.len() && #[trigger] log[i].id == x
 }
 
 /// No two rows share an id.
@@ -55,26 +55,37 @@ pub open spec fn is_compaction(c: Seq<Row>, log: Seq<Row>) -> bool {
 /// The fold's domain is exactly the ids the log mentions.
 proof fn lemma_fold_dom(log: Seq<Row>)
     ensures
-        fold(log).dom() =~= ids(log),
+        forall|x: int| #[trigger] fold(log).contains_key(x) <==> mentions(log, x),
     decreases log.len(),
 {
     if log.len() == 0 {
+        assert forall|x: int| !mentions(log, x) by {
+            if mentions(log, x) {
+                let i = choose|i: int| 0 <= i < log.len() && #[trigger] log[i].id == x;
+            }
+        }
     } else {
         let init = log.drop_last();
         lemma_fold_dom(init);
-        assert forall|x: int| fold(log).dom().contains(x) implies ids(log).contains(x) by {
+        assert forall|x: int| #[trigger] fold(log).contains_key(x) implies mentions(log, x) by {
             if x == log.last().id {
                 assert(log[log.len() - 1].id == x);
             } else {
+                assert(fold(init).contains_key(x));
+                assert(mentions(init, x));
                 let i = choose|i: int| 0 <= i < init.len() && #[trigger] init[i].id == x;
+                assert(log[i] == init[i]);
                 assert(log[i].id == x);
             }
         }
-        assert forall|x: int| ids(log).contains(x) implies fold(log).dom().contains(x) by {
+        assert forall|x: int| mentions(log, x) implies #[trigger] fold(log).contains_key(x) by {
             let i = choose|i: int| 0 <= i < log.len() && #[trigger] log[i].id == x;
             if i == log.len() - 1 {
             } else {
+                assert(init[i] == log[i]);
                 assert(init[i].id == x);
+                assert(mentions(init, x));
+                assert(fold(init).contains_key(x));
             }
         }
     }
@@ -115,13 +126,13 @@ pub proof fn compaction_replays_to_the_same_document(c: Seq<Row>, log: Seq<Row>)
 {
     lemma_fold_dom(c);
     lemma_fold_distinct(c);
-    assert forall|x: int| fold(c).contains_key(x) implies fold(log).contains_key(x) by {
+    assert forall|x: int| #[trigger] fold(c).contains_key(x) implies fold(log).contains_key(x) by {
         let i = choose|i: int| 0 <= i < c.len() && #[trigger] c[i].id == x;
     }
-    assert forall|x: int| fold(log).contains_key(x) implies fold(c).contains_key(x) by {
+    assert forall|x: int| #[trigger] fold(log).contains_key(x) implies fold(c).contains_key(x) by {
         let i = choose|i: int| 0 <= i < c.len() && #[trigger] c[i].id == x;
     }
-    assert forall|x: int| fold(c).contains_key(x) implies fold(c)[x] == fold(log)[x] by {
+    assert forall|x: int| #[trigger] fold(c).contains_key(x) implies fold(c)[x] == fold(log)[x] by {
         let i = choose|i: int| 0 <= i < c.len() && #[trigger] c[i].id == x;
     }
 }
