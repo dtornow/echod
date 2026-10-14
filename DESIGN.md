@@ -18,8 +18,11 @@ Origin: `resonate-server-blob` and `resonate-plugin-echod`.
 ### The document
 
 One origin is one object at `wf/<origin>`, JSON lines: one `Promise` per
-line, sorted by id. A task is a field of its promise, since a task's id is its
-promise's id. There is no enclosing document and no header.
+row, in commit order. A task is a field of its promise, since a task's id is
+its promise's id. There is no enclosing document and no header.
+
+The document is the fold of the rows: each row replaces the entry for its id,
+so the last row for an id wins. Reading an origin replays its object.
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -80,7 +83,31 @@ pub struct Value {
 
 ### Encoding
 
-`serde_json`, one object per line, joined by `\n`. Encoding is canonical
+`serde_json`, one object per row, joined by `\n`. Encoding is canonical
 because every collection is a `BTree*`, field order is declaration order, and
-empty fields are omitted. Canonical bytes let the applier skip a write when
-nothing changed and recognise its own landed write after a lost response.
+empty fields are omitted.
+
+### Writing
+
+A request reads the object, replays it, decides, and appends one row per
+promise it changed. Nothing changed, nothing appended.
+
+On S3 Express One Zone the append is `PutObject` with
+`x-amz-write-offset-bytes` at the current size: two writers at one offset
+cannot both land, so the offset is the commit. On general-purpose S3 there is
+no append; the whole object is rewritten with `If-Match` on its ETag.
+
+### Compaction
+
+Appends are capped per object and the log grows, so an object is periodically
+rewritten as one row per id, with `If-Match` on its ETag. Any one-row-per-id
+rendering of the document replays to the same document, in any row order;
+`proofs/compaction.rs` proves this in Verus.
+
+A rewrite shrinks the object, so a stale offset can become valid again once
+later appends regrow it. Appends therefore also carry `If-Match`, so a rewrite
+invalidates every in-flight offset. **To verify:** that S3 Express accepts
+`If-Match` together with `x-amz-write-offset-bytes` on one request.
+
+Removing a promise from an origin needs a tombstone row; a log cannot express
+removal by omission.
