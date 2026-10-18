@@ -73,6 +73,10 @@ pub trait Store: Send + Sync {
     /// The `max_keys` smallest keys under `prefix`, ascending.
     async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError>;
 
+    /// The sub-prefixes directly under `prefix`, up to the next `/`, ascending:
+    /// a delimiter listing. Each ends with `/`.
+    async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError>;
+
     /// Whether the store answers.
     async fn ready(&self) -> bool;
 }
@@ -87,6 +91,7 @@ pub trait Store: Send + Sync {
 pub struct MemoryStore {
     objects: Mutex<BTreeMap<String, (Vec<u8>, u64)>>,
     appendable: bool,
+    listings: std::sync::atomic::AtomicUsize,
 }
 
 impl MemoryStore {
@@ -96,7 +101,12 @@ impl MemoryStore {
 
     /// A store that appends, the way a directory bucket does.
     pub fn appendable() -> Self {
-        Self { objects: Mutex::new(BTreeMap::new()), appendable: true }
+        Self { objects: Mutex::new(BTreeMap::new()), appendable: true, listings: Default::default() }
+    }
+
+    /// How many listings have been asked of this store, for tests.
+    pub fn listings(&self) -> usize {
+        self.listings.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, (Vec<u8>, u64)>> {
@@ -180,7 +190,22 @@ impl Store for MemoryStore {
     }
 
     async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError> {
+        self.listings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.lock().range(prefix.to_string()..).take_while(|(k, _)| k.starts_with(prefix)).take(max_keys).map(|(k, _)| k.clone()).collect())
+    }
+
+    async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        self.listings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut out: Vec<String> = Vec::new();
+        for (k, _) in self.lock().range(prefix.to_string()..).take_while(|(k, _)| k.starts_with(prefix)) {
+            if let Some(i) = k[prefix.len()..].find('/') {
+                let p = k[..prefix.len() + i + 1].to_string();
+                if out.last() != Some(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn ready(&self) -> bool {
@@ -363,6 +388,29 @@ impl Store for S3Store {
         // General-purpose buckets list in order; directory buckets do not.
         keys.sort();
         Ok(keys)
+    }
+
+    async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = self.client.list_objects_v2().bucket(&self.bucket).prefix(prefix).delimiter("/").max_keys(1000);
+            if let Some(t) = &token {
+                req = req.continuation_token(t);
+            }
+            let resp = req.send().await.map_err(Self::unavailable)?;
+            for p in resp.common_prefixes() {
+                if let Some(p) = p.prefix() {
+                    out.push(p.to_string());
+                }
+            }
+            match resp.next_continuation_token() {
+                Some(t) if resp.is_truncated().unwrap_or(false) => token = Some(t.to_string()),
+                _ => break,
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     async fn ready(&self) -> bool {

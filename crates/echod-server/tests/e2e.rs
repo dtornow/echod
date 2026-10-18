@@ -72,6 +72,8 @@ impl Node {
         cfg.url = Some(format!("http://{addr}/"));
         cfg.compact = compact;
         cfg.retry_timeout = 600;
+        // Small buckets, so the tests cross bucket boundaries.
+        cfg.timer_bucket_ms = 400;
         let server = Server::new(cfg, store);
         server.init(false).await.unwrap();
         let (stop, rx) = tokio::sync::watch::channel(false);
@@ -263,6 +265,52 @@ async fn one_node_appending() {
     let loaded = echod_server::doc::decode(&bytes).unwrap();
     assert_eq!(loaded.rows.len(), 2);
     assert!(loaded.row_count > 2, "{} rows", loaded.row_count);
+}
+
+/// A deadline outlives the node that armed it: a fresh node, with a fresh
+/// wheel, loads the buckets at startup and fires it. The deadline sits several
+/// buckets past the horizon the new node loads first, so the wheel has to
+/// extend as the clock reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deadline_survives_a_restart() {
+    let memory = Arc::new(MemoryStore::new());
+    let store: Arc<dyn Store> = Arc::clone(&memory) as Arc<dyn Store>;
+    let worker = Worker::start().await;
+    let first = Node::start(Arc::clone(&store), "first", 0).await;
+    let (status, _, _) = first.send("promise.create", json!({ "id": "r:1", "timeoutAt": now() + 1_800, "tags": { "resonate:scope": "global" } })).await;
+    assert_eq!(status, 200);
+    let (status, _, _) = first.send("promise.register_listener", json!({ "awaited": "r:1", "address": worker.url })).await;
+    assert_eq!(status, 200);
+    first.stop().await;
+    let timer_keys = || store_keys(&store).into_iter().filter(|k| k.starts_with("t/")).count();
+    assert_eq!(timer_keys(), 1, "the key is in the bucket");
+
+    let listings_before = memory.listings();
+    let second = Node::start(Arc::clone(&store), "second", 0).await;
+    let m = worker.expect(Duration::from_secs(5), is_unblock("r:1")).await;
+    // What the new node listed to get there: the node prefix once at init,
+    // the timer prefix and its buckets once at startup, then one bucket per
+    // 400 ms crossed. Never a poll.
+    let fired_after = Duration::from_millis(1_800);
+    let buckets_crossed = (fired_after.as_millis() / 400) as usize + 2;
+    let listed = memory.listings() - listings_before;
+    assert!(listed <= 1 + 1 + 1 + buckets_crossed + 2, "{listed} listings for one restart and {buckets_crossed} buckets");
+    assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
+    let start = Instant::now();
+    while timer_keys() > 0 {
+        assert!(start.elapsed() < Duration::from_secs(2), "the fired key was not collected");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    second.stop().await;
+}
+
+fn store_keys(store: &Arc<dyn Store>) -> Vec<String> {
+    // The memory store lists everything under the empty prefix.
+    futures_lite_block_on(store.list("", usize::MAX)).unwrap()
+}
+
+fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 #[tokio::test]

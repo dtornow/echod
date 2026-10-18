@@ -1,25 +1,31 @@
 //! Where everything lives under the bucket.
 //!
 //! ```text
-//! <prefix>wf/<origin>                    an origin's document: rows
-//! <prefix>sched/<id>                     a schedule: one row
-//! <prefix>t/<shard>/<deadline>_<origin>  a deadline for an origin, empty
-//! <prefix>t/<shard>/<deadline>_sched:<id>
-//! <prefix>nodes/<node id>                a node's announcement
+//! <prefix>wf/<origin>                                    an origin's document: rows
+//! <prefix>sched/<id>                                     a schedule: one row
+//! <prefix>t/<bucket>/<deadline>_<origin>@<token>         a deadline for an origin, empty
+//! <prefix>t/<bucket>/<deadline>_sched:<id>@<token>       a schedule's next run, empty
+//! <prefix>nodes/<node id>                                a node's announcement
 //! ```
+//!
+//! A deadline key lives in the time bucket its deadline falls in, so what is
+//! due is found by listing the buckets at or before now and nothing later. The
+//! token names the arm that wrote the key, so a writer removes exactly the key
+//! its predecessor wrote and never one that happens to share the deadline.
 
 const DEADLINE_WIDTH: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct KeySpace {
     prefix: String,
-    timer_shards: u32,
+    /// The width of a timer bucket, ms.
+    bucket_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimerEntry {
-    Origin { deadline: u64, origin: String },
-    Schedule { deadline: u64, id: String },
+    Origin { deadline: u64, origin: String, token: u64 },
+    Schedule { deadline: u64, id: String, token: u64 },
 }
 
 impl TimerEntry {
@@ -85,16 +91,16 @@ pub fn origin_of(id: &str) -> &str {
 }
 
 impl KeySpace {
-    pub fn new(prefix: &str, timer_shards: u32) -> Self {
+    pub fn new(prefix: &str, bucket_ms: u64) -> Self {
         let mut prefix = prefix.to_string();
         if !prefix.is_empty() && !prefix.ends_with('/') {
             prefix.push('/');
         }
-        Self { prefix, timer_shards: timer_shards.max(1) }
+        Self { prefix, bucket_ms: bucket_ms.max(1) }
     }
 
-    pub fn timer_shards(&self) -> u32 {
-        self.timer_shards
+    pub fn bucket_ms(&self) -> u64 {
+        self.bucket_ms
     }
 
     pub fn doc_key(&self, origin: &str) -> String {
@@ -117,30 +123,46 @@ impl KeySpace {
         decode_key(key.strip_prefix(&self.node_prefix())?)
     }
 
-    pub fn timer_shard_prefix(&self, shard: u32) -> String {
-        format!("{}t/{:02}/", self.prefix, shard % self.timer_shards)
+    /// The start of the bucket an instant falls in.
+    pub fn bucket_of(&self, at: u64) -> u64 {
+        at / self.bucket_ms * self.bucket_ms
     }
 
-    fn shard_of(&self, target: &str) -> u32 {
-        (fnv1a(target) % self.timer_shards as u64) as u32
+    /// Every timer key lives under this.
+    pub fn timer_prefix(&self) -> String {
+        format!("{}t/", self.prefix)
     }
 
-    fn timer_key_for(&self, target: &str, encoded: &str, at: u64) -> String {
-        format!("{}{:0width$}_{}", self.timer_shard_prefix(self.shard_of(target)), at, encoded, width = DEADLINE_WIDTH)
+    /// The keys of one bucket live under this. `bucket` is a bucket start.
+    pub fn bucket_prefix(&self, bucket: u64) -> String {
+        format!("{}t/{:0width$}/", self.prefix, bucket, width = DEADLINE_WIDTH)
     }
 
-    pub fn timer_key(&self, origin: &str, at: u64) -> String {
-        self.timer_key_for(origin, &encode_key(origin), at)
+    /// The bucket start a bucket prefix names, as a listing returns it.
+    pub fn parse_bucket_prefix(&self, prefix: &str) -> Option<u64> {
+        let name = prefix.strip_prefix(&self.timer_prefix())?.trim_end_matches('/');
+        if name.len() != DEADLINE_WIDTH {
+            return None;
+        }
+        name.parse().ok()
     }
 
-    pub fn sched_timer_key(&self, id: &str, at: u64) -> String {
-        self.timer_key_for(id, &format!("sched:{}", encode_key(id)), at)
+    fn timer_key_for(&self, encoded: &str, at: u64, token: u64) -> String {
+        format!("{}{:0width$}_{}@{:016x}", self.bucket_prefix(self.bucket_of(at)), at, encoded, token, width = DEADLINE_WIDTH)
+    }
+
+    pub fn timer_key(&self, origin: &str, at: u64, token: u64) -> String {
+        self.timer_key_for(&encode_key(origin), at, token)
+    }
+
+    pub fn sched_timer_key(&self, id: &str, at: u64, token: u64) -> String {
+        self.timer_key_for(&format!("sched:{}", encode_key(id)), at, token)
     }
 
     pub fn timer_key_of(&self, e: &TimerEntry) -> String {
         match e {
-            TimerEntry::Origin { deadline, origin } => self.timer_key(origin, *deadline),
-            TimerEntry::Schedule { deadline, id } => self.sched_timer_key(id, *deadline),
+            TimerEntry::Origin { deadline, origin, token } => self.timer_key(origin, *deadline, *token),
+            TimerEntry::Schedule { deadline, id, token } => self.sched_timer_key(id, *deadline, *token),
         }
     }
 
@@ -151,10 +173,11 @@ impl KeySpace {
         }
         let (deadline, rest) = name.split_at(DEADLINE_WIDTH);
         let deadline: u64 = deadline.parse().ok()?;
-        let target = rest.strip_prefix('_')?;
+        let (target, token) = rest.strip_prefix('_')?.rsplit_once('@')?;
+        let token = u64::from_str_radix(token, 16).ok()?;
         match target.strip_prefix("sched:") {
-            Some(id) => Some(TimerEntry::Schedule { deadline, id: decode_key(id)? }),
-            None => Some(TimerEntry::Origin { deadline, origin: decode_key(target)? }),
+            Some(id) => Some(TimerEntry::Schedule { deadline, id: decode_key(id)?, token }),
+            None => Some(TimerEntry::Origin { deadline, origin: decode_key(target)?, token }),
         }
     }
 }

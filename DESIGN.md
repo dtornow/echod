@@ -84,11 +84,11 @@ gateway.rs    POST / and GET /ready
 ### The bucket
 
 ```text
-wf/<origin>                     an origin's document: rows
-sched/<id>                      a schedule: one row
-t/<shard>/<deadline>_<origin>   a deadline for an origin, empty
-t/<shard>/<deadline>_sched:<id> a schedule's next run, empty
-nodes/<id>                      a node's announcement: id, url, at
+wf/<origin>                              an origin's document: rows
+sched/<id>                               a schedule: one row
+t/<bucket>/<deadline>_<origin>@<token>   a deadline for an origin, empty
+t/<bucket>/<deadline>_sched:<id>@<token> a schedule's next run, empty
+nodes/<id>                               a node's announcement: id, url, at
 ```
 
 ### The document
@@ -115,9 +115,12 @@ general-purpose bucket, the whole object is rewritten as one row per id. The
 outbox is handed to the router after the commit; delivery is at most once,
 and a lost `execute` is re-offered by the task's retry deadline.
 
-A deadline is an empty object whose key says what is due and when. It is
+A deadline is an empty object whose key says what is due and when, filed
+under the time bucket (an hour by default) its deadline falls in. It is
 written before the document that arms it and deleted after the document that
-disarms it, so a deadline the document owes is always in the bucket. A
+disarms it, so a deadline the document owes is always in the bucket. The
+token names the arm that wrote the key: a writer removes exactly the key its
+own predecessor wrote, never another arm's key for the same instant. A
 schedule is its own object; firing it creates the occurrence's promise and
 advances the schedule in one turn on the promise's origin.
 
@@ -129,16 +132,19 @@ younger than the TTL. That list is the membership. Nothing is agreed on and
 nothing depends on it for correctness, which the conditional writes carry;
 membership steers three things:
 
-- **Ownership.** For a key, the live node with the highest hash of
-  `(node, key)` owns it (rendezvous hashing; a node joining or leaving moves
-  only its own keys).
+- **Ownership.** `hash(origin) mod n` over the live nodes in id order
+  (FNV-1a). A load balancer that applies the same function sends every
+  request for an origin to the node that caches it and fires its deadlines.
 - **Cache.** Each node caches the documents it read or wrote, with their
   ETags. The owner of an origin trusts its cache, since every write to the
   origin goes through it; any other node revalidates with `If-None-Match`.
-- **Timers.** The owner fires an origin's deadlines: from memory for the keys
-  it wrote, and from a periodic listing of the timer prefix for the keys
-  another node wrote or a dead node left behind. Firing is a sweep of the
-  origin, idempotent, so a key fired twice costs nothing.
+- **Timers.** Each node holds its share of the deadlines in an in-memory
+  wheel and fires from it. It lists the timer prefix only at startup, when
+  the set of live nodes changes (every node's share moved), and when the
+  clock reaches a bucket it has not loaded; each listing takes the keys of
+  the origins it owns and nothing else. Firing is a sweep of the origin,
+  idempotent, so a key fired twice costs nothing; the key is deleted once
+  the sweep has committed.
 
 A request names an origin. A node that does not own it forwards the request
 to the owner over HTTP (`x-echod-forwarded` stops a second hop) and relays

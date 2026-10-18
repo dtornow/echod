@@ -48,13 +48,10 @@ pub struct Config {
     #[arg(long, env = "ECHOD_RETRY_TIMEOUT", default_value_t = 60_000)]
     pub retry_timeout: u64,
 
-    /// Prefixes the timer keys are spread across.
-    #[arg(long, env = "ECHOD_TIMER_SHARDS", default_value_t = 4)]
-    pub timer_shards: u32,
-
-    /// How often the timer prefix is listed for other nodes' deadlines, in ms.
-    #[arg(long, env = "ECHOD_POLL", default_value_t = 1_000)]
-    pub poll_ms: u64,
+    /// The width of a timer bucket, in ms. Deadlines are keyed by the bucket
+    /// they fall in; a node lists one bucket at a time as the clock reaches it.
+    #[arg(long, env = "ECHOD_TIMER_BUCKET", default_value_t = 3_600_000)]
+    pub timer_bucket_ms: u64,
 
     /// How often this node refreshes its announcement, in ms.
     #[arg(long, env = "ECHOD_HEARTBEAT", default_value_t = 5_000)]
@@ -92,8 +89,7 @@ impl Config {
             url: None,
             node_id: None,
             retry_timeout: 60_000,
-            timer_shards: 4,
-            poll_ms: 100,
+            timer_bucket_ms: 3_600_000,
             heartbeat_ms: 500,
             node_ttl_ms: 2_000,
             cache_entries: 1_000,

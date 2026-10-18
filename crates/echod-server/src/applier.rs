@@ -8,6 +8,11 @@
 //! The cache holds the last document this node read or wrote for an origin.
 //! The owner of an origin trusts it: every write to the origin goes through
 //! the owner. Any other node revalidates it with `If-None-Match` before use.
+//!
+//! A commit that moves an origin's nearest deadline writes the new deadline
+//! key before the document and removes the previous key, the one this node
+//! armed, after it. The key's token is drawn per arm, so the removal can never
+//! land on a key another arm wrote for the same instant.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,7 +24,7 @@ use crate::doc::{self, Loaded};
 use crate::keys::KeySpace;
 use crate::nodes::Nodes;
 use crate::store::{Etag, Read, Store, StoreError};
-use crate::timers::TimerQueue;
+use crate::timers::TimerWheel;
 
 /// A document this node has seen, and the version it saw.
 #[derive(Clone)]
@@ -28,15 +33,26 @@ pub struct Cached {
     pub etag: Etag,
 }
 
+/// The deadline key this node last armed for a target, so the next commit
+/// removes exactly that one. Lost with the process: the key then stays until
+/// it fires into a sweep with nothing due, which collects it.
+#[derive(Clone, Debug)]
+pub struct Armed {
+    pub at: u64,
+    pub key: String,
+}
+
 pub struct Applier {
     store: Arc<dyn Store>,
     keys: KeySpace,
     cfg: KernelConfig,
     nodes: Arc<Nodes>,
-    timers: Arc<TimerQueue>,
+    timers: Arc<TimerWheel>,
     router: Arc<dyn ResonateRouter>,
     server_url: String,
     cache: Mutex<HashMap<String, Cached>>,
+    armed: Mutex<HashMap<String, Armed>>,
+    tokens: std::sync::atomic::AtomicU64,
     cache_entries: usize,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     max_retries: u32,
@@ -56,11 +72,12 @@ impl Applier {
         keys: KeySpace,
         cfg: KernelConfig,
         nodes: Arc<Nodes>,
-        timers: Arc<TimerQueue>,
+        timers: Arc<TimerWheel>,
         router: Arc<dyn ResonateRouter>,
         server_url: String,
         cache_entries: usize,
     ) -> Self {
+        let seed = crate::keys::fnv1a(&format!("{}/{}", server_url, resonate_core::util::system_time_ms())) | 1;
         Self {
             store,
             keys,
@@ -70,6 +87,8 @@ impl Applier {
             router,
             server_url,
             cache: Mutex::new(HashMap::new()),
+            armed: Mutex::new(HashMap::new()),
+            tokens: std::sync::atomic::AtomicU64::new(seed),
             cache_entries: cache_entries.max(1),
             locks: Mutex::new(HashMap::new()),
             max_retries: 8,
@@ -102,6 +121,51 @@ impl Applier {
 
     pub fn forget(&self, origin: &str) {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).remove(origin);
+    }
+
+    /// A token no other arm of this node has used.
+    fn token(&self) -> u64 {
+        self.tokens.fetch_add(0x9e37_79b9_7f4a_7c15, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn armed_for(&self, target: &str) -> Option<Armed> {
+        self.armed.lock().unwrap_or_else(|e| e.into_inner()).get(target).cloned()
+    }
+
+    fn set_armed(&self, target: &str, a: Option<Armed>) {
+        let mut m = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        match a {
+            Some(a) => {
+                m.insert(target.to_string(), a);
+            }
+            None => {
+                m.remove(target);
+            }
+        }
+    }
+
+    /// A fired key was collected: if it is the one this node remembers for
+    /// `target`, forget it, so the next commit arms afresh.
+    pub fn collected(&self, target: &str, key: &str) {
+        let mut m = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        if m.get(target).map(|a| a.key.as_str()) == Some(key) {
+            m.remove(target);
+        }
+    }
+
+    /// Write a deadline key and hold it in the wheel. Returns what was armed.
+    async fn arm(&self, key: String, at: u64) -> Result<Armed, StoreError> {
+        self.store.put(&key, Vec::new()).await?;
+        self.timers.arm(at, key.clone());
+        Ok(Armed { at, key })
+    }
+
+    /// Remove a deadline key this node armed. Best effort: a key that stays
+    /// fires into a sweep with nothing due and is collected then.
+    async fn disarm(&self, a: &Armed) {
+        if self.store.delete(&a.key).await.is_ok() {
+            self.timers.disarm(a.at, &a.key);
+        }
     }
 
     /// Load an origin's document: from the cache when this node owns the
@@ -279,17 +343,22 @@ impl Applier {
     /// schedules, then the old timer; and hand over the outbox.
     async fn commit(&self, w: &mut Working, state: &State, _now: u64) -> Result<(), StoreError> {
         let changed = doc::changed(&w.loaded.rows, &state.objects);
-        let old_deadline = Self::next_deadline(&w.loaded.rows);
         let new_deadline = Self::next_deadline(&state.objects);
 
         if !changed.is_empty() {
-            // (1) the new timer, before the state that arms it
-            if new_deadline != old_deadline {
-                if let Some(at) = new_deadline {
-                    let key = self.keys.timer_key(&w.origin, at);
-                    self.store.put(&key, Vec::new()).await?;
-                    self.timers.arm(at, key);
-                }
+            // (1) the new timer, before the state that arms it. Re-armed even
+            // when the deadline did not move, if this node holds no key for
+            // it: the key may be another node's, or lost with a restart.
+            let previous = self.armed_for(&w.origin);
+            let rearm = match (&new_deadline, &previous) {
+                (None, _) => false,
+                (Some(at), Some(p)) => *at != p.at,
+                (Some(_), None) => true,
+            };
+            let mut armed_now = previous.clone();
+            if rearm {
+                let at = new_deadline.expect("a deadline");
+                armed_now = Some(self.arm(self.keys.timer_key(&w.origin, at, self.token()), at).await?);
             }
             // (2) the document
             let key = self.keys.doc_key(&w.origin);
@@ -320,53 +389,56 @@ impl Applier {
                 }
             };
             let _ = etag;
-            // (3) the old timer
-            if new_deadline != old_deadline {
-                if let Some(at) = old_deadline {
-                    let key = self.keys.timer_key(&w.origin, at);
-                    if self.store.delete(&key).await.is_ok() {
-                        self.timers.disarm(at, &key);
-                    }
+            // (3) the old timer: exactly the key this node armed before
+            if new_deadline.is_none() || rearm {
+                if let Some(p) = &previous {
+                    self.disarm(p).await;
+                }
+                if new_deadline.is_none() {
+                    armed_now = None;
                 }
             }
+            self.set_armed(&w.origin, armed_now);
         }
 
         // schedules: each its own object
         for c in &state.schedules {
             let before = w.schedules.iter().find(|(b, _)| b.id == c.id);
             let body = serde_json::to_vec(c).expect("a schedule serialises");
+            let target = format!("sched:{}", c.id);
             match before {
                 Some((b, etag)) => {
                     if serde_json::to_vec(b).ok() != Some(body.clone()) {
-                        if b.next_run_at != c.next_run_at {
-                            let key = self.keys.sched_timer_key(&c.id, c.next_run_at);
-                            self.store.put(&key, Vec::new()).await?;
-                            self.timers.arm(c.next_run_at, key);
+                        let previous = self.armed_for(&target);
+                        let rearm = previous.as_ref().map_or(true, |p| p.at != c.next_run_at);
+                        let mut armed_now = previous.clone();
+                        if rearm {
+                            armed_now = Some(self.arm(self.keys.sched_timer_key(&c.id, c.next_run_at, self.token()), c.next_run_at).await?);
                         }
                         self.store.put_if_match(&self.keys.sched_key(&c.id), body, etag).await?;
-                        if b.next_run_at != c.next_run_at {
-                            let key = self.keys.sched_timer_key(&c.id, b.next_run_at);
-                            if self.store.delete(&key).await.is_ok() {
-                                self.timers.disarm(b.next_run_at, &key);
+                        if rearm {
+                            if let Some(p) = &previous {
+                                self.disarm(p).await;
                             }
                         }
+                        self.set_armed(&target, armed_now);
                     }
                 }
                 None => {
-                    let key = self.keys.sched_timer_key(&c.id, c.next_run_at);
-                    self.store.put(&key, Vec::new()).await?;
-                    self.timers.arm(c.next_run_at, key);
+                    let armed = self.arm(self.keys.sched_timer_key(&c.id, c.next_run_at, self.token()), c.next_run_at).await?;
                     self.store.put_if_none_match(&self.keys.sched_key(&c.id), body).await?;
+                    self.set_armed(&target, Some(armed));
                 }
             }
         }
         for (b, _) in &w.schedules {
             if !state.schedules.iter().any(|c| c.id == b.id) {
                 self.store.delete(&self.keys.sched_key(&b.id)).await?;
-                let key = self.keys.sched_timer_key(&b.id, b.next_run_at);
-                if self.store.delete(&key).await.is_ok() {
-                    self.timers.disarm(b.next_run_at, &key);
+                let target = format!("sched:{}", b.id);
+                if let Some(p) = self.armed_for(&target) {
+                    self.disarm(&p).await;
                 }
+                self.set_armed(&target, None);
             }
         }
 

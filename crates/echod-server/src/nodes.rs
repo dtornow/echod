@@ -8,9 +8,10 @@
 //! Membership only steers who serves an origin, who fires its deadlines, and
 //! whose cache may be trusted.
 //!
-//! Ownership is rendezvous hashing: for a key, the live node with the highest
-//! hash of `(node, key)` owns it. A node joining or leaving moves only the keys
-//! that hash to it, and every node computes the same answer from the same list.
+//! Ownership is `hash(key) mod n` over the live nodes in id order. A load
+//! balancer that applies the same function sends every request for an origin
+//! to the node that caches it and fires its deadlines. When n changes, every
+//! node's share changes, and each node reloads its timers from the bucket.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -36,9 +37,18 @@ pub struct Membership {
 }
 
 impl Membership {
-    /// The live node that owns `key`, by rendezvous hashing.
+    /// The live node that owns `key`: the one at `hash(key) mod n` in id order.
     pub fn owner_of(&self, key: &str) -> Option<&Announcement> {
-        self.nodes.values().max_by_key(|n| (fnv1a(&format!("{}\u{0}{}", n.id, key)), n.id.clone()))
+        let n = self.nodes.len() as u64;
+        if n == 0 {
+            return None;
+        }
+        self.nodes.values().nth((fnv1a(key) % n) as usize)
+    }
+
+    /// The node ids in order: the table a load balancer needs.
+    pub fn ids(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
     }
 }
 
@@ -49,6 +59,8 @@ pub struct Nodes {
     heartbeat: Duration,
     ttl: u64,
     members: RwLock<Membership>,
+    /// Bumped whenever the set of live nodes changes.
+    generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl Nodes {
@@ -56,7 +68,13 @@ impl Nodes {
         let me = Announcement { id: id.clone(), url, at: 0 };
         let mut members = Membership::default();
         members.nodes.insert(id, me.clone());
-        Self { store, keys, me, heartbeat, ttl, members: RwLock::new(members) }
+        let (generation, _) = tokio::sync::watch::channel(0);
+        Self { store, keys, me, heartbeat, ttl, members: RwLock::new(members), generation }
+    }
+
+    /// Changes of membership, for whoever must act on them.
+    pub fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generation.subscribe()
     }
 
     pub fn id(&self) -> &str {
@@ -106,10 +124,11 @@ impl Nodes {
         }
         let before: Vec<String> = self.members().nodes.keys().cloned().collect();
         let after: Vec<String> = nodes.keys().cloned().collect();
+        *self.members.write().unwrap_or_else(|e| e.into_inner()) = Membership { nodes };
         if before != after {
             tracing::info!(nodes = ?after, "membership changed");
+            self.generation.send_modify(|g| *g += 1);
         }
-        *self.members.write().unwrap_or_else(|e| e.into_inner()) = Membership { nodes };
         Ok(())
     }
 

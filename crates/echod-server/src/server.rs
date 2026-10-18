@@ -25,7 +25,7 @@ use crate::nodes::Nodes;
 use crate::push::Router;
 use crate::schedules::Schedules;
 use crate::store::{self, Store};
-use crate::timers::{TimerQueue, Timers};
+use crate::timers::{TimerWheel, Timers};
 use crate::wire;
 
 /// The header a forwarded request carries, so the owner never forwards it on.
@@ -52,14 +52,14 @@ impl Server {
     }
 
     pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Arc<Self> {
-        let keys = KeySpace::new(&cfg.prefix, cfg.timer_shards);
+        let keys = KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
         let url = cfg.url.clone().unwrap_or_else(|| format!("http://{}", cfg.bind.replace("0.0.0.0", "127.0.0.1")));
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, util::system_time_ms()))));
         let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms));
-        let queue = Arc::new(TimerQueue::new());
-        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&queue), router, url, cfg.cache_entries));
+        let wheel = Arc::new(TimerWheel::new());
+        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cfg.cache_entries));
         let schedules = Arc::new(Schedules::new(Arc::clone(&applier)));
-        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, queue, Arc::clone(&nodes), Arc::clone(&applier), schedules, Duration::from_millis(cfg.poll_ms)));
+        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, wheel, Arc::clone(&nodes), Arc::clone(&applier), schedules));
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(2)).timeout(Duration::from_secs(30)).build().expect("an HTTP client");
         Arc::new(Self { cfg, store, nodes, applier, timers, client, shutdown, tasks: tokio::sync::Mutex::new(Vec::new()) })

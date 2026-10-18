@@ -8,7 +8,7 @@
 //! wire.rs       the kernel's vocabulary to the protocol's and back
 //! nodes.rs      the nodes: announce, heartbeat, list, and who owns what
 //! applier.rs    one request against one origin, serialised and committed
-//! timers.rs     deadlines as objects, fired by the owner
+//! timers.rs     deadlines as objects in time buckets, fired by the owner from memory
 //! schedules.rs  schedules as objects, fired by the owner
 //! push.rs       messages out: HTTP push, and the router in front of it
 //! server.rs     the `ResonateServer`: dispatch, forwarding, lifecycle
