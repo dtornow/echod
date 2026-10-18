@@ -18,9 +18,8 @@
 
 use vstd::prelude::*;
 
-use crate::ident::same_origin_spec;
 use crate::store::AState;
-use crate::tags::{timer_targeted, OType};
+use crate::tags::OType;
 use crate::types::*;
 
 verus! {
@@ -182,7 +181,7 @@ pub open spec fn well_formed_promise_deadline_settlement_has_no_value(now: nat, 
 }
 
 pub open spec fn well_formed_promise_timer_not_targeted_at(_now: nat, p: APromise) -> bool {
-    !timer_targeted(p.tags)
+    !crate::tags::timer_targeted(p.tags)
 }
 pub open spec fn well_formed_promise_timer_not_targeted(now: nat, s: AState) -> bool {
     forall|id: Seq<char>| #[trigger] s.objects.contains_key(id) ==>
@@ -230,7 +229,7 @@ pub open spec fn well_formed_promise_awaiter_is_not_self(now: nat, s: AState) ->
 }
 
 pub open spec fn well_formed_promise_callbacks_same_origin_at(_now: nat, p: APromise) -> bool {
-    forall|i: int| 0 <= i < p.callbacks.len() ==> same_origin_spec(#[trigger] p.callbacks[i], p.id)
+    forall|i: int| 0 <= i < p.callbacks.len() ==> crate::ident::same_origin_spec(#[trigger] p.callbacks[i], p.id)
 }
 pub open spec fn well_formed_promise_callbacks_same_origin(now: nat, s: AState) -> bool {
     forall|id: Seq<char>| #[trigger] s.objects.contains_key(id) ==>
@@ -341,7 +340,7 @@ pub open spec fn well_formed_task_acquired_version_positive(now: nat, s: AState)
 // --- schedules ---
 
 pub open spec fn well_formed_schedule_promise_tags_not_timer_targeted_at(_now: nat, c: ASchedule) -> bool {
-    !timer_targeted(c.promise_tags)
+    !crate::tags::timer_targeted(c.promise_tags)
 }
 pub open spec fn well_formed_schedule_promise_tags_not_timer_targeted(now: nat, s: AState) -> bool {
     forall|id: Seq<char>| #[trigger] s.schedules.contains_key(id) ==>

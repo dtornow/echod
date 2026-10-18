@@ -4,7 +4,7 @@
 
 use vstd::prelude::*;
 
-use crate::tags::{is_timer, otype, OType};
+use crate::tags::OType;
 use crate::types::MAX_TIME;
 use crate::types::*;
 
@@ -16,11 +16,11 @@ verus! {
 
 impl APromise {
     pub open spec fn is_timer(self) -> bool {
-        is_timer(self.tags)
+        crate::tags::is_timer(self.tags)
     }
 
     pub open spec fn otype(self) -> OType {
-        otype(self.tags)
+        crate::tags::otype(self.tags)
     }
 
     /// `PromiseObject.project`: a pending promise past its deadline is settled
@@ -699,7 +699,7 @@ pub open spec fn first_dispatch(tags: ATags, now: nat) -> nat {
 
 /// `createPromise`: the object `promise.create` writes for a fresh id.
 pub open spec fn spec_create(req: APromiseCreateReq, now: nat) -> APromise {
-    let runnable = otype(req.tags) == OType::Runnable;
+    let runnable = crate::tags::otype(req.tags) == OType::Runnable;
     if req.timeout_at > now {
         APromise {
             id: req.id,
@@ -729,7 +729,7 @@ pub open spec fn spec_create(req: APromiseCreateReq, now: nat) -> APromise {
     } else {
         APromise {
             id: req.id,
-            state: if is_timer(req.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout },
+            state: if crate::tags::is_timer(req.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout },
             tags: req.tags,
             param: req.param,
             value: AValue::empty(),

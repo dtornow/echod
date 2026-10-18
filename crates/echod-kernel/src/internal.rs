@@ -21,7 +21,6 @@ use vstd::prelude::*;
 
 use crate::external::*;
 use crate::external_task::*;
-use crate::external_task2::unchanged_at;
 use crate::object::*;
 use crate::properties::*;
 use crate::store::{AState, State};
@@ -333,7 +332,7 @@ impl State {
                 inv(now as nat, self@),
                 self@.schedules == a.schedules,
                 self@.outbox == a.outbox,
-                forall|x: Seq<char>| !occ_touched(occs, k as int, x) ==> #[trigger] unchanged_at(a, self@, x),
+                forall|x: Seq<char>| !occ_touched(occs, k as int, x) ==> #[trigger] crate::external_task2::unchanged_at(a, self@, x),
                 forall|x: Seq<char>| #[trigger] occ_touched(occs, k as int, x) ==> fire_shape(now as nat, a, self@, sched, occs, x),
             decreases n - k,
         {
@@ -354,7 +353,7 @@ impl State {
                             assert(fire_shape(now as nat, a, s0, sched, occs, x));
                             lemma_fire_project_idem(now as nat, a, s0, self@, sched, occs, x);
                         } else {
-                            assert(unchanged_at(a, s0, x));
+                            assert(crate::external_task2::unchanged_at(a, s0, x));
                             crate::external_task2::lemma_project_idem(a.objects[x], now as nat);
                         }
                     }
@@ -369,7 +368,7 @@ impl State {
                             assert(fire_shape(now as nat, a, s0, sched, occs, x));
                             assert(false);
                         }
-                        assert(unchanged_at(a, s0, x));
+                        assert(crate::external_task2::unchanged_at(a, s0, x));
                         assert(!a.objects.contains_key(x));
                         assert(creq@ == occ_req(sched, occs[k as int]));
                         assert(self@.objects[x] == spec_create(occ_req(sched, occs[k as int]), birth_of(occs[k as int], sched, now as nat)));
@@ -387,14 +386,14 @@ impl State {
                         assert(jj < k as int);
                         assert(occ_touched(occs, k as int, y));
                         assert(fire_shape(now as nat, a, s0, sched, occs, y));
-                        assert(unchanged_at(s0, b, y));
+                        assert(crate::external_task2::unchanged_at(s0, b, y));
                     }
                 }
-                assert forall|y: Seq<char>| !occ_touched(occs, k as int + 1, y) implies #[trigger] unchanged_at(a, b, y) by {
+                assert forall|y: Seq<char>| !occ_touched(occs, k as int + 1, y) implies #[trigger] crate::external_task2::unchanged_at(a, b, y) by {
                     assert(!occ_touched(occs, k as int, y));
                     assert(occs[k as int].promise_id@ != y);
-                    assert(unchanged_at(a, s0, y));
-                    assert(unchanged_at(s0, b, y));
+                    assert(crate::external_task2::unchanged_at(a, s0, y));
+                    assert(crate::external_task2::unchanged_at(s0, b, y));
                 }
             }
             k += 1;
@@ -468,14 +467,14 @@ pub proof fn lemma_project_internal(now: nat, a: AState, b: AState, ids: spec_fn
     requires
         forall|x: Seq<char>| #[trigger] ids(x) ==>
             a.objects.contains_key(x) && b.objects.contains_key(x) && b.objects[x] == a.objects[x].project(now),
-        forall|x: Seq<char>| !ids(x) ==> #[trigger] unchanged_at(a, b, x),
+        forall|x: Seq<char>| !ids(x) ==> #[trigger] crate::external_task2::unchanged_at(a, b, x),
     ensures
         internal_legal(now, a, b),
 {
     assert forall|x: Seq<char>| #[trigger] internal_obj(now, a, b, x) by {
         if ids(x) {
         } else {
-            assert(unchanged_at(a, b, x));
+            assert(crate::external_task2::unchanged_at(a, b, x));
         }
     }
     lemma_internal_pointwise(now, a, b);
@@ -486,7 +485,7 @@ pub proof fn lemma_internal_one(now: nat, a: AState, b: AState, id: Seq<char>)
     requires
         a.objects.contains_key(id),
         b.objects.contains_key(id),
-        forall|x: Seq<char>| x != id ==> #[trigger] unchanged_at(a, b, x),
+        forall|x: Seq<char>| x != id ==> #[trigger] crate::external_task2::unchanged_at(a, b, x),
         consistent_task_state_edge_internal_admissible_at(now, b, id, a.objects[id]),
         consistent_promise_state_edge_internal_admissible_at(now, b, id, a.objects[id]),
     ensures
@@ -494,7 +493,7 @@ pub proof fn lemma_internal_one(now: nat, a: AState, b: AState, id: Seq<char>)
 {
     assert forall|x: Seq<char>| #[trigger] internal_obj(now, a, b, x) by {
         if x != id {
-            assert(unchanged_at(a, b, x));
+            assert(crate::external_task2::unchanged_at(a, b, x));
         }
     }
     lemma_internal_pointwise(now, a, b);
@@ -662,7 +661,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
         b.objects.contains_key(x),
         b.objects[x] == a.objects[x].project(now).remove_callback(y),
         resumed_shape(now, a, b, x, y),
-        forall|z: Seq<char>| z != x && z != y ==> #[trigger] unchanged_at(a, b, z),
+        forall|z: Seq<char>| z != x && z != y ==> #[trigger] crate::external_task2::unchanged_at(a, b, z),
         b.schedules == a.schedules,
         b.outbox == a.outbox,
     ensures
@@ -695,7 +694,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
         } else if w == y {
             assert(resumed_shape(now, a, b, x, y));
         } else {
-            assert(unchanged_at(a, b, w));
+            assert(crate::external_task2::unchanged_at(a, b, w));
         }
     }
     // --- the awaited object ---
@@ -755,7 +754,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
         let my = py.project(now);
         assert(b.objects.contains_key(y));
         if b.objects[y] == py && py.task is None {
-            assert(unchanged_at(a, b, y));
+            assert(crate::external_task2::unchanged_at(a, b, y));
             lemma_trans_obj_unchanged(now, a, b, y);
             lemma_callback_frame_obj(now, a, b, x, y, y);
         } else if b.objects[y] == my && (my.task is None || my.task.unwrap().state == TaskState::Fulfilled) {
@@ -829,7 +828,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
     assert forall|z: Seq<char>| !changed(z) implies
         (a.objects.contains_key(z) <==> #[trigger] b.objects.contains_key(z))
         && (a.objects.contains_key(z) ==> a.objects[z] == b.objects[z]) by {
-        assert(unchanged_at(a, b, z));
+        assert(crate::external_task2::unchanged_at(a, b, z));
     }
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z) && z != y
@@ -839,7 +838,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
     crate::frame::lemma_step(now, a, b, changed, |z: Seq<char>| z == y, |k: OutboxKey| false, |z: Seq<char>| false);
     assert forall|z: Seq<char>| #[trigger] internal_obj(now, a, b, z) by {
         if !changed(z) {
-            assert(unchanged_at(a, b, z));
+            assert(crate::external_task2::unchanged_at(a, b, z));
         }
     }
     lemma_internal_pointwise(now, a, b);
@@ -989,7 +988,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
         a.schedules[sid].next_run_at <= occs[0].at as nat,
         forall|j: int, k: int| 0 <= j < k < occs.len() ==> #[trigger] occs[j].at < #[trigger] occs[k].at,
         next > occs[occs.len() - 1].at as nat,
-        forall|x: Seq<char>| !occ_of(occs, x) ==> #[trigger] unchanged_at(a, a2, x),
+        forall|x: Seq<char>| !occ_of(occs, x) ==> #[trigger] crate::external_task2::unchanged_at(a, a2, x),
         forall|x: Seq<char>| #[trigger] occ_of(occs, x) ==> fire_shape(now, a, a2, a.schedules[sid], occs, x),
         a2.schedules == a.schedules,
         a2.outbox == a.outbox,
@@ -1023,7 +1022,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
         if occ_of(occs, w) {
             assert(fire_shape(now, a, a2, c, occs, w));
         } else {
-            assert(unchanged_at(a, a2, w));
+            assert(crate::external_task2::unchanged_at(a, a2, w));
         }
     }
     assert forall|x: Seq<char>| #[trigger] occ_of(occs, x) implies inv_obj(now, b, x) && trans_obj(now, a, b, x) by {
@@ -1045,7 +1044,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
     assert forall|x: Seq<char>| !occ_of(occs, x) implies
         (a.objects.contains_key(x) <==> #[trigger] b.objects.contains_key(x))
         && (a.objects.contains_key(x) ==> a.objects[x] == b.objects[x]) by {
-        assert(unchanged_at(a, a2, x));
+        assert(crate::external_task2::unchanged_at(a, a2, x));
     }
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
@@ -1062,7 +1061,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
         if occ_of(occs, x) {
             assert(fire_shape(now, a, a2, c, occs, x));
         } else {
-            assert(unchanged_at(a, a2, x));
+            assert(crate::external_task2::unchanged_at(a, a2, x));
         }
     }
     lemma_internal_pointwise(now, a, b);
