@@ -12,6 +12,8 @@ use resonate_core::Unavailable;
 #[derive(Default)]
 pub struct SimPeers {
     by_url: Mutex<BTreeMap<String, Weak<Server>>>,
+    /// Pairs `(from node id, to url)` that cannot talk.
+    cut: Mutex<std::collections::BTreeSet<(String, String)>>,
 }
 
 impl SimPeers {
@@ -26,11 +28,25 @@ impl SimPeers {
     pub fn unregister(&self, url: &str) {
         self.by_url.lock().unwrap().remove(url);
     }
+
+    /// Cut, or restore, the link from node `from` to the node at `to_url`.
+    pub fn set_cut(&self, from: &str, to_url: &str, cut: bool) {
+        let mut c = self.cut.lock().unwrap();
+        if cut {
+            c.insert((from.to_string(), to_url.to_string()));
+        } else {
+            c.remove(&(from.to_string(), to_url.to_string()));
+        }
+    }
 }
 
 #[async_trait]
 impl Peers for SimPeers {
-    async fn forward(&self, url: &str, _from: &str, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
+    async fn forward(&self, url: &str, from: &str, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
+        if self.cut.lock().unwrap().contains(&(from.to_string(), url.to_string())) {
+            tokio::task::yield_now().await;
+            return Err(Unavailable::new(format!("{from} cannot reach {url}")));
+        }
         let server = self.by_url.lock().unwrap().get(url).and_then(Weak::upgrade);
         let Some(server) = server else { return Err(Unavailable::new(format!("no node at {url}"))) };
         tokio::task::yield_now().await;

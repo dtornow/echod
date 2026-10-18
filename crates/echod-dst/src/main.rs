@@ -31,9 +31,33 @@ struct Knobs {
     /// Store latency, at most, in virtual ms.
     #[arg(long, default_value_t = 20)]
     latency: u64,
-    /// Chance per crash tick that a node dies and is replaced.
+    /// Chance per chaos tick that a node dies and is replaced.
     #[arg(long, default_value_t = 10)]
     crash: u64,
+    /// Chance per chaos tick that a node stops cleanly.
+    #[arg(long, default_value_t = 5)]
+    stop: u64,
+    /// Chance per chaos tick that a node joins.
+    #[arg(long, default_value_t = 8)]
+    join: u64,
+    /// Chance per chaos tick that two nodes are partitioned for a while.
+    #[arg(long, default_value_t = 10)]
+    partition: u64,
+    /// Chance per chaos tick that a node loses the store for a while.
+    #[arg(long, default_value_t = 10)]
+    outage: u64,
+    /// Chance per chaos tick that a node's clock jumps, either way.
+    #[arg(long, default_value_t = 15)]
+    jump: u64,
+    /// A node's clock is off by up to this many ms, either way.
+    #[arg(long, default_value_t = 150)]
+    skew: u64,
+    /// A clock jump moves a node's clock by up to this many ms, either way.
+    #[arg(long, default_value_t = 300)]
+    jump_ms: u64,
+    /// A node's clock drifts by up to this many parts per million.
+    #[arg(long, default_value_t = 20_000)]
+    drift: u64,
     #[arg(long, default_value_t = 2_000_000)]
     budget: u64,
 }
@@ -48,6 +72,14 @@ impl Knobs {
             origins: self.origins,
             faults: Faults { unavailable_percent: self.unavailable, lost_ack_percent: self.lost_ack, conflict_percent: self.conflict, latency_ms: self.latency },
             crash_percent: self.crash,
+            stop_percent: self.stop,
+            join_percent: self.join,
+            partition_percent: self.partition,
+            outage_percent: self.outage,
+            jump_percent: self.jump,
+            skew_ms: self.skew,
+            jump_ms: self.jump_ms,
+            drift_ppm: self.drift,
             budget: self.budget,
             ..Options::default()
         }
@@ -90,9 +122,9 @@ fn main() {
             for seed in from..from + seeds {
                 let r = run(knobs.options(seed));
                 println!(
-                    "seed {seed}: {} entries={} sweeps={} crashes={} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
+                    "seed {seed}: {} entries={} sweeps={} crash/stop/join/part/out/jump={}/{}/{}/{}/{}/{} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
                     if r.ok { "ok" } else { "FAILED" },
-                    r.entries, r.sweeps, r.crashes, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
+                    r.entries, r.sweeps, r.crashes, r.stops, r.joins, r.partitions, r.outages, r.jumps, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
                     if r.kinds_missing.is_empty() { String::new() } else { format!(" missing={:?}", r.kinds_missing) }
                 );
                 for f in &r.failures {

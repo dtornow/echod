@@ -26,6 +26,7 @@ fn create_req(id: &str, timeout_at: u64, t: &std::collections::BTreeMap<String, 
 
 /// Apply `op` at `now` to `s`, drain, and answer as the server would.
 pub fn step(s: &mut k::State, op: &Op, now: u64, cfg: &k::Config, corr: &str) -> (u16, Value) {
+    let now = echod_server::step::clamp_now(&s.objects, now);
     let kind = op.kind();
     let out = match op {
         Op::PromiseGet { id } => wire::promise_res(kind, corr, &s.promise_get(&k::PromiseGetReq { id: id.clone() }, now, cfg)),

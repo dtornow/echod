@@ -15,11 +15,11 @@ use serde::Serialize;
 
 use crate::bus::RecordingBus;
 use crate::checker::{check_origin, Verdict};
-use crate::clock::SimClock;
+use crate::clock::{NodeClock, SimClock};
 use crate::history::History;
 use crate::peers::SimPeers;
 use crate::rng::Rng;
-use crate::store::{Counters, Faults, FaultyStore};
+use crate::store::{Counters, Faults, FaultyStore, NodeStore};
 use crate::workload::{Generator, Op, Seen};
 
 #[derive(Clone, Debug)]
@@ -31,9 +31,27 @@ pub struct Options {
     pub origins: u64,
     pub promises_per_origin: u64,
     pub faults: Faults,
-    /// Chance, per crash tick, that a node is killed and replaced.
+    /// Every `chaos_every_ms`, each of these is rolled once, in percent:
+    /// a node is killed and replaced; a node stops cleanly; a node joins; a
+    /// pair of nodes is partitioned for a while; a node loses the store for a
+    /// while; a node's clock jumps, forwards or back.
     pub crash_percent: u64,
-    pub crash_every_ms: u64,
+    pub stop_percent: u64,
+    pub join_percent: u64,
+    pub partition_percent: u64,
+    pub outage_percent: u64,
+    pub jump_percent: u64,
+    pub chaos_every_ms: u64,
+    /// How long a partition or an outage lasts, at most.
+    pub disruption_ms: u64,
+    /// A node's clock is off the reference by up to this, either way.
+    pub skew_ms: u64,
+    /// A node's clock gains or loses up to this many parts per million.
+    pub drift_ppm: u64,
+    /// A jump moves a node's clock by up to this, either way.
+    pub jump_ms: u64,
+    /// The fleet never grows past this.
+    pub max_servers: u32,
     /// Promise timeouts fall within this many ms of their creation.
     pub timeout_ms: u64,
     pub ttl_ms: u64,
@@ -60,7 +78,17 @@ impl Default for Options {
             promises_per_origin: 3,
             faults: Faults { unavailable_percent: 2, lost_ack_percent: 2, conflict_percent: 2, latency_ms: 20 },
             crash_percent: 10,
-            crash_every_ms: 500,
+            stop_percent: 5,
+            join_percent: 8,
+            partition_percent: 10,
+            outage_percent: 10,
+            jump_percent: 15,
+            chaos_every_ms: 500,
+            disruption_ms: 2_500,
+            skew_ms: 150,
+            drift_ppm: 20_000,
+            jump_ms: 300,
+            max_servers: 4,
             timeout_ms: 3_000,
             ttl_ms: 4_000,
             retry_timeout_ms: 700,
@@ -81,6 +109,11 @@ pub struct Report {
     pub entries: usize,
     pub sweeps: usize,
     pub crashes: u32,
+    pub stops: u32,
+    pub joins: u32,
+    pub partitions: u32,
+    pub outages: u32,
+    pub jumps: u32,
     pub overlapping_pairs: u64,
     pub kinds_succeeded: BTreeSet<String>,
     pub kinds_missing: BTreeSet<String>,
@@ -112,10 +145,24 @@ impl Observer for SweepObserver {
     }
 }
 
+/// One node: the server, and the clock and store view it alone sees.
+struct Node {
+    server: Arc<Server>,
+    clock: Arc<NodeClock>,
+    store: Arc<NodeStore>,
+    url: String,
+}
+
+#[derive(Default)]
 struct Fleet {
-    live: BTreeMap<String, Arc<Server>>,
+    live: BTreeMap<String, Node>,
     next_id: u32,
     crashes: u32,
+    stops: u32,
+    joins: u32,
+    partitions: u32,
+    outages: u32,
+    jumps: u32,
 }
 
 struct World {
@@ -130,6 +177,7 @@ struct World {
     fleet: Mutex<Fleet>,
     issued: AtomicU64,
     appendable: bool,
+    rng: Mutex<Rng>,
 }
 
 impl World {
@@ -139,6 +187,14 @@ impl World {
             f.next_id += 1;
             format!("s{}", f.next_id)
         };
+        let (skew, drift) = {
+            let mut rng = self.rng.lock().unwrap();
+            let skew = rng.range(0, 2 * self.opts.skew_ms) as i64 - self.opts.skew_ms as i64;
+            let drift = rng.range(0, 2 * self.opts.drift_ppm) as i64 - self.opts.drift_ppm as i64;
+            (skew, drift)
+        };
+        let clock = Arc::new(NodeClock::new(Arc::clone(&self.clock), skew, drift));
+        let node_store = Arc::new(NodeStore::new(Arc::clone(&self.store)));
         let mut cfg = Config::memory("sim");
         cfg.node_id = Some(id.clone());
         cfg.url = Some(format!("sim://{id}/"));
@@ -149,8 +205,8 @@ impl World {
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
         cfg.debug = true; // the clock is the request's
         let observer = Arc::new(SweepObserver { history: Arc::clone(&self.history), clock: Arc::clone(&self.clock) });
-        let store: Arc<dyn Store> = Arc::clone(&self.store) as Arc<dyn Store>;
-        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&self.clock) as Arc<dyn echod_server::env::Clock>, Arc::clone(&self.peers) as Arc<dyn echod_server::env::Peers>, observer);
+        let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
+        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn echod_server::env::Clock>, Arc::clone(&self.peers) as Arc<dyn echod_server::env::Peers>, observer);
         // Init retries until the store answers: a node that cannot announce
         // itself is not up.
         loop {
@@ -159,40 +215,137 @@ impl World {
                 Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
-        self.peers.register(&format!("sim://{id}/"), &server);
-        self.fleet.lock().unwrap().live.insert(id, Arc::clone(&server));
+        let url = format!("sim://{id}/");
+        self.peers.register(&url, &server);
+        tracing::info!(node = %id, skew, drift, at = self.clock.now(), "started");
+        self.fleet.lock().unwrap().live.insert(id, Node { server: Arc::clone(&server), clock, store: node_store, url });
         server
     }
 
+    fn live_ids(&self) -> Vec<String> {
+        self.fleet.lock().unwrap().live.keys().cloned().collect()
+    }
+
+    fn pick_node(&self, rng: &mut Rng) -> Option<String> {
+        let ids = self.live_ids();
+        (!ids.is_empty()).then(|| rng.pick(&ids).clone())
+    }
+
+    /// Kill a node where it stands and start a replacement.
     async fn crash_one(&self, rng: &mut Rng) {
-        let victim = {
-            let f = self.fleet.lock().unwrap();
-            let ids: Vec<String> = f.live.keys().cloned().collect();
-            if ids.is_empty() {
-                return;
-            }
-            rng.pick(&ids).clone()
-        };
-        let server = self.fleet.lock().unwrap().live.remove(&victim);
-        if let Some(server) = server {
-            self.peers.unregister(&format!("sim://{victim}/"));
-            server.crash().await;
+        let Some(victim) = self.pick_node(rng) else { return };
+        let node = self.fleet.lock().unwrap().live.remove(&victim);
+        if let Some(node) = node {
+            self.peers.unregister(&node.url);
+            node.server.crash().await;
             self.fleet.lock().unwrap().crashes += 1;
             tracing::info!(node = %victim, at = self.clock.now(), "crashed");
         }
         self.start_server().await;
     }
 
+    /// Stop a node cleanly: it withdraws its announcement. Never the last one.
+    async fn stop_one(&self, rng: &mut Rng) {
+        if self.live_ids().len() <= 1 {
+            return;
+        }
+        let Some(victim) = self.pick_node(rng) else { return };
+        let node = self.fleet.lock().unwrap().live.remove(&victim);
+        if let Some(node) = node {
+            self.peers.unregister(&node.url);
+            let _ = node.server.stop().await;
+            self.fleet.lock().unwrap().stops += 1;
+            tracing::info!(node = %victim, at = self.clock.now(), "stopped");
+        }
+    }
+
+    /// A node joins, if the fleet has room.
+    async fn join_one(&self) {
+        if self.live_ids().len() as u32 >= self.opts.max_servers {
+            return;
+        }
+        self.start_server().await;
+        self.fleet.lock().unwrap().joins += 1;
+    }
+
+    /// Two nodes cannot reach each other for a while.
+    fn partition(self: &Arc<Self>, rng: &mut Rng) {
+        let ids = self.live_ids();
+        if ids.len() < 2 {
+            return;
+        }
+        let a = rng.pick(&ids).clone();
+        let b = rng.pick(&ids).clone();
+        if a == b {
+            return;
+        }
+        let (ua, ub) = {
+            let f = self.fleet.lock().unwrap();
+            (f.live[&a].url.clone(), f.live[&b].url.clone())
+        };
+        let for_ms = rng.range(100, self.opts.disruption_ms);
+        self.peers.set_cut(&a, &ub, true);
+        self.peers.set_cut(&b, &ua, true);
+        self.fleet.lock().unwrap().partitions += 1;
+        tracing::info!(%a, %b, for_ms, at = self.clock.now(), "partitioned");
+        let world = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(for_ms)).await;
+            world.peers.set_cut(&a, &ub, false);
+            world.peers.set_cut(&b, &ua, false);
+        });
+    }
+
+    /// A node loses the store for a while: long enough, sometimes, for its
+    /// view of the membership to go stale.
+    fn outage(self: &Arc<Self>, rng: &mut Rng) {
+        let Some(id) = self.pick_node(rng) else { return };
+        let store = match self.fleet.lock().unwrap().live.get(&id) {
+            Some(n) => Arc::clone(&n.store),
+            None => return,
+        };
+        let for_ms = rng.range(100, self.opts.disruption_ms);
+        store.set_cut(true);
+        self.fleet.lock().unwrap().outages += 1;
+        tracing::info!(node = %id, for_ms, at = self.clock.now(), "cut off from the store");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(for_ms)).await;
+            store.set_cut(false);
+        });
+    }
+
+    /// A node's clock jumps, forwards or back.
+    fn jump(&self, rng: &mut Rng) {
+        let Some(id) = self.pick_node(rng) else { return };
+        let delta = rng.range(0, 2 * self.opts.jump_ms) as i64 - self.opts.jump_ms as i64;
+        if let Some(n) = self.fleet.lock().unwrap().live.get(&id) {
+            n.clock.jump(delta);
+        }
+        self.fleet.lock().unwrap().jumps += 1;
+        tracing::info!(node = %id, delta, at = self.clock.now(), "clock jumped");
+    }
+
+    /// Heal every partition and outage, so the run can settle.
+    fn heal(&self) {
+        let f = self.fleet.lock().unwrap();
+        for (id, n) in &f.live {
+            n.store.set_cut(false);
+            for (_, m) in &f.live {
+                self.peers.set_cut(id, &m.url, false);
+            }
+        }
+    }
+
     /// The node a request goes to: the owner by hash, as a load balancer
     /// would route it, most of the time; any node otherwise.
     fn route(&self, origin: &str, rng: &mut Rng) -> Option<Arc<Server>> {
         let f = self.fleet.lock().unwrap();
-        let live: Vec<&Arc<Server>> = f.live.values().collect();
+        let live: Vec<&Node> = f.live.values().collect();
         if live.is_empty() {
             return None;
         }
         let i = if rng.percent(80) { (echod_server::keys::fnv1a(origin) % live.len() as u64) as usize } else { rng.below(live.len() as u64) as usize };
-        Some(Arc::clone(live[i]))
+        Some(Arc::clone(&live[i].server))
     }
 
     async fn client(self: Arc<Self>, name: String, mut rng: Rng) {
@@ -268,9 +421,10 @@ async fn simulate(opts: Options) -> Report {
         peers: Arc::new(SimPeers::new()),
         history: Arc::new(History::new()),
         keys,
-        fleet: Mutex::new(Fleet { live: BTreeMap::new(), next_id: 0, crashes: 0 }),
+        fleet: Mutex::new(Fleet::default()),
         issued: AtomicU64::new(0),
         appendable,
+        rng: Mutex::new(rng.fork()),
     });
     for _ in 0..opts.servers {
         world.start_server().await;
@@ -283,17 +437,33 @@ async fn simulate(opts: Options) -> Report {
     for c in 0..opts.clients {
         clients.push(tokio::spawn(Arc::clone(&world).client(format!("client{c}"), rng.fork())));
     }
-    let crasher = {
+    let chaos = {
         let world = Arc::clone(&world);
         let mut rng = rng.fork();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(world.opts.crash_every_ms)).await;
+                tokio::time::sleep(Duration::from_millis(world.opts.chaos_every_ms)).await;
                 if world.issued.load(Ordering::Relaxed) >= world.opts.operations {
                     return;
                 }
-                if rng.percent(world.opts.crash_percent) {
+                let o = &world.opts;
+                if rng.percent(o.crash_percent) {
                     world.crash_one(&mut rng).await;
+                }
+                if rng.percent(o.stop_percent) {
+                    world.stop_one(&mut rng).await;
+                }
+                if rng.percent(o.join_percent) {
+                    world.join_one().await;
+                }
+                if rng.percent(o.partition_percent) {
+                    world.partition(&mut rng);
+                }
+                if rng.percent(o.outage_percent) {
+                    world.outage(&mut rng);
+                }
+                if rng.percent(o.jump_percent) {
+                    world.jump(&mut rng);
                 }
             }
         })
@@ -301,9 +471,10 @@ async fn simulate(opts: Options) -> Report {
     for c in clients {
         let _ = c.await;
     }
-    let _ = crasher.await;
+    let _ = chaos.await;
+    world.heal();
     tokio::time::sleep(Duration::from_millis(opts.settle_ms)).await;
-    let live: Vec<Arc<Server>> = world.fleet.lock().unwrap().live.values().cloned().collect();
+    let live: Vec<Arc<Server>> = world.fleet.lock().unwrap().live.values().map(|n| Arc::clone(&n.server)).collect();
     for s in &live {
         let _ = s.stop().await;
     }
@@ -318,7 +489,15 @@ async fn check(world: &World) -> Report {
     let entries = world.history.entries();
     let mut report = Report { seed: opts.seed, entries: entries.len(), ..Default::default() };
     report.sweeps = entries.iter().filter(|e| matches!(e.op, Op::Sweep)).count();
-    report.crashes = world.fleet.lock().unwrap().crashes;
+    {
+        let f = world.fleet.lock().unwrap();
+        report.crashes = f.crashes;
+        report.stops = f.stops;
+        report.joins = f.joins;
+        report.partitions = f.partitions;
+        report.outages = f.outages;
+        report.jumps = f.jumps;
+    }
     let c: Counters = world.store.counters();
     report.store_operations = c.operations;
     report.store_unavailable = c.unavailable;

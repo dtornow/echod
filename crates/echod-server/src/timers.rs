@@ -117,15 +117,14 @@ pub struct Timers {
     nodes: Arc<Nodes>,
     applier: Arc<Applier>,
     schedules: Arc<Schedules>,
-    clock: Arc<dyn crate::env::Clock>,
     /// The start of the last bucket this node has listed. `None` until the
     /// first full load succeeds; nothing fires before that.
     loaded_through: Mutex<Option<u64>>,
 }
 
 impl Timers {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>, clock: Arc<dyn crate::env::Clock>) -> Self {
-        Self { store, keys, wheel, nodes, applier, schedules, clock, loaded_through: Mutex::new(None) }
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>) -> Self {
+        Self { store, keys, wheel, nodes, applier, schedules, loaded_through: Mutex::new(None) }
     }
 
     pub fn wheel(&self) -> &Arc<TimerWheel> {
@@ -257,17 +256,16 @@ impl Timers {
     pub fn spawn(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut generations = self.nodes.generations();
-            generations.mark_changed();
+            generations.borrow_and_update();
+            let mut reload_pending = true;
             loop {
-                let now = self.clock.now();
+                let now = self.nodes.now();
                 let mut backoff = None;
-                if generations.has_changed().unwrap_or(false) {
-                    generations.borrow_and_update();
+                if reload_pending {
                     match self.reload(now).await {
-                        Ok(()) => {}
+                        Ok(()) => reload_pending = false,
                         Err(e) => {
                             tracing::warn!(error = %e, "timer load failed; will retry");
-                            generations.mark_changed();
                             backoff = Some(RELIST_AFTER);
                         }
                     }
@@ -275,10 +273,10 @@ impl Timers {
                     tracing::warn!(error = %e, "timer bucket listing failed; will retry");
                     backoff = Some(RELIST_AFTER);
                 }
-                if self.loaded_through().is_some() {
+                if self.loaded_through().is_some() && !reload_pending {
                     self.fire_due(now).await;
                 }
-                let now = self.clock.now();
+                let now = self.nodes.now();
                 let next_bucket = self.loaded_through().map(|t| t.max(now));
                 let wake_at = [self.wheel.nearest(), next_bucket].into_iter().flatten().min();
                 let wait = match (backoff, wake_at) {
@@ -289,7 +287,7 @@ impl Timers {
                 tokio::select! {
                     biased;
                     _ = shutdown.changed() => return,
-                    _ = generations.changed() => generations.mark_changed(),
+                    _ = generations.changed() => reload_pending = true,
                     _ = self.wheel.nearer.notified() => {}
                     _ = tokio::time::sleep(wait) => {}
                 }

@@ -42,7 +42,7 @@ impl Schedules {
         let cfg = self.applier.kernel_config();
         let req = ScheduleTimeoutReq { schedule: id.to_string(), occurrences: vec![Occurrence { at: deadline, promise_id }], next_run_at: next };
         self.applier
-            .apply(Some(&origin), Some(id), now, |s: &mut State| {
+            .apply(Some(&origin), Some(id), now, |s: &mut State, now: u64| {
                 let Some(i) = s.schedules.iter().position(|c| c.id == req.schedule) else { return };
                 if s.schedules[i].next_run_at != deadline {
                     return;

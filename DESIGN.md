@@ -152,6 +152,21 @@ The three rules — a member counts a TTL after it joins, a change suspends
 trust, a stale view serves nothing — are what the simulation demanded: with
 "the owner trusts its cache" alone, two nodes mid-change both believed they
 owned an origin and one served a stale read.
+
+All of it is decided on the fleet's time: the later of a node's own clock and
+the latest announcement it has listed. A clock that steps back or runs slow
+is absorbed; the fleet runs on its fastest clock. A clock that steps forward
+by about a TTL is not: the node sees every peer expire and, for a heartbeat,
+writes as owner of origins whose owners still trust their caches. The rules
+hold while any node's skew plus its largest step, plus a heartbeat, stays
+under the TTL — the bound every lease carries. Beyond it, exclusive
+ownership needs a record the store arbitrates, which is celld's design and
+not this one.
+
+A step is decided at an instant never earlier than any instant the origin's
+rows record (`step::clamp_now`): the kernel is proved for `now` at or after
+every `created_at` and `settled_at`, and a node behind another node's clock
+would otherwise step outside that.
 - **Timers.** Each node holds its share of the deadlines in an in-memory
   wheel and fires from it. It lists the timer prefix only at startup, when
   the set of live nodes changes (every node's share moved), and when the
@@ -174,11 +189,15 @@ JSON `Message`. The router maps `http` and `https` to it.
 
 `echod-dst` runs several servers over one in-memory store on one thread
 under tokio's paused clock, so time moves only between tasks and the same
-seed replays the same run. The simulation owns every port: the clock, a
-store that answers nothing, loses acks or refuses conditional writes by
-seeded percentages and waits a seeded latency, the peers (a forwarded request
-is a call), a bus that checks every message against the bucket, and the
-crash of a node, which drops its tasks where they stand. Clients issue every
+seed replays the same run. The simulation owns every port: a reference
+clock the clients stamp requests with, and per node a clock with its own
+skew, drift and the jumps the run inflicts, backwards included; a store that
+answers nothing, loses acks or refuses conditional writes by seeded
+percentages and waits a seeded latency, and per node a store that can be cut
+off entirely; the peers (a forwarded request is a call), with partitions
+between chosen pairs; a bus that checks every message against the bucket.
+A chaos task crashes nodes, stops them cleanly, starts new ones, partitions
+pairs, cuts nodes off the store and jumps their clocks. Clients issue every
 request kind over a few origins; every attempt is a history entry, since an
 attempt that got no answer may have taken effect. Sweeps enter the history
 through an observer port.

@@ -189,3 +189,74 @@ impl Store for FaultyStore {
         true
     }
 }
+
+/// One node's view of the store: the shared faulty store, or nothing at all
+/// while the node is cut off from it.
+pub struct NodeStore {
+    pub shared: Arc<FaultyStore>,
+    cut: std::sync::atomic::AtomicBool,
+}
+
+impl NodeStore {
+    pub fn new(shared: Arc<FaultyStore>) -> Self {
+        Self { shared, cut: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    pub fn set_cut(&self, cut: bool) {
+        self.cut.store(cut, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn gate(&self) -> Result<(), StoreError> {
+        if self.cut.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+            return Err(StoreError::Unavailable("this node cannot reach the store".into()));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Store for NodeStore {
+    async fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
+        self.gate().await?;
+        self.shared.get(key).await
+    }
+    async fn get_if_none_match(&self, key: &str, etag: &Etag) -> Result<Read, StoreError> {
+        self.gate().await?;
+        self.shared.get_if_none_match(key, etag).await
+    }
+    async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
+        self.gate().await?;
+        self.shared.put_if_match(key, body, etag).await
+    }
+    async fn put_if_none_match(&self, key: &str, body: Vec<u8>) -> Result<Etag, StoreError> {
+        self.gate().await?;
+        self.shared.put_if_none_match(key, body).await
+    }
+    async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
+        self.gate().await?;
+        self.shared.append_if_match(key, offset, body, etag).await
+    }
+    fn supports_append(&self) -> bool {
+        self.shared.supports_append()
+    }
+    async fn put(&self, key: &str, body: Vec<u8>) -> Result<(), StoreError> {
+        self.gate().await?;
+        self.shared.put(key, body).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StoreError> {
+        self.gate().await?;
+        self.shared.delete(key).await
+    }
+    async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError> {
+        self.gate().await?;
+        self.shared.list(prefix, max_keys).await
+    }
+    async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        self.gate().await?;
+        self.shared.list_prefixes(prefix).await
+    }
+    async fn ready(&self) -> bool {
+        !self.cut.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}

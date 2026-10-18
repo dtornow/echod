@@ -19,6 +19,14 @@
 //! - **A stale view serves nothing.** A node whose last listing is a TTL old
 //!   may be fenced out and does not know it; it answers 503 until it can list.
 //!
+//! All of this is decided on the **fleet's time**: the later of a node's own
+//! clock and the latest announcement it has listed. A clock that steps back
+//! or runs slow is absorbed; the fleet runs on its fastest clock. What is not
+//! absorbed is a clock that steps forward by about a TTL at once: the node
+//! sees every peer expire, and for a heartbeat writes as owner of origins
+//! whose owners still trust their caches. The rules hold while any node's
+//! skew plus its largest step, plus a heartbeat, stays under the TTL.
+//!
 //! Ownership is `hash(key) mod n` over the members in id order. A load
 //! balancer that applies the same function sends every request for an origin
 //! to the node that caches it and fires its deadlines.
@@ -81,6 +89,8 @@ pub struct Nodes {
     ttl: u64,
     members: RwLock<Membership>,
     clock: Arc<dyn crate::env::Clock>,
+    /// The latest instant any announcement carried.
+    fleet_at: std::sync::atomic::AtomicU64,
     /// Bumped whenever the member set changes.
     generation: tokio::sync::watch::Sender<u64>,
 }
@@ -89,7 +99,13 @@ impl Nodes {
     pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, clock: Arc<dyn crate::env::Clock>) -> Self {
         let me = Announcement { id, url, at: 0, since: 0 };
         let (generation, _) = tokio::sync::watch::channel(0);
-        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, members: RwLock::new(Membership::default()), clock, generation }
+        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, members: RwLock::new(Membership::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+    }
+
+    /// The fleet's time: this node's clock, or the latest announcement it has
+    /// listed, whichever is later.
+    pub fn now(&self) -> u64 {
+        self.clock.now().max(self.fleet_at.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn ttl(&self) -> u64 {
@@ -171,6 +187,7 @@ impl Nodes {
                 tracing::warn!(key = %key, "unreadable announcement ignored");
                 continue;
             };
+            self.fleet_at.fetch_max(a.at, std::sync::atomic::Ordering::Relaxed);
             if a.at + self.ttl >= now {
                 nodes.insert(a.id.clone(), a);
             } else if a.at + 2 * self.ttl < now {
@@ -204,7 +221,7 @@ impl Nodes {
     pub fn spawn(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-                if let Err(e) = self.refresh(self.clock.now()).await {
+                if let Err(e) = self.refresh(self.now()).await {
                     tracing::warn!(error = %e, "node heartbeat failed");
                 }
                 tokio::select! {

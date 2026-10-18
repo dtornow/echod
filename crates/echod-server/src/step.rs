@@ -74,3 +74,13 @@ pub fn next_deadline(rows: &[Promise]) -> Option<u64> {
     }
     min
 }
+
+/// The instant a step on `rows` is decided at: never earlier than any instant
+/// the rows already record. The kernel's invariant has every `created_at`
+/// and `settled_at` at or before `now`; a node whose clock is behind another
+/// node's, or behind its own earlier self, would otherwise step outside what
+/// the kernel is proved for. The clamp makes each origin's clock monotone
+/// across the nodes that serve it.
+pub fn clamp_now(rows: &[Promise], now: u64) -> u64 {
+    rows.iter().fold(now, |n, p| n.max(p.created_at).max(p.settled_at.unwrap_or(0)))
+}

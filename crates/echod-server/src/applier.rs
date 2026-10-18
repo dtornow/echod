@@ -150,8 +150,10 @@ impl Applier {
     }
 
     /// Load an origin's document: from the cache when this node may trust
-    /// it, revalidated against the store otherwise.
-    async fn load(&self, origin: &str, now: u64) -> Result<(Loaded, Option<Etag>), Unavailable> {
+    /// it, revalidated against the store otherwise. Cache bookkeeping is on
+    /// the fleet's time, the frame the membership rules are stated in.
+    async fn load(&self, origin: &str) -> Result<(Loaded, Option<Etag>), Unavailable> {
+        let now = self.nodes.now();
         let key = self.keys.doc_key(origin);
         if let Some(c) = self.cached(origin) {
             if self.trusted(origin, c.filled_at, now) {
@@ -204,7 +206,7 @@ impl Applier {
     /// kernel handler does. Without an origin only the schedule is loaded.
     pub async fn apply<R, F>(&self, origin: Option<&str>, schedule: Option<&str>, now: u64, step: F) -> Result<R, Unavailable>
     where
-        F: Fn(&mut State) -> R + Send,
+        F: Fn(&mut State, u64) -> R + Send,
         R: Send,
     {
         let lock_key = origin.map(str::to_string).unwrap_or_else(|| format!("sched:{}", schedule.unwrap_or_default()));
@@ -212,7 +214,7 @@ impl Applier {
         let _guard = lock.lock().await;
         for attempt in 0..=self.max_retries {
             let (loaded, etag) = match origin {
-                Some(o) => self.load(o, now).await?,
+                Some(o) => self.load(o).await?,
                 None => (Loaded { rows: vec![], row_count: 0, bytes: 0 }, None),
             };
             let mut schedules = Vec::new();
@@ -223,7 +225,8 @@ impl Applier {
             }
             let mut w = Working { origin: origin.unwrap_or_default().to_string(), loaded, etag, schedules };
             let mut state = State { objects: w.loaded.rows.clone(), schedules: w.schedules.iter().map(|(c, _)| c.clone()).collect(), outbox: Vec::new() };
-            let r = step(&mut state);
+            let now = crate::step::clamp_now(&state.objects, now);
+            let r = step(&mut state, now);
             self.drain(&mut state, now);
             match self.commit(&mut w, &state, now).await {
                 Ok(()) => return Ok(r),
@@ -251,7 +254,7 @@ impl Applier {
     pub async fn sweep(&self, origin: &str, now: u64) -> Result<(), Unavailable> {
         let cfg = self.cfg;
         let handle = self.observer.sweep_begin(&self.nodes.id(), origin, now);
-        let r = self.apply(Some(origin), None, now, move |s: &mut State| crate::step::sweep(s, now, &cfg)).await;
+        let r = self.apply(Some(origin), None, now, move |s: &mut State, now: u64| crate::step::sweep(s, now, &cfg)).await;
         self.observer.sweep_end(handle, r.is_ok());
         r
     }
@@ -267,7 +270,8 @@ impl Applier {
 
     /// Write what the step changed: the timer first, the document, the
     /// schedules, then the old timer; and hand over the outbox.
-    async fn commit(&self, w: &mut Working, state: &State, now: u64) -> Result<(), StoreError> {
+    async fn commit(&self, w: &mut Working, state: &State, _now: u64) -> Result<(), StoreError> {
+        let now = self.nodes.now();
         let changed = doc::changed(&w.loaded.rows, &state.objects);
         let new_deadline = Self::next_deadline(&state.objects);
 

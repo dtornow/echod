@@ -1,6 +1,10 @@
 //! Virtual time. Under tokio's paused clock, `Instant` advances only when
-//! every task is idle, and then straight to the next timer; this reads it
-//! through the server's `Clock` port.
+//! every task is idle, and then straight to the next timer. `SimClock` reads
+//! it through the server's `Clock` port: the reference every client stamps
+//! its requests with. `NodeClock` is what a node sees: the reference plus a
+//! fixed skew, a drift that grows with time, and the jumps the run inflicts,
+//! backwards included. Nothing a node does with its clock may make the state
+//! wrong; the membership rules and the per-origin clamp are what it tests.
 
 use echod_server::env::Clock;
 
@@ -19,5 +23,36 @@ impl SimClock {
 impl Clock for SimClock {
     fn now(&self) -> u64 {
         self.base_ms + self.start.elapsed().as_millis() as u64
+    }
+}
+
+pub struct NodeClock {
+    reference: std::sync::Arc<SimClock>,
+    skew_ms: i64,
+    drift_ppm: i64,
+    offset: std::sync::Mutex<i64>,
+}
+
+impl NodeClock {
+    pub fn new(reference: std::sync::Arc<SimClock>, skew_ms: i64, drift_ppm: i64) -> Self {
+        Self { reference, skew_ms, drift_ppm, offset: std::sync::Mutex::new(0) }
+    }
+
+    /// Step the clock by `delta_ms`, negative for a step back.
+    pub fn jump(&self, delta_ms: i64) {
+        *self.offset.lock().unwrap() += delta_ms;
+    }
+
+    pub fn offset(&self) -> i64 {
+        *self.offset.lock().unwrap()
+    }
+}
+
+impl Clock for NodeClock {
+    fn now(&self) -> u64 {
+        let elapsed = self.reference.start.elapsed().as_millis() as i64;
+        let drift = elapsed * self.drift_ppm / 1_000_000;
+        let t = self.reference.now() as i64 + self.skew_ms + drift + self.offset();
+        t.max(0) as u64
     }
 }
