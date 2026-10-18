@@ -1,35 +1,28 @@
-//! The nodes: announce, heartbeat, list, and who owns what.
+//! The nodes: announce, heartbeat, the configuration, and who owns what.
 //!
-//! A node announces itself as `nodes/<id>` holding its URL, when it first
-//! announced and when it last did, and refreshes that every `heartbeat`. Every
-//! heartbeat it also lists `nodes/`. Nothing is agreed on; each node sees the
-//! bucket and decides alone, and the conditional writes keep the state right
-//! whatever it decides. Membership steers who serves an origin, who fires its
-//! deadlines, and whose cache may be trusted — and for the last of these to
-//! be sound, two nodes must never both act as owner of one origin while one
-//! of them trusts its cache. Three rules give that:
+//! A node announces itself as `nodes/<id>` holding its URL and when it last
+//! did so, and refreshes that every `heartbeat`. The member list is one
+//! object, `nodes/members`, holding the members and the epoch it was written
+//! in; whoever sees the announced set differ from it writes the next epoch
+//! with a conditional put, so epochs are totally ordered and every node that
+//! reads the object reads the same sequence. A node keeps the epoch and the
+//! members it read, when it read them, and when it first read the epoch it
+//! holds. It acts as owner of an origin only when its view is fresh (read
+//! within a TTL), its members make it the owner, and it has held its epoch
+//! for the grace; and it trusts a cache entry only if the entry was filled
+//! while it was acting. Writes are conditional on the version read.
 //!
-//! - **A node joins late.** It counts as a member only once its first
-//!   announcement is a TTL old, so every node has listed it by then. Until
-//!   then it owns nothing.
-//! - **A change suspends trust.** When the member set a node sees changes, it
-//!   trusts no cache entry filled before `now + ttl + heartbeat`: long enough
-//!   for every other node to have seen the same change and stopped writing
-//!   what it no longer owns.
-//! - **A stale view serves nothing.** A node whose last listing is a TTL old
-//!   may be fenced out and does not know it; it answers 503 until it can list.
+//! These are the rules `echod-fleet` proves exclusive and sound under
+//! bounded clock skew with `grace > ttl + 4 skew`: a node in an older epoch
+//! is fresh for at most a TTL after a read that preceded the newer epoch; a
+//! node in the newer epoch acts only a grace after it first read it; the
+//! windows do not meet. Membership is decided on the fleet's time, the
+//! later of a node's clock and the latest announcement it listed, which
+//! absorbs a clock that steps back or runs slow.
 //!
-//! All of this is decided on the **fleet's time**: the later of a node's own
-//! clock and the latest announcement it has listed. A clock that steps back
-//! or runs slow is absorbed; the fleet runs on its fastest clock. What is not
-//! absorbed is a clock that steps forward by about a TTL at once: the node
-//! sees every peer expire, and for a heartbeat writes as owner of origins
-//! whose owners still trust their caches. The rules hold while any node's
-//! skew plus its largest step, plus a heartbeat, stays under the TTL.
-//!
-//! Ownership is `hash(key) mod n` over the members in id order. A load
-//! balancer that applies the same function sends every request for an origin
-//! to the node that caches it and fires its deadlines.
+//! Ownership is `hash(key) mod n` over the members in order. A load balancer
+//! that applies the same function over `nodes/members` sends every request
+//! for an origin to the node that caches it and fires its deadlines.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -46,23 +39,29 @@ pub struct Announcement {
     pub url: String,
     /// The instant of the latest announcement, ms.
     pub at: u64,
-    /// The instant of the first announcement, ms.
-    #[serde(default)]
-    pub since: u64,
 }
 
-/// The nodes a node knows of, including itself.
+/// The configuration object: the members, and the epoch it was written in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Members {
+    pub epoch: u64,
+    pub members: Vec<String>,
+}
+
+/// What a node holds of the membership.
 #[derive(Debug, Clone, Default)]
 pub struct Membership {
-    /// Every node announced within a TTL.
+    /// Every node announced within a TTL, as of the last listing.
     pub nodes: BTreeMap<String, Announcement>,
-    /// The ids of the members: announced within a TTL, and first announced at
-    /// least a TTL ago. In order; what ownership is computed over.
+    /// The epoch read, and its members in order: what ownership is computed over.
+    pub epoch: u64,
     pub members: Vec<String>,
-    /// When this member set was first seen.
-    pub stable_since: u64,
-    /// When the listing behind this membership succeeded.
-    pub refreshed_at: u64,
+    /// The ETag of the configuration object read, for the next conditional put.
+    pub etag: Option<crate::store::Etag>,
+    /// When the configuration was last read, and when the epoch held was first read.
+    pub last_read: u64,
+    pub held: u64,
+    pub read_any: bool,
 }
 
 impl Membership {
@@ -87,6 +86,8 @@ pub struct Nodes {
     me: RwLock<Announcement>,
     heartbeat: Duration,
     ttl: u64,
+    /// The grace: `ttl + 4 skew`, and one more.
+    grace: u64,
     members: RwLock<Membership>,
     clock: Arc<dyn crate::env::Clock>,
     /// The latest instant any announcement carried.
@@ -96,10 +97,14 @@ pub struct Nodes {
 }
 
 impl Nodes {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, clock: Arc<dyn crate::env::Clock>) -> Self {
-        let me = Announcement { id, url, at: 0, since: 0 };
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, skew: u64, clock: Arc<dyn crate::env::Clock>) -> Self {
+        let me = Announcement { id, url, at: 0 };
         let (generation, _) = tokio::sync::watch::channel(0);
-        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, members: RwLock::new(Membership::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace: ttl + 4 * skew + 1, members: RwLock::new(Membership::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+    }
+
+    pub fn grace(&self) -> u64 {
+        self.grace
     }
 
     /// The fleet's time: this node's clock, or the latest announcement it has
@@ -137,7 +142,8 @@ impl Nodes {
         self.members.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Is this node the owner of `key`? No while nobody is a member yet.
+    /// Is this node the owner of `key` per the members it holds? No while
+    /// nobody is a member yet.
     pub fn owns(&self, key: &str) -> bool {
         self.owner(key).map(|o| o.id == self.id()).unwrap_or(false)
     }
@@ -149,27 +155,31 @@ impl Nodes {
     /// Whether this node's view of the membership is young enough to act on.
     pub fn fresh(&self, now: u64) -> bool {
         let m = self.members();
-        m.refreshed_at > 0 && m.refreshed_at + self.ttl >= now
+        m.read_any && m.last_read + self.ttl >= now
     }
 
-    /// The instant from which a cache entry may be trusted: a TTL and a
-    /// heartbeat after the member set last changed, so every node has seen
-    /// the change and stopped writing what it no longer owns. `None` while
-    /// the view is stale.
-    pub fn trust_after(&self, now: u64) -> Option<u64> {
-        if !self.fresh(now) {
+    /// Does this node act as owner of `key` right now: fresh, the owner per
+    /// its members, and holding its epoch for the grace? The model's `acts`.
+    pub fn acts(&self, key: &str, now: u64) -> bool {
+        let m = self.members();
+        m.read_any && m.last_read + self.ttl >= now && m.held + self.grace <= now && m.owner_of(key).map(|o| o.id == self.id()).unwrap_or(false)
+    }
+
+    /// The instant from which a cache entry filled by this node may be
+    /// trusted, while it acts: the grace after it first read its epoch. The
+    /// model's `trusts`. `None` while it does not act on `key`.
+    pub fn trust_after(&self, key: &str, now: u64) -> Option<u64> {
+        if !self.acts(key, now) {
             return None;
         }
-        Some(self.members().stable_since + self.ttl + self.heartbeat.as_millis() as u64)
+        Some(self.members().held + self.grace)
     }
 
-    /// Announce this node, then list the others.
+    /// Announce this node, list the others, read the configuration, and
+    /// write the next epoch if the announced set has moved away from it.
     pub async fn refresh(&self, now: u64) -> Result<(), crate::store::StoreError> {
         let mine = {
             let mut me = self.me.write().unwrap_or_else(|e| e.into_inner());
-            if me.since == 0 {
-                me.since = now;
-            }
             me.at = now;
             me.clone()
         };
@@ -184,8 +194,7 @@ impl Nodes {
             }
             let Some((bytes, _)) = self.store.get(&key).await? else { continue };
             let Ok(a) = serde_json::from_slice::<Announcement>(&bytes) else {
-                tracing::warn!(key = %key, "unreadable announcement ignored");
-                continue;
+                continue; // the configuration object, or something unreadable
             };
             self.fleet_at.fetch_max(a.at, std::sync::atomic::Ordering::Relaxed);
             if a.at + self.ttl >= now {
@@ -195,19 +204,46 @@ impl Nodes {
                 let _ = self.store.delete(&key).await;
             }
         }
-        let members: Vec<String> = nodes.values().filter(|a| a.since + self.ttl <= now).map(|a| a.id.clone()).collect();
-        let mut m = self.members.write().unwrap_or_else(|e| e.into_inner());
-        let changed = m.members != members;
-        if changed {
-            tracing::info!(members = ?members, "membership changed");
-            m.stable_since = now;
+        // The configuration: read it, and take it on.
+        let (config, etag) = match self.store.get(&self.keys.members_key()).await? {
+            Some((bytes, etag)) => (serde_json::from_slice::<Members>(&bytes).unwrap_or_default(), Some(etag)),
+            None => (Members::default(), None),
+        };
+        let now = self.now();
+        let mut changed = false;
+        {
+            let mut m = self.members.write().unwrap_or_else(|e| e.into_inner());
+            let same = m.read_any && m.epoch == config.epoch;
+            if !same {
+                tracing::info!(epoch = config.epoch, members = ?config.members, "configuration read");
+                m.held = now;
+                changed = true;
+            }
+            m.nodes = nodes.clone();
+            m.epoch = config.epoch;
+            m.members = config.members.clone();
+            m.etag = etag.clone();
+            m.last_read = now;
+            m.read_any = true;
         }
-        m.nodes = nodes;
-        m.members = members;
-        m.refreshed_at = now;
-        drop(m);
         if changed {
             self.generation.send_modify(|g| *g += 1);
+        }
+        // The announced set is the members the configuration should name.
+        // Any node may write the next epoch; a lost race is read next time.
+        let live: Vec<String> = nodes.keys().cloned().collect();
+        if live != config.members {
+            let next = Members { epoch: config.epoch + 1, members: live };
+            let body = serde_json::to_vec(&next).expect("a configuration serialises");
+            let r = match &etag {
+                Some(etag) => self.store.put_if_match(&self.keys.members_key(), body, etag).await,
+                None => self.store.put_if_none_match(&self.keys.members_key(), body).await,
+            };
+            match r {
+                Ok(_) => tracing::info!(epoch = next.epoch, members = ?next.members, "configuration written"),
+                Err(crate::store::StoreError::PreconditionFailed) => {}
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }

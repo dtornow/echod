@@ -1,0 +1,21 @@
+[package]
+name = "echod-fleet"
+description = "The fleet as a TLA-style state machine in Verus: nodes, the bucket, clocks, crashes; and the proof that ownership is exclusive and trusted caches are current."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_fleet"
+path = "src/lib.rs"
+
+[dependencies]
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

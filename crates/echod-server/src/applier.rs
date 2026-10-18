@@ -146,7 +146,7 @@ impl Applier {
     /// asking the store? Only by the owner, with a fresh view, once the
     /// membership has settled since the entry was filled.
     fn trusted(&self, origin: &str, filled_at: u64, now: u64) -> bool {
-        self.nodes.owns(origin) && self.nodes.trust_after(now).map_or(false, |t| filled_at >= t)
+        self.nodes.trust_after(origin, now).map_or(false, |t| filled_at >= t)
     }
 
     /// Load an origin's document: from the cache when this node may trust

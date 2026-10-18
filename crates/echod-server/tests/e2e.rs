@@ -92,6 +92,16 @@ impl Node {
         Self { server, addr, stop }
     }
 
+    /// Wait until the node acts as owner: it has read a configuration that
+    /// names it and held it for the grace.
+    async fn acting(&self) {
+        let start = Instant::now();
+        while !self.server.acting() {
+            assert!(start.elapsed() < Duration::from_secs(10), "{} never came to act", self.server.nodes().id());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn send(&self, kind: &str, data: Value) -> (u16, HashMap<String, String>, Value) {
         let body = json!({ "kind": kind, "head": { "corrId": "c1", "version": "2026-04-01" }, "data": data });
         let resp = reqwest::Client::new().post(format!("http://{}/", self.addr)).json(&body).send().await.unwrap();
@@ -125,6 +135,7 @@ fn is_unblock(id: &str) -> impl Fn(&Value) -> bool + '_ {
 async fn one_node(store: Arc<dyn Store>, compact: u32) {
     let worker = Worker::start().await;
     let node = Node::start(Arc::clone(&store), "n1", compact).await;
+    node.acting().await;
     let far = now() + 3_600_000;
 
     // nothing there
@@ -288,6 +299,7 @@ async fn deadline_survives_a_restart() {
     let store: Arc<dyn Store> = Arc::clone(&memory) as Arc<dyn Store>;
     let worker = Worker::start().await;
     let first = Node::start(Arc::clone(&store), "first", 0).await;
+    first.acting().await;
     let (status, _, _) = first.send("promise.create", json!({ "id": "r:1", "timeoutAt": now() + 1_800, "tags": { "resonate:scope": "global" } })).await;
     assert_eq!(status, 200);
     let (status, _, _) = first.send("promise.register_listener", json!({ "awaited": "r:1", "address": worker.url })).await;
@@ -299,7 +311,7 @@ async fn deadline_survives_a_restart() {
     let listings_before = memory.listings();
     let started = Instant::now();
     let second = Node::start(Arc::clone(&store), "second", 0).await;
-    let m = worker.expect(Duration::from_secs(6), is_unblock("r:1")).await;
+    let m = worker.expect(Duration::from_secs(8), is_unblock("r:1")).await;
     // What the new node listed to get there: the node prefix once per
     // heartbeat (500 ms), the timer prefix and its buckets at startup and
     // once more when its membership took effect, then one bucket per 400 ms
@@ -335,10 +347,10 @@ async fn two_nodes() {
     let b = Node::start(Arc::clone(&store), "b", 0).await;
     let far = now() + 3_600_000;
 
-    // they find each other, and a TTL later both are members
+    // they find each other: a configuration naming both, held for the grace
     let start = Instant::now();
-    while a.server.nodes().members().members.len() < 2 || b.server.nodes().members().members.len() < 2 {
-        assert!(start.elapsed() < Duration::from_secs(6), "nodes never met");
+    while a.server.nodes().members().members.len() < 2 || b.server.nodes().members().members.len() < 2 || !a.server.acting() || !b.server.acting() {
+        assert!(start.elapsed() < Duration::from_secs(10), "nodes never met");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -381,7 +393,7 @@ async fn two_nodes() {
         assert!(start.elapsed() < Duration::from_secs(3), "the dead node never left");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let m = worker.expect(Duration::from_secs(5), is_unblock("x:3")).await;
+    let m = worker.expect(Duration::from_secs(8), is_unblock("x:3")).await;
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
     let (status, headers, data) = survivor.send("promise.get", json!({ "id": "x:1" })).await;
     assert_eq!(status, 200);

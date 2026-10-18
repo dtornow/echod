@@ -61,6 +61,11 @@ pub struct Config {
     #[arg(long, env = "ECHOD_NODE_TTL", default_value_t = 15_000)]
     pub node_ttl_ms: u64,
 
+    /// How far any node's clock may be from true time, in ms. A node takes
+    /// ownership a TTL and four of these after it reads a new configuration.
+    #[arg(long, env = "ECHOD_CLOCK_SKEW", default_value_t = 1_000)]
+    pub clock_skew_ms: u64,
+
     /// Documents held in the read cache, at most.
     #[arg(long, env = "ECHOD_CACHE_ENTRIES", default_value_t = 10_000)]
     pub cache_entries: usize,
@@ -96,6 +101,7 @@ impl Config {
             timer_bucket_ms: 3_600_000,
             heartbeat_ms: 500,
             node_ttl_ms: 2_000,
+            clock_skew_ms: 100,
             cache_entries: 1_000,
             cache_bytes: 16 * 1024 * 1024,
             forward: true,

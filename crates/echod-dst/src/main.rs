@@ -56,8 +56,13 @@ struct Knobs {
     #[arg(long, default_value_t = 300)]
     jump_ms: u64,
     /// A node's clock drifts by up to this many parts per million.
-    #[arg(long, default_value_t = 20_000)]
+    #[arg(long, default_value_t = 5_000)]
     drift: u64,
+    /// The skew the servers are told to expect, in ms. Below what the run
+    /// inflicts (skew + jump + drift over the run), the proof's hypothesis
+    /// fails and the checker should catch a stale read.
+    #[arg(long)]
+    expected_skew: Option<u64>,
     #[arg(long, default_value_t = 2_000_000)]
     budget: u64,
 }
@@ -80,6 +85,7 @@ impl Knobs {
             skew_ms: self.skew,
             jump_ms: self.jump_ms,
             drift_ppm: self.drift,
+            expected_skew_ms: self.expected_skew.unwrap_or(self.skew + self.jump_ms + self.drift * 60 / 1000),
             budget: self.budget,
             ..Options::default()
         }

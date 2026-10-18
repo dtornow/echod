@@ -6,6 +6,7 @@
 //! <prefix>t/<bucket>/<deadline>_<origin>@<token>         a deadline for an origin, empty
 //! <prefix>t/<bucket>/<deadline>_sched:<id>@<token>       a schedule's next run, empty
 //! <prefix>nodes/<node id>                                a node's announcement
+//! <prefix>members                                        the configuration: members and epoch
 //! ```
 //!
 //! A deadline key lives in the time bucket its deadline falls in, so what is
@@ -109,6 +110,11 @@ impl KeySpace {
 
     pub fn sched_key(&self, id: &str) -> String {
         format!("{}sched/{}", self.prefix, encode_key(id))
+    }
+
+    /// The configuration object: the members and their epoch.
+    pub fn members_key(&self) -> String {
+        format!("{}members", self.prefix)
     }
 
     pub fn node_prefix(&self) -> String {

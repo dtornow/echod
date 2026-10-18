@@ -30,17 +30,21 @@ pub struct NodeClock {
     reference: std::sync::Arc<SimClock>,
     skew_ms: i64,
     drift_ppm: i64,
+    /// Jumps move the clock within this band, either way, so what a run
+    /// inflicts stays inside the skew the server is told to expect.
+    band_ms: i64,
     offset: std::sync::Mutex<i64>,
 }
 
 impl NodeClock {
-    pub fn new(reference: std::sync::Arc<SimClock>, skew_ms: i64, drift_ppm: i64) -> Self {
-        Self { reference, skew_ms, drift_ppm, offset: std::sync::Mutex::new(0) }
+    pub fn new(reference: std::sync::Arc<SimClock>, skew_ms: i64, drift_ppm: i64, band_ms: i64) -> Self {
+        Self { reference, skew_ms, drift_ppm, band_ms, offset: std::sync::Mutex::new(0) }
     }
 
-    /// Step the clock by `delta_ms`, negative for a step back.
+    /// Step the clock by `delta_ms`, negative for a step back, within the band.
     pub fn jump(&self, delta_ms: i64) {
-        *self.offset.lock().unwrap() += delta_ms;
+        let mut o = self.offset.lock().unwrap();
+        *o = (*o + delta_ms).clamp(-self.band_ms, self.band_ms);
     }
 
     pub fn offset(&self) -> i64 {

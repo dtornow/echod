@@ -1067,6 +1067,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-fleet"
+version = "0.1.0"
+dependencies = [
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-kernel"
 version = "0.1.0"
 dependencies = [

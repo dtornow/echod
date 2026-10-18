@@ -10,6 +10,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `echod-kernel` | the state machine: one object store, one transition per request, verified with Verus against the specification's catalogue |
 | `echod-server` | the `ResonateServer`: the kernel over documents in an S3 bucket, committed with conditional writes |
 | `echod-dst` | the server under deterministic simulation: one seed, no wall clock, no sockets; checked for linearizability against the kernel |
+| `echod-fleet` | the fleet as a TLA-style state machine in Verus, Anvil's shape: nodes, bucket, clocks, crashes; proved: ownership is exclusive and trusted caches are current |
 | `echod-worker` | the `ResonateWorker`: a V8 isolate (`deno_core`) whose durable ops are promises on the server |
 
 The server and the worker depend on `resonate-core` for the traits and
@@ -127,58 +128,45 @@ advances the schedule in one turn on the promise's origin.
 
 ### Nodes
 
-A node announces itself at `nodes/<id>` (its URL, when it first announced,
-when it last did) and refreshes the announcement every heartbeat; every
-heartbeat it also lists `nodes/`. The members are the nodes announced within
-a TTL whose first announcement is at least a TTL old. Nothing is agreed on
-and nothing depends on membership for the state's correctness, which the
-conditional writes carry; membership steers three things:
+A node announces itself at `nodes/<id>` (its URL, when it last did) and
+refreshes the announcement every heartbeat. The member list is one object,
+`members`, holding the members and the epoch it was written in: whoever
+sees the announced set differ from it writes the next epoch with a
+conditional put, so epochs are totally ordered and every node reads the
+same sequence. A node keeps the epoch and members it read, when it read
+them, and when it first read the epoch it holds. Nothing depends on
+membership for the state's correctness, which the conditional writes carry;
+membership steers three things:
 
-- **Ownership.** `hash(origin) mod n` over the members in id order (FNV-1a).
-  A load balancer that applies the same function sends every request for an
-  origin to the node that caches it and fires its deadlines. A node that is
-  not the owner forwards; if the owner cannot be reached it answers 503
-  rather than serve, and a node whose last listing is a TTL old serves
-  nothing, since it may be fenced out without knowing.
+- **Ownership.** `hash(origin) mod n` over the members in order (FNV-1a). A
+  load balancer that applies the same function over `members` sends every
+  request for an origin to the node that caches it and fires its deadlines.
+  A node *acts* as owner of an origin only when its view is fresh (read
+  within a TTL), its members make it the owner, and it has held its epoch
+  for the grace, `ttl + 4 skew`. Only the acting owner writes an origin. A
+  node that is not the owner forwards; if it is the owner but not acting
+  yet, or its view is stale, it answers 503.
 - **Cache.** Each node caches the documents it read or wrote, with their
-  ETags, least recently used out, bounded by entries and by bytes. The owner
-  of an origin uses its cache without asking the store, but only for entries
-  filled a TTL and a heartbeat after the member set last changed: by then
-  every node has seen the change and stopped writing what it no longer owns.
-  Any other entry is revalidated with `If-None-Match`. The cache is a port
-  (`cache.rs`); the one implementation is in memory.
+  ETags, least recently used out, bounded by entries and by bytes. The
+  acting owner uses an entry without asking the store only if the entry was
+  filled while it was acting; any other entry is revalidated with
+  `If-None-Match`. The cache is a port (`cache.rs`); the one implementation
+  is in memory.
+- **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
-The three rules — a member counts a TTL after it joins, a change suspends
-trust, a stale view serves nothing — are what the simulation demanded: with
-"the owner trusts its cache" alone, two nodes mid-change both believed they
-owned an origin and one served a stale read.
-
-All of it is decided on the fleet's time: the later of a node's own clock and
-the latest announcement it has listed. A clock that steps back or runs slow
-is absorbed; the fleet runs on its fastest clock. A clock that steps forward
-by about a TTL is not: the node sees every peer expire and, for a heartbeat,
-writes as owner of origins whose owners still trust their caches. The rules
-hold while any node's skew plus its largest step, plus a heartbeat, stays
-under the TTL — the bound every lease carries. Beyond it, exclusive
-ownership needs a record the store arbitrates, which is celld's design and
-not this one.
+These are the rules `echod-fleet` proves exclusive and sound, under the one
+hypothesis every lease carries: every live clock within `skew` of true
+time (`--clock-skew-ms`). Membership is decided on the fleet's time, the
+later of a node's clock and the latest announcement it listed, which
+absorbs a clock that steps back or runs slow. The simulation found the
+earlier rules — an owner trusts its cache; a member counts a TTL after it
+joins — unsound across membership changes; the proof gave the rules that
+are.
 
 A step is decided at an instant never earlier than any instant the origin's
 rows record (`step::clamp_now`): the kernel is proved for `now` at or after
 every `created_at` and `settled_at`, and a node behind another node's clock
 would otherwise step outside that.
-- **Timers.** Each node holds its share of the deadlines in an in-memory
-  wheel and fires from it. It lists the timer prefix only at startup, when
-  the set of live nodes changes (every node's share moved), and when the
-  clock reaches a bucket it has not loaded; each listing takes the keys of
-  the origins it owns and nothing else. Firing is a sweep of the origin,
-  idempotent, so a key fired twice costs nothing; the key is deleted once
-  the sweep has committed.
-
-A request names an origin. A node that does not own it forwards the request
-to the owner over HTTP (`x-echod-forwarded` stops a second hop) and relays
-the answer; if the owner cannot be reached the node serves the request
-itself. Every answer carries `x-echod-node`, the node that produced it.
 
 ### Transport
 
@@ -197,7 +185,9 @@ percentages and waits a seeded latency, and per node a store that can be cut
 off entirely; the peers (a forwarded request is a call), with partitions
 between chosen pairs; a bus that checks every message against the bucket.
 A chaos task crashes nodes, stops them cleanly, starts new ones, partitions
-pairs, cuts nodes off the store and jumps their clocks. Clients issue every
+pairs, cuts nodes off the store and jumps their clocks, within the skew the
+servers are told to expect, so the proof's hypothesis holds; set
+`--expected-skew` below what the run inflicts to leave it. Clients issue every
 request kind over a few origins; every attempt is a history entry, since an
 attempt that got no answer may have taken effect. Sweeps enter the history
 through an observer port.
@@ -208,6 +198,44 @@ rows the bucket holds; an entry without an answer may be placed or skipped.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
+
+## echod-fleet
+
+The multi-node system as a state machine, in the shape Anvil gives a
+Kubernetes cluster: a state, actions with preconditions and transitions,
+`init` and `next`, and Anvil's TLA embedding (`verus-tla`, vendored) to
+state the theorem as `always(inv)`.
+
+```text
+tla/            the temporal logic, vendored from Anvil's verus-tla
+spec/cluster.rs the state and the ten actions
+proof/safety.rs the invariant, one lemma per action, the theorem
+```
+
+The state: real time (ghost), the nodes, the bucket. A node has a clock, the
+epoch and members it read, when it read them (its clock, and ghost real
+time), when it first read the epoch it holds, and a cache of document
+versions with the clock at which each was filled. The bucket has every
+document's version, the configuration (members, epoch) and, ghost, when
+each epoch was written. The actions: real time advances; a clock advances,
+within `skew` of real time; a node joins or crashes; a node reads the
+configuration; a node writes the next epoch, with any members; a node reads
+a document; a conditional write lands, or is refused; a node answers from
+its cache. Clocks are never read by the model except through the node's
+own decisions; real time only states the hypothesis and orders events.
+
+Proved, with `grace > ttl + 4 skew`: two live nodes never both act as owner
+of one origin (`exclusion`), and a node that answers from its cache holds
+the bucket's current version (`currency`); both as corollaries of an
+invariant that `init` establishes and every action preserves, assembled
+into `spec ⊨ □inv` by the embedding's induction rule. A witness shows the
+invariant is not vacuous. 157 items, no admits.
+
+What the proof covers: the membership and cache rules of `nodes.rs` and
+`applier.rs`, as stated in the model. What it does not yet: the refinement
+of the running node to the model (the node is async Rust; Anvil's answer is
+a sans-I/O step function under a trusted shim), the S3 model's fidelity,
+and liveness. Those are the next layers, in that order.
 
 ### The SDKs
 

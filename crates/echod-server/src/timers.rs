@@ -181,7 +181,7 @@ impl Timers {
             }
         }
         *self.loaded_through.lock().unwrap_or_else(|e| e.into_inner()) = Some(horizon);
-        tracing::info!(deadlines = loaded, wheel = self.wheel.len(), nodes = self.nodes.members().nodes.len(), "timers loaded");
+        tracing::info!(deadlines = loaded, wheel = self.wheel.len(), epoch = self.nodes.members().epoch, "timers loaded");
         Ok(())
     }
 
@@ -206,7 +206,7 @@ impl Timers {
             tracing::warn!(key = %key, "unparseable timer key dropped");
             return;
         };
-        if !self.owns(&entry) || !self.nodes.fresh(now) {
+        if !self.owns(&entry) || !self.nodes.acts(entry.target(), now) {
             // Not this node's to fire, or this node cannot tell. The key
             // stays for whoever owns it; if it is still this node's it is
             // listed again on the next membership change.
