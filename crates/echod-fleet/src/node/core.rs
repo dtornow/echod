@@ -47,22 +47,89 @@ pub fn str_eq(a: &str, b: &str) -> (r: bool)
 // The state and its view
 // ---------------------------------------------------------------------------
 
-/// A cache entry's identity: the version read, and when.
+/// A deadline key in the bucket: what is due for which origin, and a token
+/// drawn per arm, so no two arms name one key.
+#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, PartialEq, Eq))]
+pub struct Key {
+    pub origin: String,
+    pub at: u64,
+    pub token: u64,
+}
+
+pub struct AKey {
+    pub origin: Origin,
+    pub at: nat,
+    pub token: nat,
+}
+
+impl View for Key {
+    type V = AKey;
+    open spec fn view(&self) -> AKey {
+        AKey { origin: self.origin@, at: self.at as nat, token: self.token as nat }
+    }
+}
+
+pub open spec fn opt_key(o: Option<Key>) -> Option<AKey> {
+    match o {
+        Some(k) => Some(k@),
+        None => None,
+    }
+}
+
+pub fn key_eq(a: &Key, b: &Key) -> (r: bool)
+    ensures r == (a@ == b@),
+{
+    str_eq(a.origin.as_str(), b.origin.as_str()) && a.at == b.at && a.token == b.token
+}
+
+pub fn clone_key(k: &Key) -> (r: Key)
+    ensures r@ == k@,
+{
+    Key { origin: echod_kernel::ident::clone_string(&k.origin), at: k.at, token: k.token }
+}
+
+/// The key a node remembers for an origin, and the version of the document
+/// it wrote with it. The key is relied on only while the document is still
+/// that version: any later write, by anyone, may have replaced the key.
+#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+pub struct Armed {
+    pub key: Key,
+    pub etag: String,
+}
+
+pub struct AArmed {
+    pub key: AKey,
+    pub etag: Seq<char>,
+}
+
+impl View for Armed {
+    type V = AArmed;
+    open spec fn view(&self) -> AArmed {
+        AArmed { key: self.key@, etag: self.etag@ }
+    }
+}
+
+/// A cache entry's identity: the version, when it was filled, and whether
+/// this node wrote it. Only a version this node wrote is ever trusted: a
+/// version read may be replaced by a write an earlier owner had in flight,
+/// which a version this node wrote fences out.
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
 pub struct Entry {
     pub etag: String,
     pub filled_at: u64,
+    pub wrote: bool,
 }
 
 pub struct AEntry {
     pub etag: Seq<char>,
     pub filled_at: nat,
+    pub wrote: bool,
 }
 
 impl View for Entry {
     type V = AEntry;
     open spec fn view(&self) -> AEntry {
-        AEntry { etag: self.etag@, filled_at: self.filled_at as nat }
+        AEntry { etag: self.etag@, filled_at: self.filled_at as nat, wrote: self.wrote }
     }
 }
 
@@ -78,6 +145,9 @@ pub struct NodeCore {
     /// The node's clock when it first read the epoch it holds.
     pub held: u64,
     pub cache: StringHashMap<Entry>,
+    /// The deadline key this node last armed for each origin, with the
+    /// version it wrote, so a commit on that version removes exactly that one.
+    pub armed: StringHashMap<Armed>,
 }
 
 pub struct ANode {
@@ -90,6 +160,7 @@ pub struct ANode {
     pub last_read: nat,
     pub held: nat,
     pub cache: Map<Origin, AEntry>,
+    pub armed: Map<Origin, AArmed>,
 }
 
 impl View for NodeCore {
@@ -105,6 +176,7 @@ impl View for NodeCore {
             last_read: self.last_read as nat,
             held: self.held as nat,
             cache: self.cache@.map_values(|e: Entry| e@),
+            armed: self.armed@.map_values(|a: Armed| a@),
         }
     }
 }
@@ -131,10 +203,11 @@ pub open spec fn spec_acts(n: ANode, o: Origin, now: nat) -> bool {
 }
 
 /// The node answers `o` from its cache without asking the bucket: it acts,
-/// and the entry was filled while it acted.
+/// and the entry is a version it wrote while it acted.
 pub open spec fn spec_trusts(n: ANode, o: Origin, now: nat) -> bool {
     &&& spec_acts(n, o, now)
     &&& n.cache.contains_key(o)
+    &&& n.cache[o].wrote
     &&& n.cache[o].filled_at >= n.held + n.grace
 }
 
@@ -151,14 +224,36 @@ pub open spec fn spec_read_config(n: ANode, now: nat, epoch: nat, members: Seq<I
     }
 }
 
-/// Remember the version of `o` read from, or written to, the bucket at `now`.
-pub open spec fn spec_filled(n: ANode, o: Origin, etag: Seq<char>, now: nat) -> ANode {
-    ANode { cache: n.cache.insert(o, AEntry { etag, filled_at: now }), ..n }
+/// Remember the version of `o` read from (`wrote` false), or written to
+/// (`wrote` true), the bucket at `now`.
+pub open spec fn spec_filled(n: ANode, o: Origin, etag: Seq<char>, now: nat, wrote: bool) -> ANode {
+    ANode { cache: n.cache.insert(o, AEntry { etag, filled_at: now, wrote }), ..n }
 }
 
 /// Drop what is remembered of `o`.
 pub open spec fn spec_forget(n: ANode, o: Origin) -> ANode {
     ANode { cache: n.cache.remove(o), ..n }
+}
+
+/// Remember the key armed for `o` and the version written with it, or that
+/// none is.
+pub open spec fn spec_set_armed(n: ANode, o: Origin, a: Option<AArmed>) -> ANode {
+    match a {
+        Some(a) => ANode { armed: n.armed.insert(o, a), ..n },
+        None => ANode { armed: n.armed.remove(o), ..n },
+    }
+}
+
+/// A fired key was collected: if it is the one remembered for `o`, forget it.
+pub open spec fn spec_collected(n: ANode, o: Origin, k: AKey) -> ANode {
+    if n.armed.contains_key(o) && n.armed[o].key == k { ANode { armed: n.armed.remove(o), ..n } } else { n }
+}
+
+pub open spec fn opt_armed(o: Option<Armed>) -> Option<AArmed> {
+    match o {
+        Some(a) => Some(a@),
+        None => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +265,13 @@ impl NodeCore {
         ensures
             n@ == (ANode {
                 id: id@, ttl: ttl as nat, grace: grace as nat, read_any: false, epoch: 0,
-                members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(),
+                members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(), armed: Map::empty(),
             }),
     {
-        let n = NodeCore { id, ttl, grace, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, held: 0, cache: StringHashMap::new() };
+        let n = NodeCore { id, ttl, grace, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, held: 0, cache: StringHashMap::new(), armed: StringHashMap::new() };
         assert(n@.members =~= Seq::<Id>::empty());
         assert(n@.cache =~= Map::<Origin, AEntry>::empty());
+        assert(n@.armed =~= Map::<Origin, AArmed>::empty());
         n
     }
 
@@ -220,7 +316,7 @@ impl NodeCore {
             return false;
         }
         match self.cache.get(o) {
-            Some(e) => (e.filled_at as u128) >= (self.held as u128) + (self.grace as u128),
+            Some(e) => e.wrote && (e.filled_at as u128) >= (self.held as u128) + (self.grace as u128),
             None => false,
         }
     }
@@ -239,13 +335,14 @@ impl NodeCore {
         self.last_read = now;
     }
 
-    /// Remember the version of `o` read from, or written to, the bucket at `now`.
-    pub fn filled(&mut self, o: &str, etag: String, now: u64)
-        ensures final(self)@ == spec_filled(old(self)@, o@, etag@, now as nat),
+    /// Remember the version of `o` read from (`wrote` false), or written to
+    /// (`wrote` true), the bucket at `now`.
+    pub fn filled(&mut self, o: &str, etag: String, now: u64, wrote: bool)
+        ensures final(self)@ == spec_filled(old(self)@, o@, etag@, now as nat, wrote),
     {
         let ghost before = self@;
-        self.cache.insert(o.to_string(), Entry { etag, filled_at: now });
-        assert(self@.cache =~= before.cache.insert(o@, AEntry { etag: etag@, filled_at: now as nat }));
+        self.cache.insert(o.to_string(), Entry { etag, filled_at: now, wrote });
+        assert(self@.cache =~= before.cache.insert(o@, AEntry { etag: etag@, filled_at: now as nat, wrote }));
     }
 
     /// Drop what is remembered of `o`.
@@ -255,6 +352,51 @@ impl NodeCore {
         let ghost before = self@;
         self.cache.remove(o);
         assert(self@.cache =~= before.cache.remove(o@));
+    }
+
+    /// Remember the key armed for `o` and the version written with it, or
+    /// that none is.
+    pub fn set_armed(&mut self, o: &str, a: Option<Armed>)
+        ensures final(self)@ == spec_set_armed(old(self)@, o@, opt_armed(a)),
+    {
+        let ghost before = self@;
+        match a {
+            Some(a) => {
+                let ghost aa = a@;
+                self.armed.insert(o.to_string(), a);
+                assert(self@.armed =~= before.armed.insert(o@, aa));
+            }
+            None => {
+                self.armed.remove(o);
+                assert(self@.armed =~= before.armed.remove(o@));
+            }
+        }
+    }
+
+    /// A fired key was collected: if it is the one remembered for `o`, forget it.
+    pub fn collected(&mut self, o: &str, k: &Key)
+        ensures final(self)@ == spec_collected(old(self)@, o@, k@),
+    {
+        let ghost before = self@;
+        let same = match self.armed.get(o) {
+            Some(p) => key_eq(&p.key, k),
+            None => false,
+        };
+        if same {
+            self.armed.remove(o);
+            assert(self@.armed =~= before.armed.remove(o@));
+        }
+    }
+
+    /// The key remembered for `o`, if any, with the version written with it.
+    pub fn armed_for(&self, o: &str) -> (r: Option<&Armed>)
+        ensures
+            match r {
+                Some(k) => self@.armed.contains_key(o@) && k@ == self@.armed[o@],
+                None => !self@.armed.contains_key(o@),
+            },
+    {
+        self.armed.get(o)
     }
 
     /// What is remembered of `o`, if anything.

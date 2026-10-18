@@ -37,6 +37,14 @@ pub fn same_origin(a: &String, b: &String) -> (r: bool)
 }
 
 /// `str == str`, with its meaning stated.
+/// `String::clone`, with its meaning stated.
+#[verifier::external_body]
+pub fn clone_string(s: &String) -> (r: String)
+    ensures r@ == s@,
+{
+    s.clone()
+}
+
 #[verifier::external_body]
 pub fn str_eq(a: &str, b: &str) -> (r: bool)
     ensures r == (a@ == b@),

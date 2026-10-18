@@ -40,6 +40,56 @@ pub open spec fn occurrence_ok(c: ASchedule, o: Occurrence, now: u64) -> bool {
     c.next_run_at <= o.at as nat && o.at <= now
 }
 
+// ---------------------------------------------------------------------------
+// The three sweeper steps as functions of the state: what a node that fires
+// deadlines is proved to compute, object by object.
+// ---------------------------------------------------------------------------
+
+/// `processPromiseTimeout`: the object projected at `now`, if there is one.
+pub open spec fn promise_timeout_objects(a: AState, id: Seq<char>, now: nat) -> Map<Seq<char>, APromise> {
+    if a.objects.contains_key(id) { a.objects.insert(id, a.objects[id].project(now)) } else { a.objects }
+}
+
+/// A lease is due: the task is acquired and its lease has passed, on a
+/// promise still pending and not yet past its own deadline.
+pub open spec fn lease_due(p: APromise, now: nat) -> bool {
+    &&& p.task is Some
+    &&& p.task.unwrap().state == TaskState::Acquired
+    &&& p.task.unwrap().lease_timeout_at is Some
+    &&& p.task.unwrap().lease_timeout_at.unwrap() <= now
+    &&& p.state == PromiseState::Pending
+    &&& p.timeout_at > now
+}
+
+/// `processLeaseTimeout`: a due lease returns the task to pending.
+pub open spec fn lease_timeout_objects(a: AState, id: Seq<char>, now: nat) -> Map<Seq<char>, APromise> {
+    if a.objects.contains_key(id) && lease_due(a.objects[id], now) {
+        a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().release(now)))
+    } else {
+        a.objects
+    }
+}
+
+/// A retry is due: the task is pending and its retry time has passed, on a
+/// promise still pending and not yet past its own deadline.
+pub open spec fn retry_due(p: APromise, now: nat) -> bool {
+    &&& p.task is Some
+    &&& p.task.unwrap().state == TaskState::Pending
+    &&& p.task.unwrap().retry_timeout_at is Some
+    &&& p.task.unwrap().retry_timeout_at.unwrap() <= now
+    &&& p.state == PromiseState::Pending
+    &&& p.timeout_at > now
+}
+
+/// `processRetryTimeout`: a due retry is re-armed `retry_timeout` ahead.
+pub open spec fn retry_timeout_objects(a: AState, id: Seq<char>, now: nat, retry_timeout: nat) -> Map<Seq<char>, APromise> {
+    if a.objects.contains_key(id) && retry_due(a.objects[id], now) {
+        a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().rearm(now, retry_timeout)))
+    } else {
+        a.objects
+    }
+}
+
 impl State {
     /// `processPromiseTimeout`: touch the object.
     pub fn process_promise_timeout(&mut self, req: &PromiseTimeoutReq, now: u64, cfg: &Config)
@@ -47,6 +97,9 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@.objects == promise_timeout_objects(old(self)@, req.id@, now as nat),
+            final(self)@.schedules == old(self)@.schedules,
+            final(self)@.outbox == old(self)@.outbox,
     {
         let ghost a = self@;
         match self.read_object(&req.id, now) {
@@ -71,6 +124,9 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@.objects == lease_timeout_objects(old(self)@, req.id@, now as nat),
+            final(self)@.schedules == old(self)@.schedules,
+            final(self)@.outbox == old(self)@.outbox,
     {
         let ghost a = self@;
         proof {
@@ -109,6 +165,9 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@.objects == retry_timeout_objects(old(self)@, req.id@, now as nat, cfg.retry_timeout as nat),
+            final(self)@.schedules == old(self)@.schedules,
+            !(old(self)@.objects.contains_key(req.id@) && retry_due(old(self)@.objects[req.id@], now as nat)) ==> final(self)@.outbox == old(self)@.outbox,
     {
         let ghost a = self@;
         proof {
@@ -153,6 +212,7 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@.schedules == old(self)@.schedules,
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
@@ -203,6 +263,7 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@.schedules == old(self)@.schedules,
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
@@ -651,6 +712,7 @@ pub open spec fn resumed_shape(now: nat, a: AState, b: AState, x: Seq<char>, y: 
 
 /// The callback drain: the awaited promise, read and settled, lost the
 /// awaiter's callback; the awaiter was read and resumed.
+#[verifier::rlimit(120)]
 pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, y: Seq<char>, touched: bool)
     requires
         inv(now, a),
