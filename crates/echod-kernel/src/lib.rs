@@ -19,6 +19,9 @@
 //! `./verify.sh` runs Verus; `cargo build` compiles the same sources with the
 //! ghost code erased.
 
+pub mod external;
+pub mod external_task;
+pub mod frame;
 pub mod ident;
 pub mod object;
 pub mod properties;

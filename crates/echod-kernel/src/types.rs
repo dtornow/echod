@@ -479,6 +479,26 @@ pub struct PromiseCreateReq {
     pub tags: Tags,
 }
 
+
+pub struct APromiseCreateReq {
+    pub id: Seq<char>,
+    pub timeout_at: nat,
+    pub param: AValue,
+    pub tags: ATags,
+}
+
+impl View for PromiseCreateReq {
+    type V = APromiseCreateReq;
+    open spec fn view(&self) -> APromiseCreateReq {
+        APromiseCreateReq {
+            id: self.id@,
+            timeout_at: self.timeout_at as nat,
+            param: self.param@,
+            tags: self.tags.deep_view(),
+        }
+    }
+}
+
 pub struct PromiseSettleReq {
     pub id: String,
     pub state: PromiseState,

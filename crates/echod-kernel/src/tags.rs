@@ -39,6 +39,12 @@ impl OType {
     pub open spec fn awaitable(self) -> bool {
         self != OType::Internal
     }
+
+    pub fn is_awaitable(self) -> (r: bool)
+        ensures r == self.awaitable(),
+    {
+        self != OType::Internal
+    }
 }
 
 /// `Tags.otype`.
