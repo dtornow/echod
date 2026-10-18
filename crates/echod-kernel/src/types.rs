@@ -71,6 +71,7 @@ pub type ATags = Seq<(Seq<char>, Seq<char>)>;
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default)]
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Value {
     #[cfg_attr(not(verus_keep_ghost), serde(default, skip_serializing_if = "Vec::is_empty"))]
     pub headers: Tags,
@@ -115,6 +116,7 @@ impl Value {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Task {
     pub state: TaskState,
     pub version: u64,
@@ -164,6 +166,7 @@ impl View for Task {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Promise {
     pub id: String,
     pub state: PromiseState,
@@ -231,6 +234,7 @@ impl View for Promise {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Schedule {
     pub id: String,
     pub cron: String,
@@ -281,6 +285,7 @@ impl View for Schedule {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct PromiseRecord {
     pub id: String,
     pub state: PromiseState,
@@ -337,6 +342,7 @@ impl APromise {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct TaskRecord {
     pub id: String,
     pub state: TaskState,
@@ -389,6 +395,7 @@ impl ATask {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub enum Message {
     Execute { task_id: String, version: u64 },
     Unblock(PromiseRecord),
@@ -414,6 +421,7 @@ impl View for Message {
 
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 
+#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct OutboxEntry {
     pub address: String,
     pub message: Message,

@@ -19,6 +19,8 @@
 //! `./verify.sh` runs Verus; `cargo build` compiles the same sources with the
 //! ghost code erased.
 
+#![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
+
 pub mod external;
 pub mod external_sched;
 pub mod external_task;

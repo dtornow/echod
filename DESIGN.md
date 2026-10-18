@@ -66,95 +66,86 @@ runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 
 ## echod-server
 
-### The document
-
-One origin is one object at `wf/<origin>`, JSON lines: one `Promise` per
-row, in commit order. A task is a field of its promise, since a task's id is
-its promise's id. There is no enclosing document and no header.
-
-The document is the fold of the rows: each row replaces the entry for its id,
-so the last row for an id wins. Reading an origin replays its object.
-
-```rust
-#[derive(Serialize, Deserialize)]
-pub struct Promise {
-    pub id:         String,
-    pub state:      PromiseState,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tags:       BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Value::is_empty")]
-    pub param:      Value,
-    #[serde(default, skip_serializing_if = "Value::is_empty")]
-    pub value:      Value,
-    pub timeout_at: i64,
-    pub created_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settled_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub callbacks:  Vec<String>,                // awaiter ids, registration order
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub listeners:  Vec<String>,                // listener addresses, registration order, unique
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task:       Option<Task>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Task {
-    pub state:   TaskState,
-    pub version: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pid:     Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl:     Option<i64>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub resumes: BTreeSet<String>,              // awaited ids not yet observed settled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<Timeout>,
-}
-
-/// At most one deadline is armed on a task, so it is one field.
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", content = "at", rename_all = "lowercase")]
-pub enum Timeout {
-    Retry(i64),                                 // re-dispatch deadline while pending
-    Lease(i64),                                 // lease expiry while acquired
-}
-
-/// `resonate_core::types::PromiseValue` with ordered headers.
-#[derive(Serialize, Deserialize, Default)]
-pub struct Value {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data:    Option<String>,
-}
+```text
+config.rs     the dials
+keys.rs       where everything lives under the bucket
+store.rs      the object store port: S3, and an in-memory stand-in
+doc.rs        an origin's document: rows in, rows out, the fold between
+wire.rs       the kernel's vocabulary to the protocol's and back
+nodes.rs      the nodes: announce, heartbeat, list, and who owns what
+applier.rs    one request against one origin, serialised and committed
+timers.rs     deadlines as objects, fired by the owner
+schedules.rs  schedules as objects, fired by the owner
+push.rs       messages out: HTTP push, and the router in front of it
+server.rs     the ResonateServer: dispatch, forwarding, lifecycle
+gateway.rs    POST / and GET /ready
 ```
 
-`PromiseState` and `TaskState` come from `resonate_core::types`.
+### The bucket
 
-### Encoding
+```text
+wf/<origin>                     an origin's document: rows
+sched/<id>                      a schedule: one row
+t/<shard>/<deadline>_<origin>   a deadline for an origin, empty
+t/<shard>/<deadline>_sched:<id> a schedule's next run, empty
+nodes/<id>                      a node's announcement: id, url, at
+```
 
-`serde_json`, one object per row, joined by `\n`. Encoding is canonical
-because every collection is a `BTree*`, field order is declaration order, and
-empty fields are omitted.
+### The document
+
+One origin is one object, JSON lines: one kernel `Promise` per row, in
+commit order, serialised by serde as the kernel declares it. A task is a
+field of its promise. There is no enclosing document and no header.
+
+The document is the fold of the rows by id, last row wins — the kernel's
+`fold_by`, whose lemmas (and `proofs/compaction.rs`) prove any one-row-per-id
+rendering replays to the same document. Reading an origin
+replays its object.
 
 ### Writing
 
-A request reads the object, replays it, decides, and appends one row per
-promise it changed. Nothing changed, nothing appended.
+A request loads the document, runs the kernel handler, drains what the step
+left owed (callbacks and listeners of settled promises, retries now due),
+and writes the rows that changed. Every write carries `If-Match` on the ETag
+the read returned; the ETag is the commit, so a stale read cannot win
+whatever happened in between. A lost race re-reads and runs the handler
+again. On a directory bucket (S3 Express One Zone) the write is an append at
+the current size; once the object carries `compact` stale rows, or on a
+general-purpose bucket, the whole object is rewritten as one row per id. The
+outbox is handed to the router after the commit; delivery is at most once,
+and a lost `execute` is re-offered by the task's retry deadline.
 
-Every write carries `If-Match` on the ETag the read returned; the ETag is
-the commit. On S3 Express One Zone the write is an append, `PutObject` with
-`x-amz-write-offset-bytes` at the current size. On general-purpose S3 there
-is no append; the whole object is rewritten.
+A deadline is an empty object whose key says what is due and when. It is
+written before the document that arms it and deleted after the document that
+disarms it, so a deadline the document owes is always in the bucket. A
+schedule is its own object; firing it creates the occurrence's promise and
+advances the schedule in one turn on the promise's origin.
 
-### Compaction
+### Nodes
 
-Appends are capped per object and the log grows, so an object is periodically
-rewritten as one row per id. Any one-row-per-id rendering of the document
-replays to the same document, in any row order; `proofs/compaction.rs` proves
-this in Verus. A rewrite is a write like any other: its new ETag refuses
-every append still in flight against the old object.
+A node announces itself at `nodes/<id>` and refreshes the announcement every
+heartbeat; every heartbeat it also lists `nodes/` and keeps the announcements
+younger than the TTL. That list is the membership. Nothing is agreed on and
+nothing depends on it for correctness, which the conditional writes carry;
+membership steers three things:
 
-Removing a promise from an origin needs a tombstone row; a log cannot express
-removal by omission.
+- **Ownership.** For a key, the live node with the highest hash of
+  `(node, key)` owns it (rendezvous hashing; a node joining or leaving moves
+  only its own keys).
+- **Cache.** Each node caches the documents it read or wrote, with their
+  ETags. The owner of an origin trusts its cache, since every write to the
+  origin goes through it; any other node revalidates with `If-None-Match`.
+- **Timers.** The owner fires an origin's deadlines: from memory for the keys
+  it wrote, and from a periodic listing of the timer prefix for the keys
+  another node wrote or a dead node left behind. Firing is a sweep of the
+  origin, idempotent, so a key fired twice costs nothing.
+
+A request names an origin. A node that does not own it forwards the request
+to the owner over HTTP (`x-echod-forwarded` stops a second hop) and relays
+the answer; if the owner cannot be reached the node serves the request
+itself. Every answer carries `x-echod-node`, the node that produced it.
+
+### Transport
+
+HTTP push only: a message is POSTed to the worker's URL as the protocol's
+JSON `Message`. The router maps `http` and `https` to it.

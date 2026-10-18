@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/echod-kernel"]
+members = ["crates/echod-kernel", "crates/echod-server"]
 
 [workspace.package]
 version = "0.1.0"
