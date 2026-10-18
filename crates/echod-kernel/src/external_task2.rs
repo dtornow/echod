@@ -836,7 +836,7 @@ proof fn lemma_suspended_task_obj(now: nat, a: AState, b: AState, id: Seq<char>,
 }
 
 /// `task.suspend`'s 200: the task parked, registered on every awaited promise.
-#[verifier::rlimit(60)]
+#[verifier::rlimit(400)]
 pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, acts: Seq<PromiseRegisterCallbackReq>)
     requires
         suspend_base(now, a, id),

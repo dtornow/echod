@@ -458,6 +458,124 @@ impl State {
         }
         self.schedules.remove(i);
     }
+
+    // --- outbox ---
+
+    pub proof fn lemma_outbox_at(self, i: int)
+        requires
+            self.wf(),
+            0 <= i < self.outbox@.len(),
+        ensures
+            self@.outbox.contains_key(self.outbox@[i]@.key()),
+            self@.outbox[self.outbox@[i]@.key()] == self.outbox@[i]@,
+    {
+        lemma_fold_distinct(self.outbox@, out_key(), out_val());
+        assert(out_key()(self.outbox@[i]) == self.outbox@[i]@.key());
+    }
+
+    /// The row carrying `e`'s key, if any.
+    pub fn find_outbox(&self, e: &OutboxEntry) -> (r: Option<usize>)
+        ensures
+            match r {
+                Some(i) => i < self.outbox@.len() && self.outbox@[i as int]@.key() == e@.key(),
+                None => !self@.outbox.contains_key(e@.key()),
+            },
+    {
+        let mut i: usize = 0;
+        while i < self.outbox.len()
+            invariant
+                i <= self.outbox@.len(),
+                forall|j: int| 0 <= j < i ==> self.outbox@[j]@.key() != e@.key(),
+            decreases self.outbox@.len() - i,
+        {
+            if same_key(&self.outbox[i], e) {
+                return Some(i);
+            }
+            i += 1;
+        }
+        proof {
+            lemma_fold_dom(self.outbox@, out_key(), out_val());
+            assert forall|j: int| 0 <= j < self.outbox@.len() implies #[trigger] out_key()(self.outbox@[j]) != e@.key() by {}
+        }
+        None
+    }
+
+    /// `setMessage`: one entry per key, the newest winning.
+    pub fn upsert_outbox(&mut self, e: OutboxEntry)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).objects == old(self).objects,
+            final(self).schedules == old(self).schedules,
+            final(self)@.objects == old(self)@.objects,
+            final(self)@.schedules == old(self)@.schedules,
+            final(self)@.outbox =~= old(self)@.outbox.insert(e@.key(), e@),
+    {
+        match self.find_outbox(&e) {
+            Some(i) => {
+                proof {
+                    lemma_fold_update(self.outbox@, out_key(), out_val(), i as int, e);
+                }
+                self.outbox[i] = e;
+            }
+            None => {
+                proof {
+                    let s = self.outbox@;
+                    lemma_fold_dom(s, out_key(), out_val());
+                    lemma_fold_push(s, out_key(), out_val(), e);
+                    let t = s.push(e);
+                    assert forall|a: int, b: int|
+                        0 <= a < t.len() && 0 <= b < t.len() && #[trigger] out_key()(t[a]) == #[trigger] out_key()(t[b])
+                        implies a == b by {
+                        if a == s.len() && b < s.len() {
+                            assert(out_key()(s[b]) == e@.key());
+                            assert(mentions(s, out_key(), e@.key()));
+                        }
+                        if b == s.len() && a < s.len() {
+                            assert(out_key()(s[a]) == e@.key());
+                            assert(mentions(s, out_key(), e@.key()));
+                        }
+                    }
+                }
+                self.outbox.push(e);
+            }
+        }
+    }
+
+    /// Hand the outbox to the caller, emptying it. The abstract outbox is what
+    /// the catalogue constrains; the server delivers it and starts afresh.
+    pub fn take_outbox(&mut self) -> (r: Vec<OutboxEntry>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).objects == old(self).objects,
+            final(self).schedules == old(self).schedules,
+            r == old(self).outbox,
+            final(self).outbox@ == Seq::<OutboxEntry>::empty(),
+    {
+        let mut out: Vec<OutboxEntry> = Vec::new();
+        core::mem::swap(&mut out, &mut self.outbox);
+        proof {
+            assert forall|a: int, b: int|
+                0 <= a < self.outbox@.len() && 0 <= b < self.outbox@.len()
+                && #[trigger] out_key()(self.outbox@[a]) == #[trigger] out_key()(self.outbox@[b])
+                implies a == b by {}
+        }
+        out
+    }
+}
+
+/// Do two entries share a key?
+pub fn same_key(x: &OutboxEntry, y: &OutboxEntry) -> (r: bool)
+    ensures r == (x@.key() == y@.key()),
+{
+    match (&x.message, &y.message) {
+        (Message::Execute { task_id: a, .. }, Message::Execute { task_id: b, .. }) => *a == *b,
+        (Message::Unblock(ra), Message::Unblock(rb)) => ra.id == rb.id && x.address == y.address,
+        _ => false,
+    }
 }
 
 /// Removing the row at `i` is removing its key.

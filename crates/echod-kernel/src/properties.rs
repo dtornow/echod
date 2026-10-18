@@ -1161,7 +1161,7 @@ pub open spec fn consistent_promise_state_edge_internal_admissible(now: nat, a: 
 /// Versions grow by one per acquisition, so this is a bound no run reaches;
 /// `task.create` and `task.acquire` refuse to cross it.
 pub open spec fn kernel_bounds_at(p: APromise) -> bool {
-    &&& p.timeout_at <= MAX_TIME as nat
+    &&& p.timeout_at <= 2 * (MAX_TIME as nat)
     &&& task_at(p, |t: ATask| t.version <= MAX_TIME as nat && opt_or_zero(t.ttl) <= MAX_TIME as nat)
 }
 

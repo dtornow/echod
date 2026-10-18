@@ -7,11 +7,62 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | crate | holds |
 |---|---|
-| `echod-server` | the `ResonateServer`: one document per origin in an S3 bucket, committed with conditional writes |
+| `echod-kernel` | the state machine: one object store, one transition per request, verified with Verus against the specification's catalogue |
+| `echod-server` | the `ResonateServer`: the kernel over documents in an S3 bucket, committed with conditional writes |
 | `echod-worker` | the `ResonateWorker`: a V8 isolate (`deno_core`) whose durable ops are promises on the server |
 
-Both depend on `resonate-core` for the traits and protocol types.
-Origin: `resonate-server-blob` and `resonate-plugin-echod`.
+The server and the worker depend on `resonate-core` for the traits and
+protocol types. Origin: `resonate-server-blob` and `resonate-plugin-echod`.
+
+## echod-kernel
+
+The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
+objects, schedules and an outbox; 18 request handlers and 6 internal steps
+(`debug.*` and `*.search` left out); a catalogue of 92 properties. The kernel
+is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
+on the state it leaves, `legal` on the pair, and for an internal step the two
+sweeper entries.
+
+```text
+types.rs        rows, records, requests, responses; abstract twins and views
+ident.rs        ids; the three trusted string primitives
+tags.rs         tags: first match wins; otype, timer, target
+store.rs        State: row vectors whose view is three maps, via the fold
+object.rs       projection, the per-object edits, birth
+properties.rs   the catalogue, entry for entry, same names
+frame.rs        the frame: what a step owes for the ids it touched
+external*.rs    the 18 request handlers
+internal.rs     the 6 internal steps
+```
+
+The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
+Its abstract view is three maps, the fold of the rows by key, so the
+catalogue is stated over maps and the compaction lemma is the view. Each
+handler takes the state, the request, `now`, and a `Config`.
+
+Proved: every catalogue entry, at every step, over the whole store. A step
+proves the entries at the ids it wrote; the frame lemma proves the rest. One
+entry is proved in an amended form, and one internal step departs from the
+Lean text, both because the text is wrong:
+
+- `consistent_suspension_registers_callback` demands that a task suspending
+  gains a callback it did not have. A task that suspended on `P1` and `P2`,
+  was woken by `P1` settling, ran again and suspended on `P2` alone, gains
+  nothing: `P2` still held it. Seven steps; the sweep goes to three. Proved
+  without the freshness conjunct.
+- `processSchedule` creates a promise as of its occurrence `t`. For
+  `t + promiseTimeout <= now` that is a pending task on a promise dead at
+  `now`, which `preserved_no_dead_dispatch` forbids. The kernel births such a
+  promise dead, the state Lean reaches on the next touch.
+
+Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `ident.rs`
+(bodies are plain Rust, their `ensures` assumed), and the cron arithmetic,
+which the caller supplies as a request's occurrences and next run. Doors the
+kernel adds: instants and durations at most `MAX_TIME` (2^62 ms), versions
+below it, so that no `u64` sum overflows.
+
+`cargo build` compiles the kernel with the ghost code erased; `verify.sh`
+runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 
 ## echod-server
 

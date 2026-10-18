@@ -321,6 +321,31 @@ pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: spec_fn(Seq
     crate::frame::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
+/// A promise born at `t <= now` on a fresh id obeys the catalogue at its id,
+/// provided it is either dead at birth or still live at `now`.
+pub proof fn lemma_born_obj(now: nat, t: nat, a: AState, b: AState, req: APromiseCreateReq)
+    requires
+        inv(now, a),
+        !a.objects.contains_key(req.id),
+        !crate::tags::timer_targeted(req.tags),
+        req.timeout_at <= 2 * (MAX_TIME as nat),
+        t <= now,
+        req.timeout_at <= t || req.timeout_at > now,
+        b.objects.contains_key(req.id),
+        b.objects[req.id] == spec_create(req, t),
+    ensures
+        inv_obj(now, b, req.id),
+        trans_obj(now, a, b, req.id),
+{
+    lemma_inv_pointwise(now, a);
+    let id = req.id;
+    let q = spec_create(req, t);
+    assert(q.callbacks.len() == 0);
+    assert(!q.callbacks.contains(id));
+    assert(inv_obj(now, b, id));
+    assert(trans_obj(now, a, b, id));
+}
+
 /// `promise.create` on a fresh id.
 pub proof fn lemma_create_legal(now: nat, a: AState, b: AState, req: APromiseCreateReq)
     requires
@@ -337,12 +362,7 @@ pub proof fn lemma_create_legal(now: nat, a: AState, b: AState, req: APromiseCre
 {
     lemma_inv_pointwise(now, a);
     let id = req.id;
-    let q = spec_create(req, now);
-    assert(b.objects[id] == q);
-    assert(q.callbacks.len() == 0);
-    assert(!q.callbacks.contains(id));
-    assert(inv_obj(now, b, id));
-    assert(trans_obj(now, a, b, id));
+    lemma_born_obj(now, now, a, b, req);
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
