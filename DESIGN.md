@@ -154,14 +154,21 @@ membership steers three things:
   is in memory.
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
-These are the rules `echod-fleet` proves exclusive and sound, under the one
-hypothesis every lease carries: every live clock within `skew` of true
-time (`--clock-skew-ms`). Membership is decided on the fleet's time, the
-later of a node's clock and the latest announcement it listed, which
-absorbs a clock that steps back or runs slow. The simulation found the
-earlier rules — an owner trusts its cache; a member counts a TTL after it
-joins — unsound across membership changes; the proof gave the rules that
-are.
+The state behind these rules and the decisions taken from it are not in
+`nodes.rs`: they are `echod_fleet::node::core::NodeCore`, executable Rust
+verified to compute the fleet model's specification functions step for
+step. `nodes.rs` is the trusted shim around it: it announces, lists, reads
+the configuration object and hands it to `read_config`; it asks `acts` and
+`trusts`; and `applier.rs` reports every version read or written with
+`filled` and every entry dropped, evicted or forgotten with `forget`, so
+what the core decides on is what the cache holds. `echod-fleet` proves the
+rules exclusive and sound under the one hypothesis every lease carries:
+every live clock within `skew` of true time (`--clock-skew-ms`).
+Membership is decided on the fleet's time, the later of a node's clock and
+the latest announcement it listed, which absorbs a clock that steps back or
+runs slow. The simulation found the earlier rules — an owner trusts its
+cache; a member counts a TTL after it joins — unsound across membership
+changes; the proof gave the rules that are.
 
 A step is decided at an instant never earlier than any instant the origin's
 rows record (`step::clamp_now`): the kernel is proved for `now` at or after
@@ -208,34 +215,57 @@ state the theorem as `always(inv)`.
 
 ```text
 tla/            the temporal logic, vendored from Anvil's verus-tla
-spec/cluster.rs the state and the ten actions
+node/core.rs    the node core: executable Rust, each step ensures its spec function
+spec/cluster.rs the state and the eleven actions, the node's ones being the core's spec functions
 proof/safety.rs the invariant, one lemma per action, the theorem
 ```
 
-The state: real time (ghost), the nodes, the bucket. A node has a clock, the
-epoch and members it read, when it read them (its clock, and ghost real
-time), when it first read the epoch it holds, and a cache of document
-versions with the clock at which each was filled. The bucket has every
-document's version, the configuration (members, epoch) and, ghost, when
-each epoch was written. The actions: real time advances; a clock advances,
-within `skew` of real time; a node joins or crashes; a node reads the
-configuration; a node writes the next epoch, with any members; a node reads
-a document; a conditional write lands, or is refused; a node answers from
-its cache. Clocks are never read by the model except through the node's
-own decisions; real time only states the hypothesis and orders events.
+The node core is what Anvil calls the reconciler: a sans-I/O step function.
+`NodeCore` holds what a node keeps of the configuration (epoch, members,
+the clock at the last read and at the first read of the epoch held) and of
+its cache (each origin's version and the clock at which it was filled), as
+a `StringHashMap` with a `Map` view. Its functions are `new`, `owner`,
+`fresh`, `acts`, `trusts`, `read_config`, `filled`, `forget`, and each
+`ensures` it equals the specification function of the same name on the
+state's view: `acts(o, now) == spec_acts(self@, o@, now)`,
+`read_config(..)` leaves `self@ == spec_read_config(old(self)@, ..)`. Two
+primitives are trusted with their meaning stated: FNV-1a is a function of
+the string, and `str == str` is equality of views.
+
+The fleet state: real time (ghost), the nodes, the bucket. A node is its
+core's view, whether it is alive, its clock, and, ghost, real time at its
+last read and at its first read of the epoch held. The bucket has every
+document's version (its ETag), the configuration (members, epoch) and,
+ghost, when each epoch was written. The actions: real time advances; a
+clock advances, within `skew` of real time; a node joins (its core as `new`
+makes it) or crashes; a node reads the configuration (`spec_read_config`);
+a node writes the next epoch, with any members; a node reads a document
+(`spec_filled` with the version read, `spec_forget` if there is none); the
+acting owner (`spec_acts`) creates a document or lands a conditional write
+(`spec_filled` with the new version); a node forgets an entry; a node
+answers from its cache (`spec_trusts`). Clocks are never read by the model
+except through the core's decisions; real time only states the hypothesis
+and orders events.
 
 Proved, with `grace > ttl + 4 skew`: two live nodes never both act as owner
 of one origin (`exclusion`), and a node that answers from its cache holds
 the bucket's current version (`currency`); both as corollaries of an
 invariant that `init` establishes and every action preserves, assembled
 into `spec ⊨ □inv` by the embedding's induction rule. A witness shows the
-invariant is not vacuous. 157 items, no admits.
+invariant is not vacuous. 167 items, no admits.
 
-What the proof covers: the membership and cache rules of `nodes.rs` and
-`applier.rs`, as stated in the model. What it does not yet: the refinement
-of the running node to the model (the node is async Rust; Anvil's answer is
-a sans-I/O step function under a trusted shim), the S3 model's fidelity,
-and liveness. Those are the next layers, in that order.
+What the proof covers, and how it reaches the running code: the theorems
+are about the fleet model; the model's node actions are the core's
+specification functions; the core's executable functions are verified to
+compute those functions; `echod-server` keeps its membership and cache
+state in the core and takes its decisions from it. That is Anvil's shape
+of refinement: functional, per step, with no simulation argument, and with
+a trusted shim. The shim here is `nodes.rs` and `applier.rs`: that the
+configuration handed to `read_config` is the object read, that every
+version read or written is reported with `filled` and every drop with
+`forget`, that the clock passed is the fleet's time, and that the bucket
+behaves as the model's (conditional writes, one version per object). The
+S3 model's fidelity and liveness are not proved.
 
 ### The SDKs
 

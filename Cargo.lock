@@ -1094,6 +1094,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "clap",
+ "echod-fleet",
  "echod-kernel",
  "reqwest",
  "resonate-core",

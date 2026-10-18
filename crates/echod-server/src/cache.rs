@@ -53,8 +53,10 @@ pub trait Cache: Send + Sync {
     /// The document cached for `origin`, and a touch.
     fn get(&self, origin: &str) -> Option<Cached>;
 
-    /// Remember `cached` for `origin`, replacing what was there.
-    fn put(&self, origin: &str, cached: Cached);
+    /// Remember `cached` for `origin`, replacing what was there. Returns the
+    /// origins evicted to make room, so whoever keeps count of the entries
+    /// can forget them too.
+    fn put(&self, origin: &str, cached: Cached) -> Vec<String>;
 
     /// Drop the document cached for `origin`. The armed key stays: it names
     /// an object in the store, and a document read afresh still owes it.
@@ -131,16 +133,20 @@ impl Inner {
         Some(e.cached)
     }
 
-    /// Evict, oldest first, until the bounds hold, keeping `keep`.
-    fn trim(&mut self, keep: &str, max_entries: usize, max_bytes: u64) {
+    /// Evict, oldest first, until the bounds hold, keeping `keep`. Returns
+    /// what was evicted.
+    fn trim(&mut self, keep: &str, max_entries: usize, max_bytes: u64) -> Vec<String> {
+        let mut evicted = Vec::new();
         while self.entries.len() > max_entries || self.bytes > max_bytes {
-            let Some((_, oldest)) = self.order.iter().next().map(|(t, o)| (*t, o.clone())) else { return };
+            let Some((_, oldest)) = self.order.iter().next().map(|(t, o)| (*t, o.clone())) else { break };
             if oldest == keep {
-                return;
+                break;
             }
             self.remove(&oldest);
             self.stats.evictions += 1;
+            evicted.push(oldest);
         }
+        evicted
     }
 }
 
@@ -158,7 +164,7 @@ impl Cache for MemoryCache {
         hit
     }
 
-    fn put(&self, origin: &str, cached: Cached) {
+    fn put(&self, origin: &str, cached: Cached) -> Vec<String> {
         let mut i = self.lock();
         i.remove(origin);
         i.tick += 1;
@@ -166,7 +172,7 @@ impl Cache for MemoryCache {
         i.bytes += cached.weight();
         i.entries.insert(origin.to_string(), Entry { cached, tick });
         i.order.insert(tick, origin.to_string());
-        i.trim(origin, self.max_entries, self.max_bytes);
+        i.trim(origin, self.max_entries, self.max_bytes)
     }
 
     fn forget(&self, origin: &str) {
@@ -209,7 +215,7 @@ mod tests {
         c.put("a", doc(1, "1"));
         c.put("b", doc(1, "1"));
         assert!(c.get("a").is_some()); // a is now newer than b
-        c.put("c", doc(1, "1"));
+        assert_eq!(c.put("c", doc(1, "1")), vec!["b".to_string()]);
         assert!(c.get("b").is_none(), "b was the least recently used");
         assert!(c.get("a").is_some());
         assert!(c.get("c").is_some());

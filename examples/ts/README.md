@@ -6,6 +6,7 @@ push: an HTTP listener plugged into the SDK's `HttpNetwork` as its adapter.
 
 ```shell
 cargo run --release -p echod-server          # in-memory store, :8001
+until curl -sf localhost:8001/ready; do sleep 1; done   # a node serves once it acts: a TTL and four skews after it starts
 cd examples/ts && npm install
 npm run hello
 npm run fibonacci -- --mode mix --n 8

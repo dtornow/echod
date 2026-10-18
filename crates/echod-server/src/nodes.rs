@@ -12,26 +12,31 @@
 //! for the grace; and it trusts a cache entry only if the entry was filled
 //! while it was acting. Writes are conditional on the version read.
 //!
-//! These are the rules `echod-fleet` proves exclusive and sound under
-//! bounded clock skew with `grace > ttl + 4 skew`: a node in an older epoch
-//! is fresh for at most a TTL after a read that preceded the newer epoch; a
-//! node in the newer epoch acts only a grace after it first read it; the
-//! windows do not meet. Membership is decided on the fleet's time, the
-//! later of a node's clock and the latest announcement it listed, which
-//! absorbs a clock that steps back or runs slow.
+//! The state behind those rules, and the decisions, are not here: they are
+//! `echod_fleet::node::core::NodeCore`, executable Rust verified to compute
+//! the fleet model's specification functions step for step, the model
+//! `echod-fleet` proves exclusive and sound under bounded clock skew with
+//! `grace > ttl + 4 skew`. This module is the trusted shim around that
+//! core: it announces, lists, reads the configuration object and hands the
+//! result to `read_config`; it asks `acts` and `trusts`; it reports every
+//! document version read or written with `filled`, and every entry dropped
+//! with `forget`. Membership is decided on the fleet's time, the later of a
+//! node's clock and the latest announcement it listed, which absorbs a
+//! clock that steps back or runs slow.
 //!
 //! Ownership is `hash(key) mod n` over the members in order. A load balancer
 //! that applies the same function over `nodes/members` sends every request
 //! for an origin to the node that caches it and fires its deadlines.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use echod_fleet::node::core::NodeCore;
 use serde::{Deserialize, Serialize};
 
-use crate::keys::{fnv1a, KeySpace};
-use crate::store::Store;
+use crate::keys::KeySpace;
+use crate::store::{Etag, Store};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Announcement {
@@ -48,7 +53,7 @@ pub struct Members {
     pub members: Vec<String>,
 }
 
-/// What a node holds of the membership.
+/// A snapshot of what a node holds of the membership, for whoever looks.
 #[derive(Debug, Clone, Default)]
 pub struct Membership {
     /// Every node announced within a TTL, as of the last listing.
@@ -57,7 +62,7 @@ pub struct Membership {
     pub epoch: u64,
     pub members: Vec<String>,
     /// The ETag of the configuration object read, for the next conditional put.
-    pub etag: Option<crate::store::Etag>,
+    pub etag: Option<Etag>,
     /// When the configuration was last read, and when the epoch held was first read.
     pub last_read: u64,
     pub held: u64,
@@ -65,19 +70,18 @@ pub struct Membership {
 }
 
 impl Membership {
-    /// The member that owns `key`: the one at `hash(key) mod n` in id order.
-    pub fn owner_of(&self, key: &str) -> Option<&Announcement> {
-        let n = self.members.len() as u64;
-        if n == 0 {
-            return None;
-        }
-        self.nodes.get(&self.members[(fnv1a(key) % n) as usize])
-    }
-
     /// The member ids in order: the table a load balancer needs.
     pub fn ids(&self) -> Vec<String> {
         self.members.clone()
     }
+}
+
+/// What the shim keeps beside the core: who announced, and the version of
+/// the configuration object read.
+#[derive(Default)]
+struct Listing {
+    nodes: BTreeMap<String, Announcement>,
+    etag: Option<Etag>,
 }
 
 pub struct Nodes {
@@ -88,7 +92,9 @@ pub struct Nodes {
     ttl: u64,
     /// The grace: `ttl + 4 skew`, and one more.
     grace: u64,
-    members: RwLock<Membership>,
+    /// The verified node: its view of the configuration and its cache's versions.
+    core: Mutex<NodeCore>,
+    listing: RwLock<Listing>,
     clock: Arc<dyn crate::env::Clock>,
     /// The latest instant any announcement carried.
     fleet_at: std::sync::atomic::AtomicU64,
@@ -98,9 +104,15 @@ pub struct Nodes {
 
 impl Nodes {
     pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, skew: u64, clock: Arc<dyn crate::env::Clock>) -> Self {
+        let grace = ttl + 4 * skew + 1;
+        let core = NodeCore::new(id.clone(), ttl, grace);
         let me = Announcement { id, url, at: 0 };
         let (generation, _) = tokio::sync::watch::channel(0);
-        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace: ttl + 4 * skew + 1, members: RwLock::new(Membership::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace, core: Mutex::new(core), listing: RwLock::new(Listing::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+    }
+
+    fn core(&self) -> std::sync::MutexGuard<'_, NodeCore> {
+        self.core.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn grace(&self) -> u64 {
@@ -139,40 +151,65 @@ impl Nodes {
     }
 
     pub fn members(&self) -> Membership {
-        self.members.read().unwrap_or_else(|e| e.into_inner()).clone()
+        let l = self.listing.read().unwrap_or_else(|e| e.into_inner());
+        let c = self.core();
+        Membership { nodes: l.nodes.clone(), epoch: c.epoch, members: c.members.clone(), etag: l.etag.clone(), last_read: c.last_read, held: c.held, read_any: c.read_any }
     }
 
     /// Is this node the owner of `key` per the members it holds? No while
     /// nobody is a member yet.
     pub fn owns(&self, key: &str) -> bool {
-        self.owner(key).map(|o| o.id == self.id()).unwrap_or(false)
+        self.owner_id(key).map(|o| o == self.id()).unwrap_or(false)
     }
 
+    /// The member that owns `key`: `hash(key) mod n` over the members in
+    /// order, as the core computes it.
+    pub fn owner_id(&self, key: &str) -> Option<String> {
+        self.core().owner(key)
+    }
+
+    /// The owner of `key`, with its announcement; `None` while the owner is
+    /// not among the nodes listed, or nobody is a member yet.
     pub fn owner(&self, key: &str) -> Option<Announcement> {
-        self.members().owner_of(key).cloned()
+        let id = self.owner_id(key)?;
+        if id == self.id() {
+            return Some(self.me());
+        }
+        self.listing.read().unwrap_or_else(|e| e.into_inner()).nodes.get(&id).cloned()
     }
 
     /// Whether this node's view of the membership is young enough to act on.
     pub fn fresh(&self, now: u64) -> bool {
-        let m = self.members();
-        m.read_any && m.last_read + self.ttl >= now
+        self.core().fresh(now)
     }
 
     /// Does this node act as owner of `key` right now: fresh, the owner per
     /// its members, and holding its epoch for the grace? The model's `acts`.
     pub fn acts(&self, key: &str, now: u64) -> bool {
-        let m = self.members();
-        m.read_any && m.last_read + self.ttl >= now && m.held + self.grace <= now && m.owner_of(key).map(|o| o.id == self.id()).unwrap_or(false)
+        self.core().acts(key, now)
     }
 
-    /// The instant from which a cache entry filled by this node may be
-    /// trusted, while it acts: the grace after it first read its epoch. The
-    /// model's `trusts`. `None` while it does not act on `key`.
-    pub fn trust_after(&self, key: &str, now: u64) -> Option<u64> {
-        if !self.acts(key, now) {
+    /// May this node answer `origin` from its cache: does it act on it, and
+    /// was the version it remembers filled while it acted? The model's
+    /// `trusts`. The version it remembers is returned, for the caller to
+    /// match against the body it holds.
+    pub fn trusts(&self, origin: &str, now: u64) -> Option<Etag> {
+        let c = self.core();
+        if !c.trusts(origin, now) {
             return None;
         }
-        Some(self.members().held + self.grace)
+        c.entry(origin).map(|e| Etag(e.etag.clone()))
+    }
+
+    /// This node read `origin` at version `etag` from the bucket, or wrote
+    /// it there, at `now`.
+    pub fn filled(&self, origin: &str, etag: &Etag, now: u64) {
+        self.core().filled(origin, etag.0.clone(), now);
+    }
+
+    /// This node dropped what it held of `origin`.
+    pub fn forget(&self, origin: &str) {
+        self.core().forget(origin);
     }
 
     /// Announce this node, list the others, read the configuration, and
@@ -210,21 +247,19 @@ impl Nodes {
             None => (Members::default(), None),
         };
         let now = self.now();
-        let mut changed = false;
-        {
-            let mut m = self.members.write().unwrap_or_else(|e| e.into_inner());
-            let same = m.read_any && m.epoch == config.epoch;
-            if !same {
+        let changed = {
+            let mut c = self.core();
+            let changed = !(c.read_any && c.epoch == config.epoch);
+            if changed {
                 tracing::info!(epoch = config.epoch, members = ?config.members, "configuration read");
-                m.held = now;
-                changed = true;
             }
-            m.nodes = nodes.clone();
-            m.epoch = config.epoch;
-            m.members = config.members.clone();
-            m.etag = etag.clone();
-            m.last_read = now;
-            m.read_any = true;
+            c.read_config(now, config.epoch, config.members.clone());
+            changed
+        };
+        {
+            let mut l = self.listing.write().unwrap_or_else(|e| e.into_inner());
+            l.nodes = nodes.clone();
+            l.etag = etag.clone();
         }
         if changed {
             self.generation.send_modify(|g| *g += 1);

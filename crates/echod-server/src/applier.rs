@@ -6,8 +6,12 @@
 //! lost race re-reads and re-decides.
 //!
 //! The cache holds the last document this node read or wrote for an origin.
-//! The owner of an origin trusts it: every write to the origin goes through
-//! the owner. Any other node revalidates it with `If-None-Match` before use.
+//! Whether it may be used without asking the store is the verified node's
+//! decision (`Nodes::trusts`): the acting owner trusts an entry filled while
+//! it acted, since every write to the origin goes through the owner. Anyone
+//! else revalidates it with `If-None-Match` before use. Every version read
+//! or written, and every entry dropped, is reported to the node, so what it
+//! decides on is what the cache holds.
 //!
 //! A commit that moves an origin's nearest deadline writes the new deadline
 //! key before the document and removes the previous key, the one this node
@@ -95,11 +99,16 @@ impl Applier {
     }
 
     fn remember(&self, origin: &str, c: Cached) {
-        self.cache.put(origin, c);
+        let (etag, filled_at) = (c.etag.clone(), c.filled_at);
+        for evicted in self.cache.put(origin, c) {
+            self.nodes.forget(&evicted);
+        }
+        self.nodes.filled(origin, &etag, filled_at);
     }
 
     pub fn forget(&self, origin: &str) {
         self.cache.forget(origin);
+        self.nodes.forget(origin);
     }
 
     pub fn cache_stats(&self) -> crate::cache::CacheStats {
@@ -142,21 +151,15 @@ impl Applier {
         }
     }
 
-    /// May a cache entry for `origin` filled at `filled_at` be used without
-    /// asking the store? Only by the owner, with a fresh view, once the
-    /// membership has settled since the entry was filled.
-    fn trusted(&self, origin: &str, filled_at: u64, now: u64) -> bool {
-        self.nodes.trust_after(origin, now).map_or(false, |t| filled_at >= t)
-    }
-
-    /// Load an origin's document: from the cache when this node may trust
-    /// it, revalidated against the store otherwise. Cache bookkeeping is on
-    /// the fleet's time, the frame the membership rules are stated in.
+    /// Load an origin's document: from the cache when the node trusts the
+    /// version it holds, revalidated against the store otherwise. Cache
+    /// bookkeeping is on the fleet's time, the frame the membership rules
+    /// are stated in.
     async fn load(&self, origin: &str) -> Result<(Loaded, Option<Etag>), Unavailable> {
         let now = self.nodes.now();
         let key = self.keys.doc_key(origin);
         if let Some(c) = self.cached(origin) {
-            if self.trusted(origin, c.filled_at, now) {
+            if self.nodes.trusts(origin, now).as_ref() == Some(&c.etag) {
                 return Ok((c.loaded, Some(c.etag)));
             }
             match self.store.get_if_none_match(&key, &c.etag).await.map_err(unavailable)? {

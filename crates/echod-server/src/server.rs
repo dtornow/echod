@@ -443,8 +443,12 @@ impl ResonateServer for Server {
         Ok(())
     }
 
+    /// Ready to serve: the store answers, and this node acts, past the
+    /// grace since it read its configuration. A node that is not acting
+    /// yet answers 503 to every request for an origin it owns, so a load
+    /// balancer should not send it any.
     async fn ready(&self) -> bool {
-        self.store.ready().await
+        self.store.ready().await && self.acting()
     }
 
     async fn process(&self, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
