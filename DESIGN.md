@@ -136,8 +136,10 @@ membership steers three things:
   (FNV-1a). A load balancer that applies the same function sends every
   request for an origin to the node that caches it and fires its deadlines.
 - **Cache.** Each node caches the documents it read or wrote, with their
-  ETags. The owner of an origin trusts its cache, since every write to the
-  origin goes through it; any other node revalidates with `If-None-Match`.
+  ETags, least recently used out, bounded by entries and by bytes. The owner
+  of an origin trusts its cache, since every write to the origin goes through
+  it; any other node revalidates with `If-None-Match`. The cache is a port
+  (`cache.rs`); the one implementation is in memory.
 - **Timers.** Each node holds its share of the deadlines in an in-memory
   wheel and fires from it. It lists the timer prefix only at startup, when
   the set of live nodes changes (every node's share moved), and when the

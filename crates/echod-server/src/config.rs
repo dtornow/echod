@@ -61,9 +61,13 @@ pub struct Config {
     #[arg(long, env = "ECHOD_NODE_TTL", default_value_t = 15_000)]
     pub node_ttl_ms: u64,
 
-    /// Documents held in the read cache.
-    #[arg(long, env = "ECHOD_CACHE", default_value_t = 10_000)]
+    /// Documents held in the read cache, at most.
+    #[arg(long, env = "ECHOD_CACHE_ENTRIES", default_value_t = 10_000)]
     pub cache_entries: usize,
+
+    /// Bytes of documents held in the read cache, at most, by object size.
+    #[arg(long, env = "ECHOD_CACHE_BYTES", default_value_t = 256 * 1024 * 1024)]
+    pub cache_bytes: u64,
 
     /// Forward a request for an origin another node owns to that node.
     #[arg(long, env = "ECHOD_FORWARD", default_value_t = true, action = clap::ArgAction::Set)]
@@ -93,6 +97,7 @@ impl Config {
             heartbeat_ms: 500,
             node_ttl_ms: 2_000,
             cache_entries: 1_000,
+            cache_bytes: 16 * 1024 * 1024,
             forward: true,
             debug: false,
         }

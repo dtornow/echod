@@ -57,7 +57,8 @@ impl Server {
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, util::system_time_ms()))));
         let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms));
         let wheel = Arc::new(TimerWheel::new());
-        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cfg.cache_entries));
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(crate::cache::MemoryCache::new(cfg.cache_entries, cfg.cache_bytes));
+        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cache));
         let schedules = Arc::new(Schedules::new(Arc::clone(&applier)));
         let timers = Arc::new(Timers::new(Arc::clone(&store), keys, wheel, Arc::clone(&nodes), Arc::clone(&applier), schedules));
         let (shutdown, _) = tokio::sync::watch::channel(false);

@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::cache::{Armed, Cache, Cached};
+
 use echod_kernel::{Config as KernelConfig, OutboxEntry, Promise, PromiseState, Schedule, State, TaskState};
 use resonate_core::{ResonateRouter, Unavailable};
 
@@ -26,22 +28,6 @@ use crate::nodes::Nodes;
 use crate::store::{Etag, Read, Store, StoreError};
 use crate::timers::TimerWheel;
 
-/// A document this node has seen, and the version it saw.
-#[derive(Clone)]
-pub struct Cached {
-    pub loaded: Loaded,
-    pub etag: Etag,
-}
-
-/// The deadline key this node last armed for a target, so the next commit
-/// removes exactly that one. Lost with the process: the key then stays until
-/// it fires into a sweep with nothing due, which collects it.
-#[derive(Clone, Debug)]
-pub struct Armed {
-    pub at: u64,
-    pub key: String,
-}
-
 pub struct Applier {
     store: Arc<dyn Store>,
     keys: KeySpace,
@@ -50,10 +36,8 @@ pub struct Applier {
     timers: Arc<TimerWheel>,
     router: Arc<dyn ResonateRouter>,
     server_url: String,
-    cache: Mutex<HashMap<String, Cached>>,
-    armed: Mutex<HashMap<String, Armed>>,
+    cache: Arc<dyn Cache>,
     tokens: std::sync::atomic::AtomicU64,
-    cache_entries: usize,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     max_retries: u32,
 }
@@ -75,7 +59,7 @@ impl Applier {
         timers: Arc<TimerWheel>,
         router: Arc<dyn ResonateRouter>,
         server_url: String,
-        cache_entries: usize,
+        cache: Arc<dyn Cache>,
     ) -> Self {
         let seed = crate::keys::fnv1a(&format!("{}/{}", server_url, resonate_core::util::system_time_ms())) | 1;
         Self {
@@ -86,10 +70,8 @@ impl Applier {
             timers,
             router,
             server_url,
-            cache: Mutex::new(HashMap::new()),
-            armed: Mutex::new(HashMap::new()),
+            cache,
             tokens: std::sync::atomic::AtomicU64::new(seed),
-            cache_entries: cache_entries.max(1),
             locks: Mutex::new(HashMap::new()),
             max_retries: 8,
         }
@@ -105,22 +87,19 @@ impl Applier {
     }
 
     fn cached(&self, origin: &str) -> Option<Cached> {
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(origin).cloned()
+        self.cache.get(origin)
     }
 
     fn remember(&self, origin: &str, c: Cached) {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= self.cache_entries && !cache.contains_key(origin) {
-            // Crude but bounded: drop an arbitrary entry.
-            if let Some(k) = cache.keys().next().cloned() {
-                cache.remove(&k);
-            }
-        }
-        cache.insert(origin.to_string(), c);
+        self.cache.put(origin, c);
     }
 
     pub fn forget(&self, origin: &str) {
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).remove(origin);
+        self.cache.forget(origin);
+    }
+
+    pub fn cache_stats(&self) -> crate::cache::CacheStats {
+        self.cache.stats()
     }
 
     /// A token no other arm of this node has used.
@@ -129,27 +108,18 @@ impl Applier {
     }
 
     fn armed_for(&self, target: &str) -> Option<Armed> {
-        self.armed.lock().unwrap_or_else(|e| e.into_inner()).get(target).cloned()
+        self.cache.armed(target)
     }
 
     fn set_armed(&self, target: &str, a: Option<Armed>) {
-        let mut m = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        match a {
-            Some(a) => {
-                m.insert(target.to_string(), a);
-            }
-            None => {
-                m.remove(target);
-            }
-        }
+        self.cache.set_armed(target, a);
     }
 
     /// A fired key was collected: if it is the one this node remembers for
     /// `target`, forget it, so the next commit arms afresh.
     pub fn collected(&self, target: &str, key: &str) {
-        let mut m = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        if m.get(target).map(|a| a.key.as_str()) == Some(key) {
-            m.remove(target);
+        if self.cache.armed(target).map(|a| a.key) == Some(key.to_string()) {
+            self.cache.set_armed(target, None);
         }
     }
 

@@ -7,6 +7,7 @@
 //! doc.rs        an origin's document: rows in, rows out, the fold between
 //! wire.rs       the kernel's vocabulary to the protocol's and back
 //! nodes.rs      the nodes: announce, heartbeat, list, and who owns what
+//! cache.rs      what a node remembers: documents by LRU under a byte budget, armed keys
 //! applier.rs    one request against one origin, serialised and committed
 //! timers.rs     deadlines as objects in time buckets, fired by the owner from memory
 //! schedules.rs  schedules as objects, fired by the owner
@@ -16,6 +17,7 @@
 //! ```
 
 pub mod applier;
+pub mod cache;
 pub mod config;
 pub mod doc;
 pub mod gateway;
