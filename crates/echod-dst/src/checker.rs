@@ -93,7 +93,9 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
         }
         let mut new_done = done;
         new_done.set(i);
-        let key = (new_done.clone(), hash(&model::canon(&state.objects)));
+        // The same rows at a different stamp are a different state: the next
+        // step is decided no earlier than the stamp.
+        let key = (new_done.clone(), hash(&model::canon(&state.objects)) ^ stamp.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         if !seen.insert(key) {
             continue;
         }
