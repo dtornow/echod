@@ -338,7 +338,7 @@ impl Server {
                     promise_id: d.promise_id,
                     promise_timeout,
                     promise_param: wire::value_in(&d.promise_param),
-                    promise_tags: wire::pairs(&d.promise_tags),
+                    promise_tags: wire::create_tags(&d.promise_tags),
                     next_run_at: next,
                 };
                 let r = run!(Some(&id), |s: &mut k::State| s.schedule_create(&q, now, &cfg));

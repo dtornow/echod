@@ -191,6 +191,21 @@ async fn one_node(store: Arc<dyn Store>, compact: u32) {
     let m = worker.expect(Duration::from_secs(4), is_unblock("c:1")).await;
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
 
+    // a sleep, as the SDK creates one: a timer with a target. No task, and the
+    // deadline resolves it
+    let (status, _, data) = node.send("promise.create", json!({ "id": "c:2", "timeoutAt": now() + 400, "tags": { "resonate:timer": "true", "resonate:target": worker.url } })).await;
+    assert_eq!(status, 200, "{data}");
+    assert!(data["promise"]["tags"].get("resonate:target").is_none());
+    let (status, _, _) = node.send("task.get", json!({ "id": "c:2" })).await;
+    assert_eq!(status, 404);
+    let (status, _, _) = node.send("promise.register_listener", json!({ "awaited": "c:2", "address": worker.url })).await;
+    assert_eq!(status, 200);
+    let m = worker.expect(Duration::from_secs(4), is_unblock("c:2")).await;
+    assert_eq!(m["data"]["promise"]["state"], "resolved");
+    let (status, _, data) = node.send("promise.get", json!({ "id": "c:9" })).await;
+    assert_eq!(status, 404);
+    assert!(data.is_string(), "an error carries a reason: {data}");
+
     // an unclaimed task is offered again after the retry timeout
     let (status, _, _) = node.send("promise.create", json!({ "id": "d:1", "timeoutAt": far, "tags": { "resonate:target": worker.url } })).await;
     assert_eq!(status, 200);

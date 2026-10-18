@@ -149,3 +149,12 @@ itself. Every answer carries `x-echod-node`, the node that produced it.
 
 HTTP push only: a message is POSTed to the worker's URL as the protocol's
 JSON `Message`. The router maps `http` and `https` to it.
+
+### The SDKs
+
+`examples/ts` runs the TypeScript SDK against the server. The SDK's default
+message source long-polls; `examples/ts/push.ts` is the push side, an HTTP
+listener plugged into the SDK's `HttpNetwork` as its adapter, so the worker's
+address is a URL. One concession in `wire.rs`: the SDK creates a sleep as a
+timer with a target, which the specification refuses; the server drops the
+target, and the timer is armed on its own as the specification arms it.

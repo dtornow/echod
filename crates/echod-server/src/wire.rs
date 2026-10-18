@@ -15,6 +15,20 @@ pub fn pairs(m: &HashMap<String, String>) -> Vec<(String, String)> {
     v
 }
 
+/// The tags a promise is created with.
+///
+/// One concession to the SDKs as they are: a sleep is created as a timer
+/// *with* a target, because older servers armed only targeted promises and
+/// the worker dropped the task that came with it. The specification arms a
+/// timer on its own and refuses a targeted timer, so the target is dropped
+/// here: the sleep is an external promise, armed, with no task.
+pub fn create_tags(m: &HashMap<String, String>) -> Vec<(String, String)> {
+    let timer = m.get("resonate:timer").map(String::as_str) == Some("true");
+    let mut v: Vec<(String, String)> = m.iter().filter(|(k, _)| !(timer && k.as_str() == "resonate:target")).map(|(a, b)| (a.clone(), b.clone())).collect();
+    v.sort();
+    v
+}
+
 pub fn map(v: &[(String, String)]) -> HashMap<String, String> {
     v.iter().cloned().collect()
 }
@@ -103,7 +117,7 @@ pub fn create_in(d: &w::PromiseCreateData) -> Result<k::PromiseCreateReq, String
         id: d.id.clone(),
         timeout_at: nat(d.timeout_at, "timeoutAt")?,
         param: value_in(&d.param),
-        tags: pairs(&d.tags),
+        tags: create_tags(&d.tags),
     })
 }
 
@@ -142,25 +156,39 @@ pub fn message_out(e: &k::OutboxEntry, server_url: &str) -> (String, w::Message)
     (e.address.clone(), msg)
 }
 
+/// What a status says when the kernel gives no more than the number.
+pub fn reason(status: u16) -> &'static str {
+    match status {
+        400 => "Bad request",
+        403 => "Forbidden",
+        404 => "Not found",
+        409 => "Conflict",
+        422 => "Unprocessable",
+        _ => "Error",
+    }
+}
+
+/// An envelope: `data` for a successful status, a reason string otherwise,
+/// which is what every client expects of an error.
+pub fn reply(kind: &str, corr_id: &str, status: u16, data: Value) -> w::ResponseEnvelope {
+    let data = if status >= 400 { Value::String(reason(status).to_string()) } else { data };
+    w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), status as i32, data)
+}
+
 pub fn promise_res(kind: &str, corr_id: &str, r: &k::PromiseRes) -> w::ResponseEnvelope {
     match &r.promise {
-        Some(p) => w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), r.status as i32, json!({ "promise": promise_out(p) })),
-        None => w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), r.status as i32, json!({})),
+        Some(p) => reply(kind, corr_id, r.status, json!({ "promise": promise_out(p) })),
+        None => reply(kind, corr_id, r.status, json!({})),
     }
 }
 
 pub fn claim_res(kind: &str, corr_id: &str, r: &k::TaskClaimRes) -> w::ResponseEnvelope {
     match (&r.task, &r.promise) {
-        (Some(t), Some(p)) => w::ResponseEnvelope::new(
-            kind.to_string(),
-            corr_id.to_string(),
-            r.status as i32,
-            json!({ "task": task_out(t), "promise": promise_out(p), "preload": Value::Array(vec![]) }),
-        ),
-        _ => w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), r.status as i32, json!({})),
+        (Some(t), Some(p)) => reply(kind, corr_id, r.status, json!({ "task": task_out(t), "promise": promise_out(p), "preload": Value::Array(vec![]) })),
+        _ => reply(kind, corr_id, r.status, json!({})),
     }
 }
 
 pub fn status_res(kind: &str, corr_id: &str, status: u16, data: Value) -> w::ResponseEnvelope {
-    w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), status as i32, data)
+    reply(kind, corr_id, status, data)
 }
