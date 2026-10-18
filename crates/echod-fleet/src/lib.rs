@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! tla/            the temporal logic, vendored from Anvil's verus-tla
-//! spec/cluster.rs the state and the actions
+//! node/core.rs    the node: executable, with its specification, step for step
+//! spec/cluster.rs the state and the actions; a node's are the core's spec functions
 //! proof/safety.rs the invariant and its induction
 //! ```
 //!
@@ -19,6 +20,7 @@
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 
-pub mod tla;
-pub mod spec;
+pub mod node;
 pub mod proof;
+pub mod spec;
+pub mod tla;

@@ -15,6 +15,7 @@
 
 use vstd::prelude::*;
 
+use crate::node::core::*;
 use crate::spec::cluster::*;
 use crate::tla::defs::*;
 use crate::tla::rules::*;
@@ -28,31 +29,33 @@ verus! {
 /// What holds of one node.
 pub open spec fn inv_node(p: Params, s: Cluster, i: Id) -> bool {
     let n = s.nodes[i];
-    &&& n.id == i
-    &&& n.epoch <= s.store.config.epoch
+    &&& n.core.id == i
+    &&& n.core.ttl == p.ttl
+    &&& n.core.grace == p.grace
+    &&& n.core.epoch <= s.store.config.epoch
     &&& n.alive ==> clock_ok(p, s.now, n.clock)
-    &&& n.read_any ==> {
-        &&& n.last_read <= n.clock
-        &&& n.held <= n.last_read
+    &&& n.core.read_any ==> {
+        &&& n.core.last_read <= n.clock
+        &&& n.core.held <= n.core.last_read
         &&& n.last_read_real <= s.now
         &&& n.held_real <= n.last_read_real
-        &&& n.last_read <= n.last_read_real + p.skew
-        &&& n.held + p.skew >= n.held_real
+        &&& n.core.last_read <= n.last_read_real + p.skew
+        &&& n.core.held + p.skew >= n.held_real
         // the epoch it holds was written before it first read it
-        &&& n.held_real >= s.store.written[n.epoch]
+        &&& n.held_real >= s.store.written[n.core.epoch]
         // an epoch it does not hold yet was written after its last read
-        &&& n.epoch < s.store.config.epoch ==> n.last_read_real <= s.store.written[n.epoch + 1]
+        &&& n.core.epoch < s.store.config.epoch ==> n.last_read_real <= s.store.written[n.core.epoch + 1]
         // the members it holds are the epoch's
-        &&& n.epoch == s.store.config.epoch ==> n.members == s.store.config.members
+        &&& n.core.epoch == s.store.config.epoch ==> n.core.members == s.store.config.members
     }
-    &&& forall |o: Origin| #[trigger] n.cache.contains_key(o) ==> n.cache[o].filled_at <= n.clock
+    &&& forall |o: Origin| #[trigger] n.core.cache.contains_key(o) ==> n.core.cache[o].filled_at <= n.clock
 }
 
 /// Two nodes holding one epoch hold its members.
 pub open spec fn inv_members(s: Cluster) -> bool {
     forall |i: Id, j: Id| s.nodes.contains_key(i) && s.nodes.contains_key(j)
-        && s.nodes[i].read_any && s.nodes[j].read_any && s.nodes[i].epoch == s.nodes[j].epoch
-        ==> #[trigger] s.nodes[i].members == #[trigger] s.nodes[j].members
+        && s.nodes[i].core.read_any && s.nodes[j].core.read_any && s.nodes[i].core.epoch == s.nodes[j].core.epoch
+        ==> #[trigger] s.nodes[i].core.members == #[trigger] s.nodes[j].core.members
 }
 
 /// The epochs' write times: one per epoch, in order, none in the future.
@@ -67,18 +70,18 @@ pub open spec fn inv_written(s: Cluster) -> bool {
 /// bucket's epoch, nobody else is the owner.
 pub open spec fn inv_entry_current_epoch(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     let n = s.nodes[i];
-    n.alive && n.read_any && n.epoch == s.store.config.epoch && owner(n.members, o) == Some(i)
-        && n.cache.contains_key(o) && n.cache[o].filled_at >= n.held + p.grace
-        ==> n.cache[o].version == s.store.version(o)
+    n.alive && n.core.read_any && n.core.epoch == s.store.config.epoch && owner(n.core.members, o) == Some(i)
+        && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace
+        ==> Some(n.core.cache[o].etag) == s.store.etag(o)
 }
 
 /// The same for a node in an older epoch, while it is fresh: the newer
 /// epoch's owner has not begun to act.
 pub open spec fn inv_entry_old_epoch(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     let n = s.nodes[i];
-    n.alive && n.read_any && n.epoch < s.store.config.epoch && fresh(p, n) && owner(n.members, o) == Some(i)
-        && n.cache.contains_key(o) && n.cache[o].filled_at >= n.held + p.grace
-        ==> n.cache[o].version == s.store.version(o)
+    n.alive && n.core.read_any && n.core.epoch < s.store.config.epoch && fresh(n) && owner(n.core.members, o) == Some(i)
+        && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace
+        ==> Some(n.core.cache[o].etag) == s.store.etag(o)
 }
 
 pub open spec fn inv(p: Params) -> spec_fn(Cluster) -> bool {
@@ -129,8 +132,8 @@ pub proof fn exclusion(p: Params, s: Cluster, i: Id, j: Id, o: Origin)
         inv(p)(s),
         s.nodes.contains_key(i),
         s.nodes.contains_key(j),
-        acts(p, s.nodes[i], o),
-        acts(p, s.nodes[j], o),
+        acts(s.nodes[i], o),
+        acts(s.nodes[j], o),
     ensures
         i == j,
 {
@@ -138,9 +141,9 @@ pub proof fn exclusion(p: Params, s: Cluster, i: Id, j: Id, o: Origin)
     let m = s.nodes[j];
     assert(inv_node(p, s, i));
     assert(inv_node(p, s, j));
-    if n.epoch == m.epoch {
-        assert(n.members == m.members);
-    } else if n.epoch < m.epoch {
+    if n.core.epoch == m.core.epoch {
+        assert(n.core.members == m.core.members);
+    } else if n.core.epoch < m.core.epoch {
         timing(p, s, i, j);
     } else {
         timing(p, s, j, i);
@@ -155,10 +158,10 @@ proof fn timing(p: Params, s: Cluster, i: Id, j: Id)
         s.nodes.contains_key(i),
         s.nodes.contains_key(j),
         s.nodes[i].alive, s.nodes[j].alive,
-        s.nodes[i].read_any, s.nodes[j].read_any,
-        s.nodes[i].epoch < s.nodes[j].epoch,
-        fresh(p, s.nodes[i]),
-        s.nodes[j].held + p.grace <= s.nodes[j].clock,
+        s.nodes[i].core.read_any, s.nodes[j].core.read_any,
+        s.nodes[i].core.epoch < s.nodes[j].core.epoch,
+        fresh(s.nodes[i]),
+        s.nodes[j].core.held + p.grace <= s.nodes[j].clock,
     ensures
         false,
 {
@@ -166,13 +169,13 @@ proof fn timing(p: Params, s: Cluster, i: Id, j: Id)
     let m = s.nodes[j];
     assert(inv_node(p, s, i));
     assert(inv_node(p, s, j));
-    // n read before epoch n.epoch + 1 was written, which is no later than
+    // n read before epoch n.core.epoch + 1 was written, which is no later than
     // m's epoch was written, which is no later than m first read it.
-    assert(s.store.written[n.epoch + 1] <= s.store.written[m.epoch]);
+    assert(s.store.written[n.core.epoch + 1] <= s.store.written[m.core.epoch]);
     assert(n.last_read_real <= m.held_real);
     // n is fresh: real time is within ttl + 2 skew of its last read.
     assert(s.now <= n.clock + p.skew);
-    assert(n.clock <= n.last_read + p.ttl);
+    assert(n.clock <= n.core.last_read + p.ttl);
     assert(s.now <= n.last_read_real + p.ttl + 2 * p.skew);
     // m has held for the grace: real time is at least grace - 2 skew past its first read.
     assert(m.clock <= s.now + p.skew);
@@ -185,9 +188,9 @@ pub proof fn currency(p: Params, s: Cluster, i: Id, o: Origin)
     requires
         inv(p)(s),
         s.nodes.contains_key(i),
-        trusts(p, s.nodes[i], o),
+        trusts(s.nodes[i], o),
     ensures
-        s.nodes[i].cache[o].version == s.store.version(o),
+        Some(s.nodes[i].core.cache[o].etag) == s.store.etag(o),
 {
     assert(inv_node(p, s, i));
     assert(inv_entry_current_epoch(p, s, i, o));
@@ -317,13 +320,13 @@ proof fn lemma_read_config(p: Params, s: Cluster, s2: Cluster, i: Id)
         assert(inv_entry_old_epoch(p, s, k, o));
         assert(inv_node(p, s, k));
         if k == i {
-            if n.read_any && n.epoch == s.store.config.epoch {
+            if n.core.read_any && n.core.epoch == s.store.config.epoch {
                 // held unchanged; the entry condition is as before
             } else {
                 // held is now the clock: no entry was filled after held + grace
-                if n2.cache.contains_key(o) {
-                    assert(n2.cache[o].filled_at <= n2.clock);
-                    assert(n2.held == n2.clock);
+                if n2.core.cache.contains_key(o) {
+                    assert(n2.core.cache[o].filled_at <= n2.clock);
+                    assert(n2.core.held == n2.clock);
                 }
             }
         }
@@ -333,13 +336,13 @@ proof fn lemma_read_config(p: Params, s: Cluster, s2: Cluster, i: Id)
         assert(inv_entry_old_epoch(p, s, k, o));
         assert(inv_node(p, s, k));
         if k == i {
-            if n.read_any && n.epoch == s.store.config.epoch {
+            if n.core.read_any && n.core.epoch == s.store.config.epoch {
                 // held unchanged; the entry condition is as before
             } else {
                 // held is now the clock: no entry was filled after held + grace
-                if n2.cache.contains_key(o) {
-                    assert(n2.cache[o].filled_at <= n2.clock);
-                    assert(n2.held == n2.clock);
+                if n2.core.cache.contains_key(o) {
+                    assert(n2.core.cache[o].filled_at <= n2.clock);
+                    assert(n2.core.held == n2.clock);
                 }
             }
         }
@@ -368,13 +371,13 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
     assert forall |k: Id| #[trigger] s2.nodes.contains_key(k) implies inv_node(p, s2, k) by {
         assert(inv_node(p, s, k));
         let n = s.nodes[k];
-        if n.read_any {
-            assert(s2.store.written[n.epoch] == s.store.written[n.epoch]);
-            if n.epoch < s2.store.config.epoch {
-                if n.epoch + 1 == e {
+        if n.core.read_any {
+            assert(s2.store.written[n.core.epoch] == s.store.written[n.core.epoch]);
+            if n.core.epoch < s2.store.config.epoch {
+                if n.core.epoch + 1 == e {
                     assert(s2.store.written[e] == s.now);
                 } else {
-                    assert(s2.store.written[n.epoch + 1] == s.store.written[n.epoch + 1]);
+                    assert(s2.store.written[n.core.epoch + 1] == s.store.written[n.core.epoch + 1]);
                 }
             }
         }
@@ -427,8 +430,8 @@ proof fn lemma_read_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assemble(p, s2);
 }
 
-proof fn lemma_write(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
-    requires inv(p)(s), write(p, s, i, o) == Some(s2),
+proof fn lemma_write(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), write(s, i, o, e) == Some(s2),
     ensures inv(p)(s2),
 {
     disassemble(p, s);
@@ -447,26 +450,26 @@ proof fn lemma_write(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
             // Another node's entry for the written origin: it cannot have
             // been filled by an owner in a live window, since the writer is
             // the owner now.
-            if n.alive && n.read_any && owner(n.members, o) == Some(k) && n.cache.contains_key(o) && n.cache[o].filled_at >= n.held + p.grace {
+            if n.alive && n.core.read_any && owner(n.core.members, o) == Some(k) && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace {
                 // n holds the epoch for the grace (its entry was filled after
                 // held + grace, and filled_at <= clock)
-                assert(n.held + p.grace <= n.clock);
-                if n.epoch == s.store.config.epoch {
+                assert(n.core.held + p.grace <= n.clock);
+                if n.core.epoch == s.store.config.epoch {
                     // same epoch as the writer: same members, one owner
-                    assert(w.epoch == s.store.config.epoch || w.epoch < s.store.config.epoch);
-                    if w.epoch == s.store.config.epoch {
-                        assert(w.members == n.members);
+                    assert(w.core.epoch == s.store.config.epoch || w.core.epoch < s.store.config.epoch);
+                    if w.core.epoch == s.store.config.epoch {
+                        assert(w.core.members == n.core.members);
                         assert(false);
                     } else {
                         // the writer is fresh in an older epoch; n holds the newer for the grace
                         timing(p, s, i, k);
                     }
-                } else if fresh(p, n) {
+                } else if fresh(n) {
                     // n fresh in an older epoch than the bucket's
-                    if w.epoch == n.epoch {
-                        assert(w.members == n.members);
+                    if w.core.epoch == n.core.epoch {
+                        assert(w.core.members == n.core.members);
                         assert(false);
-                    } else if w.epoch < n.epoch {
+                    } else if w.core.epoch < n.core.epoch {
                         timing(p, s, i, k);
                     } else {
                         timing(p, s, k, i);
@@ -485,26 +488,26 @@ proof fn lemma_write(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
             // Another node's entry for the written origin: it cannot have
             // been filled by an owner in a live window, since the writer is
             // the owner now.
-            if n.alive && n.read_any && owner(n.members, o) == Some(k) && n.cache.contains_key(o) && n.cache[o].filled_at >= n.held + p.grace {
+            if n.alive && n.core.read_any && owner(n.core.members, o) == Some(k) && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace {
                 // n holds the epoch for the grace (its entry was filled after
                 // held + grace, and filled_at <= clock)
-                assert(n.held + p.grace <= n.clock);
-                if n.epoch == s.store.config.epoch {
+                assert(n.core.held + p.grace <= n.clock);
+                if n.core.epoch == s.store.config.epoch {
                     // same epoch as the writer: same members, one owner
-                    assert(w.epoch == s.store.config.epoch || w.epoch < s.store.config.epoch);
-                    if w.epoch == s.store.config.epoch {
-                        assert(w.members == n.members);
+                    assert(w.core.epoch == s.store.config.epoch || w.core.epoch < s.store.config.epoch);
+                    if w.core.epoch == s.store.config.epoch {
+                        assert(w.core.members == n.core.members);
                         assert(false);
                     } else {
                         // the writer is fresh in an older epoch; n holds the newer for the grace
                         timing(p, s, i, k);
                     }
-                } else if fresh(p, n) {
+                } else if fresh(n) {
                     // n fresh in an older epoch than the bucket's
-                    if w.epoch == n.epoch {
-                        assert(w.members == n.members);
+                    if w.core.epoch == n.core.epoch {
+                        assert(w.core.members == n.core.members);
                         assert(false);
-                    } else if w.epoch < n.epoch {
+                    } else if w.core.epoch < n.core.epoch {
                         timing(p, s, i, k);
                     } else {
                         timing(p, s, k, i);
@@ -518,8 +521,99 @@ proof fn lemma_write(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assemble(p, s2);
 }
 
-proof fn lemma_write_fail(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
-    requires inv(p)(s), write_fail(s, i, o) == Some(s2),
+proof fn lemma_create(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), create(s, i, o, e) == Some(s2),
+    ensures inv(p)(s2),
+{
+    disassemble(p, s);
+    let w = s.nodes[i];
+    assert(inv_node(p, s, i));
+    assert forall |k: Id| #[trigger] s2.nodes.contains_key(k) implies inv_node(p, s2, k) by {
+        assert(inv_node(p, s, k));
+    }
+    assert forall |k: Id, q: Origin| #[trigger] s2.nodes.contains_key(k) implies #[trigger] inv_entry_current_epoch(p, s2, k, q) by {
+        assert(inv_entry_current_epoch(p, s, k, q));
+        assert(inv_entry_old_epoch(p, s, k, q));
+        assert(inv_node(p, s, k));
+        assert(inv_node(p, s, k));
+        let n = s.nodes[k];
+        if q == o && k != i {
+            // Another node's entry for the written origin: it cannot have
+            // been filled by an owner in a live window, since the writer is
+            // the owner now.
+            if n.alive && n.core.read_any && owner(n.core.members, o) == Some(k) && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace {
+                // n holds the epoch for the grace (its entry was filled after
+                // held + grace, and filled_at <= clock)
+                assert(n.core.held + p.grace <= n.clock);
+                if n.core.epoch == s.store.config.epoch {
+                    // same epoch as the writer: same members, one owner
+                    assert(w.core.epoch == s.store.config.epoch || w.core.epoch < s.store.config.epoch);
+                    if w.core.epoch == s.store.config.epoch {
+                        assert(w.core.members == n.core.members);
+                        assert(false);
+                    } else {
+                        // the writer is fresh in an older epoch; n holds the newer for the grace
+                        timing(p, s, i, k);
+                    }
+                } else if fresh(n) {
+                    // n fresh in an older epoch than the bucket's
+                    if w.core.epoch == n.core.epoch {
+                        assert(w.core.members == n.core.members);
+                        assert(false);
+                    } else if w.core.epoch < n.core.epoch {
+                        timing(p, s, i, k);
+                    } else {
+                        timing(p, s, k, i);
+                    }
+                }
+            }
+        }
+    }
+    assert forall |k: Id, q: Origin| #[trigger] s2.nodes.contains_key(k) implies #[trigger] inv_entry_old_epoch(p, s2, k, q) by {
+        assert(inv_entry_current_epoch(p, s, k, q));
+        assert(inv_entry_old_epoch(p, s, k, q));
+        assert(inv_node(p, s, k));
+        assert(inv_node(p, s, k));
+        let n = s.nodes[k];
+        if q == o && k != i {
+            // Another node's entry for the written origin: it cannot have
+            // been filled by an owner in a live window, since the writer is
+            // the owner now.
+            if n.alive && n.core.read_any && owner(n.core.members, o) == Some(k) && n.core.cache.contains_key(o) && n.core.cache[o].filled_at >= n.core.held + p.grace {
+                // n holds the epoch for the grace (its entry was filled after
+                // held + grace, and filled_at <= clock)
+                assert(n.core.held + p.grace <= n.clock);
+                if n.core.epoch == s.store.config.epoch {
+                    // same epoch as the writer: same members, one owner
+                    assert(w.core.epoch == s.store.config.epoch || w.core.epoch < s.store.config.epoch);
+                    if w.core.epoch == s.store.config.epoch {
+                        assert(w.core.members == n.core.members);
+                        assert(false);
+                    } else {
+                        // the writer is fresh in an older epoch; n holds the newer for the grace
+                        timing(p, s, i, k);
+                    }
+                } else if fresh(n) {
+                    // n fresh in an older epoch than the bucket's
+                    if w.core.epoch == n.core.epoch {
+                        assert(w.core.members == n.core.members);
+                        assert(false);
+                    } else if w.core.epoch < n.core.epoch {
+                        timing(p, s, i, k);
+                    } else {
+                        timing(p, s, k, i);
+                    }
+                }
+            }
+        }
+    }
+    assert(inv_written(s2));
+    assert(inv_members(s2));
+    assemble(p, s2);
+}
+
+proof fn lemma_forget(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires inv(p)(s), forget(s, i, o) == Some(s2),
     ensures inv(p)(s2),
 {
     disassemble(p, s);
@@ -554,8 +648,9 @@ pub proof fn lemma_next(p: Params, s: Cluster, s2: Cluster)
         Step::ReadConfig(i) => lemma_read_config(p, s, s2, i),
         Step::Propose(i, m) => lemma_propose(p, s, s2, i, m),
         Step::ReadStore(i, o) => lemma_read_store(p, s, s2, i, o),
-        Step::Write(i, o) => lemma_write(p, s, s2, i, o),
-        Step::WriteFail(i, o) => lemma_write_fail(p, s, s2, i, o),
+        Step::Create(i, o, e) => lemma_create(p, s, s2, i, o, e),
+        Step::Write(i, o, e) => lemma_write(p, s, s2, i, o, e),
+        Step::Forget(i, o) => lemma_forget(p, s, s2, i, o),
         Step::ReadCached(i, o) => {}
     }
 }
@@ -587,28 +682,29 @@ verus! {
 /// on and trusts its cache of an origin, and satisfies the invariant.
 pub proof fn not_vacuous(p: Params, o: Origin)
     requires p.wf(),
-    ensures exists |s: Cluster| #[trigger] inv(p)(s) && s.nodes.contains_key(1) && trusts(p, s.nodes[1], o),
+    ensures exists |s: Cluster| #[trigger] inv(p)(s) && s.nodes.contains_key(seq!['n']) && trusts(s.nodes[seq!['n']], o),
 {
     let now = p.grace;
-    let n = Node {
-        id: 1, alive: true, clock: now, read_any: true, epoch: 0, members: seq![1nat],
-        last_read: now, held: 0, last_read_real: now, held_real: 0,
-        cache: Map::empty().insert(o, Cached { version: 0, filled_at: now }),
+    let core = ANode {
+        id: seq!['n'], ttl: p.ttl, grace: p.grace, read_any: true, epoch: 0, members: seq![seq!['n']],
+        last_read: now, held: 0,
+        cache: Map::empty().insert(o, AEntry { etag: seq!['a'], filled_at: now }),
     };
+    let n = Node { core, alive: true, clock: now, last_read_real: now, held_real: 0 };
     let s = Cluster {
         now,
-        nodes: Map::empty().insert(1, n),
-        store: Store { docs: Map::empty(), config: Config { epoch: 0, members: seq![1nat] }, written: Map::empty().insert(0, 0) },
+        nodes: Map::empty().insert(seq!['n'], n),
+        store: Store { docs: Map::empty().insert(o, seq!['a']), config: Config { epoch: 0, members: seq![seq!['n']] }, written: Map::empty().insert(0, 0) },
     };
-    assert(owner(seq![1nat], o) == Some(1nat));
-    assert(inv_node(p, s, 1));
+    assert(owner(seq![seq!['n']], o) == Some(seq!['n']));
+    assert(inv_node(p, s, seq!['n']));
     assert(inv_written(s));
     assert(inv_members(s));
     assert forall |i: Id| #[trigger] s.nodes.contains_key(i) implies inv_node(p, s, i) by {}
     assert forall |i: Id, q: Origin| #[trigger] s.nodes.contains_key(i) implies #[trigger] inv_entry_current_epoch(p, s, i, q) by {}
     assert forall |i: Id, q: Origin| #[trigger] s.nodes.contains_key(i) implies #[trigger] inv_entry_old_epoch(p, s, i, q) by {}
     assemble(p, s);
-    assert(trusts(p, s.nodes[1], o));
+    assert(trusts(s.nodes[seq!['n']], o));
 }
 
 } // verus!
