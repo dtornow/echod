@@ -13,8 +13,11 @@
 //!
 //! Firing a key sweeps its target, which is idempotent; the key is deleted
 //! only once the sweep has committed, since until then it is the only record
-//! that the deadline exists. A key for a target this node no longer owns is
-//! dropped from the wheel unfired; its owner lists it.
+//! that the deadline exists — and only by the node that armed it, or after
+//! a sweep that found nothing due has rewritten the document, which fences
+//! any commit in flight that armed the key (`applier.rs`). A key that stays
+//! fires again. A key for a target this node no longer owns is dropped from
+//! the wheel unfired; its owner lists it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::applier::Applier;
+use crate::applier::{Applier, Fired, FiredKey};
 use crate::keys::{KeySpace, TimerEntry};
 use crate::nodes::Nodes;
 use crate::schedules::Schedules;
@@ -216,18 +219,23 @@ impl Timers {
             return;
         }
         let swept = match &entry {
-            TimerEntry::Origin { origin, .. } => self.applier.sweep(origin, now).await,
-            TimerEntry::Schedule { id, deadline, .. } => self.schedules.fire(id, *deadline, now).await,
+            TimerEntry::Origin { origin, deadline, token, by } => {
+                let fired = FiredKey { key: echod_fleet::node::core::Key { origin: origin.clone(), at: *deadline, token: *token }, by: by.clone() };
+                self.applier.sweep(origin, now, fired).await
+            }
+            TimerEntry::Schedule { id, deadline, .. } => self.schedules.fire(id, *deadline, now).await.map(|_| Fired::Kept),
         };
         match swept {
-            Ok(()) => {
-                let target = match &entry {
-                    TimerEntry::Origin { origin, .. } => origin.clone(),
-                    TimerEntry::Schedule { id, .. } => format!("sched:{id}"),
-                };
-                self.applier.collected(&target, key);
-                if let Err(e) = self.store.delete(key).await {
-                    tracing::debug!(key = %key, error = %e, "timer key not collected");
+            Ok(Fired::Deleted) => {}
+            Ok(Fired::Kept) => {
+                if let TimerEntry::Schedule { .. } = &entry {
+                    // A schedule's key: the schedule moved on, or was fired already.
+                    if let Err(e) = self.store.delete(key).await {
+                        tracing::debug!(key = %key, error = %e, "timer key not collected");
+                    }
+                } else {
+                    // Another node's key, or a delete that failed: it is collected on its next firing.
+                    self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
                 }
             }
             Err(e) => {

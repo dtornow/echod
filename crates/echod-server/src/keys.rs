@@ -25,8 +25,8 @@ pub struct KeySpace {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimerEntry {
-    Origin { deadline: u64, origin: String, token: u64 },
-    Schedule { deadline: u64, id: String, token: u64 },
+    Origin { deadline: u64, origin: String, token: u64, by: String },
+    Schedule { deadline: u64, id: String, token: u64, by: String },
 }
 
 impl TimerEntry {
@@ -153,22 +153,24 @@ impl KeySpace {
         name.parse().ok()
     }
 
-    fn timer_key_for(&self, encoded: &str, at: u64, token: u64) -> String {
-        format!("{}{:0width$}_{}@{:016x}", self.bucket_prefix(self.bucket_of(at)), at, encoded, token, width = DEADLINE_WIDTH)
+    /// A key names what is due, when, a token drawn per arm, and the node
+    /// that armed it: only that node deletes it outright.
+    fn timer_key_for(&self, encoded: &str, at: u64, token: u64, by: &str) -> String {
+        format!("{}{:0width$}_{}@{:016x}~{}", self.bucket_prefix(self.bucket_of(at)), at, encoded, token, encode_key(by), width = DEADLINE_WIDTH)
     }
 
-    pub fn timer_key(&self, origin: &str, at: u64, token: u64) -> String {
-        self.timer_key_for(&encode_key(origin), at, token)
+    pub fn timer_key(&self, origin: &str, at: u64, token: u64, by: &str) -> String {
+        self.timer_key_for(&encode_key(origin), at, token, by)
     }
 
-    pub fn sched_timer_key(&self, id: &str, at: u64, token: u64) -> String {
-        self.timer_key_for(&format!("sched:{}", encode_key(id)), at, token)
+    pub fn sched_timer_key(&self, id: &str, at: u64, token: u64, by: &str) -> String {
+        self.timer_key_for(&format!("sched:{}", encode_key(id)), at, token, by)
     }
 
     pub fn timer_key_of(&self, e: &TimerEntry) -> String {
         match e {
-            TimerEntry::Origin { deadline, origin, token } => self.timer_key(origin, *deadline, *token),
-            TimerEntry::Schedule { deadline, id, token } => self.sched_timer_key(id, *deadline, *token),
+            TimerEntry::Origin { deadline, origin, token, by } => self.timer_key(origin, *deadline, *token, by),
+            TimerEntry::Schedule { deadline, id, token, by } => self.sched_timer_key(id, *deadline, *token, by),
         }
     }
 
@@ -179,11 +181,13 @@ impl KeySpace {
         }
         let (deadline, rest) = name.split_at(DEADLINE_WIDTH);
         let deadline: u64 = deadline.parse().ok()?;
-        let (target, token) = rest.strip_prefix('_')?.rsplit_once('@')?;
+        let (target, rest) = rest.strip_prefix('_')?.rsplit_once('@')?;
+        let (token, by) = rest.split_once('~')?;
         let token = u64::from_str_radix(token, 16).ok()?;
+        let by = decode_key(by)?;
         match target.strip_prefix("sched:") {
-            Some(id) => Some(TimerEntry::Schedule { deadline, id: decode_key(id)?, token }),
-            None => Some(TimerEntry::Origin { deadline, origin: decode_key(target)?, token }),
+            Some(id) => Some(TimerEntry::Schedule { deadline, id: decode_key(id)?, token, by }),
+            None => Some(TimerEntry::Origin { deadline, origin: decode_key(target)?, token, by }),
         }
     }
 }

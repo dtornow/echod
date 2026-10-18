@@ -1,36 +1,55 @@
 //! One request against one origin, serialised and committed.
 //!
 //! Per origin, one actor at a time: load the document, run the kernel, drain
-//! what the step left owed, write what changed, arm the next deadline, hand
-//! the outbox to the router. The write is conditional on the version read; a
-//! lost race re-reads and re-decides.
+//! what the step left owed, then commit. The commit is the verified
+//! protocol of `echod_fleet::node::txn`, run against the store one operation
+//! at a time: the key for the document's nearest deadline is put before the
+//! document, the document is written conditionally on the version loaded,
+//! the key replaced is removed after, the key kept is remembered with the
+//! version written, and the key that fired a sweep is deleted if this node
+//! armed it. A sweep that found nothing due rewrites the document at a new
+//! version first — fencing every commit still in flight that armed the key —
+//! and only then deletes it. A lost race re-reads and re-decides.
 //!
 //! The cache holds the last document this node read or wrote for an origin.
 //! Whether it may be used without asking the store is the verified node's
-//! decision (`Nodes::trusts`): the acting owner trusts an entry filled while
-//! it acted, since every write to the origin goes through the owner. Anyone
-//! else revalidates it with `If-None-Match` before use. Every version read
-//! or written, and every entry dropped, is reported to the node, so what it
+//! decision (`Nodes::trusts`): the acting owner trusts a version it wrote
+//! itself while acting, since no write by an earlier owner can land on it.
+//! Anything else revalidates with `If-None-Match`. Every version read or
+//! written, and every entry dropped, is reported to the node, so what it
 //! decides on is what the cache holds.
-//!
-//! A commit that moves an origin's nearest deadline writes the new deadline
-//! key before the document and removes the previous key, the one this node
-//! armed, after it. The key's token is drawn per arm, so the removal can never
-//! land on a key another arm wrote for the same instant.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::cache::{Armed, Cache, Cached};
-
-use echod_kernel::{Config as KernelConfig, OutboxEntry, Promise, Schedule, State};
+use echod_fleet::node::core::{Armed, Key};
+use echod_fleet::node::step;
+use echod_kernel::{Config as KernelConfig, OutboxEntry, Schedule, State};
 use resonate_core::{ResonateRouter, Unavailable};
 
-use crate::doc::{self, Loaded};
+use crate::cache::{Cache, Cached};
+use crate::doc::{self, Header, Loaded};
 use crate::keys::KeySpace;
 use crate::nodes::Nodes;
 use crate::store::{Etag, Read, Store, StoreError};
 use crate::timers::TimerWheel;
+
+/// What became of the key that fired a sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fired {
+    /// Deleted from the bucket.
+    Deleted,
+    /// Still in the bucket: another node's, and the sweep changed the
+    /// document; or the delete failed. It fires again.
+    Kept,
+}
+
+/// The key that fired a sweep, and the node that armed it.
+#[derive(Debug, Clone)]
+pub struct FiredKey {
+    pub key: Key,
+    pub by: String,
+}
 
 pub struct Applier {
     store: Arc<dyn Store>,
@@ -98,12 +117,14 @@ impl Applier {
         self.cache.get(origin)
     }
 
-    fn remember(&self, origin: &str, c: Cached) {
+    /// Remember a document and report its version to the node: read
+    /// (`wrote` false) or written by this node (`wrote` true).
+    fn remember(&self, origin: &str, c: Cached, wrote: bool) {
         let (etag, filled_at) = (c.etag.clone(), c.filled_at);
         for evicted in self.cache.put(origin, c) {
             self.nodes.forget(&evicted);
         }
-        self.nodes.filled(origin, &etag, filled_at);
+        self.nodes.filled(origin, &etag, filled_at, wrote);
     }
 
     pub fn forget(&self, origin: &str) {
@@ -120,34 +141,41 @@ impl Applier {
         self.tokens.fetch_add(0x9e37_79b9_7f4a_7c15, std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn armed_for(&self, target: &str) -> Option<Armed> {
-        self.cache.armed(target)
+    fn me(&self) -> String {
+        self.nodes.id()
     }
 
-    fn set_armed(&self, target: &str, a: Option<Armed>) {
-        self.cache.set_armed(target, a);
-    }
-
-    /// A fired key was collected: if it is the one this node remembers for
-    /// `target`, forget it, so the next commit arms afresh.
-    pub fn collected(&self, target: &str, key: &str) {
-        if self.cache.armed(target).map(|a| a.key) == Some(key.to_string()) {
-            self.cache.set_armed(target, None);
+    /// The name of a key in the bucket, armed by `by`.
+    fn key_name(&self, k: &Key, by: &str) -> String {
+        if let Some(id) = k.origin.strip_prefix("sched:") {
+            self.keys.sched_timer_key(id, k.at, k.token, by)
+        } else {
+            self.keys.timer_key(&k.origin, k.at, k.token, by)
         }
     }
 
-    /// Write a deadline key and hold it in the wheel. Returns what was armed.
-    async fn arm(&self, key: String, at: u64) -> Result<Armed, StoreError> {
-        self.store.put(&key, Vec::new()).await?;
-        self.timers.arm(at, key.clone());
-        Ok(Armed { at, key })
+    /// Put a deadline key and hold it in the wheel.
+    async fn put_key(&self, target: &str, at: u64) -> Result<Key, StoreError> {
+        let k = Key { origin: target.to_string(), at, token: self.token() };
+        let name = self.key_name(&k, &self.me());
+        self.store.put(&name, Vec::new()).await?;
+        self.timers.arm(at, name);
+        Ok(k)
     }
 
-    /// Remove a deadline key this node armed. Best effort: a key that stays
-    /// fires into a sweep with nothing due and is collected then.
-    async fn disarm(&self, a: &Armed) {
-        if self.store.delete(&a.key).await.is_ok() {
-            self.timers.disarm(a.at, &a.key);
+    /// Delete a deadline key armed by `by`. Best effort: a key that stays
+    /// fires again and is collected then.
+    async fn delete_key(&self, k: &Key, by: &str) -> bool {
+        let name = self.key_name(k, by);
+        match self.store.delete(&name).await {
+            Ok(()) => {
+                self.timers.disarm(k.at, &name);
+                true
+            }
+            Err(e) => {
+                tracing::debug!(key = %name, error = %e, "deadline key not deleted; it fires again");
+                false
+            }
         }
     }
 
@@ -164,25 +192,25 @@ impl Applier {
             }
             match self.store.get_if_none_match(&key, &c.etag).await.map_err(unavailable)? {
                 Read::NotModified => {
-                    self.remember(origin, Cached { filled_at: now, ..c.clone() });
+                    self.remember(origin, Cached { filled_at: now, ..c.clone() }, false);
                     return Ok((c.loaded, Some(c.etag)));
                 }
                 Read::Absent => {
                     self.forget(origin);
-                    return Ok((Loaded { rows: vec![], row_count: 0, bytes: 0 }, None));
+                    return Ok((Loaded::empty(), None));
                 }
                 Read::Body(bytes, etag) => {
                     let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
+                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now }, false);
                     return Ok((loaded, Some(etag)));
                 }
             }
         }
         match self.store.get(&key).await.map_err(unavailable)? {
-            None => Ok((Loaded { rows: vec![], row_count: 0, bytes: 0 }, None)),
+            None => Ok((Loaded::empty(), None)),
             Some((bytes, etag)) => {
                 let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
+                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now }, false);
                 Ok((loaded, Some(etag)))
             }
         }
@@ -204,12 +232,14 @@ impl Applier {
     }
 
     /// Run one step against `origin`'s document, with `schedule` loaded too
-    /// when the step touches one. A lost race re-reads and runs the step
-    /// again, so the step must decide from the state it is given, which every
-    /// kernel handler does. Without an origin only the schedule is loaded.
-    pub async fn apply<R, F>(&self, origin: Option<&str>, schedule: Option<&str>, now: u64, step: F) -> Result<R, Unavailable>
+    /// when the step touches one; `fired` is the key whose firing this is.
+    /// The step returns its answer and whether, being a sweep, it fired
+    /// anything. A lost race re-reads and runs the step again, so the step
+    /// must decide from the state it is given, which every kernel handler
+    /// does. Without an origin only the schedule is loaded.
+    pub async fn apply<R, F>(&self, origin: Option<&str>, schedule: Option<&str>, now: u64, fired: Option<FiredKey>, step: F) -> Result<(R, Fired), Unavailable>
     where
-        F: Fn(&mut State, u64) -> R + Send,
+        F: Fn(&mut State, u64) -> (R, bool) + Send,
         R: Send,
     {
         let lock_key = origin.map(str::to_string).unwrap_or_else(|| format!("sched:{}", schedule.unwrap_or_default()));
@@ -218,7 +248,7 @@ impl Applier {
         for attempt in 0..=self.max_retries {
             let (loaded, etag) = match origin {
                 Some(o) => self.load(o).await?,
-                None => (Loaded { rows: vec![], row_count: 0, bytes: 0 }, None),
+                None => (Loaded::empty(), None),
             };
             let mut schedules = Vec::new();
             if let Some(id) = schedule {
@@ -228,11 +258,13 @@ impl Applier {
             }
             let mut w = Working { origin: origin.unwrap_or_default().to_string(), loaded, etag, schedules };
             let mut state = State { objects: w.loaded.rows.clone(), schedules: w.schedules.iter().map(|(c, _)| c.clone()).collect(), outbox: Vec::new() };
-            let now = crate::step::clamp_now(&state.objects, now);
-            let r = step(&mut state, now);
-            self.drain(&mut state, now);
-            match self.commit(&mut w, &state, now).await {
-                Ok(()) => return Ok(r),
+            // Decided no earlier than the last step on the document: the
+            // kernel is proved for an instant at or after it.
+            let now = step::clamp_now(w.loaded.stamp, now);
+            let (r, did) = step(&mut state, now);
+            step::drain(&mut state, now, &self.cfg);
+            match self.commit(&mut w, &state, now, did, fired.as_ref()).await {
+                Ok(f) => return Ok((r, f)),
                 Err(StoreError::PreconditionFailed) => {
                     tracing::debug!(origin = ?origin, schedule = ?schedule, attempt, "lost a race; re-deciding");
                     if let Some(o) = origin {
@@ -253,88 +285,97 @@ impl Applier {
     }
 
     /// Fire what is due in the origin: deadlines, leases, retries, and the
-    /// drains that follow. The sweep behind a timer.
-    pub async fn sweep(&self, origin: &str, now: u64) -> Result<(), Unavailable> {
+    /// drains that follow. The sweep behind the key `fired`.
+    pub async fn sweep(&self, origin: &str, now: u64, fired: FiredKey) -> Result<Fired, Unavailable> {
         let cfg = self.cfg;
         let handle = self.observer.sweep_begin(&self.nodes.id(), origin, now);
-        let r = self.apply(Some(origin), None, now, move |s: &mut State, now: u64| crate::step::sweep(s, now, &cfg)).await;
+        let r = self.apply(Some(origin), None, now, Some(fired), move |s: &mut State, now: u64| ((), step::sweep(s, now, &cfg))).await;
         self.observer.sweep_end(handle, r.is_ok());
-        r
+        r.map(|(_, f)| f)
     }
 
-    fn drain(&self, s: &mut State, now: u64) {
-        crate::step::drain(s, now, &self.cfg)
-    }
-
-    /// The nearest deadline the document owes a timer for.
-    pub fn next_deadline(rows: &[Promise]) -> Option<u64> {
-        crate::step::next_deadline(rows)
-    }
-
-    /// Write what the step changed: the timer first, the document, the
-    /// schedules, then the old timer; and hand over the outbox.
-    async fn commit(&self, w: &mut Working, state: &State, _now: u64) -> Result<(), StoreError> {
-        let now = self.nodes.now();
-        let changed = doc::changed(&w.loaded.rows, &state.objects);
-        let new_deadline = Self::next_deadline(&state.objects);
-
-        if !changed.is_empty() {
-            // (1) the new timer, before the state that arms it. Re-armed even
-            // when the deadline did not move, if this node holds no key for
-            // it: the key may be another node's, or lost with a restart.
-            let previous = self.armed_for(&w.origin);
-            let rearm = match (&new_deadline, &previous) {
-                (None, _) => false,
-                (Some(at), Some(p)) => *at != p.at,
-                (Some(_), None) => true,
-            };
-            let mut armed_now = previous.clone();
-            if rearm {
-                let at = new_deadline.expect("a deadline");
-                armed_now = Some(self.arm(self.keys.timer_key(&w.origin, at, self.token()), at).await?);
+    /// Write the document at a new version, conditionally on the version
+    /// loaded: the rows the step changed appended, or the whole document.
+    async fn write_doc(&self, w: &mut Working, rows: &[echod_kernel::Promise], changed: &[echod_kernel::Promise], now: u64) -> Result<Etag, StoreError> {
+        let fleet_now = self.nodes.now();
+        let key = self.keys.doc_key(&w.origin);
+        let header = Header { stamp: now, nonce: self.token() };
+        let etag = match &w.etag {
+            None => {
+                let body = doc::encode(&header, rows);
+                let etag = self.store.put_if_none_match(&key, body.clone()).await?;
+                self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: etag.clone(), filled_at: fleet_now }, true);
+                etag
             }
-            // (2) the document
-            let key = self.keys.doc_key(&w.origin);
-            let etag = match &w.etag {
-                None => {
-                    let body = doc::encode(&state.objects);
-                    let etag = self.store.put_if_none_match(&key, body.clone()).await?;
-                    self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: etag.clone(), filled_at: now });
-                    etag
+            Some(etag) => {
+                let stale_after = w.loaded.row_count + changed.len() - rows.len();
+                let append = self.store.supports_append() && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
+                if append {
+                    let body = doc::encode(&header, changed);
+                    let new = self.store.append_if_match(&key, w.loaded.bytes, body.clone(), etag).await?;
+                    self.remember(
+                        &w.origin,
+                        Cached { loaded: Loaded { rows: rows.to_vec(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now },
+                        true,
+                    );
+                    new
+                } else {
+                    let body = doc::encode(&header, rows);
+                    let new = self.store.put_if_match(&key, body.clone(), etag).await?;
+                    self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now }, true);
+                    new
                 }
-                Some(etag) => {
-                    let stale_after = w.loaded.row_count + changed.len() - state.objects.len();
-                    let append = self.store.supports_append() && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
-                    if append {
-                        let body = doc::encode(&changed);
-                        let new = self.store.append_if_match(&key, w.loaded.bytes, body.clone(), etag).await?;
-                        self.remember(
-                            &w.origin,
-                            Cached { loaded: Loaded { rows: state.objects.clone(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64 }, etag: new.clone(), filled_at: now },
-                        );
-                        new
-                    } else {
-                        let body = doc::encode(&state.objects);
-                        let new = self.store.put_if_match(&key, body.clone(), etag).await?;
-                        self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: new.clone(), filled_at: now });
-                        new
+            }
+        };
+        Ok(etag)
+    }
+
+    /// The commit: the verified decisions of `echod_fleet::node::txn`, each
+    /// store operation between them.
+    async fn commit(&self, w: &mut Working, state: &State, now: u64, did: bool, fired: Option<&FiredKey>) -> Result<Fired, StoreError> {
+        let me = self.me();
+        let mut outcome = Fired::Kept;
+        if !w.origin.is_empty() {
+            let changed = doc::changed(&w.loaded.rows, &state.objects);
+            let changed_any = did || !changed.is_empty();
+            let deadline = step::next_deadline(&state.objects);
+            let mut txn = self.nodes.begin(&w.origin, w.etag.as_ref(), deadline, changed_any, fired.map(|f| f.key.clone()));
+            if changed_any {
+                // (1) the key for the new deadline, before the state that arms it
+                if let Some(at) = txn.arm_at() {
+                    let k = self.put_key(&w.origin, at).await?;
+                    txn.armed(k);
+                }
+                // (2) the document
+                let etag = self.write_doc(w, &state.objects, &changed, now).await?;
+                // (3) the key replaced, or no longer needed
+                if let Some(p) = txn.to_disarm() {
+                    self.delete_key(&p, &me).await;
+                }
+                // (4) the key kept, with the version written
+                self.nodes.finish(&txn, &etag);
+                // (5) the key fired, if this node's own
+                if let Some(f) = fired {
+                    if f.by == me {
+                        self.nodes.collected(&w.origin, &f.key);
+                        if self.delete_key(&f.key, &me).await {
+                            outcome = Fired::Deleted;
+                        }
                     }
                 }
-            };
-            let _ = etag;
-            // (3) the old timer: exactly the key this node armed before
-            if new_deadline.is_none() || rearm {
-                if let Some(p) = &previous {
-                    self.disarm(p).await;
-                }
-                if new_deadline.is_none() {
-                    armed_now = None;
+            } else if let Some(f) = fired {
+                // Nothing was due: rewrite the document at a new version, so
+                // that no commit in flight that armed this key can land on
+                // the version it loaded; then the key goes.
+                self.write_doc(w, &state.objects, &[], now).await?;
+                self.nodes.collected(&w.origin, &f.key);
+                if self.delete_key(&f.key, &f.by).await {
+                    outcome = Fired::Deleted;
                 }
             }
-            self.set_armed(&w.origin, armed_now);
         }
 
-        // schedules: each its own object
+        // schedules: each its own object, with its own key
         for c in &state.schedules {
             let before = w.schedules.iter().find(|(b, _)| b.id == c.id);
             let body = serde_json::to_vec(c).expect("a schedule serialises");
@@ -342,25 +383,25 @@ impl Applier {
             match before {
                 Some((b, etag)) => {
                     if serde_json::to_vec(b).ok() != Some(body.clone()) {
-                        let previous = self.armed_for(&target);
-                        let rearm = previous.as_ref().map_or(true, |p| p.at != c.next_run_at);
-                        let mut armed_now = previous.clone();
+                        let previous = self.nodes.armed_for(&target).filter(|a| a.etag == etag.0);
+                        let rearm = previous.as_ref().map_or(true, |p| p.key.at != c.next_run_at);
+                        let mut key = previous.as_ref().map(|p| p.key.clone());
                         if rearm {
-                            armed_now = Some(self.arm(self.keys.sched_timer_key(&c.id, c.next_run_at, self.token()), c.next_run_at).await?);
+                            key = Some(self.put_key(&target, c.next_run_at).await?);
                         }
-                        self.store.put_if_match(&self.keys.sched_key(&c.id), body, etag).await?;
+                        let new = self.store.put_if_match(&self.keys.sched_key(&c.id), body, etag).await?;
                         if rearm {
                             if let Some(p) = &previous {
-                                self.disarm(p).await;
+                                self.delete_key(&p.key, &me).await;
                             }
                         }
-                        self.set_armed(&target, armed_now);
+                        self.nodes.set_armed(&target, key.map(|k| Armed { key: k, etag: new.0.clone() }));
                     }
                 }
                 None => {
-                    let armed = self.arm(self.keys.sched_timer_key(&c.id, c.next_run_at, self.token()), c.next_run_at).await?;
-                    self.store.put_if_none_match(&self.keys.sched_key(&c.id), body).await?;
-                    self.set_armed(&target, Some(armed));
+                    let k = self.put_key(&target, c.next_run_at).await?;
+                    let new = self.store.put_if_none_match(&self.keys.sched_key(&c.id), body).await?;
+                    self.nodes.set_armed(&target, Some(Armed { key: k, etag: new.0.clone() }));
                 }
             }
         }
@@ -368,10 +409,10 @@ impl Applier {
             if !state.schedules.iter().any(|c| c.id == b.id) {
                 self.store.delete(&self.keys.sched_key(&b.id)).await?;
                 let target = format!("sched:{}", b.id);
-                if let Some(p) = self.armed_for(&target) {
-                    self.disarm(&p).await;
+                if let Some(p) = self.nodes.armed_for(&target) {
+                    self.delete_key(&p.key, &me).await;
                 }
-                self.set_armed(&target, None);
+                self.nodes.set_armed(&target, None);
             }
         }
 
@@ -379,7 +420,7 @@ impl Applier {
         for e in &state.outbox {
             self.send(e).await;
         }
-        Ok(())
+        Ok(outcome)
     }
 
     async fn send(&self, e: &OutboxEntry) {

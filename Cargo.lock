@@ -1056,6 +1056,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
+ "echod-fleet",
  "echod-kernel",
  "echod-server",
  "resonate-core",
@@ -1070,6 +1071,7 @@ dependencies = [
 name = "echod-fleet"
 version = "0.1.0"
 dependencies = [
+ "echod-kernel",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",

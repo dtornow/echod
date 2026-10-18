@@ -6,11 +6,10 @@
 //! store.rs      the object store port: S3, and an in-memory stand-in
 //! doc.rs        an origin's document: rows in, rows out, the fold between
 //! env.rs        the clock and the other nodes, as ports
-//! step.rs       the internal steps around a request: drain, sweep, next deadline
 //! wire.rs       the kernel's vocabulary to the protocol's and back
 //! nodes.rs      the nodes: announce, heartbeat, list, and who owns what
-//! cache.rs      what a node remembers: documents by LRU under a byte budget, armed keys
-//! applier.rs    one request against one origin, serialised and committed
+//! cache.rs      what a node remembers: documents by LRU under a byte budget
+//! applier.rs    one request against one origin, serialised and committed: the verified commit, run against the store
 //! timers.rs     deadlines as objects in time buckets, fired by the owner from memory
 //! schedules.rs  schedules as objects, fired by the owner
 //! push.rs       messages out: HTTP push, and the router in front of it
@@ -29,7 +28,6 @@ pub mod nodes;
 pub mod push;
 pub mod schedules;
 pub mod server;
-pub mod step;
 pub mod store;
 pub mod timers;
 pub mod wire;

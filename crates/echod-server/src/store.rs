@@ -113,8 +113,11 @@ impl MemoryStore {
         self.objects.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn etag(v: u64) -> Etag {
-        Etag(format!("v{v}"))
+    /// The version is the content, as an S3 ETag is: writing the same bytes
+    /// again yields the same version. A writer that must move the version
+    /// changes the bytes.
+    fn etag(body: &[u8]) -> Etag {
+        Etag(format!("{:016x}", crate::keys::fnv1a(&String::from_utf8_lossy(body))))
     }
 
     /// Every key, for tests.
@@ -126,24 +129,25 @@ impl MemoryStore {
 #[async_trait]
 impl Store for MemoryStore {
     async fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
-        Ok(self.lock().get(key).map(|(b, v)| (b.clone(), Self::etag(*v))))
+        Ok(self.lock().get(key).map(|(b, _)| (b.clone(), Self::etag(b))))
     }
 
     async fn get_if_none_match(&self, key: &str, etag: &Etag) -> Result<Read, StoreError> {
         Ok(match self.lock().get(key) {
             None => Read::Absent,
-            Some((_, v)) if Self::etag(*v) == *etag => Read::NotModified,
-            Some((b, v)) => Read::Body(b.clone(), Self::etag(*v)),
+            Some((b, _)) if Self::etag(b) == *etag => Read::NotModified,
+            Some((b, _)) => Read::Body(b.clone(), Self::etag(b)),
         })
     }
 
     async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
         let mut m = self.lock();
         match m.get(key) {
-            Some((_, v)) if Self::etag(*v) == *etag => {
+            Some((b, v)) if Self::etag(b) == *etag => {
                 let nv = v + 1;
+                let e = Self::etag(&body);
                 m.insert(key.to_string(), (body, nv));
-                Ok(Self::etag(nv))
+                Ok(e)
             }
             _ => Err(StoreError::PreconditionFailed),
         }
@@ -154,8 +158,9 @@ impl Store for MemoryStore {
         if m.contains_key(key) {
             return Err(StoreError::PreconditionFailed);
         }
+        let e = Self::etag(&body);
         m.insert(key.to_string(), (body, 1));
-        Ok(Self::etag(1))
+        Ok(e)
     }
 
     async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
@@ -164,10 +169,10 @@ impl Store for MemoryStore {
         }
         let mut m = self.lock();
         match m.get_mut(key) {
-            Some((b, v)) if Self::etag(*v) == *etag && b.len() as u64 == offset => {
+            Some((b, v)) if Self::etag(b) == *etag && b.len() as u64 == offset => {
                 b.extend_from_slice(&body);
                 *v += 1;
-                Ok(Self::etag(*v))
+                Ok(Self::etag(b))
             }
             _ => Err(StoreError::PreconditionFailed),
         }

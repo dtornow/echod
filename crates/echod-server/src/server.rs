@@ -175,9 +175,10 @@ impl Server {
         // A request about a schedule names no document; the rest name one.
         let doc: Option<&str> = origin.as_deref().filter(|_| !kind.starts_with("schedule."));
         macro_rules! run {
-            ($schedule:expr, $step:expr) => {
-                self.applier.apply(doc, $schedule, now, $step).await?
-            };
+            ($schedule:expr, $step:expr) => {{
+                let step = $step;
+                self.applier.apply(doc, $schedule, now, None, move |s: &mut k::State, now: u64| (step(s, now), false)).await?.0
+            }};
         }
         match kind.as_str() {
             "promise.get" => {

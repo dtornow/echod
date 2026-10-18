@@ -11,10 +11,10 @@
 
 use vstd::prelude::*;
 
-use echod_kernel::external::pre;
+use echod_kernel::external::*;
 use echod_kernel::internal::*;
 use echod_kernel::properties::*;
-use echod_kernel::store::{distinct_by, fold_by, lemma_fold_distinct, lemma_fold_dom, mentions, obj_key, obj_val, AState, State};
+use echod_kernel::store::*;
 use echod_kernel::tags::OType;
 use echod_kernel::types::*;
 

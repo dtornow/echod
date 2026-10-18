@@ -32,8 +32,7 @@ use vstd::prelude::*;
 use crate::node::core::*;
 use crate::node::step::*;
 use crate::node::txn::*;
-use echod_kernel::properties::inv;
-use echod_kernel::types::MAX_TIME;
+use echod_kernel::types::*;
 
 verus! {
 
@@ -178,7 +177,7 @@ pub open spec fn trusts(n: Node, o: Origin) -> bool {
 /// second is reached from it.
 pub open spec fn kreach(t: nat, a: Doc, b: Doc) -> bool {
     exists |sa: echod_kernel::store::AState, sb: echod_kernel::store::AState|
-        sa.objects == a && sb.objects == b && inv(t, sa) && #[trigger] reach(t, sa, sb)
+        sa.objects == a && sb.objects == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb)
 }
 
 /// A sweep at `t`: kernel steps, after which nothing is due at `t`; if

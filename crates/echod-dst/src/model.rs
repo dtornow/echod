@@ -24,9 +24,13 @@ fn create_req(id: &str, timeout_at: u64, t: &std::collections::BTreeMap<String, 
     k::PromiseCreateReq { id: id.to_string(), timeout_at, param: k::Value { headers: vec![], data: data.map(str::to_string) }, tags: tags(t) }
 }
 
-/// Apply `op` at `now` to `s`, drain, and answer as the server would.
-pub fn step(s: &mut k::State, op: &Op, now: u64, cfg: &k::Config, corr: &str) -> (u16, Value) {
-    let now = echod_server::step::clamp_now(&s.objects, now);
+/// Apply `op` at `now` to `s`, drain, and answer as the server would. The
+/// step is decided no earlier than the document's stamp, the instant of the
+/// last write; a write moves the stamp, as the server's header does, and a
+/// sweep always writes: what it fired, or the rewrite that collects its key.
+pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Config, corr: &str) -> (u16, Value) {
+    let now = echod_fleet::node::step::clamp_now(*stamp, now);
+    let before = canon(&s.objects);
     let kind = op.kind();
     let out = match op {
         Op::PromiseGet { id } => wire::promise_res(kind, corr, &s.promise_get(&k::PromiseGetReq { id: id.clone() }, now, cfg)),
@@ -92,12 +96,15 @@ pub fn step(s: &mut k::State, op: &Op, now: u64, cfg: &k::Config, corr: &str) ->
             wire::status_res(kind, corr, r.status, serde_json::json!({}))
         }
         Op::Sweep => {
-            echod_server::step::sweep(s, now, cfg);
+            echod_fleet::node::step::sweep(s, now, cfg);
             wire::status_res(kind, corr, 200, serde_json::json!({}))
         }
     };
-    echod_server::step::drain(s, now, cfg);
+    echod_fleet::node::step::drain(s, now, cfg);
     s.outbox.clear();
+    if matches!(op, Op::Sweep) || canon(&s.objects) != before {
+        *stamp = now;
+    }
     (out.head.status as u16, out.data)
 }
 

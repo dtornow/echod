@@ -42,10 +42,10 @@ impl Schedules {
         let cfg = self.applier.kernel_config();
         let req = ScheduleTimeoutReq { schedule: id.to_string(), occurrences: vec![Occurrence { at: deadline, promise_id }], next_run_at: next };
         self.applier
-            .apply(Some(&origin), Some(id), now, |s: &mut State, now: u64| {
-                let Some(i) = s.schedules.iter().position(|c| c.id == req.schedule) else { return };
+            .apply(Some(&origin), Some(id), now, None, |s: &mut State, now: u64| {
+                let Some(i) = s.schedules.iter().position(|c| c.id == req.schedule) else { return ((), false) };
                 if s.schedules[i].next_run_at != deadline {
-                    return;
+                    return ((), false);
                 }
                 // The fired promise carries the schedule's stamp and its own
                 // lineage; the schedule row keeps its template tags.
@@ -55,8 +55,10 @@ impl Schedules {
                 if let Some(c) = s.schedules.iter_mut().find(|c| c.id == req.schedule) {
                     c.promise_tags = template;
                 }
+                ((), false)
             })
             .await
+            .map(|_| ())
     }
 }
 

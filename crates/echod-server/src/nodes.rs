@@ -32,7 +32,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use echod_fleet::node::core::NodeCore;
+use echod_fleet::node::core::{Armed, Key, NodeCore};
+use echod_fleet::node::txn::Txn;
 use serde::{Deserialize, Serialize};
 
 use crate::keys::KeySpace;
@@ -201,10 +202,35 @@ impl Nodes {
         c.entry(origin).map(|e| Etag(e.etag.clone()))
     }
 
-    /// This node read `origin` at version `etag` from the bucket, or wrote
-    /// it there, at `now`.
-    pub fn filled(&self, origin: &str, etag: &Etag, now: u64) {
-        self.core().filled(origin, etag.0.clone(), now);
+    /// This node read `origin` at version `etag` from the bucket (`wrote`
+    /// false), or wrote it there (`wrote` true), at `now`.
+    pub fn filled(&self, origin: &str, etag: &Etag, now: u64, wrote: bool) {
+        self.core().filled(origin, etag.0.clone(), now, wrote);
+    }
+
+    /// Begin a commit on `origin`, loaded at `etag`: `NodeCore::begin`.
+    pub fn begin(&self, origin: &str, etag: Option<&Etag>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> Txn {
+        let e = etag.map(|e| e.0.clone());
+        self.core().begin(origin, e.as_ref(), deadline, changed, fired)
+    }
+
+    /// After the write at `etag`: remember the key kept: `NodeCore::finish`.
+    pub fn finish(&self, txn: &Txn, etag: &Etag) {
+        self.core().finish(txn, &etag.0);
+    }
+
+    /// A fired key was collected: `NodeCore::collected`.
+    pub fn collected(&self, origin: &str, key: &Key) {
+        self.core().collected(origin, key);
+    }
+
+    /// The key remembered for `target`, with the version written with it.
+    pub fn armed_for(&self, target: &str) -> Option<Armed> {
+        self.core().armed_for(target).cloned()
+    }
+
+    pub fn set_armed(&self, target: &str, a: Option<Armed>) {
+        self.core().set_armed(target, a);
     }
 
     /// This node dropped what it held of `origin`.

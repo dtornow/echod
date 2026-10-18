@@ -10,7 +10,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `echod-kernel` | the state machine: one object store, one transition per request, verified with Verus against the specification's catalogue |
 | `echod-server` | the `ResonateServer`: the kernel over documents in an S3 bucket, committed with conditional writes |
 | `echod-dst` | the server under deterministic simulation: one seed, no wall clock, no sockets; checked for linearizability against the kernel |
-| `echod-fleet` | the fleet as a TLA-style state machine in Verus, Anvil's shape: nodes, bucket, clocks, crashes; proved: ownership is exclusive and trusted caches are current |
+| `echod-fleet` | the fleet as a TLA-style state machine in Verus over the kernel's own states, Anvil's shape: nodes, bucket, clocks, crashes, the commit protocol; proved: ownership is exclusive, trusted caches are current, every document satisfies the catalogue, every deadline has a timer |
 | `echod-worker` | the `ResonateWorker`: a V8 isolate (`deno_core`) whose durable ops are promises on the server |
 
 The server and the worker depend on `resonate-core` for the traits and
@@ -108,23 +108,35 @@ replays its object.
 
 A request loads the document, runs the kernel handler, drains what the step
 left owed (callbacks and listeners of settled promises, retries now due),
-and writes the rows that changed. Every write carries `If-Match` on the ETag
-the read returned; the ETag is the commit, so a stale read cannot win
-whatever happened in between. A lost race re-reads and runs the handler
-again. On a directory bucket (S3 Express One Zone) the write is an append at
-the current size; once the object carries `compact` stale rows, or on a
-general-purpose bucket, the whole object is rewritten as one row per id. The
-outbox is handed to the router after the commit; delivery is at most once,
-and a lost `execute` is re-offered by the task's retry deadline.
+and writes the rows that changed. The step is decided at the later of the
+node's clock and the document's stamp — the instant of the last write,
+carried in the object's header — so every step on a document is decided no
+earlier than the one before, which is what the kernel is proved for. Every
+write carries `If-Match` on the ETag the read returned, and a header with a
+fresh nonce, so every write is a new version even when the rows are the
+same; the ETag is the commit, so a stale read cannot win whatever happened
+in between. A lost race re-reads and runs the handler again. On a directory
+bucket (S3 Express One Zone) the write is an append at the current size;
+once the object carries `compact` stale rows, or on a general-purpose
+bucket, the whole object is rewritten as one row per id. The outbox is
+handed to the router after the commit; delivery is at most once, and a lost
+`execute` is re-offered by the task's retry deadline.
 
-A deadline is an empty object whose key says what is due and when, filed
-under the time bucket (an hour by default) its deadline falls in. It is
-written before the document that arms it and deleted after the document that
-disarms it, so a deadline the document owes is always in the bucket. The
-token names the arm that wrote the key: a writer removes exactly the key its
-own predecessor wrote, never another arm's key for the same instant. A
-schedule is its own object; firing it creates the occurrence's promise and
-advances the schedule in one turn on the promise's origin.
+A deadline is an empty object whose key says what is due, when, a token
+drawn per arm, and the node that armed it, filed under the time bucket (an
+hour by default) its deadline falls in. The commit is the protocol
+`echod-fleet` proves (`node/txn.rs`, run by `applier.rs`): the key for the
+document's nearest deadline is put before the document, unless the node
+remembers a key for that instant armed with the very version it loaded;
+the document is written; the key replaced is deleted; the key kept is
+remembered with the version written. A key that fires sweeps its origin;
+if the sweep changed the document the key is deleted only if this node
+armed it, and if nothing was due the document is first rewritten at a new
+version, which fences every commit in flight that armed the key, and the
+key is deleted whoever armed it. So a deadline a document owes always has
+a key in the bucket, which the fleet proof states and proves. A schedule
+is its own object; firing it creates the occurrence's promise and advances
+the schedule in one turn on the promise's origin.
 
 ### Nodes
 
@@ -148,10 +160,12 @@ membership steers three things:
   yet, or its view is stale, it answers 503.
 - **Cache.** Each node caches the documents it read or wrote, with their
   ETags, least recently used out, bounded by entries and by bytes. The
-  acting owner uses an entry without asking the store only if the entry was
-  filled while it was acting; any other entry is revalidated with
-  `If-None-Match`. The cache is a port (`cache.rs`); the one implementation
-  is in memory.
+  acting owner uses an entry without asking the store only if it is a
+  version the node itself wrote while acting: a version merely read may be
+  replaced by a write an earlier owner still had in flight, which lands on
+  the version it loaded and no later one. Any other entry is revalidated
+  with `If-None-Match`. The cache is a port (`cache.rs`); the one
+  implementation is in memory.
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
@@ -201,7 +215,9 @@ through an observer port.
 
 The check is linearizability per origin against the kernel: an order of the
 entries, each within its span, that yields every answer seen and ends in the
-rows the bucket holds; an entry without an answer may be placed or skipped.
+rows the bucket holds, each step decided at the later of its instant and the
+document's stamp as the server does; an entry without an answer may be
+placed or skipped.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
@@ -211,61 +227,94 @@ answered 200 at least once, and the history overlapped.
 The multi-node system as a state machine, in the shape Anvil gives a
 Kubernetes cluster: a state, actions with preconditions and transitions,
 `init` and `next`, and Anvil's TLA embedding (`verus-tla`, vendored) to
-state the theorem as `always(inv)`.
+state the theorem as `always(inv)`. The fleet imports the kernel under
+Verus (`verify.sh` exports the kernel's metadata and imports it), so the
+bucket's documents are the kernel's own states and the kernel's steps enter
+the model with the contracts the kernel proves of them.
 
 ```text
 tla/            the temporal logic, vendored from Anvil's verus-tla
 node/core.rs    the node core: executable Rust, each step ensures its spec function
-spec/cluster.rs the state and the eleven actions, the node's ones being the core's spec functions
-proof/safety.rs the invariant, one lemma per action, the theorem
+node/txn.rs     the commit's decisions, the same way
+node/step.rs    sweep, drain, next_deadline, clamp_now: verified over the kernel
+spec/cluster.rs the state and the seventeen actions
+proof/safety.rs the invariant, one lemma per action, the four theorems
 ```
 
-The node core is what Anvil calls the reconciler: a sans-I/O step function.
-`NodeCore` holds what a node keeps of the configuration (epoch, members,
-the clock at the last read and at the first read of the epoch held) and of
-its cache (each origin's version and the clock at which it was filled), as
-a `StringHashMap` with a `Map` view. Its functions are `new`, `owner`,
-`fresh`, `acts`, `trusts`, `read_config`, `filled`, `forget`, and each
-`ensures` it equals the specification function of the same name on the
-state's view: `acts(o, now) == spec_acts(self@, o@, now)`,
-`read_config(..)` leaves `self@ == spec_read_config(old(self)@, ..)`. Two
+The node core and the commit are what Anvil calls the reconciler: sans-I/O
+step functions. `NodeCore` holds what a node keeps of the configuration
+(epoch, members, the clock at the last read and at the first read of the
+epoch held), of its cache (each origin's version, when it was filled, and
+whether this node wrote it) and of its deadline keys (the key kept for each
+origin, with the version written with it). `Txn` is one commit's decisions:
+the previous key, whether to arm, what to delete, what to keep. Each
+function `ensures` it equals the specification function of the same name
+on the state's view. The step module verifies the loops the server runs
+around the kernel: `sweep` leaves nothing due at its instant and leaves the
+document as it was if nothing fired; `drain` is kernel steps; `next_deadline`
+is the least deadline; `clamp_now` the later of clock and stamp. Three
 primitives are trusted with their meaning stated: FNV-1a is a function of
-the string, and `str == str` is equality of views.
+the string, `str == str` is equality of views, `String::clone` copies.
 
 The fleet state: real time (ghost), the nodes, the bucket. A node is its
-core's view, whether it is alive, its clock, and, ghost, real time at its
-last read and at its first read of the epoch held. The bucket has every
-document's version (its ETag), the configuration (members, epoch) and,
-ghost, when each epoch was written. The actions: real time advances; a
-clock advances, within `skew` of real time; a node joins (its core as `new`
-makes it) or crashes; a node reads the configuration (`spec_read_config`);
-a node writes the next epoch, with any members; a node reads a document
-(`spec_filled` with the version read, `spec_forget` if there is none); the
-acting owner (`spec_acts`) creates a document or lands a conditional write
-(`spec_filled` with the new version); a node forgets an entry; a node
-answers from its cache (`spec_trusts`). Clocks are never read by the model
-except through the core's decisions; real time only states the hypothesis
-and orders events.
+core's view, its body cache, whether it is alive, its clock, the commits it
+has in flight, and, ghost, real time at its last read and at its first
+read of the epoch held. The bucket has every document as a kernel state
+with its version and stamp, the deadline keys, the configuration (members,
+epoch) and, ghost, when each version was written, by which key each
+document is covered, who armed each key, and when each epoch was written.
+The actions: real time advances; a clock advances, within `skew` of real
+time; a node joins or crashes; a node reads the configuration or writes the
+next epoch; a node drops a cache entry; and the commit, one store operation
+per action — the acting owner loads a document and decides a step on it (a
+request: any sequence of kernel steps at one instant; a sweep: the step
+module's contract), arms a key, writes the document conditionally or is
+refused, deletes the key replaced, remembers the key kept and deletes the
+key fired, or, having found nothing due, rewrites the document and
+collects the key, or aborts. Clocks are never read by the model except
+through the core's decisions; real time only states the hypothesis and
+orders events.
 
-Proved, with `grace > ttl + 4 skew`: two live nodes never both act as owner
-of one origin (`exclusion`), and a node that answers from its cache holds
-the bucket's current version (`currency`); both as corollaries of an
-invariant that `init` establishes and every action preserves, assembled
-into `spec ⊨ □inv` by the embedding's induction rule. A witness shows the
-invariant is not vacuous. 167 items, no admits.
+Proved, 233 items, no admits:
 
-What the proof covers, and how it reaches the running code: the theorems
-are about the fleet model; the model's node actions are the core's
-specification functions; the core's executable functions are verified to
-compute those functions; `echod-server` keeps its membership and cache
-state in the core and takes its decisions from it. That is Anvil's shape
-of refinement: functional, per step, with no simulation argument, and with
-a trusted shim. The shim here is `nodes.rs` and `applier.rs`: that the
-configuration handed to `read_config` is the object read, that every
-version read or written is reported with `filled` and every drop with
-`forget`, that the clock passed is the fleet's time, and that the bucket
-behaves as the model's (conditional writes, one version per object). The
-S3 model's fidelity and liveness are not proved.
+- **Exclusion.** Two live nodes never both act as owner of one origin, with
+  `grace > ttl + 4 skew` and every live clock within `skew` of real time.
+- **Currency.** A node that answers from its cache holds the bucket's
+  current version.
+- **Catalogue.** Every document in the bucket satisfies the kernel's
+  catalogue at its stamp.
+- **Timers.** Every deadline in every document — a pending promise's, a
+  lease's, a retry's — has a deadline key in the bucket for its origin at
+  or before it, at all times.
+
+All four as corollaries of one invariant that `init` establishes and every
+action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
+rule. A witness shows the invariant is not vacuous. The last two rest on
+the commit protocol alone and need no clocks.
+
+The proof changed the design twice. A writer is checked for ownership
+when a request is dispatched, but its conditional write lands later; an
+earlier owner's write in flight can land after the new owner read and
+cached the document, so a node trusts only versions it wrote itself while
+acting. And a node that fires another node's key could delete it while a
+commit that armed it was still between its key and its document; so a
+fired key is deleted outright only by the node that armed it, and
+otherwise only after a conditional rewrite that fences such commits.
+
+How the proof reaches the running code: the theorems are about the fleet
+model; the model's node actions are the core's, the commit's and the step
+module's specification functions; their executable functions are verified
+to compute those functions; `echod-server` keeps its membership, cache and
+deadline-key state in the core and takes its decisions from it, and runs
+the step module's loops. That is Anvil's shape of refinement: functional,
+per step, with a trusted shim. The shim here is `nodes.rs`, `applier.rs`
+and `timers.rs`: that the configuration handed to `read_config` is the
+object read, that every version read or written is reported, that the
+store operations are issued in the protocol's order with the decisions
+the core made, that the clock passed is the fleet's time, that the
+document decoded is the one written, and that the bucket behaves as the
+model's: conditional writes on versions, one version per content. The S3
+model's fidelity, the schedule objects and liveness are not proved.
 
 ### The SDKs
 

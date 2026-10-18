@@ -35,12 +35,13 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
     // Frames of the depth-first search: the state, and which entries are
     // linearised so far.
     struct Frame {
+        stamp: u64,
         state: k::State,
         done: Bits,
         next: usize,
     }
     let mut seen: HashSet<(Bits, u64)> = HashSet::new();
-    let mut stack = vec![Frame { state: model::state(&[]), done: Bits::new(n), next: 0 }];
+    let mut stack = vec![Frame { stamp: 0, state: model::state(&[]), done: Bits::new(n), next: 0 }];
     let mut steps: u64 = 0;
     let mut last_mismatch = String::new();
     while let Some(frame) = stack.last_mut() {
@@ -79,9 +80,10 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
             return Verdict::Undecided { origin: origin.to_string(), steps };
         }
         let mut state = model::clone_state(&frame.state);
+        let mut stamp = frame.stamp;
         let e = &entries[i];
         if !skip {
-            let got = model::step(&mut state, &e.op, e.now, cfg, &corr(e));
+            let got = model::step(&mut state, &mut stamp, &e.op, e.now, cfg, &corr(e));
             if let Some(want) = &e.outcome {
                 if !same_answer(want, &got) {
                     last_mismatch = format!("entry {} {} by {} at {}: answered {} {}, model says {} {}", e.id, e.op.kind(), e.client, e.now, want.0, compact(&want.1), got.0, compact(&got.1));
@@ -95,7 +97,7 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
         if !seen.insert(key) {
             continue;
         }
-        stack.push(Frame { state, done: new_done, next: 0 });
+        stack.push(Frame { stamp, state, done: new_done, next: 0 });
     }
     Verdict::NotLinearizable { origin: origin.to_string(), steps, detail: last_mismatch }
 }

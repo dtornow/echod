@@ -1,5 +1,4 @@
-//! What a node remembers between requests: documents, and the deadline keys
-//! it armed.
+//! What a node remembers between requests: the documents it read or wrote.
 //!
 //! The port is `Cache`. The one implementation keeps everything in memory,
 //! least recently used first out, bounded by entry count and by bytes, since
@@ -31,15 +30,6 @@ impl Cached {
     }
 }
 
-/// The deadline key this node last armed for a target, so the next commit
-/// removes exactly that one. Lost with the process: the key then stays until
-/// it fires into a sweep with nothing due, which collects it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Armed {
-    pub at: u64,
-    pub key: String,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
     pub entries: usize,
@@ -58,15 +48,8 @@ pub trait Cache: Send + Sync {
     /// can forget them too.
     fn put(&self, origin: &str, cached: Cached) -> Vec<String>;
 
-    /// Drop the document cached for `origin`. The armed key stays: it names
-    /// an object in the store, and a document read afresh still owes it.
+    /// Drop the document cached for `origin`.
     fn forget(&self, origin: &str);
-
-    /// The deadline key this node armed for `target`, if it remembers one.
-    fn armed(&self, target: &str) -> Option<Armed>;
-
-    /// Record, or clear, the key armed for `target`.
-    fn set_armed(&self, target: &str, armed: Option<Armed>);
 
     fn stats(&self) -> CacheStats;
 }
@@ -92,7 +75,6 @@ struct Inner {
 
 pub struct MemoryCache {
     inner: Mutex<Inner>,
-    armed: Mutex<HashMap<String, Armed>>,
     max_entries: usize,
     max_bytes: u64,
 }
@@ -104,7 +86,6 @@ impl MemoryCache {
     pub fn new(max_entries: usize, max_bytes: u64) -> Self {
         Self {
             inner: Mutex::new(Inner { entries: HashMap::new(), order: BTreeMap::new(), bytes: 0, tick: 0, stats: CacheStats::default() }),
-            armed: Mutex::new(HashMap::new()),
             max_entries: max_entries.max(1),
             max_bytes: max_bytes.max(1),
         }
@@ -179,22 +160,6 @@ impl Cache for MemoryCache {
         self.lock().remove(origin);
     }
 
-    fn armed(&self, target: &str) -> Option<Armed> {
-        self.armed.lock().unwrap_or_else(|e| e.into_inner()).get(target).cloned()
-    }
-
-    fn set_armed(&self, target: &str, armed: Option<Armed>) {
-        let mut m = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        match armed {
-            Some(a) => {
-                m.insert(target.to_string(), a);
-            }
-            None => {
-                m.remove(target);
-            }
-        }
-    }
-
     fn stats(&self) -> CacheStats {
         let i = self.lock();
         CacheStats { entries: i.entries.len(), bytes: i.bytes, ..i.stats }
@@ -206,7 +171,7 @@ mod tests {
     use super::*;
 
     fn doc(bytes: u64, v: &str) -> Cached {
-        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes }, etag: Etag(v.to_string()), filled_at: 0 }
+        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes, stamp: 0 }, etag: Etag(v.to_string()), filled_at: 0 }
     }
 
     #[test]
@@ -253,17 +218,5 @@ mod tests {
         c.forget("a");
         assert_eq!(c.stats().bytes, 0);
         assert_eq!(c.stats().entries, 0);
-    }
-
-    #[test]
-    fn armed_keys_outlive_the_document() {
-        let c = MemoryCache::new(1, 1);
-        c.set_armed("a", Some(Armed { at: 5, key: "k".into() }));
-        c.put("a", doc(1, "1"));
-        c.put("b", doc(1, "1"));
-        c.forget("a");
-        assert_eq!(c.armed("a"), Some(Armed { at: 5, key: "k".into() }));
-        c.set_armed("a", None);
-        assert_eq!(c.armed("a"), None);
     }
 }

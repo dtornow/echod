@@ -18,7 +18,7 @@
 use vstd::prelude::*;
 
 use crate::node::core::*;
-use echod_kernel::types::opt_nat;
+use echod_kernel::types::*;
 
 verus! {
 

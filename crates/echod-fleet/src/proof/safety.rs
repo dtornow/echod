@@ -26,7 +26,6 @@ use crate::node::txn::*;
 use crate::spec::cluster::*;
 use crate::tla::defs::*;
 use crate::tla::rules::*;
-use echod_kernel::properties::inv as kinv;
 use echod_kernel::types::MAX_TIME;
 
 verus! {
@@ -121,8 +120,8 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     &&& owner(s.store.configs[x.epoch], o) == Some(i)
     &&& x.cur is Some ==> s.store.born.contains_key(x.cur.unwrap()) && (x.phase is Written || s.store.born[x.cur.unwrap()] <= x.begun)
     &&& x.t <= MAX_TIME
-    &&& kinv(x.t, full(x.loaded))
-    &&& kinv(x.t, full(x.new))
+    &&& echod_kernel::properties::inv(x.t, full(x.loaded))
+    &&& echod_kernel::properties::inv(x.t, full(x.new))
     &&& next_is(x.new, c.deadline)
     &&& c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s.store.armer.contains_key(c.fired.unwrap())
     &&& !c.changed ==> x.new == x.loaded && (c.fired is Some ==> no_due(x.t, x.loaded))
@@ -171,7 +170,7 @@ pub open spec fn inv_store(s: Cluster) -> bool {
         &&& s.store.etags.contains_key(o)
         &&& s.store.stamps.contains_key(o)
         &&& s.store.stamps[o] <= MAX_TIME
-        &&& kinv(s.store.stamps[o], full(s.store.docs[o]))
+        &&& echod_kernel::properties::inv(s.store.stamps[o], full(s.store.docs[o]))
         &&& s.store.versions.contains_key(s.store.etags[o])
         &&& s.store.versions[s.store.etags[o]] == s.store.docs[o]
     }
@@ -331,7 +330,7 @@ pub proof fn catalogue(p: Params, s: Cluster, o: Origin)
         inv(p)(s),
         s.store.docs.contains_key(o),
     ensures
-        kinv(s.store.stamps[o], full(s.store.docs[o])),
+        echod_kernel::properties::inv(s.store.stamps[o], full(s.store.docs[o])),
 {
 }
 
@@ -393,19 +392,19 @@ pub proof fn promises_have_timers(p: Params, s: Cluster, o: Origin, id: Seq<char
 
 /// The catalogue holds of an empty document at any instant.
 proof fn lemma_inv_empty(t: nat)
-    ensures kinv(t, full(Map::empty())),
+    ensures echod_kernel::properties::inv(t, full(Map::empty())),
 {
-    reveal(kinv);
+    reveal(echod_kernel::properties::inv);
 }
 
 /// A document the kernel reached at `t` from one satisfying the catalogue
 /// satisfies it.
 proof fn lemma_kreach_inv(t: nat, a: Doc, b: Doc)
     requires kreach(t, a, b),
-    ensures kinv(t, full(b)),
+    ensures echod_kernel::properties::inv(t, full(b)),
 {
     let (sa, sb) = choose |sa: echod_kernel::store::AState, sb: echod_kernel::store::AState|
-        sa.objects == a && sb.objects == b && kinv(t, sa) && #[trigger] reach(t, sa, sb);
+        sa.objects == a && sb.objects == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb);
     lemma_reach_inv(t, sa, sb);
     lemma_inv_full(t, sb);
 }
@@ -662,7 +661,7 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
     } else {
         lemma_inv_empty(t);
     }
-    assert(kinv(t, full(x.loaded)));
+    assert(echod_kernel::properties::inv(t, full(x.loaded)));
     lemma_kreach_inv(t, x.loaded, x.new);
     assert(inv_node(p, s2, i));
     // the node acted: it held its epoch for the grace and its view was fresh
@@ -701,8 +700,8 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
             assert(x.begun <= x.lr + p.ttl + 2 * p.skew);
             assert(owner(s2.store.configs[x.epoch], o) == Some(i));
             assert(x.t <= MAX_TIME);
-            assert(kinv(x.t, full(x.loaded)));
-            assert(kinv(x.t, full(x.new)));
+            assert(echod_kernel::properties::inv(x.t, full(x.loaded)));
+            assert(echod_kernel::properties::inv(x.t, full(x.new)));
             assert(next_is(x.new, c.deadline));
             assert(c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s2.store.armer.contains_key(c.fired.unwrap()));
             assert(!c.changed ==> x.new == x.loaded);
@@ -1045,7 +1044,7 @@ proof fn lemma_commit_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             &&& s2.store.etags.contains_key(q)
             &&& s2.store.stamps.contains_key(q)
             &&& s2.store.stamps[q] <= MAX_TIME
-            &&& kinv(s2.store.stamps[q], full(s2.store.docs[q]))
+            &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
             &&& s2.store.versions.contains_key(s2.store.etags[q])
             &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
         } by {
@@ -1498,7 +1497,7 @@ proof fn lemma_collect_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origi
             &&& s2.store.etags.contains_key(q)
             &&& s2.store.stamps.contains_key(q)
             &&& s2.store.stamps[q] <= MAX_TIME
-            &&& kinv(s2.store.stamps[q], full(s2.store.docs[q]))
+            &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
             &&& s2.store.versions.contains_key(s2.store.etags[q])
             &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
         } by {
