@@ -32,8 +32,8 @@ pub open spec fn post(a: State, b: State, now: u64) -> bool {
 }
 
 /// The step wrote no object outside `ids`, and no schedule or outbox entry.
-pub open spec fn touches_only(a: AState, b: AState, ids: Set<Seq<char>>) -> bool {
-    &&& forall|z: Seq<char>| !ids.contains(z) ==>
+pub open spec fn touches_only(a: AState, b: AState, ids: spec_fn(Seq<char>) -> bool) -> bool {
+    &&& forall|z: Seq<char>| !ids(z) ==>
         (a.objects.contains_key(z) <==> #[trigger] b.objects.contains_key(z))
         && (a.objects.contains_key(z) ==> a.objects[z] == b.objects[z])
     &&& b.schedules == a.schedules
@@ -119,7 +119,7 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             post(*old(self), *final(self), now),
-            touches_only(old(self)@, final(self)@, set![req.id@]),
+            touches_only(old(self)@, final(self)@, |z: Seq<char>| z == req.id@),
             r.status == 200 || r.status == 400,
     {
         let ghost a = self@;
@@ -149,7 +149,7 @@ impl State {
             pre(*old(self), now, *cfg),
         ensures
             post(*old(self), *final(self), now),
-            touches_only(old(self)@, final(self)@, set![req.id@]),
+            touches_only(old(self)@, final(self)@, |z: Seq<char>| z == req.id@),
             r.status == 200 || r.status == 400 || r.status == 404,
     {
         let ghost a = self@;
@@ -216,7 +216,7 @@ impl State {
             self.lemma_object_at(j as int);
             assert(self@.objects[req.awaited@] == a.objects[req.awaited@].project(now as nat));
             assert(self@.objects[req.awaiter@] == a.objects[req.awaiter@].project(now as nat));
-            lemma_project_many(now as nat, a, self@, set![req.awaited@, req.awaiter@]);
+            lemma_project_many(now as nat, a, self@, |x: Seq<char>| x == req.awaited@ || x == req.awaiter@);
         }
         if self.objects[j].otype() != OType::Runnable || !self.objects[i].otype().is_awaitable() {
             return PromiseRes { status: 422, promise: None };
@@ -286,12 +286,12 @@ impl State {
 // ---------------------------------------------------------------------------
 
 /// Projecting any set of objects at `now` is a legal step that keeps the invariant.
-pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: Set<Seq<char>>)
+pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: spec_fn(Seq<char>) -> bool)
     requires
         inv(now, a),
-        forall|x: Seq<char>| #[trigger] ids.contains(x) ==>
+        forall|x: Seq<char>| #[trigger] ids(x) ==>
             a.objects.contains_key(x) && b.objects.contains_key(x) && b.objects[x] == a.objects[x].project(now),
-        forall|x: Seq<char>| !ids.contains(x) ==>
+        forall|x: Seq<char>| !ids(x) ==>
             (a.objects.contains_key(x) <==> #[trigger] b.objects.contains_key(x))
             && (a.objects.contains_key(x) ==> a.objects[x] == b.objects[x]),
         b.schedules == a.schedules,
@@ -304,21 +304,21 @@ pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: Set<Seq<cha
     assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
         b.objects.contains_key(w) && b.objects[w].callbacks == a.objects[w].callbacks
         && b.objects[w].tags == a.objects[w].tags by {
-        if ids.contains(w) {
+        if ids(w) {
         } else {
             assert(b.objects.contains_key(w));
         }
     }
-    assert forall|x: Seq<char>| #[trigger] ids.contains(x) && b.objects.contains_key(x) implies inv_obj(now, b, x) by {
+    assert forall|x: Seq<char>| #[trigger] ids(x) && b.objects.contains_key(x) implies inv_obj(now, b, x) by {
         lemma_project_inv_obj(now, a, b, x);
     }
-    assert forall|x: Seq<char>| #[trigger] ids.contains(x) implies trans_obj(now, a, b, x) by {
+    assert forall|x: Seq<char>| #[trigger] ids(x) implies trans_obj(now, a, b, x) by {
         lemma_project_trans_obj(now, a, b, x);
     }
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, ids, Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `promise.create` on a fresh id.
@@ -346,7 +346,7 @@ pub proof fn lemma_create_legal(now: nat, a: AState, b: AState, req: APromiseCre
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `promise.settle` on a pending promise.
@@ -382,7 +382,7 @@ pub proof fn lemma_settle_legal(now: nat, a: AState, b: AState, id: Seq<char>, s
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// A rung in `a` is a rung in `b` when no registered callback was lost.
@@ -480,7 +480,7 @@ pub proof fn lemma_add_callback_legal(now: nat, a: AState, b: AState, awaited: S
     }
     assert(inv_obj(now, b, awaited));
     assert(trans_obj(now, a, b, awaited));
-    crate::frame::lemma_step(now, a, b, set![awaited], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `promise.listener`: `awaited` pending, read at `now`.
@@ -543,7 +543,7 @@ pub proof fn lemma_add_listener_legal(now: nat, a: AState, b: AState, awaited: S
     }
     assert(inv_obj(now, b, awaited));
     assert(trans_obj(now, a, b, awaited));
-    crate::frame::lemma_step(now, a, b, set![awaited], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// Projecting one object at `now` is a legal step that keeps the invariant.
@@ -568,7 +568,7 @@ pub proof fn lemma_project_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert(trans_obj(now, a, b, id)) by {
         lemma_project_trans_obj(now, a, b, id);
     }
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// The projected object obeys every `.state` entry.

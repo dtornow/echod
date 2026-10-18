@@ -397,7 +397,7 @@ pub proof fn lemma_projected_task_identity(now: nat, a: AState, id: Seq<char>)
 /// The common part of every single-task-edit step: the object keeps its
 /// callbacks, listeners, tags and promise, so the pointers into and out of it
 /// are what they were.
-proof fn lemma_task_edit_frame(now: nat, a: AState, b: AState, id: Seq<char>)
+pub proof fn lemma_task_edit_frame(now: nat, a: AState, b: AState, id: Seq<char>)
     requires
         inv(now, a),
         a.objects.contains_key(id),
@@ -405,9 +405,9 @@ proof fn lemma_task_edit_frame(now: nat, a: AState, b: AState, id: Seq<char>)
         b.objects[id].callbacks == a.objects[id].callbacks,
         b.objects[id].listeners == a.objects[id].listeners,
         b.objects[id].tags == a.objects[id].tags,
-        forall|z: Seq<char>| z != id ==>
-            (a.objects.contains_key(z) <==> #[trigger] b.objects.contains_key(z))
-            && (a.objects.contains_key(z) ==> a.objects[z] == b.objects[z]),
+        forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) ==>
+            b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+            && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z),
     ensures
         forall|i: int| 0 <= i < a.objects[id].callbacks.len() ==>
             b.objects[id].callbacks.contains(#[trigger] a.objects[id].callbacks[i]),
@@ -427,10 +427,17 @@ proof fn lemma_task_edit_frame(now: nat, a: AState, b: AState, id: Seq<char>)
     assert forall|i: int| 0 <= i < q.callbacks.len() implies
         b.objects.contains_key(#[trigger] q.callbacks[i]) && b.objects[q.callbacks[i]].otype() == OType::Runnable by {
         assert(a.objects.contains_key(p.callbacks[i]) && a.objects[p.callbacks[i]].otype() == OType::Runnable);
-        if p.callbacks[i] != id {
-            assert(b.objects.contains_key(p.callbacks[i]));
-        }
+        assert(b.objects.contains_key(p.callbacks[i]));
+        assert(b.objects[p.callbacks[i]].tags == a.objects[p.callbacks[i]].tags);
     }
+}
+
+/// The pointer frame of a step that keeps every object's tags and loses no
+/// callback: what `lemma_task_edit_frame` needs of the rest of the store.
+pub open spec fn pointer_frame(a: AState, b: AState) -> bool {
+    forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) ==>
+        b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+        && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z)
 }
 
 /// `task.create` on a fresh id ahead of its deadline.
@@ -462,7 +469,7 @@ pub proof fn lemma_create_acquired_legal(now: nat, a: AState, b: AState, req: AP
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.acquire`, and `task.create` on an existing pending task.
@@ -490,12 +497,19 @@ pub proof fn lemma_acquire_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
     let u = t.acquire(pid, ttl, now);
     let q = p.with_task(u);
     assert(b.objects[id] == q);
+    assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
+        b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+        && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z) by {
+        if w != id {
+            assert(b.objects.contains_key(w));
+        }
+    }
     lemma_task_edit_frame(now, a, b, id);
     assert(q.project_promise(now) == q);
     assert(u.resumes.len() == 0);
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.release`, and the lease timeout.
@@ -521,12 +535,19 @@ pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     let u = t.release(now);
     let q = p.with_task(u);
     assert(b.objects[id] == q);
+    assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
+        b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+        && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z) by {
+        if w != id {
+            assert(b.objects.contains_key(w));
+        }
+    }
     lemma_task_edit_frame(now, a, b, id);
     assert(q.project_promise(now) == q);
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.halt` on a task that is neither fulfilled nor halted.
@@ -553,12 +574,19 @@ pub proof fn lemma_halt_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     let u = t.halt();
     let q = p.with_task(u);
     assert(b.objects[id] == q);
+    assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
+        b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+        && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z) by {
+        if w != id {
+            assert(b.objects.contains_key(w));
+        }
+    }
     lemma_task_edit_frame(now, a, b, id);
     assert(q.project_promise(now) == q);
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.continue` on a halted task.
@@ -584,12 +612,19 @@ pub proof fn lemma_continue_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     let u = t.continue_(now);
     let q = p.with_task(u);
     assert(b.objects[id] == q);
+    assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
+        b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+        && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z) by {
+        if w != id {
+            assert(b.objects.contains_key(w));
+        }
+    }
     lemma_task_edit_frame(now, a, b, id);
     assert(q.project_promise(now) == q);
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, set![id], Set::empty(), Set::empty(), Set::empty());
+    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 } // verus!

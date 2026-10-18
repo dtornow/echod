@@ -19,6 +19,7 @@ verus! {
 
 /// What a step may do, stated per id, and what follows.
 ///
+/// Each set is a predicate on ids.
 /// - `changed`: the object ids the step wrote. Elsewhere `b` agrees with `a`.
 /// - `lost`: the ids whose callbacks the step may have consumed, a subset of
 ///   `changed`. Every other registered callback survives into `b`.
@@ -26,33 +27,33 @@ verus! {
 /// - `sched`: the schedule ids the step wrote. Elsewhere `b` agrees with `a`.
 pub proof fn lemma_step(
     now: nat, a: AState, b: AState,
-    changed: Set<Seq<char>>, lost: Set<Seq<char>>,
-    new_out: Set<OutboxKey>, sched: Set<Seq<char>>,
+    changed: spec_fn(Seq<char>) -> bool, lost: spec_fn(Seq<char>) -> bool,
+    new_out: spec_fn(OutboxKey) -> bool, sched: spec_fn(Seq<char>) -> bool,
 )
     requires
         inv(now, a),
         // objects
-        forall|x: Seq<char>| !changed.contains(x) ==>
+        forall|x: Seq<char>| !changed(x) ==>
             (a.objects.contains_key(x) <==> #[trigger] b.objects.contains_key(x))
             && (a.objects.contains_key(x) ==> a.objects[x] == b.objects[x]),
-        forall|x: Seq<char>| #[trigger] changed.contains(x) && b.objects.contains_key(x) ==> inv_obj(now, b, x),
-        forall|x: Seq<char>| #[trigger] changed.contains(x) ==> trans_obj(now, a, b, x),
-        forall|z: Seq<char>| #[trigger] lost.contains(z) ==> changed.contains(z),
+        forall|x: Seq<char>| #[trigger] changed(x) && b.objects.contains_key(x) ==> inv_obj(now, b, x),
+        forall|x: Seq<char>| #[trigger] changed(x) ==> trans_obj(now, a, b, x),
+        forall|z: Seq<char>| #[trigger] lost(z) ==> changed(z),
         forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
-            && #[trigger] a.objects[w].callbacks.contains(z) && !lost.contains(z)
+            && #[trigger] a.objects[w].callbacks.contains(z) && !lost(z)
             ==> b.objects.contains_key(w) && b.objects[w].callbacks.contains(z),
         // outbox
-        forall|k: OutboxKey| !new_out.contains(k) ==>
+        forall|k: OutboxKey| !new_out(k) ==>
             (a.outbox.contains_key(k) <==> #[trigger] b.outbox.contains_key(k))
             && (a.outbox.contains_key(k) ==> a.outbox[k] == b.outbox[k]),
-        forall|k: OutboxKey| #[trigger] new_out.contains(k) && b.outbox.contains_key(k) ==> inv_out(now, b, k),
-        forall|k: OutboxKey| #[trigger] new_out.contains(k) ==> trans_out(now, a, b, k),
+        forall|k: OutboxKey| #[trigger] new_out(k) && b.outbox.contains_key(k) ==> inv_out(now, b, k),
+        forall|k: OutboxKey| #[trigger] new_out(k) ==> trans_out(now, a, b, k),
         // schedules
-        forall|x: Seq<char>| !sched.contains(x) ==>
+        forall|x: Seq<char>| !sched(x) ==>
             (a.schedules.contains_key(x) <==> #[trigger] b.schedules.contains_key(x))
             && (a.schedules.contains_key(x) ==> a.schedules[x] == b.schedules[x]),
-        forall|x: Seq<char>| #[trigger] sched.contains(x) && b.schedules.contains_key(x) ==> inv_sched(now, b, x),
-        forall|x: Seq<char>| #[trigger] sched.contains(x) ==> trans_sched(now, a, b, x),
+        forall|x: Seq<char>| #[trigger] sched(x) && b.schedules.contains_key(x) ==> inv_sched(now, b, x),
+        forall|x: Seq<char>| #[trigger] sched(x) ==> trans_sched(now, a, b, x),
     ensures
         inv(now, b),
         legal(now, a, b),
@@ -61,19 +62,19 @@ pub proof fn lemma_step(
 
     // Every id obeys the .trans entries.
     assert forall|x: Seq<char>| #[trigger] trans_obj(now, a, b, x) by {
-        if !changed.contains(x) {
+        if !changed(x) {
             assert(a.objects.contains_key(x) <==> b.objects.contains_key(x));
             lemma_trans_obj_unchanged(now, a, b, x);
         }
     }
     assert forall|k: OutboxKey| #[trigger] trans_out(now, a, b, k) by {
-        if !new_out.contains(k) {
+        if !new_out(k) {
             assert(a.outbox.contains_key(k) <==> b.outbox.contains_key(k));
             lemma_trans_out_frame(now, a, b, k);
         }
     }
     assert forall|x: Seq<char>| #[trigger] trans_sched(now, a, b, x) by {
-        if !sched.contains(x) {
+        if !sched(x) {
             assert(a.schedules.contains_key(x) <==> b.schedules.contains_key(x));
             lemma_trans_sched_unchanged(now, a, b, x);
         }
@@ -82,19 +83,19 @@ pub proof fn lemma_step(
 
     // Every id obeys the .state entries.
     assert forall|x: Seq<char>| #[trigger] b.objects.contains_key(x) implies inv_obj(now, b, x) by {
-        if !changed.contains(x) {
+        if !changed(x) {
             assert(a.objects.contains_key(x));
             lemma_inv_obj_frame(now, a, b, x, lost);
         }
     }
     assert forall|k: OutboxKey| #[trigger] b.outbox.contains_key(k) implies inv_out(now, b, k) by {
-        if !new_out.contains(k) {
+        if !new_out(k) {
             assert(a.outbox.contains_key(k));
             lemma_inv_out_frame(now, a, b, k);
         }
     }
     assert forall|x: Seq<char>| #[trigger] b.schedules.contains_key(x) implies inv_sched(now, b, x) by {
-        if !sched.contains(x) {
+        if !sched(x) {
             assert(a.schedules.contains_key(x));
             assert(inv_sched(now, a, x));
         }
@@ -109,7 +110,7 @@ pub proof fn lemma_noop(now: nat, a: AState)
     ensures
         legal(now, a, a),
 {
-    lemma_step(now, a, a, Set::empty(), Set::empty(), Set::empty(), Set::empty());
+    lemma_step(now, a, a, |x: Seq<char>| false, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// An outbox entry the step did not touch satisfies its `.trans` entries,
@@ -141,16 +142,16 @@ pub proof fn lemma_trans_out_frame(now: nat, a: AState, b: AState, k: OutboxKey)
 /// An object the step did not touch still obeys the `.state` entries in `b`:
 /// its own fields did not move, and the objects it points at obeyed the
 /// `.trans` entries.
-pub proof fn lemma_inv_obj_frame(now: nat, a: AState, b: AState, x: Seq<char>, lost: Set<Seq<char>>)
+pub proof fn lemma_inv_obj_frame(now: nat, a: AState, b: AState, x: Seq<char>, lost: spec_fn(Seq<char>) -> bool)
     requires
         inv_obj(now, a, x),
         a.objects.contains_key(x),
         b.objects.contains_key(x),
         a.objects[x] == b.objects[x],
-        !lost.contains(x),
+        !lost(x),
         forall|y: Seq<char>| #[trigger] trans_obj(now, a, b, y),
         forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
-            && #[trigger] a.objects[w].callbacks.contains(z) && !lost.contains(z)
+            && #[trigger] a.objects[w].callbacks.contains(z) && !lost(z)
             ==> b.objects.contains_key(w) && b.objects[w].callbacks.contains(z),
     ensures
         inv_obj(now, b, x),
@@ -167,6 +168,42 @@ pub proof fn lemma_inv_obj_frame(now: nat, a: AState, b: AState, x: Seq<char>, l
         assert(b.objects[t].tags == a.objects[t].tags);
     }
     // a suspended task's rung survives
+    match p.task {
+        Some(t) => {
+            if t.state == TaskState::Suspended && p.project_promise(now).state == PromiseState::Pending {
+                assert(some_callbacks_contain(a, x));
+                let w = choose|w: Seq<char>| #[trigger] a.objects.contains_key(w) && a.objects[w].callbacks.contains(x);
+                assert(b.objects.contains_key(w) && b.objects[w].callbacks.contains(x));
+                assert(some_callbacks_contain(b, x));
+            }
+        }
+        None => {}
+    }
+}
+
+/// An unchanged object under a step that keeps every object, its tags and
+/// its registered callbacks still obeys the `.state` entries.
+pub proof fn lemma_inv_obj_frame_simple(now: nat, a: AState, b: AState, x: Seq<char>)
+    requires
+        inv(now, a),
+        a.objects.contains_key(x),
+        b.objects.contains_key(x),
+        a.objects[x] == b.objects[x],
+        forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) ==>
+            b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
+            && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z),
+    ensures
+        inv_obj(now, b, x),
+{
+    lemma_inv_pointwise(now, a);
+    assert(inv_obj(now, a, x));
+    let p = a.objects[x];
+    assert forall|i: int| 0 <= i < p.callbacks.len() implies
+        b.objects.contains_key(#[trigger] p.callbacks[i]) && b.objects[p.callbacks[i]].otype() == OType::Runnable by {
+        let t = p.callbacks[i];
+        assert(a.objects.contains_key(t) && a.objects[t].otype() == OType::Runnable);
+        assert(b.objects[t].tags == a.objects[t].tags);
+    }
     match p.task {
         Some(t) => {
             if t.state == TaskState::Suspended && p.project_promise(now).state == PromiseState::Pending {

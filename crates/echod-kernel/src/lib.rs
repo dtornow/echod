@@ -20,7 +20,9 @@
 //! ghost code erased.
 
 pub mod external;
+pub mod external_sched;
 pub mod external_task;
+pub mod external_task2;
 pub mod frame;
 pub mod ident;
 pub mod object;

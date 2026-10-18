@@ -943,12 +943,30 @@ pub open spec fn consistent_wake_follows_callback_consumption(now: nat, a: AStat
         consistent_wake_follows_callback_consumption_at(now, a, b, id, b.objects[id])
 }
 
-pub open spec fn consistent_suspension_registers_callback_at(_now: nat, a: AState, b: AState, id: Seq<char>, q: APromise) -> bool {
+/// The entry as `properties.lean` states it. It is FALSE of the abstract
+/// machine, so it is not in `legal`; the amended entry below is. Witness, in
+/// the machine's own steps: a task `X` suspends on `P1` and `P2`; `P1`
+/// settles and the callback drain consumes `P1`'s callback and wakes `X`;
+/// `X` is acquired again and suspends on `P2` alone. `P2` already carried
+/// `X` (the drain removed `X` from `P1` only), so `addCallback` is a no-op
+/// and no promise gains a callback it did not have — yet `X` suspended
+/// legitimately. The sweep did not reach it: the trace is seven steps long.
+pub open spec fn consistent_suspension_registers_callback_lean_at(_now: nat, a: AState, b: AState, id: Seq<char>, q: APromise) -> bool {
     task_at(q, |u: ATask| u.state != TaskState::Suspended
         || (match a.task_of(id) { None => false, Some(t) => t.state == TaskState::Suspended })
         || exists|qid: Seq<char>| #[trigger] b.objects.contains_key(qid)
             && b.objects[qid].callbacks.contains(id)
             && (match a.promise_of(qid) { None => true, Some(p) => !p.callbacks.contains(id) })
+            && b.objects[qid].state == PromiseState::Pending)
+}
+
+/// Amended: a task that became suspended in this step holds a callback on a
+/// pending promise in `b`. (The original also demanded the callback be new.)
+pub open spec fn consistent_suspension_registers_callback_at(_now: nat, a: AState, b: AState, id: Seq<char>, q: APromise) -> bool {
+    task_at(q, |u: ATask| u.state != TaskState::Suspended
+        || (match a.task_of(id) { None => false, Some(t) => t.state == TaskState::Suspended })
+        || exists|qid: Seq<char>| #[trigger] b.objects.contains_key(qid)
+            && b.objects[qid].callbacks.contains(id)
             && b.objects[qid].state == PromiseState::Pending)
 }
 pub open spec fn consistent_suspension_registers_callback(now: nat, a: AState, b: AState) -> bool {
