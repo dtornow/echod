@@ -32,7 +32,7 @@ async fn ready(State(server): State<Arc<Server>>) -> StatusCode {
 
 async fn handle(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
     let forwarded = headers.contains_key(FORWARDED);
-    let mut node = server.nodes().id().to_string();
+    let mut node = server.nodes().id();
     let resp = match parse_and_validate(&body) {
         Err(e) => {
             let (kind, corr) = salvage_context(&body);

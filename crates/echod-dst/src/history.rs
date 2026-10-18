@@ -1,0 +1,77 @@
+//! What each client and each sweep saw, with virtual timestamps.
+//!
+//! An entry spans from the first attempt to the answer. A request answered
+//! with "no answer" is retried with the same instant until it is answered,
+//! which every operation admits, so the span is the only window in which the
+//! operation can have taken effect.
+
+use std::sync::Mutex;
+
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::workload::Op;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Entry {
+    pub id: u64,
+    pub origin: String,
+    pub client: String,
+    pub op: Op,
+    /// The instant the operation is decided at.
+    pub now: u64,
+    pub invoke: u64,
+    pub ret: u64,
+    /// `(status, data)`; `None` for a sweep, which answers nobody.
+    pub outcome: Option<(u16, Value)>,
+    pub attempts: u32,
+}
+
+#[derive(Default)]
+pub struct History {
+    entries: Mutex<Vec<Entry>>,
+    next: std::sync::atomic::AtomicU64,
+    open: Mutex<std::collections::BTreeMap<u64, Entry>>,
+}
+
+impl History {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Open an entry; it is recorded when closed.
+    pub fn begin(&self, origin: &str, client: &str, op: Op, now: u64, invoke: u64) -> u64 {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.open.lock().unwrap().insert(id, Entry { id, origin: origin.to_string(), client: client.to_string(), op, now, invoke, ret: 0, outcome: None, attempts: 0 });
+        id
+    }
+
+    pub fn attempt(&self, id: u64) {
+        if let Some(e) = self.open.lock().unwrap().get_mut(&id) {
+            e.attempts += 1;
+        }
+    }
+
+    pub fn end(&self, id: u64, ret: u64, outcome: Option<(u16, Value)>) {
+        if let Some(mut e) = self.open.lock().unwrap().remove(&id) {
+            e.ret = ret;
+            e.outcome = outcome;
+            self.entries.lock().unwrap().push(e);
+        }
+    }
+
+    /// Entries never closed: a client killed mid-request. They are closed at
+    /// `ret` with no outcome, since they may have taken effect.
+    pub fn close_open(&self, ret: u64) {
+        let open: Vec<Entry> = self.open.lock().unwrap().values().cloned().collect();
+        for e in open {
+            self.end(e.id, ret, None);
+        }
+    }
+
+    pub fn entries(&self) -> Vec<Entry> {
+        let mut v = self.entries.lock().unwrap().clone();
+        v.sort_by_key(|e| (e.invoke, e.id));
+        v
+    }
+}

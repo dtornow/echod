@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::cache::{Armed, Cache, Cached};
 
-use echod_kernel::{Config as KernelConfig, OutboxEntry, Promise, PromiseState, Schedule, State, TaskState};
+use echod_kernel::{Config as KernelConfig, OutboxEntry, Promise, Schedule, State};
 use resonate_core::{ResonateRouter, Unavailable};
 
 use crate::doc::{self, Loaded};
@@ -37,6 +37,7 @@ pub struct Applier {
     router: Arc<dyn ResonateRouter>,
     server_url: String,
     cache: Arc<dyn Cache>,
+    observer: Arc<dyn crate::env::Observer>,
     tokens: std::sync::atomic::AtomicU64,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     max_retries: u32,
@@ -60,8 +61,10 @@ impl Applier {
         router: Arc<dyn ResonateRouter>,
         server_url: String,
         cache: Arc<dyn Cache>,
+        clock: Arc<dyn crate::env::Clock>,
+        observer: Arc<dyn crate::env::Observer>,
     ) -> Self {
-        let seed = crate::keys::fnv1a(&format!("{}/{}", server_url, resonate_core::util::system_time_ms())) | 1;
+        let seed = crate::keys::fnv1a(&format!("{}/{}", server_url, clock.now())) | 1;
         Self {
             store,
             keys,
@@ -71,6 +74,7 @@ impl Applier {
             router,
             server_url,
             cache,
+            observer,
             tokens: std::sync::atomic::AtomicU64::new(seed),
             locks: Mutex::new(HashMap::new()),
             max_retries: 8,
@@ -138,23 +142,33 @@ impl Applier {
         }
     }
 
-    /// Load an origin's document: from the cache when this node owns the
-    /// origin, revalidated against the store otherwise.
-    async fn load(&self, origin: &str) -> Result<(Loaded, Option<Etag>), Unavailable> {
+    /// May a cache entry for `origin` filled at `filled_at` be used without
+    /// asking the store? Only by the owner, with a fresh view, once the
+    /// membership has settled since the entry was filled.
+    fn trusted(&self, origin: &str, filled_at: u64, now: u64) -> bool {
+        self.nodes.owns(origin) && self.nodes.trust_after(now).map_or(false, |t| filled_at >= t)
+    }
+
+    /// Load an origin's document: from the cache when this node may trust
+    /// it, revalidated against the store otherwise.
+    async fn load(&self, origin: &str, now: u64) -> Result<(Loaded, Option<Etag>), Unavailable> {
         let key = self.keys.doc_key(origin);
         if let Some(c) = self.cached(origin) {
-            if self.nodes.owns(origin) {
+            if self.trusted(origin, c.filled_at, now) {
                 return Ok((c.loaded, Some(c.etag)));
             }
             match self.store.get_if_none_match(&key, &c.etag).await.map_err(unavailable)? {
-                Read::NotModified => return Ok((c.loaded, Some(c.etag))),
+                Read::NotModified => {
+                    self.remember(origin, Cached { filled_at: now, ..c.clone() });
+                    return Ok((c.loaded, Some(c.etag)));
+                }
                 Read::Absent => {
                     self.forget(origin);
                     return Ok((Loaded { rows: vec![], row_count: 0, bytes: 0 }, None));
                 }
                 Read::Body(bytes, etag) => {
                     let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone() });
+                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                     return Ok((loaded, Some(etag)));
                 }
             }
@@ -163,7 +177,7 @@ impl Applier {
             None => Ok((Loaded { rows: vec![], row_count: 0, bytes: 0 }, None)),
             Some((bytes, etag)) => {
                 let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone() });
+                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                 Ok((loaded, Some(etag)))
             }
         }
@@ -198,7 +212,7 @@ impl Applier {
         let _guard = lock.lock().await;
         for attempt in 0..=self.max_retries {
             let (loaded, etag) = match origin {
-                Some(o) => self.load(o).await?,
+                Some(o) => self.load(o, now).await?,
                 None => (Loaded { rows: vec![], row_count: 0, bytes: 0 }, None),
             };
             let mut schedules = Vec::new();
@@ -236,82 +250,24 @@ impl Applier {
     /// drains that follow. The sweep behind a timer.
     pub async fn sweep(&self, origin: &str, now: u64) -> Result<(), Unavailable> {
         let cfg = self.cfg;
-        self.apply(Some(origin), None, now, move |s: &mut State| {
-            let ids: Vec<String> = s.objects.iter().map(|p| p.id.clone()).collect();
-            for id in ids {
-                s.process_promise_timeout(&echod_kernel::PromiseTimeoutReq { id: id.clone() }, now, &cfg);
-                s.process_lease_timeout(&echod_kernel::TaskLeaseTimeoutReq { id: id.clone() }, now, &cfg);
-                s.process_retry_timeout(&echod_kernel::TaskRetryTimeoutReq { id }, now, &cfg);
-            }
-        })
-        .await
+        let handle = self.observer.sweep_begin(&self.nodes.id(), origin, now);
+        let r = self.apply(Some(origin), None, now, move |s: &mut State| crate::step::sweep(s, now, &cfg)).await;
+        self.observer.sweep_end(handle, r.is_ok());
+        r
     }
 
-    /// Discharge every settled promise's callbacks and listeners, then fire
-    /// every retry that is due — the internal steps a request leaves owed.
     fn drain(&self, s: &mut State, now: u64) {
-        let cfg = self.cfg;
-        let mut rounds = 0;
-        loop {
-            rounds += 1;
-            let mut did = false;
-            let owed: Vec<(String, Vec<String>, Vec<String>)> = s
-                .objects
-                .iter()
-                .filter(|p| p.state != PromiseState::Pending)
-                .filter(|p| !p.callbacks.is_empty() || !p.listeners.is_empty())
-                .map(|p| (p.id.clone(), p.callbacks.clone(), p.listeners.clone()))
-                .collect();
-            for (awaited, callbacks, listeners) in owed {
-                for awaiter in callbacks {
-                    s.process_callback(&echod_kernel::PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter }, now, &cfg);
-                    did = true;
-                }
-                for address in listeners {
-                    s.process_listener(&echod_kernel::PromiseRegisterListenerReq { awaited: awaited.clone(), address }, now, &cfg);
-                    did = true;
-                }
-            }
-            let due: Vec<String> = s
-                .objects
-                .iter()
-                .filter(|p| p.state == PromiseState::Pending)
-                .filter(|p| p.task.as_ref().map(|t| t.state == TaskState::Pending && t.retry_timeout_at.map(|d| d <= now).unwrap_or(false)).unwrap_or(false))
-                .map(|p| p.id.clone())
-                .collect();
-            for id in due {
-                s.process_retry_timeout(&echod_kernel::TaskRetryTimeoutReq { id }, now, &cfg);
-                did = true;
-            }
-            if !did || rounds > 64 {
-                return;
-            }
-        }
+        crate::step::drain(s, now, &self.cfg)
     }
 
     /// The nearest deadline the document owes a timer for.
     pub fn next_deadline(rows: &[Promise]) -> Option<u64> {
-        let mut min: Option<u64> = None;
-        let mut note = |d: u64| min = Some(min.map_or(d, |m| m.min(d)));
-        for p in rows {
-            if p.state == PromiseState::Pending && echod_kernel::tags::exec_otype(&p.tags) != echod_kernel::tags::OType::Internal {
-                note(p.timeout_at);
-            }
-            if let Some(t) = &p.task {
-                if let Some(d) = t.retry_timeout_at {
-                    note(d);
-                }
-                if let Some(d) = t.lease_timeout_at {
-                    note(d);
-                }
-            }
-        }
-        min
+        crate::step::next_deadline(rows)
     }
 
     /// Write what the step changed: the timer first, the document, the
     /// schedules, then the old timer; and hand over the outbox.
-    async fn commit(&self, w: &mut Working, state: &State, _now: u64) -> Result<(), StoreError> {
+    async fn commit(&self, w: &mut Working, state: &State, now: u64) -> Result<(), StoreError> {
         let changed = doc::changed(&w.loaded.rows, &state.objects);
         let new_deadline = Self::next_deadline(&state.objects);
 
@@ -336,7 +292,7 @@ impl Applier {
                 None => {
                     let body = doc::encode(&state.objects);
                     let etag = self.store.put_if_none_match(&key, body.clone()).await?;
-                    self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: etag.clone() });
+                    self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: etag.clone(), filled_at: now });
                     etag
                 }
                 Some(etag) => {
@@ -347,13 +303,13 @@ impl Applier {
                         let new = self.store.append_if_match(&key, w.loaded.bytes, body.clone(), etag).await?;
                         self.remember(
                             &w.origin,
-                            Cached { loaded: Loaded { rows: state.objects.clone(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64 }, etag: new.clone() },
+                            Cached { loaded: Loaded { rows: state.objects.clone(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64 }, etag: new.clone(), filled_at: now },
                         );
                         new
                     } else {
                         let body = doc::encode(&state.objects);
                         let new = self.store.put_if_match(&key, body.clone(), etag).await?;
-                        self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: new.clone() });
+                        self.remember(&w.origin, Cached { loaded: Loaded { rows: state.objects.clone(), row_count: state.objects.len(), bytes: body.len() as u64 }, etag: new.clone(), filled_at: now });
                         new
                     }
                 }

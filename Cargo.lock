@@ -1051,6 +1051,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-dst"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "echod-kernel",
+ "echod-server",
+ "resonate-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "echod-kernel"
 version = "0.1.0"
 dependencies = [

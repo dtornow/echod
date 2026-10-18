@@ -117,14 +117,15 @@ pub struct Timers {
     nodes: Arc<Nodes>,
     applier: Arc<Applier>,
     schedules: Arc<Schedules>,
+    clock: Arc<dyn crate::env::Clock>,
     /// The start of the last bucket this node has listed. `None` until the
     /// first full load succeeds; nothing fires before that.
     loaded_through: Mutex<Option<u64>>,
 }
 
 impl Timers {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>) -> Self {
-        Self { store, keys, wheel, nodes, applier, schedules, loaded_through: Mutex::new(None) }
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>, clock: Arc<dyn crate::env::Clock>) -> Self {
+        Self { store, keys, wheel, nodes, applier, schedules, clock, loaded_through: Mutex::new(None) }
     }
 
     pub fn wheel(&self) -> &Arc<TimerWheel> {
@@ -206,7 +207,13 @@ impl Timers {
             tracing::warn!(key = %key, "unparseable timer key dropped");
             return;
         };
-        if !self.owns(&entry) {
+        if !self.owns(&entry) || !self.nodes.fresh(now) {
+            // Not this node's to fire, or this node cannot tell. The key
+            // stays for whoever owns it; if it is still this node's it is
+            // listed again on the next membership change.
+            if self.owns(&entry) {
+                self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
+            }
             return;
         }
         let swept = match &entry {
@@ -252,7 +259,7 @@ impl Timers {
             let mut generations = self.nodes.generations();
             generations.mark_changed();
             loop {
-                let now = resonate_core::util::system_time_ms() as u64;
+                let now = self.clock.now();
                 let mut backoff = None;
                 if generations.has_changed().unwrap_or(false) {
                     generations.borrow_and_update();
@@ -271,7 +278,7 @@ impl Timers {
                 if self.loaded_through().is_some() {
                     self.fire_due(now).await;
                 }
-                let now = resonate_core::util::system_time_ms() as u64;
+                let now = self.clock.now();
                 let next_bucket = self.loaded_through().map(|t| t.max(now));
                 let wake_at = [self.wheel.nearest(), next_bucket].into_iter().flatten().min();
                 let wait = match (backoff, wake_at) {
@@ -280,10 +287,11 @@ impl Timers {
                     (None, None) => Duration::from_secs(3600),
                 };
                 tokio::select! {
-                    _ = tokio::time::sleep(wait) => {}
-                    _ = self.wheel.nearer.notified() => {}
-                    _ = generations.changed() => {}
+                    biased;
                     _ = shutdown.changed() => return,
+                    _ = generations.changed() => generations.mark_changed(),
+                    _ = self.wheel.nearer.notified() => {}
+                    _ = tokio::time::sleep(wait) => {}
                 }
             }
         })

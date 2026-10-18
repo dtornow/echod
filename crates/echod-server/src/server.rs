@@ -20,6 +20,7 @@ use validator::Validate;
 
 use crate::applier::Applier;
 use crate::config::Config;
+use crate::env::{Clock, HttpPeers, Peers, SystemClock};
 use crate::keys::{origin_of, KeySpace};
 use crate::nodes::Nodes;
 use crate::push::Router;
@@ -28,8 +29,7 @@ use crate::store::{self, Store};
 use crate::timers::{TimerWheel, Timers};
 use crate::wire;
 
-/// The header a forwarded request carries, so the owner never forwards it on.
-pub const FORWARDED: &str = "x-echod-forwarded";
+pub use crate::env::FORWARDED;
 /// The header every answer carries: which node answered.
 pub const NODE: &str = "x-echod-node";
 
@@ -39,8 +39,10 @@ pub struct Server {
     nodes: Arc<Nodes>,
     applier: Arc<Applier>,
     timers: Arc<Timers>,
-    client: reqwest::Client,
+    clock: Arc<dyn Clock>,
+    peers: Arc<dyn Peers>,
     shutdown: tokio::sync::watch::Sender<bool>,
+    crashed: tokio::sync::watch::Sender<bool>,
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -52,18 +54,24 @@ impl Server {
     }
 
     pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Arc<Self> {
+        Self::with_env(cfg, store, router, Arc::new(SystemClock), Arc::new(HttpPeers::new()), Arc::new(crate::env::NoObserver))
+    }
+
+    /// A server whose clock, peers and observer are supplied: what a
+    /// simulation builds.
+    pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, peers: Arc<dyn Peers>, observer: Arc<dyn crate::env::Observer>) -> Arc<Self> {
         let keys = KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
         let url = cfg.url.clone().unwrap_or_else(|| format!("http://{}", cfg.bind.replace("0.0.0.0", "127.0.0.1")));
-        let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, util::system_time_ms()))));
-        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms));
+        let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, clock.now()))));
+        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms, Arc::clone(&clock)));
         let wheel = Arc::new(TimerWheel::new());
         let cache: Arc<dyn crate::cache::Cache> = Arc::new(crate::cache::MemoryCache::new(cfg.cache_entries, cfg.cache_bytes));
-        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cache));
+        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cache, Arc::clone(&clock), observer));
         let schedules = Arc::new(Schedules::new(Arc::clone(&applier)));
-        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, wheel, Arc::clone(&nodes), Arc::clone(&applier), schedules));
+        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, wheel, Arc::clone(&nodes), Arc::clone(&applier), schedules, Arc::clone(&clock)));
         let (shutdown, _) = tokio::sync::watch::channel(false);
-        let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(2)).timeout(Duration::from_secs(30)).build().expect("an HTTP client");
-        Arc::new(Self { cfg, store, nodes, applier, timers, client, shutdown, tasks: tokio::sync::Mutex::new(Vec::new()) })
+        let (crashed, _) = tokio::sync::watch::channel(false);
+        Arc::new(Self { cfg, store, nodes, applier, timers, clock, peers, shutdown, crashed, tasks: tokio::sync::Mutex::new(Vec::new()) })
     }
 
     pub fn config(&self) -> &Config {
@@ -72,6 +80,11 @@ impl Server {
 
     pub fn nodes(&self) -> &Arc<Nodes> {
         &self.nodes
+    }
+
+    /// Whether this node may act as a member right now: its view is fresh.
+    pub fn serving(&self) -> bool {
+        self.nodes.fresh(self.clock.now())
     }
 
     pub fn timers(&self) -> &Arc<Timers> {
@@ -84,55 +97,55 @@ impl Server {
 
     /// The clock a request sees.
     fn now(&self, req: &RequestEnvelope) -> u64 {
-        let debug_time = if self.cfg.debug { req.head.debug_time } else { None };
-        util::resolve_time(debug_time).max(0) as u64
+        match (self.cfg.debug, req.head.debug_time) {
+            (true, Some(t)) => t.max(0) as u64,
+            _ => self.clock.now(),
+        }
+    }
+
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// Die: every background task is aborted where it stands, nothing is
+    /// announced, nothing is flushed. For a simulation; a crashed server
+    /// answers nothing more and is dropped.
+    pub async fn crash(&self) {
+        let _ = self.crashed.send(true);
+        let tasks: Vec<_> = self.tasks.lock().await.drain(..).collect();
+        for t in tasks {
+            t.abort();
+        }
+    }
+
+    /// Fires when the server has crashed.
+    pub fn crashed(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.crashed.subscribe()
     }
 
     /// Run `req` here, or at the owner of `origin`. Returns the answer and
     /// the id of the node that produced it.
     pub async fn process_from(&self, req: &RequestEnvelope, forwarded: bool) -> Result<(ResponseEnvelope, String), Unavailable> {
         let now = self.now(req);
-        let me = self.nodes.id().to_string();
+        let me = self.nodes.id();
         let origin = match origin_of_request(req) {
             Ok(Some(o)) => o,
             Ok(None) => return Ok((self.dispatch(req, None, now).await?, me)),
             Err(e) => return Ok((ResponseEnvelope::error(req.kind.clone(), req.head.corr_id.clone(), 400, &e), me)),
         };
-        if !forwarded && self.cfg.forward && !self.nodes.owns(&origin) {
-            if let Some(owner) = self.nodes.owner(&origin) {
-                match self.forward(&owner.url, req).await {
-                    Ok(resp) => return Ok((resp, owner.id)),
-                    Err(e) => tracing::warn!(owner = %owner.id, error = %e, "forwarding failed; serving here"),
-                }
+        // A node that cannot see the membership may be fenced out without
+        // knowing it: it serves nothing until it can list.
+        if !self.nodes.fresh(self.clock.now()) {
+            return Err(Unavailable::new("this node's view of the membership is stale"));
+        }
+        if !forwarded && self.cfg.forward {
+            if let Some(owner) = self.nodes.owner(&origin).filter(|o| o.id != me) {
+                // The owner, or nobody: serving here would make the owner's
+                // cache a lie.
+                return self.peers.forward(&owner.url, &me, req).await.map(|resp| (resp, owner.id));
             }
         }
         Ok((self.dispatch(req, Some(origin), now).await?, me))
-    }
-
-    async fn forward(&self, url: &str, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
-        let body = json!({
-            "kind": req.kind,
-            "head": { "corrId": req.head.corr_id, "version": req.head.version, "auth": req.head.auth, "resonate:debug_time": req.head.debug_time },
-            "data": req.data,
-        });
-        let resp = self.client.post(url).header(FORWARDED, self.nodes.id()).json(&body).send().await.map_err(|e| Unavailable::new(e.to_string()))?;
-        if resp.status().as_u16() == 503 {
-            return Err(Unavailable::new("owner unavailable"));
-        }
-        #[derive(serde::Deserialize)]
-        struct Wire {
-            kind: String,
-            head: Head,
-            data: serde_json::Value,
-        }
-        #[derive(serde::Deserialize)]
-        struct Head {
-            #[serde(rename = "corrId")]
-            corr_id: String,
-            status: i32,
-        }
-        let w: Wire = resp.json().await.map_err(|e| Unavailable::new(e.to_string()))?;
-        Ok(ResponseEnvelope::new(w.kind, w.head.corr_id, w.head.status, w.data))
     }
 
     async fn dispatch(&self, req: &RequestEnvelope, origin: Option<String>, now: u64) -> Result<ResponseEnvelope, Unavailable> {
@@ -397,7 +410,7 @@ pub fn origin_of_request(req: &RequestEnvelope) -> Result<Option<String>, String
 #[async_trait]
 impl ResonateServer for Server {
     async fn init(&self, debug: bool) -> Result<(), Unavailable> {
-        let now = util::system_time_ms() as u64;
+        let now = self.clock.now();
         self.nodes.refresh(now).await.map_err(store::unavailable_err)?;
         if debug {
             return Ok(());

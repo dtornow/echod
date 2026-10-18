@@ -5,6 +5,8 @@
 //! keys.rs       where everything lives under the bucket
 //! store.rs      the object store port: S3, and an in-memory stand-in
 //! doc.rs        an origin's document: rows in, rows out, the fold between
+//! env.rs        the clock and the other nodes, as ports
+//! step.rs       the internal steps around a request: drain, sweep, next deadline
 //! wire.rs       the kernel's vocabulary to the protocol's and back
 //! nodes.rs      the nodes: announce, heartbeat, list, and who owns what
 //! cache.rs      what a node remembers: documents by LRU under a byte budget, armed keys
@@ -20,12 +22,14 @@ pub mod applier;
 pub mod cache;
 pub mod config;
 pub mod doc;
+pub mod env;
 pub mod gateway;
 pub mod keys;
 pub mod nodes;
 pub mod push;
 pub mod schedules;
 pub mod server;
+pub mod step;
 pub mod store;
 pub mod timers;
 pub mod wire;

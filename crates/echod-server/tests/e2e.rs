@@ -56,6 +56,16 @@ impl Worker {
     }
 }
 
+/// `RUST_LOG=debug cargo test ...` shows the server's logs.
+fn trace() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
+        }
+    });
+}
+
 struct Node {
     server: Arc<Server>,
     addr: SocketAddr,
@@ -64,6 +74,7 @@ struct Node {
 
 impl Node {
     async fn start(store: Arc<dyn Store>, id: &str, compact: u32) -> Self {
+        trace();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -286,15 +297,18 @@ async fn deadline_survives_a_restart() {
     assert_eq!(timer_keys(), 1, "the key is in the bucket");
 
     let listings_before = memory.listings();
+    let started = Instant::now();
     let second = Node::start(Arc::clone(&store), "second", 0).await;
-    let m = worker.expect(Duration::from_secs(5), is_unblock("r:1")).await;
-    // What the new node listed to get there: the node prefix once at init,
-    // the timer prefix and its buckets once at startup, then one bucket per
-    // 400 ms crossed. Never a poll.
-    let fired_after = Duration::from_millis(1_800);
-    let buckets_crossed = (fired_after.as_millis() / 400) as usize + 2;
+    let m = worker.expect(Duration::from_secs(6), is_unblock("r:1")).await;
+    // What the new node listed to get there: the node prefix once per
+    // heartbeat (500 ms), the timer prefix and its buckets at startup and
+    // once more when its membership took effect, then one bucket per 400 ms
+    // crossed. Never a poll of the timers.
+    let elapsed = started.elapsed().as_millis() as usize;
+    let heartbeats = elapsed / 500 + 2;
+    let buckets_crossed = elapsed / 400 + 2;
     let listed = memory.listings() - listings_before;
-    assert!(listed <= 1 + 1 + 1 + buckets_crossed + 2, "{listed} listings for one restart and {buckets_crossed} buckets");
+    assert!(listed <= heartbeats + 2 * (1 + buckets_crossed) + 2, "{listed} listings for one restart over {elapsed} ms");
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
     let start = Instant::now();
     while timer_keys() > 0 {
@@ -321,10 +335,10 @@ async fn two_nodes() {
     let b = Node::start(Arc::clone(&store), "b", 0).await;
     let far = now() + 3_600_000;
 
-    // they find each other
+    // they find each other, and a TTL later both are members
     let start = Instant::now();
-    while a.server.nodes().members().nodes.len() < 2 || b.server.nodes().members().nodes.len() < 2 {
-        assert!(start.elapsed() < Duration::from_secs(3), "nodes never met");
+    while a.server.nodes().members().members.len() < 2 || b.server.nodes().members().members.len() < 2 {
+        assert!(start.elapsed() < Duration::from_secs(6), "nodes never met");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -363,7 +377,7 @@ async fn two_nodes() {
         a
     };
     let start = Instant::now();
-    while survivor.server.nodes().members().nodes.len() > 1 {
+    while survivor.server.nodes().members().members.len() > 1 {
         assert!(start.elapsed() < Duration::from_secs(3), "the dead node never left");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -371,7 +385,7 @@ async fn two_nodes() {
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
     let (status, headers, data) = survivor.send("promise.get", json!({ "id": "x:1" })).await;
     assert_eq!(status, 200);
-    assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(survivor.server.nodes().id()));
+    assert_eq!(headers.get("x-echod-node").cloned(), Some(survivor.server.nodes().id()));
     assert_eq!(data["promise"]["state"], "pending");
     survivor.stop().await;
 }

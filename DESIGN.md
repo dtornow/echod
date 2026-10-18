@@ -9,6 +9,7 @@ durable executions in V8. Built inside out, from the stored data up.
 |---|---|
 | `echod-kernel` | the state machine: one object store, one transition per request, verified with Verus against the specification's catalogue |
 | `echod-server` | the `ResonateServer`: the kernel over documents in an S3 bucket, committed with conditional writes |
+| `echod-dst` | the server under deterministic simulation: one seed, no wall clock, no sockets; checked for linearizability against the kernel |
 | `echod-worker` | the `ResonateWorker`: a V8 isolate (`deno_core`) whose durable ops are promises on the server |
 
 The server and the worker depend on `resonate-core` for the traits and
@@ -126,20 +127,31 @@ advances the schedule in one turn on the promise's origin.
 
 ### Nodes
 
-A node announces itself at `nodes/<id>` and refreshes the announcement every
-heartbeat; every heartbeat it also lists `nodes/` and keeps the announcements
-younger than the TTL. That list is the membership. Nothing is agreed on and
-nothing depends on it for correctness, which the conditional writes carry;
-membership steers three things:
+A node announces itself at `nodes/<id>` (its URL, when it first announced,
+when it last did) and refreshes the announcement every heartbeat; every
+heartbeat it also lists `nodes/`. The members are the nodes announced within
+a TTL whose first announcement is at least a TTL old. Nothing is agreed on
+and nothing depends on membership for the state's correctness, which the
+conditional writes carry; membership steers three things:
 
-- **Ownership.** `hash(origin) mod n` over the live nodes in id order
-  (FNV-1a). A load balancer that applies the same function sends every
-  request for an origin to the node that caches it and fires its deadlines.
+- **Ownership.** `hash(origin) mod n` over the members in id order (FNV-1a).
+  A load balancer that applies the same function sends every request for an
+  origin to the node that caches it and fires its deadlines. A node that is
+  not the owner forwards; if the owner cannot be reached it answers 503
+  rather than serve, and a node whose last listing is a TTL old serves
+  nothing, since it may be fenced out without knowing.
 - **Cache.** Each node caches the documents it read or wrote, with their
   ETags, least recently used out, bounded by entries and by bytes. The owner
-  of an origin trusts its cache, since every write to the origin goes through
-  it; any other node revalidates with `If-None-Match`. The cache is a port
+  of an origin uses its cache without asking the store, but only for entries
+  filled a TTL and a heartbeat after the member set last changed: by then
+  every node has seen the change and stopped writing what it no longer owns.
+  Any other entry is revalidated with `If-None-Match`. The cache is a port
   (`cache.rs`); the one implementation is in memory.
+
+The three rules — a member counts a TTL after it joins, a change suspends
+trust, a stale view serves nothing — are what the simulation demanded: with
+"the owner trusts its cache" alone, two nodes mid-change both believed they
+owned an origin and one served a stale read.
 - **Timers.** Each node holds its share of the deadlines in an in-memory
   wheel and fires from it. It lists the timer prefix only at startup, when
   the set of live nodes changes (every node's share moved), and when the
@@ -157,6 +169,26 @@ itself. Every answer carries `x-echod-node`, the node that produced it.
 
 HTTP push only: a message is POSTed to the worker's URL as the protocol's
 JSON `Message`. The router maps `http` and `https` to it.
+
+### Simulation
+
+`echod-dst` runs several servers over one in-memory store on one thread
+under tokio's paused clock, so time moves only between tasks and the same
+seed replays the same run. The simulation owns every port: the clock, a
+store that answers nothing, loses acks or refuses conditional writes by
+seeded percentages and waits a seeded latency, the peers (a forwarded request
+is a call), a bus that checks every message against the bucket, and the
+crash of a node, which drops its tasks where they stand. Clients issue every
+request kind over a few origins; every attempt is a history entry, since an
+attempt that got no answer may have taken effect. Sweeps enter the history
+through an observer port.
+
+The check is linearizability per origin against the kernel: an order of the
+entries, each within its span, that yields every answer seen and ends in the
+rows the bucket holds; an entry without an answer may be placed or skipped.
+Besides that: every deadline a document owes has a key, every `execute`
+names a task that exists and every `unblock` a settled promise, every kind
+answered 200 at least once, and the history overlapped.
 
 ### The SDKs
 

@@ -19,6 +19,9 @@ use crate::store::Etag;
 pub struct Cached {
     pub loaded: Loaded,
     pub etag: Etag,
+    /// When the entry was read from or written to the store, or last
+    /// revalidated against it.
+    pub filled_at: u64,
 }
 
 impl Cached {
@@ -197,7 +200,7 @@ mod tests {
     use super::*;
 
     fn doc(bytes: u64, v: &str) -> Cached {
-        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes }, etag: Etag(v.to_string()) }
+        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes }, etag: Etag(v.to_string()), filled_at: 0 }
     }
 
     #[test]
