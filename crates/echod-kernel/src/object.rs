@@ -800,7 +800,6 @@ fn empty_task_fulfilled() -> (t: Task)
 
 /// `createPromise`, executable.
 pub fn create_promise(req: &PromiseCreateReq, now: u64) -> (p: Promise)
-    requires req.timeout_at <= MAX_TIME, now <= MAX_TIME,
     ensures p@ == spec_create(req@, now as nat),
 {
     let runnable = crate::tags::exec_otype(&req.tags) == OType::Runnable;

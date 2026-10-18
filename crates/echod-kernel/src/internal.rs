@@ -188,6 +188,11 @@ impl State {
         self.upsert_outbox(e);
         proof {
             let x = req.awaited@;
+            assert(self@.objects =~= a.objects.insert(x, a.objects[x].project(now as nat).remove_listener(req.address@)));
+            assert(self@.outbox =~= a.outbox.insert(OutboxKey::Notify(x, req.address@), AOutboxEntry {
+                address: req.address@,
+                message: AMessage::Unblock(a.objects[x].project(now as nat).remove_listener(req.address@).to_record()),
+            }));
             lemma_listener_legal(now as nat, a, self@, x, req.address@);
             lemma_internal_one(now as nat, a, self@, x);
         }
@@ -303,6 +308,10 @@ impl State {
         }
         let ghost occs = req.occurrences@;
         let ghost sched = a.schedules[req.schedule@];
+        proof {
+            lemma_inv_pointwise(now as nat, a);
+            assert(inv_sched(now as nat, a, req.schedule@));
+        }
         let n = req.occurrences.len();
         let mut k: usize = 0;
         while k < n
