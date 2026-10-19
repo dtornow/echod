@@ -15,6 +15,7 @@
 //! external.rs    the 18 request handlers
 //! external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 //! internal.rs    the 6 internal steps
+//! internal_proof.rs  their lemmas
 //! ```
 //!
 //! `./verify.sh` runs Verus; `cargo build` compiles the same sources with the
@@ -27,6 +28,7 @@ pub mod external_proof;
 pub mod frame;
 pub mod ident;
 pub mod internal;
+pub mod internal_proof;
 pub mod object;
 pub mod properties;
 pub mod store;

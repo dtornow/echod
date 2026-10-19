@@ -36,6 +36,7 @@ frame.rs        the frame: what a step owes for the ids it touched
 external.rs     the 18 request handlers
 external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 internal.rs     the 6 internal steps
+internal_proof.rs  their lemmas
 ```
 
 The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
