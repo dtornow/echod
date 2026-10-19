@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::routing::post;
 use axum::{Json, Router};
-use echod_server::store::{MemoryStore, Store};
+use echod_server::store::{MemoryStore, S3Store, Store};
 use echod_server::{gateway, Config, Server};
 use resonate_core::ResonateServer;
 use serde_json::{json, Value};
@@ -72,13 +72,33 @@ struct Node {
     stop: tokio::sync::watch::Sender<bool>,
 }
 
+/// The store a test runs on: the in-memory one, or, when `ECHOD_S3_BUCKET`
+/// is set, a real S3 API (an emulator or a bucket) under a prefix of its
+/// own, so tests do not see each other.
+async fn test_store(name: &str) -> (Arc<dyn Store>, String) {
+    match std::env::var("ECHOD_S3_BUCKET") {
+        Ok(bucket) => {
+            let endpoint = std::env::var("ECHOD_S3_ENDPOINT").ok();
+            let region = std::env::var("ECHOD_S3_REGION").ok().or_else(|| Some("us-east-1".to_string()));
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            (Arc::new(S3Store::open(&bucket, region.as_deref(), endpoint.as_deref(), false).await), format!("e2e/{name}-{nonce:x}/"))
+        }
+        Err(_) => (Arc::new(MemoryStore::new()), String::new()),
+    }
+}
+
 impl Node {
     async fn start(store: Arc<dyn Store>, id: &str, compact: u32) -> Self {
+        Self::start_under(store, id, compact, "").await
+    }
+
+    async fn start_under(store: Arc<dyn Store>, id: &str, compact: u32, prefix: &str) -> Self {
         trace();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let mut cfg = Config::memory(&addr.to_string());
+        cfg.prefix = prefix.to_string();
         cfg.node_id = Some(id.to_string());
         cfg.url = Some(format!("http://{addr}/"));
         cfg.compact = compact;
@@ -132,9 +152,9 @@ fn is_unblock(id: &str) -> impl Fn(&Value) -> bool + '_ {
     move |m| m["kind"] == "unblock" && m["data"]["promise"]["id"] == id
 }
 
-async fn one_node(store: Arc<dyn Store>, compact: u32) {
+async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     let worker = Worker::start().await;
-    let node = Node::start(Arc::clone(&store), "n1", compact).await;
+    let node = Node::start_under(Arc::clone(&store), "n1", compact, prefix).await;
     node.acting().await;
     let far = now() + 3_600_000;
 
@@ -275,13 +295,14 @@ async fn one_node(store: Arc<dyn Store>, compact: u32) {
 
 #[tokio::test]
 async fn one_node_rewriting() {
-    one_node(Arc::new(MemoryStore::new()), 0).await;
+    let (store, prefix) = test_store("one").await;
+    one_node(store, 0, &prefix).await;
 }
 
 #[tokio::test]
 async fn one_node_appending() {
     let store = Arc::new(MemoryStore::appendable());
-    one_node(Arc::clone(&store) as Arc<dyn Store>, 64).await;
+    one_node(Arc::clone(&store) as Arc<dyn Store>, 64, "").await;
     // the document is a log: more rows than promises
     let (bytes, _) = store.get("wf/a").await.unwrap().unwrap();
     let loaded = echod_server::doc::decode(&bytes).unwrap();
@@ -341,10 +362,10 @@ fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
 
 #[tokio::test]
 async fn two_nodes() {
-    let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+    let (store, prefix) = test_store("two").await;
     let worker = Worker::start().await;
-    let a = Node::start(Arc::clone(&store), "a", 0).await;
-    let b = Node::start(Arc::clone(&store), "b", 0).await;
+    let a = Node::start_under(Arc::clone(&store), "a", 0, &prefix).await;
+    let b = Node::start_under(Arc::clone(&store), "b", 0, &prefix).await;
     let far = now() + 3_600_000;
 
     // they find each other: a configuration naming both, held for the grace

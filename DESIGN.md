@@ -193,6 +193,22 @@ would otherwise step outside that.
 HTTP push only: a message is POSTed to the worker's URL as the protocol's
 JSON `Message`. The router maps `http` and `https` to it.
 
+### Against an S3 API
+
+The store's conditional writes are what every commit relies on, and the
+in-memory store is a model of them. `tests/s3_store.rs` checks the real
+thing: a conditional create of an existing key and a conditional write on
+a stale version are refused, a conditional read of the current version
+says so, listings page past a thousand keys and come back in order, and a
+version is a function of the content — the same bytes are the same
+version, which is why every write carries a nonce. The end-to-end tests
+run on the same store under a prefix of their own when `ECHOD_S3_BUCKET`
+is set. `scripts/s3-tests.sh` runs both against `s3s-fs`, the Rust S3
+emulator, or against a bucket you name. The SDK examples run unchanged
+against a server on the emulator. One gap in `s3s-fs` 0.17: it ignores
+`If-None-Match` on reads and sends the body where S3 sends 304; the store
+treats both as a revalidation that found the version current.
+
 ### Simulation
 
 `echod-dst` runs several servers over one in-memory store on one thread
