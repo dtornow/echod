@@ -8,7 +8,13 @@ use resonate_core::ResonateServer;
 async fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
     let cfg = Config::parse();
-    let store = store::open(&cfg).await;
+    let store = match store::open(&cfg).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "could not open the store");
+            std::process::exit(1);
+        }
+    };
     let server = Server::new(cfg.clone(), store);
     if let Err(e) = server.init(cfg.debug).await {
         tracing::error!(error = %e, "could not start");

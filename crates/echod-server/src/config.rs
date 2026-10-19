@@ -5,8 +5,15 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "echod-server", about = "A Resonate server over an S3 bucket", version)]
 pub struct Config {
-    /// Bucket holding every object. Without it the server runs on an in-memory
-    /// store and nothing survives the process.
+    /// The store, as a URL: `s3://bucket/prefix`, `gs://bucket`,
+    /// `az://container`, `file:///dir`, `memory:///`. Without it and without a
+    /// bucket the server runs on an in-memory store and nothing survives the
+    /// process.
+    #[arg(long, env = "ECHOD_STORE")]
+    pub store: Option<String>,
+
+    /// S3 bucket holding every object; the same as `--store s3://bucket`,
+    /// except with `--express`, where writes append.
     #[arg(long, env = "ECHOD_BUCKET")]
     pub bucket: Option<String>,
 
@@ -88,6 +95,7 @@ impl Config {
     /// A configuration for an in-memory, single-node server. Tests.
     pub fn memory(bind: &str) -> Self {
         Self {
+            store: None,
             bucket: None,
             region: None,
             endpoint: None,

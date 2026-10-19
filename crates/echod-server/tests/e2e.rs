@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::routing::post;
 use axum::{Json, Router};
-use echod_server::store::{MemoryStore, S3Store, Store};
+use echod_server::store::{MemoryStore, ObjectStoreStore, Store};
 use echod_server::{gateway, Config, Server};
 use resonate_core::ResonateServer;
 use serde_json::{json, Value};
@@ -72,16 +72,17 @@ struct Node {
     stop: tokio::sync::watch::Sender<bool>,
 }
 
-/// The store a test runs on: the in-memory one, or, when `ECHOD_S3_BUCKET`
-/// is set, a real S3 API (an emulator or a bucket) under a prefix of its
-/// own, so tests do not see each other.
+/// The store a test runs on: the in-memory one, or, when `ECHOD_STORE`
+/// names one (`s3://bucket`, `file:///dir`, ...; `ECHOD_ENDPOINT` for an
+/// emulator), that store under a prefix of its own, so tests do not see
+/// each other.
 async fn test_store(name: &str) -> (Arc<dyn Store>, String) {
-    match std::env::var("ECHOD_S3_BUCKET") {
-        Ok(bucket) => {
-            let endpoint = std::env::var("ECHOD_S3_ENDPOINT").ok();
-            let region = std::env::var("ECHOD_S3_REGION").ok().or_else(|| Some("us-east-1".to_string()));
+    match std::env::var("ECHOD_STORE") {
+        Ok(url) => {
+            let endpoint = std::env::var("ECHOD_ENDPOINT").ok();
+            let region = std::env::var("ECHOD_REGION").ok();
             let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-            (Arc::new(S3Store::open(&bucket, region.as_deref(), endpoint.as_deref(), false).await), format!("e2e/{name}-{nonce:x}/"))
+            (Arc::new(ObjectStoreStore::from_url(&url, endpoint.as_deref(), region.as_deref()).unwrap()), format!("e2e/{name}-{nonce:x}/"))
         }
         Err(_) => (Arc::new(MemoryStore::new()), String::new()),
     }

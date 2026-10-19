@@ -193,21 +193,33 @@ would otherwise step outside that.
 HTTP push only: a message is POSTed to the worker's URL as the protocol's
 JSON `Message`. The router maps `http` and `https` to it.
 
-### Against an S3 API
+### The store
 
-The store's conditional writes are what every commit relies on, and the
-in-memory store is a model of them. `tests/s3_store.rs` checks the real
-thing: a conditional create of an existing key and a conditional write on
-a stale version are refused, a conditional read of the current version
-says so, listings page past a thousand keys and come back in order, and a
-version is a function of the content — the same bytes are the same
-version, which is why every write carries a nonce. The end-to-end tests
-run on the same store under a prefix of their own when `ECHOD_S3_BUCKET`
-is set. `scripts/s3-tests.sh` runs both against `s3s-fs`, the Rust S3
-emulator, or against a bucket you name. The SDK examples run unchanged
-against a server on the emulator. One gap in `s3s-fs` 0.17: it ignores
-`If-None-Match` on reads and sends the body where S3 sends 304; the store
-treats both as a revalidation that found the version current.
+The port is `Store`: get, conditional get, conditional put (create, or
+update on a version), plain put, delete, list, list prefixes, and, where
+the bucket has it, append. Behind it, `ObjectStoreStore` is the
+`object_store` crate — the library SlateDB builds on — which gives S3, GCS,
+Azure and memory with each service's own conditional writes, named by a
+URL (`--store s3://bucket/prefix`, `gs://`, `az://`, `memory:///`). Two
+others remain: `MemoryStore`, the model the simulation runs on, with
+content-addressed versions as S3 has them; and `S3Store` on the AWS SDK,
+only for `--express`, since appending at an offset is an S3 Express One
+Zone call `object_store` does not have. `object_store`'s local filesystem
+backend is not a store: it has no conditional update.
+
+`tests/store.rs` runs the port's contract on every backend it can reach:
+a conditional create of an existing key and a conditional write on a
+stale version are refused, a conditional read of the current version says
+so, listings page past a thousand keys and come back in order, keys with
+the characters ours use round-trip, and, on S3, a version is a function
+of the content — the same bytes are the same version, which is why every
+write of ours carries a nonce. The end-to-end tests run on the same store
+under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
+runs both against `s3s-fs`, a Rust S3 emulator, or against a bucket you
+name; the SDK examples run unchanged against a server on it. One gap in
+`s3s-fs` 0.17: it ignores `If-None-Match` on reads and sends the body
+where S3 sends 304; the store treats both as a revalidation that found the
+version current.
 
 ### Simulation
 

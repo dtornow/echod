@@ -3,7 +3,7 @@
 //! ```text
 //! config.rs     the dials
 //! keys.rs       where everything lives under the bucket
-//! store.rs      the object store port: S3, and an in-memory stand-in
+//! store.rs      the object store port: `object_store` behind it, S3 Express on the SDK for appends, an in-memory model
 //! doc.rs        an origin's document: rows in, rows out, the fold between
 //! env.rs        the clock and the other nodes, as ports
 //! wire.rs       the kernel's vocabulary to the protocol's and back
