@@ -13,11 +13,11 @@
 //!
 //! Firing a key sweeps its target, which is idempotent; the key is deleted
 //! only once the sweep has committed, since until then it is the only record
-//! that the deadline exists — and only by the node that armed it, or after
-//! a sweep that found nothing due has rewritten the document, which fences
-//! any commit in flight that armed the key (`applier.rs`). A key that stays
-//! fires again. A key for a target this node no longer owns is dropped from
-//! the wheel unfired; its owner lists it.
+//! that the deadline exists; a sweep that found nothing due rewrites the
+//! document first, so that the write fences any commit in flight that armed
+//! the key (`applier.rs`). A key whose delete failed fires again. A key for
+//! a target this node no longer owns is dropped from the wheel unfired; its
+//! owner lists it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -234,7 +234,7 @@ impl Timers {
                         tracing::debug!(key = %key, error = %e, "timer key not collected");
                     }
                 } else {
-                    // Another node's key, or a delete that failed: it is collected on its next firing.
+                    // The delete failed: it is collected on its next firing.
                     self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
                 }
             }

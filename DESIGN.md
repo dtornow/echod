@@ -130,11 +130,10 @@ document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
 remembered with the version written. A key that fires sweeps its origin;
-if the sweep changed the document the key is deleted only if this node
-armed it, and if nothing was due the document is first rewritten at a new
-version, which fences every commit in flight that armed the key, and the
-key is deleted whoever armed it. So a deadline a document owes always has
-a key in the bucket, which the fleet proof states and proves. A schedule
+the sweep's own write, or, if nothing was due, a rewrite of the document
+at a new version, fences every commit in flight that armed the key, and
+then the key is deleted, whoever armed it. So a deadline a document owes
+always has a key in the bucket, which the fleet proof states and proves. A schedule
 is its own object; firing it creates the occurrence's promise and advances
 the schedule in one turn on the promise's origin.
 
@@ -296,10 +295,13 @@ The proof changed the design twice. A writer is checked for ownership
 when a request is dispatched, but its conditional write lands later; an
 earlier owner's write in flight can land after the new owner read and
 cached the document, so a node trusts only versions it wrote itself while
-acting. And a node that fires another node's key could delete it while a
-commit that armed it was still between its key and its document; so a
-fired key is deleted outright only by the node that armed it, and
-otherwise only after a conditional rewrite that fences such commits.
+acting. And a node that fires a key could delete it while a commit that
+armed it was still between its key and its document; so a fired key is
+deleted only after a write of the document — the sweep's own, or a rewrite
+when nothing was due — which fences such commits. That the write suffices,
+whoever armed the key, rests on a ghost order of the bucket's events: a
+later writer's cover was armed, or kept from a version written, after the
+version the fired key's commit loaded, so it is never that key.
 
 How the proof reaches the running code: the theorems are about the fleet
 model; the model's node actions are the core's, the commit's and the step

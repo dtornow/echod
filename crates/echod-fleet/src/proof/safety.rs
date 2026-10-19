@@ -98,7 +98,12 @@ pub open spec fn inv_armed(s: Cluster, i: Id, o: Origin) -> bool {
     &&& a.key.origin == o
     &&& s.store.armer.contains_key(a.key) && s.store.armer[a.key] == i
     &&& s.store.versions.contains_key(a.etag)
+    &&& s.store.writer[a.etag] == i
     &&& s.store.etag(o) == Some(a.etag) ==> s.store.docs.contains_key(o) && s.store.keeper.contains_key(o) && s.store.keeper[o] == a.key && has_any(s.store.docs[o])
+    // the key was not fired by a commit of another node that wrote an earlier version
+    &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
+        && s.store.born_seq[a.etag] >= s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+        ==> Some(a.key) != s.nodes[j].txns[o].c.fired
 }
 
 /// A commit in flight. The node acted as owner of `o` when it began: it
@@ -119,6 +124,25 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     &&& x.begun <= x.lr + p.ttl + 2 * p.skew
     &&& owner(s.store.configs[x.epoch], o) == Some(i)
     &&& x.cur is Some ==> s.store.born.contains_key(x.cur.unwrap()) && (x.phase is Written || s.store.born[x.cur.unwrap()] <= x.begun)
+    // the order of events: what it loaded was written before it began; what it armed, after
+    &&& x.seq0 <= s.store.counter
+    &&& x.lseq <= x.seq0
+    &&& !(x.phase is Written) ==> x.letag == x.cur
+    &&& x.letag is Some ==> s.store.versions.contains_key(x.letag.unwrap()) && s.store.born_seq[x.letag.unwrap()] == x.lseq
+    &&& x.letag is None ==> x.lseq == 0
+    &&& c.fired is Some ==> s.store.armed_seq[c.fired.unwrap()] < x.seq0
+    &&& c.previous is Some ==> s.store.armed_seq[c.previous.unwrap()] < x.seq0
+        && n.core.armed.contains_key(o) && n.core.armed[o].key == c.previous.unwrap() && Some(n.core.armed[o].etag) == x.letag
+    &&& c.armed_now is Some ==> s.store.armed_seq[c.armed_now.unwrap()] >= x.seq0
+    &&& x.phase is Written ==> {
+        &&& s.store.born_seq[x.cur.unwrap()] >= x.seq0
+        &&& s.store.writer[x.cur.unwrap()] == i
+        &&& s.store.etags.contains_key(o) && s.store.born_seq[s.store.etags[o]] >= s.store.born_seq[x.cur.unwrap()]
+        // no other node's version landed between its load and its write
+        &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
+            && s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()] < s.store.born_seq[x.cur.unwrap()]
+            ==> x.lseq >= s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+    }
     &&& x.t <= MAX_TIME
     &&& echod_kernel::properties::inv(x.t, full(x.loaded))
     &&& echod_kernel::properties::inv(x.t, full(x.new))
@@ -151,7 +175,9 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
         &&& x.cur is Some
         &&& c.rearm ==> c.armed_now is Some
         &&& live(s, o, x) ==> kept_covers(s, o, x) && s.store.stamps.contains_key(o) && s.store.stamps[o] == x.t
-        &&& kept_covers(s, o, x) || (!live(s, o, x) && (s.store.keeper.contains_key(o) ==> s.store.armer.contains_key(s.store.keeper[o]) && s.store.armer[s.store.keeper[o]] != i))
+        // the document's cover is never the key it fired, nor the key it removes
+        &&& kept_covers(s, o, x) || (!live(s, o, x) && (s.store.keeper.contains_key(o) ==>
+            Some(s.store.keeper[o]) != c.fired && ((c.rearm || c.deadline is None) ==> Some(s.store.keeper[o]) != c.previous)))
     }
 }
 
@@ -176,7 +202,11 @@ pub open spec fn inv_store(s: Cluster) -> bool {
     }
     &&& forall |o: Origin| #[trigger] s.store.etags.contains_key(o) ==> s.store.docs.contains_key(o)
     &&& forall |k: AKey| #[trigger] s.store.timers.contains(k) ==> s.store.armer.contains_key(k)
+    &&& forall |k: AKey| #[trigger] s.store.armer.contains_key(k) ==> s.store.armed_seq.contains_key(k) && s.store.armed_seq[k] < s.store.counter
     &&& forall |e: Seq<char>| #[trigger] s.store.versions.contains_key(e) ==> s.store.born.contains_key(e) && s.store.born[e] <= s.now
+        && s.store.born_seq.contains_key(e) && s.store.born_seq[e] < s.store.counter && s.store.writer.contains_key(e)
+    &&& forall |e1: Seq<char>, e2: Seq<char>| #[trigger] s.store.versions.contains_key(e1) && #[trigger] s.store.versions.contains_key(e2)
+        && s.store.born_seq[e1] == s.store.born_seq[e2] ==> e1 == e2
 }
 
 /// Every document with a deadline is covered: its keeper is in the bucket,
@@ -447,6 +477,9 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
         forall |o: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(o) ==> inv_armed(s2, i, o),
         forall |o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) ==> inv_txn(p, s2, i, o),
         forall |o: Origin| #[trigger] inv_entry(p, s2, i, o),
+        // a written commit of node i is as it was: other nodes' parts mention those
+        forall |o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written
+            ==> s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o],
     ensures inv(p)(s2),
 {
     disassemble(p, s);
@@ -457,10 +490,40 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
         if k != i { assert(inv_cache(p, s, k, o)); }
     }
     assert forall |k: Id, o: Origin| s2.nodes.contains_key(k) && #[trigger] s2.nodes[k].core.armed.contains_key(o) implies inv_armed(s2, k, o) by {
-        if k != i { assert(inv_armed(s, k, o)); }
+        if k != i {
+            assert(inv_armed(s, k, o));
+            let a = s2.nodes[k].core.armed[o];
+            assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
+                && s2.store.born_seq[a.etag] >= s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()]
+                implies Some(a.key) != s2.nodes[j].txns[o].c.fired by {
+                if j == i {
+                    assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
+                    assert(s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o]);
+                } else {
+                    assert(s2.nodes[j] == s.nodes[j]);
+                }
+                assert(s.nodes.contains_key(j) && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o] == s2.nodes[j].txns[o]);
+            }
+        }
     }
     assert forall |k: Id, o: Origin| s2.nodes.contains_key(k) && #[trigger] s2.nodes[k].txns.contains_key(o) implies inv_txn(p, s2, k, o) by {
-        if k != i { assert(inv_txn(p, s, k, o)); }
+        if k != i {
+            assert(inv_txn(p, s, k, o));
+            let x = s2.nodes[k].txns[o];
+            if x.phase is Written {
+                assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
+                    && s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()] < s2.store.born_seq[x.cur.unwrap()]
+                    implies x.lseq >= s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()] by {
+                    if j == i {
+                        assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
+                        assert(s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o]);
+                    } else {
+                        assert(s2.nodes[j] == s.nodes[j]);
+                    }
+                    assert(s.nodes.contains_key(j) && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o] == s2.nodes[j].txns[o]);
+                }
+            }
+        }
     }
     assert forall |k: Id, o: Origin| #[trigger] s2.nodes.contains_key(k) implies #[trigger] inv_entry(p, s2, k, o) by {
         if k != i { assert(inv_entry(p, s, k, o)); }
@@ -507,6 +570,8 @@ proof fn lemma_tick(p: Params, s: Cluster, s2: Cluster, i: Id, d: nat)
     assert forall |o: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(o) implies inv_armed(s2, i, o) by { assert(inv_armed(s, i, o)); }
     assert forall |o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) implies inv_txn(p, s2, i, o) by { assert(inv_txn(p, s, i, o)); }
     assert forall |o: Origin| #[trigger] inv_entry(p, s2, i, o) by { assert(inv_entry(p, s, i, o)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -520,6 +585,8 @@ proof fn lemma_join(p: Params, s: Cluster, s2: Cluster, i: Id, c: nat)
     assert forall |o: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(o) implies inv_armed(s2, i, o) by {}
     assert forall |o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) implies inv_txn(p, s2, i, o) by {}
     assert forall |o: Origin| #[trigger] inv_entry(p, s2, i, o) by {}
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -533,6 +600,8 @@ proof fn lemma_crash(p: Params, s: Cluster, s2: Cluster, i: Id)
     assert forall |o: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(o) implies inv_armed(s2, i, o) by { assert(inv_armed(s, i, o)); }
     assert forall |o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) implies inv_txn(p, s2, i, o) by { assert(inv_txn(p, s, i, o)); }
     assert forall |o: Origin| #[trigger] inv_entry(p, s2, i, o) by { assert(inv_entry(p, s, i, o)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -566,6 +635,8 @@ proof fn lemma_read_config(p: Params, s: Cluster, s2: Cluster, i: Id)
             }
         }
     }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -640,6 +711,8 @@ proof fn lemma_forget(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -726,6 +799,8 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by {
         assert(inv_entry(p, s, i, q));
     }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -1097,6 +1172,8 @@ proof fn lemma_commit_fail(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -1163,7 +1240,8 @@ proof fn lemma_disarm(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
                         assert(kp != q0);
                     }
                 } else {
-                    assert(s.store.armer[kp] != i);
+                    assert(!live(s, o, x));
+                    assert(Some(kp) != c.previous);
                     assert(kp != q0);
                 }
             } else {
@@ -1240,6 +1318,33 @@ proof fn lemma_finish_armed(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
                 assert(kept_covers(s, o, x));
                 assert(has_deadline(x.new, c.deadline.unwrap()));
             }
+            assert(s.store.writer[e] == i);
+            assert forall |j2: Id| #[trigger] s2.nodes.contains_key(j2) && j2 != i && s2.nodes[j2].txns.contains_key(o) && s2.nodes[j2].txns[o].phase is Written
+                && s2.store.born_seq[e] >= s2.store.born_seq[s2.nodes[j2].txns[o].cur.unwrap()]
+                implies Some(k) != s2.nodes[j2].txns[o].c.fired by {
+                let y = s.nodes[j2].txns[o];
+                assert(inv_txn(p, s, j2, o));
+                let ey = y.cur.unwrap();
+                assert(s.store.writer[ey] == j2);
+                assert(ey != e);
+                assert(s.store.born_seq[ey] != s.store.born_seq[e]);
+                assert(s.store.born_seq[ey] < s.store.born_seq[e]);
+                assert(x.lseq >= s.store.born_seq[ey]);
+                assert(s.store.born_seq[ey] >= y.seq0);
+                if y.c.fired is Some {
+                    let f = y.c.fired.unwrap();
+                    assert(s.store.armed_seq[f] < y.seq0);
+                    if c.rearm {
+                        assert(s.store.armed_seq[k] >= x.seq0);
+                        assert(k != f);
+                    } else {
+                        assert(n.core.armed.contains_key(o) && n.core.armed[o].key == k && Some(n.core.armed[o].etag) == x.letag);
+                        assert(inv_armed(s, i, o));
+                        assert(s.store.born_seq[n.core.armed[o].etag] == x.lseq);
+                        assert(Some(k) != y.c.fired);
+                    }
+                }
+            }
         } else {
             assert(inv_armed(s, j, q));
         }
@@ -1262,17 +1367,21 @@ proof fn lemma_finish_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin,
     assert forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].txns.contains_key(q) implies inv_txn(p, s2, j, q) by {
         assert(inv_txn(p, s, j, q));
         let y = s.nodes[j].txns[q];
-        if deleted && y.c.armed_now is Some {
+        if deleted && y.c.armed_now is Some && live(s, q, y) && !(y.phase is Written) {
             let k = y.c.armed_now.unwrap();
             let f = c.fired.unwrap();
             if k == f {
-                assert(s.store.armer[k] == j);
-                assert(s.store.armer[f] == i);
-                assert(j == i);
                 assert(k.origin == q);
                 assert(q == o);
-                assert(y == x);
-                assert(Some(k) != c.fired);
+                if j == i { assert(y == x); assert(false); }
+                // y loaded the bucket's version, which is this commit's or later; its key was armed after
+                assert(y.letag == y.cur && y.cur == s.store.etag(o));
+                assert(y.lseq == s.store.born_seq[s.store.etags[o]]);
+                assert(s.store.born_seq[s.store.etags[o]] >= s.store.born_seq[x.cur.unwrap()]);
+                assert(s.store.born_seq[x.cur.unwrap()] >= x.seq0);
+                assert(s.store.armed_seq[f] < x.seq0);
+                assert(s.store.armed_seq[k] >= y.seq0);
+                assert(y.seq0 >= y.lseq);
                 assert(false);
             }
         }
@@ -1311,7 +1420,12 @@ proof fn lemma_finish_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
     assert(inv_txn(p, s, i, o));
     let kept = spec_keep(c);
     assert(inv_written(s2));
-    assert(inv_store(s2));
+    assert(inv_store(s2)) by {
+        assert(s2.store.docs == s.store.docs && s2.store.versions == s.store.versions && s2.store.armer == s.store.armer && s2.store.counter == s.store.counter);
+        assert forall |k: AKey| #[trigger] s2.store.timers.contains(k) implies s.store.armer.contains_key(k) by {
+            assert(s.store.timers.contains(k));
+        }
+    }
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
             &&& s2.store.keeper.contains_key(q)
@@ -1340,7 +1454,8 @@ proof fn lemma_finish_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
                             assert(kp != f);
                         }
                     } else {
-                        assert(s.store.armer[kp] != i);
+                        assert(!live(s, o, x));
+                        assert(Some(kp) != c.fired);
                         assert(kp != f);
                     }
                 } else {
@@ -1559,6 +1674,8 @@ proof fn lemma_collect_fail(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -1573,6 +1690,8 @@ proof fn lemma_done(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -1587,6 +1706,8 @@ proof fn lemma_abort(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
+        implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
 }
 
@@ -1670,6 +1791,10 @@ pub proof fn not_vacuous(p: Params, o: Origin)
             keeper: Map::empty(),
             timers: Set::empty(),
             armer: Map::empty(),
+            counter: 1,
+            armed_seq: Map::empty(),
+            born_seq: Map::empty().insert(e, 0),
+            writer: Map::empty().insert(e, me),
             config: Config { epoch: 0, members: seq![me] },
             written: Map::empty().insert(0, 0),
         },

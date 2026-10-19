@@ -62,6 +62,13 @@ pub struct Store {
     pub timers: Set<AKey>,
     /// Ghost: every key ever armed, and by whom. An arm's key is new.
     pub armer: Map<AKey, Id>,
+    /// Ghost: the order of events in the bucket. Every arm and every write
+    /// takes the next number: `armed_seq` for keys, `born_seq` for versions.
+    pub counter: nat,
+    pub armed_seq: Map<AKey, nat>,
+    pub born_seq: Map<Seq<char>, nat>,
+    /// Ghost: the node that wrote each version.
+    pub writer: Map<Seq<char>, Id>,
     pub config: Config,
     /// Ghost: the real time each epoch was written at, for epochs up to the current.
     pub written: Map<nat, nat>,
@@ -109,6 +116,11 @@ pub struct Flight {
     pub epoch: nat,
     pub held_real: nat,
     pub lr: nat,
+    /// Ghost: the bucket's event count when it began; the version it loaded
+    /// and that version's number (0 if none).
+    pub seq0: nat,
+    pub letag: Option<Seq<char>>,
+    pub lseq: nat,
 }
 
 pub struct Node {
@@ -255,6 +267,10 @@ pub open spec fn init_state(s: Cluster) -> bool {
     &&& s.store.keeper == Map::<Origin, AKey>::empty()
     &&& s.store.timers == Set::<AKey>::empty()
     &&& s.store.armer == Map::<AKey, Id>::empty()
+    &&& s.store.counter == 0
+    &&& s.store.armed_seq == Map::<AKey, nat>::empty()
+    &&& s.store.born_seq == Map::<Seq<char>, nat>::empty()
+    &&& s.store.writer == Map::<Seq<char>, Id>::empty()
     &&& s.store.config == Config { epoch: 0, members: Seq::empty() }
     &&& s.store.written == Map::<nat, nat>::empty().insert(0, 0)
 }
@@ -374,6 +390,9 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
             epoch: n.core.epoch,
             held_real: n.held_real,
             lr: n.last_read_real,
+            seq0: s.store.counter,
+            letag: s.store.etag(o),
+            lseq: match s.store.etag(o) { Some(e) => s.store.born_seq[e], None => 0 },
         };
         Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
     } else {
@@ -390,7 +409,13 @@ pub open spec fn arm(s: Cluster, i: Id, o: Origin, k: AKey) -> Option<Cluster> {
         let x2 = Flight { c: spec_armed(x.c, k), phase: Phase::Armed, ..x };
         Some(Cluster {
             nodes: s.nodes.insert(i, Node { txns: n.txns.insert(o, x2), ..n }),
-            store: Store { timers: s.store.timers.insert(k), armer: s.store.armer.insert(k, i), ..s.store },
+            store: Store {
+                timers: s.store.timers.insert(k),
+                armer: s.store.armer.insert(k, i),
+                armed_seq: s.store.armed_seq.insert(k, s.store.counter),
+                counter: s.store.counter + 1,
+                ..s.store
+            },
             ..s
         })
     } else {
@@ -422,6 +447,9 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
                 stamps: s.store.stamps.insert(o, x.t),
                 versions: s.store.versions.insert(e, x.new),
                 born: s.store.born.insert(e, s.now),
+                born_seq: s.store.born_seq.insert(e, s.store.counter),
+                writer: s.store.writer.insert(e, i),
+                counter: s.store.counter + 1,
                 keeper,
                 ..s.store
             },
@@ -454,15 +482,14 @@ pub open spec fn disarm(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 }
 
 /// The node remembers what it kept with the version written
-/// (`NodeCore::finish`); the key fired, if it is this node's own, is
-/// collected (`NodeCore::collected`) and deleted — unless the delete
-/// failed, in which case it stays and fires again. Another node's key is
-/// left to the fenced path.
+/// (`NodeCore::finish`); the key fired, whoever armed it, is collected
+/// (`NodeCore::collected`) and deleted — unless the delete failed, in which
+/// case it stays and fires again.
 pub open spec fn finish(s: Cluster, i: Id, o: Origin, deleted: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written && x.cur is Some
-        && (deleted ==> x.c.fired is Some && s.store.armer.contains_key(x.c.fired.unwrap()) && s.store.armer[x.c.fired.unwrap()] == i)
+        && (deleted ==> x.c.fired is Some)
     {
         let core1 = spec_finish(n.core, x.c, x.cur.unwrap());
         let (core2, timers) = match x.c.fired {
@@ -496,6 +523,9 @@ pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<C
                 stamps: s.store.stamps.insert(o, x.t),
                 versions: s.store.versions.insert(e, x.loaded),
                 born: s.store.born.insert(e, s.now),
+                born_seq: s.store.born_seq.insert(e, s.store.counter),
+                writer: s.store.writer.insert(e, i),
+                counter: s.store.counter + 1,
                 timers: s.store.timers.remove(k),
                 ..s.store
             },

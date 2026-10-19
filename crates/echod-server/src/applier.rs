@@ -6,10 +6,10 @@
 //! at a time: the key for the document's nearest deadline is put before the
 //! document, the document is written conditionally on the version loaded,
 //! the key replaced is removed after, the key kept is remembered with the
-//! version written, and the key that fired a sweep is deleted if this node
-//! armed it. A sweep that found nothing due rewrites the document at a new
-//! version first — fencing every commit still in flight that armed the key —
-//! and only then deletes it. A lost race re-reads and re-decides.
+//! version written, and the key that fired a sweep is deleted: the write
+//! fences every commit still in flight that armed it. A sweep that found
+//! nothing due rewrites the document at a new version first, for the same
+//! reason, and only then deletes the key. A lost race re-reads and re-decides.
 //!
 //! The cache holds the last document this node read or wrote for an origin.
 //! Whether it may be used without asking the store is the verified node's
@@ -39,8 +39,7 @@ use crate::timers::TimerWheel;
 pub enum Fired {
     /// Deleted from the bucket.
     Deleted,
-    /// Still in the bucket: another node's, and the sweep changed the
-    /// document; or the delete failed. It fires again.
+    /// Still in the bucket: the delete failed. It fires again.
     Kept,
 }
 
@@ -354,13 +353,12 @@ impl Applier {
                 }
                 // (4) the key kept, with the version written
                 self.nodes.finish(&txn, &etag);
-                // (5) the key fired, if this node's own
+                // (5) the key fired: the write that just landed fences every
+                // commit that armed it and has not written yet
                 if let Some(f) = fired {
-                    if f.by == me {
-                        self.nodes.collected(&w.origin, &f.key);
-                        if self.delete_key(&f.key, &me).await {
-                            outcome = Fired::Deleted;
-                        }
+                    self.nodes.collected(&w.origin, &f.key);
+                    if self.delete_key(&f.key, &f.by).await {
+                        outcome = Fired::Deleted;
                     }
                 }
             } else if let Some(f) = fired {
