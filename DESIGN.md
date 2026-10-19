@@ -298,7 +298,11 @@ request: any sequence of kernel steps at one instant; a sweep: the step
 module's contract), arms a key, writes the document conditionally or is
 refused, deletes the key replaced, remembers the key kept and deletes the
 key fired, or, having found nothing due, rewrites the document and
-collects the key, or aborts. Clocks are never read by the model except
+collects the key. Every write has three outcomes: applied, refused by its
+condition — both decided by the bucket's contents — or unknown, where the
+bucket applied it or did not, nondeterministically, and the node, told
+only that it failed, trusts nothing cached and gives the commit up; what
+landed stays. Deletes may fail silently. Clocks are never read by the model except
 through the core's decisions; real time only states the hypothesis and
 orders events.
 

@@ -15,7 +15,9 @@
 //! loaded, remove the key replaced, remember the key kept, delete the key
 //! fired. A fired key that found nothing due is collected only after a
 //! conditional rewrite of the document, which fences any commit that armed
-//! it and has not written yet.
+//! it and has not written yet. Every write has three outcomes: applied,
+//! refused by its condition, or unknown — the bucket applied it or did not,
+//! and the node, told only that it failed, gives the commit up.
 //!
 //! Around the core, the model keeps what the node does not see — whether it
 //! is alive, its clock, and, ghost, real time at the moments that matter —
@@ -247,8 +249,15 @@ pub enum Step {
     CollectFail(Id, Origin),
     /// A request that changed nothing is done.
     Done(Id, Origin),
-    /// A store operation failed before the document was written.
-    Abort(Id, Origin),
+    /// The put of the key failed as far as the node knows; the bucket may
+    /// hold it or not. The node gives up the commit.
+    ArmUnknown(Id, Origin, AKey, bool),
+    /// The write of the document failed as far as the node knows; the
+    /// bucket may hold it or not. The node gives up the commit.
+    CommitUnknown(Id, Origin, Seq<char>, bool),
+    /// The rewrite that collects a key failed as far as the node knows; the
+    /// bucket may hold it or not. The key stays.
+    CollectUnknown(Id, Origin, Seq<char>, bool),
 }
 
 pub open spec fn init() -> spec_fn(Cluster) -> bool {
@@ -558,11 +567,66 @@ pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     }
 }
 
-pub open spec fn abort(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
+/// The node gives up a commit it does not know the outcome of: it trusts
+/// nothing cached for the origin and forgets the commit. What it put and
+/// wrote stays as it landed.
+pub open spec fn give_up(s: Cluster, i: Id, o: Origin) -> Cluster {
+    let n = s.nodes[i];
+    Cluster { nodes: s.nodes.insert(i, Node { core: spec_forget(n.core, o), txns: n.txns.remove(o), ..n }), ..s }
+}
+
+/// The key's put: landed or not, the node does not know.
+pub open spec fn arm_unknown(s: Cluster, i: Id, o: Origin, k: AKey, landed: bool) -> Option<Cluster> {
+    if landed {
+        match arm(s, i, o, k) {
+            Some(s1) => Some(give_up(s1, i, o)),
+            None => None,
+        }
+    } else {
+        let n = s.nodes[i];
+        let x = n.txns[o];
+        if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && x.c.rearm { Some(give_up(s, i, o)) } else { None }
+    }
+}
+
+/// The document's write: landed or not, the node does not know.
+pub open spec fn commit_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool) -> Option<Cluster> {
+    if landed {
+        match commit(s, i, o, e) {
+            Some(s1) => Some(give_up(s1, i, o)),
+            None => None,
+        }
+    } else {
+        let n = s.nodes[i];
+        let x = n.txns[o];
+        if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && ready(x) { Some(give_up(s, i, o)) } else { None }
+    }
+}
+
+/// The rewrite that collects a key: landed or not, the node does not know;
+/// the key is not deleted either way.
+pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && !(x.phase is Written) {
-        Some(Cluster { nodes: s.nodes.insert(i, Node { core: spec_forget(n.core, o), txns: n.txns.remove(o), ..n }), ..s })
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
+        && (landed ==> s.store.etag(o) == x.cur && !s.store.versions.contains_key(e))
+    {
+        let store = if landed {
+            Store {
+                docs: s.store.docs.insert(o, x.loaded),
+                etags: s.store.etags.insert(o, e),
+                stamps: s.store.stamps.insert(o, x.t),
+                versions: s.store.versions.insert(e, x.loaded),
+                born: s.store.born.insert(e, s.now),
+                born_seq: s.store.born_seq.insert(e, s.store.counter),
+                writer: s.store.writer.insert(e, i),
+                counter: s.store.counter + 1,
+                ..s.store
+            }
+        } else {
+            s.store
+        };
+        Some(give_up(Cluster { store, ..s }, i, o))
     } else {
         None
     }
@@ -586,7 +650,9 @@ pub open spec fn step(p: Params, s: Cluster, st: Step) -> Option<Cluster> {
         Step::Collect(i, o, e) => collect(s, i, o, e),
         Step::CollectFail(i, o) => collect_fail(s, i, o),
         Step::Done(i, o) => done(s, i, o),
-        Step::Abort(i, o) => abort(s, i, o),
+        Step::ArmUnknown(i, o, k, landed) => arm_unknown(s, i, o, k, landed),
+        Step::CommitUnknown(i, o, e, landed) => commit_unknown(s, i, o, e, landed),
+        Step::CollectUnknown(i, o, e, landed) => collect_unknown(s, i, o, e, landed),
     }
 }
 

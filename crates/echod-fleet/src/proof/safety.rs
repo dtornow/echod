@@ -917,7 +917,9 @@ proof fn lemma_entries_after_write(p: Params, s: Cluster, s2: Cluster, i: Id, o:
         s2.store.configs == s.store.configs,
         forall |j: Id| #[trigger] s2.nodes.contains_key(j) <==> s.nodes.contains_key(j),
         forall |j: Id| j != i && #[trigger] s2.nodes.contains_key(j) ==> s2.nodes[j] == s.nodes[j],
-        s2.nodes[i].core == spec_filled(s.nodes[i].core, o, e, s.nodes[i].clock, true) || s2.nodes[i].core == spec_collected(spec_filled(s.nodes[i].core, o, e, s.nodes[i].clock, true), o, s.nodes[i].txns[o].c.fired.unwrap()),
+        s2.nodes[i].core == spec_filled(s.nodes[i].core, o, e, s.nodes[i].clock, true)
+            || s2.nodes[i].core == spec_collected(spec_filled(s.nodes[i].core, o, e, s.nodes[i].clock, true), o, s.nodes[i].txns[o].c.fired.unwrap())
+            || s2.nodes[i].core == spec_forget(s.nodes[i].core, o),
         s2.nodes[i].alive == s.nodes[i].alive,
         s2.nodes[i].clock == s.nodes[i].clock,
         forall |q: Origin| q != o ==> s2.store.etag(q) == s.store.etag(q),
@@ -930,7 +932,9 @@ proof fn lemma_entries_after_write(p: Params, s: Cluster, s2: Cluster, i: Id, o:
         assert(inv_node(p, s, j));
         if q == o {
             if j == i {
-                assert(s2.nodes[i].core.cache[o].etag == e);
+                if s2.nodes[i].core.cache.contains_key(o) {
+                    assert(s2.nodes[i].core.cache[o].etag == e);
+                }
             } else {
                 let m = s.nodes[j];
                 if m.alive && m.core.read_any && (m.core.epoch == s.store.config.epoch || fresh(m)) && owner(m.core.members, o) == Some(j)
@@ -1695,20 +1699,230 @@ proof fn lemma_done(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     lemma_node_only(p, s, s2, i);
 }
 
-proof fn lemma_abort(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
-    requires inv(p)(s), abort(s, i, o) == Some(s2),
+/// Giving up a commit keeps the invariant: what the node wrote stays, what
+/// it remembers of the origin goes.
+proof fn lemma_give_up(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires inv(p)(s), s.nodes.contains_key(i), s2 == give_up(s, i, o),
     ensures inv(p)(s2),
 {
     disassemble(p, s);
     assert(inv_node(p, s, i));
     assert(inv_node(p, s2, i));
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.cache.contains_key(q) implies inv_cache(p, s2, i, q) by { assert(inv_cache(p, s, i, q)); }
-    assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
-    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by { assert(inv_txn(p, s, i, q)); }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by {
+        assert(inv_armed(s, i, q));
+        let a = s2.nodes[i].core.armed[q];
+        assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
+            && s2.store.born_seq[a.etag] >= s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()]
+            implies Some(a.key) != s2.nodes[j].txns[q].c.fired by {
+            assert(s2.nodes[j] == s.nodes[j]);
+        }
+    }
+    assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(p, s2, i, q) by {
+        assert(inv_txn(p, s, i, q));
+        let x = s2.nodes[i].txns[q];
+        if x.phase is Written {
+            assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
+                && s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()] < s2.store.born_seq[x.cur.unwrap()]
+                implies x.lseq >= s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()] by {
+                assert(s2.nodes[j] == s.nodes[j]);
+            }
+        }
+    }
     assert forall |q: Origin| #[trigger] inv_entry(p, s2, i, q) by { assert(inv_entry(p, s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q].phase is Written
         implies s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(q) && s2.nodes[i].txns[q] == s.nodes[i].txns[q] by {}
     lemma_node_only(p, s, s2, i);
+}
+
+proof fn lemma_arm_unknown(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, landed: bool)
+    requires inv(p)(s), arm_unknown(s, i, o, k, landed) == Some(s2),
+    ensures inv(p)(s2),
+{
+    if landed {
+        let s1 = arm(s, i, o, k).unwrap();
+        lemma_arm(p, s, s1, i, o, k);
+        lemma_give_up(p, s1, s2, i, o);
+    } else {
+        lemma_give_up(p, s, s2, i, o);
+    }
+}
+
+proof fn lemma_commit_unknown(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool)
+    requires inv(p)(s), commit_unknown(s, i, o, e, landed) == Some(s2),
+    ensures inv(p)(s2),
+{
+    if landed {
+        let s1 = commit(s, i, o, e).unwrap();
+        lemma_commit(p, s, s1, i, o, e);
+        lemma_give_up(p, s1, s2, i, o);
+    } else {
+        lemma_give_up(p, s, s2, i, o);
+    }
+}
+
+proof fn lemma_cu_nodes(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), collect_unknown(s, i, o, e, true) == Some(s2),
+    ensures forall |j: Id| #[trigger] s2.nodes.contains_key(j) ==> inv_node(p, s2, j),
+{
+    disassemble(p, s);
+    disassemble(p, s);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let c = x.c;
+    let k = c.fired.unwrap();
+    assert(inv_node(p, s, i));
+    assert(inv_txn(p, s, i, o));
+    assert(live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(no_due(x.t, x.loaded));
+    lemma_no_due(x.t, x.loaded);
+    assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) implies inv_node(p, s2, j) by {
+        assert(inv_node(p, s, j));
+    }
+}
+
+proof fn lemma_cu_cache(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), collect_unknown(s, i, o, e, true) == Some(s2),
+    ensures forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].core.cache.contains_key(q) ==> inv_cache(p, s2, j, q),
+{
+    disassemble(p, s);
+    disassemble(p, s);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let c = x.c;
+    let k = c.fired.unwrap();
+    assert(inv_node(p, s, i));
+    assert(inv_txn(p, s, i, o));
+    assert(live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(no_due(x.t, x.loaded));
+    lemma_no_due(x.t, x.loaded);
+    assert forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].core.cache.contains_key(q) implies inv_cache(p, s2, j, q) by {
+        assert(!(j == i && q == o));
+        assert(inv_cache(p, s, j, q));
+    }
+}
+
+proof fn lemma_cu_armed(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), collect_unknown(s, i, o, e, true) == Some(s2),
+    ensures forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].core.armed.contains_key(q) ==> inv_armed(s2, j, q),
+{
+    disassemble(p, s);
+    disassemble(p, s);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let c = x.c;
+    let k = c.fired.unwrap();
+    assert(inv_node(p, s, i));
+    assert(inv_txn(p, s, i, o));
+    assert(live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(no_due(x.t, x.loaded));
+    lemma_no_due(x.t, x.loaded);
+    assert forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].core.armed.contains_key(q) implies inv_armed(s2, j, q) by {
+        assert(inv_armed(s, j, q));
+    }
+}
+
+proof fn lemma_cu_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), collect_unknown(s, i, o, e, true) == Some(s2),
+    ensures forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].txns.contains_key(q) ==> inv_txn(p, s2, j, q),
+{
+    disassemble(p, s);
+    disassemble(p, s);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let c = x.c;
+    let k = c.fired.unwrap();
+    assert(inv_node(p, s, i));
+    assert(inv_txn(p, s, i, o));
+    assert(live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(no_due(x.t, x.loaded));
+    lemma_no_due(x.t, x.loaded);
+    assert forall |j: Id, q: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].txns.contains_key(q) implies inv_txn(p, s2, j, q) by {
+        assert(inv_txn(p, s, j, q));
+        let y = s.nodes[j].txns[q];
+        assert(!(j == i && q == o));
+        if q == o {
+            assert(!live(s2, o, y));
+        }
+    }
+}
+
+proof fn lemma_cu_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires inv(p)(s), collect_unknown(s, i, o, e, true) == Some(s2),
+    ensures inv_written(s2), inv_store(s2), inv_timer(s2),
+{
+    disassemble(p, s);
+    disassemble(p, s);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let c = x.c;
+    let k = c.fired.unwrap();
+    assert(inv_node(p, s, i));
+    assert(inv_txn(p, s, i, o));
+    assert(live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(no_due(x.t, x.loaded));
+    lemma_no_due(x.t, x.loaded);
+    assert(inv_written(s2));
+    assert(inv_store(s2)) by {
+        assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) implies {
+            &&& s2.store.etags.contains_key(q)
+            &&& s2.store.stamps.contains_key(q)
+            &&& s2.store.stamps[q] <= MAX_TIME
+            &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
+            &&& s2.store.versions.contains_key(s2.store.etags[q])
+            &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
+        } by {
+            if q != o {
+                assert(s.store.docs.contains_key(q));
+            }
+        }
+        assert forall |v: Seq<char>| #[trigger] s2.store.versions.contains_key(v) implies s2.store.born.contains_key(v) && s2.store.born[v] <= s2.now by {
+            if v != e { assert(s.store.versions.contains_key(v)); }
+        }
+    }
+    assert(inv_timer(s2)) by {
+        assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
+            &&& s2.store.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.store.keeper[q])
+            &&& s2.store.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+        } by {
+            if q == o {
+                assert(s2.store.docs[o] == x.loaded);
+                assert(s.store.docs.contains_key(o));
+                assert(has_any(s.store.docs[o]));
+            } else {
+                assert(s.store.docs.contains_key(q) && has_any(s.store.docs[q]));
+            }
+        }
+    }
+}
+
+/// The rewrite landed, and the node gave up: the same document at a new
+/// version, this node's cache of it gone, its commit gone. The same shape
+/// as `collect` without the key's deletion.
+proof fn lemma_collect_unknown(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool)
+    requires inv(p)(s), collect_unknown(s, i, o, e, landed) == Some(s2),
+    ensures inv(p)(s2),
+{
+    if !landed {
+        lemma_give_up(p, s, s2, i, o);
+        return;
+    }
+    disassemble(p, s);
+    lemma_cu_nodes(p, s, s2, i, o, e);
+    lemma_cu_cache(p, s, s2, i, o, e);
+    lemma_cu_armed(p, s, s2, i, o, e);
+    lemma_cu_txns(p, s, s2, i, o, e);
+    lemma_cu_store(p, s, s2, i, o, e);
+    assert(live(s, o, s.nodes[i].txns[o]));
+    lemma_entries_after_write(p, s, s2, i, o, e);
+    assemble(p, s2);
 }
 
 pub proof fn lemma_next(p: Params, s: Cluster, s2: Cluster)
@@ -1733,7 +1947,9 @@ pub proof fn lemma_next(p: Params, s: Cluster, s2: Cluster)
         Step::Collect(i, o, e) => lemma_collect(p, s, s2, i, o, e),
         Step::CollectFail(i, o) => lemma_collect_fail(p, s, s2, i, o),
         Step::Done(i, o) => lemma_done(p, s, s2, i, o),
-        Step::Abort(i, o) => lemma_abort(p, s, s2, i, o),
+        Step::ArmUnknown(i, o, k, landed) => lemma_arm_unknown(p, s, s2, i, o, k, landed),
+        Step::CommitUnknown(i, o, e, landed) => lemma_commit_unknown(p, s, s2, i, o, e, landed),
+        Step::CollectUnknown(i, o, e, landed) => lemma_collect_unknown(p, s, s2, i, o, e, landed),
     }
 }
 
