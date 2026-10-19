@@ -33,7 +33,8 @@ store.rs        State: row vectors whose view is three maps, via the fold
 object.rs       projection, the per-object edits, birth
 properties.rs   the catalogue, entry for entry, same names
 frame.rs        the frame: what a step owes for the ids it touched
-external*.rs    the 18 request handlers
+external.rs     the 18 request handlers
+external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 internal.rs     the 6 internal steps
 ```
 

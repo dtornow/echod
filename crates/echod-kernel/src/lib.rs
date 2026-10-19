@@ -13,6 +13,7 @@
 //! properties.rs  the catalogue, transcribed
 //! object.rs      projection and the per-object helpers the handlers share
 //! external.rs    the 18 request handlers
+//! external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 //! internal.rs    the 6 internal steps
 //! ```
 //!
@@ -22,9 +23,7 @@
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 
 pub mod external;
-pub mod external_sched;
-pub mod external_task;
-pub mod external_task2;
+pub mod external_proof;
 pub mod frame;
 pub mod ident;
 pub mod internal;
