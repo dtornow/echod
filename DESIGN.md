@@ -215,11 +215,13 @@ the characters ours use round-trip, and, on S3, a version is a function
 of the content — the same bytes are the same version, which is why every
 write of ours carries a nonce. The end-to-end tests run on the same store
 under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
-runs both against `s3s-fs`, a Rust S3 emulator, or against a bucket you
-name; the SDK examples run unchanged against a server on it. One gap in
-`s3s-fs` 0.17: it ignores `If-None-Match` on reads and sends the body
-where S3 sends 304; the store treats both as a revalidation that found the
-version current.
+runs both against `s3s-fs`, a Rust S3 emulator, against RustFS, the other
+Rust S3 server, or against a bucket you name; the SDK examples run
+unchanged against a server on either. Both servers refuse conditional
+writes as S3 does. RustFS also honours conditional reads and makes
+versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
+on reads and sends the body where S3 sends 304, which the store treats as
+a revalidation that found the version current.
 
 ### Simulation
 
