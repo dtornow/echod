@@ -30,6 +30,7 @@ use resonate_core::{ResonateRouter, Unavailable};
 use crate::cache::{Cache, Cached};
 use crate::doc::{self, Header, Loaded};
 use crate::keys::KeySpace;
+use crate::metrics::{CacheResult, CommitOutcome, MessageOutcome, Metrics, SweepOutcome, WriteMode};
 use crate::nodes::Nodes;
 use crate::store::{Etag, Read, Store, StoreError};
 use crate::timers::TimerWheel;
@@ -60,6 +61,7 @@ pub struct Applier {
     server_url: String,
     cache: Arc<dyn Cache>,
     observer: Arc<dyn crate::env::Observer>,
+    metrics: Arc<Metrics>,
     tokens: std::sync::atomic::AtomicU64,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     max_retries: u32,
@@ -85,6 +87,7 @@ impl Applier {
         cache: Arc<dyn Cache>,
         clock: Arc<dyn crate::env::Clock>,
         observer: Arc<dyn crate::env::Observer>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let seed = crate::keys::fnv1a(&format!("{}/{}", server_url, clock.now())) | 1;
         Self {
@@ -97,6 +100,7 @@ impl Applier {
             server_url,
             cache,
             observer,
+            metrics,
             tokens: std::sync::atomic::AtomicU64::new(seed),
             locks: Mutex::new(HashMap::new()),
             max_retries: 8,
@@ -187,24 +191,29 @@ impl Applier {
         let key = self.keys.doc_key(origin);
         if let Some(c) = self.cached(origin) {
             if self.nodes.trusts(origin, now).as_ref() == Some(&c.etag) {
+                self.metrics.cache(CacheResult::Trusted);
                 return Ok((c.loaded, Some(c.etag)));
             }
             match self.store.get_if_none_match(&key, &c.etag).await.map_err(unavailable)? {
                 Read::NotModified => {
+                    self.metrics.cache(CacheResult::Revalidated);
                     self.remember(origin, Cached { filled_at: now, ..c.clone() }, false);
                     return Ok((c.loaded, Some(c.etag)));
                 }
                 Read::Absent => {
+                    self.metrics.cache(CacheResult::Absent);
                     self.forget(origin);
                     return Ok((Loaded::empty(), None));
                 }
                 Read::Body(bytes, etag) => {
+                    self.metrics.cache(CacheResult::Refreshed);
                     let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
                     self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now }, false);
                     return Ok((loaded, Some(etag)));
                 }
             }
         }
+        self.metrics.cache(CacheResult::Miss);
         match self.store.get(&key).await.map_err(unavailable)? {
             None => Ok((Loaded::empty(), None)),
             Some((bytes, etag)) => {
@@ -263,8 +272,12 @@ impl Applier {
             let (r, did) = step(&mut state, now);
             step::drain(&mut state, now, &self.cfg);
             match self.commit(&mut w, &state, now, did, fired.as_ref()).await {
-                Ok(f) => return Ok((r, f)),
+                Ok(f) => {
+                    self.metrics.commit(CommitOutcome::Committed);
+                    return Ok((r, f));
+                }
                 Err(StoreError::PreconditionFailed) => {
+                    self.metrics.commit(CommitOutcome::Raced);
                     tracing::debug!(origin = ?origin, schedule = ?schedule, attempt, "lost a race; re-deciding");
                     if let Some(o) = origin {
                         self.forget(o);
@@ -272,6 +285,7 @@ impl Applier {
                     continue;
                 }
                 Err(e) => {
+                    self.metrics.commit(CommitOutcome::Failed);
                     // The write may or may not have landed: trust nothing cached.
                     if let Some(o) = origin {
                         self.forget(o);
@@ -280,6 +294,7 @@ impl Applier {
                 }
             }
         }
+        self.metrics.commit(CommitOutcome::Exhausted);
         Err(Unavailable::new("too many races on the document"))
     }
 
@@ -288,8 +303,17 @@ impl Applier {
     pub async fn sweep(&self, origin: &str, now: u64, fired: FiredKey) -> Result<Fired, Unavailable> {
         let cfg = self.cfg;
         let handle = self.observer.sweep_begin(&self.nodes.id(), origin, now);
-        let r = self.apply(Some(origin), None, now, Some(fired), move |s: &mut State, now: u64| ((), step::sweep(s, now, &cfg))).await;
+        let r = self.apply(Some(origin), None, now, Some(fired), move |s: &mut State, now: u64| {
+            let did = step::sweep(s, now, &cfg);
+            (did, did)
+        })
+        .await;
         self.observer.sweep_end(handle, r.is_ok());
+        self.metrics.sweep(match &r {
+            Ok((true, _)) => SweepOutcome::Fired,
+            Ok((false, _)) => SweepOutcome::Idle,
+            Err(_) => SweepOutcome::Failed,
+        });
         r.map(|(_, f)| f)
     }
 
@@ -303,6 +327,7 @@ impl Applier {
             None => {
                 let body = doc::encode(&header, rows);
                 let etag = self.store.put_if_none_match(&key, body.clone()).await?;
+                self.metrics.document_write(WriteMode::Create, body.len());
                 self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: etag.clone(), filled_at: fleet_now }, true);
                 etag
             }
@@ -312,6 +337,7 @@ impl Applier {
                 if append {
                     let body = doc::encode(&header, changed);
                     let new = self.store.append_if_match(&key, w.loaded.bytes, body.clone(), etag).await?;
+                    self.metrics.document_write(WriteMode::Append, body.len());
                     self.remember(
                         &w.origin,
                         Cached { loaded: Loaded { rows: rows.to_vec(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now },
@@ -321,6 +347,7 @@ impl Applier {
                 } else {
                     let body = doc::encode(&header, rows);
                     let new = self.store.put_if_match(&key, body.clone(), etag).await?;
+                    self.metrics.document_write(WriteMode::Rewrite, body.len());
                     self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now }, true);
                     new
                 }
@@ -423,9 +450,22 @@ impl Applier {
 
     async fn send(&self, e: &OutboxEntry) {
         let (address, msg) = crate::wire::message_out(e, &self.server_url);
-        if let Err(err) = self.router.route(&address, &msg).await {
-            tracing::warn!(address = %address, error = %err, "message not delivered");
-        }
+        let started = std::time::Instant::now();
+        let outcome = match self.router.route(&address, &msg).await {
+            Ok(()) => MessageOutcome::Delivered,
+            Err(err) => {
+                tracing::warn!(address = %address, error = %err, "message not delivered");
+                match err.cause {
+                    resonate_core::Cause::Unroutable => MessageOutcome::Unroutable,
+                    resonate_core::Cause::Delivery => MessageOutcome::Failed,
+                }
+            }
+        };
+        let kind = match &msg {
+            resonate_core::types::Message::Execute(_) => "execute",
+            resonate_core::types::Message::Unblock(_) => "unblock",
+        };
+        self.metrics.message(kind, outcome, started);
     }
 }
 

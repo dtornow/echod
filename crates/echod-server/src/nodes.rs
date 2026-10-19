@@ -37,6 +37,7 @@ use echod_fleet::node::txn::Txn;
 use serde::{Deserialize, Serialize};
 
 use crate::keys::KeySpace;
+use crate::metrics::{ConfigWrite, Metrics};
 use crate::store::{Etag, Store};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,15 +102,16 @@ pub struct Nodes {
     fleet_at: std::sync::atomic::AtomicU64,
     /// Bumped whenever the member set changes.
     generation: tokio::sync::watch::Sender<u64>,
+    metrics: Arc<Metrics>,
 }
 
 impl Nodes {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, skew: u64, clock: Arc<dyn crate::env::Clock>) -> Self {
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, skew: u64, clock: Arc<dyn crate::env::Clock>, metrics: Arc<Metrics>) -> Self {
         let grace = ttl + 4 * skew + 1;
         let core = NodeCore::new(id.clone(), ttl, grace);
         let me = Announcement { id, url, at: 0 };
         let (generation, _) = tokio::sync::watch::channel(0);
-        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace, core: Mutex::new(core), listing: RwLock::new(Listing::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation }
+        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace, core: Mutex::new(core), listing: RwLock::new(Listing::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation, metrics }
     }
 
     fn core(&self) -> std::sync::MutexGuard<'_, NodeCore> {
@@ -184,6 +186,14 @@ impl Nodes {
         self.core().fresh(now)
     }
 
+    /// Whether this node acts as owner of what the members make it the
+    /// owner of: fresh, in a configuration with members, past the grace.
+    pub fn acting(&self) -> bool {
+        let now = self.now();
+        let c = self.core();
+        !c.members.is_empty() && c.fresh(now) && c.held + self.grace <= now
+    }
+
     /// Does this node act as owner of `key` right now: fresh, the owner per
     /// its members, and holding its epoch for the grace? The model's `acts`.
     pub fn acts(&self, key: &str, now: u64) -> bool {
@@ -241,6 +251,12 @@ impl Nodes {
     /// Announce this node, list the others, read the configuration, and
     /// write the next epoch if the announced set has moved away from it.
     pub async fn refresh(&self, now: u64) -> Result<(), crate::store::StoreError> {
+        let r = self.refresh_inner(now).await;
+        self.metrics.membership_refresh(r.is_ok());
+        r
+    }
+
+    async fn refresh_inner(&self, now: u64) -> Result<(), crate::store::StoreError> {
         let mine = {
             let mut me = self.me.write().unwrap_or_else(|e| e.into_inner());
             me.at = now;
@@ -288,6 +304,7 @@ impl Nodes {
             l.etag = etag.clone();
         }
         if changed {
+            self.metrics.configuration_change();
             self.generation.send_modify(|g| *g += 1);
         }
         // The announced set is the members the configuration should name.
@@ -301,9 +318,15 @@ impl Nodes {
                 None => self.store.put_if_none_match(&self.keys.members_key(), body).await,
             };
             match r {
-                Ok(_) => tracing::info!(epoch = next.epoch, members = ?next.members, "configuration written"),
-                Err(crate::store::StoreError::PreconditionFailed) => {}
-                Err(e) => return Err(e),
+                Ok(_) => {
+                    self.metrics.configuration_write(ConfigWrite::Written);
+                    tracing::info!(epoch = next.epoch, members = ?next.members, "configuration written");
+                }
+                Err(crate::store::StoreError::PreconditionFailed) => self.metrics.configuration_write(ConfigWrite::Conflict),
+                Err(e) => {
+                    self.metrics.configuration_write(ConfigWrite::Failed);
+                    return Err(e);
+                }
             }
         }
         Ok(())

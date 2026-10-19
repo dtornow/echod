@@ -22,6 +22,7 @@ use crate::applier::Applier;
 use crate::config::Config;
 use crate::env::{Clock, HttpPeers, Peers, SystemClock};
 use crate::keys::{origin_of, KeySpace};
+use crate::metrics::{self, Metrics, Route};
 use crate::nodes::Nodes;
 use crate::push::Router;
 use crate::schedules::Schedules;
@@ -41,6 +42,7 @@ pub struct Server {
     timers: Arc<Timers>,
     clock: Arc<dyn Clock>,
     peers: Arc<dyn Peers>,
+    metrics: Arc<Metrics>,
     shutdown: tokio::sync::watch::Sender<bool>,
     crashed: tokio::sync::watch::Sender<bool>,
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -61,17 +63,43 @@ impl Server {
     /// simulation builds.
     pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, peers: Arc<dyn Peers>, observer: Arc<dyn crate::env::Observer>) -> Arc<Self> {
         let keys = KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
+        // Every call on the bucket goes through the meter.
+        let metrics = Metrics::new();
+        let store: Arc<dyn Store> = Arc::new(metrics::MeteredStore::new(store, keys.clone(), Arc::clone(&metrics)));
         let url = cfg.url.clone().unwrap_or_else(|| format!("http://{}", cfg.bind.replace("0.0.0.0", "127.0.0.1")));
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, clock.now()))));
-        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms, cfg.clock_skew_ms, Arc::clone(&clock)));
+        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms, cfg.clock_skew_ms, Arc::clone(&clock), Arc::clone(&metrics)));
         let wheel = Arc::new(TimerWheel::new());
         let cache: Arc<dyn crate::cache::Cache> = Arc::new(crate::cache::MemoryCache::new(cfg.cache_entries, cfg.cache_bytes));
-        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, cache, Arc::clone(&clock), observer));
+        let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, Arc::clone(&cache), Arc::clone(&clock), observer, Arc::clone(&metrics)));
         let schedules = Arc::new(Schedules::new(Arc::clone(&applier)));
-        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, wheel, Arc::clone(&nodes), Arc::clone(&applier), schedules));
+        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, Arc::clone(&wheel), Arc::clone(&nodes), Arc::clone(&applier), schedules, Arc::clone(&metrics)));
+        // The gauges: read when scraped, from the state as it is then.
+        {
+            let (nodes, cache, wheel) = (Arc::clone(&nodes), Arc::clone(&cache), Arc::clone(&wheel));
+            metrics.set_snapshot(move || {
+                let m = nodes.members();
+                let c = cache.stats();
+                metrics::Snapshot {
+                    cache_entries: c.entries as u64,
+                    cache_bytes: c.bytes,
+                    cache_evictions: c.evictions,
+                    epoch: m.epoch,
+                    members: m.members.len() as u64,
+                    fresh: nodes.fresh(nodes.now()),
+                    acting: nodes.acting(),
+                    timers_armed: wheel.len() as u64,
+                }
+            });
+        }
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let (crashed, _) = tokio::sync::watch::channel(false);
-        Arc::new(Self { cfg, store, nodes, applier, timers, clock, peers, shutdown, crashed, tasks: tokio::sync::Mutex::new(Vec::new()) })
+        Arc::new(Self { cfg, store, nodes, applier, timers, clock, peers, metrics, shutdown, crashed, tasks: tokio::sync::Mutex::new(Vec::new()) })
+    }
+
+    /// What this node counts and measures.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     pub fn config(&self) -> &Config {
@@ -90,9 +118,7 @@ impl Server {
     /// Whether this node acts as owner of what the members make it the
     /// owner of: fresh, in a configuration with members, past the grace.
     pub fn acting(&self) -> bool {
-        let now = self.nodes.now();
-        let m = self.nodes.members();
-        !m.members.is_empty() && self.nodes.fresh(now) && m.held + self.nodes.grace() <= now
+        self.nodes.acting()
     }
 
     pub fn timers(&self) -> &Arc<Timers> {
@@ -134,29 +160,45 @@ impl Server {
     /// Run `req` here, or at the owner of `origin`. Returns the answer and
     /// the id of the node that produced it.
     pub async fn process_from(&self, req: &RequestEnvelope, forwarded: bool) -> Result<(ResponseEnvelope, String), Unavailable> {
+        let started = std::time::Instant::now();
+        let (r, route) = self.route(req, forwarded).await;
+        let status = match &r {
+            Ok((resp, _)) => resp.head.status.clamp(0, u16::MAX as i32) as u16,
+            Err(_) => 503,
+        };
+        self.metrics.request(&req.kind, route, status, started);
+        r
+    }
+
+    /// `process_from`, and where the request ran.
+    async fn route(&self, req: &RequestEnvelope, forwarded: bool) -> (Result<(ResponseEnvelope, String), Unavailable>, Route) {
+        let here = if forwarded { Route::Relayed } else { Route::Local };
         let now = self.now(req);
         let me = self.nodes.id();
         let origin = match origin_of_request(req) {
             Ok(Some(o)) => o,
-            Ok(None) => return Ok((self.dispatch(req, None, now).await?, me)),
-            Err(e) => return Ok((ResponseEnvelope::error(req.kind.clone(), req.head.corr_id.clone(), 400, &e), me)),
+            Ok(None) => return (self.dispatch(req, None, now).await.map(|resp| (resp, me)), here),
+            Err(e) => return (Ok((ResponseEnvelope::error(req.kind.clone(), req.head.corr_id.clone(), 400, &e), me)), here),
         };
         // A node that cannot see the membership may be fenced out without
         // knowing it: it serves nothing until it can read.
         let fleet_now = self.nodes.now();
         if !self.nodes.fresh(fleet_now) {
-            return Err(Unavailable::new("this node's view of the membership is stale"));
+            return (Err(Unavailable::new("this node's view of the membership is stale")), here);
         }
         if !forwarded && self.cfg.forward {
             if let Some(owner) = self.nodes.owner(&origin).filter(|o| o.id != me) {
-                return self.peers.forward(&owner.url, &me, req).await.map(|resp| (resp, owner.id));
+                let started = std::time::Instant::now();
+                let r = self.peers.forward(&owner.url, &me, req).await;
+                self.metrics.forward(if r.is_ok() { metrics::ForwardOutcome::Answered } else { metrics::ForwardOutcome::Unavailable }, started);
+                return (r.map(|resp| (resp, owner.id)), Route::Forwarded);
             }
         }
         // Only the acting owner writes an origin: the proof's one writer.
         if !self.nodes.acts(&origin, fleet_now) {
-            return Err(Unavailable::new("this node does not act as owner of the origin yet"));
+            return (Err(Unavailable::new("this node does not act as owner of the origin yet")), here);
         }
-        Ok((self.dispatch(req, Some(origin), now).await?, me))
+        (self.dispatch(req, Some(origin), now).await.map(|resp| (resp, me)), here)
     }
 
     async fn dispatch(&self, req: &RequestEnvelope, origin: Option<String>, now: u64) -> Result<ResponseEnvelope, Unavailable> {

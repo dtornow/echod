@@ -71,7 +71,7 @@ runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 ```text
 config.rs     the dials
 keys.rs       where everything lives under the bucket
-store.rs      the object store port: S3, and an in-memory stand-in
+store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
 doc.rs        an origin's document: rows in, rows out, the fold between
 wire.rs       the kernel's vocabulary to the protocol's and back
 nodes.rs      the nodes: announce, heartbeat, list, and who owns what
@@ -80,7 +80,8 @@ timers.rs     deadlines as objects, fired by the owner
 schedules.rs  schedules as objects, fired by the owner
 push.rs       messages out: HTTP push, and the router in front of it
 server.rs     the ResonateServer: dispatch, forwarding, lifecycle
-gateway.rs    POST / and GET /ready
+gateway.rs    POST /, GET /ready and GET /metrics
+metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets only
 ```
 
 ### The bucket
@@ -222,6 +223,41 @@ writes as S3 does. RustFS also honours conditional reads and makes
 versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
 on reads and sends the body where S3 sends 304, which the store treats as
 a revalidation that found the version current.
+
+### Observability
+
+`GET /metrics` is OpenMetrics text (`prometheus-client`), one registry per
+server. The rule for every label: its values are a closed set the server
+decides. No origin, promise id, key, address, node id or error text is ever
+a label; a request kind is a label only if the protocol defines it, anything
+else is `other`. So the number of series is a small constant however many
+promises, origins or workers there are, and a client cannot mint one.
+
+What is counted, and why:
+
+| metric | labels | tells an operator |
+|---|---|---|
+| `echod_requests_total`, `echod_request_duration_seconds` | `kind`, `route` (`local`, `relayed`: run here for another node, `forwarded`: sent to the owner), `status` | the protocol's traffic, where it ran, how it ended, how long it took |
+| `echod_forwards_total`, `echod_forward_duration_seconds` | `outcome` (`answered`, `unavailable`) | the node-to-node hop |
+| `echod_messages_total`, `echod_message_duration_seconds` | `kind` (`execute`, `unblock`), `outcome` (`delivered`, `unroutable`, `failed`) | pushes to workers |
+| `echod_store_operations_total`, `echod_store_operation_duration_seconds` | `op` (the port's nine calls), `object` (`document`, `schedule`, `timer`, `node`, `members`), `outcome` (`ok`, `not_modified`, `absent`, `conflict`, `failed`) | every call on the bucket: how many, of what, on what, and how it ended. `conflict` is a conditional write the store refused: CAS'ed out. `failed` on a write is the third outcome of the fleet model: the write may or may not have landed |
+| `echod_document_writes_total`, `echod_document_bytes` | `mode` (`create`, `rewrite`, `append`) | how documents are written and how big they are |
+| `echod_commits_total` | `outcome` (`committed`, `raced`: lost the race on the document and re-decided, `failed`, `exhausted`) | the commit protocol's fate |
+| `echod_cache_lookups_total` | `result` (`trusted`: served from memory, `revalidated`: a conditional read said not modified, `refreshed`: it brought a newer version, `absent`, `miss`) | what a load cost; `trusted` is the hit, the rest are round trips |
+| `echod_cache_entries`, `echod_cache_bytes`, `echod_cache_evictions_total` | | the cache against its bounds |
+| `echod_membership_refreshes_total`, `echod_configuration_writes_total` | `outcome` | the heartbeat, and who wrote the next epoch |
+| `echod_configuration_changes_total` | | ownership moved: this node took on a new epoch |
+| `echod_membership_epoch`, `echod_members`, `echod_node_fresh`, `echod_node_acting` | | what the node holds of the fleet, and whether it is serving and acting |
+| `echod_timer_fires_total`, `echod_timer_lag_seconds` | `kind` (`origin`, `schedule`), `outcome` (`deleted`, `kept`: the delete failed and it fires again, `failed`, `deferred`: not this node's to fire now) | deadlines firing, and how late |
+| `echod_timer_listings_total`, `echod_timers_armed` | `outcome` | the three occasions a bucket is listed, and the wheel |
+| `echod_sweeps_total` | `outcome` (`fired`, `idle`, `failed`) | what a fired key found |
+| `echod_build_info` | `version` | |
+
+The store is observed by a decorator over the port (`MeteredStore`), so
+every backend is measured the same way and the object's kind comes from
+the key's place in the bucket, not from the caller. The gauges are read
+when scraped, from the node's state as it is then. Logs carry the names
+the metrics leave out: an origin, a key, an address, an error.
 
 ### Simulation
 

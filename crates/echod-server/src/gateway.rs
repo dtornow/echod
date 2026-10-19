@@ -1,4 +1,4 @@
-//! `POST /` and `GET /ready`.
+//! `POST /`, `GET /ready` and `GET /metrics`.
 //!
 //! Bytes become an envelope and go to the server; the answer's `head.status`
 //! becomes the HTTP status. `Unavailable` is a 503. A request from another
@@ -19,7 +19,12 @@ use resonate_core::ResonateServer;
 use crate::server::{Server, FORWARDED, NODE};
 
 pub fn app(server: Arc<Server>) -> Router {
-    Router::new().route("/", post(handle)).route("/ready", get(ready)).with_state(server)
+    Router::new().route("/", post(handle)).route("/ready", get(ready)).route("/metrics", get(metrics)).with_state(server)
+}
+
+async fn metrics(State(server): State<Arc<Server>>) -> Response {
+    let body = server.metrics().encode();
+    ([(axum::http::header::CONTENT_TYPE, crate::metrics::CONTENT_TYPE)], body).into_response()
 }
 
 async fn ready(State(server): State<Arc<Server>>) -> StatusCode {
@@ -36,6 +41,7 @@ async fn handle(State(server): State<Arc<Server>>, headers: HeaderMap, body: Byt
     let resp = match parse_and_validate(&body) {
         Err(e) => {
             let (kind, corr) = salvage_context(&body);
+            server.metrics().request(&kind, crate::metrics::Route::Local, 400, std::time::Instant::now());
             ResponseEnvelope::error(kind, corr, 400, &e.to_string())
         }
         Ok(req) => match server.process_from(&req, forwarded).await {

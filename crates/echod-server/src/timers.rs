@@ -27,6 +27,7 @@ use tokio::sync::Notify;
 
 use crate::applier::{Applier, Fired, FiredKey};
 use crate::keys::{KeySpace, TimerEntry};
+use crate::metrics::{FireOutcome, Metrics, TimerKind};
 use crate::nodes::Nodes;
 use crate::schedules::Schedules;
 use crate::store::Store;
@@ -123,11 +124,12 @@ pub struct Timers {
     /// The start of the last bucket this node has listed. `None` until the
     /// first full load succeeds; nothing fires before that.
     loaded_through: Mutex<Option<u64>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Timers {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>) -> Self {
-        Self { store, keys, wheel, nodes, applier, schedules, loaded_through: Mutex::new(None) }
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>, metrics: Arc<Metrics>) -> Self {
+        Self { store, keys, wheel, nodes, applier, schedules, loaded_through: Mutex::new(None), metrics }
     }
 
     pub fn wheel(&self) -> &Arc<TimerWheel> {
@@ -189,13 +191,16 @@ impl Timers {
     }
 
     /// Bring the loaded range up to the horizon, one bucket at a time.
-    async fn extend(&self, now: u64) -> Result<(), crate::store::StoreError> {
+    /// Returns whether any bucket was listed.
+    async fn extend(&self, now: u64) -> Result<bool, crate::store::StoreError> {
         let horizon = self.horizon(now);
+        let mut listed = false;
         loop {
-            let Some(through) = self.loaded_through() else { return Ok(()) };
+            let Some(through) = self.loaded_through() else { return Ok(listed) };
             if through >= horizon {
-                return Ok(());
+                return Ok(listed);
             }
+            listed = true;
             let next = through + self.keys.bucket_ms();
             let n = self.load_bucket(next).await?;
             tracing::debug!(bucket = next, deadlines = n, "timer bucket loaded");
@@ -209,6 +214,11 @@ impl Timers {
             tracing::warn!(key = %key, "unparseable timer key dropped");
             return;
         };
+        let kind = match &entry {
+            TimerEntry::Origin { .. } => TimerKind::Origin,
+            TimerEntry::Schedule { .. } => TimerKind::Schedule,
+        };
+        let lag = now.saturating_sub(at);
         if !self.owns(&entry) || !self.nodes.acts(entry.target(), now) {
             // Not this node's to fire, or this node cannot tell. The key
             // stays for whoever owns it; if it is still this node's it is
@@ -216,6 +226,7 @@ impl Timers {
             if self.owns(&entry) {
                 self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
             }
+            self.metrics.timer_fire(kind, FireOutcome::Deferred, lag);
             return;
         }
         let swept = match &entry {
@@ -225,24 +236,31 @@ impl Timers {
             }
             TimerEntry::Schedule { id, deadline, .. } => self.schedules.fire(id, *deadline, now).await.map(|_| Fired::Kept),
         };
-        match swept {
-            Ok(Fired::Deleted) => {}
+        let outcome = match swept {
+            Ok(Fired::Deleted) => FireOutcome::Deleted,
             Ok(Fired::Kept) => {
                 if let TimerEntry::Schedule { .. } = &entry {
                     // A schedule's key: the schedule moved on, or was fired already.
-                    if let Err(e) = self.store.delete(key).await {
-                        tracing::debug!(key = %key, error = %e, "timer key not collected");
+                    match self.store.delete(key).await {
+                        Ok(()) => FireOutcome::Deleted,
+                        Err(e) => {
+                            tracing::debug!(key = %key, error = %e, "timer key not collected");
+                            FireOutcome::Kept
+                        }
                     }
                 } else {
                     // The delete failed: it is collected on its next firing.
                     self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
+                    FireOutcome::Kept
                 }
             }
             Err(e) => {
                 tracing::warn!(key = %key, error = %e, "sweep failed; the key stays");
                 self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
+                FireOutcome::Failed
             }
-        }
+        };
+        self.metrics.timer_fire(kind, outcome, lag);
     }
 
     /// Fire what is due, with a bound on how many sweeps run at once.
@@ -271,15 +289,29 @@ impl Timers {
                 let mut backoff = None;
                 if reload_pending {
                     match self.reload(now).await {
-                        Ok(()) => reload_pending = false,
+                        Ok(()) => {
+                            self.metrics.timer_listing(true);
+                            reload_pending = false;
+                        }
                         Err(e) => {
+                            self.metrics.timer_listing(false);
                             tracing::warn!(error = %e, "timer load failed; will retry");
                             backoff = Some(RELIST_AFTER);
                         }
                     }
-                } else if let Err(e) = self.extend(now).await {
-                    tracing::warn!(error = %e, "timer bucket listing failed; will retry");
-                    backoff = Some(RELIST_AFTER);
+                } else {
+                    match self.extend(now).await {
+                        Ok(listed) => {
+                            if listed {
+                                self.metrics.timer_listing(true);
+                            }
+                        }
+                        Err(e) => {
+                            self.metrics.timer_listing(false);
+                            tracing::warn!(error = %e, "timer bucket listing failed; will retry");
+                            backoff = Some(RELIST_AFTER);
+                        }
+                    }
                 }
                 if self.loaded_through().is_some() && !reload_pending {
                     self.fire_due(now).await;

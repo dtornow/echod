@@ -14,7 +14,8 @@
 //! schedules.rs  schedules as objects, fired by the owner
 //! push.rs       messages out: HTTP push, and the router in front of it
 //! server.rs     the `ResonateServer`: dispatch, forwarding, lifecycle
-//! gateway.rs    `POST /` and `GET /ready`
+//! gateway.rs    `POST /`, `GET /ready` and `GET /metrics`
+//! metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets only
 //! ```
 
 pub mod applier;
@@ -24,6 +25,7 @@ pub mod doc;
 pub mod env;
 pub mod gateway;
 pub mod keys;
+pub mod metrics;
 pub mod nodes;
 pub mod push;
 pub mod schedules;

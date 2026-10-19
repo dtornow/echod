@@ -135,10 +135,23 @@ impl Node {
         (status, headers, v["data"].clone())
     }
 
+    /// The node's `/metrics`, as text.
+    async fn metrics(&self) -> String {
+        let resp = reqwest::Client::new().get(format!("http://{}/metrics", self.addr)).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.headers().get("content-type").unwrap().to_str().unwrap(), "application/openmetrics-text; version=1.0.0; charset=utf-8");
+        resp.text().await.unwrap()
+    }
+
     async fn stop(self) {
         self.server.stop().await.unwrap();
         let _ = self.stop.send(true);
     }
+}
+
+/// The value of the one sample `prefix` starts, or 0 if there is none.
+fn sample(text: &str, prefix: &str) -> f64 {
+    text.lines().find_map(|l| l.strip_prefix(prefix)).and_then(|rest| rest.trim().split(' ').next()).and_then(|v| v.parse().ok()).unwrap_or(0.0)
 }
 
 fn now() -> u64 {
@@ -291,6 +304,37 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     let (status, _, _) = node.send("promise.create", json!({ "id": "" })).await;
     assert_eq!(status, 400);
 
+    // what the operator sees of all that
+    let text = node.metrics().await;
+    assert!(text.ends_with("# EOF\n"), "OpenMetrics ends with EOF");
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",route="local",status="200"} "#) >= 1.0, "{text}");
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",route="local",status="400"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_requests_total{kind="other",route="local",status="400"} "#) >= 1.0, "an unknown kind is counted as other");
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.search",route="local",status="403"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_request_duration_seconds_count{kind="promise.create",route="local"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_store_operations_total{op="put_if_none_match",object="document",outcome="ok"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_store_operations_total{op="put",object="timer",outcome="ok"} "#) >= 1.0, "deadline keys were put");
+    assert!(sample(&text, r#"echod_store_operations_total{op="put",object="node",outcome="ok"} "#) >= 1.0, "the node announced itself");
+    assert!(sample(&text, r#"echod_store_operation_duration_seconds_count{op="list",object="node"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_document_writes_total{mode="create"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_commits_total{outcome="committed"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_cache_lookups_total{result="trusted"} "#) >= 1.0, "the acting owner served from memory");
+    assert!(sample(&text, r#"echod_messages_total{kind="execute",outcome="delivered"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_messages_total{kind="unblock",outcome="delivered"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_timer_fires_total{kind="origin",outcome="deleted"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_timer_fires_total{kind="schedule",outcome="deleted"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_sweeps_total{outcome="fired"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_timer_listings_total{outcome="ok"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_membership_refreshes_total{outcome="ok"} "#) >= 1.0);
+    assert!(sample(&text, "echod_configuration_changes_total ") >= 1.0);
+    assert_eq!(sample(&text, "echod_members "), 1.0);
+    assert_eq!(sample(&text, "echod_node_acting "), 1.0);
+    assert!(sample(&text, "echod_cache_entries ") >= 1.0);
+    assert!(text.contains("echod_build_info{version="));
+    for secret in ["a:1", "wf/", "x-echod", "127.0.0.1"] {
+        assert!(!text.contains(secret), "{secret:?} is not a label");
+    }
+
     node.stop().await;
 }
 
@@ -388,6 +432,16 @@ async fn two_nodes() {
     let (status, headers, _) = own.send("promise.get", json!({ "id": "x:1" })).await;
     assert_eq!(status, 200);
     assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(owner.as_str()));
+
+    // the other node counts a forward, the owner a relay
+    let (ot, wt) = (other.metrics().await, own.metrics().await);
+    assert_eq!(sample(&ot, r#"echod_requests_total{kind="promise.create",route="forwarded",status="200"} "#), 1.0, "{ot}");
+    assert_eq!(sample(&ot, r#"echod_forwards_total{outcome="answered"} "#), 1.0);
+    assert_eq!(sample(&ot, "echod_forward_duration_seconds_count "), 1.0);
+    assert_eq!(sample(&wt, r#"echod_requests_total{kind="promise.create",route="relayed",status="200"} "#), 1.0, "{wt}");
+    assert_eq!(sample(&wt, r#"echod_requests_total{kind="promise.get",route="local",status="200"} "#), 1.0);
+    assert_eq!(sample(&wt, "echod_members "), 2.0);
+    assert!(sample(&wt, r#"echod_configuration_writes_total{outcome="written"} "#) + sample(&ot, r#"echod_configuration_writes_total{outcome="written"} "#) >= 1.0, "someone wrote the configuration");
 
     // a deadline armed through either node fires once
     let (status, _, _) = other.send("promise.create", json!({ "id": "x:2", "timeoutAt": now() + 400, "tags": { "resonate:scope": "global" } })).await;

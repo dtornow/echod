@@ -104,6 +104,14 @@ impl KeySpace {
         self.bucket_ms
     }
 
+    /// The class of object a key names: its first path segment under the
+    /// prefix (`wf`, `sched`, `t`, `nodes`, `members`); `None` for a key
+    /// outside the prefix.
+    pub fn class_of<'a>(&self, key: &'a str) -> Option<&'a str> {
+        let rest = key.strip_prefix(self.prefix.as_str())?;
+        Some(rest.split('/').next().unwrap_or(rest))
+    }
+
     pub fn doc_key(&self, origin: &str) -> String {
         format!("{}wf/{}", self.prefix, encode_key(origin))
     }
