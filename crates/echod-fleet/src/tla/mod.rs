@@ -4,4 +4,3 @@
 pub mod action;
 pub mod defs;
 pub mod rules;
-pub mod state_machine;

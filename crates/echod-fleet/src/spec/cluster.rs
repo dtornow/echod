@@ -34,6 +34,7 @@ use vstd::prelude::*;
 use crate::node::core::*;
 use crate::node::step::*;
 use crate::node::txn::*;
+use crate::tla::action::*;
 use echod_kernel::types::*;
 
 verus! {
@@ -650,36 +651,176 @@ pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, lan
     }
 }
 
-pub open spec fn step(p: Params, s: Cluster, st: Step) -> Option<Cluster> {
-    match st {
-        Step::Advance(d) => advance(p, s, d),
-        Step::Tick(i, d) => tick(p, s, i, d),
-        Step::Join(i, c) => join(p, s, i, c),
-        Step::Crash(i) => crash(s, i),
-        Step::ReadConfig(i) => read_config(s, i),
-        Step::Propose(i, m) => propose(s, i, m),
-        Step::Forget(i, o) => forget(s, i, o),
-        Step::Begin(i, o, t, new, fired, did, deadline) => begin(s, i, o, t, new, fired, did, deadline),
-        Step::Arm(i, o, k) => arm(s, i, o, k),
-        Step::Commit(i, o, e) => commit(s, i, o, e),
-        Step::CommitFail(i, o) => commit_fail(s, i, o),
-        Step::Disarm(i, o) => disarm(s, i, o),
-        Step::Finish(i, o, deleted) => finish(s, i, o, deleted),
-        Step::Collect(i, o, e) => collect(s, i, o, e),
-        Step::CollectFail(i, o) => collect_fail(s, i, o),
-        Step::Done(i, o) => done(s, i, o),
-        Step::ArmUnknown(i, o, k, landed) => arm_unknown(s, i, o, k, landed),
-        Step::CommitUnknown(i, o, e, landed) => commit_unknown(s, i, o, e, landed),
-        Step::CollectUnknown(i, o, e, landed) => collect_unknown(s, i, o, e, landed),
+// ---------------------------------------------------------------------------
+// The actions as `Action` values, Anvil's shape
+// ---------------------------------------------------------------------------
+//
+// Each is a precondition and a transition over the action's input, from the
+// function above that computes it: enabled where that function is `Some`,
+// and then its state. The temporal rules take them as they are — the
+// induction now, fairness and liveness later.
+
+pub open spec fn advance_action(p: Params) -> Action<Cluster, nat, ()> {
+    Action {
+        precondition: |input: nat, s: Cluster| { let d = input; advance(p, s, d) is Some },
+        transition: |input: nat, s: Cluster| { let d = input; (advance(p, s, d).unwrap(), ()) },
     }
 }
 
-pub open spec fn next_by(p: Params, st: Step, s: Cluster, s2: Cluster) -> bool {
-    step(p, s, st) == Some(s2)
+pub open spec fn tick_action(p: Params) -> Action<Cluster, (Id, nat), ()> {
+    Action {
+        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; tick(p, s, i, d) is Some },
+        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; (tick(p, s, i, d).unwrap(), ()) },
+    }
+}
+
+pub open spec fn join_action(p: Params) -> Action<Cluster, (Id, nat), ()> {
+    Action {
+        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; join(p, s, i, c) is Some },
+        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; (join(p, s, i, c).unwrap(), ()) },
+    }
+}
+
+pub open spec fn crash_action() -> Action<Cluster, Id, ()> {
+    Action {
+        precondition: |input: Id, s: Cluster| { let i = input; crash(s, i) is Some },
+        transition: |input: Id, s: Cluster| { let i = input; (crash(s, i).unwrap(), ()) },
+    }
+}
+
+pub open spec fn read_config_action() -> Action<Cluster, Id, ()> {
+    Action {
+        precondition: |input: Id, s: Cluster| { let i = input; read_config(s, i) is Some },
+        transition: |input: Id, s: Cluster| { let i = input; (read_config(s, i).unwrap(), ()) },
+    }
+}
+
+pub open spec fn propose_action() -> Action<Cluster, (Id, Seq<Id>), ()> {
+    Action {
+        precondition: |input: (Id, Seq<Id>), s: Cluster| { let i = input.0; let m = input.1; propose(s, i, m) is Some },
+        transition: |input: (Id, Seq<Id>), s: Cluster| { let i = input.0; let m = input.1; (propose(s, i, m).unwrap(), ()) },
+    }
+}
+
+pub open spec fn forget_action() -> Action<Cluster, (Id, Origin), ()> {
+    Action {
+        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; forget(s, i, o) is Some },
+        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (forget(s, i, o).unwrap(), ()) },
+    }
+}
+
+pub open spec fn begin_action() -> Action<Cluster, (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), ()> {
+    Action {
+        precondition: |input: (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let new = input.3; let fired = input.4; let did = input.5; let deadline = input.6; begin(s, i, o, t, new, fired, did, deadline) is Some },
+        transition: |input: (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let new = input.3; let fired = input.4; let did = input.5; let deadline = input.6; (begin(s, i, o, t, new, fired, did, deadline).unwrap(), ()) },
+    }
+}
+
+pub open spec fn arm_action() -> Action<Cluster, (Id, Origin, AKey), ()> {
+    Action {
+        precondition: |input: (Id, Origin, AKey), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; arm(s, i, o, k) is Some },
+        transition: |input: (Id, Origin, AKey), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; (arm(s, i, o, k).unwrap(), ()) },
+    }
+}
+
+pub open spec fn commit_action() -> Action<Cluster, (Id, Origin, Seq<char>), ()> {
+    Action {
+        precondition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; commit(s, i, o, e) is Some },
+        transition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; (commit(s, i, o, e).unwrap(), ()) },
+    }
+}
+
+pub open spec fn commit_fail_action() -> Action<Cluster, (Id, Origin), ()> {
+    Action {
+        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; commit_fail(s, i, o) is Some },
+        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (commit_fail(s, i, o).unwrap(), ()) },
+    }
+}
+
+pub open spec fn disarm_action() -> Action<Cluster, (Id, Origin), ()> {
+    Action {
+        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; disarm(s, i, o) is Some },
+        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (disarm(s, i, o).unwrap(), ()) },
+    }
+}
+
+pub open spec fn finish_action() -> Action<Cluster, (Id, Origin, bool), ()> {
+    Action {
+        precondition: |input: (Id, Origin, bool), s: Cluster| { let i = input.0; let o = input.1; let deleted = input.2; finish(s, i, o, deleted) is Some },
+        transition: |input: (Id, Origin, bool), s: Cluster| { let i = input.0; let o = input.1; let deleted = input.2; (finish(s, i, o, deleted).unwrap(), ()) },
+    }
+}
+
+pub open spec fn collect_action() -> Action<Cluster, (Id, Origin, Seq<char>), ()> {
+    Action {
+        precondition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; collect(s, i, o, e) is Some },
+        transition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; (collect(s, i, o, e).unwrap(), ()) },
+    }
+}
+
+pub open spec fn collect_fail_action() -> Action<Cluster, (Id, Origin), ()> {
+    Action {
+        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; collect_fail(s, i, o) is Some },
+        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (collect_fail(s, i, o).unwrap(), ()) },
+    }
+}
+
+pub open spec fn done_action() -> Action<Cluster, (Id, Origin), ()> {
+    Action {
+        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; done(s, i, o) is Some },
+        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (done(s, i, o).unwrap(), ()) },
+    }
+}
+
+pub open spec fn arm_unknown_action() -> Action<Cluster, (Id, Origin, AKey, bool), ()> {
+    Action {
+        precondition: |input: (Id, Origin, AKey, bool), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let landed = input.3; arm_unknown(s, i, o, k, landed) is Some },
+        transition: |input: (Id, Origin, AKey, bool), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let landed = input.3; (arm_unknown(s, i, o, k, landed).unwrap(), ()) },
+    }
+}
+
+pub open spec fn commit_unknown_action() -> Action<Cluster, (Id, Origin, Seq<char>, bool), ()> {
+    Action {
+        precondition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; commit_unknown(s, i, o, e, landed) is Some },
+        transition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; (commit_unknown(s, i, o, e, landed).unwrap(), ()) },
+    }
+}
+
+pub open spec fn collect_unknown_action() -> Action<Cluster, (Id, Origin, Seq<char>, bool), ()> {
+    Action {
+        precondition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; collect_unknown(s, i, o, e, landed) is Some },
+        transition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; (collect_unknown(s, i, o, e, landed).unwrap(), ()) },
+    }
+}
+
+/// The next-state relation, one step at a time: the step's action, forward
+/// on the step's input.
+pub open spec fn next_step(p: Params, s: Cluster, s2: Cluster, st: Step) -> bool {
+    match st {
+        Step::Advance(d) => advance_action(p).forward(d)(s, s2),
+        Step::Tick(i, d) => tick_action(p).forward((i, d))(s, s2),
+        Step::Join(i, c) => join_action(p).forward((i, c))(s, s2),
+        Step::Crash(i) => crash_action().forward(i)(s, s2),
+        Step::ReadConfig(i) => read_config_action().forward(i)(s, s2),
+        Step::Propose(i, m) => propose_action().forward((i, m))(s, s2),
+        Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
+        Step::Begin(i, o, t, new, fired, did, deadline) => begin_action().forward((i, o, t, new, fired, did, deadline))(s, s2),
+        Step::Arm(i, o, k) => arm_action().forward((i, o, k))(s, s2),
+        Step::Commit(i, o, e) => commit_action().forward((i, o, e))(s, s2),
+        Step::CommitFail(i, o) => commit_fail_action().forward((i, o))(s, s2),
+        Step::Disarm(i, o) => disarm_action().forward((i, o))(s, s2),
+        Step::Finish(i, o, deleted) => finish_action().forward((i, o, deleted))(s, s2),
+        Step::Collect(i, o, e) => collect_action().forward((i, o, e))(s, s2),
+        Step::CollectFail(i, o) => collect_fail_action().forward((i, o))(s, s2),
+        Step::Done(i, o) => done_action().forward((i, o))(s, s2),
+        Step::ArmUnknown(i, o, k, landed) => arm_unknown_action().forward((i, o, k, landed))(s, s2),
+        Step::CommitUnknown(i, o, e, landed) => commit_unknown_action().forward((i, o, e, landed))(s, s2),
+        Step::CollectUnknown(i, o, e, landed) => collect_unknown_action().forward((i, o, e, landed))(s, s2),
+    }
 }
 
 pub open spec fn next(p: Params) -> spec_fn(Cluster, Cluster) -> bool {
-    |s: Cluster, s2: Cluster| exists |st: Step| #[trigger] next_by(p, st, s, s2)
+    |s: Cluster, s2: Cluster| exists |st: Step| #[trigger] next_step(p, s, s2, st)
 }
 
 } // verus!

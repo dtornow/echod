@@ -1946,7 +1946,7 @@ pub proof fn lemma_next(p: Params, s: Cluster, s2: Cluster)
     requires inv(p)(s), next(p)(s, s2),
     ensures inv(p)(s2),
 {
-    let st = choose |st: Step| #[trigger] next_by(p, st, s, s2);
+    let st = choose |st: Step| #[trigger] next_step(p, s, s2, st);
     match st {
         Step::Advance(d) => lemma_advance(p, s, s2, d),
         Step::Tick(i, d) => lemma_tick(p, s, s2, i, d),

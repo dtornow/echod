@@ -300,9 +300,12 @@ answered 200 at least once, and the history overlapped.
 ## echod-fleet
 
 The multi-node system as a state machine, in the shape Anvil gives a
-Kubernetes cluster: a state, actions with preconditions and transitions,
-`init` and `next`, and Anvil's TLA embedding (`verus-tla`, vendored) to
-state the theorem as `always(inv)`. The fleet imports the kernel under
+Kubernetes cluster: a state, a `Step` for every action, each action an
+`Action` value — a precondition and a transition over the step's input —
+`init`, `next` as the step's action forward on its input, and Anvil's TLA
+embedding (`verus-tla`, vendored) to state the theorem as `always(inv)`.
+The `Action` values are what the embedding's fairness rules take, for the
+liveness to come. The fleet imports the kernel under
 Verus (`verify.sh` exports the kernel's metadata and imports it), so the
 bucket's documents are the kernel's own states and the kernel's steps enter
 the model with the contracts the kernel proves of them.
