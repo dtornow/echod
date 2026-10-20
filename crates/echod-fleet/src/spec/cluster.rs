@@ -2,8 +2,7 @@
 //!
 //! The bucket holds every origin's document — a kernel state, the objects
 //! the kernel is proved over — with its version, the instant of the step
-//! that wrote it, and the deadline keys armed for it; and one configuration
-//! object, the member list and the epoch it was written in.
+//! that wrote it, and the deadline keys armed for it.
 //!
 //! A node's part of the state is the node core's view (`node::core::ANode`)
 //! and the commits it has in flight (`node::txn::ATxn`, with what the model
@@ -20,14 +19,18 @@
 //! and the node, told only that it failed, gives the commit up.
 //!
 //! Around the core, the model keeps what the node does not see — whether it
-//! is alive, its clock, and, ghost, real time at the moments that matter —
-//! and the kernel's steps as the relation the kernel proves of them: what a
-//! step makes of a document is anything the catalogue allows, reached by
-//! steps at one instant (`node::step::reach`), and a sweep leaves nothing
-//! due (`node::step::no_due`).
+//! is alive and its clock — and the kernel's steps as the relation the
+//! kernel proves of them: what a step makes of a document is anything the
+//! catalogue allows, reached by steps at one instant (`node::step::reach`),
+//! and a sweep leaves nothing due (`node::step::no_due`).
 //!
-//! Real time is a ghost variable: nodes never see it, but the hypothesis on
-//! clocks — every live clock within `skew` of real time — is stated with it.
+//! There is no real time and no hypothesis on clocks. A node's clock is its
+//! own, advances as it will, and is read for one purpose: the instant a
+//! step is decided at, which is where the kernel judges what has expired.
+//! Nothing a node decides is trusted across nodes: every load is the
+//! bucket's current document, and every write is conditional on the
+//! version loaded. Which node acts on an origin is the server's routing,
+//! not the model's concern: the theorems hold whoever acts.
 
 use vstd::prelude::*;
 
@@ -38,12 +41,6 @@ use crate::tla::action::*;
 use echod_kernel::types::*;
 
 verus! {
-
-/// The configuration object in the bucket.
-pub struct Config {
-    pub epoch: nat,
-    pub members: Seq<Id>,
-}
 
 /// An event in the bucket: a key armed, a version written.
 pub enum Event {
@@ -62,8 +59,6 @@ pub struct Store {
     pub stamps: Map<Origin, nat>,
     /// The deadline keys in the bucket.
     pub timers: Set<AKey>,
-    /// The configuration object.
-    pub config: Config,
 }
 
 /// What the proof remembers of the bucket's past. Ghost: no node reads any
@@ -74,8 +69,6 @@ pub struct Store {
 pub struct History {
     /// Every version ever written, with its content.
     pub versions: Map<Seq<char>, Doc>,
-    /// The real time each version was written at.
-    pub born: Map<Seq<char>, nat>,
     /// The node that wrote each version.
     pub writer: Map<Seq<char>, Id>,
     /// Every key ever armed, and by whom.
@@ -87,10 +80,6 @@ pub struct History {
     /// the next number.
     pub counter: nat,
     pub order: Map<Event, nat>,
-    /// Every epoch's members, and the real time each was written at, for
-    /// epochs up to the current.
-    pub configs: Map<nat, Seq<Id>>,
-    pub written: Map<nat, nat>,
 }
 
 impl Store {
@@ -129,12 +118,6 @@ pub struct Flight {
     /// The instant the step was decided at.
     pub t: nat,
     pub phase: Phase,
-    /// Ghost: real time when it began; the node's epoch, `held_real` and
-    /// `last_read_real` then.
-    pub begun: nat,
-    pub epoch: nat,
-    pub held_real: nat,
-    pub lr: nat,
     /// Ghost: the bucket's event count when it began; the version it loaded
     /// and that version's number (0 if none).
     pub seq0: nat,
@@ -149,56 +132,17 @@ pub struct Node {
     /// body cache, which holds the version the core's entry names.
     pub bodies: Map<Origin, Doc>,
     pub alive: bool,
+    /// The node's own clock: no relation to any other.
     pub clock: nat,
-    /// Ghost: real time of the last configuration read, and of the first read of the epoch held.
-    pub last_read_real: nat,
-    pub held_real: nat,
     /// The commits in flight, one per origin at most.
     pub txns: Map<Origin, Flight>,
 }
 
 pub struct Cluster {
-    /// Ghost: real time.
-    pub now: nat,
     pub nodes: Map<Id, Node>,
     pub store: Store,
     /// Ghost: the bucket's past.
     pub hist: History,
-}
-
-/// The constants: a view is fresh for `ttl` after it was read; a clock is
-/// within `skew` of real time; a node acts as owner `grace` after it first
-/// read the epoch it holds. The proof needs `grace > ttl + 4 skew`.
-pub struct Params {
-    pub ttl: nat,
-    pub skew: nat,
-    pub grace: nat,
-}
-
-impl Params {
-    pub open spec fn wf(self) -> bool {
-        self.grace > self.ttl + 4 * self.skew
-    }
-}
-
-// ---------------------------------------------------------------------------
-// What a node decides: the core's functions, at the node's clock
-// ---------------------------------------------------------------------------
-
-pub open spec fn owner(members: Seq<Id>, o: Origin) -> Option<Id> {
-    spec_owner(members, o)
-}
-
-pub open spec fn fresh(n: Node) -> bool {
-    spec_fresh(n.core, n.clock)
-}
-
-pub open spec fn acts(n: Node, o: Origin) -> bool {
-    n.alive && spec_acts(n.core, o, n.clock)
-}
-
-pub open spec fn trusts(n: Node, o: Origin) -> bool {
-    n.alive && spec_trusts(n.core, o, n.clock)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,20 +177,14 @@ pub open spec fn next_is(d: Doc, deadline: Option<nat>) -> bool {
 // ---------------------------------------------------------------------------
 
 pub enum Step {
-    /// Real time passes.
-    Advance(nat),
     /// A node's clock advances.
     Tick(Id, nat),
-    /// A node starts, with a clock within skew of real time.
+    /// A node starts, with any clock.
     Join(Id, nat),
     Crash(Id),
-    /// A node reads the configuration.
-    ReadConfig(Id),
-    /// A node writes a new configuration, conditionally on the epoch it holds.
-    Propose(Id, Seq<Id>),
     /// A node drops a cache entry.
     Forget(Id, Origin),
-    /// The acting owner loads a document and decides a step on it: a request
+    /// A node loads a document and decides a step on it: a request
     /// (`fired` none) or the sweep behind a fired key. The instant, what the
     /// step made of the document, whether the sweep fired anything, and the
     /// document's nearest deadline after.
@@ -284,38 +222,22 @@ pub open spec fn init() -> spec_fn(Cluster) -> bool {
 }
 
 pub open spec fn init_state(s: Cluster) -> bool {
-    &&& s.now == 0
     &&& s.nodes == Map::<Id, Node>::empty()
     &&& s.store.docs == Map::<Origin, Doc>::empty()
     &&& s.store.etags == Map::<Origin, Seq<char>>::empty()
     &&& s.store.stamps == Map::<Origin, nat>::empty()
     &&& s.store.timers == Set::<AKey>::empty()
-    &&& s.store.config == Config { epoch: 0, members: Seq::empty() }
     &&& s.hist.versions == Map::<Seq<char>, Doc>::empty()
-    &&& s.hist.born == Map::<Seq<char>, nat>::empty()
     &&& s.hist.writer == Map::<Seq<char>, Id>::empty()
     &&& s.hist.armer == Map::<AKey, Id>::empty()
     &&& s.hist.keeper == Map::<Origin, AKey>::empty()
     &&& s.hist.counter == 0
     &&& s.hist.order == Map::<Event, nat>::empty()
-    &&& s.hist.configs == Map::<nat, Seq<Id>>::empty().insert(0, Seq::empty())
-    &&& s.hist.written == Map::<nat, nat>::empty().insert(0, 0)
 }
 
-pub open spec fn clock_ok(p: Params, now: nat, clock: nat) -> bool {
-    clock + p.skew >= now && clock <= now + p.skew
-}
-
-pub open spec fn advance(p: Params, s: Cluster, d: nat) -> Option<Cluster> {
-    if forall |i: Id| #[trigger] s.nodes.contains_key(i) && s.nodes[i].alive ==> clock_ok(p, s.now + d, s.nodes[i].clock) {
-        Some(Cluster { now: s.now + d, ..s })
-    } else {
-        None
-    }
-}
-
-pub open spec fn tick(p: Params, s: Cluster, i: Id, d: nat) -> Option<Cluster> {
-    if s.nodes.contains_key(i) && s.nodes[i].alive && clock_ok(p, s.now, s.nodes[i].clock + d) {
+/// A node's clock advances, by any amount.
+pub open spec fn tick(s: Cluster, i: Id, d: nat) -> Option<Cluster> {
+    if s.nodes.contains_key(i) && s.nodes[i].alive {
         let n = s.nodes[i];
         Some(Cluster { nodes: s.nodes.insert(i, Node { clock: n.clock + d, ..n }), ..s })
     } else {
@@ -323,14 +245,17 @@ pub open spec fn tick(p: Params, s: Cluster, i: Id, d: nat) -> Option<Cluster> {
     }
 }
 
-/// A fresh node: the core as `NodeCore::new` makes it.
-pub open spec fn fresh_core(p: Params, i: Id) -> ANode {
-    ANode { id: i, ttl: p.ttl, grace: p.grace, read_any: false, epoch: 0, members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(), armed: Map::empty() }
+/// A fresh node: the core as `NodeCore::new` makes it. Its membership
+/// dials, `ttl` and `grace`, are the server's routing and nothing here
+/// reads them.
+pub open spec fn fresh_core(i: Id) -> ANode {
+    ANode { id: i, ttl: 0, grace: 0, read_any: false, epoch: 0, members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(), armed: Map::empty() }
 }
 
-pub open spec fn join(p: Params, s: Cluster, i: Id, clock: nat) -> Option<Cluster> {
-    if !s.nodes.contains_key(i) && clock_ok(p, s.now, clock) {
-        let n = Node { core: fresh_core(p, i), bodies: Map::empty(), alive: true, clock, last_read_real: 0, held_real: 0, txns: Map::empty() };
+/// A node starts, with any clock.
+pub open spec fn join(s: Cluster, i: Id, clock: nat) -> Option<Cluster> {
+    if !s.nodes.contains_key(i) {
+        let n = Node { core: fresh_core(i), bodies: Map::empty(), alive: true, clock, txns: Map::empty() };
         Some(Cluster { nodes: s.nodes.insert(i, n), ..s })
     } else {
         None
@@ -346,36 +271,6 @@ pub open spec fn crash(s: Cluster, i: Id) -> Option<Cluster> {
     }
 }
 
-/// The node reads the configuration and takes it on: `NodeCore::read_config`.
-pub open spec fn read_config(s: Cluster, i: Id) -> Option<Cluster> {
-    if s.nodes.contains_key(i) && s.nodes[i].alive {
-        let n = s.nodes[i];
-        let same = n.core.read_any && n.core.epoch == s.store.config.epoch;
-        let n2 = Node {
-            core: spec_read_config(n.core, n.clock, s.store.config.epoch, s.store.config.members),
-            last_read_real: s.now,
-            held_real: if same { n.held_real } else { s.now },
-            ..n
-        };
-        Some(Cluster { nodes: s.nodes.insert(i, n2), ..s })
-    } else {
-        None
-    }
-}
-
-pub open spec fn propose(s: Cluster, i: Id, members: Seq<Id>) -> Option<Cluster> {
-    if s.nodes.contains_key(i) && s.nodes[i].alive {
-        let e = s.store.config.epoch + 1;
-        Some(Cluster {
-            store: Store { config: Config { epoch: e, members }, ..s.store },
-            hist: History { written: s.hist.written.insert(e, s.now), configs: s.hist.configs.insert(e, members), ..s.hist },
-            ..s
-        })
-    } else {
-        None
-    }
-}
-
 pub open spec fn forget(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     if s.nodes.contains_key(i) && s.nodes[i].alive {
         let n = s.nodes[i];
@@ -385,14 +280,15 @@ pub open spec fn forget(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     }
 }
 
-/// The acting owner loads `o` — from its cache if it trusts it, from the
-/// bucket otherwise — and decides a step at `t`, the later of its clock
-/// and the document's stamp: `NodeCore::begin`.
+/// A node loads `o` — the bucket's current document; a cached body is
+/// used only once a conditional read has confirmed its version — and
+/// decides a step at `t`, the later of its clock and the document's
+/// stamp: `NodeCore::begin`. Any live node may: which one does is routing.
 pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Option<AKey>, did: bool, deadline: Option<nat>) -> Option<Cluster> {
     let n = s.nodes[i];
-    let loaded = if trusts(n, o) { n.bodies[o] } else { s.store.doc(o) };
+    let loaded = s.store.doc(o);
     let changed = did || new != loaded;
-    if s.nodes.contains_key(i) && acts(n, o) && !n.txns.contains_key(o)
+    if s.nodes.contains_key(i) && n.alive && !n.txns.contains_key(o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
         && (match fired {
             Some(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did),
@@ -400,9 +296,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
         })
         && next_is(new, deadline)
     {
-        let (core, bodies) = if trusts(n, o) {
-            (n.core, n.bodies)
-        } else if s.store.docs.contains_key(o) {
+        let (core, bodies) = if s.store.docs.contains_key(o) {
             (spec_filled(n.core, o, s.store.etags[o], n.clock, false), n.bodies.insert(o, s.store.docs[o]))
         } else {
             (spec_forget(n.core, o), n.bodies)
@@ -414,10 +308,6 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
             new,
             t,
             phase: Phase::Decided,
-            begun: s.now,
-            epoch: n.core.epoch,
-            held_real: n.held_real,
-            lr: n.last_read_real,
             seq0: s.hist.counter,
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
@@ -452,11 +342,10 @@ pub open spec fn arm(s: Cluster, i: Id, o: Origin, k: AKey) -> Option<Cluster> {
 }
 
 /// What the history records of a write: version `e` holding `d`, by `i`,
-/// now, next in the order of events; and which key covers the document.
+/// next in the order of events; and which key covers the document.
 pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Origin, AKey>) -> History {
     History {
         versions: s.hist.versions.insert(e, d),
-        born: s.hist.born.insert(e, s.now),
         order: s.hist.order.insert(Event::Born(e), s.hist.counter),
         writer: s.hist.writer.insert(e, i),
         counter: s.hist.counter + 1,
@@ -660,24 +549,17 @@ pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, lan
 // and then its state. The temporal rules take them as they are — the
 // induction now, fairness and liveness later.
 
-pub open spec fn advance_action(p: Params) -> Action<Cluster, nat, ()> {
+pub open spec fn tick_action() -> Action<Cluster, (Id, nat), ()> {
     Action {
-        precondition: |input: nat, s: Cluster| { let d = input; advance(p, s, d) is Some },
-        transition: |input: nat, s: Cluster| { let d = input; (advance(p, s, d).unwrap(), ()) },
+        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; tick(s, i, d) is Some },
+        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; (tick(s, i, d).unwrap(), ()) },
     }
 }
 
-pub open spec fn tick_action(p: Params) -> Action<Cluster, (Id, nat), ()> {
+pub open spec fn join_action() -> Action<Cluster, (Id, nat), ()> {
     Action {
-        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; tick(p, s, i, d) is Some },
-        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let d = input.1; (tick(p, s, i, d).unwrap(), ()) },
-    }
-}
-
-pub open spec fn join_action(p: Params) -> Action<Cluster, (Id, nat), ()> {
-    Action {
-        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; join(p, s, i, c) is Some },
-        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; (join(p, s, i, c).unwrap(), ()) },
+        precondition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; join(s, i, c) is Some },
+        transition: |input: (Id, nat), s: Cluster| { let i = input.0; let c = input.1; (join(s, i, c).unwrap(), ()) },
     }
 }
 
@@ -685,20 +567,6 @@ pub open spec fn crash_action() -> Action<Cluster, Id, ()> {
     Action {
         precondition: |input: Id, s: Cluster| { let i = input; crash(s, i) is Some },
         transition: |input: Id, s: Cluster| { let i = input; (crash(s, i).unwrap(), ()) },
-    }
-}
-
-pub open spec fn read_config_action() -> Action<Cluster, Id, ()> {
-    Action {
-        precondition: |input: Id, s: Cluster| { let i = input; read_config(s, i) is Some },
-        transition: |input: Id, s: Cluster| { let i = input; (read_config(s, i).unwrap(), ()) },
-    }
-}
-
-pub open spec fn propose_action() -> Action<Cluster, (Id, Seq<Id>), ()> {
-    Action {
-        precondition: |input: (Id, Seq<Id>), s: Cluster| { let i = input.0; let m = input.1; propose(s, i, m) is Some },
-        transition: |input: (Id, Seq<Id>), s: Cluster| { let i = input.0; let m = input.1; (propose(s, i, m).unwrap(), ()) },
     }
 }
 
@@ -795,14 +663,11 @@ pub open spec fn collect_unknown_action() -> Action<Cluster, (Id, Origin, Seq<ch
 
 /// The next-state relation, one step at a time: the step's action, forward
 /// on the step's input.
-pub open spec fn next_step(p: Params, s: Cluster, s2: Cluster, st: Step) -> bool {
+pub open spec fn next_step(s: Cluster, s2: Cluster, st: Step) -> bool {
     match st {
-        Step::Advance(d) => advance_action(p).forward(d)(s, s2),
-        Step::Tick(i, d) => tick_action(p).forward((i, d))(s, s2),
-        Step::Join(i, c) => join_action(p).forward((i, c))(s, s2),
+        Step::Tick(i, d) => tick_action().forward((i, d))(s, s2),
+        Step::Join(i, c) => join_action().forward((i, c))(s, s2),
         Step::Crash(i) => crash_action().forward(i)(s, s2),
-        Step::ReadConfig(i) => read_config_action().forward(i)(s, s2),
-        Step::Propose(i, m) => propose_action().forward((i, m))(s, s2),
         Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
         Step::Begin(i, o, t, new, fired, did, deadline) => begin_action().forward((i, o, t, new, fired, did, deadline))(s, s2),
         Step::Arm(i, o, k) => arm_action().forward((i, o, k))(s, s2),
@@ -819,8 +684,8 @@ pub open spec fn next_step(p: Params, s: Cluster, s2: Cluster, st: Step) -> bool
     }
 }
 
-pub open spec fn next(p: Params) -> spec_fn(Cluster, Cluster) -> bool {
-    |s: Cluster, s2: Cluster| exists |st: Step| #[trigger] next_step(p, s, s2, st)
+pub open spec fn next() -> spec_fn(Cluster, Cluster) -> bool {
+    |s: Cluster, s2: Cluster| exists |st: Step| #[trigger] next_step(s, s2, st)
 }
 
 } // verus!
