@@ -813,7 +813,7 @@ pub proof fn lemma_heartbeat_legal(now: nat, a: AState, b: AState, ids: spec_fn(
 
 /// `task.suspend`'s 300: the task keeps running with its ledger cleared, and
 /// every awaited promise was read.
-pub proof fn lemma_suspend_300_legal(now: nat, a: AState, b: AState, id: Seq<char>, acts: Seq<PromiseRegisterCallbackReq>)
+pub proof fn lemma_suspend_300_legal(now: nat, a: AState, b: AState, id: Seq<char>, acts: Seq<APromiseRegisterCallbackReq>)
     requires
         inv(now, a),
         a.objects.contains_key(id),
@@ -934,7 +934,7 @@ proof fn lemma_suspended_task_obj(now: nat, a: AState, b: AState, id: Seq<char>,
 
 /// `task.suspend`'s 200: the task parked, registered on every awaited promise.
 #[verifier::rlimit(400)]
-pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, acts: Seq<PromiseRegisterCallbackReq>)
+pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, acts: Seq<APromiseRegisterCallbackReq>)
     requires
         suspend_base(now, a, id),
         acts.len() > 0,
@@ -970,7 +970,7 @@ pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
     }
     assert(pointer_frame(a, b));
     // the rung: the first awaited promise holds `id`
-    let w0 = acts[0].awaited@;
+    let w0 = acts[0].awaited;
     assert(awaited_touched(acts, acts.len() as int, w0));
     assert(awaited_of(acts, w0));
     lemma_add_callback_contains(a.objects[w0], id);
@@ -1157,6 +1157,779 @@ pub proof fn lemma_fence_legal(now: nat, a: AState, a1: AState, c: AState, x: Se
         lemma_trans_sched_unchanged(now, a, c, id);
     }
     lemma_legal_pointwise(now, a, c);
+}
+
+// ---------------------------------------------------------------------------
+// The catalogue, of each handler's specification
+// ---------------------------------------------------------------------------
+//
+// What every `spec_*` leaves satisfies `inv`, and the pair satisfies
+// `legal`: the catalogue, proved of the specification; the executable
+// handler computes the specification, so it inherits it.
+
+pub open spec fn spec_post(now: nat, a: AState, b: AState) -> bool {
+    inv(now, b) && legal(now, a, b)
+}
+
+pub proof fn lemma_spec_read(now: nat, a: AState, id: Seq<char>)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_read(a, id, now)),
+{
+    if a.objects.contains_key(id) {
+        lemma_project_legal(now, a, spec_read(a, id, now), id);
+    } else {
+        crate::properties_proof::lemma_noop(now, a);
+    }
+}
+
+pub proof fn lemma_spec_promise_get(now: nat, a: AState, req: APromiseGetReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_promise_get(a, req, now).0),
+{
+    lemma_spec_read(now, a, req.id);
+    crate::properties_proof::lemma_noop(now, a);
+}
+
+pub proof fn lemma_spec_promise_create(now: nat, a: AState, req: APromiseCreateReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_promise_create(a, req, now).0),
+{
+    if crate::tags::timer_targeted(req.tags) || req.timeout_at > MAX_TIME {
+        crate::properties_proof::lemma_noop(now, a);
+    } else if a.objects.contains_key(req.id) {
+        lemma_spec_read(now, a, req.id);
+    } else {
+        lemma_create_legal(now, a, spec_promise_create(a, req, now).0, req);
+    }
+}
+
+pub proof fn lemma_spec_promise_settle(now: nat, a: AState, req: APromiseSettleReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_promise_settle(a, req, now).0),
+{
+    if !req.state.spec_settable() || !a.objects.contains_key(req.id) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read(a, req.id, now);
+        lemma_spec_read(now, a, req.id);
+        if b.objects[req.id].state == PromiseState::Pending {
+            let c = spec_promise_settle(a, req, now).0;
+            assert(c.objects =~= a.objects.insert(req.id, a.objects[req.id].project(now).settle(req.state, req.value, now)));
+            lemma_settle_legal(now, a, c, req.id, req.state, req.value);
+        }
+    }
+}
+
+pub proof fn lemma_spec_promise_register_callback(now: nat, a: AState, req: APromiseRegisterCallbackReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_promise_register_callback(a, req, now).0),
+{
+    let x = req.awaited;
+    let y = req.awaiter;
+    if x == y || !crate::types::same_origin_spec(x, y) || !a.objects.contains_key(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let a1 = spec_read(a, x, now);
+        if !a1.objects.contains_key(y) {
+            lemma_spec_read(now, a, x);
+        } else {
+            let a2 = spec_read(a1, y, now);
+            assert(a2.objects[x] == a.objects[x].project(now));
+            assert(a2.objects[y] == a.objects[y].project(now));
+            lemma_project_many(now, a, a2, |z: Seq<char>| z == x || z == y);
+            if a2.objects[y].otype() != OType::Runnable || !a2.objects[x].otype().awaitable() {
+            } else if a2.objects[x].state == PromiseState::Pending && a2.objects[y].state == PromiseState::Pending {
+                assert(a2.objects[x] == a.objects[x]);
+                assert(a2.objects[y] == a.objects[y]);
+                assert(a2.objects =~= a.objects);
+                let a3 = spec_promise_register_callback(a, req, now).0;
+                assert(a3.objects =~= a.objects.insert(x, a.objects[x].add_callback(y)));
+                lemma_add_callback_legal(now, a, a3, x, y);
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_promise_register_listener(now: nat, a: AState, req: APromiseRegisterListenerReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_promise_register_listener(a, req, now).0),
+{
+    let x = req.awaited;
+    if !a.objects.contains_key(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read(a, x, now);
+        lemma_spec_read(now, a, x);
+        if !b.objects[x].otype().awaitable() {
+        } else if b.objects[x].state == PromiseState::Pending {
+            assert(b.objects[x] == a.objects[x]);
+            let c = spec_promise_register_listener(a, req, now).0;
+            assert(c.objects =~= a.objects.insert(x, a.objects[x].add_listener(req.address)));
+            lemma_add_listener_legal(now, a, c, x, req.address);
+        }
+    }
+}
+
+pub proof fn lemma_spec_schedule_get(now: nat, a: AState, req: AScheduleGetReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_schedule_get(a, req, now).0),
+{
+    crate::properties_proof::lemma_noop(now, a);
+}
+
+pub proof fn lemma_spec_schedule_create(now: nat, a: AState, req: AScheduleCreateReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_schedule_create(a, req, now).0),
+{
+    if crate::tags::timer_targeted(req.promise_tags) || req.promise_timeout > MAX_TIME || req.next_run_at < now
+        || a.schedules.contains_key(req.id) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        lemma_schedule_create_legal(now, a, spec_schedule_create(a, req, now).0, req.id);
+    }
+}
+
+pub proof fn lemma_spec_schedule_delete(now: nat, a: AState, req: AScheduleDeleteReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_schedule_delete(a, req, now).0),
+{
+    if a.schedules.contains_key(req.id) {
+        lemma_schedule_delete_legal(now, a, spec_schedule_delete(a, req, now).0, req.id);
+    } else {
+        crate::properties_proof::lemma_noop(now, a);
+    }
+}
+
+pub proof fn lemma_spec_read_task(now: nat, a: AState, id: Seq<char>)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_read_task(a, id, now)),
+{
+    if a.has_task(id) {
+        lemma_spec_read(now, a, id);
+    } else {
+        crate::properties_proof::lemma_noop(now, a);
+    }
+}
+
+pub proof fn lemma_spec_task_get(now: nat, a: AState, req: ATaskGetReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_get(a, req, now).0),
+{
+    lemma_spec_read_task(now, a, req.id);
+    crate::properties_proof::lemma_noop(now, a);
+}
+
+pub proof fn lemma_spec_task_create(now: nat, a: AState, req: ATaskCreateReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_create(a, req, now).0),
+{
+    let act = req.action;
+    if crate::tags::otype(act.tags) != OType::Runnable || crate::tags::timer_targeted(act.tags)
+        || act.timeout_at > MAX_TIME || req.ttl > MAX_TIME {
+        crate::properties_proof::lemma_noop(now, a);
+    } else if !a.objects.contains_key(act.id) {
+        let c = spec_task_create(a, req, now).0;
+        if act.timeout_at > now {
+            lemma_create_acquired_legal(now, a, c, act, req.pid, req.ttl as nat);
+        } else {
+            lemma_create_legal(now, a, c, act);
+        }
+    } else {
+        let x = act.id;
+        let b = spec_read(a, x, now);
+        lemma_spec_read(now, a, x);
+        let p = b.objects[x];
+        if p.otype() != OType::Runnable {
+        } else {
+            match p.task {
+                None => {}
+                Some(t) => {
+                    if t.state == TaskState::Fulfilled {
+                    } else if t.state != TaskState::Pending || t.version >= MAX_TIME {
+                    } else {
+                        lemma_projected_task_identity(now, a, x);
+                        let c = spec_task_create(a, req, now).0;
+                        assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().acquire(req.pid, req.ttl as nat, now))));
+                        lemma_acquire_legal(now, a, c, x, req.pid, req.ttl as nat);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_acquire(now: nat, a: AState, req: ATaskAcquireReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_acquire(a, req, now).0),
+{
+    let x = req.id;
+    if req.ttl > MAX_TIME || !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != req.version || t.version >= MAX_TIME {
+                } else {
+                    lemma_projected_task_identity(now, a, x);
+                    let c = spec_task_acquire(a, req, now).0;
+                    assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().acquire(req.pid, req.ttl as nat, now))));
+                    lemma_acquire_legal(now, a, c, x, req.pid, req.ttl as nat);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_fulfill(now: nat, a: AState, req: ATaskFulfillReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_fulfill(a, req, now).0),
+{
+    let x = req.id;
+    if !req.action.state.spec_settable() || !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != req.version {
+                } else {
+                    let c = spec_task_fulfill(a, req, now).0;
+                    assert(c.objects =~= a.objects.insert(x, a.objects[x].project(now).settle(req.action.state, req.action.value, now)));
+                    lemma_settle_legal(now, a, c, x, req.action.state, req.action.value);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_release(now: nat, a: AState, req: ATaskReleaseReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_release(a, req, now).0),
+{
+    let x = req.id;
+    if !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != req.version {
+                } else {
+                    lemma_projected_task_identity(now, a, x);
+                    let c = spec_task_release(a, req, now).0;
+                    assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now))));
+                    lemma_release_legal(now, a, c, x);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_halt(now: nat, a: AState, req: ATaskHaltReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_halt(a, req, now).0),
+{
+    let x = req.id;
+    if !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state == TaskState::Fulfilled || t.state == TaskState::Halted {
+                } else {
+                    lemma_projected_task_identity(now, a, x);
+                    let c = spec_task_halt(a, req, now).0;
+                    assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().halt())));
+                    lemma_halt_legal(now, a, c, x);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_continue(now: nat, a: AState, req: ATaskContinueReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_continue(a, req, now).0),
+{
+    let x = req.id;
+    if !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Halted || p.state != PromiseState::Pending {
+                } else {
+                    lemma_projected_task_identity(now, a, x);
+                    let c = spec_task_continue(a, req, now).0;
+                    assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().continue_(now))));
+                    lemma_continue_legal(now, a, c, x);
+                }
+            }
+        }
+    }
+}
+
+/// `spec_promise_create` and `spec_promise_settle` touch their id alone.
+pub proof fn lemma_spec_promise_create_touches(now: nat, a: AState, req: APromiseCreateReq)
+    ensures touches_only(a, spec_promise_create(a, req, now).0, |z: Seq<char>| z == req.id),
+{
+}
+
+pub proof fn lemma_spec_promise_settle_touches(now: nat, a: AState, req: APromiseSettleReq)
+    ensures touches_only(a, spec_promise_settle(a, req, now).0, |z: Seq<char>| z == req.id),
+{
+}
+
+pub proof fn lemma_spec_task_fence(now: nat, a: AState, req: ATaskFenceReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_fence(a, req, now).0),
+{
+    let x = req.id;
+    let target = fence_target(req.action);
+    if target == x || !crate::types::same_origin_spec(target, x) || !a.has_task(x) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, x, now);
+        lemma_spec_read_task(now, a, x);
+        let p = b.objects[x];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != req.version {
+                } else {
+                    let c = spec_task_fence(a, req, now).0;
+                    match req.action {
+                        ATaskFenceAction::Create(cr) => {
+                            lemma_spec_promise_create(now, b, cr);
+                            lemma_spec_promise_create_touches(now, b, cr);
+                        }
+                        ATaskFenceAction::Settle(cr) => {
+                            lemma_spec_promise_settle(now, b, cr);
+                            lemma_spec_promise_settle_touches(now, b, cr);
+                        }
+                    }
+                    lemma_fence_legal(now, a, b, c, x, target);
+                }
+            }
+        }
+    }
+}
+
+// --- task.heartbeat ---
+
+pub proof fn lemma_spec_heartbeat_one(now: nat, s0: AState, pid: Seq<char>, r: ATaskRef)
+    requires inv(now, s0),
+    ensures ({
+        let b = spec_heartbeat_one(s0, pid, r, now);
+        &&& inv(now, b)
+        &&& legal(now, s0, b)
+        &&& b.schedules == s0.schedules
+        &&& b.outbox == s0.outbox
+        &&& heartbeat_shape(now, s0, b, r.id)
+        &&& forall|y: Seq<char>| y != r.id ==> #[trigger] unchanged_at(s0, b, y)
+    }),
+{
+    let x = r.id;
+    let b = spec_heartbeat_one(s0, pid, r, now);
+    if !s0.has_task(x) {
+        crate::properties_proof::lemma_noop(now, s0);
+    } else {
+        let b1 = spec_read_task(s0, x, now);
+        lemma_spec_read_task(now, s0, x);
+        let p = b1.objects[x];
+        match p.task {
+            Some(t) => {
+                if t.state == TaskState::Acquired && t.version == r.version && t.pid == Some(pid) && p.state == PromiseState::Pending {
+                    lemma_projected_task_identity(now, s0, x);
+                    assert(b.objects =~= s0.objects.insert(x, s0.objects[x].with_task(s0.objects[x].task.unwrap().heartbeat(now))));
+                    assert forall|y: Seq<char>| y != x implies #[trigger] unchanged_at(s0, b, y) by {}
+                    lemma_heartbeat_legal(now, s0, b, |y: Seq<char>| y == x);
+                }
+            }
+            None => {}
+        }
+    }
+    assert forall|y: Seq<char>| y != x implies #[trigger] unchanged_at(s0, b, y) by {}
+}
+
+pub proof fn lemma_spec_heartbeat_fold_inv(now: nat, a: AState, pid: Seq<char>, refs: Seq<ATaskRef>, k: int)
+    requires inv(now, a), 0 <= k <= refs.len(),
+    ensures ({
+        let b = spec_heartbeat_fold(a, pid, refs, k, now);
+        &&& inv(now, b)
+        &&& b.schedules == a.schedules
+        &&& b.outbox == a.outbox
+        &&& forall|x: Seq<char>| #[trigger] ref_touched(refs, k, x) ==> heartbeat_shape(now, a, b, x)
+        &&& forall|x: Seq<char>| !ref_touched(refs, k, x) ==> #[trigger] unchanged_at(a, b, x)
+    }),
+    decreases k,
+{
+    if k == 0 {
+        assert forall|x: Seq<char>| !ref_touched(refs, 0, x) implies #[trigger] unchanged_at(a, a, x) by {}
+    } else {
+        lemma_spec_heartbeat_fold_inv(now, a, pid, refs, k - 1);
+        let s0 = spec_heartbeat_fold(a, pid, refs, k - 1, now);
+        let r = refs[k - 1];
+        lemma_spec_heartbeat_one(now, s0, pid, r);
+        let b = spec_heartbeat_fold(a, pid, refs, k, now);
+        assert forall|y: Seq<char>| #[trigger] ref_touched(refs, k, y) implies heartbeat_shape(now, a, b, y) by {
+            if y == r.id {
+                if ref_touched(refs, k - 1, y) {
+                    assert(heartbeat_shape(now, a, s0, y));
+                } else {
+                    assert(unchanged_at(a, s0, y));
+                }
+                lemma_heartbeat_compose(now, a, s0, b, y);
+            } else {
+                let j = choose|j: int| 0 <= j < k && #[trigger] refs[j].id == y;
+                assert(j < k - 1);
+                assert(ref_touched(refs, k - 1, y));
+                assert(heartbeat_shape(now, a, s0, y));
+                assert(unchanged_at(s0, b, y));
+                lemma_heartbeat_compose(now, a, s0, b, y);
+            }
+        }
+        assert forall|y: Seq<char>| !ref_touched(refs, k, y) implies #[trigger] unchanged_at(a, b, y) by {
+            assert(!ref_touched(refs, k - 1, y));
+            assert(refs[k - 1].id != y);
+            assert(unchanged_at(a, s0, y));
+            assert(unchanged_at(s0, b, y));
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_heartbeat(now: nat, a: AState, req: ATaskHeartbeatReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_heartbeat(a, req, now).0),
+{
+    let refs = req.tasks;
+    let n = refs.len() as int;
+    lemma_spec_heartbeat_fold_inv(now, a, req.pid, refs, n);
+    let b = spec_heartbeat_fold(a, req.pid, refs, n, now);
+    assert forall|y: Seq<char>| #[trigger] ref_of(refs, y) implies heartbeat_shape(now, a, b, y) by {}
+    assert forall|y: Seq<char>| !ref_of(refs, y) implies #[trigger] unchanged_at(a, b, y) by {}
+    lemma_heartbeat_legal(now, a, b, |y: Seq<char>| ref_of(refs, y));
+}
+
+// --- task.suspend ---
+
+/// No action among the first `k` fails the check.
+pub proof fn lemma_first_failing_none(a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int)
+    requires 0 <= k <= acts.len(), first_failing(a, acts, k) is None,
+    ensures forall|j: int| 0 <= j < k ==> !awaited_fails(a, #[trigger] acts[j]),
+    decreases k,
+{
+    if k > 0 {
+        assert(first_failing(a, acts, k - 1) is None);
+        lemma_first_failing_none(a, acts, k - 1);
+    }
+}
+
+/// The first failing action: it fails, and none before it does.
+pub proof fn lemma_first_failing_some(a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int)
+    requires 0 <= k <= acts.len(), first_failing(a, acts, k) is Some,
+    ensures ({
+        let j = first_failing(a, acts, k).unwrap();
+        0 <= j < k && first_failing(a, acts, j) is None && awaited_fails(a, acts[j])
+    }),
+    decreases k,
+{
+    if first_failing(a, acts, k - 1) is Some {
+        lemma_first_failing_some(a, acts, k - 1);
+    }
+}
+
+/// None of the first `k` fails and `k` does: `k` is the first failing of any
+/// longer prefix.
+pub proof fn lemma_first_failing_at(a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int, n: int)
+    requires 0 <= k < n <= acts.len(), first_failing(a, acts, k) is None, awaited_fails(a, acts[k]),
+    ensures first_failing(a, acts, n) == Some(k),
+    decreases n,
+{
+    if n == k + 1 {
+    } else {
+        lemma_first_failing_at(a, acts, k, n - 1);
+    }
+}
+
+/// Reading the first `k` awaited promises: each that exists is projected,
+/// nothing else moves; a legal step.
+pub proof fn lemma_spec_awaited_read(now: nat, a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int)
+    requires inv(now, a), 0 <= k <= acts.len(),
+    ensures ({
+        let r = spec_awaited_read(a, acts, k, now);
+        &&& inv(now, r)
+        &&& legal(now, a, r)
+        &&& r.schedules == a.schedules
+        &&& r.outbox == a.outbox
+        &&& forall|x: Seq<char>| #[trigger] awaited_touched(acts, k, x) && a.objects.contains_key(x) ==>
+            r.objects.contains_key(x) && r.objects[x] == a.objects[x].project(now)
+        &&& forall|x: Seq<char>| !awaited_touched(acts, k, x) ==> #[trigger] unchanged_at(a, r, x)
+        &&& forall|x: Seq<char>| !a.objects.contains_key(x) ==> !r.objects.contains_key(x)
+    }),
+    decreases k,
+{
+    let r = spec_awaited_read(a, acts, k, now);
+    if k == 0 {
+        crate::properties_proof::lemma_noop(now, a);
+        assert forall|x: Seq<char>| !awaited_touched(acts, 0, x) implies #[trigger] unchanged_at(a, a, x) by {}
+    } else {
+        lemma_spec_awaited_read(now, a, acts, k - 1);
+        let s0 = spec_awaited_read(a, acts, k - 1, now);
+        let w = acts[k - 1].awaited;
+        assert forall|x: Seq<char>| #[trigger] awaited_touched(acts, k, x) && a.objects.contains_key(x) implies
+            r.objects.contains_key(x) && r.objects[x] == a.objects[x].project(now) by {
+            if x == w {
+                if awaited_touched(acts, k - 1, w) {
+                    assert(s0.objects.contains_key(w) && s0.objects[w] == a.objects[w].project(now));
+                    lemma_project_idem(a.objects[w], now);
+                } else {
+                    assert(unchanged_at(a, s0, w));
+                    assert(s0.objects.contains_key(w) && s0.objects[w] == a.objects[w]);
+                }
+                assert(r.objects[w] == s0.objects[w].project(now));
+            } else {
+                let jj = choose|jj: int| 0 <= jj < k && #[trigger] acts[jj].awaited == x;
+                assert(jj < k - 1);
+                assert(awaited_touched(acts, k - 1, x));
+            }
+        }
+        assert forall|x: Seq<char>| !awaited_touched(acts, k, x) implies #[trigger] unchanged_at(a, r, x) by {
+            assert(!awaited_touched(acts, k - 1, x));
+            assert(acts[k - 1].awaited != x);
+            assert(unchanged_at(a, s0, x));
+        }
+        let ids = |x: Seq<char>| awaited_touched(acts, k, x) && a.objects.contains_key(x);
+        assert forall|x: Seq<char>| #[trigger] ids(x) implies
+            a.objects.contains_key(x) && r.objects.contains_key(x) && r.objects[x] == a.objects[x].project(now) by {
+            assert(awaited_touched(acts, k, x) && a.objects.contains_key(x));
+        }
+        assert forall|x: Seq<char>| !ids(x) implies
+            (a.objects.contains_key(x) <==> #[trigger] r.objects.contains_key(x))
+            && (a.objects.contains_key(x) ==> a.objects[x] == r.objects[x]) by {
+            if awaited_touched(acts, k, x) {
+                assert(!a.objects.contains_key(x));
+            } else {
+                assert(unchanged_at(a, r, x));
+            }
+        }
+        lemma_project_many(now, a, r, ids);
+    }
+}
+
+/// Registering `id` on the first `k` awaited promises, all pending and ahead
+/// of their deadlines: the invariant holds throughout, and nothing else moves.
+pub proof fn lemma_spec_awaited_register(now: nat, c: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int, id: Seq<char>)
+    requires
+        inv(now, c),
+        0 <= k <= acts.len(),
+        awaited_distinct(acts),
+        forall|j: int| 0 <= j < acts.len() ==> {
+            let x = #[trigger] acts[j].awaited;
+            &&& x != id
+            &&& crate::types::same_origin_spec(x, id)
+            &&& c.objects.contains_key(x)
+            &&& c.objects[x].otype().awaitable()
+            &&& c.objects[x].state == PromiseState::Pending
+            &&& c.objects[x].timeout_at > now
+        },
+        c.objects.contains_key(id),
+        c.objects[id].otype() == OType::Runnable,
+        c.objects[id].state == PromiseState::Pending,
+        c.objects[id].timeout_at > now,
+    ensures ({
+        let d = spec_awaited_register(c, acts, k, id);
+        &&& inv(now, d)
+        &&& d.schedules == c.schedules
+        &&& d.outbox == c.outbox
+        &&& forall|j: int| 0 <= j < k ==> d.objects.contains_key(#[trigger] acts[j].awaited)
+            && d.objects[acts[j].awaited] == c.objects[acts[j].awaited].add_callback(id)
+        &&& forall|x: Seq<char>| !awaited_touched(acts, k, x) ==> #[trigger] unchanged_at(c, d, x)
+    }),
+    decreases k,
+{
+    let d = spec_awaited_register(c, acts, k, id);
+    if k == 0 {
+        assert forall|x: Seq<char>| !awaited_touched(acts, 0, x) implies #[trigger] unchanged_at(c, d, x) by {}
+    } else {
+        lemma_spec_awaited_register(now, c, acts, k - 1, id);
+        let s0 = spec_awaited_register(c, acts, k - 1, id);
+        let w = acts[k - 1].awaited;
+        assert(!awaited_touched(acts, k - 1, w)) by {
+            if awaited_touched(acts, k - 1, w) {
+                let jj = choose|jj: int| 0 <= jj < k - 1 && #[trigger] acts[jj].awaited == w;
+                assert(acts[jj].awaited == acts[k - 1].awaited);
+                assert(jj == k - 1);
+            }
+        }
+        assert(unchanged_at(c, s0, w));
+        assert(s0.objects[w] == c.objects[w]);
+        assert(!awaited_touched(acts, k - 1, id));
+        assert(unchanged_at(c, s0, id));
+        assert(s0.objects[id] == c.objects[id]);
+        assert(s0.objects[w].project(now) == s0.objects[w]);
+        assert(s0.objects[id].project(now) == s0.objects[id]);
+        assert(d.objects == s0.objects.insert(w, s0.objects[w].add_callback(id)));
+        lemma_add_callback_legal(now, s0, d, w, id);
+        assert forall|j: int| 0 <= j < k implies d.objects.contains_key(#[trigger] acts[j].awaited)
+            && d.objects[acts[j].awaited] == c.objects[acts[j].awaited].add_callback(id) by {
+            if j < k - 1 {
+                assert(acts[j].awaited != w);
+            }
+        }
+        assert forall|x: Seq<char>| !awaited_touched(acts, k, x) implies #[trigger] unchanged_at(c, d, x) by {
+            assert(!awaited_touched(acts, k - 1, x));
+            assert(x != w);
+            assert(unchanged_at(c, s0, x));
+        }
+    }
+}
+
+pub proof fn lemma_spec_task_suspend(now: nat, a: AState, req: ATaskSuspendReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_suspend(a, req, now).0),
+{
+    let id = req.id;
+    let acts = req.actions;
+    let n = acts.len() as int;
+    if !suspend_doors(acts, id) || !a.has_task(id) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        let b = spec_read_task(a, id, now);
+        lemma_spec_read_task(now, a, id);
+        let p = b.objects[id];
+        match p.task {
+            None => {}
+            Some(t) => {
+                if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != req.version {
+                } else {
+                    lemma_projected_task_identity(now, a, id);
+                    assert(b.objects =~= a.objects);
+                    assert(b == a);
+                    assert(suspend_base(now, a, id));
+                    match first_failing(b, acts, n) {
+                        Some(j) => {
+                            lemma_first_failing_some(b, acts, n);
+                            let m = if b.objects.contains_key(acts[j].awaited) { j + 1 } else { j };
+                            lemma_spec_awaited_read(now, a, acts, m);
+                        }
+                        None => {
+                            lemma_first_failing_none(b, acts, n);
+                            let c = spec_awaited_read(a, acts, n, now);
+                            lemma_spec_awaited_read(now, a, acts, n);
+                            assert(!awaited_of(acts, id));
+                            assert(unchanged_at(a, c, id));
+                            if any_settled(b, acts, now) {
+                                let r = spec_task_suspend(a, req, now).0;
+                                assert(r.objects[id] == a.objects[id].with_task(a.objects[id].task.unwrap().clear_resumes()));
+                                assert forall|x: Seq<char>| #[trigger] awaited_of(acts, x) implies
+                                    a.objects.contains_key(x) && x != id
+                                    && r.objects.contains_key(x) && r.objects[x] == a.objects[x].project(now) by {
+                                    let jj = choose|jj: int| 0 <= jj < n && #[trigger] acts[jj].awaited == x;
+                                    assert(!awaited_fails(a, acts[jj]));
+                                }
+                                assert forall|x: Seq<char>| !awaited_of(acts, x) && x != id implies #[trigger] unchanged_at(a, r, x) by {
+                                    assert(unchanged_at(a, c, x));
+                                }
+                                lemma_suspend_300_legal(now, a, r, id, acts);
+                            } else {
+                                // every awaited promise is pending ahead of its deadline: the reads were the identity
+                                assert forall|j: int| 0 <= j < n implies {
+                                    let x = #[trigger] acts[j].awaited;
+                                    &&& x != id
+                                    &&& crate::types::same_origin_spec(x, id)
+                                    &&& a.objects.contains_key(x)
+                                    &&& a.objects[x].otype().awaitable()
+                                    &&& a.objects[x].state == PromiseState::Pending
+                                    &&& a.objects[x].timeout_at > now
+                                    &&& c.objects.contains_key(x) && c.objects[x] == a.objects[x]
+                                } by {
+                                    assert(!awaited_fails(a, acts[j]));
+                                    assert(a.objects[acts[j].awaited].project(now).state == PromiseState::Pending);
+                                    assert(awaited_touched(acts, n, acts[j].awaited));
+                                }
+                                assert forall|x: Seq<char>| #[trigger] c.objects.contains_key(x) == a.objects.contains_key(x)
+                                    && (a.objects.contains_key(x) ==> c.objects[x] == a.objects[x]) by {
+                                    if awaited_touched(acts, n, x) {
+                                        let jj = choose|jj: int| 0 <= jj < n && #[trigger] acts[jj].awaited == x;
+                                    } else {
+                                        assert(unchanged_at(a, c, x));
+                                    }
+                                }
+                                assert(c.objects =~= a.objects);
+                                assert(c == a);
+                                lemma_inv_pointwise(now, a);
+                                assert(inv_obj(now, a, id));
+                                assert(a.objects[id].otype() == OType::Runnable);
+                                let d = spec_awaited_register(c, acts, n, id);
+                                lemma_spec_awaited_register(now, c, acts, n, id);
+                                let r = spec_task_suspend(a, req, now).0;
+                                assert(unchanged_at(c, d, id));
+                                assert(r.objects[id] == a.objects[id].with_task(a.objects[id].task.unwrap().suspend()));
+                                assert forall|x: Seq<char>| #[trigger] awaited_of(acts, x) implies
+                                    a.objects.contains_key(x) && a.objects[x].otype().awaitable()
+                                    && a.objects[x].state == PromiseState::Pending && a.objects[x].timeout_at > now
+                                    && x != id && crate::types::same_origin_spec(x, id)
+                                    && r.objects.contains_key(x) && r.objects[x] == a.objects[x].add_callback(id) by {
+                                    let jj = choose|jj: int| 0 <= jj < n && #[trigger] acts[jj].awaited == x;
+                                }
+                                assert forall|x: Seq<char>| !awaited_of(acts, x) && x != id implies #[trigger] unchanged_at(a, r, x) by {
+                                    assert(unchanged_at(c, d, x));
+                                }
+                                lemma_suspend_legal(now, a, r, id, acts);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The catalogue of any request: `spec_handle` leaves a state the catalogue
+/// holds of, by a step it allows.
+pub proof fn lemma_spec_handle(now: nat, a: AState, req: ARequest)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_handle(a, req, now).0),
+{
+    match req {
+        ARequest::PromiseGet(q) => lemma_spec_promise_get(now, a, q),
+        ARequest::PromiseCreate(q) => lemma_spec_promise_create(now, a, q),
+        ARequest::PromiseSettle(q) => lemma_spec_promise_settle(now, a, q),
+        ARequest::PromiseRegisterCallback(q) => lemma_spec_promise_register_callback(now, a, q),
+        ARequest::PromiseRegisterListener(q) => lemma_spec_promise_register_listener(now, a, q),
+        ARequest::ScheduleGet(q) => lemma_spec_schedule_get(now, a, q),
+        ARequest::ScheduleCreate(q) => lemma_spec_schedule_create(now, a, q),
+        ARequest::ScheduleDelete(q) => lemma_spec_schedule_delete(now, a, q),
+        ARequest::TaskGet(q) => lemma_spec_task_get(now, a, q),
+        ARequest::TaskCreate(q) => lemma_spec_task_create(now, a, q),
+        ARequest::TaskAcquire(q) => lemma_spec_task_acquire(now, a, q),
+        ARequest::TaskFulfill(q) => lemma_spec_task_fulfill(now, a, q),
+        ARequest::TaskRelease(q) => lemma_spec_task_release(now, a, q),
+        ARequest::TaskHalt(q) => lemma_spec_task_halt(now, a, q),
+        ARequest::TaskContinue(q) => lemma_spec_task_continue(now, a, q),
+        ARequest::TaskFence(q) => lemma_spec_task_fence(now, a, q),
+        ARequest::TaskHeartbeat(q) => lemma_spec_task_heartbeat(now, a, q),
+        ARequest::TaskSuspend(q) => lemma_spec_task_suspend(now, a, q),
+    }
 }
 
 } // verus!

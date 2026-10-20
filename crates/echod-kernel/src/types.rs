@@ -346,7 +346,11 @@ impl Config {
 // Requests
 // ---------------------------------------------------------------------------
 
+#[make_spec_type]
 pub struct PromiseGetReq { pub id: String }
+
+#[cfg(verus_keep_ghost)]
+pub type APromiseGetReq = PromiseGetReqSpec;
 
 #[make_spec_type]
 pub struct PromiseCreateReq {
@@ -360,18 +364,35 @@ pub struct PromiseCreateReq {
 pub type APromiseCreateReq = PromiseCreateReqSpec;
 
 
+#[make_spec_type]
 pub struct PromiseSettleReq {
     pub id: String,
     pub state: PromiseState,
     pub value: Value,
 }
 
+#[cfg(verus_keep_ghost)]
+pub type APromiseSettleReq = PromiseSettleReqSpec;
+
+#[make_spec_type]
 pub struct PromiseRegisterCallbackReq { pub awaited: String, pub awaiter: String }
 
+#[cfg(verus_keep_ghost)]
+pub type APromiseRegisterCallbackReq = PromiseRegisterCallbackReqSpec;
+
+#[make_spec_type]
 pub struct PromiseRegisterListenerReq { pub awaited: String, pub address: String }
 
+#[cfg(verus_keep_ghost)]
+pub type APromiseRegisterListenerReq = PromiseRegisterListenerReqSpec;
+
+#[make_spec_type]
 pub struct ScheduleGetReq { pub id: String }
 
+#[cfg(verus_keep_ghost)]
+pub type AScheduleGetReq = ScheduleGetReqSpec;
+
+#[make_spec_type]
 pub struct ScheduleCreateReq {
     pub id: String,
     pub cron: String,
@@ -383,38 +404,112 @@ pub struct ScheduleCreateReq {
     pub next_run_at: u64,
 }
 
+#[cfg(verus_keep_ghost)]
+pub type AScheduleCreateReq = ScheduleCreateReqSpec;
+
+#[make_spec_type]
 pub struct ScheduleDeleteReq { pub id: String }
 
+#[cfg(verus_keep_ghost)]
+pub type AScheduleDeleteReq = ScheduleDeleteReqSpec;
+
+#[make_spec_type]
 pub struct TaskGetReq { pub id: String }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskGetReq = TaskGetReqSpec;
+
+#[make_spec_type]
 pub struct TaskCreateReq { pub pid: String, pub ttl: u64, pub action: PromiseCreateReq }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskCreateReq = TaskCreateReqSpec;
+
+#[make_spec_type]
 pub struct TaskAcquireReq { pub id: String, pub version: u64, pub pid: String, pub ttl: u64 }
+
+#[cfg(verus_keep_ghost)]
+pub type ATaskAcquireReq = TaskAcquireReqSpec;
 
 pub enum TaskFenceAction {
     Create(PromiseCreateReq),
     Settle(PromiseSettleReq),
 }
 
+#[cfg(verus_keep_ghost)]
+pub enum ATaskFenceAction {
+    Create(APromiseCreateReq),
+    Settle(APromiseSettleReq),
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceAction {
+    type V = ATaskFenceAction;
+    open spec fn deep_view(&self) -> ATaskFenceAction {
+        match self {
+            TaskFenceAction::Create(c) => ATaskFenceAction::Create(c.deep_view()),
+            TaskFenceAction::Settle(c) => ATaskFenceAction::Settle(c.deep_view()),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceAction {
+    type V = ATaskFenceAction;
+    open spec fn view(&self) -> ATaskFenceAction { self.deep_view() }
+}
+
+#[make_spec_type]
 pub struct TaskFenceReq { pub id: String, pub version: u64, pub action: TaskFenceAction }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskFenceReq = TaskFenceReqSpec;
+
+#[make_spec_type]
 pub struct TaskRef { pub id: String, pub version: u64 }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskRef = TaskRefSpec;
+
+#[make_spec_type]
 pub struct TaskHeartbeatReq { pub pid: String, pub tasks: Vec<TaskRef> }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskHeartbeatReq = TaskHeartbeatReqSpec;
+
+#[make_spec_type]
 pub struct TaskSuspendReq {
     pub id: String,
     pub version: u64,
     pub actions: Vec<PromiseRegisterCallbackReq>,
 }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskSuspendReq = TaskSuspendReqSpec;
+
+#[make_spec_type]
 pub struct TaskFulfillReq { pub id: String, pub version: u64, pub action: PromiseSettleReq }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskFulfillReq = TaskFulfillReqSpec;
+
+#[make_spec_type]
 pub struct TaskReleaseReq { pub id: String, pub version: u64 }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskReleaseReq = TaskReleaseReqSpec;
+
+#[make_spec_type]
 pub struct TaskHaltReq { pub id: String }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskHaltReq = TaskHaltReqSpec;
+
+#[make_spec_type]
 pub struct TaskContinueReq { pub id: String }
+
+#[cfg(verus_keep_ghost)]
+pub type ATaskContinueReq = TaskContinueReqSpec;
 
 // Internal steps.
 
@@ -438,30 +533,211 @@ pub struct ScheduleTimeoutReq {
     pub next_run_at: u64,
 }
 
+/// Any request: what the fleet model carries into a step, and what `handle`
+/// dispatches on.
+pub enum Request {
+    PromiseGet(PromiseGetReq),
+    PromiseCreate(PromiseCreateReq),
+    PromiseSettle(PromiseSettleReq),
+    PromiseRegisterCallback(PromiseRegisterCallbackReq),
+    PromiseRegisterListener(PromiseRegisterListenerReq),
+    ScheduleGet(ScheduleGetReq),
+    ScheduleCreate(ScheduleCreateReq),
+    ScheduleDelete(ScheduleDeleteReq),
+    TaskGet(TaskGetReq),
+    TaskCreate(TaskCreateReq),
+    TaskAcquire(TaskAcquireReq),
+    TaskFulfill(TaskFulfillReq),
+    TaskRelease(TaskReleaseReq),
+    TaskHalt(TaskHaltReq),
+    TaskContinue(TaskContinueReq),
+    TaskFence(TaskFenceReq),
+    TaskHeartbeat(TaskHeartbeatReq),
+    TaskSuspend(TaskSuspendReq),
+}
+
+#[cfg(verus_keep_ghost)]
+pub enum ARequest {
+    PromiseGet(APromiseGetReq),
+    PromiseCreate(APromiseCreateReq),
+    PromiseSettle(APromiseSettleReq),
+    PromiseRegisterCallback(APromiseRegisterCallbackReq),
+    PromiseRegisterListener(APromiseRegisterListenerReq),
+    ScheduleGet(AScheduleGetReq),
+    ScheduleCreate(AScheduleCreateReq),
+    ScheduleDelete(AScheduleDeleteReq),
+    TaskGet(ATaskGetReq),
+    TaskCreate(ATaskCreateReq),
+    TaskAcquire(ATaskAcquireReq),
+    TaskFulfill(ATaskFulfillReq),
+    TaskRelease(ATaskReleaseReq),
+    TaskHalt(ATaskHaltReq),
+    TaskContinue(ATaskContinueReq),
+    TaskFence(ATaskFenceReq),
+    TaskHeartbeat(ATaskHeartbeatReq),
+    TaskSuspend(ATaskSuspendReq),
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Request {
+    type V = ARequest;
+    open spec fn view(&self) -> ARequest {
+        match self {
+            Request::PromiseGet(r) => ARequest::PromiseGet(r@),
+            Request::PromiseCreate(r) => ARequest::PromiseCreate(r@),
+            Request::PromiseSettle(r) => ARequest::PromiseSettle(r@),
+            Request::PromiseRegisterCallback(r) => ARequest::PromiseRegisterCallback(r@),
+            Request::PromiseRegisterListener(r) => ARequest::PromiseRegisterListener(r@),
+            Request::ScheduleGet(r) => ARequest::ScheduleGet(r@),
+            Request::ScheduleCreate(r) => ARequest::ScheduleCreate(r@),
+            Request::ScheduleDelete(r) => ARequest::ScheduleDelete(r@),
+            Request::TaskGet(r) => ARequest::TaskGet(r@),
+            Request::TaskCreate(r) => ARequest::TaskCreate(r@),
+            Request::TaskAcquire(r) => ARequest::TaskAcquire(r@),
+            Request::TaskFulfill(r) => ARequest::TaskFulfill(r@),
+            Request::TaskRelease(r) => ARequest::TaskRelease(r@),
+            Request::TaskHalt(r) => ARequest::TaskHalt(r@),
+            Request::TaskContinue(r) => ARequest::TaskContinue(r@),
+            Request::TaskFence(r) => ARequest::TaskFence(r@),
+            Request::TaskHeartbeat(r) => ARequest::TaskHeartbeat(r@),
+            Request::TaskSuspend(r) => ARequest::TaskSuspend(r@),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
 
+#[make_spec_type]
 pub struct PromiseRes { pub status: u16, pub promise: Option<PromiseRecord> }
 
+#[cfg(verus_keep_ghost)]
+pub type APromiseRes = PromiseResSpec;
+
+#[make_spec_type]
 pub struct ScheduleRes { pub status: u16, pub schedule: Option<Schedule> }
 
+#[cfg(verus_keep_ghost)]
+pub type AScheduleRes = ScheduleResSpec;
+
+#[make_spec_type]
 pub struct StatusRes { pub status: u16 }
 
+#[cfg(verus_keep_ghost)]
+pub type AStatusRes = StatusResSpec;
+
+#[make_spec_type]
 pub struct TaskGetRes { pub status: u16, pub task: Option<TaskRecord> }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskGetRes = TaskGetResSpec;
+
+#[make_spec_type]
 pub struct TaskClaimRes {
     pub status: u16,
     pub task: Option<TaskRecord>,
     pub promise: Option<PromiseRecord>,
 }
 
+#[cfg(verus_keep_ghost)]
+pub type ATaskClaimRes = TaskClaimResSpec;
+
 pub enum TaskFenceInnerRes {
     Create(PromiseRes),
     Settle(PromiseRes),
 }
 
+#[cfg(verus_keep_ghost)]
+pub enum ATaskFenceInnerRes {
+    Create(APromiseRes),
+    Settle(APromiseRes),
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceInnerRes {
+    type V = ATaskFenceInnerRes;
+    open spec fn deep_view(&self) -> ATaskFenceInnerRes {
+        match self {
+            TaskFenceInnerRes::Create(r) => ATaskFenceInnerRes::Create(r.deep_view()),
+            TaskFenceInnerRes::Settle(r) => ATaskFenceInnerRes::Settle(r.deep_view()),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceInnerRes {
+    type V = ATaskFenceInnerRes;
+    open spec fn view(&self) -> ATaskFenceInnerRes { self.deep_view() }
+}
+
+#[make_spec_type]
 pub struct TaskFenceRes { pub status: u16, pub action: Option<TaskFenceInnerRes> }
+
+#[cfg(verus_keep_ghost)]
+pub type ATaskFenceRes = TaskFenceResSpec;
+
+/// Any response: what `handle` answers, and what the fleet model records.
+pub enum Response {
+    Promise(PromiseRes),
+    Schedule(ScheduleRes),
+    Status(StatusRes),
+    TaskGet(TaskGetRes),
+    TaskClaim(TaskClaimRes),
+    TaskFence(TaskFenceRes),
+}
+
+#[cfg(verus_keep_ghost)]
+pub enum AResponse {
+    Promise(APromiseRes),
+    Schedule(AScheduleRes),
+    Status(AStatusRes),
+    TaskGet(ATaskGetRes),
+    TaskClaim(ATaskClaimRes),
+    TaskFence(ATaskFenceRes),
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Response {
+    type V = AResponse;
+    open spec fn view(&self) -> AResponse {
+        match self {
+            Response::Promise(r) => AResponse::Promise(r@),
+            Response::Schedule(r) => AResponse::Schedule(r@),
+            Response::Status(r) => AResponse::Status(r@),
+            Response::TaskGet(r) => AResponse::TaskGet(r@),
+            Response::TaskClaim(r) => AResponse::TaskClaim(r@),
+            Response::TaskFence(r) => AResponse::TaskFence(r@),
+        }
+    }
+}
+
+impl Response {
+    pub open spec fn status(self) -> u16 {
+        match self {
+            Response::Promise(r) => r.status,
+            Response::Schedule(r) => r.status,
+            Response::Status(r) => r.status,
+            Response::TaskGet(r) => r.status,
+            Response::TaskClaim(r) => r.status,
+            Response::TaskFence(r) => r.status,
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl AResponse {
+    pub open spec fn status(self) -> u16 {
+        match self {
+            AResponse::Promise(r) => r.status,
+            AResponse::Schedule(r) => r.status,
+            AResponse::Status(r) => r.status,
+            AResponse::TaskGet(r) => r.status,
+            AResponse::TaskClaim(r) => r.status,
+            AResponse::TaskFence(r) => r.status,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Identifiers, and the three string primitives the kernel trusts
