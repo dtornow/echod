@@ -102,7 +102,7 @@ pub open spec fn inv_armed(s: Cluster, i: Id, o: Origin) -> bool {
     &&& s.store.etag(o) == Some(a.etag) ==> s.store.docs.contains_key(o) && s.hist.keeper.contains_key(o) && s.hist.keeper[o] == a.key && has_any(s.store.docs[o])
     // the key was not fired by a commit of another node that wrote an earlier version
     &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
-        && s.hist.born_seq[a.etag] >= s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+        && s.hist.order[Event::Born(a.etag)] >= s.hist.order[Event::Born(s.nodes[j].txns[o].cur.unwrap())]
         ==> Some(a.key) != s.nodes[j].txns[o].c.fired
 }
 
@@ -128,20 +128,20 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     &&& x.seq0 <= s.hist.counter
     &&& x.lseq <= x.seq0
     &&& !(x.phase is Written) ==> x.letag == x.cur
-    &&& x.letag is Some ==> s.hist.versions.contains_key(x.letag.unwrap()) && s.hist.born_seq[x.letag.unwrap()] == x.lseq
+    &&& x.letag is Some ==> s.hist.versions.contains_key(x.letag.unwrap()) && s.hist.order[Event::Born(x.letag.unwrap())] == x.lseq
     &&& x.letag is None ==> x.lseq == 0
-    &&& c.fired is Some ==> s.hist.armed_seq[c.fired.unwrap()] < x.seq0
-    &&& c.previous is Some ==> s.hist.armed_seq[c.previous.unwrap()] < x.seq0
+    &&& c.fired is Some ==> s.hist.order[Event::Armed(c.fired.unwrap())] < x.seq0
+    &&& c.previous is Some ==> s.hist.order[Event::Armed(c.previous.unwrap())] < x.seq0
         && n.core.armed.contains_key(o) && n.core.armed[o].key == c.previous.unwrap() && Some(n.core.armed[o].etag) == x.letag
-    &&& c.armed_now is Some ==> s.hist.armed_seq[c.armed_now.unwrap()] >= x.seq0
+    &&& c.armed_now is Some ==> s.hist.order[Event::Armed(c.armed_now.unwrap())] >= x.seq0
     &&& x.phase is Written ==> {
-        &&& s.hist.born_seq[x.cur.unwrap()] >= x.seq0
+        &&& s.hist.order[Event::Born(x.cur.unwrap())] >= x.seq0
         &&& s.hist.writer[x.cur.unwrap()] == i
-        &&& s.store.etags.contains_key(o) && s.hist.born_seq[s.store.etags[o]] >= s.hist.born_seq[x.cur.unwrap()]
+        &&& s.store.etags.contains_key(o) && s.hist.order[Event::Born(s.store.etags[o])] >= s.hist.order[Event::Born(x.cur.unwrap())]
         // no other node's version landed between its load and its write
         &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
-            && s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()] < s.hist.born_seq[x.cur.unwrap()]
-            ==> x.lseq >= s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+            && s.hist.order[Event::Born(s.nodes[j].txns[o].cur.unwrap())] < s.hist.order[Event::Born(x.cur.unwrap())]
+            ==> x.lseq >= s.hist.order[Event::Born(s.nodes[j].txns[o].cur.unwrap())]
     }
     &&& x.t <= MAX_TIME
     &&& echod_kernel::properties::inv(x.t, full(x.loaded))
@@ -202,11 +202,11 @@ pub open spec fn inv_store(s: Cluster) -> bool {
     }
     &&& forall |o: Origin| #[trigger] s.store.etags.contains_key(o) ==> s.store.docs.contains_key(o)
     &&& forall |k: AKey| #[trigger] s.store.timers.contains(k) ==> s.hist.armer.contains_key(k)
-    &&& forall |k: AKey| #[trigger] s.hist.armer.contains_key(k) ==> s.hist.armed_seq.contains_key(k) && s.hist.armed_seq[k] < s.hist.counter
+    &&& forall |k: AKey| #[trigger] s.hist.armer.contains_key(k) ==> s.hist.order.contains_key(Event::Armed(k)) && s.hist.order[Event::Armed(k)] < s.hist.counter
     &&& forall |e: Seq<char>| #[trigger] s.hist.versions.contains_key(e) ==> s.hist.born.contains_key(e) && s.hist.born[e] <= s.now
-        && s.hist.born_seq.contains_key(e) && s.hist.born_seq[e] < s.hist.counter && s.hist.writer.contains_key(e)
+        && s.hist.order.contains_key(Event::Born(e)) && s.hist.order[Event::Born(e)] < s.hist.counter && s.hist.writer.contains_key(e)
     &&& forall |e1: Seq<char>, e2: Seq<char>| #[trigger] s.hist.versions.contains_key(e1) && #[trigger] s.hist.versions.contains_key(e2)
-        && s.hist.born_seq[e1] == s.hist.born_seq[e2] ==> e1 == e2
+        && s.hist.order[Event::Born(e1)] == s.hist.order[Event::Born(e2)] ==> e1 == e2
 }
 
 /// Every document with a deadline is covered: its keeper is in the bucket,
@@ -495,7 +495,7 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
             assert(inv_armed(s, k, o));
             let a = s2.nodes[k].core.armed[o];
             assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
-                && s2.hist.born_seq[a.etag] >= s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()]
+                && s2.hist.order[Event::Born(a.etag)] >= s2.hist.order[Event::Born(s2.nodes[j].txns[o].cur.unwrap())]
                 implies Some(a.key) != s2.nodes[j].txns[o].c.fired by {
                 if j == i {
                     assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
@@ -513,8 +513,8 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
             let x = s2.nodes[k].txns[o];
             if x.phase is Written {
                 assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
-                    && s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()] < s2.hist.born_seq[x.cur.unwrap()]
-                    implies x.lseq >= s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()] by {
+                    && s2.hist.order[Event::Born(s2.nodes[j].txns[o].cur.unwrap())] < s2.hist.order[Event::Born(x.cur.unwrap())]
+                    implies x.lseq >= s2.hist.order[Event::Born(s2.nodes[j].txns[o].cur.unwrap())] by {
                     if j == i {
                         assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
                         assert(s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o]);
@@ -641,6 +641,13 @@ proof fn lemma_read_config(p: Params, s: Cluster, s2: Cluster, i: Id)
     lemma_node_only(p, s, s2, i);
 }
 
+/// An epoch up to the current has its members and its time on record.
+proof fn lemma_written_at(s: Cluster, a: nat)
+    requires inv_written(s), a <= s.store.config.epoch,
+    ensures s.hist.written.contains_key(a) && s.hist.configs.contains_key(a),
+{
+}
+
 proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
     requires inv(p)(s), propose(s, i, m) == Some(s2),
     ensures inv(p)(s2),
@@ -651,7 +658,7 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
         assert forall |a: nat| a <= s2.store.config.epoch implies #[trigger] s2.hist.written.contains_key(a) && s2.hist.configs.contains_key(a) by {
             if a != e {
                 assert(a <= s.store.config.epoch);
-                assert(s.hist.written.contains_key(a) && s.hist.configs.contains_key(a));
+                lemma_written_at(s, a);
             }
         }
         assert forall |a: nat, b: nat| a <= b && b <= s2.store.config.epoch implies #[trigger] s2.hist.written[a] <= #[trigger] s2.hist.written[b] by {
@@ -1330,27 +1337,27 @@ proof fn lemma_finish_armed(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             }
             assert(s.hist.writer[e] == i);
             assert forall |j2: Id| #[trigger] s2.nodes.contains_key(j2) && j2 != i && s2.nodes[j2].txns.contains_key(o) && s2.nodes[j2].txns[o].phase is Written
-                && s2.hist.born_seq[e] >= s2.hist.born_seq[s2.nodes[j2].txns[o].cur.unwrap()]
+                && s2.hist.order[Event::Born(e)] >= s2.hist.order[Event::Born(s2.nodes[j2].txns[o].cur.unwrap())]
                 implies Some(k) != s2.nodes[j2].txns[o].c.fired by {
                 let y = s.nodes[j2].txns[o];
                 assert(inv_txn(p, s, j2, o));
                 let ey = y.cur.unwrap();
                 assert(s.hist.writer[ey] == j2);
                 assert(ey != e);
-                assert(s.hist.born_seq[ey] != s.hist.born_seq[e]);
-                assert(s.hist.born_seq[ey] < s.hist.born_seq[e]);
-                assert(x.lseq >= s.hist.born_seq[ey]);
-                assert(s.hist.born_seq[ey] >= y.seq0);
+                assert(s.hist.order[Event::Born(ey)] != s.hist.order[Event::Born(e)]);
+                assert(s.hist.order[Event::Born(ey)] < s.hist.order[Event::Born(e)]);
+                assert(x.lseq >= s.hist.order[Event::Born(ey)]);
+                assert(s.hist.order[Event::Born(ey)] >= y.seq0);
                 if y.c.fired is Some {
                     let f = y.c.fired.unwrap();
-                    assert(s.hist.armed_seq[f] < y.seq0);
+                    assert(s.hist.order[Event::Armed(f)] < y.seq0);
                     if c.rearm {
-                        assert(s.hist.armed_seq[k] >= x.seq0);
+                        assert(s.hist.order[Event::Armed(k)] >= x.seq0);
                         assert(k != f);
                     } else {
                         assert(n.core.armed.contains_key(o) && n.core.armed[o].key == k && Some(n.core.armed[o].etag) == x.letag);
                         assert(inv_armed(s, i, o));
-                        assert(s.hist.born_seq[n.core.armed[o].etag] == x.lseq);
+                        assert(s.hist.order[Event::Born(n.core.armed[o].etag)] == x.lseq);
                         assert(Some(k) != y.c.fired);
                     }
                 }
@@ -1386,11 +1393,11 @@ proof fn lemma_finish_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin,
                 if j == i { assert(y == x); assert(false); }
                 // y loaded the bucket's version, which is this commit's or later; its key was armed after
                 assert(y.letag == y.cur && y.cur == s.store.etag(o));
-                assert(y.lseq == s.hist.born_seq[s.store.etags[o]]);
-                assert(s.hist.born_seq[s.store.etags[o]] >= s.hist.born_seq[x.cur.unwrap()]);
-                assert(s.hist.born_seq[x.cur.unwrap()] >= x.seq0);
-                assert(s.hist.armed_seq[f] < x.seq0);
-                assert(s.hist.armed_seq[k] >= y.seq0);
+                assert(y.lseq == s.hist.order[Event::Born(s.store.etags[o])]);
+                assert(s.hist.order[Event::Born(s.store.etags[o])] >= s.hist.order[Event::Born(x.cur.unwrap())]);
+                assert(s.hist.order[Event::Born(x.cur.unwrap())] >= x.seq0);
+                assert(s.hist.order[Event::Armed(f)] < x.seq0);
+                assert(s.hist.order[Event::Armed(k)] >= y.seq0);
                 assert(y.seq0 >= y.lseq);
                 assert(false);
             }
@@ -1723,7 +1730,7 @@ proof fn lemma_give_up(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
         assert(inv_armed(s, i, q));
         let a = s2.nodes[i].core.armed[q];
         assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
-            && s2.hist.born_seq[a.etag] >= s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()]
+            && s2.hist.order[Event::Born(a.etag)] >= s2.hist.order[Event::Born(s2.nodes[j].txns[q].cur.unwrap())]
             implies Some(a.key) != s2.nodes[j].txns[q].c.fired by {
             assert(s2.nodes[j] == s.nodes[j]);
         }
@@ -1733,8 +1740,8 @@ proof fn lemma_give_up(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
         let x = s2.nodes[i].txns[q];
         if x.phase is Written {
             assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
-                && s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()] < s2.hist.born_seq[x.cur.unwrap()]
-                implies x.lseq >= s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()] by {
+                && s2.hist.order[Event::Born(s2.nodes[j].txns[q].cur.unwrap())] < s2.hist.order[Event::Born(x.cur.unwrap())]
+                implies x.lseq >= s2.hist.order[Event::Born(s2.nodes[j].txns[q].cur.unwrap())] by {
                 assert(s2.nodes[j] == s.nodes[j]);
             }
         }
@@ -2021,8 +2028,7 @@ pub proof fn not_vacuous(p: Params, o: Origin)
             armer: Map::empty(),
             keeper: Map::empty(),
             counter: 1,
-            armed_seq: Map::empty(),
-            born_seq: Map::empty().insert(e, 0),
+            order: Map::empty().insert(Event::Born(e), 0),
             configs: Map::empty().insert(0, seq![me]),
             written: Map::empty().insert(0, 0),
         },

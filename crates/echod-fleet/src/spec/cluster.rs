@@ -44,6 +44,12 @@ pub struct Config {
     pub members: Seq<Id>,
 }
 
+/// An event in the bucket: a key armed, a version written.
+pub enum Event {
+    Armed(AKey),
+    Born(Seq<char>),
+}
+
 /// The bucket: what it holds, and nothing it does not.
 pub struct Store {
     /// Each origin's document. Absent means no object.
@@ -77,10 +83,9 @@ pub struct History {
     /// last write kept.
     pub keeper: Map<Origin, AKey>,
     /// The order of events in the bucket. Every arm and every write takes
-    /// the next number: `armed_seq` for keys, `born_seq` for versions.
+    /// the next number.
     pub counter: nat,
-    pub armed_seq: Map<AKey, nat>,
-    pub born_seq: Map<Seq<char>, nat>,
+    pub order: Map<Event, nat>,
     /// Every epoch's members, and the real time each was written at, for
     /// epochs up to the current.
     pub configs: Map<nat, Seq<Id>>,
@@ -291,8 +296,7 @@ pub open spec fn init_state(s: Cluster) -> bool {
     &&& s.hist.armer == Map::<AKey, Id>::empty()
     &&& s.hist.keeper == Map::<Origin, AKey>::empty()
     &&& s.hist.counter == 0
-    &&& s.hist.armed_seq == Map::<AKey, nat>::empty()
-    &&& s.hist.born_seq == Map::<Seq<char>, nat>::empty()
+    &&& s.hist.order == Map::<Event, nat>::empty()
     &&& s.hist.configs == Map::<nat, Seq<Id>>::empty().insert(0, Seq::empty())
     &&& s.hist.written == Map::<nat, nat>::empty().insert(0, 0)
 }
@@ -415,7 +419,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
             lr: n.last_read_real,
             seq0: s.hist.counter,
             letag: s.store.etag(o),
-            lseq: match s.store.etag(o) { Some(e) => s.hist.born_seq[e], None => 0 },
+            lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
         };
         Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
     } else {
@@ -435,7 +439,7 @@ pub open spec fn arm(s: Cluster, i: Id, o: Origin, k: AKey) -> Option<Cluster> {
             store: Store { timers: s.store.timers.insert(k), ..s.store },
             hist: History {
                 armer: s.hist.armer.insert(k, i),
-                armed_seq: s.hist.armed_seq.insert(k, s.hist.counter),
+                order: s.hist.order.insert(Event::Armed(k), s.hist.counter),
                 counter: s.hist.counter + 1,
                 ..s.hist
             },
@@ -452,7 +456,7 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
     History {
         versions: s.hist.versions.insert(e, d),
         born: s.hist.born.insert(e, s.now),
-        born_seq: s.hist.born_seq.insert(e, s.hist.counter),
+        order: s.hist.order.insert(Event::Born(e), s.hist.counter),
         writer: s.hist.writer.insert(e, i),
         counter: s.hist.counter + 1,
         keeper,
