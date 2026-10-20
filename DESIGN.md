@@ -355,9 +355,9 @@ The actions: a clock advances; a node joins or crashes; a node drops a
 cache entry; and the commit, one store operation per action — a node loads
 the bucket's document and decides a step on it — `Begin` carries the
 work: a request, and the document is the kernel's `spec_handle` of the one
-loaded followed by any sequence of internal steps at the same instant, the
-response going to a ghost log of what was served; or a sweep, the step
-module's contract — arms a key, writes the document conditionally or is refused, deletes the key
+loaded followed by any sequence of internal steps at the same instant, and
+the response joins a ghost log when the write lands, or at once when
+nothing changed; or a sweep, the step module's contract — arms a key, writes the document conditionally or is refused, deletes the key
 replaced, remembers the key kept and deletes the key fired, or, having
 found nothing due, rewrites the document and collects the key. Any live
 node may act on any origin: which does is the server's routing, and the

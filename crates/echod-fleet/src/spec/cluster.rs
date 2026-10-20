@@ -109,6 +109,8 @@ pub enum Phase {
 
 /// A commit in flight, as the model sees it.
 pub struct Flight {
+    /// What it is for.
+    pub work: Work,
     /// The node's decision.
     pub c: ATxn,
     /// The version the store is expected to hold: the one loaded, then,
@@ -145,8 +147,10 @@ pub enum Work {
     Sweep(AKey),
 }
 
-/// Ghost: a request served — where, at what instant, what it asked, and
-/// what it was answered.
+/// Ghost: a request answered — where, at what instant it was decided, what
+/// it asked, and what it was told. A request is answered when its write
+/// lands, or at once when it changed nothing; one that lost its race is
+/// decided again and answered then.
 pub struct Served {
     pub origin: Origin,
     pub at: nat,
@@ -324,16 +328,13 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Do
         })
         && next_is(new, deadline)
     {
-        let log = match work {
-            Work::Request(req) => s.log.push(Served { origin: o, at: t, req, resp: spec_handle(full(loaded), req, t).1 }),
-            Work::Sweep(_) => s.log,
-        };
         let (core, bodies) = if s.store.docs.contains_key(o) {
             (spec_filled(n.core, o, s.store.etags[o], n.clock), n.bodies.insert(o, s.store.docs[o]))
         } else {
             (spec_forget(n.core, o), n.bodies)
         };
         let x = Flight {
+            work,
             c: spec_begin(core, o, s.store.etag(o), deadline, changed, fired),
             cur: s.store.etag(o),
             loaded,
@@ -344,7 +345,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Do
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
         };
-        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), log, ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
     } else {
         None
     }
@@ -387,6 +388,15 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
 }
 
 /// The write may go once the key is armed, if one had to be.
+/// The log once the commit `x` on `o` is answered: its request and the
+/// response the kernel gave it on the document it loaded.
+pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
+    match x.work {
+        Work::Request(req) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(x.loaded), req, x.t).1 }),
+        Work::Sweep(_) => s.log,
+    }
+}
+
 pub open spec fn ready(x: Flight) -> bool {
     x.c.changed && (if x.c.rearm { x.phase is Armed } else { x.phase is Decided })
 }
@@ -411,6 +421,7 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
                 ..s.store
             },
             hist: written(s, e, x.new, i, keeper),
+            log: answered(s, o, x),
             ..s
         })
     } else {
@@ -506,7 +517,7 @@ pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is None {
-        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: n.txns.remove(o), ..n }), ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: n.txns.remove(o), ..n }), log: answered(s, o, x), ..s })
     } else {
         None
     }
