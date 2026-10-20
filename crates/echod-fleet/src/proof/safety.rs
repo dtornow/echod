@@ -47,7 +47,7 @@ pub open spec fn has_any(d: Doc) -> bool {
 pub open spec fn kept_covers(s: Cluster, o: Origin, x: Flight) -> bool {
     &&& s.store.docs.contains_key(o) && s.store.docs[o] == x.new
     &&& match spec_keep(x.c) {
-        Some(k) => s.store.keeper.contains_key(o) && s.store.keeper[o] == k,
+        Some(k) => s.hist.keeper.contains_key(o) && s.hist.keeper[o] == k,
         None => true,
     }
 }
@@ -69,11 +69,11 @@ pub open spec fn inv_node(p: Params, s: Cluster, i: Id) -> bool {
         &&& c.last_read <= n.last_read_real + p.skew
         &&& c.held + p.skew >= n.held_real
         // the epoch it holds was written before it first read it
-        &&& n.held_real >= s.store.written[c.epoch]
+        &&& n.held_real >= s.hist.written[c.epoch]
         // an epoch it does not hold yet was written after its last read
-        &&& c.epoch < s.store.config.epoch ==> n.last_read_real <= s.store.written[c.epoch + 1]
+        &&& c.epoch < s.store.config.epoch ==> n.last_read_real <= s.hist.written[c.epoch + 1]
         // the members it holds are the epoch's
-        &&& c.members == s.store.configs[c.epoch]
+        &&& c.members == s.hist.configs[c.epoch]
     }
 }
 
@@ -86,9 +86,9 @@ pub open spec fn inv_cache(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     &&& e.filled_at <= n.clock
     &&& s.store.docs.contains_key(o)
     &&& n.bodies.contains_key(o)
-    &&& s.store.versions.contains_key(e.etag)
-    &&& n.bodies[o] == s.store.versions[e.etag]
-    &&& e.wrote && e.filled_at >= n.core.held + p.grace ==> s.store.born.contains_key(e.etag) && s.store.born[e.etag] + 2 * p.skew >= n.held_real + p.grace
+    &&& s.hist.versions.contains_key(e.etag)
+    &&& n.bodies[o] == s.hist.versions[e.etag]
+    &&& e.wrote && e.filled_at >= n.core.held + p.grace ==> s.hist.born.contains_key(e.etag) && s.hist.born[e.etag] + 2 * p.skew >= n.held_real + p.grace
 }
 
 /// A remembered key: this node's, for this origin; and while the document
@@ -96,13 +96,13 @@ pub open spec fn inv_cache(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
 pub open spec fn inv_armed(s: Cluster, i: Id, o: Origin) -> bool {
     let a = s.nodes[i].core.armed[o];
     &&& a.key.origin == o
-    &&& s.store.armer.contains_key(a.key) && s.store.armer[a.key] == i
-    &&& s.store.versions.contains_key(a.etag)
-    &&& s.store.writer[a.etag] == i
-    &&& s.store.etag(o) == Some(a.etag) ==> s.store.docs.contains_key(o) && s.store.keeper.contains_key(o) && s.store.keeper[o] == a.key && has_any(s.store.docs[o])
+    &&& s.hist.armer.contains_key(a.key) && s.hist.armer[a.key] == i
+    &&& s.hist.versions.contains_key(a.etag)
+    &&& s.hist.writer[a.etag] == i
+    &&& s.store.etag(o) == Some(a.etag) ==> s.store.docs.contains_key(o) && s.hist.keeper.contains_key(o) && s.hist.keeper[o] == a.key && has_any(s.store.docs[o])
     // the key was not fired by a commit of another node that wrote an earlier version
     &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
-        && s.store.born_seq[a.etag] >= s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+        && s.hist.born_seq[a.etag] >= s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()]
         ==> Some(a.key) != s.nodes[j].txns[o].c.fired
 }
 
@@ -119,43 +119,43 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
     &&& x.lr <= x.begun
     &&& x.epoch <= s.store.config.epoch
     &&& x.held_real + p.grace <= x.begun + 2 * p.skew
-    &&& s.store.written[x.epoch] <= x.held_real
-    &&& x.epoch < s.store.config.epoch ==> x.lr <= s.store.written[x.epoch + 1]
+    &&& s.hist.written[x.epoch] <= x.held_real
+    &&& x.epoch < s.store.config.epoch ==> x.lr <= s.hist.written[x.epoch + 1]
     &&& x.begun <= x.lr + p.ttl + 2 * p.skew
-    &&& owner(s.store.configs[x.epoch], o) == Some(i)
-    &&& x.cur is Some ==> s.store.born.contains_key(x.cur.unwrap()) && (x.phase is Written || s.store.born[x.cur.unwrap()] <= x.begun)
+    &&& owner(s.hist.configs[x.epoch], o) == Some(i)
+    &&& x.cur is Some ==> s.hist.born.contains_key(x.cur.unwrap()) && (x.phase is Written || s.hist.born[x.cur.unwrap()] <= x.begun)
     // the order of events: what it loaded was written before it began; what it armed, after
-    &&& x.seq0 <= s.store.counter
+    &&& x.seq0 <= s.hist.counter
     &&& x.lseq <= x.seq0
     &&& !(x.phase is Written) ==> x.letag == x.cur
-    &&& x.letag is Some ==> s.store.versions.contains_key(x.letag.unwrap()) && s.store.born_seq[x.letag.unwrap()] == x.lseq
+    &&& x.letag is Some ==> s.hist.versions.contains_key(x.letag.unwrap()) && s.hist.born_seq[x.letag.unwrap()] == x.lseq
     &&& x.letag is None ==> x.lseq == 0
-    &&& c.fired is Some ==> s.store.armed_seq[c.fired.unwrap()] < x.seq0
-    &&& c.previous is Some ==> s.store.armed_seq[c.previous.unwrap()] < x.seq0
+    &&& c.fired is Some ==> s.hist.armed_seq[c.fired.unwrap()] < x.seq0
+    &&& c.previous is Some ==> s.hist.armed_seq[c.previous.unwrap()] < x.seq0
         && n.core.armed.contains_key(o) && n.core.armed[o].key == c.previous.unwrap() && Some(n.core.armed[o].etag) == x.letag
-    &&& c.armed_now is Some ==> s.store.armed_seq[c.armed_now.unwrap()] >= x.seq0
+    &&& c.armed_now is Some ==> s.hist.armed_seq[c.armed_now.unwrap()] >= x.seq0
     &&& x.phase is Written ==> {
-        &&& s.store.born_seq[x.cur.unwrap()] >= x.seq0
-        &&& s.store.writer[x.cur.unwrap()] == i
-        &&& s.store.etags.contains_key(o) && s.store.born_seq[s.store.etags[o]] >= s.store.born_seq[x.cur.unwrap()]
+        &&& s.hist.born_seq[x.cur.unwrap()] >= x.seq0
+        &&& s.hist.writer[x.cur.unwrap()] == i
+        &&& s.store.etags.contains_key(o) && s.hist.born_seq[s.store.etags[o]] >= s.hist.born_seq[x.cur.unwrap()]
         // no other node's version landed between its load and its write
         &&& forall |j: Id| #[trigger] s.nodes.contains_key(j) && j != i && s.nodes[j].txns.contains_key(o) && s.nodes[j].txns[o].phase is Written
-            && s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()] < s.store.born_seq[x.cur.unwrap()]
-            ==> x.lseq >= s.store.born_seq[s.nodes[j].txns[o].cur.unwrap()]
+            && s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()] < s.hist.born_seq[x.cur.unwrap()]
+            ==> x.lseq >= s.hist.born_seq[s.nodes[j].txns[o].cur.unwrap()]
     }
     &&& x.t <= MAX_TIME
     &&& echod_kernel::properties::inv(x.t, full(x.loaded))
     &&& echod_kernel::properties::inv(x.t, full(x.new))
     &&& next_is(x.new, c.deadline)
-    &&& c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s.store.armer.contains_key(c.fired.unwrap())
+    &&& c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s.hist.armer.contains_key(c.fired.unwrap())
     &&& !c.changed ==> x.new == x.loaded && (c.fired is Some ==> no_due(x.t, x.loaded))
     &&& c.rearm == (c.changed && c.deadline is Some && (c.previous is None || c.previous.unwrap().at != c.deadline.unwrap()))
     &&& c.previous is Some ==> {
         let q = c.previous.unwrap();
         &&& q.origin == o
-        &&& s.store.armer.contains_key(q) && s.store.armer[q] == i
+        &&& s.hist.armer.contains_key(q) && s.hist.armer[q] == i
         &&& Some(q) != c.fired
-        &&& !(x.phase is Written) && live(s, o, x) ==> s.store.docs.contains_key(o) && s.store.keeper.contains_key(o) && s.store.keeper[o] == q && has_any(s.store.docs[o])
+        &&& !(x.phase is Written) && live(s, o, x) ==> s.store.docs.contains_key(o) && s.hist.keeper.contains_key(o) && s.hist.keeper[o] == q && has_any(s.store.docs[o])
     }
     &&& x.phase is Decided ==> c.armed_now is None
     &&& x.phase is Armed ==> c.rearm && c.armed_now is Some
@@ -163,12 +163,12 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
         let k = c.armed_now.unwrap();
         &&& k.origin == o
         &&& Some(k.at) == c.deadline
-        &&& s.store.armer.contains_key(k) && s.store.armer[k] == i
+        &&& s.hist.armer.contains_key(k) && s.hist.armer[k] == i
         &&& Some(k) != c.previous
         &&& Some(k) != c.fired
         &&& !(x.phase is Written) && live(s, o, x) ==> s.store.timers.contains(k)
     }
-    &&& x.cur is Some ==> s.store.versions.contains_key(x.cur.unwrap())
+    &&& x.cur is Some ==> s.hist.versions.contains_key(x.cur.unwrap())
     &&& !(x.phase is Written) ==> (live(s, o, x) ==> s.store.doc(o) == x.loaded && s.store.stamp(o) <= x.t)
     &&& x.phase is Written ==> {
         &&& c.changed
@@ -176,17 +176,17 @@ pub open spec fn inv_txn(p: Params, s: Cluster, i: Id, o: Origin) -> bool {
         &&& c.rearm ==> c.armed_now is Some
         &&& live(s, o, x) ==> kept_covers(s, o, x) && s.store.stamps.contains_key(o) && s.store.stamps[o] == x.t
         // the document's cover is never the key it fired, nor the key it removes
-        &&& kept_covers(s, o, x) || (!live(s, o, x) && (s.store.keeper.contains_key(o) ==>
-            Some(s.store.keeper[o]) != c.fired && ((c.rearm || c.deadline is None) ==> Some(s.store.keeper[o]) != c.previous)))
+        &&& kept_covers(s, o, x) || (!live(s, o, x) && (s.hist.keeper.contains_key(o) ==>
+            Some(s.hist.keeper[o]) != c.fired && ((c.rearm || c.deadline is None) ==> Some(s.hist.keeper[o]) != c.previous)))
     }
 }
 
 /// The epochs: each one's members and write time, in order, none in the future.
 pub open spec fn inv_written(s: Cluster) -> bool {
-    &&& forall |e: nat| e <= s.store.config.epoch ==> #[trigger] s.store.written.contains_key(e) && s.store.configs.contains_key(e)
-    &&& forall |e: nat, e2: nat| e <= e2 && e2 <= s.store.config.epoch ==> #[trigger] s.store.written[e] <= #[trigger] s.store.written[e2]
-    &&& s.store.written[s.store.config.epoch] <= s.now
-    &&& s.store.configs[s.store.config.epoch] == s.store.config.members
+    &&& forall |e: nat| e <= s.store.config.epoch ==> #[trigger] s.hist.written.contains_key(e) && s.hist.configs.contains_key(e)
+    &&& forall |e: nat, e2: nat| e <= e2 && e2 <= s.store.config.epoch ==> #[trigger] s.hist.written[e] <= #[trigger] s.hist.written[e2]
+    &&& s.hist.written[s.store.config.epoch] <= s.now
+    &&& s.hist.configs[s.store.config.epoch] == s.store.config.members
 }
 
 /// Every document satisfies the catalogue at its stamp, and is the content
@@ -197,26 +197,26 @@ pub open spec fn inv_store(s: Cluster) -> bool {
         &&& s.store.stamps.contains_key(o)
         &&& s.store.stamps[o] <= MAX_TIME
         &&& echod_kernel::properties::inv(s.store.stamps[o], full(s.store.docs[o]))
-        &&& s.store.versions.contains_key(s.store.etags[o])
-        &&& s.store.versions[s.store.etags[o]] == s.store.docs[o]
+        &&& s.hist.versions.contains_key(s.store.etags[o])
+        &&& s.hist.versions[s.store.etags[o]] == s.store.docs[o]
     }
     &&& forall |o: Origin| #[trigger] s.store.etags.contains_key(o) ==> s.store.docs.contains_key(o)
-    &&& forall |k: AKey| #[trigger] s.store.timers.contains(k) ==> s.store.armer.contains_key(k)
-    &&& forall |k: AKey| #[trigger] s.store.armer.contains_key(k) ==> s.store.armed_seq.contains_key(k) && s.store.armed_seq[k] < s.store.counter
-    &&& forall |e: Seq<char>| #[trigger] s.store.versions.contains_key(e) ==> s.store.born.contains_key(e) && s.store.born[e] <= s.now
-        && s.store.born_seq.contains_key(e) && s.store.born_seq[e] < s.store.counter && s.store.writer.contains_key(e)
-    &&& forall |e1: Seq<char>, e2: Seq<char>| #[trigger] s.store.versions.contains_key(e1) && #[trigger] s.store.versions.contains_key(e2)
-        && s.store.born_seq[e1] == s.store.born_seq[e2] ==> e1 == e2
+    &&& forall |k: AKey| #[trigger] s.store.timers.contains(k) ==> s.hist.armer.contains_key(k)
+    &&& forall |k: AKey| #[trigger] s.hist.armer.contains_key(k) ==> s.hist.armed_seq.contains_key(k) && s.hist.armed_seq[k] < s.hist.counter
+    &&& forall |e: Seq<char>| #[trigger] s.hist.versions.contains_key(e) ==> s.hist.born.contains_key(e) && s.hist.born[e] <= s.now
+        && s.hist.born_seq.contains_key(e) && s.hist.born_seq[e] < s.hist.counter && s.hist.writer.contains_key(e)
+    &&& forall |e1: Seq<char>, e2: Seq<char>| #[trigger] s.hist.versions.contains_key(e1) && #[trigger] s.hist.versions.contains_key(e2)
+        && s.hist.born_seq[e1] == s.hist.born_seq[e2] ==> e1 == e2
 }
 
 /// Every document with a deadline is covered: its keeper is in the bucket,
 /// for it, at its nearest deadline.
 pub open spec fn inv_timer(s: Cluster) -> bool {
     forall |o: Origin| #[trigger] s.store.docs.contains_key(o) && has_any(s.store.docs[o]) ==> {
-        &&& s.store.keeper.contains_key(o)
-        &&& s.store.timers.contains(s.store.keeper[o])
-        &&& s.store.keeper[o].origin == o
-        &&& is_next(s.store.docs[o], s.store.keeper[o].at)
+        &&& s.hist.keeper.contains_key(o)
+        &&& s.store.timers.contains(s.hist.keeper[o])
+        &&& s.hist.keeper[o].origin == o
+        &&& is_next(s.store.docs[o], s.hist.keeper[o].at)
     }
 }
 
@@ -298,8 +298,8 @@ pub proof fn exclusion(p: Params, s: Cluster, i: Id, j: Id, o: Origin)
     assert(inv_node(p, s, i));
     assert(inv_node(p, s, j));
     if n.core.epoch == m.core.epoch {
-        assert(n.core.members == s.store.configs[n.core.epoch]);
-        assert(m.core.members == s.store.configs[m.core.epoch]);
+        assert(n.core.members == s.hist.configs[n.core.epoch]);
+        assert(m.core.members == s.hist.configs[m.core.epoch]);
     } else if n.core.epoch < m.core.epoch {
         timing(p, s, i, j);
     } else {
@@ -326,7 +326,7 @@ proof fn timing(p: Params, s: Cluster, i: Id, j: Id)
     let m = s.nodes[j];
     assert(inv_node(p, s, i));
     assert(inv_node(p, s, j));
-    assert(s.store.written[n.core.epoch + 1] <= s.store.written[m.core.epoch]);
+    assert(s.hist.written[n.core.epoch + 1] <= s.hist.written[m.core.epoch]);
     assert(n.last_read_real <= m.held_real);
     assert(s.now <= n.clock + p.skew);
     assert(n.clock <= n.core.last_read + p.ttl);
@@ -374,7 +374,7 @@ pub proof fn timers_cover(p: Params, s: Cluster, o: Origin, t: nat)
     ensures
         exists |k: AKey| #[trigger] s.store.timers.contains(k) && k.origin == o && k.at <= t,
 {
-    let k = s.store.keeper[o];
+    let k = s.hist.keeper[o];
     assert(s.store.timers.contains(k) && k.origin == o && k.at <= t);
 }
 
@@ -459,9 +459,9 @@ pub proof fn lemma_init(p: Params, s: Cluster)
     requires p.wf(), init_state(s),
     ensures inv(p)(s),
 {
-    assert(s.store.written.contains_key(0));
-    assert(s.store.configs.contains_key(0));
-    assert forall |e: nat| e <= s.store.config.epoch implies #[trigger] s.store.written.contains_key(e) && s.store.configs.contains_key(e) by {}
+    assert(s.hist.written.contains_key(0));
+    assert(s.hist.configs.contains_key(0));
+    assert forall |e: nat| e <= s.store.config.epoch implies #[trigger] s.hist.written.contains_key(e) && s.hist.configs.contains_key(e) by {}
 }
 
 /// Node `i` keeps its part; the store and every other node are as they were.
@@ -469,6 +469,7 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
     requires
         inv(p)(s),
         s2.store == s.store,
+        s2.hist == s.hist,
         s2.now == s.now,
         s2.nodes.contains_key(i),
         forall |k: Id| k != i ==> (s2.nodes.contains_key(k) <==> s.nodes.contains_key(k)) && (s.nodes.contains_key(k) ==> s2.nodes[k] == s.nodes[k]),
@@ -494,7 +495,7 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
             assert(inv_armed(s, k, o));
             let a = s2.nodes[k].core.armed[o];
             assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
-                && s2.store.born_seq[a.etag] >= s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()]
+                && s2.hist.born_seq[a.etag] >= s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()]
                 implies Some(a.key) != s2.nodes[j].txns[o].c.fired by {
                 if j == i {
                     assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
@@ -512,8 +513,8 @@ proof fn lemma_node_only(p: Params, s: Cluster, s2: Cluster, i: Id)
             let x = s2.nodes[k].txns[o];
             if x.phase is Written {
                 assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != k && s2.nodes[j].txns.contains_key(o) && s2.nodes[j].txns[o].phase is Written
-                    && s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()] < s2.store.born_seq[x.cur.unwrap()]
-                    implies x.lseq >= s2.store.born_seq[s2.nodes[j].txns[o].cur.unwrap()] by {
+                    && s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()] < s2.hist.born_seq[x.cur.unwrap()]
+                    implies x.lseq >= s2.hist.born_seq[s2.nodes[j].txns[o].cur.unwrap()] by {
                     if j == i {
                         assert(s2.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o].phase is Written);
                         assert(s.nodes.contains_key(i) && s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o]);
@@ -613,7 +614,7 @@ proof fn lemma_read_config(p: Params, s: Cluster, s2: Cluster, i: Id)
     let n = s.nodes[i];
     let n2 = s2.nodes[i];
     assert(inv_node(p, s, i));
-    assert(s.store.written.contains_key(s.store.config.epoch));
+    assert(s.hist.written.contains_key(s.store.config.epoch));
     assert(inv_node(p, s2, i));
     assert forall |o: Origin| #[trigger] s2.nodes[i].core.cache.contains_key(o) implies inv_cache(p, s2, i, o) by {
         assert(inv_cache(p, s, i, o));
@@ -647,16 +648,16 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
     disassemble(p, s);
     let e = s.store.config.epoch + 1;
     assert(inv_written(s2)) by {
-        assert forall |a: nat| a <= s2.store.config.epoch implies #[trigger] s2.store.written.contains_key(a) && s2.store.configs.contains_key(a) by {
+        assert forall |a: nat| a <= s2.store.config.epoch implies #[trigger] s2.hist.written.contains_key(a) && s2.hist.configs.contains_key(a) by {
             if a != e {
                 assert(a <= s.store.config.epoch);
-                assert(s.store.written.contains_key(a) && s.store.configs.contains_key(a));
+                assert(s.hist.written.contains_key(a) && s.hist.configs.contains_key(a));
             }
         }
-        assert forall |a: nat, b: nat| a <= b && b <= s2.store.config.epoch implies #[trigger] s2.store.written[a] <= #[trigger] s2.store.written[b] by {
+        assert forall |a: nat, b: nat| a <= b && b <= s2.store.config.epoch implies #[trigger] s2.hist.written[a] <= #[trigger] s2.hist.written[b] by {
             if b == e {
                 if a < e {
-                    assert(s.store.written[a] <= s.store.written[s.store.config.epoch]);
+                    assert(s.hist.written[a] <= s.hist.written[s.store.config.epoch]);
                 }
             }
         }
@@ -665,13 +666,13 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
         assert(inv_node(p, s, k));
         let n = s.nodes[k];
         if n.core.read_any {
-            assert(s2.store.written[n.core.epoch] == s.store.written[n.core.epoch]);
-            assert(s2.store.configs[n.core.epoch] == s.store.configs[n.core.epoch]);
+            assert(s2.hist.written[n.core.epoch] == s.hist.written[n.core.epoch]);
+            assert(s2.hist.configs[n.core.epoch] == s.hist.configs[n.core.epoch]);
             if n.core.epoch < s2.store.config.epoch {
                 if n.core.epoch + 1 == e {
-                    assert(s2.store.written[e] == s.now);
+                    assert(s2.hist.written[e] == s.now);
                 } else {
-                    assert(s2.store.written[n.core.epoch + 1] == s.store.written[n.core.epoch + 1]);
+                    assert(s2.hist.written[n.core.epoch + 1] == s.hist.written[n.core.epoch + 1]);
                 }
             }
         }
@@ -685,14 +686,14 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
     assert forall |k: Id, o: Origin| s2.nodes.contains_key(k) && #[trigger] s2.nodes[k].txns.contains_key(o) implies inv_txn(p, s2, k, o) by {
         assert(inv_txn(p, s, k, o));
         let x = s.nodes[k].txns[o];
-        assert(s2.store.written[x.epoch] == s.store.written[x.epoch]);
-        assert(s2.store.configs[x.epoch] == s.store.configs[x.epoch]);
+        assert(s2.hist.written[x.epoch] == s.hist.written[x.epoch]);
+        assert(s2.hist.configs[x.epoch] == s.hist.configs[x.epoch]);
         if x.epoch < s2.store.config.epoch {
             if x.epoch + 1 == e {
-                assert(s2.store.written[e] == s.now);
+                assert(s2.hist.written[e] == s.now);
                 assert(x.lr <= s.now);
             } else {
-                assert(s2.store.written[x.epoch + 1] == s.store.written[x.epoch + 1]);
+                assert(s2.hist.written[x.epoch + 1] == s.hist.written[x.epoch + 1]);
             }
         }
     }
@@ -747,10 +748,10 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
     assert(n.held_real + p.grace <= s.now + 2 * p.skew);
     assert(s.now <= n.last_read_real + p.ttl + 2 * p.skew);
     assert(owner(n.core.members, o) == Some(i));
-    assert(n.core.members == s.store.configs[n.core.epoch]);
+    assert(n.core.members == s.hist.configs[n.core.epoch]);
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.cache.contains_key(q) implies inv_cache(p, s2, i, q) by {
         if q == o && !trusts(n, o) && s.store.docs.contains_key(o) {
-            assert(s.store.versions.contains_key(s.store.etags[o]));
+            assert(s.hist.versions.contains_key(s.store.etags[o]));
         } else {
             assert(inv_cache(p, s, i, q));
         }
@@ -764,8 +765,8 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
                 assert(inv_armed(s, i, o));
             }
             if x.cur is Some {
-                assert(s.store.versions.contains_key(x.cur.unwrap()));
-                assert(s.store.born.contains_key(x.cur.unwrap()) && s.store.born[x.cur.unwrap()] <= s.now);
+                assert(s.hist.versions.contains_key(x.cur.unwrap()));
+                assert(s.hist.born.contains_key(x.cur.unwrap()) && s.hist.born[x.cur.unwrap()] <= s.now);
             }
             assert(c.origin == o);
             assert(n2.core.read_any);
@@ -773,28 +774,28 @@ proof fn lemma_begin(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, t: na
             assert(x.lr <= x.begun);
             assert(x.epoch <= s2.store.config.epoch);
             assert(x.held_real + p.grace <= x.begun + 2 * p.skew);
-            assert(s2.store.written[x.epoch] <= x.held_real);
-            assert(x.epoch < s2.store.config.epoch ==> x.lr <= s2.store.written[x.epoch + 1]);
+            assert(s2.hist.written[x.epoch] <= x.held_real);
+            assert(x.epoch < s2.store.config.epoch ==> x.lr <= s2.hist.written[x.epoch + 1]);
             assert(x.begun <= x.lr + p.ttl + 2 * p.skew);
-            assert(owner(s2.store.configs[x.epoch], o) == Some(i));
+            assert(owner(s2.hist.configs[x.epoch], o) == Some(i));
             assert(x.t <= MAX_TIME);
             assert(echod_kernel::properties::inv(x.t, full(x.loaded)));
             assert(echod_kernel::properties::inv(x.t, full(x.new)));
             assert(next_is(x.new, c.deadline));
-            assert(c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s2.store.armer.contains_key(c.fired.unwrap()));
+            assert(c.fired is Some ==> c.fired.unwrap().origin == o && c.fired.unwrap().at <= x.t && s2.hist.armer.contains_key(c.fired.unwrap()));
             assert(!c.changed ==> x.new == x.loaded);
             assert(!c.changed && c.fired is Some ==> no_due(x.t, x.loaded));
             assert(c.rearm == (c.changed && c.deadline is Some && (c.previous is None || c.previous.unwrap().at != c.deadline.unwrap())));
             if c.previous is Some {
                 let q = c.previous.unwrap();
                 assert(q.origin == o);
-                assert(s2.store.armer.contains_key(q) && s2.store.armer[q] == i);
+                assert(s2.hist.armer.contains_key(q) && s2.hist.armer[q] == i);
                 assert(Some(q) != c.fired);
                 assert(live(s2, o, x));
-                assert(s2.store.docs.contains_key(o) && s2.store.keeper.contains_key(o) && s2.store.keeper[o] == q && has_any(s2.store.docs[o]));
+                assert(s2.store.docs.contains_key(o) && s2.hist.keeper.contains_key(o) && s2.hist.keeper[o] == q && has_any(s2.store.docs[o]));
             }
             assert(x.phase is Decided && c.armed_now is None);
-            assert(x.cur is Some ==> s2.store.versions.contains_key(x.cur.unwrap()));
+            assert(x.cur is Some ==> s2.hist.versions.contains_key(x.cur.unwrap()));
             assert(live(s2, o, x) ==> s2.store.doc(o) == x.loaded && s2.store.stamp(o) <= x.t);
             assert(inv_txn(p, s2, i, o));
         } else {
@@ -875,17 +876,17 @@ proof fn lemma_no_trusted_entry(p: Params, s: Cluster, i: Id, j: Id, o: Origin)
     let v = m.core.cache[o].etag;
     assert(Some(v) == s.store.etag(o));
     assert(x.cur == Some(v));
-    assert(s.store.born[v] <= x.begun);
-    assert(s.store.born[v] + 2 * p.skew >= m.held_real + p.grace);
+    assert(s.hist.born[v] <= x.begun);
+    assert(s.hist.born[v] + 2 * p.skew >= m.held_real + p.grace);
     if x.epoch == m.core.epoch {
-        assert(owner(s.store.configs[x.epoch], o) == Some(i));
-        assert(m.core.members == s.store.configs[m.core.epoch]);
+        assert(owner(s.hist.configs[x.epoch], o) == Some(i));
+        assert(m.core.members == s.hist.configs[m.core.epoch]);
         assert(false);
     } else if x.epoch > m.core.epoch {
         assert(m.core.epoch < s.store.config.epoch);
-        assert(m.last_read_real <= s.store.written[m.core.epoch + 1]);
-        assert(s.store.written[m.core.epoch + 1] <= s.store.written[x.epoch]);
-        assert(s.store.written[x.epoch] <= x.held_real);
+        assert(m.last_read_real <= s.hist.written[m.core.epoch + 1]);
+        assert(s.hist.written[m.core.epoch + 1] <= s.hist.written[x.epoch]);
+        assert(s.hist.written[x.epoch] <= x.held_real);
         assert(x.held_real + p.grace <= x.begun + 2 * p.skew);
         assert(x.begun <= s.now);
         // so the other node's last read is older than the grace, less the slack: stale
@@ -897,9 +898,9 @@ proof fn lemma_no_trusted_entry(p: Params, s: Cluster, i: Id, j: Id, o: Origin)
         assert(false);
     } else {
         assert(x.epoch < s.store.config.epoch);
-        assert(x.lr <= s.store.written[x.epoch + 1]);
-        assert(s.store.written[x.epoch + 1] <= s.store.written[m.core.epoch]);
-        assert(s.store.written[m.core.epoch] <= m.held_real);
+        assert(x.lr <= s.hist.written[x.epoch + 1]);
+        assert(s.hist.written[x.epoch + 1] <= s.hist.written[m.core.epoch]);
+        assert(s.hist.written[m.core.epoch] <= m.held_real);
         assert(x.begun <= x.lr + p.ttl + 2 * p.skew);
         assert(false);
     }
@@ -918,8 +919,8 @@ proof fn lemma_entries_after_write(p: Params, s: Cluster, s2: Cluster, i: Id, o:
         s2.store.etag(o) == Some(e),
         s2.now == s.now,
         s2.store.config == s.store.config,
-        s2.store.written == s.store.written,
-        s2.store.configs == s.store.configs,
+        s2.hist.written == s.hist.written,
+        s2.hist.configs == s.hist.configs,
         forall |j: Id| #[trigger] s2.nodes.contains_key(j) <==> s.nodes.contains_key(j),
         forall |j: Id| j != i && #[trigger] s2.nodes.contains_key(j) ==> s2.nodes[j] == s.nodes[j],
         s2.nodes[i].core == spec_filled(s.nodes[i].core, o, e, s.nodes[i].clock, true)
@@ -971,7 +972,7 @@ proof fn lemma_commit_nodes(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             assert(s.store.timers.contains(c.armed_now.unwrap()));
         } else {
             let q = c.previous.unwrap();
-            assert(s.store.keeper[o] == q && has_any(s.store.docs[o]));
+            assert(s.hist.keeper[o] == q && has_any(s.store.docs[o]));
             assert(s.store.timers.contains(q));
         }
         assert(kept is Some && s2.store.timers.contains(kept.unwrap()) && Some(kept.unwrap().at) == c.deadline && kept.unwrap().origin == o);
@@ -1001,7 +1002,7 @@ proof fn lemma_commit_cache(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             assert(s.store.timers.contains(c.armed_now.unwrap()));
         } else {
             let q = c.previous.unwrap();
-            assert(s.store.keeper[o] == q && has_any(s.store.docs[o]));
+            assert(s.hist.keeper[o] == q && has_any(s.store.docs[o]));
             assert(s.store.timers.contains(q));
         }
         assert(kept is Some && s2.store.timers.contains(kept.unwrap()) && Some(kept.unwrap().at) == c.deadline && kept.unwrap().origin == o);
@@ -1039,7 +1040,7 @@ proof fn lemma_commit_armed(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             assert(s.store.timers.contains(c.armed_now.unwrap()));
         } else {
             let q = c.previous.unwrap();
-            assert(s.store.keeper[o] == q && has_any(s.store.docs[o]));
+            assert(s.hist.keeper[o] == q && has_any(s.store.docs[o]));
             assert(s.store.timers.contains(q));
         }
         assert(kept is Some && s2.store.timers.contains(kept.unwrap()) && Some(kept.unwrap().at) == c.deadline && kept.unwrap().origin == o);
@@ -1069,7 +1070,7 @@ proof fn lemma_commit_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin,
             assert(s.store.timers.contains(c.armed_now.unwrap()));
         } else {
             let q = c.previous.unwrap();
-            assert(s.store.keeper[o] == q && has_any(s.store.docs[o]));
+            assert(s.hist.keeper[o] == q && has_any(s.store.docs[o]));
             assert(s.store.timers.contains(q));
         }
         assert(kept is Some && s2.store.timers.contains(kept.unwrap()) && Some(kept.unwrap().at) == c.deadline && kept.unwrap().origin == o);
@@ -1084,9 +1085,9 @@ proof fn lemma_commit_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin,
             assert(!live(s2, o, y));
             if y.phase is Written {
                 if !kept_covers(s2, o, y) {
-                    if s2.store.keeper.contains_key(o) {
-                        assert(s2.store.keeper[o] == kept.unwrap());
-                        assert(s2.store.armer[kept.unwrap()] == i);
+                    if s2.hist.keeper.contains_key(o) {
+                        assert(s2.hist.keeper[o] == kept.unwrap());
+                        assert(s2.hist.armer[kept.unwrap()] == i);
                     }
                 }
             }
@@ -1117,7 +1118,7 @@ proof fn lemma_commit_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             assert(s.store.timers.contains(c.armed_now.unwrap()));
         } else {
             let q = c.previous.unwrap();
-            assert(s.store.keeper[o] == q && has_any(s.store.docs[o]));
+            assert(s.hist.keeper[o] == q && has_any(s.store.docs[o]));
             assert(s.store.timers.contains(q));
         }
         assert(kept is Some && s2.store.timers.contains(kept.unwrap()) && Some(kept.unwrap().at) == c.deadline && kept.unwrap().origin == o);
@@ -1129,23 +1130,23 @@ proof fn lemma_commit_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
             &&& s2.store.stamps.contains_key(q)
             &&& s2.store.stamps[q] <= MAX_TIME
             &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
-            &&& s2.store.versions.contains_key(s2.store.etags[q])
-            &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
+            &&& s2.hist.versions.contains_key(s2.store.etags[q])
+            &&& s2.hist.versions[s2.store.etags[q]] == s2.store.docs[q]
         } by {
             if q != o {
                 assert(s.store.docs.contains_key(q));
             }
         }
-        assert forall |v: Seq<char>| #[trigger] s2.store.versions.contains_key(v) implies s2.store.born.contains_key(v) && s2.store.born[v] <= s2.now by {
-            if v != e { assert(s.store.versions.contains_key(v)); }
+        assert forall |v: Seq<char>| #[trigger] s2.hist.versions.contains_key(v) implies s2.hist.born.contains_key(v) && s2.hist.born[v] <= s2.now by {
+            if v != e { assert(s.hist.versions.contains_key(v)); }
         }
     }
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
-            &&& s2.store.keeper.contains_key(q)
-            &&& s2.store.timers.contains(s2.store.keeper[q])
-            &&& s2.store.keeper[q].origin == q
-            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+            &&& s2.hist.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.hist.keeper[q])
+            &&& s2.hist.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.hist.keeper[q].at)
         } by {
             if q == o {
                 assert(c.deadline is Some);
@@ -1197,7 +1198,7 @@ proof fn lemma_disarm(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     let q0 = spec_to_disarm(c).unwrap();
     assert(inv_txn(p, s, i, o));
     assert(c.previous == Some(q0));
-    assert(s.store.armer[q0] == i && q0.origin == o);
+    assert(s.hist.armer[q0] == i && q0.origin == o);
     assert(c.changed && (c.deadline is None || c.rearm));
     assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) implies inv_node(p, s2, j) by {
         assert(inv_node(p, s, j));
@@ -1215,7 +1216,7 @@ proof fn lemma_disarm(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
             let k = y.c.armed_now.unwrap();
             if k == q0 {
                 // the same key: same armer and origin, so this node's own on o — but this node's only commit on o is x, whose key is not its previous
-                assert(s.store.armer[k] == j);
+                assert(s.hist.armer[k] == j);
                 assert(j == i);
                 assert(k.origin == q);
                 assert(q == o);
@@ -1232,14 +1233,14 @@ proof fn lemma_disarm(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert(inv_store(s2));
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
-            &&& s2.store.keeper.contains_key(q)
-            &&& s2.store.timers.contains(s2.store.keeper[q])
-            &&& s2.store.keeper[q].origin == q
-            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+            &&& s2.hist.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.hist.keeper[q])
+            &&& s2.hist.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.hist.keeper[q].at)
         } by {
             assert(s.store.docs.contains_key(q) && has_any(s.store.docs[q]));
             if q == o {
-                let kp = s.store.keeper[o];
+                let kp = s.hist.keeper[o];
                 if kept_covers(s, o, x) {
                     if c.deadline is None {
                         assert(!has_any(s.store.docs[o]));
@@ -1254,8 +1255,8 @@ proof fn lemma_disarm(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
                     assert(kp != q0);
                 }
             } else {
-                assert(s.store.keeper[q].origin == q);
-                assert(s.store.keeper[q] != q0);
+                assert(s.hist.keeper[q].origin == q);
+                assert(s.hist.keeper[q] != q0);
             }
         }
     }
@@ -1327,29 +1328,29 @@ proof fn lemma_finish_armed(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
                 assert(kept_covers(s, o, x));
                 assert(has_deadline(x.new, c.deadline.unwrap()));
             }
-            assert(s.store.writer[e] == i);
+            assert(s.hist.writer[e] == i);
             assert forall |j2: Id| #[trigger] s2.nodes.contains_key(j2) && j2 != i && s2.nodes[j2].txns.contains_key(o) && s2.nodes[j2].txns[o].phase is Written
-                && s2.store.born_seq[e] >= s2.store.born_seq[s2.nodes[j2].txns[o].cur.unwrap()]
+                && s2.hist.born_seq[e] >= s2.hist.born_seq[s2.nodes[j2].txns[o].cur.unwrap()]
                 implies Some(k) != s2.nodes[j2].txns[o].c.fired by {
                 let y = s.nodes[j2].txns[o];
                 assert(inv_txn(p, s, j2, o));
                 let ey = y.cur.unwrap();
-                assert(s.store.writer[ey] == j2);
+                assert(s.hist.writer[ey] == j2);
                 assert(ey != e);
-                assert(s.store.born_seq[ey] != s.store.born_seq[e]);
-                assert(s.store.born_seq[ey] < s.store.born_seq[e]);
-                assert(x.lseq >= s.store.born_seq[ey]);
-                assert(s.store.born_seq[ey] >= y.seq0);
+                assert(s.hist.born_seq[ey] != s.hist.born_seq[e]);
+                assert(s.hist.born_seq[ey] < s.hist.born_seq[e]);
+                assert(x.lseq >= s.hist.born_seq[ey]);
+                assert(s.hist.born_seq[ey] >= y.seq0);
                 if y.c.fired is Some {
                     let f = y.c.fired.unwrap();
-                    assert(s.store.armed_seq[f] < y.seq0);
+                    assert(s.hist.armed_seq[f] < y.seq0);
                     if c.rearm {
-                        assert(s.store.armed_seq[k] >= x.seq0);
+                        assert(s.hist.armed_seq[k] >= x.seq0);
                         assert(k != f);
                     } else {
                         assert(n.core.armed.contains_key(o) && n.core.armed[o].key == k && Some(n.core.armed[o].etag) == x.letag);
                         assert(inv_armed(s, i, o));
-                        assert(s.store.born_seq[n.core.armed[o].etag] == x.lseq);
+                        assert(s.hist.born_seq[n.core.armed[o].etag] == x.lseq);
                         assert(Some(k) != y.c.fired);
                     }
                 }
@@ -1385,11 +1386,11 @@ proof fn lemma_finish_txns(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin,
                 if j == i { assert(y == x); assert(false); }
                 // y loaded the bucket's version, which is this commit's or later; its key was armed after
                 assert(y.letag == y.cur && y.cur == s.store.etag(o));
-                assert(y.lseq == s.store.born_seq[s.store.etags[o]]);
-                assert(s.store.born_seq[s.store.etags[o]] >= s.store.born_seq[x.cur.unwrap()]);
-                assert(s.store.born_seq[x.cur.unwrap()] >= x.seq0);
-                assert(s.store.armed_seq[f] < x.seq0);
-                assert(s.store.armed_seq[k] >= y.seq0);
+                assert(y.lseq == s.hist.born_seq[s.store.etags[o]]);
+                assert(s.hist.born_seq[s.store.etags[o]] >= s.hist.born_seq[x.cur.unwrap()]);
+                assert(s.hist.born_seq[x.cur.unwrap()] >= x.seq0);
+                assert(s.hist.armed_seq[f] < x.seq0);
+                assert(s.hist.armed_seq[k] >= y.seq0);
                 assert(y.seq0 >= y.lseq);
                 assert(false);
             }
@@ -1430,26 +1431,26 @@ proof fn lemma_finish_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
     let kept = spec_keep(c);
     assert(inv_written(s2)) by {
         // finish touches the timers alone
-        assert(s2.store.written == s.store.written && s2.store.configs == s.store.configs
+        assert(s2.hist.written == s.hist.written && s2.hist.configs == s.hist.configs
             && s2.store.config == s.store.config && s2.now == s.now);
     }
     assert(inv_store(s2)) by {
-        assert(s2.store.docs == s.store.docs && s2.store.versions == s.store.versions && s2.store.armer == s.store.armer && s2.store.counter == s.store.counter);
-        assert forall |k: AKey| #[trigger] s2.store.timers.contains(k) implies s.store.armer.contains_key(k) by {
+        assert(s2.store.docs == s.store.docs && s2.hist.versions == s.hist.versions && s2.hist.armer == s.hist.armer && s2.hist.counter == s.hist.counter);
+        assert forall |k: AKey| #[trigger] s2.store.timers.contains(k) implies s.hist.armer.contains_key(k) by {
             assert(s.store.timers.contains(k));
         }
     }
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
-            &&& s2.store.keeper.contains_key(q)
-            &&& s2.store.timers.contains(s2.store.keeper[q])
-            &&& s2.store.keeper[q].origin == q
-            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+            &&& s2.hist.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.hist.keeper[q])
+            &&& s2.hist.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.hist.keeper[q].at)
         } by {
             assert(s.store.docs.contains_key(q) && has_any(s.store.docs[q]));
             if deleted {
                 let f = c.fired.unwrap();
-                let kp = s.store.keeper[q];
+                let kp = s.hist.keeper[q];
                 if q == o {
                     if kept_covers(s, o, x) {
                         if c.deadline is None {
@@ -1626,37 +1627,37 @@ proof fn lemma_collect_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origi
             &&& s2.store.stamps.contains_key(q)
             &&& s2.store.stamps[q] <= MAX_TIME
             &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
-            &&& s2.store.versions.contains_key(s2.store.etags[q])
-            &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
+            &&& s2.hist.versions.contains_key(s2.store.etags[q])
+            &&& s2.hist.versions[s2.store.etags[q]] == s2.store.docs[q]
         } by {
             if q != o {
                 assert(s.store.docs.contains_key(q));
             }
         }
-        assert forall |v: Seq<char>| #[trigger] s2.store.versions.contains_key(v) implies s2.store.born.contains_key(v) && s2.store.born[v] <= s2.now by {
-            if v != e { assert(s.store.versions.contains_key(v)); }
+        assert forall |v: Seq<char>| #[trigger] s2.hist.versions.contains_key(v) implies s2.hist.born.contains_key(v) && s2.hist.born[v] <= s2.now by {
+            if v != e { assert(s.hist.versions.contains_key(v)); }
         }
     }
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
-            &&& s2.store.keeper.contains_key(q)
-            &&& s2.store.timers.contains(s2.store.keeper[q])
-            &&& s2.store.keeper[q].origin == q
-            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+            &&& s2.hist.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.hist.keeper[q])
+            &&& s2.hist.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.hist.keeper[q].at)
         } by {
             if q == o {
                 assert(s2.store.docs[o] == x.loaded);
                 assert(s.store.docs.contains_key(o));
                 assert(has_any(s.store.docs[o]));
-                let kp = s.store.keeper[o];
+                let kp = s.hist.keeper[o];
                 assert(has_deadline(x.loaded, kp.at));
                 assert(kp.at > x.t);
                 assert(k.at <= x.t);
                 assert(kp != k);
             } else {
                 assert(s.store.docs.contains_key(q) && has_any(s.store.docs[q]));
-                assert(s.store.keeper[q].origin == q);
-                assert(s.store.keeper[q] != k);
+                assert(s.hist.keeper[q].origin == q);
+                assert(s.hist.keeper[q] != k);
             }
         }
     }
@@ -1722,7 +1723,7 @@ proof fn lemma_give_up(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
         assert(inv_armed(s, i, q));
         let a = s2.nodes[i].core.armed[q];
         assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
-            && s2.store.born_seq[a.etag] >= s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()]
+            && s2.hist.born_seq[a.etag] >= s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()]
             implies Some(a.key) != s2.nodes[j].txns[q].c.fired by {
             assert(s2.nodes[j] == s.nodes[j]);
         }
@@ -1732,8 +1733,8 @@ proof fn lemma_give_up(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin)
         let x = s2.nodes[i].txns[q];
         if x.phase is Written {
             assert forall |j: Id| #[trigger] s2.nodes.contains_key(j) && j != i && s2.nodes[j].txns.contains_key(q) && s2.nodes[j].txns[q].phase is Written
-                && s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()] < s2.store.born_seq[x.cur.unwrap()]
-                implies x.lseq >= s2.store.born_seq[s2.nodes[j].txns[q].cur.unwrap()] by {
+                && s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()] < s2.hist.born_seq[x.cur.unwrap()]
+                implies x.lseq >= s2.hist.born_seq[s2.nodes[j].txns[q].cur.unwrap()] by {
                 assert(s2.nodes[j] == s.nodes[j]);
             }
         }
@@ -1883,23 +1884,23 @@ proof fn lemma_cu_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin, e:
             &&& s2.store.stamps.contains_key(q)
             &&& s2.store.stamps[q] <= MAX_TIME
             &&& echod_kernel::properties::inv(s2.store.stamps[q], full(s2.store.docs[q]))
-            &&& s2.store.versions.contains_key(s2.store.etags[q])
-            &&& s2.store.versions[s2.store.etags[q]] == s2.store.docs[q]
+            &&& s2.hist.versions.contains_key(s2.store.etags[q])
+            &&& s2.hist.versions[s2.store.etags[q]] == s2.store.docs[q]
         } by {
             if q != o {
                 assert(s.store.docs.contains_key(q));
             }
         }
-        assert forall |v: Seq<char>| #[trigger] s2.store.versions.contains_key(v) implies s2.store.born.contains_key(v) && s2.store.born[v] <= s2.now by {
-            if v != e { assert(s.store.versions.contains_key(v)); }
+        assert forall |v: Seq<char>| #[trigger] s2.hist.versions.contains_key(v) implies s2.hist.born.contains_key(v) && s2.hist.born[v] <= s2.now by {
+            if v != e { assert(s.hist.versions.contains_key(v)); }
         }
     }
     assert(inv_timer(s2)) by {
         assert forall |q: Origin| #[trigger] s2.store.docs.contains_key(q) && has_any(s2.store.docs[q]) implies {
-            &&& s2.store.keeper.contains_key(q)
-            &&& s2.store.timers.contains(s2.store.keeper[q])
-            &&& s2.store.keeper[q].origin == q
-            &&& is_next(s2.store.docs[q], s2.store.keeper[q].at)
+            &&& s2.hist.keeper.contains_key(q)
+            &&& s2.store.timers.contains(s2.hist.keeper[q])
+            &&& s2.hist.keeper[q].origin == q
+            &&& is_next(s2.store.docs[q], s2.hist.keeper[q].at)
         } by {
             if q == o {
                 assert(s2.store.docs[o] == x.loaded);
@@ -2010,17 +2011,19 @@ pub proof fn not_vacuous(p: Params, o: Origin)
             docs: Map::empty().insert(o, empty),
             etags: Map::empty().insert(o, e),
             stamps: Map::empty().insert(o, 0),
+            timers: Set::empty(),
+            config: Config { epoch: 0, members: seq![me] },
+        },
+        hist: History {
             versions: Map::empty().insert(e, empty),
             born: Map::empty().insert(e, now),
-            configs: Map::empty().insert(0, seq![me]),
-            keeper: Map::empty(),
-            timers: Set::empty(),
+            writer: Map::empty().insert(e, me),
             armer: Map::empty(),
+            keeper: Map::empty(),
             counter: 1,
             armed_seq: Map::empty(),
             born_seq: Map::empty().insert(e, 0),
-            writer: Map::empty().insert(e, me),
-            config: Config { epoch: 0, members: seq![me] },
+            configs: Map::empty().insert(0, seq![me]),
             written: Map::empty().insert(0, 0),
         },
     };

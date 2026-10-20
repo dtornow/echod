@@ -44,35 +44,46 @@ pub struct Config {
     pub members: Seq<Id>,
 }
 
+/// The bucket: what it holds, and nothing it does not.
 pub struct Store {
     /// Each origin's document. Absent means no object.
     pub docs: Map<Origin, Doc>,
     /// Each document's version: its ETag. Same domain as `docs`.
     pub etags: Map<Origin, Seq<char>>,
-    /// The instant of the step that wrote each document. Same domain as `docs`.
+    /// The instant of the step that wrote each document, carried in the
+    /// object's header. Same domain as `docs`.
     pub stamps: Map<Origin, nat>,
-    /// Ghost: every version ever written, with its content. A write's version is new.
-    pub versions: Map<Seq<char>, Doc>,
-    /// Ghost: the real time each version was written at.
-    pub born: Map<Seq<char>, nat>,
-    /// Ghost: every epoch's members, for epochs up to the current.
-    pub configs: Map<nat, Seq<Id>>,
-    /// Ghost: the key that covers each document's nearest deadline — the one
-    /// the last write kept.
-    pub keeper: Map<Origin, AKey>,
     /// The deadline keys in the bucket.
     pub timers: Set<AKey>,
-    /// Ghost: every key ever armed, and by whom. An arm's key is new.
+    /// The configuration object.
+    pub config: Config,
+}
+
+/// What the proof remembers of the bucket's past. Ghost: no node reads any
+/// of it, and no action's guard depends on it except two that state what is
+/// assumed of S3 — a new version is never a version seen before, a new key
+/// never a key seen before. An inductive invariant is a predicate on one
+/// state; what it has to say about the past is recorded here.
+pub struct History {
+    /// Every version ever written, with its content.
+    pub versions: Map<Seq<char>, Doc>,
+    /// The real time each version was written at.
+    pub born: Map<Seq<char>, nat>,
+    /// The node that wrote each version.
+    pub writer: Map<Seq<char>, Id>,
+    /// Every key ever armed, and by whom.
     pub armer: Map<AKey, Id>,
-    /// Ghost: the order of events in the bucket. Every arm and every write
-    /// takes the next number: `armed_seq` for keys, `born_seq` for versions.
+    /// The key that covers each document's nearest deadline: the one the
+    /// last write kept.
+    pub keeper: Map<Origin, AKey>,
+    /// The order of events in the bucket. Every arm and every write takes
+    /// the next number: `armed_seq` for keys, `born_seq` for versions.
     pub counter: nat,
     pub armed_seq: Map<AKey, nat>,
     pub born_seq: Map<Seq<char>, nat>,
-    /// Ghost: the node that wrote each version.
-    pub writer: Map<Seq<char>, Id>,
-    pub config: Config,
-    /// Ghost: the real time each epoch was written at, for epochs up to the current.
+    /// Every epoch's members, and the real time each was written at, for
+    /// epochs up to the current.
+    pub configs: Map<nat, Seq<Id>>,
     pub written: Map<nat, nat>,
 }
 
@@ -145,6 +156,8 @@ pub struct Cluster {
     pub now: nat,
     pub nodes: Map<Id, Node>,
     pub store: Store,
+    /// Ghost: the bucket's past.
+    pub hist: History,
 }
 
 /// The constants: a view is fresh for `ttl` after it was read; a clock is
@@ -270,18 +283,18 @@ pub open spec fn init_state(s: Cluster) -> bool {
     &&& s.store.docs == Map::<Origin, Doc>::empty()
     &&& s.store.etags == Map::<Origin, Seq<char>>::empty()
     &&& s.store.stamps == Map::<Origin, nat>::empty()
-    &&& s.store.versions == Map::<Seq<char>, Doc>::empty()
-    &&& s.store.born == Map::<Seq<char>, nat>::empty()
-    &&& s.store.configs == Map::<nat, Seq<Id>>::empty().insert(0, Seq::empty())
-    &&& s.store.keeper == Map::<Origin, AKey>::empty()
     &&& s.store.timers == Set::<AKey>::empty()
-    &&& s.store.armer == Map::<AKey, Id>::empty()
-    &&& s.store.counter == 0
-    &&& s.store.armed_seq == Map::<AKey, nat>::empty()
-    &&& s.store.born_seq == Map::<Seq<char>, nat>::empty()
-    &&& s.store.writer == Map::<Seq<char>, Id>::empty()
     &&& s.store.config == Config { epoch: 0, members: Seq::empty() }
-    &&& s.store.written == Map::<nat, nat>::empty().insert(0, 0)
+    &&& s.hist.versions == Map::<Seq<char>, Doc>::empty()
+    &&& s.hist.born == Map::<Seq<char>, nat>::empty()
+    &&& s.hist.writer == Map::<Seq<char>, Id>::empty()
+    &&& s.hist.armer == Map::<AKey, Id>::empty()
+    &&& s.hist.keeper == Map::<Origin, AKey>::empty()
+    &&& s.hist.counter == 0
+    &&& s.hist.armed_seq == Map::<AKey, nat>::empty()
+    &&& s.hist.born_seq == Map::<Seq<char>, nat>::empty()
+    &&& s.hist.configs == Map::<nat, Seq<Id>>::empty().insert(0, Seq::empty())
+    &&& s.hist.written == Map::<nat, nat>::empty().insert(0, 0)
 }
 
 pub open spec fn clock_ok(p: Params, now: nat, clock: nat) -> bool {
@@ -349,7 +362,8 @@ pub open spec fn propose(s: Cluster, i: Id, members: Seq<Id>) -> Option<Cluster>
     if s.nodes.contains_key(i) && s.nodes[i].alive {
         let e = s.store.config.epoch + 1;
         Some(Cluster {
-            store: Store { config: Config { epoch: e, members }, written: s.store.written.insert(e, s.now), configs: s.store.configs.insert(e, members), ..s.store },
+            store: Store { config: Config { epoch: e, members }, ..s.store },
+            hist: History { written: s.hist.written.insert(e, s.now), configs: s.hist.configs.insert(e, members), ..s.hist },
             ..s
         })
     } else {
@@ -376,7 +390,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
     if s.nodes.contains_key(i) && acts(n, o) && !n.txns.contains_key(o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
         && (match fired {
-            Some(k) => k.origin == o && k.at <= n.clock && s.store.armer.contains_key(k) && swept(t, loaded, new, did),
+            Some(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did),
             None => !did && kreach(t, loaded, new),
         })
         && next_is(new, deadline)
@@ -399,9 +413,9 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
             epoch: n.core.epoch,
             held_real: n.held_real,
             lr: n.last_read_real,
-            seq0: s.store.counter,
+            seq0: s.hist.counter,
             letag: s.store.etag(o),
-            lseq: match s.store.etag(o) { Some(e) => s.store.born_seq[e], None => 0 },
+            lseq: match s.store.etag(o) { Some(e) => s.hist.born_seq[e], None => 0 },
         };
         Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
     } else {
@@ -413,22 +427,36 @@ pub open spec fn arm(s: Cluster, i: Id, o: Origin, k: AKey) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && x.c.rearm
-        && k.origin == o && Some(k.at) == x.c.deadline && !s.store.armer.contains_key(k)
+        && k.origin == o && Some(k.at) == x.c.deadline && !s.hist.armer.contains_key(k)
     {
         let x2 = Flight { c: spec_armed(x.c, k), phase: Phase::Armed, ..x };
         Some(Cluster {
             nodes: s.nodes.insert(i, Node { txns: n.txns.insert(o, x2), ..n }),
-            store: Store {
-                timers: s.store.timers.insert(k),
-                armer: s.store.armer.insert(k, i),
-                armed_seq: s.store.armed_seq.insert(k, s.store.counter),
-                counter: s.store.counter + 1,
-                ..s.store
+            store: Store { timers: s.store.timers.insert(k), ..s.store },
+            hist: History {
+                armer: s.hist.armer.insert(k, i),
+                armed_seq: s.hist.armed_seq.insert(k, s.hist.counter),
+                counter: s.hist.counter + 1,
+                ..s.hist
             },
             ..s
         })
     } else {
         None
+    }
+}
+
+/// What the history records of a write: version `e` holding `d`, by `i`,
+/// now, next in the order of events; and which key covers the document.
+pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Origin, AKey>) -> History {
+    History {
+        versions: s.hist.versions.insert(e, d),
+        born: s.hist.born.insert(e, s.now),
+        born_seq: s.hist.born_seq.insert(e, s.hist.counter),
+        writer: s.hist.writer.insert(e, i),
+        counter: s.hist.counter + 1,
+        keeper,
+        ..s.hist
     }
 }
 
@@ -441,12 +469,12 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && ready(x)
-        && s.store.etag(o) == x.cur && !s.store.versions.contains_key(e)
+        && s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e)
     {
         let x2 = Flight { cur: Some(e), phase: Phase::Written, ..x };
         let keeper = match spec_keep(x.c) {
-            Some(k) => s.store.keeper.insert(o, k),
-            None => s.store.keeper.remove(o),
+            Some(k) => s.hist.keeper.insert(o, k),
+            None => s.hist.keeper.remove(o),
         };
         Some(Cluster {
             nodes: s.nodes.insert(i, Node { core: spec_filled(n.core, o, e, n.clock, true), bodies: n.bodies.insert(o, x.new), txns: n.txns.insert(o, x2), ..n }),
@@ -454,14 +482,9 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
                 docs: s.store.docs.insert(o, x.new),
                 etags: s.store.etags.insert(o, e),
                 stamps: s.store.stamps.insert(o, x.t),
-                versions: s.store.versions.insert(e, x.new),
-                born: s.store.born.insert(e, s.now),
-                born_seq: s.store.born_seq.insert(e, s.store.counter),
-                writer: s.store.writer.insert(e, i),
-                counter: s.store.counter + 1,
-                keeper,
                 ..s.store
             },
+            hist: written(s, e, x.new, i, keeper),
             ..s
         })
     } else {
@@ -521,7 +544,7 @@ pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<C
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
-        && s.store.etag(o) == x.cur && !s.store.versions.contains_key(e)
+        && s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e)
     {
         let k = x.c.fired.unwrap();
         Some(Cluster {
@@ -530,14 +553,10 @@ pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<C
                 docs: s.store.docs.insert(o, x.loaded),
                 etags: s.store.etags.insert(o, e),
                 stamps: s.store.stamps.insert(o, x.t),
-                versions: s.store.versions.insert(e, x.loaded),
-                born: s.store.born.insert(e, s.now),
-                born_seq: s.store.born_seq.insert(e, s.store.counter),
-                writer: s.store.writer.insert(e, i),
-                counter: s.store.counter + 1,
                 timers: s.store.timers.remove(k),
                 ..s.store
             },
+            hist: written(s, e, x.loaded, i, s.hist.keeper),
             ..s
         })
     } else {
@@ -609,24 +628,19 @@ pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, lan
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
-        && (landed ==> s.store.etag(o) == x.cur && !s.store.versions.contains_key(e))
+        && (landed ==> s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e))
     {
-        let store = if landed {
-            Store {
+        let (store, hist) = if landed {
+            (Store {
                 docs: s.store.docs.insert(o, x.loaded),
                 etags: s.store.etags.insert(o, e),
                 stamps: s.store.stamps.insert(o, x.t),
-                versions: s.store.versions.insert(e, x.loaded),
-                born: s.store.born.insert(e, s.now),
-                born_seq: s.store.born_seq.insert(e, s.store.counter),
-                writer: s.store.writer.insert(e, i),
-                counter: s.store.counter + 1,
                 ..s.store
-            }
+            }, written(s, e, x.loaded, i, s.hist.keeper))
         } else {
-            s.store
+            (s.store, s.hist)
         };
-        Some(give_up(Cluster { store, ..s }, i, o))
+        Some(give_up(Cluster { store, hist, ..s }, i, o))
     } else {
         None
     }

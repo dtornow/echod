@@ -335,9 +335,11 @@ The fleet state: real time (ghost), the nodes, the bucket. A node is its
 core's view, its body cache, whether it is alive, its clock, the commits it
 has in flight, and, ghost, real time at its last read and at its first
 read of the epoch held. The bucket has every document as a kernel state
-with its version and stamp, the deadline keys, the configuration (members,
-epoch) and, ghost, when each version was written, by which key each
-document is covered, who armed each key, and when each epoch was written.
+with its version and stamp, the deadline keys, and the configuration
+(members, epoch): five fields, what S3 holds. Beside it, ghost, a history
+the proof remembers and no node reads: every version written and by whom,
+every key armed and by whom, which key covers each document, one order of
+arms and writes, and when each version and each epoch was written.
 The actions: real time advances; a clock advances, within `skew` of real
 time; a node joins or crashes; a node reads the configuration or writes the
 next epoch; a node drops a cache entry; and the commit, one store operation
