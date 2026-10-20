@@ -29,8 +29,11 @@ sweeper entries.
 types.rs        rows, records, requests, responses; their abstract twins, derived
 ident.rs        ids; the three trusted string primitives
 tags.rs         tags: first match wins; otype, timer, target
+tags_proof.rs   what `get` returns
 store.rs        State: row vectors whose view is three maps, via the fold
+store_proof.rs  the fold lemmas and the row readers
 object.rs       projection, the per-object edits, birth
+object_proof.rs its two lemmas on `without`
 properties.rs   the catalogue, entry for entry, same names
 properties_proof.rs  its theorems: the frame every step ends with, and the folds
 external.rs     the 18 request handlers

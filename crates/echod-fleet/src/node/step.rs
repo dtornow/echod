@@ -15,6 +15,7 @@ use echod_kernel::external::*;
 use echod_kernel::internal::*;
 use echod_kernel::properties::*;
 use echod_kernel::store::*;
+use echod_kernel::store_proof::*;
 use echod_kernel::tags::OType;
 use echod_kernel::types::*;
 

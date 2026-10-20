@@ -20,6 +20,7 @@ use crate::object::*;
 use crate::properties::*;
 use crate::properties_proof::*;
 use crate::store::*;
+use crate::store_proof::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -87,7 +88,7 @@ impl State {
                 }
                 self.objects[i].project(now);
                 proof {
-                    crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                    crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)
             }
@@ -176,7 +177,7 @@ impl State {
                     let ghost before = self.objects@;
                     self.objects[i].settle(req.state, req.value.dup(), now);
                     proof {
-                        crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                        crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                         assert(self@.objects =~= a.objects.insert(req.id@, a.objects[req.id@].project(now as nat).settle(req.state, req.value@, now as nat)));
                         lemma_settle_legal(now as nat, a, self@, req.id@, req.state, req.value@);
                     }
@@ -241,7 +242,7 @@ impl State {
                 assert(a.objects[y].project(now as nat).state == PromiseState::Pending);
                 assert(a2.objects[x] == a.objects[x]);
                 assert(a2.objects[y] == a.objects[y]);
-                crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 assert(self@.objects =~= a.objects.insert(x, a.objects[x].add_callback(y)));
                 lemma_add_callback_legal(now as nat, a, self@, x, y);
             }
@@ -280,7 +281,7 @@ impl State {
                 let x = req.awaited@;
                 assert(a.objects[x].project(now as nat).state == PromiseState::Pending);
                 assert(a.objects[x].project(now as nat) == a.objects[x]);
-                crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 assert(self@.objects =~= a.objects.insert(x, a.objects[x].add_listener(req.address@)));
                 lemma_add_listener_legal(now as nat, a, self@, x, req.address@);
             }
@@ -425,7 +426,7 @@ impl State {
                 let ghost before = self.objects@;
                 self.objects[i].project(now);
                 proof {
-                    crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                    crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)
             }
@@ -513,7 +514,7 @@ impl State {
                 self.objects[i].task_acquire(&req.pid, req.ttl, now);
                 proof {
                     let x = act.id@;
-                    crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                    crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                     lemma_projected_task_identity(now as nat, a, x);
                     assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().acquire(req.pid@, req.ttl as nat, now as nat))));
                     lemma_acquire_legal(now as nat, a, self@, x, req.pid@, req.ttl as nat);
@@ -561,7 +562,7 @@ impl State {
         self.objects[i].task_acquire(&req.pid, req.ttl, now);
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             lemma_projected_task_identity(now as nat, a, x);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().acquire(req.pid@, req.ttl as nat, now as nat))));
             lemma_acquire_legal(now as nat, a, self@, x, req.pid@, req.ttl as nat);
@@ -606,7 +607,7 @@ impl State {
         self.objects[i].settle(req.action.state, req.action.value.dup(), now);
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].project(now as nat).settle(req.action.state, req.action.value@, now as nat)));
             lemma_settle_legal(now as nat, a, self@, x, req.action.state, req.action.value@);
         }
@@ -645,7 +646,7 @@ impl State {
         self.objects[i].task_release(now);
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             lemma_projected_task_identity(now as nat, a, x);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now as nat))));
             lemma_release_legal(now as nat, a, self@, x);
@@ -687,7 +688,7 @@ impl State {
         self.objects[i].task_halt();
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             lemma_projected_task_identity(now as nat, a, x);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().halt())));
             lemma_halt_legal(now as nat, a, self@, x);
@@ -726,7 +727,7 @@ impl State {
         self.objects[i].task_continue(now);
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             lemma_projected_task_identity(now as nat, a, x);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().continue_(now as nat))));
             lemma_continue_legal(now as nat, a, self@, x);
@@ -908,7 +909,7 @@ impl State {
                         }
                         self.objects[i].task_heartbeat(now);
                         proof {
-                            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                             assert(self@.objects =~= s0.objects.insert(x@, s0.objects[x@].with_task(s0.objects[x@].task.unwrap().heartbeat(now as nat))));
                             assert(heartbeat_shape(now as nat, s0, self@, x@));
                             assert forall|y: Seq<char>| !(y == x@) implies #[trigger] unchanged_at(s0, self@, y) by {}
@@ -1134,7 +1135,7 @@ impl State {
             let ghost before = self.objects@;
             self.objects[i].task_clear_resumes();
             proof {
-                crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+                crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 let ghost b = self@;
                 assert(b.objects[id] == a.objects[id].with_task(a.objects[id].task.unwrap().clear_resumes()));
                 assert forall|x: Seq<char>| #[trigger] awaited_of(acts, x) implies
@@ -1226,7 +1227,7 @@ impl State {
             let ghost before = self.objects@;
             self.objects[j].add_callback(&req.id);
             proof {
-                crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
+                crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
                 assert(self@.objects =~= s0.objects.insert(w@, s0.objects[w@].add_callback(id)));
                 assert(a.objects[w@].project(now as nat) == a.objects[w@]);
                 assert(a.objects[id].project(now as nat) == a.objects[id]);
@@ -1256,7 +1257,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].task_suspend();
         proof {
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             let ghost b = self@;
             assert(b.objects[id] == a.objects[id].with_task(a.objects[id].task.unwrap().suspend()));
             assert forall|x: Seq<char>| #[trigger] awaited_of(acts, x) implies

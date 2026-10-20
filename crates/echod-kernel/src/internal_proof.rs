@@ -7,6 +7,7 @@ use crate::external::*;
 use crate::external_proof::*;
 use crate::internal::*;
 use crate::object::*;
+use crate::object_proof::*;
 use crate::properties::*;
 use crate::properties_proof::*;
 use crate::store::*;

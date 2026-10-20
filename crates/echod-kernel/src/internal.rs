@@ -29,6 +29,7 @@ use crate::object::*;
 use crate::properties::*;
 use crate::properties_proof::*;
 use crate::store::*;
+use crate::store_proof::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -157,7 +158,7 @@ impl State {
         self.objects[i].task_release(now);
         proof {
             let x = req.id@;
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now as nat))));
             lemma_release_legal(now as nat, a, self@, x);
             lemma_internal_one(now as nat, a, self@, x);
@@ -198,7 +199,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].task_rearm(now, cfg.retry_timeout);
         proof {
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
         let e = OutboxEntry { address, message: Message::Execute { task_id: req.id.clone(), version } };
@@ -245,7 +246,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_listener(&req.address);
         proof {
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let rec = self.objects[i].to_record();
         let e = OutboxEntry { address: req.address.clone(), message: Message::Unblock(rec) };
@@ -302,7 +303,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_callback(&req.awaiter);
         proof {
-            crate::store::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
         // resumeOne
@@ -331,7 +332,7 @@ impl State {
             self.objects[j].task_buffer(&req.awaited);
         }
         proof {
-            crate::store::lemma_fold_update(before2, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
+            crate::store_proof::lemma_fold_update(before2, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
             lemma_callback_legal(now as nat, a, self@, x, y, true);
         }
     }
