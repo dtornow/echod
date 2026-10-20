@@ -68,7 +68,7 @@ impl Server {
         let store: Arc<dyn Store> = Arc::new(metrics::MeteredStore::new(store, keys.clone(), Arc::clone(&metrics)));
         let url = cfg.url.clone().unwrap_or_else(|| format!("http://{}", cfg.bind.replace("0.0.0.0", "127.0.0.1")));
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", crate::keys::fnv1a(&format!("{}/{}", url, clock.now()))));
-        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms, cfg.clock_skew_ms, Arc::clone(&clock), Arc::clone(&metrics)));
+        let nodes = Arc::new(Nodes::new(Arc::clone(&store), keys.clone(), id, url.clone(), Duration::from_millis(cfg.heartbeat_ms), cfg.node_ttl_ms, Arc::clone(&clock), Arc::clone(&metrics)));
         let wheel = Arc::new(TimerWheel::new());
         let cache: Arc<dyn crate::cache::Cache> = Arc::new(crate::cache::MemoryCache::new(cfg.cache_entries, cfg.cache_bytes));
         let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, Arc::clone(&cache), Arc::clone(&clock), observer, Arc::clone(&metrics)));
@@ -116,7 +116,7 @@ impl Server {
     }
 
     /// Whether this node acts as owner of what the members make it the
-    /// owner of: fresh, in a configuration with members, past the grace.
+    /// owner of: fresh, in a configuration with members.
     pub fn acting(&self) -> bool {
         self.nodes.acting()
     }
@@ -180,12 +180,9 @@ impl Server {
             Ok(None) => return (self.dispatch(req, None, now).await.map(|resp| (resp, me)), here),
             Err(e) => return (Ok((ResponseEnvelope::error(req.kind.clone(), req.head.corr_id.clone(), 400, &e), me)), here),
         };
-        // A node that cannot see the membership may be fenced out without
-        // knowing it: it serves nothing until it can read.
-        let fleet_now = self.nodes.now();
-        if !self.nodes.fresh(fleet_now) {
-            return (Err(Unavailable::new("this node's view of the membership is stale")), here);
-        }
+        // Forward to the node the members make the owner, for its cache and
+        // its wheel; serve here otherwise. Safety does not depend on which
+        // node writes: every write is conditional on the version loaded.
         if !forwarded && self.cfg.forward {
             if let Some(owner) = self.nodes.owner(&origin).filter(|o| o.id != me) {
                 let started = std::time::Instant::now();
@@ -193,10 +190,6 @@ impl Server {
                 self.metrics.forward(if r.is_ok() { metrics::ForwardOutcome::Answered } else { metrics::ForwardOutcome::Unavailable }, started);
                 return (r.map(|resp| (resp, owner.id)), Route::Forwarded);
             }
-        }
-        // Only the acting owner writes an origin: the proof's one writer.
-        if !self.nodes.acts(&origin, fleet_now) {
-            return (Err(Unavailable::new("this node does not act as owner of the origin yet")), here);
         }
         (self.dispatch(req, Some(origin), now).await.map(|resp| (resp, me)), here)
     }
@@ -486,10 +479,10 @@ impl ResonateServer for Server {
         Ok(())
     }
 
-    /// Ready to serve: the store answers, and this node acts, past the
-    /// grace since it read its configuration. A node that is not acting
-    /// yet answers 503 to every request for an origin it owns, so a load
-    /// balancer should not send it any.
+    /// Ready to serve: the store answers, and this node has read a
+    /// configuration naming it, so it forwards and fires deadlines as the
+    /// members intend. It would answer correctly before that; it would
+    /// not route.
     async fn ready(&self) -> bool {
         self.store.ready().await && self.acting()
     }

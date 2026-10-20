@@ -6,23 +6,27 @@
 //! in; whoever sees the announced set differ from it writes the next epoch
 //! with a conditional put, so epochs are totally ordered and every node that
 //! reads the object reads the same sequence. A node keeps the epoch and the
-//! members it read, when it read them, and when it first read the epoch it
-//! holds. It acts as owner of an origin only when its view is fresh (read
-//! within a TTL), its members make it the owner, and it has held its epoch
-//! for the grace; and it trusts a cache entry only if the entry was filled
-//! while it was acting. Writes are conditional on the version read.
+//! members it read and when it read them. It acts as owner of an origin
+//! when its view is fresh (read within a TTL, by its own clock) and its
+//! members make it the owner.
 //!
-//! The state behind those rules, and the decisions, are not here: they are
+//! None of this is safety. Writes are conditional on the version read, and
+//! `echod-fleet` proves the documents correct and every deadline covered
+//! whichever node acts; a node's cache is used only once a conditional read
+//! has confirmed its version. Membership steers where requests go, which
+//! node caches an origin, and which node fires its deadlines: two nodes
+//! acting on one origin at once waste work, and nothing more.
+//!
+//! The state behind the rules, and the decisions, are not here: they are
 //! `echod_fleet::node::core::NodeCore`, executable Rust verified to compute
-//! the fleet model's specification functions step for step, the model
-//! `echod-fleet` proves exclusive and sound under bounded clock skew with
-//! `grace > ttl + 4 skew`. This module is the trusted shim around that
-//! core: it announces, lists, reads the configuration object and hands the
-//! result to `read_config`; it asks `acts` and `trusts`; it reports every
-//! document version read or written with `filled`, and every entry dropped
-//! with `forget`. Membership is decided on the fleet's time, the later of a
-//! node's clock and the latest announcement it listed, which absorbs a
-//! clock that steps back or runs slow.
+//! the fleet model's specification functions step for step. This module is
+//! the trusted shim around that core: it announces, lists, reads the
+//! configuration object and hands the result to `read_config`; it asks
+//! `acts`; it reports every document version read or written with
+//! `filled`, and every entry dropped with `forget`. Membership is decided
+//! on the fleet's time, the later of a node's clock and the latest
+//! announcement it listed, which absorbs a clock that steps back or runs
+//! slow.
 //!
 //! Ownership is `hash(key) mod n` over the members in order. A load balancer
 //! that applies the same function over `nodes/members` sends every request
@@ -65,9 +69,8 @@ pub struct Membership {
     pub members: Vec<String>,
     /// The ETag of the configuration object read, for the next conditional put.
     pub etag: Option<Etag>,
-    /// When the configuration was last read, and when the epoch held was first read.
+    /// When the configuration was last read.
     pub last_read: u64,
-    pub held: u64,
     pub read_any: bool,
 }
 
@@ -92,8 +95,6 @@ pub struct Nodes {
     me: RwLock<Announcement>,
     heartbeat: Duration,
     ttl: u64,
-    /// The grace: `ttl + 4 skew`, and one more.
-    grace: u64,
     /// The verified node: its view of the configuration and its cache's versions.
     core: Mutex<NodeCore>,
     listing: RwLock<Listing>,
@@ -106,20 +107,15 @@ pub struct Nodes {
 }
 
 impl Nodes {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, skew: u64, clock: Arc<dyn crate::env::Clock>, metrics: Arc<Metrics>) -> Self {
-        let grace = ttl + 4 * skew + 1;
-        let core = NodeCore::new(id.clone(), ttl, grace);
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, id: String, url: String, heartbeat: Duration, ttl: u64, clock: Arc<dyn crate::env::Clock>, metrics: Arc<Metrics>) -> Self {
+        let core = NodeCore::new(id.clone(), ttl);
         let me = Announcement { id, url, at: 0 };
         let (generation, _) = tokio::sync::watch::channel(0);
-        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, grace, core: Mutex::new(core), listing: RwLock::new(Listing::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation, metrics }
+        Self { store, keys, me: RwLock::new(me), heartbeat, ttl, core: Mutex::new(core), listing: RwLock::new(Listing::default()), clock, fleet_at: std::sync::atomic::AtomicU64::new(0), generation, metrics }
     }
 
     fn core(&self) -> std::sync::MutexGuard<'_, NodeCore> {
         self.core.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn grace(&self) -> u64 {
-        self.grace
     }
 
     /// The fleet's time: this node's clock, or the latest announcement it has
@@ -156,7 +152,7 @@ impl Nodes {
     pub fn members(&self) -> Membership {
         let l = self.listing.read().unwrap_or_else(|e| e.into_inner());
         let c = self.core();
-        Membership { nodes: l.nodes.clone(), epoch: c.epoch, members: c.members.clone(), etag: l.etag.clone(), last_read: c.last_read, held: c.held, read_any: c.read_any }
+        Membership { nodes: l.nodes.clone(), epoch: c.epoch, members: c.members.clone(), etag: l.etag.clone(), last_read: c.last_read, read_any: c.read_any }
     }
 
     /// Is this node the owner of `key` per the members it holds? No while
@@ -187,35 +183,23 @@ impl Nodes {
     }
 
     /// Whether this node acts as owner of what the members make it the
-    /// owner of: fresh, in a configuration with members, past the grace.
+    /// owner of: fresh, in a configuration with members.
     pub fn acting(&self) -> bool {
         let now = self.now();
         let c = self.core();
-        !c.members.is_empty() && c.fresh(now) && c.held + self.grace <= now
+        !c.members.is_empty() && c.fresh(now)
     }
 
-    /// Does this node act as owner of `key` right now: fresh, the owner per
-    /// its members, and holding its epoch for the grace? The model's `acts`.
+    /// Does this node act as owner of `key` right now: fresh, and the owner
+    /// per its members? The core's `acts`. Routing, not safety.
     pub fn acts(&self, key: &str, now: u64) -> bool {
         self.core().acts(key, now)
     }
 
-    /// May this node answer `origin` from its cache: does it act on it, and
-    /// was the version it remembers filled while it acted? The model's
-    /// `trusts`. The version it remembers is returned, for the caller to
-    /// match against the body it holds.
-    pub fn trusts(&self, origin: &str, now: u64) -> Option<Etag> {
-        let c = self.core();
-        if !c.trusts(origin, now) {
-            return None;
-        }
-        c.entry(origin).map(|e| Etag(e.etag.clone()))
-    }
-
-    /// This node read `origin` at version `etag` from the bucket (`wrote`
-    /// false), or wrote it there (`wrote` true), at `now`.
-    pub fn filled(&self, origin: &str, etag: &Etag, now: u64, wrote: bool) {
-        self.core().filled(origin, etag.0.clone(), now, wrote);
+    /// This node read `origin` at version `etag` from the bucket, or wrote
+    /// it there, at `now`.
+    pub fn filled(&self, origin: &str, etag: &Etag, now: u64) {
+        self.core().filled(origin, etag.0.clone(), now);
     }
 
     /// Begin a commit on `origin`, loaded at `etag`: `NodeCore::begin`.

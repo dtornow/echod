@@ -12,12 +12,11 @@
 //! reason, and only then deletes the key. A lost race re-reads and re-decides.
 //!
 //! The cache holds the last document this node read or wrote for an origin.
-//! Whether it may be used without asking the store is the verified node's
-//! decision (`Nodes::trusts`): the acting owner trusts a version it wrote
-//! itself while acting, since no write by an earlier owner can land on it.
-//! Anything else revalidates with `If-None-Match`. Every version read or
-//! written, and every entry dropped, is reported to the node, so what it
-//! decides on is what the cache holds.
+//! It is never used without asking the store: every load revalidates with
+//! `If-None-Match`, and the body is used only when the store says the
+//! version held is current (the fleet's revalidation theorem). Every
+//! version read or written, and every entry dropped, is reported to the
+//! node, so what it decides on is what the cache holds.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -121,13 +120,13 @@ impl Applier {
     }
 
     /// Remember a document and report its version to the node: read
-    /// (`wrote` false) or written by this node (`wrote` true).
-    fn remember(&self, origin: &str, c: Cached, wrote: bool) {
+    /// or wrote.
+    fn remember(&self, origin: &str, c: Cached) {
         let (etag, filled_at) = (c.etag.clone(), c.filled_at);
         for evicted in self.cache.put(origin, c) {
             self.nodes.forget(&evicted);
         }
-        self.nodes.filled(origin, &etag, filled_at, wrote);
+        self.nodes.filled(origin, &etag, filled_at);
     }
 
     pub fn forget(&self, origin: &str) {
@@ -182,22 +181,17 @@ impl Applier {
         }
     }
 
-    /// Load an origin's document: from the cache when the node trusts the
-    /// version it holds, revalidated against the store otherwise. Cache
-    /// bookkeeping is on the fleet's time, the frame the membership rules
-    /// are stated in.
+    /// Load an origin's document: revalidated against the store when the
+    /// cache holds a version, read in full otherwise. Cache bookkeeping is
+    /// on the fleet's time.
     async fn load(&self, origin: &str) -> Result<(Loaded, Option<Etag>), Unavailable> {
         let now = self.nodes.now();
         let key = self.keys.doc_key(origin);
         if let Some(c) = self.cached(origin) {
-            if self.nodes.trusts(origin, now).as_ref() == Some(&c.etag) {
-                self.metrics.cache(CacheResult::Trusted);
-                return Ok((c.loaded, Some(c.etag)));
-            }
             match self.store.get_if_none_match(&key, &c.etag).await.map_err(unavailable)? {
                 Read::NotModified => {
                     self.metrics.cache(CacheResult::Revalidated);
-                    self.remember(origin, Cached { filled_at: now, ..c.clone() }, false);
+                    self.remember(origin, Cached { filled_at: now, ..c.clone() });
                     return Ok((c.loaded, Some(c.etag)));
                 }
                 Read::Absent => {
@@ -208,7 +202,7 @@ impl Applier {
                 Read::Body(bytes, etag) => {
                     self.metrics.cache(CacheResult::Refreshed);
                     let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now }, false);
+                    self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                     return Ok((loaded, Some(etag)));
                 }
             }
@@ -218,7 +212,7 @@ impl Applier {
             None => Ok((Loaded::empty(), None)),
             Some((bytes, etag)) => {
                 let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
-                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now }, false);
+                self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                 Ok((loaded, Some(etag)))
             }
         }
@@ -328,7 +322,7 @@ impl Applier {
                 let body = doc::encode(&header, rows);
                 let etag = self.store.put_if_none_match(&key, body.clone()).await?;
                 self.metrics.document_write(WriteMode::Create, body.len());
-                self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: etag.clone(), filled_at: fleet_now }, true);
+                self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: etag.clone(), filled_at: fleet_now });
                 etag
             }
             Some(etag) => {
@@ -341,14 +335,13 @@ impl Applier {
                     self.remember(
                         &w.origin,
                         Cached { loaded: Loaded { rows: rows.to_vec(), row_count: w.loaded.row_count + changed.len(), bytes: w.loaded.bytes + body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now },
-                        true,
                     );
                     new
                 } else {
                     let body = doc::encode(&header, rows);
                     let new = self.store.put_if_match(&key, body.clone(), etag).await?;
                     self.metrics.document_write(WriteMode::Rewrite, body.len());
-                    self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now }, true);
+                    self.remember(&w.origin, Cached { loaded: Loaded { rows: rows.to_vec(), row_count: rows.len(), bytes: body.len() as u64, stamp: now }, etag: new.clone(), filled_at: fleet_now });
                     new
                 }
             }

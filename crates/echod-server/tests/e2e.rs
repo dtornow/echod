@@ -114,7 +114,7 @@ impl Node {
     }
 
     /// Wait until the node acts as owner: it has read a configuration that
-    /// names it and held it for the grace.
+    /// names it.
     async fn acting(&self) {
         let start = Instant::now();
         while !self.server.acting() {
@@ -318,7 +318,7 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     assert!(sample(&text, r#"echod_store_operation_duration_seconds_count{op="list",object="node"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_document_writes_total{mode="create"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_commits_total{outcome="committed"} "#) >= 1.0);
-    assert!(sample(&text, r#"echod_cache_lookups_total{result="trusted"} "#) >= 1.0, "the acting owner served from memory");
+    assert!(sample(&text, r#"echod_cache_lookups_total{result="revalidated"} "#) >= 1.0, "the cache was revalidated and used");
     assert!(sample(&text, r#"echod_messages_total{kind="execute",outcome="delivered"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_messages_total{kind="unblock",outcome="delivered"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_timer_fires_total{kind="origin",outcome="deleted"} "#) >= 1.0);
@@ -413,7 +413,7 @@ async fn two_nodes() {
     let b = Node::start_under(Arc::clone(&store), "b", 0, &prefix).await;
     let far = now() + 3_600_000;
 
-    // they find each other: a configuration naming both, held for the grace
+    // they find each other: a configuration naming both
     let start = Instant::now();
     while a.server.nodes().members().members.len() < 2 || b.server.nodes().members().members.len() < 2 || !a.server.acting() || !b.server.acting() {
         assert!(start.elapsed() < Duration::from_secs(10), "nodes never met");

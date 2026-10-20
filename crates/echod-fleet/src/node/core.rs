@@ -104,41 +104,35 @@ impl View for Armed {
     }
 }
 
-/// A cache entry's identity: the version, when it was filled, and whether
-/// this node wrote it. Only a version this node wrote is ever trusted: a
-/// version read may be replaced by a write an earlier owner had in flight,
-/// which a version this node wrote fences out.
+/// A cache entry's identity: the version, and when it was filled. The body
+/// held for it is used only once a conditional read has confirmed the
+/// version is the bucket's.
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
 pub struct Entry {
     pub etag: String,
     pub filled_at: u64,
-    pub wrote: bool,
 }
 
 pub struct AEntry {
     pub etag: Seq<char>,
     pub filled_at: nat,
-    pub wrote: bool,
 }
 
 impl View for Entry {
     type V = AEntry;
     open spec fn view(&self) -> AEntry {
-        AEntry { etag: self.etag@, filled_at: self.filled_at as nat, wrote: self.wrote }
+        AEntry { etag: self.etag@, filled_at: self.filled_at as nat }
     }
 }
 
 pub struct NodeCore {
     pub id: String,
     pub ttl: u64,
-    pub grace: u64,
     pub read_any: bool,
     pub epoch: u64,
     pub members: Vec<String>,
     /// The node's clock at its last read of the configuration.
     pub last_read: u64,
-    /// The node's clock when it first read the epoch it holds.
-    pub held: u64,
     pub cache: StringHashMap<Entry>,
     /// The deadline key this node last armed for each origin, with the
     /// version it wrote, so a commit on that version removes exactly that one.
@@ -148,12 +142,10 @@ pub struct NodeCore {
 pub struct ANode {
     pub id: Id,
     pub ttl: nat,
-    pub grace: nat,
     pub read_any: bool,
     pub epoch: nat,
     pub members: Seq<Id>,
     pub last_read: nat,
-    pub held: nat,
     pub cache: Map<Origin, AEntry>,
     pub armed: Map<Origin, AArmed>,
 }
@@ -164,12 +156,10 @@ impl View for NodeCore {
         ANode {
             id: self.id@,
             ttl: self.ttl as nat,
-            grace: self.grace as nat,
             read_any: self.read_any,
             epoch: self.epoch as nat,
             members: self.members.deep_view(),
             last_read: self.last_read as nat,
-            held: self.held as nat,
             cache: self.cache@.map_values(|e: Entry| e@),
             armed: self.armed@.map_values(|a: Armed| a@),
         }
@@ -189,40 +179,27 @@ pub open spec fn spec_fresh(n: ANode, now: nat) -> bool {
     n.read_any && n.last_read + n.ttl >= now
 }
 
-/// The node acts as owner of `o`: fresh, the owner per its members, and
-/// holding its epoch for the grace.
+/// The node acts as owner of `o`: fresh, and the owner per its members.
+/// Routing: nothing the proof relies on.
 pub open spec fn spec_acts(n: ANode, o: Origin, now: nat) -> bool {
     &&& spec_fresh(n, now)
     &&& spec_owner(n.members, o) == Some(n.id)
-    &&& n.held + n.grace <= now
-}
-
-/// The node answers `o` from its cache without asking the bucket: it acts,
-/// and the entry is a version it wrote while it acted.
-pub open spec fn spec_trusts(n: ANode, o: Origin, now: nat) -> bool {
-    &&& spec_acts(n, o, now)
-    &&& n.cache.contains_key(o)
-    &&& n.cache[o].wrote
-    &&& n.cache[o].filled_at >= n.held + n.grace
 }
 
 /// Take on the configuration read at `now`.
 pub open spec fn spec_read_config(n: ANode, now: nat, epoch: nat, members: Seq<Id>) -> ANode {
-    let same = n.read_any && n.epoch == epoch;
     ANode {
         read_any: true,
         epoch,
         members,
         last_read: now,
-        held: if same { n.held } else { now },
         ..n
     }
 }
 
-/// Remember the version of `o` read from (`wrote` false), or written to
-/// (`wrote` true), the bucket at `now`.
-pub open spec fn spec_filled(n: ANode, o: Origin, etag: Seq<char>, now: nat, wrote: bool) -> ANode {
-    ANode { cache: n.cache.insert(o, AEntry { etag, filled_at: now, wrote }), ..n }
+/// Remember the version of `o` read from, or written to, the bucket at `now`.
+pub open spec fn spec_filled(n: ANode, o: Origin, etag: Seq<char>, now: nat) -> ANode {
+    ANode { cache: n.cache.insert(o, AEntry { etag, filled_at: now }), ..n }
 }
 
 /// Drop what is remembered of `o`.
@@ -256,14 +233,14 @@ pub open spec fn opt_armed(o: Option<Armed>) -> Option<AArmed> {
 // ---------------------------------------------------------------------------
 
 impl NodeCore {
-    pub fn new(id: String, ttl: u64, grace: u64) -> (n: NodeCore)
+    pub fn new(id: String, ttl: u64) -> (n: NodeCore)
         ensures
             n@ == (ANode {
-                id: id@, ttl: ttl as nat, grace: grace as nat, read_any: false, epoch: 0,
-                members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(), armed: Map::empty(),
+                id: id@, ttl: ttl as nat, read_any: false, epoch: 0,
+                members: Seq::empty(), last_read: 0, cache: Map::empty(), armed: Map::empty(),
             }),
     {
-        let n = NodeCore { id, ttl, grace, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, held: 0, cache: StringHashMap::new(), armed: StringHashMap::new() };
+        let n = NodeCore { id, ttl, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, cache: StringHashMap::new(), armed: StringHashMap::new() };
         assert(n@.members =~= Seq::<Id>::empty());
         assert(n@.cache =~= Map::<Origin, AEntry>::empty());
         assert(n@.armed =~= Map::<Origin, AArmed>::empty());
@@ -295,23 +272,8 @@ impl NodeCore {
         if !self.fresh(now) {
             return false;
         }
-        if (self.held as u128) + (self.grace as u128) > now as u128 {
-            return false;
-        }
         match self.owner(o) {
             Some(id) => str_eq(id.as_str(), self.id.as_str()),
-            None => false,
-        }
-    }
-
-    pub fn trusts(&self, o: &str, now: u64) -> (r: bool)
-        ensures r == spec_trusts(self@, o@, now as nat),
-    {
-        if !self.acts(o, now) {
-            return false;
-        }
-        match self.cache.get(o) {
-            Some(e) => e.wrote && (e.filled_at as u128) >= (self.held as u128) + (self.grace as u128),
             None => false,
         }
     }
@@ -320,24 +282,19 @@ impl NodeCore {
     pub fn read_config(&mut self, now: u64, epoch: u64, members: Vec<String>)
         ensures final(self)@ == spec_read_config(old(self)@, now as nat, epoch as nat, members.deep_view()),
     {
-        let same = self.read_any && self.epoch == epoch;
-        if !same {
-            self.held = now;
-        }
         self.read_any = true;
         self.epoch = epoch;
         self.members = members;
         self.last_read = now;
     }
 
-    /// Remember the version of `o` read from (`wrote` false), or written to
-    /// (`wrote` true), the bucket at `now`.
-    pub fn filled(&mut self, o: &str, etag: String, now: u64, wrote: bool)
-        ensures final(self)@ == spec_filled(old(self)@, o@, etag@, now as nat, wrote),
+    /// Remember the version of `o` read from, or written to, the bucket at `now`.
+    pub fn filled(&mut self, o: &str, etag: String, now: u64)
+        ensures final(self)@ == spec_filled(old(self)@, o@, etag@, now as nat),
     {
         let ghost before = self@;
-        self.cache.insert(o.to_string(), Entry { etag, filled_at: now, wrote });
-        assert(self@.cache =~= before.cache.insert(o@, AEntry { etag: etag@, filled_at: now as nat, wrote }));
+        self.cache.insert(o.to_string(), Entry { etag, filled_at: now });
+        assert(self@.cache =~= before.cache.insert(o@, AEntry { etag: etag@, filled_at: now as nat }));
     }
 
     /// Drop what is remembered of `o`.

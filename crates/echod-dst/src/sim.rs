@@ -52,10 +52,6 @@ pub struct Options {
     pub jump_ms: u64,
     /// The fleet never grows past this.
     pub max_servers: u32,
-    /// The skew the servers are told to expect. The run keeps every clock
-    /// within it: skew, drift over the run and jumps together. Set it below
-    /// what the run inflicts to watch the proof's hypothesis fail.
-    pub expected_skew_ms: u64,
     /// Promise timeouts fall within this many ms of their creation.
     pub timeout_ms: u64,
     pub ttl_ms: u64,
@@ -93,7 +89,6 @@ impl Default for Options {
             drift_ppm: 5_000,
             jump_ms: 300,
             max_servers: 4,
-            expected_skew_ms: 150 + 300 + 300,
             timeout_ms: 3_000,
             ttl_ms: 4_000,
             retry_timeout_ms: 700,
@@ -208,7 +203,6 @@ impl World {
         cfg.timer_bucket_ms = self.opts.timer_bucket_ms;
         cfg.heartbeat_ms = self.opts.heartbeat_ms;
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
-        cfg.clock_skew_ms = self.opts.expected_skew_ms;
         cfg.debug = true; // the clock is the request's
         let observer = Arc::new(SweepObserver { history: Arc::clone(&self.history), clock: Arc::clone(&self.clock) });
         let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
@@ -435,10 +429,9 @@ async fn simulate(opts: Options) -> Report {
     for _ in 0..opts.servers {
         world.start_server().await;
     }
-    // Let the nodes meet and take ownership before the load arrives: a
-    // configuration naming them, held for the grace.
-    let grace = opts.node_ttl_ms + 4 * opts.expected_skew_ms + 1;
-    tokio::time::sleep(Duration::from_millis(grace + opts.heartbeat_ms * 4)).await;
+    // Let the nodes meet before the load arrives: a configuration naming
+    // them. Nothing is unsafe before that; requests would just not route.
+    tokio::time::sleep(Duration::from_millis(opts.node_ttl_ms + opts.heartbeat_ms * 4)).await;
 
     let mut clients = Vec::new();
     for c in 0..opts.clients {

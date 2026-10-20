@@ -1403,9 +1403,9 @@ pub proof fn not_vacuous(o: Origin)
     let e: Seq<char> = seq!['v'];
     let empty: Doc = Map::empty();
     let core = ANode {
-        id: me, ttl: 0, grace: 0, read_any: false, epoch: 0, members: Seq::empty(),
-        last_read: 0, held: 0,
-        cache: Map::empty().insert(o, AEntry { etag: e, filled_at: 0, wrote: true }),
+        id: me, ttl: 0, read_any: false, epoch: 0, members: Seq::empty(),
+        last_read: 0,
+        cache: Map::empty().insert(o, AEntry { etag: e, filled_at: 0 }),
         armed: Map::empty(),
     };
     let n = Node { core, bodies: Map::empty().insert(o, empty), alive: true, clock: 0, txns: Map::empty() };

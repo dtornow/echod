@@ -22,8 +22,7 @@
 //! documents    echod_document_writes_total{mode}                 create, rewrite, append
 //!              echod_document_bytes                              what a write put down
 //!              echod_commits_total{outcome}                      committed, raced, failed, exhausted
-//! cache        echod_cache_lookups_total{result}                 trusted, revalidated, refreshed,
-//!                                                                absent, miss
+//! cache        echod_cache_lookups_total{result}                 revalidated, refreshed, absent, miss
 //!              echod_cache_entries, echod_cache_bytes,
 //!              echod_cache_evictions_total
 //! membership   echod_membership_refreshes_total{outcome}
@@ -139,12 +138,12 @@ label! {
 }
 
 label! {
-    /// What a lookup in the document cache cost. `trusted`: served from
-    /// memory, no store call. `revalidated`: a conditional read confirmed
-    /// the version held. `refreshed`: the conditional read brought a newer
-    /// version. `absent`: the document is gone from the bucket. `miss`:
-    /// nothing was held; a full read.
-    CacheResult { Trusted => "trusted", Revalidated => "revalidated", Refreshed => "refreshed", Absent => "absent", Miss => "miss" }
+    /// What a lookup in the document cache cost. `revalidated`: a
+    /// conditional read confirmed the version held, and the body in memory
+    /// was used. `refreshed`: the conditional read brought a newer version.
+    /// `absent`: the document is gone from the bucket. `miss`: nothing was
+    /// held; a full read.
+    CacheResult { Revalidated => "revalidated", Refreshed => "refreshed", Absent => "absent", Miss => "miss" }
 }
 
 label! {
@@ -339,7 +338,7 @@ impl Collector for Gauges {
         gauge(&mut encoder, "echod_membership_epoch", "The epoch of the configuration this node holds.", snap.epoch)?;
         gauge(&mut encoder, "echod_members", "Members in the configuration this node holds.", snap.members)?;
         gauge(&mut encoder, "echod_node_fresh", "Whether this node's view of the membership is fresh enough to serve.", snap.fresh as u64)?;
-        gauge(&mut encoder, "echod_node_acting", "Whether this node acts as owner of what the members make it the owner of.", snap.acting as u64)?;
+        gauge(&mut encoder, "echod_node_acting", "Whether this node acts as owner of what the members make it the owner of: it routes.", snap.acting as u64)?;
         gauge(&mut encoder, "echod_timers_armed", "Deadline keys held in the wheel.", snap.timers_armed)?;
         Ok(())
     }
@@ -417,7 +416,7 @@ impl Metrics {
         registry.register("echod_commits", "Attempts to commit a step on a document, by how they ended", commits.clone());
 
         let cache_lookups = Family::<CacheLabels, Counter>::default();
-        registry.register("echod_cache_lookups", "Document loads, by what they cost: trusted from memory, revalidated, refreshed, absent, or a miss", cache_lookups.clone());
+        registry.register("echod_cache_lookups", "Document loads, by what they cost: revalidated, refreshed, absent, or a miss", cache_lookups.clone());
 
         let membership_refreshes = Family::<OutcomeLabels, Counter>::default();
         registry.register("echod_membership_refreshes", "Heartbeats: announce, list the nodes, read the configuration", membership_refreshes.clone());

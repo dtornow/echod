@@ -246,10 +246,9 @@ pub open spec fn tick(s: Cluster, i: Id, d: nat) -> Option<Cluster> {
 }
 
 /// A fresh node: the core as `NodeCore::new` makes it. Its membership
-/// dials, `ttl` and `grace`, are the server's routing and nothing here
-/// reads them.
+/// dial, `ttl`, is the server's routing and nothing here reads it.
 pub open spec fn fresh_core(i: Id) -> ANode {
-    ANode { id: i, ttl: 0, grace: 0, read_any: false, epoch: 0, members: Seq::empty(), last_read: 0, held: 0, cache: Map::empty(), armed: Map::empty() }
+    ANode { id: i, ttl: 0, read_any: false, epoch: 0, members: Seq::empty(), last_read: 0, cache: Map::empty(), armed: Map::empty() }
 }
 
 /// A node starts, with any clock.
@@ -297,7 +296,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
         && next_is(new, deadline)
     {
         let (core, bodies) = if s.store.docs.contains_key(o) {
-            (spec_filled(n.core, o, s.store.etags[o], n.clock, false), n.bodies.insert(o, s.store.docs[o]))
+            (spec_filled(n.core, o, s.store.etags[o], n.clock), n.bodies.insert(o, s.store.docs[o]))
         } else {
             (spec_forget(n.core, o), n.bodies)
         };
@@ -371,7 +370,7 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
             None => s.hist.keeper.remove(o),
         };
         Some(Cluster {
-            nodes: s.nodes.insert(i, Node { core: spec_filled(n.core, o, e, n.clock, true), bodies: n.bodies.insert(o, x.new), txns: n.txns.insert(o, x2), ..n }),
+            nodes: s.nodes.insert(i, Node { core: spec_filled(n.core, o, e, n.clock), bodies: n.bodies.insert(o, x.new), txns: n.txns.insert(o, x2), ..n }),
             store: Store {
                 docs: s.store.docs.insert(o, x.new),
                 etags: s.store.etags.insert(o, e),
@@ -442,7 +441,7 @@ pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<C
     {
         let k = x.c.fired.unwrap();
         Some(Cluster {
-            nodes: s.nodes.insert(i, Node { core: spec_collected(spec_filled(n.core, o, e, n.clock, true), o, k), bodies: n.bodies.insert(o, x.loaded), txns: n.txns.remove(o), ..n }),
+            nodes: s.nodes.insert(i, Node { core: spec_collected(spec_filled(n.core, o, e, n.clock), o, k), bodies: n.bodies.insert(o, x.loaded), txns: n.txns.remove(o), ..n }),
             store: Store {
                 docs: s.store.docs.insert(o, x.loaded),
                 etags: s.store.etags.insert(o, e),
