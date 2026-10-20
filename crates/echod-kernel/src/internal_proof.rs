@@ -8,6 +8,7 @@ use crate::external_proof::*;
 use crate::internal::*;
 use crate::object::*;
 use crate::properties::*;
+use crate::properties_proof::*;
 use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
@@ -119,7 +120,7 @@ pub proof fn lemma_retry_legal(now: nat, a: AState, b: AState, id: Seq<char>, rt
     assert forall|kk: OutboxKey| kk != k implies
         (a.outbox.contains_key(kk) <==> #[trigger] b.outbox.contains_key(kk))
         && (a.outbox.contains_key(kk) ==> a.outbox[kk] == b.outbox[kk]) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |kk: OutboxKey| kk == k, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |kk: OutboxKey| kk == k, |x: Seq<char>| false);
 }
 
 /// The listener drain: the promise was read, lost one listener, and the
@@ -196,7 +197,7 @@ pub proof fn lemma_listener_legal(now: nat, a: AState, b: AState, id: Seq<char>,
     assert forall|kk: OutboxKey| kk != k implies
         (a.outbox.contains_key(kk) <==> #[trigger] b.outbox.contains_key(kk))
         && (a.outbox.contains_key(kk) ==> a.outbox[kk] == b.outbox[kk]) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |kk: OutboxKey| kk == k, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |kk: OutboxKey| kk == k, |x: Seq<char>| false);
 }
 
 /// The callback drain: the awaited promise, read and settled, lost the
@@ -386,7 +387,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
     assert forall|z: Seq<char>| #[trigger] changed(z) && b.objects.contains_key(z) implies inv_obj(now, b, z) by {}
     assert forall|z: Seq<char>| #[trigger] changed(z) implies trans_obj(now, a, b, z) by {}
-    crate::frame::lemma_step(now, a, b, changed, |z: Seq<char>| z == y, |k: OutboxKey| false, |z: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, changed, |z: Seq<char>| z == y, |k: OutboxKey| false, |z: Seq<char>| false);
     assert forall|z: Seq<char>| #[trigger] internal_obj(now, a, b, z) by {
         if !changed(z) {
             assert(crate::external::unchanged_at(a, b, z));
@@ -504,7 +505,7 @@ pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == o.promise_id@, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == o.promise_id@, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
     assert(seq![o][0] == o);
 }
 
@@ -606,7 +607,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
     assert forall|x: Seq<char>| x != sid implies
         (a.schedules.contains_key(x) <==> #[trigger] b.schedules.contains_key(x))
         && (a.schedules.contains_key(x) ==> a.schedules[x] == b.schedules[x]) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| occ_of(occs, x), |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == sid);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| occ_of(occs, x), |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == sid);
     // sweeper entries: births are vacuous, projections admissible
     assert forall|x: Seq<char>| #[trigger] internal_obj(now, a, b, x) by {
         if occ_of(occs, x) {

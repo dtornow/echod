@@ -27,6 +27,7 @@ use crate::external_proof::*;
 use crate::internal_proof::*;
 use crate::object::*;
 use crate::properties::*;
+use crate::properties_proof::*;
 use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
@@ -109,7 +110,7 @@ impl State {
         match self.read_object(&req.id, now) {
             None => {
                 proof {
-                    crate::frame::lemma_noop(now as nat, a);
+                    crate::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
             }
@@ -134,7 +135,7 @@ impl State {
     {
         let ghost a = self@;
         proof {
-            crate::frame::lemma_noop(now as nat, a);
+            crate::properties_proof::lemma_noop(now as nat, a);
             lemma_internal_noop(now as nat, a);
         }
         let i = match self.find_object(&req.id) {
@@ -175,7 +176,7 @@ impl State {
     {
         let ghost a = self@;
         proof {
-            crate::frame::lemma_noop(now as nat, a);
+            crate::properties_proof::lemma_noop(now as nat, a);
             lemma_internal_noop(now as nat, a);
         }
         let i = match self.find_object(&req.id) {
@@ -222,7 +223,7 @@ impl State {
         let i = match self.read_object(&req.awaited, now) {
             None => {
                 proof {
-                    crate::frame::lemma_noop(now as nat, a);
+                    crate::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -273,7 +274,7 @@ impl State {
         let i = match self.read_object(&req.awaited, now) {
             None => {
                 proof {
-                    crate::frame::lemma_noop(now as nat, a);
+                    crate::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -355,7 +356,7 @@ impl State {
         let si = match self.find_schedule(&req.schedule) {
             None => {
                 proof {
-                    crate::frame::lemma_noop(now as nat, a);
+                    crate::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -365,7 +366,7 @@ impl State {
         proof { self.lemma_schedule_at(si as int); }
         if req.occurrences.len() == 0 {
             proof {
-                crate::frame::lemma_noop(now as nat, a);
+                crate::properties_proof::lemma_noop(now as nat, a);
                 lemma_internal_noop(now as nat, a);
             }
             return;

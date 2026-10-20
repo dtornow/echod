@@ -1,5 +1,9 @@
-//! The frame: what a step owes for the ids it touched, and nothing for the
-//! rest.
+//! The catalogue's own theorems. First the frame, the theorem every step
+//! ends with: a step that proves the entries at the ids it touched, and
+//! touched nothing else, satisfies the whole catalogue. Then its pieces,
+//! then the folds between the catalogue stated entry by entry and stated
+//! id by id, and the frames an untouched id gets for free. Nothing here
+//! is executed.
 //!
 //! A step changes a few objects, a few outbox entries, a few schedules. For
 //! each one it touched it proves the catalogue's entries at that id, locally.
@@ -253,6 +257,180 @@ pub proof fn lemma_inv_out_frame(now: nat, a: AState, b: AState, k: OutboxKey)
             assert(preserved_promise_state_frozen_once_settled_at(now, b, r.id, p));
         }
     }
+}
+
+// ===========================================================================
+// Folding one way and the other
+// ===========================================================================
+
+/// The `.state` entries hold iff they hold at every id.
+pub proof fn lemma_inv_pointwise(now: nat, s: AState)
+    ensures
+        inv(now, s) <==> {
+            &&& forall|id: Seq<char>| #[trigger] s.objects.contains_key(id) ==> inv_obj(now, s, id)
+            &&& forall|k: OutboxKey| #[trigger] s.outbox.contains_key(k) ==> inv_out(now, s, k)
+            &&& forall|id: Seq<char>| #[trigger] s.schedules.contains_key(id) ==> inv_sched(now, s, id)
+        },
+{
+    reveal(inv);
+}
+
+/// The `.trans` entries hold iff they hold at every id and key.
+pub proof fn lemma_legal_pointwise(now: nat, a: AState, b: AState)
+    ensures
+        legal(now, a, b) <==> {
+            &&& forall|id: Seq<char>| #[trigger] trans_obj(now, a, b, id)
+            &&& forall|k: OutboxKey| #[trigger] trans_out(now, a, b, k)
+            &&& forall|id: Seq<char>| #[trigger] trans_sched(now, a, b, id)
+        },
+{
+    reveal(legal);
+    if forall|id: Seq<char>| #[trigger] trans_obj(now, a, b, id) {
+        assert forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) implies
+            preserved_promise_birth_fields_immutable_at(now, b, id, a.objects[id])
+            && preserved_settled_promise_record_at(now, b, id, a.objects[id])
+            && monotone_promise_set_grows_at(now, b, id, a.objects[id])
+            && monotone_task_set_grows_at(now, b, id, a.objects[id])
+            && monotone_task_version_increases_only_on_acquisition_at(now, b, id, a.objects[id])
+            && preserved_fulfilled_task_at(now, b, id, a.objects[id])
+            && preserved_promise_state_frozen_once_settled_at(now, b, id, a.objects[id])
+            && consistent_promise_settled_at_moves_with_state_at(now, b, id, a.objects[id])
+            && preserved_promise_value_until_settlement_at(now, b, id, a.objects[id])
+            && consistent_promise_state_edge_admissible_at(now, b, id, a.objects[id])
+            && consistent_task_state_edge_admissible_at(now, b, id, a.objects[id])
+            && preserved_task_halted_only_reenters_via_pending_at(now, b, id, a.objects[id])
+            && consistent_settlement_fulfils_task_at(now, b, id, a.objects[id])
+            && consistent_obligation_discharge_requires_settled_at(now, b, id, a.objects[id])
+            && consistent_callback_consumption_resumes_awaiter_at(now, b, id, a.objects[id])
+            && consistent_listener_consumption_enqueues_unblock_at(now, b, id, a.objects[id])
+            && consistent_task_lease_released_atomically_at(now, b, id, a.objects[id])
+            && preserved_task_lease_holder_stable_at(now, b, id, a.objects[id])
+            && consistent_task_lease_fields_move_together_at(now, b, id, a.objects[id])
+            && monotone_task_resumes_grow_or_clear_at(now, b, id, a.objects[id])
+            && consistent_task_resumes_cleared_only_on_dispatch_or_park_at(now, b, id, a.objects[id])
+            && consistent_task_acquisition_is_atomic_at(now, b, id, a.objects[id])
+            && consistent_task_pending_entry_arms_retry_at(now, b, id, a.objects[id])
+            && consistent_task_retry_rearm_only_when_due_at(now, b, id, a.objects[id])
+            && monotone_task_retry_rearm_advances_at(now, b, id, a.objects[id])
+            && consistent_task_wake_records_resume_at(now, b, id, a.objects[id])
+            && consistent_promise_settlement_stamp_at(now, b, id, a.objects[id])
+            && preserved_timedout_is_server_owned_at(now, b, id, a.objects[id]) by {
+            assert(trans_obj(now, a, b, id));
+        }
+        assert forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) implies
+            preserved_no_dead_dispatch_at(now, a, id, b.objects[id])
+            && preserved_promise_settlement_is_one_way_at(now, a, id, b.objects[id])
+            && monotone_promise_callbacks_grow_while_pending_at(now, a, id, b.objects[id])
+            && monotone_promise_callbacks_shrink_once_settled_at(now, a, id, b.objects[id])
+            && monotone_promise_listeners_grow_while_pending_at(now, a, id, b.objects[id])
+            && monotone_promise_listeners_shrink_once_settled_at(now, a, id, b.objects[id])
+            && preserved_task_acquisition_only_from_pending_at(now, a, id, b.objects[id])
+            && preserved_task_suspension_only_from_acquired_at(now, a, id, b.objects[id])
+            && consistent_task_fulfilment_needs_settlement_at(now, a, id, b.objects[id])
+            && consistent_wake_follows_callback_consumption_at(now, a, b, id, b.objects[id])
+            && consistent_suspension_registers_callback_at(now, a, b, id, b.objects[id])
+            && consistent_task_birth_couples_promise_birth_at(now, a, id, b.objects[id])
+            && consistent_task_birth_state_at(now, a, id, b.objects[id])
+            && consistent_task_lease_deadline_is_now_plus_ttl_at(now, a, id, b.objects[id])
+            && consistent_new_promise_born_clean_at(now, a, id, b.objects[id]) by {
+            assert(trans_obj(now, a, b, id));
+        }
+    }
+    if forall|k: OutboxKey| #[trigger] trans_out(now, a, b, k) {
+        assert forall|k: OutboxKey| #[trigger] a.outbox.contains_key(k) implies b.outbox.contains_key(k) by {
+            assert(trans_out(now, a, b, k));
+        }
+        assert forall|k: OutboxKey| #[trigger] b.outbox.contains_key(k) implies
+            preserved_execute_only_for_live_task_at(now, a, b, b.outbox[k])
+            && consistent_new_execute_matches_task_and_target_at(now, a, b, b.outbox[k])
+            && consistent_new_unblock_carries_stored_record_at(now, a, b, b.outbox[k])
+            && consistent_new_unblock_discharges_its_listener_at(now, a, b, b.outbox[k]) by {
+            assert(trans_out(now, a, b, k));
+        }
+    }
+    if forall|id: Seq<char>| #[trigger] trans_sched(now, a, b, id) {
+        assert forall|id: Seq<char>| #[trigger] a.schedules.contains_key(id) implies
+            preserved_schedule_birth_fields_immutable_at(now, b, id, a.schedules[id]) by {
+            assert(trans_sched(now, a, b, id));
+        }
+    }
+}
+
+/// The sweeper entries hold iff they hold at every id.
+pub proof fn lemma_internal_pointwise(now: nat, a: AState, b: AState)
+    ensures
+        internal_legal(now, a, b) <==> forall|id: Seq<char>| #[trigger] internal_obj(now, a, b, id),
+{
+    reveal(internal_legal);
+    if forall|id: Seq<char>| #[trigger] internal_obj(now, a, b, id) {
+        assert forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) implies
+            consistent_task_state_edge_internal_admissible_at(now, b, id, a.objects[id])
+            && consistent_promise_state_edge_internal_admissible_at(now, b, id, a.objects[id]) by {
+            assert(internal_obj(now, a, b, id));
+        }
+    }
+}
+
+// ===========================================================================
+// Frames: what an untouched id satisfies for free
+// ===========================================================================
+
+/// An object the step did not touch satisfies every `.trans` entry.
+pub proof fn lemma_trans_obj_unchanged(now: nat, a: AState, b: AState, id: Seq<char>)
+    requires
+        a.objects.contains_key(id) ==> inv_obj(now, a, id),
+        a.objects.contains_key(id) <==> b.objects.contains_key(id),
+        a.objects.contains_key(id) ==> a.objects[id] == b.objects[id],
+    ensures
+        trans_obj(now, a, b, id),
+{
+    if a.objects.contains_key(id) {
+        let p = a.objects[id];
+        assert forall|i: int| 0 <= i < p.callbacks.len() implies p.callbacks.contains(#[trigger] p.callbacks[i]) by {}
+        assert forall|i: int| 0 <= i < p.listeners.len() implies p.listeners.contains(#[trigger] p.listeners[i]) by {}
+        assert(subset_of(p.callbacks, p.callbacks));
+        assert(subset_of(p.listeners, p.listeners));
+        match p.task {
+            Some(t) => {
+                assert forall|i: int| 0 <= i < t.resumes.len() implies t.resumes.contains(#[trigger] t.resumes[i]) by {}
+                assert(subset_of(t.resumes, t.resumes));
+            }
+            None => {}
+        }
+    }
+}
+
+/// An outbox the step did not touch satisfies every `.trans` entry.
+pub proof fn lemma_trans_out_unchanged(now: nat, a: AState, b: AState, k: OutboxKey)
+    requires
+        a.outbox == b.outbox,
+    ensures
+        trans_out(now, a, b, k),
+{
+    if b.outbox.contains_key(k) {
+        let e = b.outbox[k];
+        match e.message {
+            AMessage::Execute { task_id, version } => {
+                assert(has_execute(a, task_id, version, e.address)) by {
+                    assert(a.outbox.contains_key(k));
+                }
+            }
+            AMessage::Unblock(r) => {
+                assert(has_unblock(a, r.id, e.address)) by {
+                    assert(a.outbox.contains_key(k));
+                }
+            }
+        }
+    }
+}
+
+/// A schedule the step did not touch satisfies its `.trans` entry.
+pub proof fn lemma_trans_sched_unchanged(now: nat, a: AState, b: AState, id: Seq<char>)
+    requires
+        a.schedules.contains_key(id) ==> b.schedules.contains_key(id) && a.schedules[id] == b.schedules[id],
+    ensures
+        trans_sched(now, a, b, id),
+{
 }
 
 } // verus!

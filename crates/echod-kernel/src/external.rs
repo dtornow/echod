@@ -18,6 +18,7 @@ use vstd::prelude::*;
 use crate::external_proof::*;
 use crate::object::*;
 use crate::properties::*;
+use crate::properties_proof::*;
 use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
@@ -108,7 +109,7 @@ impl State {
         let ghost a = self@;
         match self.read_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 PromiseRes { status: 404, promise: None }
             }
             Some(i) => {
@@ -132,7 +133,7 @@ impl State {
     {
         let ghost a = self@;
         if crate::tags::exec_timer_targeted(&req.tags) || req.timeout_at > MAX_TIME {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return PromiseRes { status: 400, promise: None };
         }
         match self.read_object(&req.id, now) {
@@ -162,12 +163,12 @@ impl State {
     {
         let ghost a = self@;
         if !req.state.settable() {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return PromiseRes { status: 400, promise: None };
         }
         match self.read_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 PromiseRes { status: 404, promise: None }
             }
             Some(i) => {
@@ -200,12 +201,12 @@ impl State {
     {
         let ghost a = self@;
         if req.awaited == req.awaiter || !crate::ident::same_origin(&req.awaited, &req.awaiter) {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return PromiseRes { status: 400, promise: None };
         }
         let i = match self.read_object(&req.awaited, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return PromiseRes { status: 404, promise: None };
             }
             Some(i) => i,
@@ -260,7 +261,7 @@ impl State {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return PromiseRes { status: 404, promise: None };
             }
             Some(i) => i,
@@ -316,7 +317,7 @@ impl State {
             post(*old(self), *final(self), now),
             r.status == 200 || r.status == 404,
     {
-        proof { crate::frame::lemma_noop(now as nat, self@); }
+        proof { crate::properties_proof::lemma_noop(now as nat, self@); }
         match self.find_schedule(&req.id) {
             None => ScheduleRes { status: 404, schedule: None },
             Some(i) => ScheduleRes { status: 200, schedule: Some(self.schedules[i].dup()) },
@@ -334,12 +335,12 @@ impl State {
     {
         let ghost a = self@;
         if crate::tags::exec_timer_targeted(&req.promise_tags) || req.promise_timeout > MAX_TIME || req.next_run_at < now {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return ScheduleRes { status: 400, schedule: None };
         }
         match self.find_schedule(&req.id) {
             Some(i) => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 ScheduleRes { status: 200, schedule: Some(self.schedules[i].dup()) }
             }
             None => {
@@ -373,7 +374,7 @@ impl State {
         let ghost a = self@;
         match self.find_schedule(&req.id) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 StatusRes { status: 404 }
             }
             Some(i) => {
@@ -442,7 +443,7 @@ impl State {
         let ghost a = self@;
         match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 TaskGetRes { status: 404, task: None }
             }
             Some(i) => {
@@ -467,7 +468,7 @@ impl State {
         let act = &req.action;
         if crate::tags::exec_otype(&act.tags) != OType::Runnable || crate::tags::exec_timer_targeted(&act.tags)
             || act.timeout_at > MAX_TIME || req.ttl > MAX_TIME {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return TaskClaimRes { status: 400, task: None, promise: None };
         }
         match self.read_object(&act.id, now) {
@@ -534,12 +535,12 @@ impl State {
     {
         let ghost a = self@;
         if req.ttl > MAX_TIME {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return TaskClaimRes { status: 400, task: None, promise: None };
         }
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return TaskClaimRes { status: 404, task: None, promise: None };
             }
             Some(i) => i,
@@ -580,12 +581,12 @@ impl State {
     {
         let ghost a = self@;
         if !req.action.state.settable() {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return PromiseRes { status: 400, promise: None };
         }
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return PromiseRes { status: 404, promise: None };
             }
             Some(i) => i,
@@ -624,7 +625,7 @@ impl State {
         let ghost a = self@;
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return StatusRes { status: 404 };
             }
             Some(i) => i,
@@ -663,7 +664,7 @@ impl State {
         let ghost a = self@;
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return StatusRes { status: 404 };
             }
             Some(i) => i,
@@ -705,7 +706,7 @@ impl State {
         let ghost a = self@;
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return StatusRes { status: 404 };
             }
             Some(i) => i,
@@ -824,12 +825,12 @@ impl State {
             TaskFenceAction::Settle(c) => &c.id,
         };
         if *target == req.id || !crate::ident::same_origin(target, &req.id) {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return TaskFenceRes { status: 400, action: None };
         }
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return TaskFenceRes { status: 404, action: None };
             }
             Some(i) => i,
@@ -969,7 +970,7 @@ impl State {
         let ghost id = req.id@;
         let n = req.actions.len();
         if n == 0 || awaits_self_or_crosses(&req.actions, &req.id) || awaits_twice(&req.actions) {
-            proof { crate::frame::lemma_noop(now as nat, a); }
+            proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return StatusRes { status: 400 };
         }
         proof {
@@ -979,7 +980,7 @@ impl State {
         }
         let i = match self.read_task_object(&req.id, now) {
             None => {
-                proof { crate::frame::lemma_noop(now as nat, a); }
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
                 return StatusRes { status: 404 };
             }
             Some(i) => i,

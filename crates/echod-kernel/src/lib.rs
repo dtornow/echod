@@ -11,6 +11,7 @@
 //! tags.rs        tags: first match wins; otype, timer, target
 //! store.rs       State: row vectors whose view is three maps, via the fold
 //! properties.rs  the catalogue, transcribed
+//! properties_proof.rs  its theorems: the frame every step ends with, the folds
 //! object.rs      projection and the per-object helpers the handlers share
 //! external.rs    the 18 request handlers
 //! external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
@@ -25,12 +26,12 @@
 
 pub mod external;
 pub mod external_proof;
-pub mod frame;
 pub mod ident;
 pub mod internal;
 pub mod internal_proof;
 pub mod object;
 pub mod properties;
+pub mod properties_proof;
 pub mod store;
 pub mod tags;
 pub mod types;

@@ -8,6 +8,7 @@ use vstd::prelude::*;
 use crate::external::*;
 use crate::object::*;
 use crate::properties::*;
+use crate::properties_proof::*;
 use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
@@ -51,7 +52,7 @@ pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: spec_fn(Seq
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// A promise born at `t <= now` on a fresh id obeys the catalogue at its id,
@@ -99,7 +100,7 @@ pub proof fn lemma_create_legal(now: nat, a: AState, b: AState, req: APromiseCre
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `promise.settle` on a pending promise.
@@ -135,7 +136,7 @@ pub proof fn lemma_settle_legal(now: nat, a: AState, b: AState, id: Seq<char>, s
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// A rung in `a` is a rung in `b` when no registered callback was lost.
@@ -233,7 +234,7 @@ pub proof fn lemma_add_callback_legal(now: nat, a: AState, b: AState, awaited: S
     }
     assert(inv_obj(now, b, awaited));
     assert(trans_obj(now, a, b, awaited));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `promise.listener`: `awaited` pending, read at `now`.
@@ -296,7 +297,7 @@ pub proof fn lemma_add_listener_legal(now: nat, a: AState, b: AState, awaited: S
     }
     assert(inv_obj(now, b, awaited));
     assert(trans_obj(now, a, b, awaited));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == awaited, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// Projecting one object at `now` is a legal step that keeps the invariant.
@@ -321,7 +322,7 @@ pub proof fn lemma_project_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert(trans_obj(now, a, b, id)) by {
         lemma_project_trans_obj(now, a, b, id);
     }
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// The projected object obeys every `.state` entry.
@@ -409,7 +410,7 @@ pub proof fn lemma_schedule_create_legal(now: nat, a: AState, b: AState, id: Seq
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| false, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == id);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| false, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == id);
 }
 
 pub proof fn lemma_schedule_delete_legal(now: nat, a: AState, b: AState, id: Seq<char>)
@@ -429,7 +430,7 @@ pub proof fn lemma_schedule_delete_legal(now: nat, a: AState, b: AState, id: Seq
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| false, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == id);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| false, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| x == id);
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +530,7 @@ pub proof fn lemma_create_acquired_legal(now: nat, a: AState, b: AState, req: AP
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.acquire`, and `task.create` on an existing pending task.
@@ -569,7 +570,7 @@ pub proof fn lemma_acquire_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
     assert(u.resumes.len() == 0);
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.release`, and the lease timeout.
@@ -607,7 +608,7 @@ pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.halt` on a task that is neither fulfilled nor halted.
@@ -646,7 +647,7 @@ pub proof fn lemma_halt_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.continue` on a halted task.
@@ -684,7 +685,7 @@ pub proof fn lemma_continue_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
-    crate::frame::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +778,7 @@ pub proof fn lemma_heartbeat_legal(now: nat, a: AState, b: AState, ids: spec_fn(
         if b.objects[x] == p {
             assert(unchanged_at(a, b, x));
             lemma_trans_obj_unchanged(now, a, b, x);
-            crate::frame::lemma_inv_obj_frame_simple(now, a, b, x);
+            crate::properties_proof::lemma_inv_obj_frame_simple(now, a, b, x);
         } else if b.objects[x] == p.project(now) {
             lemma_project_inv_obj(now, a, b, x);
             lemma_project_trans_obj(now, a, b, x);
@@ -807,7 +808,7 @@ pub proof fn lemma_heartbeat_legal(now: nat, a: AState, b: AState, ids: spec_fn(
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `task.suspend`'s 300: the task keeps running with its ledger cleared, and
@@ -881,7 +882,7 @@ pub proof fn lemma_suspend_300_legal(now: nat, a: AState, b: AState, id: Seq<cha
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, changed, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, changed, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// `add_callback` registers `y`, and keeps what was registered.
@@ -993,7 +994,7 @@ pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::frame::lemma_step(now, a, b, changed, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, changed, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
 /// A pending, awaitable promise that gained a callback on a runnable, pending
