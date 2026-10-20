@@ -180,6 +180,7 @@ pub struct State {
 }
 
 /// The state as the specification sees it.
+#[cfg(verus_keep_ghost)]
 pub struct AState {
     pub objects: Map<Seq<char>, APromise>,
     pub schedules: Map<Seq<char>, ASchedule>,
@@ -205,6 +206,7 @@ pub open spec fn out_val() -> spec_fn(OutboxEntry) -> AOutboxEntry {
     |e: OutboxEntry| e@
 }
 
+#[cfg(verus_keep_ghost)]
 impl View for State {
     type V = AState;
     open spec fn view(&self) -> AState {

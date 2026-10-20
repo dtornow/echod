@@ -8,7 +8,7 @@ use crate::external_proof::*;
 use crate::internal::*;
 use crate::object::*;
 use crate::properties::*;
-use crate::store::{AState, State};
+use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -529,7 +529,7 @@ pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState,
 }
 
 /// `processSchedule` as one step: the objects fired, the schedule advanced.
-pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: nat)
+pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: u64)
     requires
         inv(now, a),
         inv(now, a2),
@@ -538,7 +538,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
         forall|j: int| 0 <= j < occs.len() ==> #[trigger] occs[j].at <= now,
         a.schedules[sid].next_run_at <= occs[0].at as nat,
         forall|j: int, k: int| 0 <= j < k < occs.len() ==> #[trigger] occs[j].at < #[trigger] occs[k].at,
-        next > occs[occs.len() - 1].at as nat,
+        next > occs[occs.len() - 1].at,
         forall|x: Seq<char>| !occ_of(occs, x) ==> #[trigger] crate::external::unchanged_at(a, a2, x),
         forall|x: Seq<char>| #[trigger] occ_of(occs, x) ==> fire_shape(now, a, a2, a.schedules[sid], occs, x),
         a2.schedules == a.schedules,
@@ -546,7 +546,7 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
         b.objects == a2.objects,
         b.outbox == a2.outbox,
         b.schedules == a2.schedules.insert(sid, ASchedule {
-            last_run_at: Some(occs[occs.len() - 1].at as nat),
+            last_run_at: Some(occs[occs.len() - 1].at),
             next_run_at: next,
             ..a.schedules[sid]
         }),

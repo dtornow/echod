@@ -27,7 +27,7 @@ use crate::external_proof::*;
 use crate::internal_proof::*;
 use crate::object::*;
 use crate::properties::*;
-use crate::store::{AState, State};
+use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -471,7 +471,7 @@ impl State {
         let ghost a2 = self@;
         self.set_schedule(si, c);
         proof {
-            lemma_fire_legal(now as nat, a, a2, self@, req.schedule@, occs, req.next_run_at as nat);
+            lemma_fire_legal(now as nat, a, a2, self@, req.schedule@, occs, req.next_run_at);
         }
     }
 }
@@ -493,7 +493,7 @@ pub open spec fn occ_of(occs: Seq<Occurrence>, x: Seq<char>) -> bool {
 pub open spec fn occ_req(c: ASchedule, o: Occurrence) -> APromiseCreateReq {
     APromiseCreateReq {
         id: o.promise_id@,
-        timeout_at: o.at as nat + c.promise_timeout,
+        timeout_at: (o.at + c.promise_timeout) as u64,
         param: c.promise_param,
         tags: c.promise_tags,
     }
@@ -502,7 +502,7 @@ pub open spec fn occ_req(c: ASchedule, o: Occurrence) -> APromiseCreateReq {
 /// When the occurrence's promise is born: at the occurrence if it is still
 /// live at `now`, else at `now`, dead.
 pub open spec fn birth_of(o: Occurrence, c: ASchedule, now: nat) -> nat {
-    if o.at as nat + c.promise_timeout > now { o.at as nat } else { now }
+    if occ_req(c, o).timeout_at > now { o.at as nat } else { now }
 }
 
 /// What firing leaves at `x`: an existing object projected, or a promise born

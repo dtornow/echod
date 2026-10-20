@@ -1,13 +1,15 @@
 //! The vocabulary: rows, records, requests, responses, configuration.
 //!
-//! Every exec type here has an abstract twin (`A…`) reached through `View`.
-//! The abstract twins are what the machine and the catalogue are stated
-//! over: strings become `Seq<char>`, `u64` becomes `nat`, vectors become
-//! `Seq`. Equality on them is structural, which is what a property needs.
+//! Every exec type with a string or a list in it has an abstract twin,
+//! `make_spec_type`'s `…Spec`, named `A…` here, reached through `View`:
+//! strings become `Seq<char>`, vectors become `Seq`, numbers stay `u64`.
+//! The machine and the catalogue are stated over the twins, whose equality
+//! is structural, which is what a property needs. Enums view as themselves.
 //!
 //! serde derives are present only under plain cargo: `cfg_attr(not(
 //! verus_keep_ghost), …)` keeps the generated impls out of the verifier.
 
+use vstd::contrib::{make_spec_type, self_view};
 use vstd::prelude::*;
 
 verus! {
@@ -24,6 +26,7 @@ pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
 // Enumerations
 // ---------------------------------------------------------------------------
 
+#[self_view]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(verus_keep_ghost), serde(rename_all = "snake_case"))]
 #[derive(Clone, Copy, PartialEq, Eq, Structural, Debug)]
@@ -35,6 +38,7 @@ pub enum PromiseState {
     RejectedTimedout,
 }
 
+#[self_view]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(verus_keep_ghost), serde(rename_all = "snake_case"))]
 #[derive(Clone, Copy, PartialEq, Eq, Structural, Debug)]
@@ -69,6 +73,7 @@ impl PromiseState {
 pub type Tags = Vec<(String, String)>;
 pub type ATags = Seq<(Seq<char>, Seq<char>)>;
 
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default)]
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
@@ -79,18 +84,10 @@ pub struct Value {
     pub data: Option<String>,
 }
 
-pub struct AValue {
-    pub headers: ATags,
-    pub data: Option<Seq<char>>,
-}
+#[cfg(verus_keep_ghost)]
+pub type AValue = ValueSpec;
 
-impl View for Value {
-    type V = AValue;
-    open spec fn view(&self) -> AValue {
-        AValue { headers: self.headers.deep_view(), data: self.data.deep_view() }
-    }
-}
-
+#[cfg(verus_keep_ghost)]
 impl AValue {
     pub open spec fn empty() -> AValue {
         AValue { headers: Seq::empty(), data: None }
@@ -114,8 +111,8 @@ impl Value {
 // The row: a promise and the task that executes it
 // ---------------------------------------------------------------------------
 
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Task {
     pub state: TaskState,
@@ -132,40 +129,11 @@ pub struct Task {
     pub resumes: Vec<String>,
 }
 
-pub struct ATask {
-    pub state: TaskState,
-    pub version: nat,
-    pub ttl: Option<nat>,
-    pub pid: Option<Seq<char>>,
-    pub lease_timeout_at: Option<nat>,
-    pub retry_timeout_at: Option<nat>,
-    pub resumes: Seq<Seq<char>>,
-}
+#[cfg(verus_keep_ghost)]
+pub type ATask = TaskSpec;
 
-pub open spec fn opt_nat(o: Option<u64>) -> Option<nat> {
-    match o {
-        Some(x) => Some(x as nat),
-        None => None,
-    }
-}
-
-impl View for Task {
-    type V = ATask;
-    open spec fn view(&self) -> ATask {
-        ATask {
-            state: self.state,
-            version: self.version as nat,
-            ttl: opt_nat(self.ttl),
-            pid: self.pid.deep_view(),
-            lease_timeout_at: opt_nat(self.lease_timeout_at),
-            retry_timeout_at: opt_nat(self.retry_timeout_at),
-            resumes: self.resumes.deep_view(),
-        }
-    }
-}
-
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Promise {
     pub id: String,
@@ -188,52 +156,15 @@ pub struct Promise {
     pub task: Option<Task>,
 }
 
-pub struct APromise {
-    pub id: Seq<char>,
-    pub state: PromiseState,
-    pub tags: ATags,
-    pub param: AValue,
-    pub value: AValue,
-    pub timeout_at: nat,
-    pub created_at: nat,
-    pub settled_at: Option<nat>,
-    pub callbacks: Seq<Seq<char>>,
-    pub listeners: Seq<Seq<char>>,
-    pub task: Option<ATask>,
-}
-
-pub open spec fn opt_task(o: Option<Task>) -> Option<ATask> {
-    match o {
-        Some(t) => Some(t@),
-        None => None,
-    }
-}
-
-impl View for Promise {
-    type V = APromise;
-    open spec fn view(&self) -> APromise {
-        APromise {
-            id: self.id@,
-            state: self.state,
-            tags: self.tags.deep_view(),
-            param: self.param@,
-            value: self.value@,
-            timeout_at: self.timeout_at as nat,
-            created_at: self.created_at as nat,
-            settled_at: opt_nat(self.settled_at),
-            callbacks: self.callbacks.deep_view(),
-            listeners: self.listeners.deep_view(),
-            task: opt_task(self.task),
-        }
-    }
-}
+#[cfg(verus_keep_ghost)]
+pub type APromise = PromiseSpec;
 
 // ---------------------------------------------------------------------------
 // Schedules
 // ---------------------------------------------------------------------------
 
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct Schedule {
     pub id: String,
@@ -250,41 +181,15 @@ pub struct Schedule {
     pub created_at: u64,
 }
 
-pub struct ASchedule {
-    pub id: Seq<char>,
-    pub cron: Seq<char>,
-    pub promise_id: Seq<char>,
-    pub promise_timeout: nat,
-    pub promise_param: AValue,
-    pub promise_tags: ATags,
-    pub next_run_at: nat,
-    pub last_run_at: Option<nat>,
-    pub created_at: nat,
-}
-
-impl View for Schedule {
-    type V = ASchedule;
-    open spec fn view(&self) -> ASchedule {
-        ASchedule {
-            id: self.id@,
-            cron: self.cron@,
-            promise_id: self.promise_id@,
-            promise_timeout: self.promise_timeout as nat,
-            promise_param: self.promise_param@,
-            promise_tags: self.promise_tags.deep_view(),
-            next_run_at: self.next_run_at as nat,
-            last_run_at: opt_nat(self.last_run_at),
-            created_at: self.created_at as nat,
-        }
-    }
-}
+#[cfg(verus_keep_ghost)]
+pub type ASchedule = ScheduleSpec;
 
 // ---------------------------------------------------------------------------
 // Records: what a response carries
 // ---------------------------------------------------------------------------
 
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct PromiseRecord {
     pub id: String,
@@ -297,33 +202,10 @@ pub struct PromiseRecord {
     pub settled_at: Option<u64>,
 }
 
-pub struct APromiseRecord {
-    pub id: Seq<char>,
-    pub state: PromiseState,
-    pub param: AValue,
-    pub value: AValue,
-    pub tags: ATags,
-    pub timeout_at: nat,
-    pub created_at: nat,
-    pub settled_at: Option<nat>,
-}
+#[cfg(verus_keep_ghost)]
+pub type APromiseRecord = PromiseRecordSpec;
 
-impl View for PromiseRecord {
-    type V = APromiseRecord;
-    open spec fn view(&self) -> APromiseRecord {
-        APromiseRecord {
-            id: self.id@,
-            state: self.state,
-            param: self.param@,
-            value: self.value@,
-            tags: self.tags.deep_view(),
-            timeout_at: self.timeout_at as nat,
-            created_at: self.created_at as nat,
-            settled_at: opt_nat(self.settled_at),
-        }
-    }
-}
-
+#[cfg(verus_keep_ghost)]
 impl APromise {
     /// `PromiseObject.toRecord`.
     pub open spec fn to_record(self) -> APromiseRecord {
@@ -340,8 +222,8 @@ impl APromise {
     }
 }
 
+#[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct TaskRecord {
     pub id: String,
@@ -352,29 +234,10 @@ pub struct TaskRecord {
     pub pid: Option<String>,
 }
 
-pub struct ATaskRecord {
-    pub id: Seq<char>,
-    pub state: TaskState,
-    pub version: nat,
-    pub resumes: nat,
-    pub ttl: Option<nat>,
-    pub pid: Option<Seq<char>>,
-}
+#[cfg(verus_keep_ghost)]
+pub type ATaskRecord = TaskRecordSpec;
 
-impl View for TaskRecord {
-    type V = ATaskRecord;
-    open spec fn view(&self) -> ATaskRecord {
-        ATaskRecord {
-            id: self.id@,
-            state: self.state,
-            version: self.version as nat,
-            resumes: self.resumes as nat,
-            ttl: opt_nat(self.ttl),
-            pid: self.pid.deep_view(),
-        }
-    }
-}
-
+#[cfg(verus_keep_ghost)]
 impl ATask {
     /// `TaskObject.toRecord`.
     pub open spec fn to_record(self, id: Seq<char>) -> ATaskRecord {
@@ -382,7 +245,7 @@ impl ATask {
             id: id,
             state: self.state,
             version: self.version,
-            resumes: self.resumes.len(),
+            resumes: self.resumes.len() as u64,
             ttl: self.ttl,
             pid: self.pid,
         }
@@ -393,51 +256,54 @@ impl ATask {
 // Messages and the outbox
 // ---------------------------------------------------------------------------
 
+// `make_spec_type` on an enum with payloads trips the field accessors Verus
+// generates for every enum (they come out twice), so this one twin is by
+// hand, in the macro's shape: `DeepView` to the spec enum, `View` the same.
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub enum Message {
     Execute { task_id: String, version: u64 },
     Unblock(PromiseRecord),
 }
 
-pub enum AMessage {
-    Execute { task_id: Seq<char>, version: nat },
-    Unblock(APromiseRecord),
+#[cfg(verus_keep_ghost)]
+pub enum MessageSpec {
+    Execute { task_id: Seq<char>, version: u64 },
+    Unblock(PromiseRecordSpec),
 }
 
-impl View for Message {
-    type V = AMessage;
-    open spec fn view(&self) -> AMessage {
+#[cfg(verus_keep_ghost)]
+pub type AMessage = MessageSpec;
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Message {
+    type V = MessageSpec;
+    open spec fn deep_view(&self) -> MessageSpec {
         match self {
-            Message::Execute { task_id, version } => AMessage::Execute {
-                task_id: task_id@,
-                version: *version as nat,
-            },
-            Message::Unblock(r) => AMessage::Unblock(r@),
+            Message::Execute { task_id, version } => MessageSpec::Execute { task_id: task_id.deep_view(), version: *version },
+            Message::Unblock(r) => MessageSpec::Unblock(r.deep_view()),
         }
     }
 }
 
-#[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
+#[cfg(verus_keep_ghost)]
+impl View for Message {
+    type V = MessageSpec;
+    open spec fn view(&self) -> MessageSpec {
+        self.deep_view()
+    }
+}
 
+#[make_spec_type]
+#[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(verus_keep_ghost), derive(Clone))]
 pub struct OutboxEntry {
     pub address: String,
     pub message: Message,
 }
 
-pub struct AOutboxEntry {
-    pub address: Seq<char>,
-    pub message: AMessage,
-}
-
-impl View for OutboxEntry {
-    type V = AOutboxEntry;
-    open spec fn view(&self) -> AOutboxEntry {
-        AOutboxEntry { address: self.address@, message: self.message@ }
-    }
-}
+#[cfg(verus_keep_ghost)]
+pub type AOutboxEntry = OutboxEntrySpec;
 
 /// `OutboxKey`: one `execute` per task, one `unblock` per promise and address.
 pub enum OutboxKey {
@@ -445,6 +311,7 @@ pub enum OutboxKey {
     Notify(Seq<char>, Seq<char>),
 }
 
+#[cfg(verus_keep_ghost)]
 impl AOutboxEntry {
     pub open spec fn key(self) -> OutboxKey {
         match self.message {
@@ -480,6 +347,7 @@ impl Config {
 
 pub struct PromiseGetReq { pub id: String }
 
+#[make_spec_type]
 pub struct PromiseCreateReq {
     pub id: String,
     pub timeout_at: u64,
@@ -487,25 +355,9 @@ pub struct PromiseCreateReq {
     pub tags: Tags,
 }
 
+#[cfg(verus_keep_ghost)]
+pub type APromiseCreateReq = PromiseCreateReqSpec;
 
-pub struct APromiseCreateReq {
-    pub id: Seq<char>,
-    pub timeout_at: nat,
-    pub param: AValue,
-    pub tags: ATags,
-}
-
-impl View for PromiseCreateReq {
-    type V = APromiseCreateReq;
-    open spec fn view(&self) -> APromiseCreateReq {
-        APromiseCreateReq {
-            id: self.id@,
-            timeout_at: self.timeout_at as nat,
-            param: self.param@,
-            tags: self.tags.deep_view(),
-        }
-    }
-}
 
 pub struct PromiseSettleReq {
     pub id: String,

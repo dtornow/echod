@@ -21,6 +21,8 @@
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 
 pub mod node;
+#[cfg(verus_keep_ghost)]
 pub mod proof;
+#[cfg(verus_keep_ghost)]
 pub mod spec;
 pub mod tla;

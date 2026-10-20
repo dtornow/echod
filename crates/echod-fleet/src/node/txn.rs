@@ -152,6 +152,13 @@ impl NodeCore {
     }
 }
 
+pub open spec fn opt_nat(o: Option<u64>) -> Option<nat> {
+    match o {
+        Some(x) => Some(x as nat),
+        None => None,
+    }
+}
+
 pub open spec fn opt_str(o: Option<&String>) -> Option<Seq<char>> {
     match o {
         Some(s) => Some(s@),

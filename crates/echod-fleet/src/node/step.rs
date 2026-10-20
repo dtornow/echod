@@ -18,9 +18,12 @@ use echod_kernel::store::*;
 use echod_kernel::tags::OType;
 use echod_kernel::types::*;
 
+use crate::node::txn::*;
+
 verus! {
 
 /// An origin's document: its objects, as the kernel sees them.
+#[cfg(verus_keep_ghost)]
 pub type Doc = Map<Seq<char>, APromise>;
 
 /// A document as a kernel state: the objects alone, no schedule, nothing
@@ -35,15 +38,15 @@ pub open spec fn full(d: Doc) -> AState {
 
 /// A pending promise that is not internal owes a timer at its deadline.
 pub open spec fn promise_deadline(p: APromise) -> Option<nat> {
-    if p.state == PromiseState::Pending && p.otype() != OType::Internal { Some(p.timeout_at) } else { None }
+    if p.state == PromiseState::Pending && p.otype() != OType::Internal { Some(p.timeout_at as nat) } else { None }
 }
 
 pub open spec fn lease_deadline(p: APromise) -> Option<nat> {
-    match p.task { Some(t) => t.lease_timeout_at, None => None }
+    match p.task { Some(t) => opt_nat(t.lease_timeout_at), None => None }
 }
 
 pub open spec fn retry_deadline(p: APromise) -> Option<nat> {
-    match p.task { Some(t) => t.retry_timeout_at, None => None }
+    match p.task { Some(t) => opt_nat(t.retry_timeout_at), None => None }
 }
 
 pub open spec fn deadline_at(p: APromise, t: nat) -> bool {
@@ -274,7 +277,7 @@ pub fn next_deadline(rows: &Vec<Promise>) -> (r: Option<u64>)
             None => {}
         }
         proof {
-            assert(promise_deadline(ap) == (if pending && !internal { Some(ap.timeout_at) } else { None }));
+            assert(promise_deadline(ap) == (if pending && !internal { Some(ap.timeout_at as nat) } else { None }));
             assert forall |t: nat| deadline_at(ap, t) implies min is Some && min.unwrap() as nat <= t by {}
             assert forall |j: int, t: nat| 0 <= j < i + 1 && #[trigger] deadline_at(rows@[j]@, t) implies min is Some && min.unwrap() as nat <= t by {
                 if j < i {
@@ -324,7 +327,7 @@ proof fn lemma_swept_object(now: nat, s0: AState, s1: AState, s2: AState, s3: AS
         s1.objects == promise_timeout_objects(s0, id, now),
         s2.objects == lease_timeout_objects(s1, id, now),
         s3.objects == retry_timeout_objects(s2, id, now, rt),
-        rt > 0,
+        0 < rt <= MAX_TIME, now <= MAX_TIME,
     ensures
         s3.objects.contains_key(id) ==> cleared(s3.objects[id], now),
         forall |x: Seq<char>| x != id ==> (s3.objects.contains_key(x) <==> s0.objects.contains_key(x)) && (s0.objects.contains_key(x) ==> s3.objects[x] == s0.objects[x]),
@@ -343,8 +346,11 @@ proof fn lemma_swept_object(now: nat, s0: AState, s1: AState, s2: AState, s3: AS
         assert(p3.state == p1.state && p3.timeout_at == p1.timeout_at);
         assert forall |t: nat| deadline_at(p3, t) implies t > now by {
             if promise_deadline(p3) == Some(t) {
+                assert(t == p3.timeout_at as nat);
+                assert(t > now);
             } else if lease_deadline(p3) == Some(t) {
                 let t3 = p3.task.unwrap();
+                assert(t3.lease_timeout_at is Some && t == t3.lease_timeout_at.unwrap() as nat);
                 assert(t3.state == TaskState::Acquired);
                 if p1.state != PromiseState::Pending {
                     assert(false);
@@ -352,21 +358,29 @@ proof fn lemma_swept_object(now: nat, s0: AState, s1: AState, s2: AState, s3: AS
                     assert(!lease_due(p1, now));
                     assert(p2 == p1);
                     assert(!retry_due(p2, now) || p3.task.unwrap().lease_timeout_at == p2.task.unwrap().lease_timeout_at);
+                    assert(t > now);
                 }
             } else {
                 let t3 = p3.task.unwrap();
+                assert(t3.retry_timeout_at is Some && t == t3.retry_timeout_at.unwrap() as nat);
                 assert(t3.state == TaskState::Pending);
                 if p1.state != PromiseState::Pending {
                     assert(false);
                 } else {
                     if retry_due(p2, now) {
+                        // re-offered: the retry is `rt` ahead of `now`, and the sum fits
+                        assert(t3 == p2.task.unwrap().rearm(now, rt));
+                        assert(now + rt <= 2 * (MAX_TIME as nat));
+                        assert(t3.retry_timeout_at == Some((now + rt) as u64));
+                        assert(t == now + rt);
                     } else {
                         if lease_due(p1, now) {
-                            assert(p2.task.unwrap().retry_timeout_at == Some(now));
+                            assert(p2.task.unwrap().retry_timeout_at == Some(now as u64));
                             assert(retry_due(p2, now));
                             assert(false);
                         }
                     }
+                    assert(t > now);
                 }
             }
         }

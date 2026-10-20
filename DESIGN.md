@@ -26,7 +26,7 @@ on the state it leaves, `legal` on the pair, and for an internal step the two
 sweeper entries.
 
 ```text
-types.rs        rows, records, requests, responses; abstract twins and views
+types.rs        rows, records, requests, responses; their abstract twins, derived
 ident.rs        ids; the three trusted string primitives
 tags.rs         tags: first match wins; otype, timer, target
 store.rs        State: row vectors whose view is three maps, via the fold
@@ -38,6 +38,12 @@ external_proof.rs  their lemmas: one per handler, and the projection and frame l
 internal.rs     the 6 internal steps
 internal_proof.rs  their lemmas
 ```
+
+Every exec type with a string or a list in it has an abstract twin, which
+`vstd::contrib::make_spec_type` derives: strings become `Seq<char>`, vectors
+`Seq`, numbers stay `u64`. The machine and the catalogue are stated over the
+twins, whose equality is structural. The twins exist only under the verifier;
+`cargo build` sees the exec types alone.
 
 The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
 Its abstract view is three maps, the fold of the rows by key, so the

@@ -14,6 +14,7 @@ verus! {
 // Specification
 // ---------------------------------------------------------------------------
 
+#[cfg(verus_keep_ghost)]
 impl APromise {
     pub open spec fn is_timer(self) -> bool {
         crate::tags::is_timer(self.tags)
@@ -79,7 +80,7 @@ impl APromise {
         APromise {
             state: state,
             value: value,
-            settled_at: Some(now),
+            settled_at: Some(now as u64),
             task: match self.task {
                 Some(t) => Some(if t.state != TaskState::Fulfilled { t.fulfill() } else { t }),
                 None => None,
@@ -93,15 +94,16 @@ impl APromise {
     }
 }
 
+#[cfg(verus_keep_ghost)]
 impl ATask {
     /// `task.create` on a pending task, `task.acquire`.
     pub open spec fn acquire(self, pid: Seq<char>, ttl: nat, now: nat) -> ATask {
         ATask {
             state: TaskState::Acquired,
-            version: self.version + 1,
-            ttl: Some(ttl),
+            version: (self.version + 1) as u64,
+            ttl: Some(ttl as u64),
             pid: Some(pid),
-            lease_timeout_at: Some(now + ttl),
+            lease_timeout_at: Some((now + ttl) as u64),
             retry_timeout_at: None,
             resumes: Seq::empty(),
         }
@@ -114,7 +116,7 @@ impl ATask {
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: Some(now),
+            retry_timeout_at: Some(now as u64),
             ..self
         }
     }
@@ -131,7 +133,7 @@ impl ATask {
     }
 
     pub open spec fn continue_(self, now: nat) -> ATask {
-        ATask { state: TaskState::Pending, retry_timeout_at: Some(now), ..self }
+        ATask { state: TaskState::Pending, retry_timeout_at: Some(now as u64), ..self }
     }
 
     pub open spec fn suspend(self) -> ATask {
@@ -151,12 +153,12 @@ impl ATask {
     }
 
     pub open spec fn heartbeat(self, now: nat) -> ATask {
-        ATask { lease_timeout_at: Some(now + crate::properties::opt_or_zero(self.ttl)), ..self }
+        ATask { lease_timeout_at: Some((now + crate::properties::opt_or_zero(self.ttl)) as u64), ..self }
     }
 
     /// `resumeOne` on a suspended task.
     pub open spec fn wake(self, awaited: Seq<char>, now: nat) -> ATask {
-        ATask { state: TaskState::Pending, resumes: seq![awaited], retry_timeout_at: Some(now), ..self }
+        ATask { state: TaskState::Pending, resumes: seq![awaited], retry_timeout_at: Some(now as u64), ..self }
     }
 
     /// `resumeOne` on a task that is not suspended.
@@ -165,10 +167,11 @@ impl ATask {
     }
 
     pub open spec fn rearm(self, now: nat, retry_timeout: nat) -> ATask {
-        ATask { retry_timeout_at: Some(now + retry_timeout), ..self }
+        ATask { retry_timeout_at: Some((now + retry_timeout) as u64), ..self }
     }
 }
 
+#[cfg(verus_keep_ghost)]
 impl ATask {
     /// `TaskObject.fulfill`.
     pub open spec fn fulfill(self) -> ATask {
@@ -544,7 +547,7 @@ impl Promise {
     pub fn task_heartbeat(&mut self, now: u64)
         requires
             old(self).task is Some,
-            now + crate::properties::opt_or_zero(crate::types::opt_nat(old(self).task.unwrap().ttl)) <= u64::MAX,
+            now + crate::properties::opt_or_zero(old(self).task.unwrap().ttl) <= u64::MAX,
         ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().heartbeat(now as nat)),
     {
         match &mut self.task {
@@ -708,7 +711,7 @@ pub open spec fn spec_create(req: APromiseCreateReq, now: nat) -> APromise {
             param: req.param,
             value: AValue::empty(),
             timeout_at: req.timeout_at,
-            created_at: now,
+            created_at: now as u64,
             settled_at: None,
             callbacks: Seq::empty(),
             listeners: Seq::empty(),
@@ -719,7 +722,7 @@ pub open spec fn spec_create(req: APromiseCreateReq, now: nat) -> APromise {
                     ttl: None,
                     pid: None,
                     lease_timeout_at: None,
-                    retry_timeout_at: Some(first_dispatch(req.tags, now)),
+                    retry_timeout_at: Some(first_dispatch(req.tags, now) as u64),
                     resumes: Seq::empty(),
                 })
             } else {
@@ -766,16 +769,16 @@ pub open spec fn spec_create_acquired(req: APromiseCreateReq, pid: Seq<char>, tt
         param: req.param,
         value: AValue::empty(),
         timeout_at: req.timeout_at,
-        created_at: now,
+        created_at: now as u64,
         settled_at: None,
         callbacks: Seq::empty(),
         listeners: Seq::empty(),
         task: Some(ATask {
             state: TaskState::Acquired,
             version: 1,
-            ttl: Some(ttl),
+            ttl: Some(ttl as u64),
             pid: Some(pid),
-            lease_timeout_at: Some(now + ttl),
+            lease_timeout_at: Some((now + ttl) as u64),
             retry_timeout_at: None,
             resumes: Seq::empty(),
         }),
@@ -810,7 +813,7 @@ pub fn create_promise(req: &PromiseCreateReq, now: u64) -> (p: Promise)
         param: req.param.dup(),
         value: Value::empty(),
         timeout_at: req.timeout_at,
-        created_at: now,
+        created_at: now as u64,
         settled_at: None,
         callbacks: Vec::new(),
         listeners: Vec::new(),
@@ -872,7 +875,7 @@ pub fn create_promise_acquired(req: &PromiseCreateReq, pid: &String, ttl: u64, n
         param: req.param.dup(),
         value: Value::empty(),
         timeout_at: req.timeout_at,
-        created_at: now,
+        created_at: now as u64,
         settled_at: None,
         callbacks: Vec::new(),
         listeners: Vec::new(),

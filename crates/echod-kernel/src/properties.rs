@@ -18,7 +18,7 @@
 
 use vstd::prelude::*;
 
-use crate::store::AState;
+use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -28,6 +28,7 @@ verus! {
 // Reading the state
 // ---------------------------------------------------------------------------
 
+#[cfg(verus_keep_ghost)]
 impl AState {
     /// `s.promise? id`.
     pub open spec fn promise_of(self, id: Seq<char>) -> Option<APromise> {
@@ -64,8 +65,8 @@ pub open spec fn task_cleared(t: ATask) -> bool {
     t.pid is None && t.ttl is None && t.lease_timeout_at is None && t.retry_timeout_at is None
 }
 
-pub open spec fn opt_or_zero(o: Option<nat>) -> nat {
-    match o { Some(x) => x, None => 0 }
+pub open spec fn opt_or_zero(o: Option<u64>) -> nat {
+    match o { Some(x) => x as nat, None => 0 }
 }
 
 pub open spec fn deadline_verdict(p: APromise) -> PromiseState {
@@ -80,7 +81,7 @@ pub open spec fn some_callbacks_contain(s: AState, awaiter: Seq<char>) -> bool {
     exists|id: Seq<char>| #[trigger] s.objects.contains_key(id) && s.objects[id].callbacks.contains(awaiter)
 }
 
-pub open spec fn has_execute(s: AState, id: Seq<char>, v: nat, address: Seq<char>) -> bool {
+pub open spec fn has_execute(s: AState, id: Seq<char>, v: u64, address: Seq<char>) -> bool {
     exists|k: OutboxKey| #[trigger] s.outbox.contains_key(k)
         && s.outbox[k].address == address
         && match s.outbox[k].message {
@@ -739,7 +740,7 @@ pub open spec fn consistent_task_acquisition_is_atomic_at(now: nat, b: AState, i
         !(t.state != TaskState::Acquired && u.state == TaskState::Acquired)
             || (t.state == TaskState::Pending && t.version < u.version
                 && u.pid is Some && u.ttl is Some
-                && u.lease_timeout_at == Some((now + opt_or_zero(u.ttl)) as nat)
+                && u.lease_timeout_at == Some((now + opt_or_zero(u.ttl)) as u64)
                 && u.retry_timeout_at is None && u.resumes.len() == 0))
 }
 pub open spec fn consistent_task_acquisition_is_atomic(now: nat, a: AState, b: AState) -> bool {
@@ -749,7 +750,7 @@ pub open spec fn consistent_task_acquisition_is_atomic(now: nat, a: AState, b: A
 
 pub open spec fn consistent_task_pending_entry_arms_retry_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
-        !(t.state != TaskState::Pending && u.state == TaskState::Pending) || u.retry_timeout_at == Some(now))
+        !(t.state != TaskState::Pending && u.state == TaskState::Pending) || u.retry_timeout_at == Some(now as u64))
 }
 pub open spec fn consistent_task_pending_entry_arms_retry(now: nat, a: AState, b: AState) -> bool {
     forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==>
@@ -780,7 +781,7 @@ pub open spec fn monotone_task_retry_rearm_advances(now: nat, a: AState, b: ASta
 pub open spec fn consistent_task_wake_records_resume_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
         !(t.state == TaskState::Suspended && u.state == TaskState::Pending)
-            || (u.resumes.len() != 0 && u.retry_timeout_at == Some(now) && u.version == t.version))
+            || (u.resumes.len() != 0 && u.retry_timeout_at == Some(now as u64) && u.version == t.version))
 }
 pub open spec fn consistent_task_wake_records_resume(now: nat, a: AState, b: AState) -> bool {
     forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==>
@@ -793,7 +794,7 @@ pub open spec fn consistent_promise_settlement_stamp_at(now: nat, b: AState, id:
             None => false,
             Some(q) => {
                 ||| q.state == PromiseState::Pending
-                ||| (q.settled_at == Some(now) && now < q.timeout_at && q.state != PromiseState::RejectedTimedout)
+                ||| (q.settled_at == Some(now as u64) && now < q.timeout_at && q.state != PromiseState::RejectedTimedout)
                 ||| (q.settled_at == Some(q.timeout_at) && q.timeout_at <= now
                         && q.state == deadline_verdict(q)
                         && q.value.data == p.value.data && q.value.headers == p.value.headers)

@@ -398,9 +398,9 @@ pub proof fn promises_have_timers(p: Params, s: Cluster, o: Origin, id: Seq<char
     let d = s.store.docs[o];
     let q = d[id];
     if q.state == echod_kernel::types::PromiseState::Pending && q.otype() != echod_kernel::tags::OType::Internal {
-        assert(deadline_at(q, q.timeout_at));
-        assert(has_deadline(d, q.timeout_at));
-        timers_cover(p, s, o, q.timeout_at);
+        assert(deadline_at(q, q.timeout_at as nat));
+        assert(has_deadline(d, q.timeout_at as nat));
+        timers_cover(p, s, o, q.timeout_at as nat);
     }
     if lease_deadline(q) is Some {
         let t = lease_deadline(q).unwrap();
@@ -647,7 +647,12 @@ proof fn lemma_propose(p: Params, s: Cluster, s2: Cluster, i: Id, m: Seq<Id>)
     disassemble(p, s);
     let e = s.store.config.epoch + 1;
     assert(inv_written(s2)) by {
-        assert forall |a: nat| a <= s2.store.config.epoch implies #[trigger] s2.store.written.contains_key(a) && s2.store.configs.contains_key(a) by {}
+        assert forall |a: nat| a <= s2.store.config.epoch implies #[trigger] s2.store.written.contains_key(a) && s2.store.configs.contains_key(a) by {
+            if a != e {
+                assert(a <= s.store.config.epoch);
+                assert(s.store.written.contains_key(a) && s.store.configs.contains_key(a));
+            }
+        }
         assert forall |a: nat, b: nat| a <= b && b <= s2.store.config.epoch implies #[trigger] s2.store.written[a] <= #[trigger] s2.store.written[b] by {
             if b == e {
                 if a < e {
@@ -1423,7 +1428,11 @@ proof fn lemma_finish_store(p: Params, s: Cluster, s2: Cluster, i: Id, o: Origin
     assert(inv_node(p, s, i));
     assert(inv_txn(p, s, i, o));
     let kept = spec_keep(c);
-    assert(inv_written(s2));
+    assert(inv_written(s2)) by {
+        // finish touches the timers alone
+        assert(s2.store.written == s.store.written && s2.store.configs == s.store.configs
+            && s2.store.config == s.store.config && s2.now == s.now);
+    }
     assert(inv_store(s2)) by {
         assert(s2.store.docs == s.store.docs && s2.store.versions == s.store.versions && s2.store.armer == s.store.armer && s2.store.counter == s.store.counter);
         assert forall |k: AKey| #[trigger] s2.store.timers.contains(k) implies s.store.armer.contains_key(k) by {

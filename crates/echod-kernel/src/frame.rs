@@ -11,7 +11,7 @@
 use vstd::prelude::*;
 
 use crate::properties::*;
-use crate::store::AState;
+use crate::store::*;
 use crate::tags::OType;
 use crate::types::*;
 
