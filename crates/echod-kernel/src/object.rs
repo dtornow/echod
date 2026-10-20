@@ -608,7 +608,7 @@ impl Value {
 /// before `now`.
 pub open spec fn first_dispatch(tags: ATags, now: nat) -> nat {
     match crate::tags::tags_get(tags, "resonate:delay"@) {
-        Some(d) => if crate::ident::spec_parse_nat(d) > now { crate::ident::spec_parse_nat(d) } else { now },
+        Some(d) => if crate::types::spec_parse_nat(d) > now { crate::types::spec_parse_nat(d) } else { now },
         None => now,
     }
 }
@@ -738,7 +738,7 @@ pub fn create_promise(req: &PromiseCreateReq, now: u64) -> (p: Promise)
         if runnable {
             let due = match crate::tags::tag_find(&req.tags, "resonate:delay") {
                 Some(i) => {
-                    let d = crate::ident::parse_nat(&req.tags[i].1);
+                    let d = crate::types::parse_nat(&req.tags[i].1);
                     if d > now { d } else { now }
                 }
                 None => now,

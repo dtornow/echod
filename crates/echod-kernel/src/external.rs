@@ -201,7 +201,7 @@ impl State {
             r.status == 200 || r.status == 400 || r.status == 404 || r.status == 422,
     {
         let ghost a = self@;
-        if req.awaited == req.awaiter || !crate::ident::same_origin(&req.awaited, &req.awaiter) {
+        if req.awaited == req.awaiter || !crate::types::same_origin(&req.awaited, &req.awaiter) {
             proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return PromiseRes { status: 400, promise: None };
         }
@@ -792,7 +792,7 @@ pub open spec fn suspend_doors(actions: Seq<PromiseRegisterCallbackReq>, id: Seq
     &&& actions.len() > 0
     &&& awaited_distinct(actions)
     &&& forall|j: int| 0 <= j < actions.len() ==>
-        #[trigger] actions[j].awaited@ != id && crate::ident::same_origin_spec(actions[j].awaited@, id)
+        #[trigger] actions[j].awaited@ != id && crate::types::same_origin_spec(actions[j].awaited@, id)
 }
 
 /// The task `task.suspend` found: acquired, on a pending promise ahead of its
@@ -825,7 +825,7 @@ impl State {
             TaskFenceAction::Create(c) => &c.id,
             TaskFenceAction::Settle(c) => &c.id,
         };
-        if *target == req.id || !crate::ident::same_origin(target, &req.id) {
+        if *target == req.id || !crate::types::same_origin(target, &req.id) {
             proof { crate::properties_proof::lemma_noop(now as nat, a); }
             return TaskFenceRes { status: 400, action: None };
         }
@@ -976,7 +976,7 @@ impl State {
         }
         proof {
             assert forall|j: int| 0 <= j < acts.len() implies
-                #[trigger] acts[j].awaited@ != id && crate::ident::same_origin_spec(acts[j].awaited@, id) by {}
+                #[trigger] acts[j].awaited@ != id && crate::types::same_origin_spec(acts[j].awaited@, id) by {}
             assert(suspend_doors(acts, id));
         }
         let i = match self.read_task_object(&req.id, now) {
@@ -1159,7 +1159,7 @@ impl State {
             assert forall|x: Seq<char>| #[trigger] awaited_of(acts, x) implies
                 a.objects.contains_key(x) && a.objects[x].otype().awaitable()
                 && a.objects[x].state == PromiseState::Pending && a.objects[x].timeout_at > now
-                && x != id && crate::ident::same_origin_spec(x, id)
+                && x != id && crate::types::same_origin_spec(x, id)
                 && self@.objects.contains_key(x) && self@.objects[x] == a.objects[x] by {
                 assert(awaited_touched(acts, n as int, x));
                 let jj = choose|jj: int| 0 <= jj < n && #[trigger] acts[jj].awaited@ == x;
@@ -1196,7 +1196,7 @@ impl State {
                 forall|x: Seq<char>| #[trigger] awaited_of(acts, x) ==>
                     a.objects.contains_key(x) && a.objects[x].otype().awaitable()
                     && a.objects[x].state == PromiseState::Pending && a.objects[x].timeout_at > now
-                    && x != id && crate::ident::same_origin_spec(x, id),
+                    && x != id && crate::types::same_origin_spec(x, id),
                 forall|j: int| 0 <= j < k ==> self@.objects.contains_key(#[trigger] acts[j].awaited@)
                     && self@.objects[acts[j].awaited@] == a.objects[acts[j].awaited@].add_callback(id),
                 forall|j: int| k <= j < n ==> self@.objects.contains_key(#[trigger] acts[j].awaited@)
@@ -1284,17 +1284,17 @@ impl State {
 pub fn awaits_self_or_crosses(actions: &Vec<PromiseRegisterCallbackReq>, id: &String) -> (r: bool)
     ensures
         r == exists|j: int| 0 <= j < actions@.len()
-            && (#[trigger] actions@[j].awaited@ == id@ || !crate::ident::same_origin_spec(actions@[j].awaited@, id@)),
+            && (#[trigger] actions@[j].awaited@ == id@ || !crate::types::same_origin_spec(actions@[j].awaited@, id@)),
 {
     let mut k: usize = 0;
     while k < actions.len()
         invariant
             k <= actions@.len(),
             forall|j: int| 0 <= j < k ==>
-                #[trigger] actions@[j].awaited@ != id@ && crate::ident::same_origin_spec(actions@[j].awaited@, id@),
+                #[trigger] actions@[j].awaited@ != id@ && crate::types::same_origin_spec(actions@[j].awaited@, id@),
         decreases actions@.len() - k,
     {
-        if actions[k].awaited == *id || !crate::ident::same_origin(&actions[k].awaited, id) {
+        if actions[k].awaited == *id || !crate::types::same_origin(&actions[k].awaited, id) {
             return true;
         }
         k += 1;

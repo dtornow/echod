@@ -13,6 +13,9 @@
 use vstd::hash_map::StringHashMap;
 use vstd::prelude::*;
 
+// `str == str` and `String::clone` are the kernel's trusted primitives.
+pub use echod_kernel::types::{clone_string, str_eq};
+
 verus! {
 
 pub type Id = Seq<char>;
@@ -33,14 +36,6 @@ pub fn fnv1a(s: &str) -> (r: u64)
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
-}
-
-/// `str == str`, with its meaning stated.
-#[verifier::external_body]
-pub fn str_eq(a: &str, b: &str) -> (r: bool)
-    ensures r == (a@ == b@),
-{
-    a == b
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +80,7 @@ pub fn key_eq(a: &Key, b: &Key) -> (r: bool)
 pub fn clone_key(k: &Key) -> (r: Key)
     ensures r@ == k@,
 {
-    Key { origin: echod_kernel::ident::clone_string(&k.origin), at: k.at, token: k.token }
+    Key { origin: clone_string(&k.origin), at: k.at, token: k.token }
 }
 
 /// The key a node remembers for an origin, and the version of the document

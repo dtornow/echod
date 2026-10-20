@@ -3,7 +3,7 @@
 
 use vstd::prelude::*;
 
-use crate::ident::str_eq;
+use crate::types::str_eq;
 use crate::tags::*;
 use crate::types::{ATags, Tags};
 

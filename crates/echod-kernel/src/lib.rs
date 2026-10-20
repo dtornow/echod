@@ -6,8 +6,7 @@
 //! as executable Rust, with the catalogue as the `ensures` of every step.
 //!
 //! ```text
-//! types.rs       rows, records, requests, responses; abstract twins and views
-//! ident.rs       ids and the three trusted string primitives
+//! types.rs       rows, records, requests, responses, ids; the twins, derived; the trusted string primitives
 //! tags.rs        tags: first match wins; otype, timer, target
 //! tags_proof.rs  what `get` returns
 //! store.rs       State: row vectors whose view is three maps, via the fold
@@ -29,7 +28,6 @@
 
 pub mod external;
 pub mod external_proof;
-pub mod ident;
 pub mod internal;
 pub mod internal_proof;
 pub mod object;

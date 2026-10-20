@@ -146,7 +146,7 @@ impl NodeCore {
             },
         };
         match keep {
-            Some(k) => self.set_armed(t.origin.as_str(), Some(Armed { key: k, etag: echod_kernel::ident::clone_string(etag) })),
+            Some(k) => self.set_armed(t.origin.as_str(), Some(Armed { key: k, etag: clone_string(etag) })),
             None => self.set_armed(t.origin.as_str(), None),
         }
     }

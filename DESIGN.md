@@ -26,8 +26,7 @@ on the state it leaves, `legal` on the pair, and for an internal step the two
 sweeper entries.
 
 ```text
-types.rs        rows, records, requests, responses; their abstract twins, derived
-ident.rs        ids; the three trusted string primitives
+types.rs        rows, records, requests, responses, ids; the twins, derived; the trusted string primitives
 tags.rs         tags: first match wins; otype, timer, target
 tags_proof.rs   what `get` returns
 store.rs        State: row vectors whose view is three maps, via the fold
@@ -68,7 +67,7 @@ Lean text, both because the text is wrong:
   `now`, which `preserved_no_dead_dispatch` forbids. The kernel births such a
   promise dead, the state Lean reaches on the next touch.
 
-Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `ident.rs`
+Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `types.rs`
 (bodies are plain Rust, their `ensures` assumed), and the cron arithmetic,
 which the caller supplies as a request's occurrences and next run. Doors the
 kernel adds: instants and durations at most `MAX_TIME` (2^62 ms), versions
@@ -328,9 +327,9 @@ function `ensures` it equals the specification function of the same name
 on the state's view. The step module verifies the loops the server runs
 around the kernel: `sweep` leaves nothing due at its instant and leaves the
 document as it was if nothing fired; `drain` is kernel steps; `next_deadline`
-is the least deadline; `clamp_now` the later of clock and stamp. Three
-primitives are trusted with their meaning stated: FNV-1a is a function of
-the string, `str == str` is equality of views, `String::clone` copies.
+is the least deadline; `clamp_now` the later of clock and stamp. One
+primitive of its own is trusted with its meaning stated: FNV-1a is a
+function of the string. `str == str` and `String::clone` are the kernel's.
 
 The fleet state: real time (ghost), the nodes, the bucket. A node is its
 core's view, its body cache, whether it is alive, its clock, the commits it

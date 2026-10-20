@@ -253,7 +253,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
     // --- the awaited object ---
     assert forall|i: int| 0 <= i < q.callbacks.len() implies
         b.objects.contains_key(#[trigger] q.callbacks[i]) && b.objects[q.callbacks[i]].otype() == OType::Runnable
-        && crate::ident::same_origin_spec(q.callbacks[i], x) by {
+        && crate::types::same_origin_spec(q.callbacks[i], x) by {
         assert(q.callbacks.contains(q.callbacks[i]));
         let z = q.callbacks[i];
         assert(p.callbacks.contains(z));

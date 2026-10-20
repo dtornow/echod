@@ -230,7 +230,7 @@ pub open spec fn well_formed_promise_awaiter_is_not_self(now: nat, s: AState) ->
 }
 
 pub open spec fn well_formed_promise_callbacks_same_origin_at(_now: nat, p: APromise) -> bool {
-    forall|i: int| 0 <= i < p.callbacks.len() ==> crate::ident::same_origin_spec(#[trigger] p.callbacks[i], p.id)
+    forall|i: int| 0 <= i < p.callbacks.len() ==> crate::types::same_origin_spec(#[trigger] p.callbacks[i], p.id)
 }
 pub open spec fn well_formed_promise_callbacks_same_origin(now: nat, s: AState) -> bool {
     forall|id: Seq<char>| #[trigger] s.objects.contains_key(id) ==>

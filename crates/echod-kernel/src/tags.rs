@@ -4,7 +4,7 @@ use vstd::prelude::*;
 
 use crate::tags_proof::*;
 
-use crate::ident::str_eq;
+use crate::types::str_eq;
 use crate::types::{ATags, Tags};
 
 verus! {

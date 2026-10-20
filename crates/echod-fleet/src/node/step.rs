@@ -414,7 +414,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             forall |j: int| 0 <= j < i ==> #[trigger] ids@[j]@ == s.objects@[j].id@,
         decreases s.objects@.len() - i,
     {
-        ids.push(echod_kernel::ident::clone_string(&s.objects[i].id));
+        ids.push(clone_string(&s.objects[i].id));
         i += 1;
     }
     proof {
@@ -452,7 +452,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_promise_timeout(&PromiseTimeoutReq { id: echod_kernel::ident::clone_string(id) }, now, cfg);
+        s.process_promise_timeout(&PromiseTimeoutReq { id: clone_string(id) }, now, cfg);
         let ghost s1 = s@;
         proof { lemma_reach_step(now as nat, a, s0, s1); }
         let due_l = match s.find_object(id) {
@@ -473,7 +473,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_lease_timeout(&TaskLeaseTimeoutReq { id: echod_kernel::ident::clone_string(id) }, now, cfg);
+        s.process_lease_timeout(&TaskLeaseTimeoutReq { id: clone_string(id) }, now, cfg);
         let ghost s2 = s@;
         proof { lemma_reach_step(now as nat, a, s1, s2); }
         let due_r = match s.find_object(id) {
@@ -494,7 +494,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_retry_timeout(&TaskRetryTimeoutReq { id: echod_kernel::ident::clone_string(id) }, now, cfg);
+        s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(id) }, now, cfg);
         let ghost s3 = s@;
         proof { lemma_reach_step(now as nat, a, s2, s3); }
         if due_p || due_l || due_r {
@@ -551,7 +551,7 @@ fn clone_strings(v: &Vec<String>) -> (r: Vec<String>)
         invariant i <= v@.len(), r@.len() == i, forall |j: int| 0 <= j < i ==> #[trigger] r@[j]@ == v@[j]@,
         decreases v@.len() - i,
     {
-        r.push(echod_kernel::ident::clone_string(&v[i]));
+        r.push(clone_string(&v[i]));
         i += 1;
     }
     assert(r.deep_view() =~= v.deep_view());
@@ -592,7 +592,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
             let p = &s.objects[i];
             let pending = match p.state { PromiseState::Pending => true, _ => false };
             if !pending && (p.callbacks.len() > 0 || p.listeners.len() > 0) {
-                owed.push(Owed { awaited: echod_kernel::ident::clone_string(&p.id), callbacks: clone_strings(&p.callbacks), listeners: clone_strings(&p.listeners) });
+                owed.push(Owed { awaited: clone_string(&p.id), callbacks: clone_strings(&p.callbacks), listeners: clone_strings(&p.listeners) });
             }
             i += 1;
         }
@@ -612,7 +612,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 decreases owed@[o as int].callbacks@.len() - c,
             {
                 let ghost b = s@;
-                let req = PromiseRegisterCallbackReq { awaited: echod_kernel::ident::clone_string(&owed[o].awaited), awaiter: echod_kernel::ident::clone_string(&owed[o].callbacks[c]) };
+                let req = PromiseRegisterCallbackReq { awaited: clone_string(&owed[o].awaited), awaiter: clone_string(&owed[o].callbacks[c]) };
                 s.process_callback(&req, now, cfg);
                 proof {
                     assert(inv(now as nat, s@));
@@ -632,7 +632,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 decreases owed@[o as int].listeners@.len() - l,
             {
                 let ghost b = s@;
-                let req = PromiseRegisterListenerReq { awaited: echod_kernel::ident::clone_string(&owed[o].awaited), address: echod_kernel::ident::clone_string(&owed[o].listeners[l]) };
+                let req = PromiseRegisterListenerReq { awaited: clone_string(&owed[o].awaited), address: clone_string(&owed[o].listeners[l]) };
                 s.process_listener(&req, now, cfg);
                 proof { lemma_reach_step(now as nat, old(s)@, b, s@); }
                 did = true;
@@ -656,7 +656,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 None => false,
             };
             if pending && task_due {
-                due.push(echod_kernel::ident::clone_string(&p.id));
+                due.push(clone_string(&p.id));
             }
             i += 1;
         }
@@ -668,7 +668,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
             decreases due@.len() - d,
         {
             let ghost b = s@;
-            s.process_retry_timeout(&TaskRetryTimeoutReq { id: echod_kernel::ident::clone_string(&due[d]) }, now, cfg);
+            s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(&due[d]) }, now, cfg);
             proof { lemma_reach_step(now as nat, old(s)@, b, s@); }
             did = true;
             d += 1;

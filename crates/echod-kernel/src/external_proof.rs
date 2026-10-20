@@ -158,7 +158,7 @@ pub proof fn lemma_add_callback_legal(now: nat, a: AState, b: AState, awaited: S
     requires
         inv(now, a),
         awaited != awaiter,
-        crate::ident::same_origin_spec(awaited, awaiter),
+        crate::types::same_origin_spec(awaited, awaiter),
         a.objects.contains_key(awaited),
         a.objects.contains_key(awaiter),
         a.objects[awaited].project(now).state == PromiseState::Pending,
@@ -206,7 +206,7 @@ pub proof fn lemma_add_callback_legal(now: nat, a: AState, b: AState, awaited: S
     assert forall|i: int| 0 <= i < p.listeners.len() implies q.listeners.contains(#[trigger] p.listeners[i]) by {}
     assert forall|i: int| 0 <= i < q.callbacks.len() implies
         b.objects.contains_key(#[trigger] q.callbacks[i]) && b.objects[q.callbacks[i]].otype() == OType::Runnable
-        && crate::ident::same_origin_spec(q.callbacks[i], awaited) && q.callbacks[i] != awaited by {
+        && crate::types::same_origin_spec(q.callbacks[i], awaited) && q.callbacks[i] != awaited by {
         if i < p.callbacks.len() {
             assert(q.callbacks[i] == p.callbacks[i]);
             assert(a.objects.contains_key(p.callbacks[i]) && a.objects[p.callbacks[i]].otype() == OType::Runnable);
@@ -944,7 +944,7 @@ pub proof fn lemma_suspend_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
         forall|x: Seq<char>| #[trigger] awaited_of(acts, x) ==>
             a.objects.contains_key(x) && a.objects[x].otype().awaitable()
             && a.objects[x].state == PromiseState::Pending && a.objects[x].timeout_at > now
-            && x != id && crate::ident::same_origin_spec(x, id)
+            && x != id && crate::types::same_origin_spec(x, id)
             && b.objects.contains_key(x) && b.objects[x] == a.objects[x].add_callback(id),
         forall|x: Seq<char>| !awaited_of(acts, x) && x != id ==> #[trigger] unchanged_at(a, b, x),
         b.schedules == a.schedules,
@@ -1004,7 +1004,7 @@ pub proof fn lemma_added_callback_obj(now: nat, a: AState, b: AState, w: Seq<cha
         inv(now, a),
         a.objects.contains_key(w),
         w != awaiter,
-        crate::ident::same_origin_spec(awaiter, w),
+        crate::types::same_origin_spec(awaiter, w),
         a.objects[w].state == PromiseState::Pending,
         a.objects[w].otype().awaitable(),
         b.objects.contains_key(w),
@@ -1041,7 +1041,7 @@ pub proof fn lemma_added_callback_obj(now: nat, a: AState, b: AState, w: Seq<cha
     assert forall|i: int| 0 <= i < p.listeners.len() implies q.listeners.contains(#[trigger] p.listeners[i]) by {}
     assert forall|i: int| 0 <= i < q.callbacks.len() implies
         b.objects.contains_key(#[trigger] q.callbacks[i]) && b.objects[q.callbacks[i]].otype() == OType::Runnable
-        && crate::ident::same_origin_spec(q.callbacks[i], w) && q.callbacks[i] != w by {
+        && crate::types::same_origin_spec(q.callbacks[i], w) && q.callbacks[i] != w by {
         if i < p.callbacks.len() {
             assert(q.callbacks[i] == p.callbacks[i]);
             assert(a.objects.contains_key(p.callbacks[i]) && a.objects[p.callbacks[i]].otype() == OType::Runnable);
