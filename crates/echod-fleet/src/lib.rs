@@ -10,13 +10,14 @@
 //! ```text
 //! tla/            the temporal logic, vendored from Anvil's verus-tla
 //! node/core.rs    the node: executable, with its specification, step for step
-//! spec/cluster.rs the state and the actions; a node's are the core's spec functions
+//! spec/cluster.rs the state and the sixteen actions; requests enter through the kernel's `spec_handle`
 //! proof/safety.rs the invariant and its induction
 //! ```
 //!
-//! What is proved (`proof/safety.rs`): under bounded clock skew, two nodes
-//! never both act as owner of one origin, and a node that answers from its
-//! cache answers from the bucket's current document.
+//! What is proved (`proof/safety.rs`), with nothing assumed of any clock:
+//! every document in the bucket satisfies the kernel's catalogue; every
+//! deadline in every document has a key in the bucket at or before it; and a
+//! cached body whose version the bucket still holds is the bucket's document.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 

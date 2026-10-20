@@ -15,7 +15,6 @@ use echod_kernel as k;
 use resonate_core::types::{self as w, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{util, ResonateRouter, ResonateServer, Unavailable};
 use serde::de::DeserializeOwned;
-use serde_json::json;
 use validator::Validate;
 
 use crate::applier::Applier;
@@ -215,49 +214,38 @@ impl Server {
                 self.applier.apply(doc, $schedule, now, None, move |s: &mut k::State, now: u64| (step(s, now), false)).await?.0
             }};
         }
-        match kind.as_str() {
+        // The envelope to the kernel's request: the protocol's checks, then
+        // one call, `handle`, which the fleet model's `Begin` names.
+        let (q, schedule, action_kind): (k::Request, Option<String>, Option<String>) = match kind.as_str() {
             "promise.get" => {
                 let d = parsed!(w::PromiseGetData);
-                let r = run!(None, |s: &mut k::State, now: u64| s.promise_get(&k::PromiseGetReq { id: d.id.clone() }, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                (k::Request::PromiseGet(k::PromiseGetReq { id: d.id }), None, None)
             }
             "promise.create" => {
                 let d = parsed!(w::PromiseCreateData);
-                let q = match wire::create_in(&d) {
-                    Ok(q) => q,
+                match wire::create_in(&d) {
+                    Ok(q) => (k::Request::PromiseCreate(q), None, None),
                     Err(m) => return err(400, &m),
-                };
-                let r = run!(None, |s: &mut k::State, now: u64| s.promise_create(&q, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                }
             }
             "promise.settle" => {
                 let d = parsed!(w::PromiseSettleData);
-                let q = wire::settle_in_req(&d);
-                let r = run!(None, |s: &mut k::State, now: u64| s.promise_settle(&q, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                (k::Request::PromiseSettle(wire::settle_in_req(&d)), None, None)
             }
             "promise.register_callback" => {
                 let d = parsed!(w::PromiseRegisterCallbackData);
-                let q = k::PromiseRegisterCallbackReq { awaited: d.awaited, awaiter: d.awaiter };
-                let r = run!(None, |s: &mut k::State, now: u64| s.promise_register_callback(&q, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                (k::Request::PromiseRegisterCallback(k::PromiseRegisterCallbackReq { awaited: d.awaited, awaiter: d.awaiter }), None, None)
             }
             "promise.register_listener" => {
                 let d = parsed!(w::PromiseRegisterListenerData);
                 if !resonate_core::is_valid_address(&d.address) {
                     return err(400, "Address must be a URI with a scheme");
                 }
-                let q = k::PromiseRegisterListenerReq { awaited: d.awaited, address: d.address };
-                let r = run!(None, |s: &mut k::State, now: u64| s.promise_register_listener(&q, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                (k::Request::PromiseRegisterListener(k::PromiseRegisterListenerReq { awaited: d.awaited, address: d.address }), None, None)
             }
             "task.get" => {
                 let d = parsed!(w::TaskGetData);
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_get(&k::TaskGetReq { id: d.id.clone() }, now, &cfg));
-                match &r.task {
-                    Some(t) => Ok(wire::status_res(&kind, &corr, r.status, json!({ "task": wire::task_out(t) }))),
-                    None => Ok(wire::status_res(&kind, &corr, r.status, json!({}))),
-                }
+                (k::Request::TaskGet(k::TaskGetReq { id: d.id }), None, None)
             }
             "task.create" => {
                 let d = parsed!(w::TaskCreateData);
@@ -269,9 +257,7 @@ impl Server {
                     Ok(v) => v,
                     Err(m) => return err(400, &m),
                 };
-                let q = k::TaskCreateReq { pid: d.pid, ttl, action };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_create(&q, now, &cfg));
-                Ok(wire::claim_res(&kind, &corr, &r))
+                (k::Request::TaskCreate(k::TaskCreateReq { pid: d.pid, ttl, action }), None, None)
             }
             "task.acquire" => {
                 let d = parsed!(w::TaskAcquireData);
@@ -279,9 +265,7 @@ impl Server {
                     (Ok(v), Ok(t)) => (v, t),
                     (Err(m), _) | (_, Err(m)) => return err(400, &m),
                 };
-                let q = k::TaskAcquireReq { id: d.id, version, pid: d.pid, ttl };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_acquire(&q, now, &cfg));
-                Ok(wire::claim_res(&kind, &corr, &r))
+                (k::Request::TaskAcquire(k::TaskAcquireReq { id: d.id, version, pid: d.pid, ttl }), None, None)
             }
             "task.release" => {
                 let d = parsed!(w::TaskReleaseData);
@@ -289,9 +273,7 @@ impl Server {
                     Ok(v) => v,
                     Err(m) => return err(400, &m),
                 };
-                let q = k::TaskReleaseReq { id: d.id, version };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_release(&q, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({})))
+                (k::Request::TaskRelease(k::TaskReleaseReq { id: d.id, version }), None, None)
             }
             "task.fulfill" => {
                 let d = parsed!(w::TaskFulfillData);
@@ -304,8 +286,7 @@ impl Server {
                     version,
                     action: k::PromiseSettleReq { id: d.action.data.id, state: wire::settle_in(d.action.data.state), value: wire::value_in(&d.action.data.value) },
                 };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_fulfill(&q, now, &cfg));
-                Ok(wire::promise_res(&kind, &corr, &r))
+                (k::Request::TaskFulfill(q), None, None)
             }
             "task.suspend" => {
                 let d = parsed!(w::TaskSuspendData);
@@ -314,9 +295,7 @@ impl Server {
                     Err(m) => return err(400, &m),
                 };
                 let actions = d.actions.into_iter().map(|a| k::PromiseRegisterCallbackReq { awaited: a.data.awaited, awaiter: a.data.awaiter }).collect();
-                let q = k::TaskSuspendReq { id: d.id, version, actions };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_suspend(&q, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({ "preload": [] })))
+                (k::Request::TaskSuspend(k::TaskSuspendReq { id: d.id, version, actions }), None, None)
             }
             "task.fence" => {
                 let d = parsed!(w::TaskFenceData);
@@ -342,16 +321,7 @@ impl Server {
                     },
                     other => return err(400, &format!("Unsupported fence action: {other}")),
                 };
-                let action_kind = d.action.kind.clone();
-                let q = k::TaskFenceReq { id: d.id, version, action };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_fence(&q, now, &cfg));
-                match &r.action {
-                    Some(k::TaskFenceInnerRes::Create(p)) | Some(k::TaskFenceInnerRes::Settle(p)) => {
-                        let inner = wire::promise_res(&action_kind, &corr, p);
-                        Ok(wire::status_res(&kind, &corr, r.status, json!({ "action": inner, "preload": [] })))
-                    }
-                    None => Ok(wire::status_res(&kind, &corr, r.status, json!({}))),
-                }
+                (k::Request::TaskFence(k::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind))
             }
             "task.heartbeat" => {
                 let d = parsed!(w::TaskHeartbeatData);
@@ -362,25 +332,19 @@ impl Server {
                         Err(m) => return err(400, &m),
                     }
                 }
-                let q = k::TaskHeartbeatReq { pid: d.pid, tasks };
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_heartbeat(&q, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({})))
+                (k::Request::TaskHeartbeat(k::TaskHeartbeatReq { pid: d.pid, tasks }), None, None)
             }
             "task.halt" => {
                 let d = parsed!(w::TaskHaltData);
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_halt(&k::TaskHaltReq { id: d.id.clone() }, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({})))
+                (k::Request::TaskHalt(k::TaskHaltReq { id: d.id }), None, None)
             }
             "task.continue" => {
                 let d = parsed!(w::TaskContinueData);
-                let r = run!(None, |s: &mut k::State, now: u64| s.task_continue(&k::TaskContinueReq { id: d.id.clone() }, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({})))
+                (k::Request::TaskContinue(k::TaskContinueReq { id: d.id }), None, None)
             }
             "schedule.get" => {
                 let d = parsed!(w::ScheduleGetData);
-                let id = d.id.clone();
-                let r = run!(Some(&id), |s: &mut k::State, now: u64| s.schedule_get(&k::ScheduleGetReq { id: d.id.clone() }, now, &cfg));
-                Ok(schedule_res(&kind, &corr, &r))
+                (k::Request::ScheduleGet(k::ScheduleGetReq { id: d.id.clone() }), Some(d.id), None)
             }
             "schedule.create" => {
                 let d = parsed!(w::ScheduleCreateData);
@@ -402,28 +366,21 @@ impl Server {
                     promise_tags: wire::create_tags(&d.promise_tags),
                     next_run_at: next,
                 };
-                let r = run!(Some(&id), |s: &mut k::State, now: u64| s.schedule_create(&q, now, &cfg));
-                Ok(schedule_res(&kind, &corr, &r))
+                (k::Request::ScheduleCreate(q), Some(id), None)
             }
             "schedule.delete" => {
                 let d = parsed!(w::ScheduleDeleteData);
-                let id = d.id.clone();
-                let r = run!(Some(&id), |s: &mut k::State, now: u64| s.schedule_delete(&k::ScheduleDeleteReq { id: d.id.clone() }, now, &cfg));
-                Ok(wire::status_res(&kind, &corr, r.status, json!({})))
+                (k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
             }
-            "promise.search" | "task.search" | "schedule.search" => err(403, "Search operations are not supported"),
-            "debug.reset" | "debug.snap" | "debug.tick" => err(403, "Debug operations are not supported"),
-            _ => err(400, &format!("Unknown request kind: {kind}")),
-        }
+            "promise.search" | "task.search" | "schedule.search" => return err(403, "Search operations are not supported"),
+            "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are not supported"),
+            _ => return err(400, &format!("Unknown request kind: {kind}")),
+        };
+        let r = run!(schedule.as_deref(), |s: &mut k::State, now: u64| s.handle(&q, now, &cfg));
+        Ok(wire::response_out(&kind, &corr, action_kind.as_deref(), &r))
     }
 }
 
-fn schedule_res(kind: &str, corr: &str, r: &k::ScheduleRes) -> ResponseEnvelope {
-    match &r.schedule {
-        Some(c) => wire::status_res(kind, corr, r.status, json!({ "schedule": wire::schedule_out(c) })),
-        None => wire::status_res(kind, corr, r.status, json!({})),
-    }
-}
 
 /// Parse and validate a request's `data`.
 fn parse<T: DeserializeOwned + Validate>(data: &serde_json::Value) -> Result<T, String> {

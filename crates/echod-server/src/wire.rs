@@ -192,3 +192,31 @@ pub fn claim_res(kind: &str, corr_id: &str, r: &k::TaskClaimRes) -> w::ResponseE
 pub fn status_res(kind: &str, corr_id: &str, status: u16, data: Value) -> w::ResponseEnvelope {
     reply(kind, corr_id, status, data)
 }
+
+/// Any kernel response as the protocol's envelope. A fence's inner action is
+/// rendered under its own kind; a suspend carries an empty preload.
+pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &k::Response) -> w::ResponseEnvelope {
+    match r {
+        k::Response::Promise(p) => promise_res(kind, corr, p),
+        k::Response::Schedule(c) => match &c.schedule {
+            Some(sc) => status_res(kind, corr, c.status, json!({ "schedule": schedule_out(sc) })),
+            None => status_res(kind, corr, c.status, json!({})),
+        },
+        k::Response::Status(st) => {
+            let data = if kind == "task.suspend" { json!({ "preload": [] }) } else { json!({}) };
+            status_res(kind, corr, st.status, data)
+        }
+        k::Response::TaskGet(g) => match &g.task {
+            Some(t) => status_res(kind, corr, g.status, json!({ "task": task_out(t) })),
+            None => status_res(kind, corr, g.status, json!({})),
+        },
+        k::Response::TaskClaim(c) => claim_res(kind, corr, c),
+        k::Response::TaskFence(f) => match &f.action {
+            Some(k::TaskFenceInnerRes::Create(p)) | Some(k::TaskFenceInnerRes::Settle(p)) => {
+                let inner = promise_res(action_kind.unwrap_or(""), corr, p);
+                status_res(kind, corr, f.status, json!({ "action": inner, "preload": [] }))
+            }
+            None => status_res(kind, corr, f.status, json!({})),
+        },
+    }
+}

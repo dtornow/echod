@@ -50,7 +50,13 @@ twins, whose equality is structural. The twins exist only under the verifier;
 The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
 Its abstract view is three maps, the fold of the rows by key, so the
 catalogue is stated over maps and the compaction lemma is the view. Each
-handler takes the state, the request, `now`, and a `Config`.
+handler takes the state, the request, `now`, and a `Config`, and is a
+function: `spec_promise_create(a, req, now)` and its seventeen siblings
+give the abstract state each handler leaves, and each handler `ensures` it
+computes its function. `handle` takes a `Request`, one enum over the
+eighteen, and returns the `Response`; `spec_handle` is its function, state
+and response at once. That is the one name the fleet model uses for a
+request, and the one call the server makes.
 
 Proved: every catalogue entry, at every step, over the whole store. A step
 proves the entries at the ids it wrote; the frame lemma proves the rest. One
@@ -347,9 +353,11 @@ and is read for one purpose: the instant a step is decided at.
 
 The actions: a clock advances; a node joins or crashes; a node drops a
 cache entry; and the commit, one store operation per action — a node loads
-the bucket's document and decides a step on it (a request: any sequence of
-kernel steps at one instant; a sweep: the step module's contract), arms a
-key, writes the document conditionally or is refused, deletes the key
+the bucket's document and decides a step on it — `Begin` carries the
+work: a request, and the document is the kernel's `spec_handle` of the one
+loaded followed by any sequence of internal steps at the same instant, the
+response going to a ghost log of what was served; or a sweep, the step
+module's contract — arms a key, writes the document conditionally or is refused, deletes the key
 replaced, remembers the key kept and deletes the key fired, or, having
 found nothing due, rewrites the document and collects the key. Any live
 node may act on any origin: which does is the server's routing, and the
@@ -359,7 +367,7 @@ unknown, where the bucket applied it or did not, nondeterministically, and
 the node, told only that it failed, forgets what it cached and gives the
 commit up; what landed stays. Deletes may fail silently.
 
-Proved, 227 items, no admits:
+Proved, 228 items, no admits:
 
 - **Catalogue.** Every document in the bucket satisfies the kernel's
   catalogue at its stamp.
@@ -392,8 +400,11 @@ How the proof reaches the running code: the theorems are about the fleet
 model; the model's node actions are the core's, the commit's and the step
 module's specification functions; their executable functions are verified
 to compute those functions; `echod-server` keeps its membership, cache and
-deadline-key state in the core and takes its decisions from it, and runs
-the step module's loops. That is Anvil's shape of refinement: functional,
+deadline-key state in the core and takes its decisions from it, runs
+the step module's loops, and serves every request through the kernel's
+`handle`: the dispatch turns the envelope into a `Request`, makes one
+call, and renders the `Response`, so the request the model's `Begin`
+carries is the request the server runs. That is Anvil's shape of refinement: functional,
 per step, with a trusted shim. The shim here is `nodes.rs`, `applier.rs`
 and `timers.rs`: that the configuration handed to `read_config` is the
 object read, that every version read or written is reported, that the

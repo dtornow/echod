@@ -1,7 +1,7 @@
 //! The specification: the kernel, one operation at a time.
 //!
 //! The model is what the applier runs, without the store around it: a
-//! kernel handler on one origin's state, then the drain. Its answers are
+//! `handle` on one origin's state, then the drain. Its answers are
 //! rendered by the same `wire` functions the server uses, so a history entry
 //! and a model step compare as `(status, data)` exactly.
 
@@ -32,70 +32,9 @@ pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Confi
     let now = echod_fleet::node::step::clamp_now(*stamp, now);
     let before = canon(&s.objects);
     let kind = op.kind();
-    let out = match op {
-        Op::PromiseGet { id } => wire::promise_res(kind, corr, &s.promise_get(&k::PromiseGetReq { id: id.clone() }, now, cfg)),
-        Op::PromiseCreate { id, timeout_at, tags: t, data } => wire::promise_res(kind, corr, &s.promise_create(&create_req(id, *timeout_at, t, Some(data)), now, cfg)),
-        Op::PromiseSettle { id, state, data } => {
-            wire::promise_res(kind, corr, &s.promise_settle(&k::PromiseSettleReq { id: id.clone(), state: *state, value: value(data) }, now, cfg))
-        }
-        Op::RegisterCallback { awaited, awaiter } => {
-            wire::promise_res(kind, corr, &s.promise_register_callback(&k::PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter: awaiter.clone() }, now, cfg))
-        }
-        Op::RegisterListener { awaited, address } => {
-            wire::promise_res(kind, corr, &s.promise_register_listener(&k::PromiseRegisterListenerReq { awaited: awaited.clone(), address: address.clone() }, now, cfg))
-        }
-        Op::TaskGet { id } => {
-            let r = s.task_get(&k::TaskGetReq { id: id.clone() }, now, cfg);
-            match &r.task {
-                Some(t) => wire::status_res(kind, corr, r.status, serde_json::json!({ "task": wire::task_out(t) })),
-                None => wire::status_res(kind, corr, r.status, serde_json::json!({})),
-            }
-        }
-        Op::TaskCreate { pid, ttl, id, timeout_at, tags: t } => {
-            wire::claim_res(kind, corr, &s.task_create(&k::TaskCreateReq { pid: pid.clone(), ttl: *ttl, action: create_req(id, *timeout_at, t, None) }, now, cfg))
-        }
-        Op::TaskAcquire { id, version, pid, ttl } => {
-            wire::claim_res(kind, corr, &s.task_acquire(&k::TaskAcquireReq { id: id.clone(), version: *version, pid: pid.clone(), ttl: *ttl }, now, cfg))
-        }
-        Op::TaskFulfill { id, version, state, data } => wire::promise_res(
-            kind,
-            corr,
-            &s.task_fulfill(&k::TaskFulfillReq { id: id.clone(), version: *version, action: k::PromiseSettleReq { id: id.clone(), state: *state, value: value(data) } }, now, cfg),
-        ),
-        Op::TaskRelease { id, version } => {
-            let r = s.task_release(&k::TaskReleaseReq { id: id.clone(), version: *version }, now, cfg);
-            wire::status_res(kind, corr, r.status, serde_json::json!({}))
-        }
-        Op::TaskHeartbeat { pid, tasks } => {
-            let r = s.task_heartbeat(&k::TaskHeartbeatReq { pid: pid.clone(), tasks: tasks.iter().map(|(id, v)| k::TaskRef { id: id.clone(), version: *v }).collect() }, now, cfg);
-            wire::status_res(kind, corr, r.status, serde_json::json!({}))
-        }
-        Op::TaskSuspend { id, version, awaited } => {
-            let actions = awaited.iter().map(|a| k::PromiseRegisterCallbackReq { awaited: a.clone(), awaiter: id.clone() }).collect();
-            let r = s.task_suspend(&k::TaskSuspendReq { id: id.clone(), version: *version, actions }, now, cfg);
-            wire::status_res(kind, corr, r.status, serde_json::json!({ "preload": [] }))
-        }
-        Op::TaskFenceCreate { id, version, child, timeout_at, tags: t } => {
-            let r = s.task_fence(&k::TaskFenceReq { id: id.clone(), version: *version, action: k::TaskFenceAction::Create(create_req(child, *timeout_at, t, None)) }, now, cfg);
-            fence_res(kind, corr, "promise.create", &r)
-        }
-        Op::TaskFenceSettle { id, version, target, state, data } => {
-            let r = s.task_fence(
-                &k::TaskFenceReq { id: id.clone(), version: *version, action: k::TaskFenceAction::Settle(k::PromiseSettleReq { id: target.clone(), state: *state, value: value(data) }) },
-                now,
-                cfg,
-            );
-            fence_res(kind, corr, "promise.settle", &r)
-        }
-        Op::TaskHalt { id } => {
-            let r = s.task_halt(&k::TaskHaltReq { id: id.clone() }, now, cfg);
-            wire::status_res(kind, corr, r.status, serde_json::json!({}))
-        }
-        Op::TaskContinue { id } => {
-            let r = s.task_continue(&k::TaskContinueReq { id: id.clone() }, now, cfg);
-            wire::status_res(kind, corr, r.status, serde_json::json!({}))
-        }
-        Op::Sweep => {
+    let out = match request_of(op) {
+        Some((q, action_kind)) => wire::response_out(kind, corr, action_kind, &s.handle(&q, now, cfg)),
+        None => {
             echod_fleet::node::step::sweep(s, now, cfg);
             wire::status_res(kind, corr, 200, serde_json::json!({}))
         }
@@ -108,14 +47,42 @@ pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Confi
     (out.head.status as u16, out.data)
 }
 
-fn fence_res(kind: &str, corr: &str, action_kind: &str, r: &k::TaskFenceRes) -> resonate_core::types::ResponseEnvelope {
-    match &r.action {
-        Some(k::TaskFenceInnerRes::Create(p)) | Some(k::TaskFenceInnerRes::Settle(p)) => {
-            let inner = wire::promise_res(action_kind, corr, p);
-            wire::status_res(kind, corr, r.status, serde_json::json!({ "action": inner, "preload": [] }))
+/// The kernel's request for an operation, with the kind of a fence's inner
+/// action; none for a sweep.
+pub fn request_of(op: &Op) -> Option<(k::Request, Option<&'static str>)> {
+    let q = match op {
+        Op::PromiseGet { id } => k::Request::PromiseGet(k::PromiseGetReq { id: id.clone() }),
+        Op::PromiseCreate { id, timeout_at, tags: t, data } => k::Request::PromiseCreate(create_req(id, *timeout_at, t, Some(data))),
+        Op::PromiseSettle { id, state, data } => k::Request::PromiseSettle(k::PromiseSettleReq { id: id.clone(), state: *state, value: value(data) }),
+        Op::RegisterCallback { awaited, awaiter } => k::Request::PromiseRegisterCallback(k::PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter: awaiter.clone() }),
+        Op::RegisterListener { awaited, address } => k::Request::PromiseRegisterListener(k::PromiseRegisterListenerReq { awaited: awaited.clone(), address: address.clone() }),
+        Op::TaskGet { id } => k::Request::TaskGet(k::TaskGetReq { id: id.clone() }),
+        Op::TaskCreate { pid, ttl, id, timeout_at, tags: t } => k::Request::TaskCreate(k::TaskCreateReq { pid: pid.clone(), ttl: *ttl, action: create_req(id, *timeout_at, t, None) }),
+        Op::TaskAcquire { id, version, pid, ttl } => k::Request::TaskAcquire(k::TaskAcquireReq { id: id.clone(), version: *version, pid: pid.clone(), ttl: *ttl }),
+        Op::TaskFulfill { id, version, state, data } => {
+            k::Request::TaskFulfill(k::TaskFulfillReq { id: id.clone(), version: *version, action: k::PromiseSettleReq { id: id.clone(), state: *state, value: value(data) } })
         }
-        None => wire::status_res(kind, corr, r.status, serde_json::json!({})),
-    }
+        Op::TaskRelease { id, version } => k::Request::TaskRelease(k::TaskReleaseReq { id: id.clone(), version: *version }),
+        Op::TaskHeartbeat { pid, tasks } => {
+            k::Request::TaskHeartbeat(k::TaskHeartbeatReq { pid: pid.clone(), tasks: tasks.iter().map(|(id, v)| k::TaskRef { id: id.clone(), version: *v }).collect() })
+        }
+        Op::TaskSuspend { id, version, awaited } => {
+            let actions = awaited.iter().map(|a| k::PromiseRegisterCallbackReq { awaited: a.clone(), awaiter: id.clone() }).collect();
+            k::Request::TaskSuspend(k::TaskSuspendReq { id: id.clone(), version: *version, actions })
+        }
+        Op::TaskFenceCreate { id, version, child, timeout_at, tags: t } => {
+            let q = k::TaskFenceReq { id: id.clone(), version: *version, action: k::TaskFenceAction::Create(create_req(child, *timeout_at, t, None)) };
+            return Some((k::Request::TaskFence(q), Some("promise.create")));
+        }
+        Op::TaskFenceSettle { id, version, target, state, data } => {
+            let q = k::TaskFenceReq { id: id.clone(), version: *version, action: k::TaskFenceAction::Settle(k::PromiseSettleReq { id: target.clone(), state: *state, value: value(data) }) };
+            return Some((k::Request::TaskFence(q), Some("promise.settle")));
+        }
+        Op::TaskHalt { id } => k::Request::TaskHalt(k::TaskHaltReq { id: id.clone() }),
+        Op::TaskContinue { id } => k::Request::TaskContinue(k::TaskContinueReq { id: id.clone() }),
+        Op::Sweep => return None,
+    };
+    Some((q, None))
 }
 
 /// A fresh state over `rows`.

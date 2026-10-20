@@ -38,6 +38,7 @@ use crate::node::core::*;
 use crate::node::step::*;
 use crate::node::txn::*;
 use crate::tla::action::*;
+use echod_kernel::external::spec_handle;
 use echod_kernel::types::*;
 
 verus! {
@@ -138,16 +139,39 @@ pub struct Node {
     pub txns: Map<Origin, Flight>,
 }
 
+/// What a step is for: a request, or the sweep behind a fired key.
+pub enum Work {
+    Request(ARequest),
+    Sweep(AKey),
+}
+
+/// Ghost: a request served — where, at what instant, what it asked, and
+/// what it was answered.
+pub struct Served {
+    pub origin: Origin,
+    pub at: nat,
+    pub req: ARequest,
+    pub resp: AResponse,
+}
+
 pub struct Cluster {
     pub nodes: Map<Id, Node>,
     pub store: Store,
     /// Ghost: the bucket's past.
     pub hist: History,
+    /// Ghost: every request served, in order.
+    pub log: Seq<Served>,
 }
 
 // ---------------------------------------------------------------------------
 // The kernel's steps, on documents
 // ---------------------------------------------------------------------------
+
+/// `b` is what kernel steps at `t` make of the kernel state `a`: the drain
+/// after a request. Nothing is assumed of `a`; what holds of it is proved.
+pub open spec fn kreach_from(t: nat, a: echod_kernel::store::AState, b: Doc) -> bool {
+    exists |sb: echod_kernel::store::AState| sb.objects == b && #[trigger] reach(t, a, sb)
+}
 
 /// `b` is what kernel steps at `t` make of document `a`: for some kernel
 /// states holding these objects, the catalogue holds of the first and the
@@ -184,11 +208,11 @@ pub enum Step {
     Crash(Id),
     /// A node drops a cache entry.
     Forget(Id, Origin),
-    /// A node loads a document and decides a step on it: a request
-    /// (`fired` none) or the sweep behind a fired key. The instant, what the
-    /// step made of the document, whether the sweep fired anything, and the
-    /// document's nearest deadline after.
-    Begin(Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>),
+    /// A node loads a document and decides a step on it: a request, or the
+    /// sweep behind a fired key. The instant, what the step made of the
+    /// document, whether the sweep fired anything, and the document's
+    /// nearest deadline after.
+    Begin(Id, Origin, nat, Work, Doc, bool, Option<nat>),
     /// The key for the new deadline is put.
     Arm(Id, Origin, AKey),
     /// The conditional write of the document lands, at a new version.
@@ -233,6 +257,7 @@ pub open spec fn init_state(s: Cluster) -> bool {
     &&& s.hist.keeper == Map::<Origin, AKey>::empty()
     &&& s.hist.counter == 0
     &&& s.hist.order == Map::<Event, nat>::empty()
+    &&& s.log == Seq::<Served>::empty()
 }
 
 /// A node's clock advances, by any amount.
@@ -282,19 +307,27 @@ pub open spec fn forget(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 /// A node loads `o` — the bucket's current document; a cached body is
 /// used only once a conditional read has confirmed its version — and
 /// decides a step at `t`, the later of its clock and the document's
-/// stamp: `NodeCore::begin`. Any live node may: which one does is routing.
-pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Option<AKey>, did: bool, deadline: Option<nat>) -> Option<Cluster> {
+/// stamp: `NodeCore::begin`. A request is the kernel's handler for it,
+/// `spec_handle`, then the drain; a sweep is the step module's contract.
+/// Any live node may: which one does is routing. A request served is
+/// logged with its answer.
+pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>) -> Option<Cluster> {
     let n = s.nodes[i];
     let loaded = s.store.doc(o);
     let changed = did || new != loaded;
+    let fired = match work { Work::Sweep(k) => Some(k), Work::Request(_) => None };
     if s.nodes.contains_key(i) && n.alive && !n.txns.contains_key(o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
-        && (match fired {
-            Some(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did),
-            None => !did && kreach(t, loaded, new),
+        && (match work {
+            Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did),
+            Work::Request(req) => !did && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
         })
         && next_is(new, deadline)
     {
+        let log = match work {
+            Work::Request(req) => s.log.push(Served { origin: o, at: t, req, resp: spec_handle(full(loaded), req, t).1 }),
+            Work::Sweep(_) => s.log,
+        };
         let (core, bodies) = if s.store.docs.contains_key(o) {
             (spec_filled(n.core, o, s.store.etags[o], n.clock), n.bodies.insert(o, s.store.docs[o]))
         } else {
@@ -311,7 +344,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Op
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
         };
-        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), log, ..s })
     } else {
         None
     }
@@ -576,10 +609,10 @@ pub open spec fn forget_action() -> Action<Cluster, (Id, Origin), ()> {
     }
 }
 
-pub open spec fn begin_action() -> Action<Cluster, (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), ()> {
+pub open spec fn begin_action() -> Action<Cluster, (Id, Origin, nat, Work, Doc, bool, Option<nat>), ()> {
     Action {
-        precondition: |input: (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let new = input.3; let fired = input.4; let did = input.5; let deadline = input.6; begin(s, i, o, t, new, fired, did, deadline) is Some },
-        transition: |input: (Id, Origin, nat, Doc, Option<AKey>, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let new = input.3; let fired = input.4; let did = input.5; let deadline = input.6; (begin(s, i, o, t, new, fired, did, deadline).unwrap(), ()) },
+        precondition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; begin(s, i, o, t, work, new, did, deadline) is Some },
+        transition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; (begin(s, i, o, t, work, new, did, deadline).unwrap(), ()) },
     }
 }
 
@@ -668,7 +701,7 @@ pub open spec fn next_step(s: Cluster, s2: Cluster, st: Step) -> bool {
         Step::Join(i, c) => join_action().forward((i, c))(s, s2),
         Step::Crash(i) => crash_action().forward(i)(s, s2),
         Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
-        Step::Begin(i, o, t, new, fired, did, deadline) => begin_action().forward((i, o, t, new, fired, did, deadline))(s, s2),
+        Step::Begin(i, o, t, work, new, did, deadline) => begin_action().forward((i, o, t, work, new, did, deadline))(s, s2),
         Step::Arm(i, o, k) => arm_action().forward((i, o, k))(s, s2),
         Step::Commit(i, o, e) => commit_action().forward((i, o, e))(s, s2),
         Step::CommitFail(i, o) => commit_fail_action().forward((i, o))(s, s2),

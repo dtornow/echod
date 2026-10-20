@@ -25,6 +25,8 @@ use crate::node::txn::*;
 use crate::spec::cluster::*;
 use crate::tla::defs::*;
 use crate::tla::rules::*;
+use echod_kernel::external::spec_handle;
+use echod_kernel::external_proof::lemma_spec_handle;
 use echod_kernel::types::MAX_TIME;
 
 verus! {
@@ -440,8 +442,19 @@ proof fn lemma_forget(s: Cluster, s2: Cluster, i: Id, o: Origin)
 
 // --- the commit protocol ---
 
-proof fn lemma_begin(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, new: Doc, fired: Option<AKey>, did: bool, deadline: Option<nat>)
-    requires inv()(s), begin(s, i, o, t, new, fired, did, deadline) == Some(s2),
+/// A document kernel steps reach at `t` from a state the catalogue holds of
+/// satisfies the catalogue.
+proof fn lemma_kreach_from_inv(t: nat, a: echod_kernel::store::AState, b: Doc)
+    requires kreach_from(t, a, b), echod_kernel::properties::inv(t, a),
+    ensures echod_kernel::properties::inv(t, full(b)),
+{
+    let sb = choose |sb: echod_kernel::store::AState| sb.objects == b && #[trigger] reach(t, a, sb);
+    lemma_reach_inv(t, a, sb);
+    lemma_inv_full(t, sb);
+}
+
+proof fn lemma_begin(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
+    requires inv()(s), begin(s, i, o, t, work, new, did, deadline) == Some(s2),
     ensures inv()(s2),
 {
     disassemble(s);
@@ -455,7 +468,16 @@ proof fn lemma_begin(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, new: Doc
         lemma_inv_empty(t);
     }
     assert(echod_kernel::properties::inv(t, full(x.loaded)));
-    lemma_kreach_inv(t, x.loaded, x.new);
+    match work {
+        Work::Sweep(_) => {
+            lemma_kreach_inv(t, x.loaded, x.new);
+        }
+        Work::Request(req) => {
+            // the handler keeps the catalogue; the drain keeps it from there
+            lemma_spec_handle(t, full(x.loaded), req);
+            lemma_kreach_from_inv(t, spec_handle(full(x.loaded), req, t).0, x.new);
+        }
+    }
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.cache.contains_key(q) implies inv_cache(s2, i, q) by {
         if q == o && s.store.docs.contains_key(o) {
             assert(s.hist.versions.contains_key(s.store.etags[o]));
@@ -1356,7 +1378,7 @@ pub proof fn lemma_next(s: Cluster, s2: Cluster)
         Step::Join(i, c) => lemma_join(s, s2, i, c),
         Step::Crash(i) => lemma_crash(s, s2, i),
         Step::Forget(i, o) => lemma_forget(s, s2, i, o),
-        Step::Begin(i, o, t, new, fired, did, deadline) => lemma_begin(s, s2, i, o, t, new, fired, did, deadline),
+        Step::Begin(i, o, t, work, new, did, deadline) => lemma_begin(s, s2, i, o, t, work, new, did, deadline),
         Step::Arm(i, o, k) => lemma_arm(s, s2, i, o, k),
         Step::Commit(i, o, e) => lemma_commit(s, s2, i, o, e),
         Step::CommitFail(i, o) => lemma_commit_fail(s, s2, i, o),
@@ -1425,6 +1447,7 @@ pub proof fn not_vacuous(o: Origin)
             counter: 1,
             order: Map::empty().insert(Event::Born(e), 0),
         },
+        log: Seq::empty(),
     };
     lemma_inv_empty(0);
     assert(inv_store(s));

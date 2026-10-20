@@ -15,7 +15,7 @@
 //! properties_proof.rs  its theorems: the frame every step ends with, the folds
 //! object.rs      projection and the per-object helpers the handlers share
 //! object_proof.rs  its two lemmas on `without`
-//! external.rs    the 18 request handlers
+//! external.rs    the 18 request handlers, each a function of the abstract state; `handle` over `Request`
 //! external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 //! internal.rs    the 6 internal steps
 //! internal_proof.rs  their lemmas
