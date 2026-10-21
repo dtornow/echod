@@ -10,9 +10,9 @@
 //! instant). A node's actions are the core's specification functions: what
 //! the executable node is proved to compute. A commit is the applier's
 //! protocol, one store round trip per action. `Prepare` loads and decides,
-//! and touches nothing. `Arm` puts the key for the document's nearest
+//! and touches nothing. `AddTimer` puts the key for the document's nearest
 //! deadline. `Write` puts the document, conditionally on the version
-//! loaded. `Cleanup` deletes the key replaced and the key fired, and the
+//! loaded. `DelTimer` deletes the key replaced and the key fired, and the
 //! node remembers the key kept. `Done` closes a commit that changed
 //! nothing. Each put carries the store's answer, `Outcome`: applied,
 //! refused by its condition, or unknown — the bucket applied it or did not,
@@ -232,14 +232,14 @@ pub enum Step {
     /// nearest deadline after. Nothing in the store moves.
     Prepare(Id, Origin, nat, Work, Doc, bool, Option<nat>),
     /// The key for the new deadline is put.
-    Arm(Id, Origin, AKey, Outcome),
+    AddTimer(Id, Origin, AKey, Outcome),
     /// The document is put, conditionally on the version loaded, at a new
     /// version: the commit of a changed document, or the rewrite that
     /// collects a fired key behind an unchanged one.
     Write(Id, Origin, Seq<char>, Outcome),
     /// After the write: the key replaced and the key fired are deleted, each
     /// if the delete went through, and the node remembers the key kept.
-    Cleanup(Id, Origin, bool, bool),
+    DelTimer(Id, Origin, bool, bool),
     /// A request that changed nothing is done.
     Done(Id, Origin),
 }
@@ -587,7 +587,7 @@ pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, lan
 // ---------------------------------------------------------------------------
 
 /// The key's put. A put without a condition is never refused.
-pub open spec fn arm_key(s: Cluster, i: Id, o: Origin, k: AKey, out: Outcome) -> Option<Cluster> {
+pub open spec fn add_timer(s: Cluster, i: Id, o: Origin, k: AKey, out: Outcome) -> Option<Cluster> {
     match out {
         Outcome::Applied => arm(s, i, o, k),
         Outcome::Refused => None,
@@ -618,7 +618,7 @@ pub open spec fn write_doc(s: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outc
 /// fired if `fired`, each a delete that may have failed silently; and the
 /// node remembers the key kept. Two round trips, but the document is
 /// written and both keys are dead, so nothing observes their order.
-pub open spec fn cleanup(s: Cluster, i: Id, o: Origin, prev: bool, fired: bool) -> Option<Cluster> {
+pub open spec fn del_timer(s: Cluster, i: Id, o: Origin, prev: bool, fired: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written
@@ -675,10 +675,10 @@ pub open spec fn prepare_action() -> Action<Cluster, (Id, Origin, nat, Work, Doc
     }
 }
 
-pub open spec fn arm_action() -> Action<Cluster, (Id, Origin, AKey, Outcome), ()> {
+pub open spec fn add_timer_action() -> Action<Cluster, (Id, Origin, AKey, Outcome), ()> {
     Action {
-        precondition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; arm_key(s, i, o, k, out) is Some },
-        transition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; (arm_key(s, i, o, k, out).unwrap(), ()) },
+        precondition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; add_timer(s, i, o, k, out) is Some },
+        transition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; (add_timer(s, i, o, k, out).unwrap(), ()) },
     }
 }
 
@@ -689,10 +689,10 @@ pub open spec fn write_action() -> Action<Cluster, (Id, Origin, Seq<char>, Outco
     }
 }
 
-pub open spec fn cleanup_action() -> Action<Cluster, (Id, Origin, bool, bool), ()> {
+pub open spec fn del_timer_action() -> Action<Cluster, (Id, Origin, bool, bool), ()> {
     Action {
-        precondition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; cleanup(s, i, o, prev, fired) is Some },
-        transition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; (cleanup(s, i, o, prev, fired).unwrap(), ()) },
+        precondition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; del_timer(s, i, o, prev, fired) is Some },
+        transition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; (del_timer(s, i, o, prev, fired).unwrap(), ()) },
     }
 }
 
@@ -712,9 +712,9 @@ pub open spec fn next_step(s: Cluster, s2: Cluster, st: Step) -> bool {
         Step::Crash(i) => crash_action().forward(i)(s, s2),
         Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
         Step::Prepare(i, o, t, work, new, did, deadline) => prepare_action().forward((i, o, t, work, new, did, deadline))(s, s2),
-        Step::Arm(i, o, k, out) => arm_action().forward((i, o, k, out))(s, s2),
+        Step::AddTimer(i, o, k, out) => add_timer_action().forward((i, o, k, out))(s, s2),
         Step::Write(i, o, e, out) => write_action().forward((i, o, e, out))(s, s2),
-        Step::Cleanup(i, o, prev, fired) => cleanup_action().forward((i, o, prev, fired))(s, s2),
+        Step::DelTimer(i, o, prev, fired) => del_timer_action().forward((i, o, prev, fired))(s, s2),
         Step::Done(i, o) => done_action().forward((i, o))(s, s2),
     }
 }

@@ -356,11 +356,11 @@ cache entry; and the commit, five actions, one store round trip each.
 `Prepare` loads the bucket's document and decides a step on it, and
 touches nothing: for a request, the document after is the kernel's
 `spec_handle` of the one loaded followed by any sequence of internal
-steps at the same instant; for a sweep, the step module's contract. `Arm`
+steps at the same instant; for a sweep, the step module's contract. `AddTimer`
 puts the key for the document's nearest deadline. `Write` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
-one. `Cleanup` deletes the key replaced and the key fired, and the node
+one. `DelTimer` deletes the key replaced and the key fired, and the node
 remembers the key kept. `Done` closes a request that changed nothing,
 with no round trip. A request's response joins a ghost log at `Write`
 or at `Done`, when the client is answered. Each put carries the store's

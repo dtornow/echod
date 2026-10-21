@@ -1369,8 +1369,8 @@ proof fn lemma_collect_unknown(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq
 }
 
 /// The key's put, by outcome.
-proof fn lemma_arm_key(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, out: Outcome)
-    requires inv()(s), arm_key(s, i, o, k, out) == Some(s2),
+proof fn lemma_add_timer(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, out: Outcome)
+    requires inv()(s), add_timer(s, i, o, k, out) == Some(s2),
     ensures inv()(s2),
 {
     match out {
@@ -1404,8 +1404,8 @@ proof fn lemma_write_doc(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>
 
 /// The two deletes after the write, in sequence: each keeps the invariant
 /// on its own, so their composition does.
-proof fn lemma_cleanup(s: Cluster, s2: Cluster, i: Id, o: Origin, prev: bool, fired: bool)
-    requires inv()(s), cleanup(s, i, o, prev, fired) == Some(s2),
+proof fn lemma_del_timer(s: Cluster, s2: Cluster, i: Id, o: Origin, prev: bool, fired: bool)
+    requires inv()(s), del_timer(s, i, o, prev, fired) == Some(s2),
     ensures inv()(s2),
 {
     let s1 = if prev { disarm(s, i, o).unwrap() } else { s };
@@ -1426,9 +1426,9 @@ pub proof fn lemma_next(s: Cluster, s2: Cluster)
         Step::Crash(i) => lemma_crash(s, s2, i),
         Step::Forget(i, o) => lemma_forget(s, s2, i, o),
         Step::Prepare(i, o, t, work, new, did, deadline) => lemma_prepare(s, s2, i, o, t, work, new, did, deadline),
-        Step::Arm(i, o, k, out) => lemma_arm_key(s, s2, i, o, k, out),
+        Step::AddTimer(i, o, k, out) => lemma_add_timer(s, s2, i, o, k, out),
         Step::Write(i, o, e, out) => lemma_write_doc(s, s2, i, o, e, out),
-        Step::Cleanup(i, o, prev, fired) => lemma_cleanup(s, s2, i, o, prev, fired),
+        Step::DelTimer(i, o, prev, fired) => lemma_del_timer(s, s2, i, o, prev, fired),
         Step::Done(i, o) => lemma_done(s, s2, i, o),
     }
 }
