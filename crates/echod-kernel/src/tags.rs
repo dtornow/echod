@@ -1,6 +1,7 @@
 //! Tags: first match wins, and the three axes read off them.
 
 use vstd::prelude::*;
+use vstd::string::StringExecFns;
 
 use crate::tags_proof::*;
 
@@ -71,6 +72,91 @@ pub open spec fn target_of(t: ATags) -> Seq<char> {
         Some(a) => a,
         None => Seq::empty(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stamping: the tags a schedule's occurrence is born with
+// ---------------------------------------------------------------------------
+
+/// The keys a schedule's template does not carry onto the promise it fires:
+/// the schedule's own, and the lineage, which the firing sets.
+pub open spec fn stamped_key(k: Seq<char>) -> bool {
+    ||| k == "resonate:schedule"@
+    ||| k == "resonate:origin"@
+    ||| k == "resonate:branch"@
+    ||| k == "resonate:parent"@
+    ||| k == "resonate:prefix"@
+}
+
+/// The template without the stamped keys, in order.
+pub open spec fn strip(t: ATags) -> ATags
+    decreases t.len(),
+{
+    if t.len() == 0 {
+        Seq::empty()
+    } else if stamped_key(t[0].0) {
+        strip(t.drop_first())
+    } else {
+        seq![t[0]] + strip(t.drop_first())
+    }
+}
+
+/// What the firing sets: the schedule, and the lineage, which is the
+/// promise itself.
+pub open spec fn lineage(sid: Seq<char>, pid: Seq<char>) -> ATags {
+    seq![("resonate:schedule"@, sid), ("resonate:origin"@, pid), ("resonate:branch"@, pid), ("resonate:parent"@, pid), ("resonate:prefix"@, pid)]
+}
+
+/// The tags of the promise schedule `sid` fires at `pid`: the template
+/// stripped, then the stamp.
+pub open spec fn spec_stamp(t: ATags, sid: Seq<char>, pid: Seq<char>) -> ATags {
+    strip(t) + lineage(sid, pid)
+}
+
+pub fn is_stamped_key(k: &str) -> (r: bool)
+    ensures r == stamped_key(k@),
+{
+    str_eq(k, "resonate:schedule") || str_eq(k, "resonate:origin") || str_eq(k, "resonate:branch") || str_eq(k, "resonate:parent") || str_eq(k, "resonate:prefix")
+}
+
+pub fn stamp_tags(t: &Tags, sid: &str, pid: &str) -> (r: Tags)
+    ensures r.deep_view() == spec_stamp(t.deep_view(), sid@, pid@),
+{
+    let ghost s = t.deep_view();
+    let mut r: Tags = Vec::new();
+    let mut i: usize = 0;
+    assert(r.deep_view() =~= strip(s.take(0)));
+    while i < t.len()
+        invariant
+            i <= t@.len(),
+            s == t.deep_view(),
+            r.deep_view() == strip(s.take(i as int)),
+        decreases t@.len() - i,
+    {
+        let ghost before = r.deep_view();
+        let keep = !is_stamped_key(t[i].0.as_str());
+        if keep {
+            r.push((crate::types::clone_string(&t[i].0), crate::types::clone_string(&t[i].1)));
+        }
+        proof {
+            assert(s[i as int] == (t@[i as int].0@, t@[i as int].1@));
+            assert(s.take(i as int + 1) =~= s.take(i as int).push(s[i as int]));
+            lemma_strip_push(s.take(i as int), s[i as int]);
+            if keep {
+                assert(r.deep_view() =~= before.push(s[i as int]));
+            }
+        }
+        i += 1;
+    }
+    assert(s.take(s.len() as int) =~= s);
+    let ghost stripped = r.deep_view();
+    r.push((String::from_str("resonate:schedule"), String::from_str(sid)));
+    r.push((String::from_str("resonate:origin"), String::from_str(pid)));
+    r.push((String::from_str("resonate:branch"), String::from_str(pid)));
+    r.push((String::from_str("resonate:parent"), String::from_str(pid)));
+    r.push((String::from_str("resonate:prefix"), String::from_str(pid)));
+    assert(r.deep_view() =~= stripped + lineage(sid@, pid@));
+    r
 }
 
 // ---------------------------------------------------------------------------

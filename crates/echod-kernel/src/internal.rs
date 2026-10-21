@@ -352,6 +352,7 @@ impl State {
                 old(self)@.schedules[req.schedule@].next_run_at <= req.occurrences@[0].at as nat,
         ensures
             ipost(*old(self), *final(self), now),
+            final(self)@ == spec_fire(old(self)@, req.schedule@, req.occurrences@, req.next_run_at, now as nat),
     {
         let ghost a = self@;
         let si = match self.find_schedule(&req.schedule) {
@@ -390,81 +391,42 @@ impl State {
                 inv(now as nat, a),
                 a.schedules.contains_key(req.schedule@),
                 sched == a.schedules[req.schedule@],
+                sched.id == req.schedule@,
                 sched.promise_timeout <= MAX_TIME as nat,
                 !crate::tags::timer_targeted(sched.promise_tags),
                 forall|j: int| 0 <= j < n ==> #[trigger] occs[j].at <= now,
                 si < self.schedules@.len(),
                 self.schedules@[si as int]@ == sched,
                 self.wf(),
-                inv(now as nat, self@),
-                self@.schedules == a.schedules,
-                self@.outbox == a.outbox,
-                forall|x: Seq<char>| !occ_touched(occs, k as int, x) ==> #[trigger] crate::external::unchanged_at(a, self@, x),
-                forall|x: Seq<char>| #[trigger] occ_touched(occs, k as int, x) ==> fire_shape(now as nat, a, self@, sched, occs, x),
+                self@ == fire_fold(now as nat, a, sched, occs, k as int),
             decreases n - k,
         {
             let ghost s0 = self@;
+            proof { lemma_fire_fold(now as nat, a, sched, occs, k as int); }
             let o = &req.occurrences[k];
             let ghost x = o.promise_id@;
             let creq = PromiseCreateReq {
                 id: o.promise_id.clone(),
                 timeout_at: o.at + self.schedules[si].promise_timeout,
                 param: self.schedules[si].promise_param.dup(),
-                tags: clone_tags(&self.schedules[si].promise_tags),
+                tags: crate::tags::stamp_tags(&self.schedules[si].promise_tags, &req.schedule, &o.promise_id),
             };
+            assert(creq@ == occ_req(sched, occs[k as int]));
             match self.read_object(&o.promise_id, now) {
                 Some(_) => {
-                    proof {
-                        lemma_project_legal(now as nat, s0, self@, x);
-                        if occ_touched(occs, k as int, x) {
-                            assert(fire_shape(now as nat, a, s0, sched, occs, x));
-                            lemma_fire_project_idem(now as nat, a, s0, self@, sched, occs, x);
-                        } else {
-                            assert(crate::external::unchanged_at(a, s0, x));
-                            crate::external_proof::lemma_project_idem(a.objects[x], now as nat);
-                        }
-                    }
+                    assert(self@ == fire_step(now as nat, s0, sched, occs[k as int]));
                 }
                 None => {
                     let birth = if creq.timeout_at > now { o.at } else { now };
                     let p = create_promise(&creq, birth);
                     self.push_object(p);
-                    proof {
-                        assert(!s0.objects.contains_key(x));
-                        if occ_touched(occs, k as int, x) {
-                            assert(fire_shape(now as nat, a, s0, sched, occs, x));
-                            assert(false);
-                        }
-                        assert(crate::external::unchanged_at(a, s0, x));
-                        assert(!a.objects.contains_key(x));
-                        assert(creq@ == occ_req(sched, occs[k as int]));
-                        assert(self@.objects[x] == spec_create(occ_req(sched, occs[k as int]), birth_of(occs[k as int], sched, now as nat)));
-                        lemma_fire_birth_legal(now as nat, s0, self@, sched, occs[k as int]);
-                    }
-                }
-            }
-            proof {
-                let ghost b = self@;
-                assert forall|y: Seq<char>| #[trigger] occ_touched(occs, k as int + 1, y) implies fire_shape(now as nat, a, b, sched, occs, y) by {
-                    if y == x {
-                        assert(fire_shape(now as nat, a, b, sched, occs, y));
-                    } else {
-                        let jj = choose|jj: int| 0 <= jj < k as int + 1 && #[trigger] occs[jj].promise_id@ == y;
-                        assert(jj < k as int);
-                        assert(occ_touched(occs, k as int, y));
-                        assert(fire_shape(now as nat, a, s0, sched, occs, y));
-                        assert(crate::external::unchanged_at(s0, b, y));
-                    }
-                }
-                assert forall|y: Seq<char>| !occ_touched(occs, k as int + 1, y) implies #[trigger] crate::external::unchanged_at(a, b, y) by {
-                    assert(!occ_touched(occs, k as int, y));
-                    assert(occs[k as int].promise_id@ != y);
-                    assert(crate::external::unchanged_at(a, s0, y));
-                    assert(crate::external::unchanged_at(s0, b, y));
+                    assert(birth as nat == birth_of(occs[k as int], sched, now as nat));
+                    assert(self@ == fire_step(now as nat, s0, sched, occs[k as int]));
                 }
             }
             k += 1;
         }
+        proof { lemma_fire_fold(now as nat, a, sched, occs, n as int); }
         // advance the schedule
         let last = req.occurrences[n - 1].at;
         let mut c = self.schedules[si].dup();
@@ -474,6 +436,8 @@ impl State {
         self.set_schedule(si, c);
         proof {
             lemma_fire_legal(now as nat, a, a2, self@, req.schedule@, occs, req.next_run_at);
+            assert(self@.schedules =~= a2.schedules.insert(req.schedule@, ASchedule { last_run_at: Some(last), next_run_at: req.next_run_at, ..sched }));
+            assert(self@ == spec_fire(a, req.schedule@, occs, req.next_run_at, now as nat));
         }
     }
 }
@@ -491,13 +455,44 @@ pub open spec fn occ_of(occs: Seq<Occurrence>, x: Seq<char>) -> bool {
     occ_touched(occs, occs.len() as int, x)
 }
 
-/// The create request an occurrence stands for.
+/// The create request an occurrence stands for: the template's tags,
+/// stamped with the schedule and the promise's own lineage.
 pub open spec fn occ_req(c: ASchedule, o: Occurrence) -> APromiseCreateReq {
     APromiseCreateReq {
         id: o.promise_id@,
         timeout_at: (o.at + c.promise_timeout) as u64,
         param: c.promise_param,
-        tags: c.promise_tags,
+        tags: crate::tags::spec_stamp(c.promise_tags, c.id, o.promise_id@),
+    }
+}
+
+/// One occurrence fired: the object projected if it exists, else born of
+/// the occurrence.
+pub open spec fn fire_step(now: nat, a: AState, c: ASchedule, o: Occurrence) -> AState {
+    let x = o.promise_id@;
+    if a.objects.contains_key(x) {
+        with_objects(a, a.objects.insert(x, a.objects[x].project(now)))
+    } else {
+        with_objects(a, a.objects.insert(x, spec_create(occ_req(c, o), birth_of(o, c, now))))
+    }
+}
+
+/// The first `k` occurrences fired, in order.
+pub open spec fn fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurrence>, k: int) -> AState
+    decreases k,
+{
+    if k <= 0 { a } else { fire_step(now, fire_fold(now, a, c, occs, k - 1), c, occs[k - 1]) }
+}
+
+/// `processSchedule` as a function: every occurrence fired, then the
+/// schedule advanced; nothing when the schedule is absent or nothing is due.
+pub open spec fn spec_fire(a: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: u64, now: nat) -> AState {
+    if !a.schedules.contains_key(sid) || occs.len() == 0 {
+        a
+    } else {
+        let c = a.schedules[sid];
+        let a2 = fire_fold(now, a, c, occs, occs.len() as int);
+        AState { schedules: a2.schedules.insert(sid, ASchedule { last_run_at: Some(occs[occs.len() - 1].at), next_run_at: next, ..c }), ..a2 }
     }
 }
 
