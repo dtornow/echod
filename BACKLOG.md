@@ -9,7 +9,7 @@ No CI runs today. We want one pipeline with two soaks:
 
 - **On every push and pull request**: build, `cargo fmt --check`,
   `cargo clippy`, the unit and end-to-end tests, and a short soak of
-  `echod-dst` that stays under about 30 seconds. The default soak
+  `echod-sim` that stays under about 30 seconds. The default soak
   (`--servers 2 --operations 300`) runs a seed in a second or two, so
   this is in the order of 20 seeds. The seed range should move with the
   commit (for instance from the run number), so that over time CI
@@ -40,7 +40,7 @@ Run echod under Antithesis. Two parts:
   compose of nodes plus a store, the client driver that issues the
   protocol's requests and checks the answers, and the fault
   configuration (crashes, partitions, clock jumps, store outages,
-  matching what `echod-dst` inflicts). The checker in `echod-dst`
+  matching what `echod-sim` inflicts). The checker in `echod-sim`
   should be reusable as the workload's oracle rather than rewritten.
 
 Done: a workload that runs on the platform and a first report.
@@ -69,7 +69,7 @@ shows the panels with data.
   or a faster search. The nightly soak needs this bounded.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
-  are often missing. The client mix in `echod-dst` does not generate
+  are often missing. The client mix in `echod-sim` does not generate
   them, so those handlers are verified but never simulated.
 - **Clippy.** The server crate has two constructors with more than
   seven arguments (`Applier::new`, `Nodes::new`), two `map_or` that

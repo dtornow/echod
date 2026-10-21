@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/echod-kernel", "crates/echod-server", "crates/echod-dst", "crates/echod-fleet"]
+members = ["kernel", "fleet", "server", "sim"]
 
 [workspace.package]
 version = "0.1.0"

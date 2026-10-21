@@ -3,18 +3,19 @@
 A Resonate server on S3 plus a worker that runs JavaScript and TypeScript
 durable executions in V8. Built inside out, from the stored data up.
 
-## Crates
+## Layout
 
-| crate | holds |
+| | |
 |---|---|
-| `echod-kernel` | the state machine: one object store, one transition per request, verified with Verus against the specification's catalogue |
-| `echod-server` | the `ResonateServer`: the kernel over documents in an S3 bucket, committed with conditional writes |
-| `echod-dst` | the server under deterministic simulation: one seed, no wall clock, no sockets; checked for linearizability against the kernel |
-| `echod-fleet` | the fleet as a TLA-style state machine in Verus over the kernel's own states, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current |
-| `echod-worker` | the `ResonateWorker`: a V8 isolate (`deno_core`) whose durable ops are promises on the server |
+| `kernel/` | `echod-kernel`: the state machine, one object store, one transition per request, verified with Verus against the specification's catalogue |
+| `fleet/` | `echod-fleet`: the fleet as a TLA-style state machine in Verus over the kernel's own states, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
+| `server/` | `echod-server`: the `ResonateServer`, the kernel over documents in an S3 bucket, committed with conditional writes; the trusted shim and the binary |
+| `sim/` | `echod-sim`: the server under deterministic simulation, one seed, no wall clock, no sockets; checked for linearizability against the kernel |
 
-The server and the worker depend on `resonate-core` for the traits and
-protocol types. Origin: `resonate-server-blob` and `resonate-plugin-echod`.
+The first two are proved; the third is the shim the proof stops at; the
+fourth is the evidence for the shim. The server depends on `resonate-core`
+for the traits and protocol types. Origin: `resonate-server-blob` and
+`resonate-plugin-echod`.
 
 ## echod-kernel
 
@@ -123,8 +124,8 @@ commit order, serialised by serde as the kernel declares it. A task is a
 field of its promise. There is no enclosing document and no header.
 
 The document is the fold of the rows by id, last row wins — the kernel's
-`fold_by`, whose lemmas (and `proofs/compaction.rs`) prove any one-row-per-id
-rendering replays to the same document. Reading an origin
+`fold_by`, whose lemmas prove any one-row-per-id rendering replays to the
+same document (`compaction_replays_to_the_same_document`). Reading an origin
 replays its object.
 
 ### Writing
@@ -199,7 +200,7 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`nodes.rs`: they are `echod_fleet::node::core::NodeCore`, executable Rust
+`nodes.rs`: they are `echod_fleet::node::NodeCore`, executable Rust
 verified to compute the fleet model's specification functions step for
 step. `nodes.rs` is the trusted shim around it: it announces, lists, reads
 the configuration object and hands it to `read_config`; it asks `acts`;
@@ -295,7 +296,7 @@ the metrics leave out: an origin, a key, an address, an error.
 
 ### Simulation
 
-`echod-dst` runs several servers over one in-memory store on one thread
+`echod-sim` runs several servers over one in-memory store on one thread
 under tokio's paused clock, so time moves only between tasks and the same
 seed replays the same run. The simulation owns every port: a reference
 clock the clients stamp requests with, and per node a clock with its own
@@ -343,12 +344,12 @@ bucket's documents are the kernel's own states and the kernel's steps enter
 the model with the contracts the kernel proves of them.
 
 ```text
-tla/            the temporal logic, vendored from Anvil's verus-tla
-node/core.rs    the node core: executable Rust, each step ensures its spec function
-node/txn.rs     the commit's decisions, the same way
-node/step.rs    sweep, drain, next_deadline, clamp_now: verified over the kernel
-spec/cluster.rs the state and the nine actions
-proof/safety.rs the invariant, one lemma per action, the four theorems
+node.rs           the node core: executable Rust, each step ensures its spec function
+txn.rs            the commit's decisions, the same way
+step.rs           sweep, drain, next_deadline, clamp_now: verified over the kernel
+cluster.rs        the state and the nine actions
+cluster_proof.rs  the invariant, one lemma per action, the four theorems
+tla/              the temporal logic, vendored from Anvil's verus-tla
 ```
 
 The node core and the commit are what Anvil calls the reconciler: sans-I/O

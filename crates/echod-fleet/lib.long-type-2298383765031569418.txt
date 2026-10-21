@@ -1,1 +1,0 @@
-vstd::map::Map<spec::cluster::Event, vstd::prelude::nat>: vstd::prelude::SpecEq<vstd::map::Map<node::core::AKey, vstd::prelude::nat>>
