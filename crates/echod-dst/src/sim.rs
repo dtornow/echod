@@ -565,17 +565,29 @@ async fn check(world: &World) -> Report {
         .iter()
         .filter_map(|k| match world.keys.parse_timer_key(k) {
             Some(TimerEntry::Origin { origin, deadline, .. }) => Some((origin, deadline)),
-            _ => None,
+            Some(TimerEntry::Schedule { id, deadline, .. }) => Some((format!("sched:{id}"), deadline)),
+            None => None,
         })
         .collect();
     for key in world.inner.list("wf/", usize::MAX).await.unwrap_or_default() {
         let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let rows = echod_server::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default();
+        let rows = echod_server::doc::decode::<echod_kernel::Promise>(&bytes).map(|l| l.rows).unwrap_or_default();
         let origin = key.trim_start_matches("wf/");
         let origin = echod_server::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
         if let Some(d) = echod_fleet::node::step::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
             if !armed.contains(&(origin.clone(), d)) {
                 report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
+            }
+        }
+    }
+    for key in world.inner.list("sched/", usize::MAX).await.unwrap_or_default() {
+        let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
+        let rows = echod_server::doc::decode::<echod_kernel::Schedule>(&bytes).map(|l| l.rows).unwrap_or_default();
+        let id = key.trim_start_matches("sched/");
+        let id = echod_server::keys::decode_key(id).unwrap_or_else(|| id.to_string());
+        if let Some(d) = echod_fleet::node::step::next_deadline(&echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }) {
+            if !armed.contains(&(format!("sched:{id}"), d)) {
+                report.failures.push(format!("schedule {id}: owes its next run at {d} and the bucket holds no key for it"));
             }
         }
     }

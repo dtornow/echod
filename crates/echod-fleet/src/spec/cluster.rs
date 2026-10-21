@@ -427,7 +427,10 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
         })
         && next_is(new, deadline)
     {
-        let (core, bodies) = if s.store.docs.contains_key(o) {
+        // the load fills the cache: an origin's document; a schedule's is not cached
+        let (core, bodies) = if is_sched(o) {
+            (n.core, n.bodies)
+        } else if s.store.docs.contains_key(o) {
             (spec_filled(n.core, o, s.store.etags[o], n.clock), n.bodies.insert(o, s.store.docs[o]))
         } else {
             (spec_forget(n.core, o), n.bodies)

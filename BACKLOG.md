@@ -70,7 +70,18 @@ shows the panels with data.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-dst` does not generate
-  them, so those handlers are verified but never simulated.
+  them, so those handlers are verified but never simulated. Schedules
+  are not simulated at all: no `schedule.*` request in the mix, so the
+  fire, its two commits and the collection of a stale schedule key run
+  only in the end-to-end test. The oracle needs the schedule's document
+  beside the origin's for a fire, and the checker a way to place a fire
+  on both.
+- **Occurrences theorem.** The fleet model orders a fire's two commits,
+  origin then schedule, so that an occurrence is never lost; the proof
+  does not yet state it. The theorem: every schedule whose last run is
+  `t` has the promise its template expands to at `t` in the bucket. It
+  needs the expansion as a function in the model and an invariant that a
+  pending half's promise is in the origin's document.
 - **Clippy.** The server crate has two constructors with more than
   seven arguments (`Applier::new`, `Nodes::new`), two `map_or` that
   should be `is_none_or`, and a large-variant enum in `doc.rs`.

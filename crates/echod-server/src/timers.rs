@@ -29,7 +29,6 @@ use crate::applier::{Applier, Fired, FiredKey};
 use crate::keys::{KeySpace, TimerEntry};
 use crate::metrics::{FireOutcome, Metrics, TimerKind};
 use crate::nodes::Nodes;
-use crate::schedules::Schedules;
 use crate::store::Store;
 
 /// Armed keys by deadline.
@@ -120,7 +119,6 @@ pub struct Timers {
     wheel: Arc<TimerWheel>,
     nodes: Arc<Nodes>,
     applier: Arc<Applier>,
-    schedules: Arc<Schedules>,
     /// The start of the last bucket this node has listed. `None` until the
     /// first full load succeeds; nothing fires before that.
     loaded_through: Mutex<Option<u64>>,
@@ -128,8 +126,8 @@ pub struct Timers {
 }
 
 impl Timers {
-    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, schedules: Arc<Schedules>, metrics: Arc<Metrics>) -> Self {
-        Self { store, keys, wheel, nodes, applier, schedules, loaded_through: Mutex::new(None), metrics }
+    pub fn new(store: Arc<dyn Store>, keys: KeySpace, wheel: Arc<TimerWheel>, nodes: Arc<Nodes>, applier: Arc<Applier>, metrics: Arc<Metrics>) -> Self {
+        Self { store, keys, wheel, nodes, applier, loaded_through: Mutex::new(None), metrics }
     }
 
     pub fn wheel(&self) -> &Arc<TimerWheel> {
@@ -234,25 +232,17 @@ impl Timers {
                 let fired = FiredKey { key: echod_fleet::node::core::Key { origin: origin.clone(), at: *deadline, token: *token }, by: by.clone() };
                 self.applier.sweep(origin, now, fired).await
             }
-            TimerEntry::Schedule { id, deadline, .. } => self.schedules.fire(id, *deadline, now).await.map(|_| Fired::Kept),
+            TimerEntry::Schedule { id, deadline, token, by } => {
+                let fired = FiredKey { key: echod_fleet::node::core::Key { origin: format!("sched:{id}"), at: *deadline, token: *token }, by: by.clone() };
+                self.applier.fire(id, now, fired).await
+            }
         };
         let outcome = match swept {
             Ok(Fired::Deleted) => FireOutcome::Deleted,
             Ok(Fired::Kept) => {
-                if let TimerEntry::Schedule { .. } = &entry {
-                    // A schedule's key: the schedule moved on, or was fired already.
-                    match self.store.delete(key).await {
-                        Ok(()) => FireOutcome::Deleted,
-                        Err(e) => {
-                            tracing::debug!(key = %key, error = %e, "timer key not collected");
-                            FireOutcome::Kept
-                        }
-                    }
-                } else {
-                    // The delete failed: it is collected on its next firing.
-                    self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
-                    FireOutcome::Kept
-                }
+                // The delete failed: it is collected on its next firing.
+                self.wheel.arm(now.max(at) + RETRY_AFTER_MS, key.to_string());
+                FireOutcome::Kept
             }
             Err(e) => {
                 tracing::warn!(key = %key, error = %e, "sweep failed; the key stays");

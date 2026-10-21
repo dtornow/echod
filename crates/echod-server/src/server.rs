@@ -17,14 +17,13 @@ use resonate_core::{util, ResonateRouter, ResonateServer, Unavailable};
 use serde::de::DeserializeOwned;
 use validator::Validate;
 
-use crate::applier::Applier;
+use crate::applier::{Applier, Target};
 use crate::config::Config;
 use crate::env::{Clock, HttpPeers, Peers, SystemClock};
 use crate::keys::{origin_of, KeySpace};
 use crate::metrics::{self, Metrics, Route};
 use crate::nodes::Nodes;
 use crate::push::Router;
-use crate::schedules::Schedules;
 use crate::store::{self, Store};
 use crate::timers::{TimerWheel, Timers};
 use crate::wire;
@@ -71,8 +70,7 @@ impl Server {
         let wheel = Arc::new(TimerWheel::new());
         let cache: Arc<dyn crate::cache::Cache> = Arc::new(crate::cache::MemoryCache::new(cfg.cache_entries, cfg.cache_bytes));
         let applier = Arc::new(Applier::new(Arc::clone(&store), keys.clone(), cfg.kernel(), Arc::clone(&nodes), Arc::clone(&wheel), router, url, Arc::clone(&cache), Arc::clone(&clock), observer, Arc::clone(&metrics)));
-        let schedules = Arc::new(Schedules::new(Arc::clone(&applier)));
-        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, Arc::clone(&wheel), Arc::clone(&nodes), Arc::clone(&applier), schedules, Arc::clone(&metrics)));
+        let timers = Arc::new(Timers::new(Arc::clone(&store), keys, Arc::clone(&wheel), Arc::clone(&nodes), Arc::clone(&applier), Arc::clone(&metrics)));
         // The gauges: read when scraped, from the state as it is then.
         {
             let (nodes, cache, wheel) = (Arc::clone(&nodes), Arc::clone(&cache), Arc::clone(&wheel));
@@ -206,12 +204,10 @@ impl Server {
                 }
             };
         }
-        // A request about a schedule names no document; the rest name one.
-        let doc: Option<&str> = origin.as_deref().filter(|_| !kind.starts_with("schedule."));
         macro_rules! run {
-            ($schedule:expr, $step:expr) => {{
+            ($target:expr, $step:expr) => {{
                 let step = $step;
-                self.applier.apply(doc, $schedule, now, None, move |s: &mut k::State, now: u64| (step(s, now), false)).await?.0
+                self.applier.apply(&$target, now, None, move |s: &mut k::State, now: u64| (step(s, now), false)).await?.0
             }};
         }
         // The envelope to the kernel's request: the protocol's checks, then
@@ -376,7 +372,14 @@ impl Server {
             "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are not supported"),
             _ => return err(400, &format!("Unknown request kind: {kind}")),
         };
-        let r = run!(schedule.as_deref(), |s: &mut k::State, now: u64| s.handle(&q, now, &cfg));
+        // A request about a schedule is served on its document; the rest on
+        // their id's origin.
+        let target = match (schedule, origin) {
+            (Some(id), _) => Target::Schedule(id),
+            (None, Some(o)) => Target::Origin(o),
+            (None, None) => return err(400, "Request data does not name an id"),
+        };
+        let r = run!(target, |s: &mut k::State, now: u64| s.handle(&q, now, &cfg));
         Ok(wire::response_out(&kind, &corr, action_kind.as_deref(), &r))
     }
 }

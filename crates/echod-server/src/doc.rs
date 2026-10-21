@@ -1,8 +1,9 @@
-//! An origin's document: a log of rows in the object, a map in memory.
+//! A document: a log of rows in the object, a map in memory.
 //!
-//! The object is JSON lines: a header, then one `Promise` per row, in commit
-//! order. Reading folds the rows by id, last row winning —
-//! `echod_kernel::store::fold_by`, which the kernel proves is what
+//! An origin's document holds `Promise` rows; a schedule's holds its one
+//! `Schedule` row, or none. The object is JSON lines: a header, then one row
+//! per line, in commit order. Reading folds the rows by id, last row
+//! winning — `echod_kernel::store::fold_by`, which the kernel proves is what
 //! compaction preserves. Writing appends a header and the rows the step
 //! changed, or rewrites the whole object once enough rows are stale.
 //!
@@ -12,21 +13,56 @@
 //! write, a rewrite of the same rows included, is a new version: the
 //! conditional writes of every commit in flight are fenced by it.
 
-use echod_kernel::Promise;
+use echod_kernel::{Promise, Schedule, State};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// A row of a document: what it is keyed by, and the kernel state the rows
+/// of a document make.
+pub trait Row: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
+    fn id(&self) -> &str;
+    fn state_of(rows: &[Self]) -> State;
+    /// The rows as an origin's, which the node's cache holds; `None` for a
+    /// schedule's, which it does not.
+    fn promises(rows: &[Self]) -> Option<Vec<Promise>>;
+}
+
+impl Row for Promise {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn state_of(rows: &[Self]) -> State {
+        State { objects: rows.to_vec(), schedules: Vec::new(), outbox: Vec::new() }
+    }
+    fn promises(rows: &[Self]) -> Option<Vec<Promise>> {
+        Some(rows.to_vec())
+    }
+}
+
+impl Row for Schedule {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn state_of(rows: &[Self]) -> State {
+        State { objects: Vec::new(), schedules: rows.to_vec(), outbox: Vec::new() }
+    }
+    fn promises(_rows: &[Self]) -> Option<Vec<Promise>> {
+        None
+    }
+}
 
 /// What was read: the folded rows, how many rows the object holds, the
 /// bytes it holds, so an append knows its offset, and the stamp of the last
 /// write.
 #[derive(Clone)]
-pub struct Loaded {
-    pub rows: Vec<Promise>,
+pub struct Loaded<R: Row = Promise> {
+    pub rows: Vec<R>,
     pub row_count: usize,
     pub bytes: u64,
     pub stamp: u64,
 }
 
-impl Loaded {
+impl<R: Row> Loaded<R> {
     pub fn empty() -> Self {
         Self { rows: vec![], row_count: 0, bytes: 0, stamp: 0 }
     }
@@ -40,27 +76,27 @@ pub struct Header {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum Line {
+#[serde(untagged, bound = "R: DeserializeOwned")]
+enum Line<R> {
     Header(Header),
-    Row(Promise),
+    Row(R),
 }
 
 /// Fold the object's rows by id, last wins, keeping first-seen order; the
 /// stamp is the last header's.
-pub fn decode(bytes: &[u8]) -> Result<Loaded, String> {
-    let mut rows: Vec<Promise> = Vec::new();
+pub fn decode<R: Row>(bytes: &[u8]) -> Result<Loaded<R>, String> {
+    let mut rows: Vec<R> = Vec::new();
     let mut count = 0usize;
     let mut stamp = 0u64;
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_slice::<Line>(line).map_err(|e| format!("bad row: {e}"))? {
+        match serde_json::from_slice::<Line<R>>(line).map_err(|e| format!("bad row: {e}"))? {
             Line::Header(h) => stamp = stamp.max(h.stamp),
             Line::Row(p) => {
                 count += 1;
-                match rows.iter().position(|q| q.id == p.id) {
+                match rows.iter().position(|q| q.id() == p.id()) {
                     Some(i) => rows[i] = p,
                     None => rows.push(p),
                 }
@@ -71,22 +107,22 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, String> {
 }
 
 /// The header, then the rows, one line each, newline-terminated.
-pub fn encode(header: &Header, rows: &[Promise]) -> Vec<u8> {
+pub fn encode<R: Row>(header: &Header, rows: &[R]) -> Vec<u8> {
     let mut out = Vec::new();
     serde_json::to_writer(&mut out, header).expect("a header serialises");
     out.push(b'\n');
     for p in rows {
-        serde_json::to_writer(&mut out, p).expect("a promise serialises");
+        serde_json::to_writer(&mut out, p).expect("a row serialises");
         out.push(b'\n');
     }
     out
 }
 
 /// The rows of `after` that differ from `before`, by id.
-pub fn changed(before: &[Promise], after: &[Promise]) -> Vec<Promise> {
+pub fn changed<R: Row>(before: &[R], after: &[R]) -> Vec<R> {
     let mut out = Vec::new();
     for p in after {
-        let same = before.iter().find(|q| q.id == p.id).map(|q| serde_json::to_vec(q).ok() == serde_json::to_vec(p).ok()).unwrap_or(false);
+        let same = before.iter().find(|q| q.id() == p.id()).map(|q| serde_json::to_vec(q).ok() == serde_json::to_vec(p).ok()).unwrap_or(false);
         if !same {
             out.push(p.clone());
         }

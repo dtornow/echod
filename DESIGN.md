@@ -73,6 +73,13 @@ Lean text, both because the text is wrong:
   `now`, which `preserved_no_dead_dispatch` forbids. The kernel births such a
   promise dead, the state Lean reaches on the next touch.
 
+`processSchedule` is also a function, `spec_fire`: each occurrence's object
+projected if it exists, else born of the occurrence, then the schedule
+advanced; the fleet model fires a schedule by it. The promise an occurrence
+is born with carries the schedule and its own lineage in its tags
+(`spec_stamp`), and a lemma shows the stamp changes neither the timer axis
+nor the type of the tags.
+
 Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `types.rs`
 (bodies are plain Rust, their `ensures` assumed), and the cron arithmetic,
 which the caller supplies as a request's occurrences and next run. Doors the
@@ -88,12 +95,11 @@ runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 config.rs     the dials
 keys.rs       where everything lives under the bucket
 store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
-doc.rs        an origin's document: rows in, rows out, the fold between
+doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
 wire.rs       the kernel's vocabulary to the protocol's and back
 nodes.rs      the nodes: announce, heartbeat, list, and who owns what
-applier.rs    one request against one origin, serialised and committed
+applier.rs    one step against one document, serialised and committed; the fire across two
 timers.rs     deadlines as objects, fired by the owner
-schedules.rs  schedules as objects, fired by the owner
 push.rs       messages out: HTTP push, and the router in front of it
 server.rs     the ResonateServer: dispatch, forwarding, lifecycle
 gateway.rs    POST /, GET /ready and GET /metrics
@@ -103,8 +109,8 @@ metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets o
 ### The bucket
 
 ```text
-wf/<origin>                              an origin's document: rows
-sched/<id>                               a schedule: one row
+wf/<origin>                              an origin's document: promise rows
+sched/<id>                               a schedule's document: its row, or none
 t/<bucket>/<deadline>_<origin>@<token>   a deadline for an origin, empty
 t/<bucket>/<deadline>_sched:<id>@<token> a schedule's next run, empty
 nodes/<id>                               a node's announcement: id, url, at
@@ -150,9 +156,20 @@ remembered with the version written. A key that fires sweeps its origin;
 the sweep's own write, or, if nothing was due, a rewrite of the document
 at a new version, fences every commit in flight that armed the key, and
 then the key is deleted, whoever armed it. So a deadline a document owes
-always has a key in the bucket, which the fleet proof states and proves. A schedule
-is its own object; firing it creates the occurrence's promise and advances
-the schedule in one turn on the promise's origin.
+always has a key in the bucket, which the fleet proof states and proves.
+
+A schedule's document goes through the same commit, with its next run as
+the deadline it owes. Its key fires on two documents: the row decides the
+occurrence's promise and its origin; the kernel's `processSchedule` runs
+on the row beside the origin's objects; the origin is committed first,
+then the schedule with the key fired, each under the protocol, the
+schedule's conditional on the version loaded with the origin. A crash
+between the two refires the occurrence, which the kernel makes a no-op
+on the promise and an advance on the schedule. A key whose schedule is
+not due, or gone, is collected like an origin's: behind a rewrite. An
+earlier design deleted such a key outright, which the model refused: a
+node ahead on its clock could delete the key another node had armed for
+a schedule it had not yet written.
 
 ### Nodes
 
@@ -344,8 +361,10 @@ kernel's.
 The fleet state: the nodes and the bucket, and beside them a ghost
 history. A node is its core's view, its body cache, whether it is alive,
 its clock, and the commits it has in flight. The bucket has every document
-as a kernel state with its version and stamp, and the deadline keys: four
-fields, what S3 holds. The history is what the proof remembers and no
+— an origin's objects or a schedule's row, the kernel's own types — with
+its version and stamp, and the deadline keys: four fields, what S3 holds.
+A document is named for what it holds, and the shape is an invariant: an
+origin's has no schedule, a schedule's no object. The history is what the proof remembers and no
 node reads: every version written and by whom, every key armed and by
 whom, which key covers each document, and one order of arms and writes.
 There is no real time. A clock is a node's own, advances by any amount,
@@ -371,7 +390,17 @@ what it cached and gives the commit up; what landed stays. Deletes may
 fail silently. Any live node may act on any origin: which does is the
 server's routing, and the theorems hold whoever does.
 
-Proved, 231 items, no admits:
+A schedule's key fires on two documents. `Prepare` on the promise's
+origin, with the work `Fire`, loads the schedule's document too, decides
+the kernel's `spec_fire` on the pair, and keeps the schedule's half
+pending in the flight: what it loaded and at which version, what it
+writes, its deadline, the key fired. When the origin's commit is done, by
+`DelTimer` or `Done`, the pending half becomes a commit on the schedule's
+document, conditional on the version loaded with the origin, and runs the
+same five actions. That is the server's order, origin then schedule, and
+why a crash between the two loses nothing.
+
+Proved, 242 items, no admits:
 
 - **Catalogue.** Every document in the bucket satisfies the kernel's
   catalogue at its stamp.
@@ -381,6 +410,9 @@ Proved, 231 items, no admits:
 - **Revalidation.** A cached body whose version the bucket still holds is
   the bucket's document: a conditional read answered not modified may be
   served from the cache.
+
+The Catalogue and Timers theorems cover both kinds of document; in
+particular every schedule has a key at or before its next run.
 
 All three as corollaries of one invariant that `init` establishes and every
 action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
@@ -415,8 +447,7 @@ object read, that every version read or written is reported, that the
 store operations are issued in the protocol's order with the decisions
 the core made, that the document decoded is the one written, and that the
 bucket behaves as the model's: conditional writes on versions, one version
-per content. The S3 model's fidelity, the schedule objects and liveness
-are not proved.
+per content. The S3 model's fidelity and liveness are not proved.
 
 ### The SDKs
 
