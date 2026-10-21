@@ -42,7 +42,7 @@ pub open spec fn ipost(a: State, b: State, now: u64) -> bool {
 }
 
 /// An occurrence of a schedule, as the kernel asks for it.
-pub open spec fn occurrence_ok(c: ASchedule, o: Occurrence, now: u64) -> bool {
+pub open spec fn occurrence_ok(c: ASchedule, o: AOccurrence, now: u64) -> bool {
     c.next_run_at <= o.at as nat && o.at <= now
 }
 
@@ -345,14 +345,14 @@ impl State {
     pub fn process_schedule(&mut self, req: &ScheduleTimeoutReq, now: u64, cfg: &Config)
         requires
             pre(*old(self), now, *cfg),
-            forall|j: int| 0 <= j < req.occurrences@.len() ==> #[trigger] req.occurrences@[j].at <= now,
-            forall|j: int, k: int| 0 <= j < k < req.occurrences@.len() ==> #[trigger] req.occurrences@[j].at < #[trigger] req.occurrences@[k].at,
-            req.occurrences@.len() > 0 ==> req.next_run_at > req.occurrences@[req.occurrences@.len() - 1].at,
-            old(self)@.schedules.contains_key(req.schedule@) && req.occurrences@.len() > 0 ==>
-                old(self)@.schedules[req.schedule@].next_run_at <= req.occurrences@[0].at as nat,
+            forall|j: int| 0 <= j < req.occurrences.deep_view().len() ==> #[trigger] req.occurrences.deep_view()[j].at <= now,
+            forall|j: int, k: int| 0 <= j < k < req.occurrences.deep_view().len() ==> #[trigger] req.occurrences.deep_view()[j].at < #[trigger] req.occurrences.deep_view()[k].at,
+            req.occurrences.deep_view().len() > 0 ==> req.next_run_at > req.occurrences.deep_view()[req.occurrences.deep_view().len() - 1].at,
+            old(self)@.schedules.contains_key(req.schedule@) && req.occurrences.deep_view().len() > 0 ==>
+                old(self)@.schedules[req.schedule@].next_run_at <= req.occurrences.deep_view()[0].at as nat,
         ensures
             ipost(*old(self), *final(self), now),
-            final(self)@ == spec_fire(old(self)@, req.schedule@, req.occurrences@, req.next_run_at, now as nat),
+            final(self)@ == spec_fire(old(self)@, req.schedule@, req.occurrences.deep_view(), req.next_run_at, now as nat),
     {
         let ghost a = self@;
         let si = match self.find_schedule(&req.schedule) {
@@ -373,7 +373,7 @@ impl State {
             }
             return;
         }
-        let ghost occs = req.occurrences@;
+        let ghost occs = req.occurrences.deep_view();
         let ghost sched = a.schedules[req.schedule@];
         proof {
             lemma_inv_pointwise(now as nat, a);
@@ -386,7 +386,7 @@ impl State {
                 a == old(self)@,
                 k <= n,
                 n == occs.len(),
-                occs == req.occurrences@,
+                occs == req.occurrences.deep_view(),
                 now <= MAX_TIME,
                 inv(now as nat, a),
                 a.schedules.contains_key(req.schedule@),
@@ -411,6 +411,7 @@ impl State {
                 param: self.schedules[si].promise_param.dup(),
                 tags: crate::tags::stamp_tags(&self.schedules[si].promise_tags, &req.schedule, &o.promise_id),
             };
+            assert(occs[k as int] == o@);
             assert(creq@ == occ_req(sched, occs[k as int]));
             match self.read_object(&o.promise_id, now) {
                 Some(_) => {
@@ -447,29 +448,29 @@ impl State {
 // ---------------------------------------------------------------------------
 
 /// Some occurrence among the first `k` expands to `x`.
-pub open spec fn occ_touched(occs: Seq<Occurrence>, k: int, x: Seq<char>) -> bool {
-    exists|j: int| 0 <= j < k && #[trigger] occs[j].promise_id@ == x
+pub open spec fn occ_touched(occs: Seq<AOccurrence>, k: int, x: Seq<char>) -> bool {
+    exists|j: int| 0 <= j < k && #[trigger] occs[j].promise_id == x
 }
 
-pub open spec fn occ_of(occs: Seq<Occurrence>, x: Seq<char>) -> bool {
+pub open spec fn occ_of(occs: Seq<AOccurrence>, x: Seq<char>) -> bool {
     occ_touched(occs, occs.len() as int, x)
 }
 
 /// The create request an occurrence stands for: the template's tags,
 /// stamped with the schedule and the promise's own lineage.
-pub open spec fn occ_req(c: ASchedule, o: Occurrence) -> APromiseCreateReq {
+pub open spec fn occ_req(c: ASchedule, o: AOccurrence) -> APromiseCreateReq {
     APromiseCreateReq {
-        id: o.promise_id@,
+        id: o.promise_id,
         timeout_at: (o.at + c.promise_timeout) as u64,
         param: c.promise_param,
-        tags: crate::tags::spec_stamp(c.promise_tags, c.id, o.promise_id@),
+        tags: crate::tags::spec_stamp(c.promise_tags, c.id, o.promise_id),
     }
 }
 
 /// One occurrence fired: the object projected if it exists, else born of
 /// the occurrence.
-pub open spec fn fire_step(now: nat, a: AState, c: ASchedule, o: Occurrence) -> AState {
-    let x = o.promise_id@;
+pub open spec fn fire_step(now: nat, a: AState, c: ASchedule, o: AOccurrence) -> AState {
+    let x = o.promise_id;
     if a.objects.contains_key(x) {
         with_objects(a, a.objects.insert(x, a.objects[x].project(now)))
     } else {
@@ -478,7 +479,7 @@ pub open spec fn fire_step(now: nat, a: AState, c: ASchedule, o: Occurrence) -> 
 }
 
 /// The first `k` occurrences fired, in order.
-pub open spec fn fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurrence>, k: int) -> AState
+pub open spec fn fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<AOccurrence>, k: int) -> AState
     decreases k,
 {
     if k <= 0 { a } else { fire_step(now, fire_fold(now, a, c, occs, k - 1), c, occs[k - 1]) }
@@ -486,7 +487,7 @@ pub open spec fn fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurren
 
 /// `processSchedule` as a function: every occurrence fired, then the
 /// schedule advanced; nothing when the schedule is absent or nothing is due.
-pub open spec fn spec_fire(a: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: u64, now: nat) -> AState {
+pub open spec fn spec_fire(a: AState, sid: Seq<char>, occs: Seq<AOccurrence>, next: u64, now: nat) -> AState {
     if !a.schedules.contains_key(sid) || occs.len() == 0 {
         a
     } else {
@@ -498,16 +499,16 @@ pub open spec fn spec_fire(a: AState, sid: Seq<char>, occs: Seq<Occurrence>, nex
 
 /// When the occurrence's promise is born: at the occurrence if it is still
 /// live at `now`, else at `now`, dead.
-pub open spec fn birth_of(o: Occurrence, c: ASchedule, now: nat) -> nat {
+pub open spec fn birth_of(o: AOccurrence, c: ASchedule, now: nat) -> nat {
     if occ_req(c, o).timeout_at > now { o.at as nat } else { now }
 }
 
 /// What firing leaves at `x`: an existing object projected, or a promise born
 /// of one of the occurrences that expand to `x`.
-pub open spec fn fire_shape(now: nat, a: AState, b: AState, c: ASchedule, occs: Seq<Occurrence>, x: Seq<char>) -> bool {
+pub open spec fn fire_shape(now: nat, a: AState, b: AState, c: ASchedule, occs: Seq<AOccurrence>, x: Seq<char>) -> bool {
     &&& b.objects.contains_key(x)
     &&& a.objects.contains_key(x) ==> b.objects[x] == a.objects[x].project(now)
-    &&& !a.objects.contains_key(x) ==> exists|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id@ == x
+    &&& !a.objects.contains_key(x) ==> exists|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
         && b.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now))
 }
 

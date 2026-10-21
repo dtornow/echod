@@ -521,7 +521,11 @@ pub struct TaskRetryTimeoutReq { pub id: String }
 
 /// One due occurrence of a schedule: the instant, and the promise id the
 /// schedule's template expands to at that instant (`expand`).
+#[make_spec_type]
 pub struct Occurrence { pub at: u64, pub promise_id: String }
+
+#[cfg(verus_keep_ghost)]
+pub type AOccurrence = OccurrenceSpec;
 
 /// A schedule's occurrences coming due. The cron arithmetic (`occurrences`,
 /// `nextCron`) is the caller's: the kernel takes its results and holds them

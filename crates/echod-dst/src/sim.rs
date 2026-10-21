@@ -573,7 +573,7 @@ async fn check(world: &World) -> Report {
         let rows = echod_server::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default();
         let origin = key.trim_start_matches("wf/");
         let origin = echod_server::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
-        if let Some(d) = echod_fleet::node::step::next_deadline(&rows) {
+        if let Some(d) = echod_fleet::node::step::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
             if !armed.contains(&(origin.clone(), d)) {
                 report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
             }

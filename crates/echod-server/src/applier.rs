@@ -357,7 +357,7 @@ impl Applier {
         if !w.origin.is_empty() {
             let changed = doc::changed(&w.loaded.rows, &state.objects);
             let changed_any = did || !changed.is_empty();
-            let deadline = step::next_deadline(&state.objects);
+            let deadline = step::next_deadline(&State { objects: state.objects.clone(), schedules: Vec::new(), outbox: Vec::new() });
             let mut txn = self.nodes.prepare(&w.origin, w.etag.as_ref(), deadline, changed_any, fired.map(|f| f.key.clone()));
             if changed_any {
                 // (1) the key for the new deadline, before the state that arms it

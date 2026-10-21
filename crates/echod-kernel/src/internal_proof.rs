@@ -480,26 +480,26 @@ proof fn lemma_project_inv_obj_lost(now: nat, a: AState, b: AState, id: Seq<char
 }
 
 /// Firing one occurrence on a fresh id is a legal step.
-pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule, o: Occurrence)
+pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule, o: AOccurrence)
     requires
         inv(now, a),
-        !a.objects.contains_key(o.promise_id@),
+        !a.objects.contains_key(o.promise_id),
         !crate::tags::timer_targeted(c.promise_tags),
         c.promise_timeout <= MAX_TIME as nat,
         o.at <= now,
         now <= MAX_TIME,
-        b.objects == a.objects.insert(o.promise_id@, spec_create(occ_req(c, o), birth_of(o, c, now))),
+        b.objects == a.objects.insert(o.promise_id, spec_create(occ_req(c, o), birth_of(o, c, now))),
         b.schedules == a.schedules,
         b.outbox == a.outbox,
     ensures
         inv(now, b),
         legal(now, a, b),
-        fire_shape(now, a, b, c, seq![o], o.promise_id@),
+        fire_shape(now, a, b, c, seq![o], o.promise_id),
 {
     lemma_inv_pointwise(now, a);
     let req = occ_req(c, o);
     let t = birth_of(o, c, now);
-    crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, o.promise_id@);
+    crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, o.promise_id);
     assert(req.timeout_at <= 2 * (MAX_TIME as nat));
     assert(t <= now);
     assert(req.timeout_at <= t || req.timeout_at > now);
@@ -507,12 +507,12 @@ pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
-    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == o.promise_id@, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
+    crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == o.promise_id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
     assert(seq![o][0] == o);
 }
 
 /// Projecting again an object the firing already touched leaves the shape.
-pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState, c: ASchedule, occs: Seq<Occurrence>, x: Seq<char>)
+pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState, c: ASchedule, occs: Seq<AOccurrence>, x: Seq<char>)
     requires
         fire_shape(now, a, s0, c, occs, x),
         b.objects.contains_key(x),
@@ -523,7 +523,7 @@ pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState,
     if a.objects.contains_key(x) {
         crate::external_proof::lemma_project_idem(a.objects[x], now);
     } else {
-        let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id@ == x
+        let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
             && s0.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
         let q = spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
         // a promise born live is ahead of `now`; one born dead is settled: both fixed by projection
@@ -533,7 +533,7 @@ pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState,
 
 /// The first `k` occurrences fired: the catalogue holds, nothing else
 /// moved, and each object touched has the firing's shape.
-pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurrence>, k: int)
+pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<AOccurrence>, k: int)
     requires
         inv(now, a),
         !crate::tags::timer_targeted(c.promise_tags),
@@ -555,7 +555,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurr
         lemma_fire_fold(now, a, c, occs, k - 1);
         let s0 = fire_fold(now, a, c, occs, k - 1);
         let o = occs[k - 1];
-        let x = o.promise_id@;
+        let x = o.promise_id;
         let b = fire_step(now, s0, c, o);
         if s0.objects.contains_key(x) {
             lemma_project_legal(now, s0, b, x);
@@ -578,10 +578,10 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurr
                         lemma_fire_project_idem(now, a, s0, b, c, occs, x);
                     }
                 } else {
-                    assert(0 <= k - 1 < occs.len() && occs[k - 1].promise_id@ == x);
+                    assert(0 <= k - 1 < occs.len() && occs[k - 1].promise_id == x);
                 }
             } else {
-                let jj = choose|jj: int| 0 <= jj < k && #[trigger] occs[jj].promise_id@ == y;
+                let jj = choose|jj: int| 0 <= jj < k && #[trigger] occs[jj].promise_id == y;
                 assert(jj < k - 1);
                 assert(occ_touched(occs, k - 1, y));
                 assert(fire_shape(now, a, s0, c, occs, y));
@@ -590,7 +590,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurr
         }
         assert forall|y: Seq<char>| !occ_touched(occs, k, y) implies #[trigger] crate::external::unchanged_at(a, b, y) by {
             assert(!occ_touched(occs, k - 1, y));
-            assert(occs[k - 1].promise_id@ != y);
+            assert(occs[k - 1].promise_id != y);
             assert(crate::external::unchanged_at(a, s0, y));
             assert(crate::external::unchanged_at(s0, b, y));
         }
@@ -598,7 +598,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<Occurr
 }
 
 /// `spec_fire` keeps the catalogue and is an internal step.
-pub proof fn lemma_spec_fire(now: nat, a: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: u64)
+pub proof fn lemma_spec_fire(now: nat, a: AState, sid: Seq<char>, occs: Seq<AOccurrence>, next: u64)
     requires
         inv(now, a),
         now <= MAX_TIME,
@@ -626,7 +626,7 @@ pub proof fn lemma_spec_fire(now: nat, a: AState, sid: Seq<char>, occs: Seq<Occu
 }
 
 /// `processSchedule` as one step: the objects fired, the schedule advanced.
-pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: Seq<char>, occs: Seq<Occurrence>, next: u64)
+pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: Seq<char>, occs: Seq<AOccurrence>, next: u64)
     requires
         inv(now, a),
         inv(now, a2),
@@ -679,13 +679,13 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
             lemma_project_inv_obj(now, a, b, x);
             lemma_project_trans_obj(now, a, b, x);
         } else {
-            let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id@ == x
+            let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
                 && a2.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
             let req = occ_req(c, occs[j]);
             let t = birth_of(occs[j], c, now);
             assert(inv_sched(now, a, sid));
             assert(c.promise_timeout <= MAX_TIME as nat);
-            crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, occs[j].promise_id@);
+            crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, occs[j].promise_id);
             assert(req.timeout_at <= 2 * (MAX_TIME as nat));
             lemma_born_obj(now, t, a, b, req);
         }

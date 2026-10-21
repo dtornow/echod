@@ -42,6 +42,7 @@ use crate::node::step::*;
 use crate::node::txn::*;
 use crate::tla::action::*;
 use echod_kernel::external::spec_handle;
+use echod_kernel::internal::spec_fire;
 use echod_kernel::types::*;
 
 verus! {
@@ -92,7 +93,7 @@ impl Store {
     }
 
     pub open spec fn doc(self, o: Origin) -> Doc {
-        if self.docs.contains_key(o) { self.docs[o] } else { Map::empty() }
+        if self.docs.contains_key(o) { self.docs[o] } else { empty_doc() }
     }
 
     pub open spec fn stamp(self, o: Origin) -> nat {
@@ -110,10 +111,25 @@ pub enum Phase {
     Written,
 }
 
+/// The second half of a fire: the schedule's commit, decided with the
+/// origin's and run once the origin's is done. What it loaded of the
+/// schedule's document and at which version, what it writes, the
+/// document's deadline after, and the key whose firing this is.
+pub struct Pending {
+    pub target: Origin,
+    pub cur: Option<Seq<char>>,
+    pub loaded: Doc,
+    pub new: Doc,
+    pub deadline: Option<nat>,
+    pub fired: AKey,
+}
+
 /// A commit in flight, as the model sees it.
 pub struct Flight {
     /// What it is for.
     pub work: Work,
+    /// A fire's commit on the schedule, to follow this one.
+    pub then: Option<Pending>,
     /// The node's decision.
     pub c: ATxn,
     /// The version the store is expected to hold: the one loaded, then,
@@ -144,10 +160,56 @@ pub struct Node {
     pub txns: Map<Origin, Flight>,
 }
 
-/// What a step is for: a request, or the sweep behind a fired key.
+/// What a step is for: a request; the sweep behind a fired key; or the
+/// fire behind a schedule's key — the schedule, the promise its occurrence
+/// expands to, the run after, and the schedule document's deadline after.
 pub enum Work {
     Request(ARequest),
     Sweep(AKey),
+    Fire(AKey, Seq<char>, Seq<char>, u64, Option<nat>),
+}
+
+// ---------------------------------------------------------------------------
+// Targets: what a document is named for
+// ---------------------------------------------------------------------------
+
+/// A schedule's document is named for it.
+pub open spec fn sched_target(sid: Seq<char>) -> Origin {
+    "sched:"@ + sid
+}
+
+pub open spec fn is_sched(o: Origin) -> bool {
+    o.len() >= 6 && o.take(6) == "sched:"@
+}
+
+/// A schedule's document holds no objects; an origin's no schedule.
+pub open spec fn shaped(o: Origin, d: Doc) -> bool {
+    if is_sched(o) { d.objects == Map::<Seq<char>, APromise>::empty() } else { d.schedules == Map::<Seq<char>, ASchedule>::empty() }
+}
+
+/// The document a request is served on: its id's origin, or its
+/// schedule's. A heartbeat with no task names none.
+pub open spec fn request_target(req: ARequest) -> Option<Origin> {
+    match req {
+        ARequest::PromiseGet(q) => Some(origin(q.id)),
+        ARequest::PromiseCreate(q) => Some(origin(q.id)),
+        ARequest::PromiseSettle(q) => Some(origin(q.id)),
+        ARequest::PromiseRegisterCallback(q) => Some(origin(q.awaited)),
+        ARequest::PromiseRegisterListener(q) => Some(origin(q.awaited)),
+        ARequest::ScheduleGet(q) => Some(sched_target(q.id)),
+        ARequest::ScheduleCreate(q) => Some(sched_target(q.id)),
+        ARequest::ScheduleDelete(q) => Some(sched_target(q.id)),
+        ARequest::TaskGet(q) => Some(origin(q.id)),
+        ARequest::TaskCreate(q) => Some(origin(q.action.id)),
+        ARequest::TaskAcquire(q) => Some(origin(q.id)),
+        ARequest::TaskFulfill(q) => Some(origin(q.id)),
+        ARequest::TaskRelease(q) => Some(origin(q.id)),
+        ARequest::TaskHalt(q) => Some(origin(q.id)),
+        ARequest::TaskContinue(q) => Some(origin(q.id)),
+        ARequest::TaskFence(q) => Some(origin(q.id)),
+        ARequest::TaskHeartbeat(q) => if q.tasks.len() > 0 { Some(origin(q.tasks[0].id)) } else { None },
+        ARequest::TaskSuspend(q) => Some(origin(q.id)),
+    }
 }
 
 /// Ghost: a request answered — where, at what instant it was decided, what
@@ -177,7 +239,14 @@ pub struct Cluster {
 /// `b` is what kernel steps at `t` make of the kernel state `a`: the drain
 /// after a request. Nothing is assumed of `a`; what holds of it is proved.
 pub open spec fn kreach_from(t: nat, a: echod_kernel::store::AState, b: Doc) -> bool {
-    exists |sb: echod_kernel::store::AState| sb.objects == b && #[trigger] reach(t, a, sb)
+    exists |sb: echod_kernel::store::AState| strip(sb) == b && #[trigger] reach(t, a, sb)
+}
+
+/// A fire's two documents from the fired state: the origin's is what
+/// kernel steps make of its objects; the schedule's is its schedules,
+/// which the steps after leave.
+pub open spec fn kreach_fire(t: nat, a: echod_kernel::store::AState, o: Doc, c: Doc) -> bool {
+    exists |sb: echod_kernel::store::AState| objects_only(sb) == o && schedules_only(sb) == c && #[trigger] reach(t, a, sb)
 }
 
 /// `b` is what kernel steps at `t` make of document `a`: for some kernel
@@ -185,7 +254,7 @@ pub open spec fn kreach_from(t: nat, a: echod_kernel::store::AState, b: Doc) -> 
 /// second is reached from it.
 pub open spec fn kreach(t: nat, a: Doc, b: Doc) -> bool {
     exists |sa: echod_kernel::store::AState, sb: echod_kernel::store::AState|
-        sa.objects == a && sb.objects == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb)
+        strip(sa) == a && strip(sb) == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb)
 }
 
 /// A sweep at `t`: kernel steps, after which nothing is due at `t`; if
@@ -314,16 +383,47 @@ pub open spec fn forget(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 /// `spec_handle`, then the drain; a sweep is the step module's contract.
 /// Any live node may: which one does is routing. A request served is
 /// logged with its answer.
+/// No commit of the node is on `o`, nor has one to come on it.
+pub open spec fn free(n: Node, o: Origin) -> bool {
+    &&& !n.txns.contains_key(o)
+    &&& forall |q: Origin| #[trigger] n.txns.contains_key(q) ==> match n.txns[q].then { Some(p) => p.target != o, None => true }
+}
+
+/// A fire's second half, decided with its first: the schedule `sid` at
+/// `pid`'s origin, `k` its key, the run after `next`.
+pub open spec fn fire_pending(s: Cluster, k: AKey, sid: Seq<char>, pid: Seq<char>, next: u64, t: nat, deadline: Option<nat>, loaded: Doc) -> Pending {
+    let st = sched_target(sid);
+    let sd = s.store.doc(st);
+    let occ = AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid };
+    let fired_state = spec_fire(joint(loaded, sd), sid, seq![occ], next, t);
+    Pending { target: st, cur: s.store.etag(st), loaded: sd, new: schedules_only(fired_state), deadline, fired: k }
+}
+
 pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>) -> Option<Cluster> {
     let n = s.nodes[i];
     let loaded = s.store.doc(o);
     let changed = did || new != loaded;
-    let fired = match work { Work::Sweep(k) => Some(k), Work::Request(_) => None };
-    if s.nodes.contains_key(i) && n.alive && !n.txns.contains_key(o)
+    let fired = match work { Work::Sweep(k) => Some(k), Work::Request(_) => None, Work::Fire(..) => None };
+    if s.nodes.contains_key(i) && n.alive && free(n, o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
+        && shaped(o, new)
         && (match work {
-            Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did),
-            Work::Request(req) => !did && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
+            Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did) && (is_sched(o) ==> !did),
+            Work::Request(req) => !did && request_target(req) == Some(o) && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
+            Work::Fire(k, sid, pid, next, deadline_s) => {
+                let st = sched_target(sid);
+                let sd = s.store.doc(st);
+                let p = fire_pending(s, k, sid, pid, next, t, deadline_s, loaded);
+                &&& !did
+                &&& origin(pid) == o
+                &&& k.origin == st && k.at <= n.clock && s.hist.armer.contains_key(k)
+                &&& free(n, st)
+                &&& t >= s.store.stamp(st)
+                &&& sd.schedules.contains_key(sid) && sd.schedules[sid].next_run_at <= t
+                &&& next > sd.schedules[sid].next_run_at && next <= MAX_TIME
+                &&& kreach_fire(t, spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t), new, p.new)
+                &&& next_is(p.new, deadline_s)
+            }
         })
         && next_is(new, deadline)
     {
@@ -332,8 +432,13 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
         } else {
             (spec_forget(n.core, o), n.bodies)
         };
+        let then = match work {
+            Work::Fire(k, sid, pid, next, deadline_s) => Some(fire_pending(s, k, sid, pid, next, t, deadline_s, loaded)),
+            _ => None,
+        };
         let x = Flight {
             work,
+            then,
             c: spec_prepare(core, o, s.store.etag(o), deadline, changed, fired),
             cur: s.store.etag(o),
             loaded,
@@ -392,7 +497,7 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
 pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
     match x.work {
         Work::Request(req) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(x.loaded), req, x.t).1 }),
-        Work::Sweep(_) => s.log,
+        _ => s.log,
     }
 }
 
@@ -449,6 +554,35 @@ pub open spec fn disarm(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     }
 }
 
+/// A fire's second half begins where its first ends: the schedule's
+/// commit, decided from what was loaded with the origin, with the key
+/// fired; `NodeCore::prepare` on the schedule's document.
+pub open spec fn continued(s: Cluster, core: ANode, p: Pending, t: nat) -> Flight {
+    Flight {
+        work: Work::Sweep(p.fired),
+        then: None,
+        c: spec_prepare(core, p.target, p.cur, p.deadline, p.new != p.loaded, Some(p.fired)),
+        cur: p.cur,
+        loaded: p.loaded,
+        new: p.new,
+        t,
+        phase: Phase::Decided,
+        seq0: s.hist.counter,
+        letag: p.cur,
+        lseq: match p.cur { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
+    }
+}
+
+/// The node's commits once the one on `o` is done: removed, or, when a
+/// fire's second half follows, replaced by it on the schedule's document.
+pub open spec fn after(s: Cluster, core: ANode, n: Node, o: Origin) -> Map<Origin, Flight> {
+    let x = n.txns[o];
+    match x.then {
+        Some(p) => n.txns.remove(o).insert(p.target, continued(s, core, p, x.t)),
+        None => n.txns.remove(o),
+    }
+}
+
 /// The node remembers what it kept with the version written
 /// (`NodeCore::finish`); the key fired, whoever armed it, is collected
 /// (`NodeCore::collected`) and deleted — unless the delete failed, in which
@@ -465,7 +599,7 @@ pub open spec fn finish(s: Cluster, i: Id, o: Origin, deleted: bool) -> Option<C
             None => (core1, s.store.timers),
         };
         Some(Cluster {
-            nodes: s.nodes.insert(i, Node { core: core2, txns: n.txns.remove(o), ..n }),
+            nodes: s.nodes.insert(i, Node { core: core2, txns: after(s, core2, n, o), ..n }),
             store: Store { timers, ..s.store },
             ..s
         })
@@ -516,7 +650,7 @@ pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is None {
-        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: n.txns.remove(o), ..n }), log: answered(s, o, x), ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), log: answered(s, o, x), ..s })
     } else {
         None
     }

@@ -23,14 +23,43 @@ use crate::node::txn::*;
 
 verus! {
 
-/// An origin's document: its objects, as the kernel sees them.
+/// A document, as the kernel sees it: an origin's objects, or a schedule's
+/// row. The bucket holds either kind under one protocol; which a document
+/// is, its name says (`is_sched`), and the shape invariant keeps the other
+/// map empty.
 #[cfg(verus_keep_ghost)]
-pub type Doc = Map<Seq<char>, APromise>;
+pub struct Doc {
+    pub objects: Map<Seq<char>, APromise>,
+    pub schedules: Map<Seq<char>, ASchedule>,
+}
 
-/// A document as a kernel state: the objects alone, no schedule, nothing
-/// in the outbox.
+pub open spec fn empty_doc() -> Doc {
+    Doc { objects: Map::empty(), schedules: Map::empty() }
+}
+
+/// A document as a kernel state: nothing in the outbox.
 pub open spec fn full(d: Doc) -> AState {
-    AState { objects: d, schedules: Map::empty(), outbox: Map::empty() }
+    AState { objects: d.objects, schedules: d.schedules, outbox: Map::empty() }
+}
+
+/// A kernel state as a document: the outbox dropped.
+pub open spec fn strip(s: AState) -> Doc {
+    Doc { objects: s.objects, schedules: s.schedules }
+}
+
+/// A kernel state's objects alone, and its schedules alone: what a fire
+/// writes to the origin's document and to the schedule's.
+pub open spec fn objects_only(s: AState) -> Doc {
+    Doc { objects: s.objects, schedules: Map::empty() }
+}
+
+pub open spec fn schedules_only(s: AState) -> Doc {
+    Doc { objects: Map::empty(), schedules: s.schedules }
+}
+
+/// An origin's document and a schedule's, loaded together for a fire.
+pub open spec fn joint(o: Doc, c: Doc) -> AState {
+    AState { objects: o.objects, schedules: c.schedules, outbox: Map::empty() }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,8 +83,17 @@ pub open spec fn deadline_at(p: APromise, t: nat) -> bool {
     promise_deadline(p) == Some(t) || lease_deadline(p) == Some(t) || retry_deadline(p) == Some(t)
 }
 
-pub open spec fn has_deadline(d: Doc, t: nat) -> bool {
+pub open spec fn objects_deadline(d: Map<Seq<char>, APromise>, t: nat) -> bool {
     exists |id: Seq<char>| #[trigger] d.contains_key(id) && deadline_at(d[id], t)
+}
+
+/// A schedule owes a timer at its next run.
+pub open spec fn schedules_deadline(c: Map<Seq<char>, ASchedule>, t: nat) -> bool {
+    exists |id: Seq<char>| #[trigger] c.contains_key(id) && c[id].next_run_at as nat == t
+}
+
+pub open spec fn has_deadline(d: Doc, t: nat) -> bool {
+    objects_deadline(d.objects, t) || schedules_deadline(d.schedules, t)
 }
 
 /// `t` is the least deadline of the document.
@@ -68,8 +106,14 @@ pub open spec fn cleared(p: APromise, now: nat) -> bool {
     forall |t: nat| deadline_at(p, t) ==> t > now
 }
 
-pub open spec fn no_due(now: nat, d: Doc) -> bool {
+pub open spec fn objects_cleared(now: nat, d: Map<Seq<char>, APromise>) -> bool {
     forall |id: Seq<char>| #[trigger] d.contains_key(id) ==> cleared(d[id], now)
+}
+
+/// Nothing in the document is due at `now`: no object, and no schedule.
+pub open spec fn no_due(now: nat, d: Doc) -> bool {
+    &&& objects_cleared(now, d.objects)
+    &&& forall |id: Seq<char>| #[trigger] d.schedules.contains_key(id) ==> d.schedules[id].next_run_at > now
 }
 
 pub proof fn lemma_no_due(now: nat, d: Doc)
@@ -77,8 +121,12 @@ pub proof fn lemma_no_due(now: nat, d: Doc)
     ensures forall |t: nat| has_deadline(d, t) ==> t > now,
 {
     assert forall |t: nat| has_deadline(d, t) implies t > now by {
-        let id = choose |id: Seq<char>| #[trigger] d.contains_key(id) && deadline_at(d[id], t);
-        assert(cleared(d[id], now));
+        if objects_deadline(d.objects, t) {
+            let id = choose |id: Seq<char>| #[trigger] d.objects.contains_key(id) && deadline_at(d.objects[id], t);
+            assert(cleared(d.objects[id], now));
+        } else {
+            let id = choose |id: Seq<char>| #[trigger] d.schedules.contains_key(id) && d.schedules[id].next_run_at as nat == t;
+        }
     }
 }
 
@@ -201,7 +249,31 @@ pub proof fn lemma_inv_at(t0: nat, t: nat, s: AState)
 /// The catalogue on the objects alone.
 pub proof fn lemma_inv_full(now: nat, s: AState)
     requires inv(now, s),
-    ensures inv(now, full(s.objects)),
+    ensures inv(now, full(strip(s))),
+{
+    reveal(inv);
+}
+
+/// The catalogue holds of a state's objects alone, and of its schedules
+/// alone: no entry crosses from one to the other.
+pub proof fn lemma_inv_objects_only(now: nat, s: AState)
+    requires inv(now, s),
+    ensures inv(now, full(objects_only(s))),
+{
+    reveal(inv);
+}
+
+pub proof fn lemma_inv_schedules_only(now: nat, s: AState)
+    requires inv(now, s),
+    ensures inv(now, full(schedules_only(s))),
+{
+    reveal(inv);
+}
+
+/// And of an origin's objects beside a schedule's row.
+pub proof fn lemma_inv_joint(now: nat, o: Doc, c: Doc)
+    requires inv(now, full(o)), inv(now, full(c)), o.schedules == Map::<Seq<char>, ASchedule>::empty(), c.objects == Map::<Seq<char>, APromise>::empty(),
+    ensures inv(now, joint(o, c)),
 {
     reveal(inv);
 }
@@ -234,13 +306,14 @@ fn note(min: Option<u64>, d: u64) -> (r: Option<u64>)
     }
 }
 
-/// The least deadline of the rows, which fold to the document.
-pub fn next_deadline(rows: &Vec<Promise>) -> (r: Option<u64>)
+/// The least deadline of the object rows, which fold to the objects.
+fn objects_next(rows: &Vec<Promise>) -> (r: Option<u64>)
     requires distinct_by(rows@, obj_key()),
     ensures
         match r {
-            Some(d) => is_next(fold_by(rows@, obj_key(), obj_val()), d as nat),
-            None => forall |t: nat| !has_deadline(fold_by(rows@, obj_key(), obj_val()), t),
+            Some(d) => objects_deadline(fold_by(rows@, obj_key(), obj_val()), d as nat)
+                && forall |u: nat| objects_deadline(fold_by(rows@, obj_key(), obj_val()), u) ==> d as nat <= u,
+            None => forall |t: nat| !objects_deadline(fold_by(rows@, obj_key(), obj_val()), t),
         },
 {
     let mut min: Option<u64> = None;
@@ -301,19 +374,97 @@ pub fn next_deadline(rows: &Vec<Promise>) -> (r: Option<u64>)
         let d = fold_by(rows@, obj_key(), obj_val());
         lemma_fold_dom(rows@, obj_key(), obj_val());
         lemma_fold_distinct(rows@, obj_key(), obj_val());
-        assert forall |t: nat| has_deadline(d, t) implies exists |j: int| 0 <= j < rows@.len() && #[trigger] deadline_at(rows@[j]@, t) by {
+        assert forall |t: nat| objects_deadline(d, t) implies exists |j: int| 0 <= j < rows@.len() && #[trigger] deadline_at(rows@[j]@, t) by {
             let id = choose |id: Seq<char>| #[trigger] d.contains_key(id) && deadline_at(d[id], t);
             assert(mentions(rows@, obj_key(), id));
             let j = choose |j: int| 0 <= j < rows@.len() && #[trigger] obj_key()(rows@[j]) == id;
             assert(d[obj_key()(rows@[j])] == obj_val()(rows@[j]));
             assert(deadline_at(rows@[j]@, t));
         }
-        assert forall |j: int, t: nat| 0 <= j < rows@.len() && #[trigger] deadline_at(rows@[j]@, t) implies has_deadline(d, t) by {
+        assert forall |j: int, t: nat| 0 <= j < rows@.len() && #[trigger] deadline_at(rows@[j]@, t) implies objects_deadline(d, t) by {
             assert(d.contains_key(obj_key()(rows@[j])));
             assert(d[obj_key()(rows@[j])] == obj_val()(rows@[j]));
         }
     }
     min
+}
+
+/// The least next run of the schedule rows, which fold to the schedules.
+fn schedules_next(rows: &Vec<Schedule>) -> (r: Option<u64>)
+    requires distinct_by(rows@, sched_key()),
+    ensures
+        match r {
+            Some(d) => schedules_deadline(fold_by(rows@, sched_key(), sched_val()), d as nat)
+                && forall |u: nat| schedules_deadline(fold_by(rows@, sched_key(), sched_val()), u) ==> d as nat <= u,
+            None => forall |t: nat| !schedules_deadline(fold_by(rows@, sched_key(), sched_val()), t),
+        },
+{
+    let mut min: Option<u64> = None;
+    let mut i: usize = 0;
+    while i < rows.len()
+        invariant
+            i <= rows@.len(),
+            match min {
+                Some(m) => (exists |j: int| 0 <= j < i && #[trigger] rows@[j].next_run_at == m)
+                    && forall |j: int| 0 <= j < i ==> m <= #[trigger] rows@[j].next_run_at,
+                None => i == 0,
+            },
+        decreases rows@.len() - i,
+    {
+        let ghost before = min;
+        min = note(min, rows[i].next_run_at);
+        proof {
+            if before is Some && min == before {
+                let j = choose |j: int| 0 <= j < i && #[trigger] rows@[j].next_run_at == before.unwrap();
+                assert(rows@[j].next_run_at == min.unwrap());
+            } else {
+                assert(rows@[i as int].next_run_at == min.unwrap());
+            }
+        }
+        i += 1;
+    }
+    proof {
+        let c = fold_by(rows@, sched_key(), sched_val());
+        lemma_fold_dom(rows@, sched_key(), sched_val());
+        lemma_fold_distinct(rows@, sched_key(), sched_val());
+        assert forall |t: nat| schedules_deadline(c, t) implies exists |j: int| 0 <= j < rows@.len() && #[trigger] rows@[j].next_run_at as nat == t by {
+            let id = choose |id: Seq<char>| #[trigger] c.contains_key(id) && c[id].next_run_at as nat == t;
+            assert(mentions(rows@, sched_key(), id));
+            let j = choose |j: int| 0 <= j < rows@.len() && #[trigger] sched_key()(rows@[j]) == id;
+            assert(c[sched_key()(rows@[j])] == sched_val()(rows@[j]));
+            assert(rows@[j].next_run_at as nat == t);
+        }
+        assert forall |j: int| 0 <= j < rows@.len() implies schedules_deadline(c, #[trigger] rows@[j].next_run_at as nat) by {
+            assert(c.contains_key(sched_key()(rows@[j])));
+            assert(c[sched_key()(rows@[j])] == sched_val()(rows@[j]));
+        }
+    }
+    min
+}
+
+/// The least deadline of a state: of its objects and of its schedules.
+pub fn next_deadline(s: &State) -> (r: Option<u64>)
+    requires s.wf(),
+    ensures
+        match r {
+            Some(d) => is_next(strip(s@), d as nat),
+            None => forall |t: nat| !has_deadline(strip(s@), t),
+        },
+{
+    let a = objects_next(&s.objects);
+    let b = schedules_next(&s.schedules);
+    let r = match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (Some(x), Some(y)) => Some(if x < y { x } else { y }),
+    };
+    proof {
+        let d = strip(s@);
+        assert(d.objects == fold_by(s.objects@, obj_key(), obj_val()));
+        assert(d.schedules == fold_by(s.schedules@, sched_key(), sched_val()));
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +551,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
         reach(now as nat, old(s)@, final(s)@),
         final(s)@.schedules == old(s)@.schedules,
         final(s)@.objects.dom() == old(s)@.objects.dom(),
-        no_due(now as nat, final(s)@.objects),
+        objects_cleared(now as nat, final(s)@.objects),
         !did ==> final(s)@ == old(s)@,
 {
     let ghost a = s@;
