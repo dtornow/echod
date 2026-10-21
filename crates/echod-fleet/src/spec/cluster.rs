@@ -117,6 +117,8 @@ pub enum Phase {
 /// document's deadline after, and the key whose firing this is.
 pub struct Pending {
     pub target: Origin,
+    /// The occurrence's promise, in the origin the first half commits.
+    pub pid: Seq<char>,
     pub cur: Option<Seq<char>>,
     pub loaded: Doc,
     pub new: Doc,
@@ -172,6 +174,10 @@ pub enum Work {
 // ---------------------------------------------------------------------------
 // Targets: what a document is named for
 // ---------------------------------------------------------------------------
+
+/// The promise id a schedule's template expands to at an instant: the
+/// server's `Applier::expand`, trusted to be a function of the three.
+pub uninterp spec fn expand(template: Seq<char>, sid: Seq<char>, at: nat) -> Seq<char>;
 
 /// A schedule's document is named for it.
 pub open spec fn sched_target(sid: Seq<char>) -> Origin {
@@ -396,7 +402,7 @@ pub open spec fn fire_pending(s: Cluster, k: AKey, sid: Seq<char>, pid: Seq<char
     let sd = s.store.doc(st);
     let occ = AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid };
     let fired_state = spec_fire(joint(loaded, sd), sid, seq![occ], next, t);
-    Pending { target: st, cur: s.store.etag(st), loaded: sd, new: schedules_only(fired_state), deadline, fired: k }
+    Pending { target: st, pid, cur: s.store.etag(st), loaded: sd, new: schedules_only(fired_state), deadline, fired: k }
 }
 
 pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>) -> Option<Cluster> {
@@ -407,9 +413,18 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
     if s.nodes.contains_key(i) && n.alive && free(n, o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
         && shaped(o, new)
+        // a step drops no object: the kernel's steps never do, and the catalogue does not say so
+        && loaded.objects.dom() <= new.objects.dom()
         && (match work {
             Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did) && (is_sched(o) ==> !did),
-            Work::Request(req) => !did && request_target(req) == Some(o) && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
+            Work::Request(req) => {
+                let h = spec_handle(full(loaded), req, t).0;
+                &&& !did
+                &&& request_target(req) == Some(o)
+                &&& kreach_from(t, h, new)
+                // the drain after the handler leaves the schedules as the handler did
+                &&& new.schedules == h.schedules
+            }
             Work::Fire(k, sid, pid, next, deadline_s) => {
                 let st = sched_target(sid);
                 let sd = s.store.doc(st);
@@ -420,8 +435,10 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
                 &&& free(n, st)
                 &&& t >= s.store.stamp(st)
                 &&& sd.schedules.contains_key(sid) && sd.schedules[sid].next_run_at <= t
+                &&& pid == expand(sd.schedules[sid].promise_id, sid, sd.schedules[sid].next_run_at as nat)
                 &&& next > sd.schedules[sid].next_run_at && next <= MAX_TIME
                 &&& kreach_fire(t, spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t), new, p.new)
+                &&& spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t).objects.dom() <= new.objects.dom()
                 &&& next_is(p.new, deadline_s)
             }
         })

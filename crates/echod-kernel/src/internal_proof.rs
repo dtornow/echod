@@ -547,6 +547,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<AOccur
         fire_fold(now, a, c, occs, k).outbox == a.outbox,
         forall|x: Seq<char>| !occ_touched(occs, k, x) ==> #[trigger] crate::external::unchanged_at(a, fire_fold(now, a, c, occs, k), x),
         forall|x: Seq<char>| #[trigger] occ_touched(occs, k, x) ==> fire_shape(now, a, fire_fold(now, a, c, occs, k), c, occs, x),
+        a.objects.dom() <= fire_fold(now, a, c, occs, k).objects.dom(),
     decreases k,
 {
     if k == 0 {
@@ -610,6 +611,11 @@ pub proof fn lemma_spec_fire(now: nat, a: AState, sid: Seq<char>, occs: Seq<AOcc
         inv(now, spec_fire(a, sid, occs, next, now)),
         legal(now, a, spec_fire(a, sid, occs, next, now)),
         internal_legal(now, a, spec_fire(a, sid, occs, next, now)),
+        a.objects.dom() <= spec_fire(a, sid, occs, next, now).objects.dom(),
+        a.schedules.contains_key(sid) ==> forall|j: int| 0 <= j < occs.len() ==> spec_fire(a, sid, occs, next, now).objects.contains_key(#[trigger] occs[j].promise_id),
+        a.schedules.contains_key(sid) && occs.len() > 0 ==> spec_fire(a, sid, occs, next, now).schedules
+            == a.schedules.insert(sid, ASchedule { last_run_at: Some(occs[occs.len() - 1].at), next_run_at: next, ..a.schedules[sid] }),
+        !(a.schedules.contains_key(sid) && occs.len() > 0) ==> spec_fire(a, sid, occs, next, now) == a,
 {
     if !a.schedules.contains_key(sid) || occs.len() == 0 {
         crate::properties_proof::lemma_noop(now, a);
@@ -622,6 +628,10 @@ pub proof fn lemma_spec_fire(now: nat, a: AState, sid: Seq<char>, occs: Seq<AOcc
         let a2 = fire_fold(now, a, c, occs, occs.len() as int);
         let b = spec_fire(a, sid, occs, next, now);
         lemma_fire_legal(now, a, a2, b, sid, occs, next);
+        assert forall|j: int| 0 <= j < occs.len() implies b.objects.contains_key(#[trigger] occs[j].promise_id) by {
+            assert(occ_touched(occs, occs.len() as int, occs[j].promise_id));
+            assert(fire_shape(now, a, a2, c, occs, occs[j].promise_id));
+        }
     }
 }
 

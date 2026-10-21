@@ -27,7 +27,7 @@ use crate::tla::defs::*;
 use crate::tla::rules::*;
 use echod_kernel::external::spec_handle;
 use echod_kernel::internal::spec_fire;
-use echod_kernel::types::{origin, AOccurrence};
+use echod_kernel::types::{origin, AOccurrence, ARequest, ASchedule};
 use echod_kernel::external_proof::lemma_spec_handle;
 use echod_kernel::types::MAX_TIME;
 
@@ -82,12 +82,34 @@ pub open spec fn inv_armed(s: Cluster, i: Id, o: Origin) -> bool {
         ==> Some(a.key) != s.nodes[j].txns[o].c.fired
 }
 
+/// The promise schedule `sid`'s row `c` fired at `t` is in the bucket, in
+/// its origin's document.
+pub open spec fn has_promise(s: Cluster, c: ASchedule, sid: Seq<char>, t: nat) -> bool {
+    let pid = expand(c.promise_id, sid, t);
+    s.store.docs.contains_key(origin(pid)) && s.store.docs[origin(pid)].objects.contains_key(pid)
+}
+
+/// Every row with a last run has that run's promise in the bucket.
+pub open spec fn runs_have_promises(s: Cluster, d: Doc) -> bool {
+    forall |sid: Seq<char>| #[trigger] d.schedules.contains_key(sid) && d.schedules[sid].last_run_at is Some
+        ==> has_promise(s, d.schedules[sid], sid, d.schedules[sid].last_run_at.unwrap() as nat)
+}
+
 /// A fire's second half, waiting on its first: what it will commit is
 /// decided, satisfies the catalogue, is shaped for the schedule's
 /// document, and was loaded at a version the bucket wrote; the key it
-/// fires is the schedule's, armed, and due.
+/// fires is the schedule's, armed, and due. Its row's last run is the
+/// occurrence the first half commits, whose promise is in the origin's
+/// document once that commit has landed, or when it had nothing to land.
 pub open spec fn inv_pending(s: Cluster, o: Origin, x: Flight, p: Pending) -> bool {
     &&& is_sched(p.target) && p.target != o
+    &&& origin(p.pid) == o
+    &&& x.new.objects.contains_key(p.pid)
+    &&& x.phase is Written ==> s.store.docs.contains_key(o) && s.store.docs[o].objects.contains_key(p.pid)
+    &&& x.new == x.loaded ==> s.store.docs.contains_key(o) && s.store.docs[o].objects.contains_key(p.pid)
+    &&& forall |sid: Seq<char>| #[trigger] p.new.schedules.contains_key(sid) && p.new.schedules[sid].last_run_at is Some
+        ==> has_promise(s, p.new.schedules[sid], sid, p.new.schedules[sid].last_run_at.unwrap() as nat)
+            || expand(p.new.schedules[sid].promise_id, sid, p.new.schedules[sid].last_run_at.unwrap() as nat) == p.pid
     &&& echod_kernel::properties::inv(x.t, full(p.loaded))
     &&& echod_kernel::properties::inv(x.t, full(p.new))
     &&& next_is(p.new, p.deadline)
@@ -107,6 +129,8 @@ pub open spec fn inv_txn(s: Cluster, i: Id, o: Origin) -> bool {
     let c = x.c;
     &&& c.origin == o
     &&& shaped(o, x.loaded) && shaped(o, x.new)
+    &&& x.loaded.objects.dom() <= x.new.objects.dom()
+    &&& runs_have_promises(s, x.new)
     &&& match x.then { Some(p) => inv_pending(s, o, x, p), None => true }
     // the order of events: what it loaded was written before it began; what it armed, after
     &&& x.seq0 <= s.hist.counter
@@ -174,6 +198,7 @@ pub open spec fn inv_store(s: Cluster) -> bool {
         &&& s.store.stamps[o] <= MAX_TIME
         &&& echod_kernel::properties::inv(s.store.stamps[o], full(s.store.docs[o]))
         &&& shaped(o, s.store.docs[o])
+        &&& runs_have_promises(s, s.store.docs[o])
         &&& s.hist.versions.contains_key(s.store.etags[o])
         &&& s.hist.versions[s.store.etags[o]] == s.store.docs[o]
     }
@@ -314,6 +339,23 @@ pub proof fn promises_have_timers(s: Cluster, o: Origin, id: Seq<char>)
         assert(objects_deadline(d.objects, t));
         timers_cover(s, o, t);
     }
+}
+
+/// Every occurrence a schedule has fired has its promise: the schedule's
+/// row says its last run, and the promise its template expands to at
+/// that run is in the bucket, in its origin's document.
+pub proof fn occurrences(s: Cluster, o: Origin, id: Seq<char>)
+    requires
+        inv()(s),
+        s.store.docs.contains_key(o),
+        s.store.docs[o].schedules.contains_key(id),
+        s.store.docs[o].schedules[id].last_run_at is Some,
+    ensures
+        ({ let c = s.store.docs[o].schedules[id];
+            let pid = expand(c.promise_id, id, c.last_run_at.unwrap() as nat);
+            s.store.docs.contains_key(origin(pid)) && s.store.docs[origin(pid)].objects.contains_key(pid) }),
+{
+    assert(runs_have_promises(s, s.store.docs[o]));
 }
 
 /// And every schedule has a timer at or before its next run.
@@ -519,6 +561,62 @@ proof fn lemma_kreach_from_inv(t: nat, a: echod_kernel::store::AState, b: Doc)
     lemma_inv_full(t, sb);
 }
 
+/// What was loaded has its runs' promises: the bucket's document does,
+/// and an empty one has no runs.
+proof fn lemma_loaded_runs(s: Cluster, o: Origin)
+    requires inv()(s),
+    ensures runs_have_promises(s, s.store.doc(o)),
+{
+    disassemble(s);
+    if s.store.docs.contains_key(o) {
+        assert(runs_have_promises(s, s.store.docs[o]));
+    } else {
+        assert(s.store.doc(o) == empty_doc());
+        assert forall |sid: Seq<char>| #[trigger] empty_doc().schedules.contains_key(sid) && empty_doc().schedules[sid].last_run_at is Some implies false by {}
+    }
+}
+
+/// On a schedule's document a request is one of the schedule's three; the
+/// handler's schedules are the loaded ones, less one, or plus one with no
+/// run yet.
+proof fn lemma_sched_request_runs(s: Cluster, o: Origin, req: ARequest, t: nat, d: Doc)
+    requires inv()(s), is_sched(o), request_target(req) == Some(o), d.schedules == spec_handle(full(s.store.doc(o)), req, t).0.schedules,
+    ensures runs_have_promises(s, d),
+{
+    lemma_loaded_runs(s, o);
+    let loaded = s.store.doc(o);
+    match req {
+        ARequest::ScheduleGet(q) => {}
+        ARequest::ScheduleCreate(q) => {
+            let h = echod_kernel::external::spec_schedule_create(full(loaded), q, t).0;
+            assert forall |sid: Seq<char>| #[trigger] d.schedules.contains_key(sid) && d.schedules[sid].last_run_at is Some
+                implies has_promise(s, d.schedules[sid], sid, d.schedules[sid].last_run_at.unwrap() as nat) by {
+                if sid == q.id && !loaded.schedules.contains_key(q.id) {
+                    assert(d.schedules[sid].last_run_at is None);
+                } else {
+                    assert(loaded.schedules.contains_key(sid) && d.schedules[sid] == loaded.schedules[sid]);
+                }
+            }
+        }
+        ARequest::ScheduleDelete(q) => {}
+        ARequest::PromiseGet(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseCreate(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseSettle(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseRegisterCallback(q) => { lemma_origin_not_sched(q.awaited); }
+        ARequest::PromiseRegisterListener(q) => { lemma_origin_not_sched(q.awaited); }
+        ARequest::TaskGet(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskCreate(q) => { lemma_origin_not_sched(q.action.id); }
+        ARequest::TaskAcquire(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFulfill(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskRelease(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskHalt(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskContinue(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFence(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskHeartbeat(q) => { if q.tasks.len() > 0 { lemma_origin_not_sched(q.tasks[0].id); } }
+        ARequest::TaskSuspend(q) => { lemma_origin_not_sched(q.id); }
+    }
+}
+
 /// A fire's two documents satisfy the catalogue: the fired state does, the
 /// steps after keep it, and each document is one side of the result.
 proof fn lemma_kreach_fire_inv(t: nat, a: echod_kernel::store::AState, o: Doc, c: Doc)
@@ -546,14 +644,24 @@ proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: 
         lemma_inv_empty(t);
     }
     assert(echod_kernel::properties::inv(t, full(x.loaded)));
+    lemma_loaded_runs(s, o);
     match work {
         Work::Sweep(_) => {
             lemma_kreach_inv(t, x.loaded, x.new);
+            // an origin's document has no runs; a schedule's is as loaded
+            if is_sched(o) {
+                assert(x.new == x.loaded);
+            }
+            assert(runs_have_promises(s2, x.new));
         }
         Work::Request(req) => {
             // the handler keeps the catalogue; the drain keeps it from there
             lemma_spec_handle(t, full(x.loaded), req);
             lemma_kreach_from_inv(t, spec_handle(full(x.loaded), req, t).0, x.new);
+            if is_sched(o) {
+                lemma_sched_request_runs(s, o, req, t, x.new);
+            }
+            assert(runs_have_promises(s2, x.new));
         }
         Work::Fire(k, sid, pid, next, deadline_s) => {
             // the origin's objects beside the schedule's row satisfy the
@@ -585,6 +693,31 @@ proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: 
             if s.store.etags.contains_key(st) {
                 assert(s.hist.versions.contains_key(s.store.etags[st]));
             }
+            // the occurrence's promise is in the fired state, which the steps after keep
+            let fired = spec_fire(joint(x.loaded, sd), sid, occs, next, t);
+            assert(fired.objects.contains_key(occs[0].promise_id));
+            assert(x.new.objects.contains_key(pid));
+            assert(x.loaded.objects.dom() <= fired.objects.dom());
+            assert forall |y: Seq<char>| x.loaded.objects.dom().contains(y) implies x.new.objects.dom().contains(y) by {
+                assert(fired.objects.dom().contains(y));
+            }
+            if x.new == x.loaded {
+                assert(x.loaded.objects.contains_key(pid));
+                assert(s.store.docs.contains_key(o));
+            }
+            // the schedule's rows after: the fired row's run is this occurrence; the rest as loaded
+            lemma_loaded_runs(s, st);
+            assert forall |q: Seq<char>| #[trigger] p.new.schedules.contains_key(q) && p.new.schedules[q].last_run_at is Some
+                implies has_promise(s2, p.new.schedules[q], q, p.new.schedules[q].last_run_at.unwrap() as nat)
+                    || expand(p.new.schedules[q].promise_id, q, p.new.schedules[q].last_run_at.unwrap() as nat) == p.pid by {
+                if q == sid {
+                    assert(p.new.schedules[q].last_run_at == Some(occ.at));
+                    assert(p.new.schedules[q].promise_id == sd.schedules[sid].promise_id);
+                } else {
+                    assert(sd.schedules.contains_key(q) && p.new.schedules[q] == sd.schedules[q]);
+                }
+            }
+            assert(runs_have_promises(s2, x.new));
             assert(inv_pending(s2, o, x, p));
         }
     }
@@ -1010,6 +1143,7 @@ proof fn lemma_continued(s: Cluster, s2: Cluster, i: Id, o: Origin)
         s.nodes.contains_key(i),
         s.nodes[i].txns.contains_key(o),
         s.nodes[i].txns[o].then is Some,
+        s.nodes[i].txns[o].phase is Written || s.nodes[i].txns[o].new == s.nodes[i].txns[o].loaded,
         s2.nodes.contains_key(i),
         ({ let p = s.nodes[i].txns[o].then.unwrap();
             &&& s2.nodes[i].txns.contains_key(p.target)
@@ -1061,6 +1195,18 @@ proof fn lemma_continued(s: Cluster, s2: Cluster, i: Id, o: Origin)
         }
         assert(s2.store.stamp(st) <= y.t);
     }
+    // the occurrence's promise is in the origin's document, so the row's run has it
+    assert(s.store.docs.contains_key(o) && s.store.docs[o].objects.contains_key(p.pid));
+    assert forall |q: Seq<char>| #[trigger] y.new.schedules.contains_key(q) && y.new.schedules[q].last_run_at is Some
+        implies has_promise(s2, y.new.schedules[q], q, y.new.schedules[q].last_run_at.unwrap() as nat) by {
+        let t = y.new.schedules[q].last_run_at.unwrap() as nat;
+        if expand(y.new.schedules[q].promise_id, q, t) == p.pid {
+            assert(origin(p.pid) == o);
+        } else {
+            assert(has_promise(s, p.new.schedules[q], q, t));
+        }
+    }
+    assert(y.loaded.objects.dom() <= y.new.objects.dom());
     assert(inv_txn(s2, i, st));
 }
 
@@ -1348,6 +1494,8 @@ proof fn lemma_done(s: Cluster, s2: Cluster, i: Id, o: Origin)
     assert forall |q: Origin| #[trigger] s2.nodes[i].core.armed.contains_key(q) implies inv_armed(s2, i, q) by { assert(inv_armed(s, i, q)); }
     assert forall |q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies inv_txn(s2, i, q) by {
         if x.then is Some && q == x.then.unwrap().target {
+            assert(inv_txn(s, i, o));
+            assert(x.new == x.loaded);
             lemma_continued(s, s2, i, o);
         } else {
             assert(inv_txn(s, i, q));
