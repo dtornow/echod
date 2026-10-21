@@ -9,14 +9,17 @@
 //! sees of each: the version loaded, the documents before and after, the
 //! instant). A node's actions are the core's specification functions: what
 //! the executable node is proved to compute. A commit is the applier's
-//! protocol, one store operation per action: arm the key for the document's
-//! nearest deadline, write the document conditionally on the version
-//! loaded, remove the key replaced, remember the key kept, delete the key
-//! fired. A fired key that found nothing due is collected only after a
-//! conditional rewrite of the document, which fences any commit that armed
-//! it and has not written yet. Every write has three outcomes: applied,
+//! protocol, one store round trip per action. `Prepare` loads and decides,
+//! and touches nothing. `Arm` puts the key for the document's nearest
+//! deadline. `Write` puts the document, conditionally on the version
+//! loaded. `Cleanup` deletes the key replaced and the key fired, and the
+//! node remembers the key kept. `Done` closes a commit that changed
+//! nothing. Each put carries the store's answer, `Outcome`: applied,
 //! refused by its condition, or unknown — the bucket applied it or did not,
-//! and the node, told only that it failed, gives the commit up.
+//! and the node, told only that it failed, gives the commit up. A fired key
+//! that found nothing due is collected only after a conditional rewrite of
+//! the document, which fences any commit that armed it and has not written
+//! yet; that rewrite is `Write` of an unchanged document.
 //!
 //! Around the core, the model keeps what the node does not see — whether it
 //! is alive and its clock — and the kernel's steps as the relation the
@@ -201,8 +204,19 @@ pub open spec fn next_is(d: Doc, deadline: Option<nat>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The actions
+// The actions. The commit's puts are given case by case — applied, refused,
+// unknown; a changed document and an unchanged one — and folded into one
+// action per round trip below.
 // ---------------------------------------------------------------------------
+
+/// The store's answer to a put.
+pub enum Outcome {
+    Applied,
+    /// Refused by its condition. A key's put has none, so a key is never refused.
+    Refused,
+    /// Failed as far as the node knows; whether the bucket applied it.
+    Unknown(bool),
+}
 
 pub enum Step {
     /// A node's clock advances.
@@ -215,34 +229,19 @@ pub enum Step {
     /// A node loads a document and decides a step on it: a request, or the
     /// sweep behind a fired key. The instant, what the step made of the
     /// document, whether the sweep fired anything, and the document's
-    /// nearest deadline after.
-    Begin(Id, Origin, nat, Work, Doc, bool, Option<nat>),
+    /// nearest deadline after. Nothing in the store moves.
+    Prepare(Id, Origin, nat, Work, Doc, bool, Option<nat>),
     /// The key for the new deadline is put.
-    Arm(Id, Origin, AKey),
-    /// The conditional write of the document lands, at a new version.
-    Commit(Id, Origin, Seq<char>),
-    /// The conditional write is refused.
-    CommitFail(Id, Origin),
-    /// The key replaced, or no longer needed, is deleted.
-    Disarm(Id, Origin),
-    /// The node remembers the key kept and deletes the key fired, if it can.
-    Finish(Id, Origin, bool),
-    /// A fired key that found nothing due is collected: the document is
-    /// rewritten conditionally, at a new version, then the key is deleted.
-    Collect(Id, Origin, Seq<char>),
-    /// The conditional rewrite is refused; the key stays.
-    CollectFail(Id, Origin),
+    Arm(Id, Origin, AKey, Outcome),
+    /// The document is put, conditionally on the version loaded, at a new
+    /// version: the commit of a changed document, or the rewrite that
+    /// collects a fired key behind an unchanged one.
+    Write(Id, Origin, Seq<char>, Outcome),
+    /// After the write: the key replaced and the key fired are deleted, each
+    /// if the delete went through, and the node remembers the key kept.
+    Cleanup(Id, Origin, bool, bool),
     /// A request that changed nothing is done.
     Done(Id, Origin),
-    /// The put of the key failed as far as the node knows; the bucket may
-    /// hold it or not. The node gives up the commit.
-    ArmUnknown(Id, Origin, AKey, bool),
-    /// The write of the document failed as far as the node knows; the
-    /// bucket may hold it or not. The node gives up the commit.
-    CommitUnknown(Id, Origin, Seq<char>, bool),
-    /// The rewrite that collects a key failed as far as the node knows; the
-    /// bucket may hold it or not. The key stays.
-    CollectUnknown(Id, Origin, Seq<char>, bool),
 }
 
 pub open spec fn init() -> spec_fn(Cluster) -> bool {
@@ -311,11 +310,11 @@ pub open spec fn forget(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 /// A node loads `o` — the bucket's current document; a cached body is
 /// used only once a conditional read has confirmed its version — and
 /// decides a step at `t`, the later of its clock and the document's
-/// stamp: `NodeCore::begin`. A request is the kernel's handler for it,
+/// stamp: `NodeCore::prepare`. A request is the kernel's handler for it,
 /// `spec_handle`, then the drain; a sweep is the step module's contract.
 /// Any live node may: which one does is routing. A request served is
 /// logged with its answer.
-pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>) -> Option<Cluster> {
+pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>) -> Option<Cluster> {
     let n = s.nodes[i];
     let loaded = s.store.doc(o);
     let changed = did || new != loaded;
@@ -335,7 +334,7 @@ pub open spec fn begin(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Do
         };
         let x = Flight {
             work,
-            c: spec_begin(core, o, s.store.etag(o), deadline, changed, fired),
+            c: spec_prepare(core, o, s.store.etag(o), deadline, changed, fired),
             cur: s.store.etag(o),
             loaded,
             new,
@@ -584,6 +583,55 @@ pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, lan
 }
 
 // ---------------------------------------------------------------------------
+// The round trips, by outcome
+// ---------------------------------------------------------------------------
+
+/// The key's put. A put without a condition is never refused.
+pub open spec fn arm_key(s: Cluster, i: Id, o: Origin, k: AKey, out: Outcome) -> Option<Cluster> {
+    match out {
+        Outcome::Applied => arm(s, i, o, k),
+        Outcome::Refused => None,
+        Outcome::Unknown(landed) => arm_unknown(s, i, o, k, landed),
+    }
+}
+
+/// The document's put: the commit of a changed document, or the rewrite
+/// that collects a fired key behind an unchanged one.
+pub open spec fn write_doc(s: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome) -> Option<Cluster> {
+    let n = s.nodes[i];
+    if s.nodes.contains_key(i) && n.txns.contains_key(o) && n.txns[o].c.changed {
+        match out {
+            Outcome::Applied => commit(s, i, o, e),
+            Outcome::Refused => commit_fail(s, i, o),
+            Outcome::Unknown(landed) => commit_unknown(s, i, o, e, landed),
+        }
+    } else {
+        match out {
+            Outcome::Applied => collect(s, i, o, e),
+            Outcome::Refused => collect_fail(s, i, o),
+            Outcome::Unknown(landed) => collect_unknown(s, i, o, e, landed),
+        }
+    }
+}
+
+/// After the write: the key replaced is deleted if `prev` and the key
+/// fired if `fired`, each a delete that may have failed silently; and the
+/// node remembers the key kept. Two round trips, but the document is
+/// written and both keys are dead, so nothing observes their order.
+pub open spec fn cleanup(s: Cluster, i: Id, o: Origin, prev: bool, fired: bool) -> Option<Cluster> {
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written
+        && (prev ==> spec_to_disarm(x.c) is Some)
+    {
+        let s1 = if prev { disarm(s, i, o).unwrap() } else { s };
+        finish(s1, i, o, fired)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The actions as `Action` values, Anvil's shape
 // ---------------------------------------------------------------------------
 //
@@ -620,59 +668,31 @@ pub open spec fn forget_action() -> Action<Cluster, (Id, Origin), ()> {
     }
 }
 
-pub open spec fn begin_action() -> Action<Cluster, (Id, Origin, nat, Work, Doc, bool, Option<nat>), ()> {
+pub open spec fn prepare_action() -> Action<Cluster, (Id, Origin, nat, Work, Doc, bool, Option<nat>), ()> {
     Action {
-        precondition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; begin(s, i, o, t, work, new, did, deadline) is Some },
-        transition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; (begin(s, i, o, t, work, new, did, deadline).unwrap(), ()) },
+        precondition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; prepare(s, i, o, t, work, new, did, deadline) is Some },
+        transition: |input: (Id, Origin, nat, Work, Doc, bool, Option<nat>), s: Cluster| { let i = input.0; let o = input.1; let t = input.2; let work = input.3; let new = input.4; let did = input.5; let deadline = input.6; (prepare(s, i, o, t, work, new, did, deadline).unwrap(), ()) },
     }
 }
 
-pub open spec fn arm_action() -> Action<Cluster, (Id, Origin, AKey), ()> {
+pub open spec fn arm_action() -> Action<Cluster, (Id, Origin, AKey, Outcome), ()> {
     Action {
-        precondition: |input: (Id, Origin, AKey), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; arm(s, i, o, k) is Some },
-        transition: |input: (Id, Origin, AKey), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; (arm(s, i, o, k).unwrap(), ()) },
+        precondition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; arm_key(s, i, o, k, out) is Some },
+        transition: |input: (Id, Origin, AKey, Outcome), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let out = input.3; (arm_key(s, i, o, k, out).unwrap(), ()) },
     }
 }
 
-pub open spec fn commit_action() -> Action<Cluster, (Id, Origin, Seq<char>), ()> {
+pub open spec fn write_action() -> Action<Cluster, (Id, Origin, Seq<char>, Outcome), ()> {
     Action {
-        precondition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; commit(s, i, o, e) is Some },
-        transition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; (commit(s, i, o, e).unwrap(), ()) },
+        precondition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; write_doc(s, i, o, e, out) is Some },
+        transition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; (write_doc(s, i, o, e, out).unwrap(), ()) },
     }
 }
 
-pub open spec fn commit_fail_action() -> Action<Cluster, (Id, Origin), ()> {
+pub open spec fn cleanup_action() -> Action<Cluster, (Id, Origin, bool, bool), ()> {
     Action {
-        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; commit_fail(s, i, o) is Some },
-        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (commit_fail(s, i, o).unwrap(), ()) },
-    }
-}
-
-pub open spec fn disarm_action() -> Action<Cluster, (Id, Origin), ()> {
-    Action {
-        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; disarm(s, i, o) is Some },
-        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (disarm(s, i, o).unwrap(), ()) },
-    }
-}
-
-pub open spec fn finish_action() -> Action<Cluster, (Id, Origin, bool), ()> {
-    Action {
-        precondition: |input: (Id, Origin, bool), s: Cluster| { let i = input.0; let o = input.1; let deleted = input.2; finish(s, i, o, deleted) is Some },
-        transition: |input: (Id, Origin, bool), s: Cluster| { let i = input.0; let o = input.1; let deleted = input.2; (finish(s, i, o, deleted).unwrap(), ()) },
-    }
-}
-
-pub open spec fn collect_action() -> Action<Cluster, (Id, Origin, Seq<char>), ()> {
-    Action {
-        precondition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; collect(s, i, o, e) is Some },
-        transition: |input: (Id, Origin, Seq<char>), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; (collect(s, i, o, e).unwrap(), ()) },
-    }
-}
-
-pub open spec fn collect_fail_action() -> Action<Cluster, (Id, Origin), ()> {
-    Action {
-        precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; collect_fail(s, i, o) is Some },
-        transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (collect_fail(s, i, o).unwrap(), ()) },
+        precondition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; cleanup(s, i, o, prev, fired) is Some },
+        transition: |input: (Id, Origin, bool, bool), s: Cluster| { let i = input.0; let o = input.1; let prev = input.2; let fired = input.3; (cleanup(s, i, o, prev, fired).unwrap(), ()) },
     }
 }
 
@@ -680,27 +700,6 @@ pub open spec fn done_action() -> Action<Cluster, (Id, Origin), ()> {
     Action {
         precondition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; done(s, i, o) is Some },
         transition: |input: (Id, Origin), s: Cluster| { let i = input.0; let o = input.1; (done(s, i, o).unwrap(), ()) },
-    }
-}
-
-pub open spec fn arm_unknown_action() -> Action<Cluster, (Id, Origin, AKey, bool), ()> {
-    Action {
-        precondition: |input: (Id, Origin, AKey, bool), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let landed = input.3; arm_unknown(s, i, o, k, landed) is Some },
-        transition: |input: (Id, Origin, AKey, bool), s: Cluster| { let i = input.0; let o = input.1; let k = input.2; let landed = input.3; (arm_unknown(s, i, o, k, landed).unwrap(), ()) },
-    }
-}
-
-pub open spec fn commit_unknown_action() -> Action<Cluster, (Id, Origin, Seq<char>, bool), ()> {
-    Action {
-        precondition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; commit_unknown(s, i, o, e, landed) is Some },
-        transition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; (commit_unknown(s, i, o, e, landed).unwrap(), ()) },
-    }
-}
-
-pub open spec fn collect_unknown_action() -> Action<Cluster, (Id, Origin, Seq<char>, bool), ()> {
-    Action {
-        precondition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; collect_unknown(s, i, o, e, landed) is Some },
-        transition: |input: (Id, Origin, Seq<char>, bool), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let landed = input.3; (collect_unknown(s, i, o, e, landed).unwrap(), ()) },
     }
 }
 
@@ -712,18 +711,11 @@ pub open spec fn next_step(s: Cluster, s2: Cluster, st: Step) -> bool {
         Step::Join(i, c) => join_action().forward((i, c))(s, s2),
         Step::Crash(i) => crash_action().forward(i)(s, s2),
         Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
-        Step::Begin(i, o, t, work, new, did, deadline) => begin_action().forward((i, o, t, work, new, did, deadline))(s, s2),
-        Step::Arm(i, o, k) => arm_action().forward((i, o, k))(s, s2),
-        Step::Commit(i, o, e) => commit_action().forward((i, o, e))(s, s2),
-        Step::CommitFail(i, o) => commit_fail_action().forward((i, o))(s, s2),
-        Step::Disarm(i, o) => disarm_action().forward((i, o))(s, s2),
-        Step::Finish(i, o, deleted) => finish_action().forward((i, o, deleted))(s, s2),
-        Step::Collect(i, o, e) => collect_action().forward((i, o, e))(s, s2),
-        Step::CollectFail(i, o) => collect_fail_action().forward((i, o))(s, s2),
+        Step::Prepare(i, o, t, work, new, did, deadline) => prepare_action().forward((i, o, t, work, new, did, deadline))(s, s2),
+        Step::Arm(i, o, k, out) => arm_action().forward((i, o, k, out))(s, s2),
+        Step::Write(i, o, e, out) => write_action().forward((i, o, e, out))(s, s2),
+        Step::Cleanup(i, o, prev, fired) => cleanup_action().forward((i, o, prev, fired))(s, s2),
         Step::Done(i, o) => done_action().forward((i, o))(s, s2),
-        Step::ArmUnknown(i, o, k, landed) => arm_unknown_action().forward((i, o, k, landed))(s, s2),
-        Step::CommitUnknown(i, o, e, landed) => commit_unknown_action().forward((i, o, e, landed))(s, s2),
-        Step::CollectUnknown(i, o, e, landed) => collect_unknown_action().forward((i, o, e, landed))(s, s2),
     }
 }
 

@@ -203,9 +203,9 @@ impl Nodes {
     }
 
     /// Begin a commit on `origin`, loaded at `etag`: `NodeCore::begin`.
-    pub fn begin(&self, origin: &str, etag: Option<&Etag>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> Txn {
+    pub fn prepare(&self, origin: &str, etag: Option<&Etag>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> Txn {
         let e = etag.map(|e| e.0.clone());
-        self.core().begin(origin, e.as_ref(), deadline, changed, fired)
+        self.core().prepare(origin, e.as_ref(), deadline, changed, fired)
     }
 
     /// After the write at `etag`: remember the key kept: `NodeCore::finish`.

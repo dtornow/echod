@@ -358,7 +358,7 @@ impl Applier {
             let changed = doc::changed(&w.loaded.rows, &state.objects);
             let changed_any = did || !changed.is_empty();
             let deadline = step::next_deadline(&state.objects);
-            let mut txn = self.nodes.begin(&w.origin, w.etag.as_ref(), deadline, changed_any, fired.map(|f| f.key.clone()));
+            let mut txn = self.nodes.prepare(&w.origin, w.etag.as_ref(), deadline, changed_any, fired.map(|f| f.key.clone()));
             if changed_any {
                 // (1) the key for the new deadline, before the state that arms it
                 if let Some(at) = txn.arm_at() {

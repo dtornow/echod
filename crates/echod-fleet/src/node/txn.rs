@@ -68,11 +68,11 @@ impl View for Txn {
 // The specification
 // ---------------------------------------------------------------------------
 
-/// Begin a commit on `o`, having loaded version `etag`: the previous key
+/// Prepare a commit on `o`, having loaded version `etag`: the previous key
 /// is the one remembered for `o` if it was armed with that very version
 /// and is not the key being fired; a key is armed if the document changed,
 /// owes a deadline, and the previous key is not at that instant.
-pub open spec fn spec_begin(n: ANode, o: Origin, etag: Option<Seq<char>>, deadline: Option<nat>, changed: bool, fired: Option<AKey>) -> ATxn {
+pub open spec fn spec_prepare(n: ANode, o: Origin, etag: Option<Seq<char>>, deadline: Option<nat>, changed: bool, fired: Option<AKey>) -> ATxn {
     let previous = if n.armed.contains_key(o) && Some(n.armed[o].etag) == etag && Some(n.armed[o].key) != fired { Some(n.armed[o].key) } else { None };
     let rearm = changed && match deadline {
         None => false,
@@ -109,8 +109,8 @@ pub open spec fn spec_finish(n: ANode, t: ATxn, etag: Seq<char>) -> ANode {
 // ---------------------------------------------------------------------------
 
 impl NodeCore {
-    pub fn begin(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Txn)
-        ensures t@ == spec_begin(self@, origin@, opt_str(etag), opt_nat(deadline), changed, opt_key(fired)),
+    pub fn prepare(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Txn)
+        ensures t@ == spec_prepare(self@, origin@, opt_str(etag), opt_nat(deadline), changed, opt_key(fired)),
     {
         let previous: Option<Key> = match self.armed.get(origin) {
             Some(a) => {

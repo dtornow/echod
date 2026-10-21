@@ -10,7 +10,7 @@
 //! ```text
 //! tla/            the temporal logic, vendored from Anvil's verus-tla
 //! node/core.rs    the node: executable, with its specification, step for step
-//! spec/cluster.rs the state and the sixteen actions; requests enter through the kernel's `spec_handle`
+//! spec/cluster.rs the state and the nine actions; requests enter through the kernel's `spec_handle`
 //! proof/safety.rs the invariant and its induction
 //! ```
 //!

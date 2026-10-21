@@ -453,8 +453,8 @@ proof fn lemma_kreach_from_inv(t: nat, a: echod_kernel::store::AState, b: Doc)
     lemma_inv_full(t, sb);
 }
 
-proof fn lemma_begin(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
-    requires inv()(s), begin(s, i, o, t, work, new, did, deadline) == Some(s2),
+proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
+    requires inv()(s), prepare(s, i, o, t, work, new, did, deadline) == Some(s2),
     ensures inv()(s2),
 {
     disassemble(s);
@@ -1368,6 +1368,53 @@ proof fn lemma_collect_unknown(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq
     assemble(s2);
 }
 
+/// The key's put, by outcome.
+proof fn lemma_arm_key(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, out: Outcome)
+    requires inv()(s), arm_key(s, i, o, k, out) == Some(s2),
+    ensures inv()(s2),
+{
+    match out {
+        Outcome::Applied => lemma_arm(s, s2, i, o, k),
+        Outcome::Refused => assert(false),
+        Outcome::Unknown(landed) => lemma_arm_unknown(s, s2, i, o, k, landed),
+    }
+}
+
+/// The document's put, by outcome: a changed document commits, an
+/// unchanged one collects.
+proof fn lemma_write_doc(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome)
+    requires inv()(s), write_doc(s, i, o, e, out) == Some(s2),
+    ensures inv()(s2),
+{
+    let n = s.nodes[i];
+    if s.nodes.contains_key(i) && n.txns.contains_key(o) && n.txns[o].c.changed {
+        match out {
+            Outcome::Applied => lemma_commit(s, s2, i, o, e),
+            Outcome::Refused => lemma_commit_fail(s, s2, i, o),
+            Outcome::Unknown(landed) => lemma_commit_unknown(s, s2, i, o, e, landed),
+        }
+    } else {
+        match out {
+            Outcome::Applied => lemma_collect(s, s2, i, o, e),
+            Outcome::Refused => lemma_collect_fail(s, s2, i, o),
+            Outcome::Unknown(landed) => lemma_collect_unknown(s, s2, i, o, e, landed),
+        }
+    }
+}
+
+/// The two deletes after the write, in sequence: each keeps the invariant
+/// on its own, so their composition does.
+proof fn lemma_cleanup(s: Cluster, s2: Cluster, i: Id, o: Origin, prev: bool, fired: bool)
+    requires inv()(s), cleanup(s, i, o, prev, fired) == Some(s2),
+    ensures inv()(s2),
+{
+    let s1 = if prev { disarm(s, i, o).unwrap() } else { s };
+    if prev {
+        lemma_disarm(s, s1, i, o);
+    }
+    lemma_finish(s1, s2, i, o, fired);
+}
+
 pub proof fn lemma_next(s: Cluster, s2: Cluster)
     requires inv()(s), next()(s, s2),
     ensures inv()(s2),
@@ -1378,18 +1425,11 @@ pub proof fn lemma_next(s: Cluster, s2: Cluster)
         Step::Join(i, c) => lemma_join(s, s2, i, c),
         Step::Crash(i) => lemma_crash(s, s2, i),
         Step::Forget(i, o) => lemma_forget(s, s2, i, o),
-        Step::Begin(i, o, t, work, new, did, deadline) => lemma_begin(s, s2, i, o, t, work, new, did, deadline),
-        Step::Arm(i, o, k) => lemma_arm(s, s2, i, o, k),
-        Step::Commit(i, o, e) => lemma_commit(s, s2, i, o, e),
-        Step::CommitFail(i, o) => lemma_commit_fail(s, s2, i, o),
-        Step::Disarm(i, o) => lemma_disarm(s, s2, i, o),
-        Step::Finish(i, o, deleted) => lemma_finish(s, s2, i, o, deleted),
-        Step::Collect(i, o, e) => lemma_collect(s, s2, i, o, e),
-        Step::CollectFail(i, o) => lemma_collect_fail(s, s2, i, o),
+        Step::Prepare(i, o, t, work, new, did, deadline) => lemma_prepare(s, s2, i, o, t, work, new, did, deadline),
+        Step::Arm(i, o, k, out) => lemma_arm_key(s, s2, i, o, k, out),
+        Step::Write(i, o, e, out) => lemma_write_doc(s, s2, i, o, e, out),
+        Step::Cleanup(i, o, prev, fired) => lemma_cleanup(s, s2, i, o, prev, fired),
         Step::Done(i, o) => lemma_done(s, s2, i, o),
-        Step::ArmUnknown(i, o, k, landed) => lemma_arm_unknown(s, s2, i, o, k, landed),
-        Step::CommitUnknown(i, o, e, landed) => lemma_commit_unknown(s, s2, i, o, e, landed),
-        Step::CollectUnknown(i, o, e, landed) => lemma_collect_unknown(s, s2, i, o, e, landed),
     }
 }
 

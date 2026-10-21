@@ -322,7 +322,7 @@ tla/            the temporal logic, vendored from Anvil's verus-tla
 node/core.rs    the node core: executable Rust, each step ensures its spec function
 node/txn.rs     the commit's decisions, the same way
 node/step.rs    sweep, drain, next_deadline, clamp_now: verified over the kernel
-spec/cluster.rs the state and the sixteen actions
+spec/cluster.rs the state and the nine actions
 proof/safety.rs the invariant, one lemma per action, the three theorems
 ```
 
@@ -352,22 +352,26 @@ There is no real time. A clock is a node's own, advances by any amount,
 and is read for one purpose: the instant a step is decided at.
 
 The actions: a clock advances; a node joins or crashes; a node drops a
-cache entry; and the commit, one store operation per action — a node loads
-the bucket's document and decides a step on it — `Begin` carries the
-work: a request, and the document is the kernel's `spec_handle` of the one
-loaded followed by any sequence of internal steps at the same instant, and
-the response joins a ghost log when the write lands, or at once when
-nothing changed; or a sweep, the step module's contract — arms a key, writes the document conditionally or is refused, deletes the key
-replaced, remembers the key kept and deletes the key fired, or, having
-found nothing due, rewrites the document and collects the key. Any live
-node may act on any origin: which does is the server's routing, and the
-theorems hold whoever does. Every write has three outcomes: applied,
-refused by its condition — both decided by the bucket's contents — or
-unknown, where the bucket applied it or did not, nondeterministically, and
-the node, told only that it failed, forgets what it cached and gives the
-commit up; what landed stays. Deletes may fail silently.
+cache entry; and the commit, five actions, one store round trip each.
+`Prepare` loads the bucket's document and decides a step on it, and
+touches nothing: for a request, the document after is the kernel's
+`spec_handle` of the one loaded followed by any sequence of internal
+steps at the same instant; for a sweep, the step module's contract. `Arm`
+puts the key for the document's nearest deadline. `Write` puts the
+document conditionally on the version loaded: the commit of a changed
+document, or the rewrite that collects a fired key behind an unchanged
+one. `Cleanup` deletes the key replaced and the key fired, and the node
+remembers the key kept. `Done` closes a request that changed nothing,
+with no round trip. A request's response joins a ghost log at `Write`
+or at `Done`, when the client is answered. Each put carries the store's
+answer: applied, refused by its condition — both decided by the bucket's
+contents — or unknown, where the bucket applied it or did not,
+nondeterministically, and the node, told only that it failed, forgets
+what it cached and gives the commit up; what landed stays. Deletes may
+fail silently. Any live node may act on any origin: which does is the
+server's routing, and the theorems hold whoever does.
 
-Proved, 228 items, no admits:
+Proved, 231 items, no admits:
 
 - **Catalogue.** Every document in the bucket satisfies the kernel's
   catalogue at its stamp.
@@ -403,7 +407,7 @@ to compute those functions; `echod-server` keeps its membership, cache and
 deadline-key state in the core and takes its decisions from it, runs
 the step module's loops, and serves every request through the kernel's
 `handle`: the dispatch turns the envelope into a `Request`, makes one
-call, and renders the `Response`, so the request the model's `Begin`
+call, and renders the `Response`, so the request the model's `Prepare`
 carries is the request the server runs. That is Anvil's shape of refinement: functional,
 per step, with a trusted shim. The shim here is `nodes.rs`, `applier.rs`
 and `timers.rs`: that the configuration handed to `read_config` is the
