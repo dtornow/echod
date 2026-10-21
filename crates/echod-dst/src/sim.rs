@@ -108,6 +108,7 @@ pub struct Report {
     pub ok: bool,
     pub entries: usize,
     pub sweeps: usize,
+    pub fires: usize,
     pub crashes: u32,
     pub stops: u32,
     pub joins: u32,
@@ -140,6 +141,22 @@ impl Observer for SweepObserver {
     }
     fn sweep_end(&self, handle: u64, committed: bool) {
         // A committed sweep took effect; a failed one may or may not have.
+        let outcome = committed.then(|| (200u16, serde_json::json!({})));
+        self.history.end(handle, self.clock.now(), outcome);
+    }
+    fn fire_begin(&self, node: &str, origin: &str, now: u64, row: &echod_kernel::Schedule, at: u64, promise_id: &str, next: u64) -> u64 {
+        let op = Op::Fire { schedule: crate::workload::Row(row.clone()), at, promise_id: promise_id.to_string(), next };
+        self.history.begin(origin, node, op, now, self.clock.now())
+    }
+    fn fire_end(&self, handle: u64, committed: bool) {
+        let outcome = committed.then(|| (200u16, serde_json::json!({})));
+        self.history.end(handle, self.clock.now(), outcome);
+    }
+    fn advance_begin(&self, node: &str, schedule: &str, now: u64, at: u64, next: u64) -> u64 {
+        let op = Op::Advance { id: schedule.to_string(), at, next };
+        self.history.begin(&format!("sched:{schedule}"), node, op, now, self.clock.now())
+    }
+    fn advance_end(&self, handle: u64, committed: bool) {
         let outcome = committed.then(|| (200u16, serde_json::json!({})));
         self.history.end(handle, self.clock.now(), outcome);
     }
@@ -489,6 +506,7 @@ async fn check(world: &World) -> Report {
     let entries = world.history.entries();
     let mut report = Report { seed: opts.seed, entries: entries.len(), ..Default::default() };
     report.sweeps = entries.iter().filter(|e| matches!(e.op, Op::Sweep)).count();
+    report.fires = entries.iter().filter(|e| matches!(e.op, Op::Fire { .. })).count();
     {
         let f = world.fleet.lock().unwrap();
         report.crashes = f.crashes;
@@ -516,6 +534,7 @@ async fn check(world: &World) -> Report {
     let all_kinds: BTreeSet<String> = [
         "promise.get", "promise.create", "promise.settle", "promise.register_callback", "promise.register_listener",
         "task.get", "task.create", "task.acquire", "task.fulfill", "task.release", "task.heartbeat", "task.suspend", "task.fence", "task.halt", "task.continue",
+        "schedule.get", "schedule.create", "schedule.delete",
     ].iter().map(|s| s.to_string()).collect();
     for e in &entries {
         if let Some((200, _)) = &e.outcome {
@@ -523,7 +542,7 @@ async fn check(world: &World) -> Report {
         }
     }
     report.kinds_missing = all_kinds.difference(&report.kinds_succeeded).cloned().collect();
-    let clients: Vec<&crate::history::Entry> = entries.iter().filter(|e| !matches!(e.op, Op::Sweep)).collect();
+    let clients: Vec<&crate::history::Entry> = entries.iter().filter(|e| !matches!(e.op, Op::Sweep | Op::Fire { .. } | Op::Advance { .. })).collect();
     for (i, a) in clients.iter().enumerate() {
         for b in &clients[i + 1..] {
             if b.invoke < a.ret && a.invoke <= b.invoke {
@@ -541,12 +560,25 @@ async fn check(world: &World) -> Report {
         by_origin.entry(e.origin.clone()).or_default().push(e.clone());
     }
     for (origin, es) in &by_origin {
-        let rows = match world.inner.get(&world.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_server::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
-            _ => Vec::new(),
+        // the document at the end: an origin's objects, or a schedule's row
+        let final_state = match origin.strip_prefix("sched:") {
+            Some(id) => {
+                let rows = match world.inner.get(&world.keys.sched_key(id)).await {
+                    Ok(Some((bytes, _))) => echod_server::doc::decode::<echod_kernel::Schedule>(&bytes).map(|l| l.rows).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }
+            }
+            None => {
+                let rows = match world.inner.get(&world.keys.doc_key(origin)).await {
+                    Ok(Some((bytes, _))) => echod_server::doc::decode::<echod_kernel::Promise>(&bytes).map(|l| l.rows).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }
+            }
         };
         report.checked_origins += 1;
-        match check_origin(origin, es, &rows, &cfg, opts.budget) {
+        match check_origin(origin, es, &final_state, &cfg, opts.budget) {
             Verdict::Linearizable { steps } => report.search_steps += steps,
             Verdict::NotLinearizable { origin, steps, detail } => {
                 report.search_steps += steps;

@@ -28,28 +28,55 @@ fn create_req(id: &str, timeout_at: u64, t: &std::collections::BTreeMap<String, 
 /// step is decided no earlier than the document's stamp, the instant of the
 /// last write; a write moves the stamp, as the server's header does, and a
 /// sweep always writes: what it fired, or the rewrite that collects its key.
+/// A schedule's next run is computed from the request's instant, before the
+/// stamp, as the server's dispatch does.
 pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Config, corr: &str) -> (u16, Value) {
+    let asked = now;
     let now = echod_fleet::node::step::clamp_now(*stamp, now);
-    let before = canon(&s.objects);
+    let before = canon_state(s);
     let kind = op.kind();
-    let out = match request_of(op) {
-        Some((q, action_kind)) => wire::response_out(kind, corr, action_kind, &s.handle(&q, now, cfg)),
-        None => {
+    let out = match op {
+        Op::Sweep => {
             echod_fleet::node::step::sweep(s, now, cfg);
             wire::status_res(kind, corr, 200, serde_json::json!({}))
+        }
+        Op::Fire { schedule, at, promise_id, next } => {
+            // the kernel's step on the row beside the origin's objects; the row
+            // is the schedule's document's, not this one's
+            s.schedules = vec![schedule.0.clone()];
+            let req = k::ScheduleTimeoutReq { schedule: schedule.0.id.clone(), occurrences: vec![k::Occurrence { at: *at, promise_id: promise_id.clone() }], next_run_at: *next };
+            s.process_schedule(&req, now, cfg);
+            s.schedules.clear();
+            wire::status_res(kind, corr, 200, serde_json::json!({}))
+        }
+        Op::Advance { id, at, next } => {
+            // conditional on the version loaded with the origin: the row still at the occurrence
+            match s.schedules.iter_mut().find(|c| c.id == *id) {
+                Some(c) if c.next_run_at == *at => {
+                    c.last_run_at = Some(*at);
+                    c.next_run_at = *next;
+                    wire::status_res(kind, corr, 200, serde_json::json!({}))
+                }
+                _ => wire::status_res(kind, corr, 409, serde_json::json!({})),
+            }
+        }
+        _ => {
+            let (q, action_kind) = request_of(op, asked).expect("a client's request");
+            wire::response_out(kind, corr, action_kind, &s.handle(&q, now, cfg))
         }
     };
     echod_fleet::node::step::drain(s, now, cfg);
     s.outbox.clear();
-    if matches!(op, Op::Sweep) || canon(&s.objects) != before {
+    if matches!(op, Op::Sweep | Op::Fire { .. } | Op::Advance { .. }) || canon_state(s) != before {
         *stamp = now;
     }
     (out.head.status as u16, out.data)
 }
 
 /// The kernel's request for an operation, with the kind of a fence's inner
-/// action; none for a sweep.
-pub fn request_of(op: &Op) -> Option<(k::Request, Option<&'static str>)> {
+/// action; none for an internal step. `now` is the request's instant, which
+/// a schedule's next run is computed from.
+pub fn request_of(op: &Op, now: u64) -> Option<(k::Request, Option<&'static str>)> {
     let q = match op {
         Op::PromiseGet { id } => k::Request::PromiseGet(k::PromiseGetReq { id: id.clone() }),
         Op::PromiseCreate { id, timeout_at, tags: t, data } => k::Request::PromiseCreate(create_req(id, *timeout_at, t, Some(data))),
@@ -80,14 +107,35 @@ pub fn request_of(op: &Op) -> Option<(k::Request, Option<&'static str>)> {
         }
         Op::TaskHalt { id } => k::Request::TaskHalt(k::TaskHaltReq { id: id.clone() }),
         Op::TaskContinue { id } => k::Request::TaskContinue(k::TaskContinueReq { id: id.clone() }),
-        Op::Sweep => return None,
+        Op::ScheduleGet { id } => k::Request::ScheduleGet(k::ScheduleGetReq { id: id.clone() }),
+        Op::ScheduleCreate { id, cron, promise_id, promise_timeout, tags: t } => {
+            let next = resonate_core::util::compute_next_cron(cron, now as i64).max(now as i64 + 1) as u64;
+            k::Request::ScheduleCreate(k::ScheduleCreateReq {
+                id: id.clone(),
+                cron: cron.clone(),
+                promise_id: promise_id.clone(),
+                promise_timeout: *promise_timeout,
+                promise_param: k::Value { headers: vec![], data: None },
+                promise_tags: tags(t),
+                next_run_at: next,
+            })
+        }
+        Op::ScheduleDelete { id } => k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: id.clone() }),
+        Op::Sweep | Op::Fire { .. } | Op::Advance { .. } => return None,
     };
     Some((q, None))
 }
 
-/// A fresh state over `rows`.
-pub fn state(rows: &[k::Promise]) -> k::State {
-    k::State { objects: rows.to_vec(), schedules: vec![], outbox: vec![] }
+/// A fresh, empty state.
+pub fn state() -> k::State {
+    k::State { objects: vec![], schedules: vec![], outbox: vec![] }
+}
+
+/// The state's rows of both kinds, canonically.
+pub fn canon_state(s: &k::State) -> Value {
+    let mut c: Vec<(String, Value)> = s.schedules.iter().map(|c| (c.id.clone(), serde_json::to_value(c).unwrap())).collect();
+    c.sort_by(|a, b| a.0.cmp(&b.0));
+    serde_json::json!({ "objects": canon(&s.objects), "schedules": c.into_iter().map(|(_, v)| v).collect::<Vec<_>>() })
 }
 
 pub fn clone_state(s: &k::State) -> k::State {

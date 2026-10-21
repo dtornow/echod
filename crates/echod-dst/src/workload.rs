@@ -16,6 +16,17 @@ use crate::rng::Rng;
 /// The worker every task is dispatched to, and every listener listens at.
 pub const WORKER: &str = "sim://worker";
 
+/// A schedule's row, as a history entry carries it: the kernel's record,
+/// shown by its id.
+#[derive(Clone, Serialize)]
+pub struct Row(pub k::Schedule);
+
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Schedule({})", self.0.id)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub enum Op {
     PromiseGet { id: String },
@@ -34,8 +45,18 @@ pub enum Op {
     TaskFenceSettle { id: String, version: u64, target: String, state: k::PromiseState, data: String },
     TaskHalt { id: String },
     TaskContinue { id: String },
+    ScheduleGet { id: String },
+    ScheduleCreate { id: String, cron: String, promise_id: String, promise_timeout: u64, tags: BTreeMap<String, String> },
+    ScheduleDelete { id: String },
     /// The internal step a timer fires: not a client's, recorded by the observer.
     Sweep,
+    /// A schedule's fire on the occurrence's origin: the row as the node
+    /// loaded it, the occurrence, the promise, the run after. Recorded by
+    /// the observer.
+    Fire { schedule: Row, at: u64, promise_id: String, next: u64 },
+    /// The fire's second half, on the schedule's document. Recorded by the
+    /// observer.
+    Advance { id: String, at: u64, next: u64 },
 }
 
 impl Op {
@@ -56,7 +77,12 @@ impl Op {
             Op::TaskFenceCreate { .. } | Op::TaskFenceSettle { .. } => "task.fence",
             Op::TaskHalt { .. } => "task.halt",
             Op::TaskContinue { .. } => "task.continue",
+            Op::ScheduleGet { .. } => "schedule.get",
+            Op::ScheduleCreate { .. } => "schedule.create",
+            Op::ScheduleDelete { .. } => "schedule.delete",
             Op::Sweep => "sweep",
+            Op::Fire { .. } => "fire",
+            Op::Advance { .. } => "advance",
         }
     }
 
@@ -78,6 +104,8 @@ impl Op {
             | Op::TaskContinue { id } => id.clone(),
             Op::RegisterCallback { awaited, .. } | Op::RegisterListener { awaited, .. } => awaited.clone(),
             Op::TaskHeartbeat { tasks, .. } => tasks[0].0.clone(),
+            Op::ScheduleGet { id } | Op::ScheduleCreate { id, .. } | Op::ScheduleDelete { id } | Op::Advance { id, .. } => return format!("sched:{id}"),
+            Op::Fire { promise_id, .. } => promise_id.clone(),
             Op::Sweep => String::new(),
         };
         echod_server::keys::origin_of(&id).to_string()
@@ -120,7 +148,11 @@ impl Op {
                 json!({ "id": id, "version": version, "action": { "kind": "promise.settle", "head": {}, "data": { "id": target, "state": Self::state_str(*state), "value": { "data": data } } } })
             }
             Op::TaskHalt { id } | Op::TaskContinue { id } => json!({ "id": id }),
-            Op::Sweep => json!({}),
+            Op::ScheduleGet { id } | Op::ScheduleDelete { id } => json!({ "id": id }),
+            Op::ScheduleCreate { id, cron, promise_id, promise_timeout, tags } => {
+                json!({ "id": id, "cron": cron, "promiseId": promise_id, "promiseTimeout": promise_timeout, "promiseTags": tags })
+            }
+            Op::Sweep | Op::Fire { .. } | Op::Advance { .. } => json!({}),
         }
     }
 }
@@ -232,7 +264,27 @@ impl Generator {
         }
     }
 
+    /// A schedule: a few ids, firing every few seconds into one origin, so
+    /// that fires and client requests collide on the origin's document.
+    fn schedule(&self, rng: &mut Rng) -> Op {
+        let id = format!("s{}", rng.below(3));
+        match rng.below(10) {
+            0..=2 => Op::ScheduleGet { id },
+            3..=7 => {
+                let cron = (*rng.pick(&["*/2 * * * * *", "*/3 * * * * *", "*/5 * * * * *"])).to_string();
+                let promise_id = format!("o{}:{id}-{{{{.timestamp}}}}", rng.below(self.origins));
+                let promise_timeout = rng.range(1, self.timeout_ms);
+                // the protocol requires a target on a schedule's promise
+                Op::ScheduleCreate { id, cron, promise_id, promise_timeout, tags: self.tags(rng, true) }
+            }
+            _ => Op::ScheduleDelete { id },
+        }
+    }
+
     pub fn next(&self, rng: &mut Rng, seen: &Seen, now: u64) -> Op {
+        if rng.percent(4) {
+            return self.schedule(rng);
+        }
         let roll = rng.below(100);
         let id = if roll >= 46 { self.task_id(seen, rng) } else { self.id(rng) };
         let pid = format!("p{}", rng.below(3));

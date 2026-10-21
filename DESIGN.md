@@ -309,14 +309,22 @@ A chaos task crashes nodes, stops them cleanly, starts new ones, partitions
 pairs, cuts nodes off the store and jumps their clocks, by any amount:
 the checker expects linearizability whatever the clocks do. Clients issue every
 request kind over a few origins; every attempt is a history entry, since an
-attempt that got no answer may have taken effect. Sweeps enter the history
-through an observer port.
+attempt that got no answer may have taken effect. Sweeps and fires enter
+the history through an observer port: a fire as two entries, the first on
+the occurrence's origin with the schedule's row as the node loaded it,
+the second on the schedule's document, each spanning its own commit.
+Clients create, read and delete a few schedules firing every few seconds
+into the origins the clients work on, so fires collide with requests.
 
-The check is linearizability per origin against the kernel: an order of the
-entries, each within its span, that yields every answer seen and ends in the
-rows the bucket holds, each step decided at the later of its instant and the
-document's stamp as the server does; an entry without an answer may be
-placed or skipped.
+The check is linearizability per document against the kernel, an origin's
+or a schedule's: an order of the entries, each within its span, that
+yields every answer seen and ends in the rows the bucket holds, each step
+decided at the later of its instant and the document's stamp as the server
+does; an entry without an answer may be placed or skipped. A fire's first
+half is the kernel's `processSchedule` on the row beside the origin's
+objects; its second half advances the row if it is still at the
+occurrence, and is refused otherwise, as the server's conditional write
+would be.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
@@ -340,7 +348,7 @@ node/core.rs    the node core: executable Rust, each step ensures its spec funct
 node/txn.rs     the commit's decisions, the same way
 node/step.rs    sweep, drain, next_deadline, clamp_now: verified over the kernel
 spec/cluster.rs the state and the nine actions
-proof/safety.rs the invariant, one lemma per action, the three theorems
+proof/safety.rs the invariant, one lemma per action, the four theorems
 ```
 
 The node core and the commit are what Anvil calls the reconciler: sans-I/O
@@ -400,7 +408,7 @@ document, conditional on the version loaded with the origin, and runs the
 same five actions. That is the server's order, origin then schedule, and
 why a crash between the two loses nothing.
 
-Proved, 242 items, no admits:
+Proved, 245 items, no admits:
 
 - **Catalogue.** Every document in the bucket satisfies the kernel's
   catalogue at its stamp.
@@ -411,10 +419,19 @@ Proved, 242 items, no admits:
   the bucket's document: a conditional read answered not modified may be
   served from the cache.
 
-The Catalogue and Timers theorems cover both kinds of document; in
-particular every schedule has a key at or before its next run.
+- **Occurrences.** Every occurrence a schedule has fired has its promise:
+  a row whose last run is `t` has the promise its template expands to at
+  `t` in the bucket, in its origin's document. The expansion is a function
+  of template, schedule and instant, trusted to be the server's.
 
-All three as corollaries of one invariant that `init` establishes and every
+The Catalogue and Timers theorems cover both kinds of document; in
+particular every schedule has a key at or before its next run. The
+Occurrences theorem is why a fire commits the origin before the schedule.
+It rests on one fact the model states as the step's obligation, since the
+catalogue, written from the Lean, does not say it: a step drops no object.
+The kernel's steps never do.
+
+All four as corollaries of one invariant that `init` establishes and every
 action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
 rule. A witness shows the invariant is not vacuous. Nothing is assumed of
 any clock.

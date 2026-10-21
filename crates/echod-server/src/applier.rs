@@ -365,8 +365,12 @@ impl Applier {
             let t1 = step::clamp_now(ws.loaded.stamp, now);
             let due = ws.loaded.rows.iter().find(|c| c.id == id && c.next_run_at <= t1).cloned();
             let Some(c) = due else {
+                // a sweep of the schedule's document that finds nothing due
                 let rows = ws.loaded.rows.clone();
-                match self.commit(&mut ws, &rows, t1, false, Some(&fired)).await {
+                let handle = self.observer.sweep_begin(&self.nodes.id(), &ws.target, t1);
+                let r = self.commit(&mut ws, &rows, t1, false, Some(&fired)).await;
+                self.observer.sweep_end(handle, r.is_ok());
+                match r {
                     Ok(f) => {
                         self.metrics.commit(CommitOutcome::Committed);
                         return Ok(f);
@@ -394,7 +398,10 @@ impl Applier {
             state.process_schedule(&req, t, &cfg);
             step::drain(&mut state, t, &cfg);
             // the origin first: the occurrence's promise
-            match self.commit(&mut wo, &state.objects, t, false, None).await {
+            let handle = self.observer.fire_begin(&self.nodes.id(), &origin, t, &c, at, &req.occurrences[0].promise_id, next);
+            let r = self.commit(&mut wo, &state.objects, t, false, None).await;
+            self.observer.fire_end(handle, r.is_ok());
+            match r {
                 Ok(_) => {
                     self.metrics.commit(CommitOutcome::Committed);
                     for e in &state.outbox {
@@ -414,7 +421,10 @@ impl Applier {
                 }
             }
             // then the schedule, advanced, with the key fired
-            match self.commit(&mut ws, &state.schedules, t, false, Some(&fired)).await {
+            let handle = self.observer.advance_begin(&self.nodes.id(), id, t, at, next);
+            let r = self.commit(&mut ws, &state.schedules, t, false, Some(&fired)).await;
+            self.observer.advance_end(handle, r.is_ok());
+            match r {
                 Ok(f) => {
                     self.metrics.commit(CommitOutcome::Committed);
                     return Ok(f);

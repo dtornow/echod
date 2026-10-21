@@ -122,9 +122,9 @@ fn main() {
             for seed in from..from + seeds {
                 let r = run(knobs.options(seed));
                 println!(
-                    "seed {seed}: {} entries={} sweeps={} crash/stop/join/part/out/jump={}/{}/{}/{}/{}/{} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
+                    "seed {seed}: {} entries={} sweeps={} fires={} crash/stop/join/part/out/jump={}/{}/{}/{}/{}/{} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
                     if r.ok { "ok" } else { "FAILED" },
-                    r.entries, r.sweeps, r.crashes, r.stops, r.joins, r.partitions, r.outages, r.jumps, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
+                    r.entries, r.sweeps, r.fires, r.crashes, r.stops, r.joins, r.partitions, r.outages, r.jumps, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
                     if r.kinds_missing.is_empty() { String::new() } else { format!(" missing={:?}", r.kinds_missing) }
                 );
                 for f in &r.failures {

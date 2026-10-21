@@ -16,8 +16,9 @@
 //!
 //! What is proved (`proof/safety.rs`), with nothing assumed of any clock:
 //! every document in the bucket satisfies the kernel's catalogue; every
-//! deadline in every document has a key in the bucket at or before it; and a
-//! cached body whose version the bucket still holds is the bucket's document.
+//! deadline in every document has a key in the bucket at or before it; a
+//! cached body whose version the bucket still holds is the bucket's document;
+//! and every occurrence a schedule has fired has its promise in the bucket.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 

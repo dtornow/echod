@@ -27,11 +27,12 @@ pub enum Verdict {
     Undecided { origin: String, steps: u64 },
 }
 
-/// Check one origin's entries against `final_rows`, the origin's document at
-/// the end of the run. `budget` bounds the search.
-pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], cfg: &k::Config, budget: u64) -> Verdict {
+/// Check one document's entries against `final_state`, the document at the
+/// end of the run: an origin's objects, or a schedule's row. `budget`
+/// bounds the search.
+pub fn check_origin(origin: &str, entries: &[Entry], final_state: &k::State, cfg: &k::Config, budget: u64) -> Verdict {
     let n = entries.len();
-    let want_final = model::canon(final_rows);
+    let want_final = model::canon_state(final_state);
     // Frames of the depth-first search: the state, and which entries are
     // linearised so far.
     struct Frame {
@@ -41,12 +42,12 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
         next: usize,
     }
     let mut seen: HashSet<(Bits, u64)> = HashSet::new();
-    let mut stack = vec![Frame { stamp: 0, state: model::state(&[]), done: Bits::new(n), next: 0 }];
+    let mut stack = vec![Frame { stamp: 0, state: model::state(), done: Bits::new(n), next: 0 }];
     let mut steps: u64 = 0;
     let mut last_mismatch = String::new();
     while let Some(frame) = stack.last_mut() {
         if frame.done.count() == n {
-            if model::canon(&frame.state.objects) == want_final {
+            if model::canon_state(&frame.state) == want_final {
                 return Verdict::Linearizable { steps };
             }
             last_mismatch = format!("every answer explained, but the order leaves other rows than the bucket holds");
@@ -95,7 +96,7 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_rows: &[k::Promise], 
         new_done.set(i);
         // The same rows at a different stamp are a different state: the next
         // step is decided no earlier than the stamp.
-        let key = (new_done.clone(), hash(&model::canon(&state.objects)) ^ stamp.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let key = (new_done.clone(), hash(&model::canon_state(&state)) ^ stamp.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         if !seen.insert(key) {
             continue;
         }

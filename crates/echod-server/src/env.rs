@@ -93,6 +93,25 @@ pub trait Observer: Send + Sync {
     fn sweep_end(&self, handle: u64, committed: bool) {
         let _ = (handle, committed);
     }
+    /// A schedule fires on `origin` at `now` on `node`: the row as loaded,
+    /// the occurrence, the promise it expands to, the run after. The first
+    /// half of a fire. Returns a handle for `fire_end`.
+    fn fire_begin(&self, node: &str, origin: &str, now: u64, row: &echod_kernel::Schedule, at: u64, promise_id: &str, next: u64) -> u64 {
+        let _ = (node, origin, now, row, at, promise_id, next);
+        0
+    }
+    fn fire_end(&self, handle: u64, committed: bool) {
+        let _ = (handle, committed);
+    }
+    /// The second half: the schedule advanced past the occurrence at `at`
+    /// to `next`, on its own document.
+    fn advance_begin(&self, node: &str, schedule: &str, now: u64, at: u64, next: u64) -> u64 {
+        let _ = (node, schedule, now, at, next);
+        0
+    }
+    fn advance_end(&self, handle: u64, committed: bool) {
+        let _ = (handle, committed);
+    }
 }
 
 /// Watches nothing.
