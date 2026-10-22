@@ -553,6 +553,16 @@ pub open spec fn spec_task_suspend(a: AState, req: ATaskSuspendReq, now: nat) ->
     }
 }
 
+/// A request about a schedule: served on the schedule's document, where
+/// there are no objects; every other request on its id's origin, where
+/// there are no schedules.
+pub open spec fn is_schedule_request(req: ARequest) -> bool {
+    match req {
+        ARequest::ScheduleGet(_) | ARequest::ScheduleCreate(_) | ARequest::ScheduleDelete(_) => true,
+        _ => false,
+    }
+}
+
 /// Any request, as a function of the abstract state: the handler for its
 /// kind. What the fleet model carries a request into a step through.
 pub open spec fn spec_handle(a: AState, req: ARequest, now: nat) -> (AState, AResponse) {

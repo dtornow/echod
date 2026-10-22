@@ -22,10 +22,10 @@
 //! yet; that rewrite is `Write` of an unchanged document.
 //!
 //! Around the core, the model keeps what the node does not see — whether it
-//! is alive and its clock — and the kernel's steps as the relation the
-//! kernel proves of them: what a step makes of a document is anything the
-//! catalogue allows, reached by steps at one instant (`step::reach`),
-//! and a sweep leaves nothing due (`step::no_due`).
+//! is alive and its clock — and the kernel's steps as what the node's
+//! verified functions ensure of them: a handler's or a fire's function, then
+//! what `drain` ensures (`step::drained`); `sweep` then `drain` for a sweep
+//! (`step::swept_by`); `schedule_due` for a schedule's key with nothing due.
 //!
 //! There is no real time and no hypothesis on clocks. A node's clock is its
 //! own, advances as it will, and is read for one purpose: the instant a
@@ -245,30 +245,22 @@ pub struct Cluster {
 /// `b` is what kernel steps at `t` make of the kernel state `a`: the drain
 /// after a request. Nothing is assumed of `a`; what holds of it is proved.
 pub open spec fn kreach_from(t: nat, a: echod_kernel::store::AState, b: Doc) -> bool {
-    exists |sb: echod_kernel::store::AState| strip(sb) == b && #[trigger] reach(t, a, sb)
+    exists |sb: echod_kernel::store::AState| strip(sb) == b && #[trigger] drained(t, a, sb)
 }
 
-/// A fire's two documents from the fired state: the origin's is what
-/// kernel steps make of its objects; the schedule's is its schedules,
-/// which the steps after leave.
+/// A fire's two documents from the fired state: the origin's is what the
+/// drain makes of its objects; the schedule's is its schedules, which the
+/// drain leaves.
 pub open spec fn kreach_fire(t: nat, a: echod_kernel::store::AState, o: Doc, c: Doc) -> bool {
-    exists |sb: echod_kernel::store::AState| objects_only(sb) == o && schedules_only(sb) == c && #[trigger] reach(t, a, sb)
+    exists |sb: echod_kernel::store::AState| objects_only(sb) == o && schedules_only(sb) == c && #[trigger] drained(t, a, sb)
 }
 
-/// `b` is what kernel steps at `t` make of document `a`: for some kernel
-/// states holding these objects, the catalogue holds of the first and the
-/// second is reached from it.
-pub open spec fn kreach(t: nat, a: Doc, b: Doc) -> bool {
-    exists |sa: echod_kernel::store::AState, sb: echod_kernel::store::AState|
-        strip(sa) == a && strip(sb) == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb)
-}
-
-/// A sweep at `t`: kernel steps, after which nothing is due at `t`; if
-/// nothing fired (`did` false), the document is as it was.
+/// A sweep at `t`: what `sweep` then `drain` make of the document, given
+/// the catalogue holds of it.
 pub open spec fn swept(t: nat, a: Doc, b: Doc, did: bool) -> bool {
-    &&& kreach(t, a, b)
-    &&& no_due(t, b)
-    &&& !did ==> b == a
+    &&& echod_kernel::properties::inv(t, full(a))
+    &&& exists |m: echod_kernel::store::AState, sb: echod_kernel::store::AState|
+        #[trigger] swept_by(t, full(a), m, did) && #[trigger] drained(t, m, sb) && strip(sb) == b
 }
 
 pub open spec fn next_is(d: Doc, deadline: Option<nat>) -> bool {
@@ -412,19 +404,12 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
     let fired = match work { Work::Sweep(k) => Some(k), Work::Request(_) => None, Work::Fire(..) => None };
     if s.nodes.contains_key(i) && n.alive && free(n, o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
-        && shaped(o, new)
-        // a step drops no object: the kernel's steps never do, and the catalogue does not say so
-        && loaded.objects.dom() <= new.objects.dom()
         && (match work {
-            Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did) && (is_sched(o) ==> !did),
-            Work::Request(req) => {
-                let h = spec_handle(full(loaded), req, t).0;
-                &&& !did
-                &&& request_target(req) == Some(o)
-                &&& kreach_from(t, h, new)
-                // the drain after the handler leaves the schedules as the handler did
-                &&& new.schedules == h.schedules
-            }
+            // a sweep: `sweep` then `drain`; on a schedule's document, `schedule_due` found nothing due
+            Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did)
+                && (is_sched(o) ==> schedules_idle(t, loaded.schedules)),
+            // a request: its handler, then `drain`
+            Work::Request(req) => !did && request_target(req) == Some(o) && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
             Work::Fire(k, sid, pid, next, deadline_s) => {
                 let st = sched_target(sid);
                 let sd = s.store.doc(st);
@@ -438,7 +423,6 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
                 &&& pid == expand(sd.schedules[sid].promise_id, sid, sd.schedules[sid].next_run_at as nat)
                 &&& next > sd.schedules[sid].next_run_at && next <= MAX_TIME
                 &&& kreach_fire(t, spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t), new, p.new)
-                &&& spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t).objects.dom() <= new.objects.dom()
                 &&& next_is(p.new, deadline_s)
             }
         })

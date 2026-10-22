@@ -363,7 +363,8 @@ impl Applier {
         for attempt in 0..=self.max_retries {
             let mut ws = self.load_schedule(id).await?;
             let t1 = step::clamp_now(ws.loaded.stamp, now);
-            let due = ws.loaded.rows.iter().find(|c| c.id == id && c.next_run_at <= t1).cloned();
+            // the decision is the step module's: a row due at the instant, or none
+            let due = step::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
             let Some(c) = due else {
                 // a sweep of the schedule's document that finds nothing due
                 let rows = ws.loaded.rows.clone();

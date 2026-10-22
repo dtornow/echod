@@ -27,7 +27,7 @@ use crate::tla::defs::*;
 use crate::tla::rules::*;
 use echod_kernel::external::spec_handle;
 use echod_kernel::internal::spec_fire;
-use echod_kernel::types::{origin, AOccurrence, ARequest, ASchedule};
+use echod_kernel::types::{origin, AOccurrence, APromise, ARequest, ASchedule};
 use echod_kernel::external_proof::lemma_spec_handle;
 use echod_kernel::types::MAX_TIME;
 
@@ -413,15 +413,20 @@ proof fn lemma_origin_not_sched(id: Seq<char>)
     }
 }
 
-/// A document the kernel reached at `t` from one satisfying the catalogue
-/// satisfies it.
-proof fn lemma_kreach_inv(t: nat, a: Doc, b: Doc)
-    requires kreach(t, a, b),
-    ensures echod_kernel::properties::inv(t, full(b)),
+/// A swept document satisfies the catalogue, keeps its schedules and its
+/// objects' keys, and, if nothing fired, has no object due at `t`.
+proof fn lemma_swept_inv(t: nat, a: Doc, b: Doc, did: bool)
+    requires swept(t, a, b, did),
+    ensures
+        echod_kernel::properties::inv(t, full(b)),
+        b.schedules == a.schedules,
+        b.objects.dom() == a.objects.dom(),
+        !did ==> objects_cleared(t, a.objects),
 {
-    let (sa, sb) = choose |sa: echod_kernel::store::AState, sb: echod_kernel::store::AState|
-        strip(sa) == a && strip(sb) == b && echod_kernel::properties::inv(t, sa) && #[trigger] reach(t, sa, sb);
-    lemma_reach_inv(t, sa, sb);
+    let (m, sb) = choose |m: echod_kernel::store::AState, sb: echod_kernel::store::AState|
+        #[trigger] swept_by(t, full(a), m, did) && #[trigger] drained(t, m, sb) && strip(sb) == b;
+    lemma_reach_inv(t, full(a), m);
+    lemma_reach_inv(t, m, sb);
     lemma_inv_full(t, sb);
 }
 
@@ -554,9 +559,12 @@ proof fn lemma_forget(s: Cluster, s2: Cluster, i: Id, o: Origin)
 /// satisfies the catalogue.
 proof fn lemma_kreach_from_inv(t: nat, a: echod_kernel::store::AState, b: Doc)
     requires kreach_from(t, a, b), echod_kernel::properties::inv(t, a),
-    ensures echod_kernel::properties::inv(t, full(b)),
+    ensures
+        echod_kernel::properties::inv(t, full(b)),
+        b.schedules == a.schedules,
+        b.objects.dom() == a.objects.dom(),
 {
-    let sb = choose |sb: echod_kernel::store::AState| strip(sb) == b && #[trigger] reach(t, a, sb);
+    let sb = choose |sb: echod_kernel::store::AState| strip(sb) == b && #[trigger] drained(t, a, sb);
     lemma_reach_inv(t, a, sb);
     lemma_inv_full(t, sb);
 }
@@ -617,16 +625,82 @@ proof fn lemma_sched_request_runs(s: Cluster, o: Origin, req: ARequest, t: nat, 
     }
 }
 
+/// A request served on a schedule's document is one of the schedule's three.
+proof fn lemma_sched_request_is(req: ARequest, o: Origin)
+    requires is_sched(o), request_target(req) == Some(o),
+    ensures echod_kernel::external::is_schedule_request(req),
+{
+    match req {
+        ARequest::ScheduleGet(_) | ARequest::ScheduleCreate(_) | ARequest::ScheduleDelete(_) => {}
+        ARequest::PromiseGet(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseCreate(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseSettle(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::PromiseRegisterCallback(q) => { lemma_origin_not_sched(q.awaited); }
+        ARequest::PromiseRegisterListener(q) => { lemma_origin_not_sched(q.awaited); }
+        ARequest::TaskGet(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskCreate(q) => { lemma_origin_not_sched(q.action.id); }
+        ARequest::TaskAcquire(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFulfill(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskRelease(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskHalt(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskContinue(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFence(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskHeartbeat(q) => { if q.tasks.len() > 0 { lemma_origin_not_sched(q.tasks[0].id); } }
+        ARequest::TaskSuspend(q) => { lemma_origin_not_sched(q.id); }
+    }
+}
+
+/// A request served on an origin's document is not one of them.
+proof fn lemma_origin_request_is(req: ARequest, o: Origin)
+    requires !is_sched(o), request_target(req) == Some(o),
+    ensures !echod_kernel::external::is_schedule_request(req),
+{
+    match req {
+        ARequest::ScheduleGet(q) => { assert(is_sched(sched_target(q.id))) by { reveal_strlit("sched:"); assert(sched_target(q.id).take(6) =~= "sched:"@); } }
+        ARequest::ScheduleCreate(q) => { assert(is_sched(sched_target(q.id))) by { reveal_strlit("sched:"); assert(sched_target(q.id).take(6) =~= "sched:"@); } }
+        ARequest::ScheduleDelete(q) => { assert(is_sched(sched_target(q.id))) by { reveal_strlit("sched:"); assert(sched_target(q.id).take(6) =~= "sched:"@); } }
+        _ => {}
+    }
+}
+
 /// A fire's two documents satisfy the catalogue: the fired state does, the
 /// steps after keep it, and each document is one side of the result.
 proof fn lemma_kreach_fire_inv(t: nat, a: echod_kernel::store::AState, o: Doc, c: Doc)
     requires kreach_fire(t, a, o, c), echod_kernel::properties::inv(t, a),
-    ensures echod_kernel::properties::inv(t, full(o)), echod_kernel::properties::inv(t, full(c)),
+    ensures
+        echod_kernel::properties::inv(t, full(o)), echod_kernel::properties::inv(t, full(c)),
+        o.objects.dom() == a.objects.dom(), o.schedules == Map::<Seq<char>, ASchedule>::empty(),
+        c.schedules == a.schedules, c.objects == Map::<Seq<char>, APromise>::empty(),
 {
-    let sb = choose |sb: echod_kernel::store::AState| objects_only(sb) == o && schedules_only(sb) == c && #[trigger] reach(t, a, sb);
+    let sb = choose |sb: echod_kernel::store::AState| objects_only(sb) == o && schedules_only(sb) == c && #[trigger] drained(t, a, sb);
     lemma_reach_inv(t, a, sb);
     lemma_inv_objects_only(t, sb);
     lemma_inv_schedules_only(t, sb);
+}
+
+/// A document of the right shape, from the keys and the schedules alone.
+proof fn lemma_shaped(o: Origin, d: Doc)
+    requires
+        is_sched(o) ==> d.objects.dom() == Set::<Seq<char>>::empty(),
+        !is_sched(o) ==> d.schedules == Map::<Seq<char>, ASchedule>::empty(),
+    ensures shaped(o, d),
+{
+    if is_sched(o) {
+        assert(d.objects =~= Map::<Seq<char>, APromise>::empty());
+    }
+}
+
+/// What was loaded is shaped: the bucket's document is, and an empty one is.
+proof fn lemma_loaded_shaped(s: Cluster, o: Origin)
+    requires inv()(s),
+    ensures shaped(o, s.store.doc(o)),
+{
+    disassemble(s);
+    if s.store.docs.contains_key(o) {
+        assert(shaped(o, s.store.docs[o]));
+    } else {
+        lemma_shaped(o, empty_doc());
+    }
 }
 
 proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
@@ -645,22 +719,38 @@ proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: 
     }
     assert(echod_kernel::properties::inv(t, full(x.loaded)));
     lemma_loaded_runs(s, o);
+    lemma_loaded_shaped(s, o);
     match work {
         Work::Sweep(_) => {
-            lemma_kreach_inv(t, x.loaded, x.new);
-            // an origin's document has no runs; a schedule's is as loaded
-            if is_sched(o) {
-                assert(x.new == x.loaded);
-            }
+            // the sweep and the drain keep the schedules and the objects' keys
+            lemma_swept_inv(t, x.loaded, x.new, did);
+            lemma_shaped(o, x.new);
             assert(runs_have_promises(s2, x.new));
+            if !x.c.changed {
+                assert(x.new == x.loaded);
+                assert(objects_cleared(t, x.loaded.objects));
+                if !is_sched(o) {
+                    assert forall |id: Seq<char>| #[trigger] x.loaded.schedules.contains_key(id) implies x.loaded.schedules[id].next_run_at > t by {}
+                }
+                assert(no_due(t, x.loaded));
+            }
         }
         Work::Request(req) => {
-            // the handler keeps the catalogue; the drain keeps it from there
+            // the handler keeps the catalogue and the shape; the drain keeps both from there
+            let h = spec_handle(full(x.loaded), req, t).0;
             lemma_spec_handle(t, full(x.loaded), req);
-            lemma_kreach_from_inv(t, spec_handle(full(x.loaded), req, t).0, x.new);
+            echod_kernel::external_proof::lemma_spec_handle_keeps(t, full(x.loaded), req);
+            lemma_kreach_from_inv(t, h, x.new);
             if is_sched(o) {
+                lemma_sched_request_is(req, o);
+                assert(h.objects == x.loaded.objects);
+                assert(x.new.objects.dom() == x.loaded.objects.dom());
                 lemma_sched_request_runs(s, o, req, t, x.new);
+            } else {
+                lemma_origin_request_is(req, o);
+                assert(h.schedules == x.loaded.schedules);
             }
+            lemma_shaped(o, x.new);
             assert(runs_have_promises(s2, x.new));
         }
         Work::Fire(k, sid, pid, next, deadline_s) => {
@@ -693,14 +783,17 @@ proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: 
             if s.store.etags.contains_key(st) {
                 assert(s.hist.versions.contains_key(s.store.etags[st]));
             }
-            // the occurrence's promise is in the fired state, which the steps after keep
+            // the occurrence's promise is in the fired state, whose keys the drain keeps
             let fired = spec_fire(joint(x.loaded, sd), sid, occs, next, t);
             assert(fired.objects.contains_key(occs[0].promise_id));
+            assert(x.new.objects.dom() == fired.objects.dom());
             assert(x.new.objects.contains_key(pid));
             assert(x.loaded.objects.dom() <= fired.objects.dom());
             assert forall |y: Seq<char>| x.loaded.objects.dom().contains(y) implies x.new.objects.dom().contains(y) by {
                 assert(fired.objects.dom().contains(y));
             }
+            lemma_shaped(o, x.new);
+            lemma_shaped(st, p.new);
             if x.new == x.loaded {
                 assert(x.loaded.objects.contains_key(pid));
                 assert(s.store.docs.contains_key(o));

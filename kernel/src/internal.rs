@@ -219,6 +219,7 @@ impl State {
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
+            final(self)@.objects.dom() == old(self)@.objects.dom(),
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
@@ -270,6 +271,7 @@ impl State {
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
+            final(self)@.objects.dom() == old(self)@.objects.dom(),
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {

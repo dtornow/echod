@@ -1906,6 +1906,160 @@ pub proof fn lemma_spec_task_suspend(now: nat, a: AState, req: ATaskSuspendReq)
 
 /// The catalogue of any request: `spec_handle` leaves a state the catalogue
 /// holds of, by a step it allows.
+// ---------------------------------------------------------------------------
+// What every handler keeps: no object is dropped; a request about a schedule
+// leaves the objects, any other the schedules. The catalogue does not say
+// so; the functions do.
+// ---------------------------------------------------------------------------
+
+/// What a handler leaves of the state's shape.
+pub open spec fn keeps(a: AState, b: AState) -> bool {
+    &&& a.objects.dom() <= b.objects.dom()
+    &&& b.schedules == a.schedules
+}
+
+pub proof fn lemma_read_keeps(now: nat, a: AState, id: Seq<char>)
+    ensures keeps(a, spec_read(a, id, now)), keeps(a, spec_read_task(a, id, now)),
+{
+}
+
+pub proof fn lemma_keeps_trans(a: AState, b: AState, c: AState)
+    requires keeps(a, b), keeps(b, c),
+    ensures keeps(a, c),
+{
+}
+
+/// Inserting at a key keeps every key.
+pub proof fn lemma_insert_keeps(a: AState, id: Seq<char>, p: APromise)
+    ensures keeps(a, with_objects(a, a.objects.insert(id, p))),
+{
+}
+
+pub proof fn lemma_heartbeat_fold_keeps(now: nat, a: AState, pid: Seq<char>, refs: Seq<ATaskRef>, k: int)
+    requires 0 <= k <= refs.len(),
+    ensures keeps(a, spec_heartbeat_fold(a, pid, refs, k, now)),
+    decreases k,
+{
+    if k == 0 {
+    } else {
+        lemma_heartbeat_fold_keeps(now, a, pid, refs, k - 1);
+        let s = spec_heartbeat_fold(a, pid, refs, k - 1, now);
+        let r = refs[k - 1];
+        lemma_read_keeps(now, s, r.id);
+        let b = spec_read_task(s, r.id, now);
+        if s.has_task(r.id) {
+            match b.objects[r.id].task {
+                Some(t) => { lemma_insert_keeps(b, r.id, b.objects[r.id].with_task(t.heartbeat(now))); }
+                None => {}
+            }
+        }
+        lemma_keeps_trans(a, s, spec_heartbeat_one(s, pid, r, now));
+    }
+}
+
+pub proof fn lemma_awaited_read_keeps(now: nat, a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int)
+    requires 0 <= k <= acts.len(),
+    ensures keeps(a, spec_awaited_read(a, acts, k, now)),
+    decreases k,
+{
+    if k == 0 {
+    } else {
+        lemma_awaited_read_keeps(now, a, acts, k - 1);
+        let s = spec_awaited_read(a, acts, k - 1, now);
+        lemma_read_keeps(now, s, acts[k - 1].awaited);
+        lemma_keeps_trans(a, s, spec_read(s, acts[k - 1].awaited, now));
+    }
+}
+
+pub proof fn lemma_awaited_register_keeps(a: AState, acts: Seq<APromiseRegisterCallbackReq>, k: int, id: Seq<char>)
+    requires 0 <= k <= acts.len(),
+    ensures keeps(a, spec_awaited_register(a, acts, k, id)),
+    decreases k,
+{
+    if k == 0 {
+    } else {
+        lemma_awaited_register_keeps(a, acts, k - 1, id);
+        let s = spec_awaited_register(a, acts, k - 1, id);
+        let w = acts[k - 1].awaited;
+        lemma_insert_keeps(s, w, s.objects[w].add_callback(id));
+        lemma_keeps_trans(a, s, spec_awaited_register(a, acts, k, id));
+    }
+}
+
+/// Every handler keeps the shape: no object dropped; a schedule request
+/// leaves the objects as they were, any other the schedules.
+pub proof fn lemma_spec_handle_keeps(now: nat, a: AState, req: ARequest)
+    ensures
+        a.objects.dom() <= spec_handle(a, req, now).0.objects.dom(),
+        is_schedule_request(req) ==> spec_handle(a, req, now).0.objects == a.objects,
+        !is_schedule_request(req) ==> spec_handle(a, req, now).0.schedules == a.schedules,
+{
+    let b = spec_handle(a, req, now).0;
+    match req {
+        ARequest::PromiseGet(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::PromiseCreate(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::PromiseSettle(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::PromiseRegisterCallback(q) => {
+            lemma_read_keeps(now, a, q.awaited);
+            let a1 = spec_read(a, q.awaited, now);
+            lemma_read_keeps(now, a1, q.awaiter);
+            lemma_keeps_trans(a, a1, spec_read(a1, q.awaiter, now));
+        }
+        ARequest::PromiseRegisterListener(q) => { lemma_read_keeps(now, a, q.awaited); }
+        ARequest::ScheduleGet(_) => {}
+        ARequest::ScheduleCreate(_) => {}
+        ARequest::ScheduleDelete(_) => {}
+        ARequest::TaskGet(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskCreate(q) => { lemma_read_keeps(now, a, q.action.id); }
+        ARequest::TaskAcquire(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskFulfill(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskRelease(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskHalt(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskContinue(q) => { lemma_read_keeps(now, a, q.id); }
+        ARequest::TaskFence(q) => {
+            lemma_read_keeps(now, a, q.id);
+            let s = spec_read_task(a, q.id, now);
+            match q.action {
+                ATaskFenceAction::Create(c) => { lemma_read_keeps(now, s, c.id); lemma_keeps_trans(a, s, spec_read(s, c.id, now)); }
+                ATaskFenceAction::Settle(c) => { lemma_read_keeps(now, s, c.id); lemma_keeps_trans(a, s, spec_read(s, c.id, now)); }
+            }
+        }
+        ARequest::TaskHeartbeat(q) => { lemma_heartbeat_fold_keeps(now, a, q.pid, q.tasks, q.tasks.len() as int); }
+        ARequest::TaskSuspend(q) => {
+            let id = q.id;
+            let acts = q.actions;
+            let n = acts.len() as int;
+            if suspend_doors(acts, id) && a.has_task(id) {
+                let s = spec_read_task(a, id, now);
+                lemma_read_keeps(now, a, id);
+                match s.objects[id].task {
+                    None => {}
+                    Some(t) => {
+                        match first_failing(s, acts, n) {
+                            Some(j) => {
+                                lemma_first_failing_some(s, acts, n);
+                                let m = if s.objects.contains_key(acts[j].awaited) { j + 1 } else { j };
+                                lemma_awaited_read_keeps(now, s, acts, m);
+                                lemma_keeps_trans(a, s, spec_awaited_read(s, acts, m, now));
+                            }
+                            None => {
+                                lemma_awaited_read_keeps(now, s, acts, n);
+                                let c = spec_awaited_read(s, acts, n, now);
+                                lemma_keeps_trans(a, s, c);
+                                if any_settled(s, acts, now) {
+                                } else {
+                                    lemma_awaited_register_keeps(c, acts, n, id);
+                                    lemma_keeps_trans(a, c, spec_awaited_register(c, acts, n, id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub proof fn lemma_spec_handle(now: nat, a: AState, req: ARequest)
     requires inv(now, a),
     ensures spec_post(now, a, spec_handle(a, req, now).0),

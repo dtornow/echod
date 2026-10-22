@@ -134,6 +134,28 @@ pub proof fn lemma_no_due(now: nat, d: Doc)
 // Kernel steps, chained
 // ---------------------------------------------------------------------------
 
+/// What `drain` ensures: kernel steps at `now` that leave the schedules and
+/// every object's key as they were. The fleet model's relation for the
+/// steps after a handler or a fire.
+pub open spec fn drained(now: nat, a: AState, b: AState) -> bool {
+    &&& reach(now, a, b)
+    &&& b.schedules == a.schedules
+    &&& b.objects.dom() == a.objects.dom()
+}
+
+/// What `sweep` ensures: as `drained`, and nothing in the objects is due;
+/// if nothing fired, the state is as it was.
+pub open spec fn swept_by(now: nat, a: AState, b: AState, did: bool) -> bool {
+    &&& drained(now, a, b)
+    &&& objects_cleared(now, b.objects)
+    &&& !did ==> b == a
+}
+
+/// No schedule is due at `now`: what `schedule_due` answers `None` with.
+pub open spec fn schedules_idle(now: nat, c: Map<Seq<char>, ASchedule>) -> bool {
+    forall |id: Seq<char>| #[trigger] c.contains_key(id) ==> c[id].next_run_at > now
+}
+
 /// One kernel step at `now`: what every handler and internal step ensures.
 pub open spec fn kstep(now: nat, a: AState, b: AState) -> bool {
     inv(now, b) && legal(now, a, b)
@@ -442,6 +464,45 @@ fn schedules_next(rows: &Vec<Schedule>) -> (r: Option<u64>)
     min
 }
 
+/// A schedule due at `now`, if any: the first row whose next run has come.
+/// A fire's decision: `None` is a schedule's document with nothing due,
+/// which is swept unchanged so its key can be collected.
+pub fn schedule_due(s: &State, now: u64) -> (r: Option<usize>)
+    requires s.wf(),
+    ensures
+        match r {
+            Some(i) => i < s.schedules@.len() && s.schedules@[i as int].next_run_at <= now
+                && s@.schedules.contains_key(s.schedules@[i as int].id@) && s@.schedules[s.schedules@[i as int].id@] == s.schedules@[i as int]@,
+            None => schedules_idle(now as nat, s@.schedules),
+        },
+{
+    let mut i: usize = 0;
+    while i < s.schedules.len()
+        invariant
+            s.wf(),
+            i <= s.schedules@.len(),
+            forall |j: int| 0 <= j < i ==> #[trigger] s.schedules@[j].next_run_at > now,
+        decreases s.schedules@.len() - i,
+    {
+        if s.schedules[i].next_run_at <= now {
+            proof { s.lemma_schedule_at(i as int); }
+            return Some(i);
+        }
+        i += 1;
+    }
+    proof {
+        let c = fold_by(s.schedules@, sched_key(), sched_val());
+        lemma_fold_dom(s.schedules@, sched_key(), sched_val());
+        lemma_fold_distinct(s.schedules@, sched_key(), sched_val());
+        assert forall |id: Seq<char>| #[trigger] c.contains_key(id) implies c[id].next_run_at > now by {
+            assert(mentions(s.schedules@, sched_key(), id));
+            let j = choose |j: int| 0 <= j < s.schedules@.len() && #[trigger] sched_key()(s.schedules@[j]) == id;
+            assert(c[sched_key()(s.schedules@[j])] == sched_val()(s.schedules@[j]));
+        }
+    }
+    None
+}
+
 /// The least deadline of a state: of its objects and of its schedules.
 pub fn next_deadline(s: &State) -> (r: Option<u64>)
     requires s.wf(),
@@ -548,11 +609,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
     ensures
         final(s).wf(),
         inv(now as nat, final(s)@),
-        reach(now as nat, old(s)@, final(s)@),
-        final(s)@.schedules == old(s)@.schedules,
-        final(s)@.objects.dom() == old(s)@.objects.dom(),
-        objects_cleared(now as nat, final(s)@.objects),
-        !did ==> final(s)@ == old(s)@,
+        swept_by(now as nat, old(s)@, final(s)@, did),
 {
     let ghost a = s@;
     proof { lemma_reach_refl(now as nat, a); }
@@ -717,8 +774,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
     ensures
         final(s).wf(),
         inv(now as nat, final(s)@),
-        reach(now as nat, old(s)@, final(s)@),
-        final(s)@.schedules == old(s)@.schedules,
+        drained(now as nat, old(s)@, final(s)@),
 {
     proof { lemma_reach_refl(now as nat, old(s)@); }
     let mut rounds: u64 = 0;
@@ -728,6 +784,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
             inv(now as nat, s@),
             reach(now as nat, old(s)@, s@),
             s@.schedules == old(s)@.schedules,
+            s@.objects.dom() == old(s)@.objects.dom(),
             now <= MAX_TIME,
             cfg.wf(),
         decreases 65 - rounds,
@@ -751,7 +808,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
         while o < owed.len()
             invariant
                 o <= owed@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, now <= MAX_TIME, cfg.wf(),
+                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
             decreases owed@.len() - o,
         {
             let mut c: usize = 0;
@@ -759,7 +816,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 invariant
                     o < owed@.len(),
                     c <= owed@[o as int].callbacks@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, now <= MAX_TIME, cfg.wf(),
+                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
                 decreases owed@[o as int].callbacks@.len() - c,
             {
                 let ghost b = s@;
@@ -779,7 +836,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 invariant
                     o < owed@.len(),
                     l <= owed@[o as int].listeners@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, now <= MAX_TIME, cfg.wf(),
+                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
                 decreases owed@[o as int].listeners@.len() - l,
             {
                 let ghost b = s@;
@@ -815,12 +872,15 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
         while d < due.len()
             invariant
                 d <= due@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, now <= MAX_TIME, cfg.wf(),
+                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
             decreases due@.len() - d,
         {
             let ghost b = s@;
             s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(&due[d]) }, now, cfg);
-            proof { lemma_reach_step(now as nat, old(s)@, b, s@); }
+            proof {
+                lemma_reach_step(now as nat, old(s)@, b, s@);
+                assert(s@.objects.dom() =~= b.objects.dom());
+            }
             did = true;
             d += 1;
         }

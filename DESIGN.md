@@ -384,7 +384,8 @@ cache entry; and the commit, five actions, one store round trip each.
 `Prepare` loads the bucket's document and decides a step on it, and
 touches nothing: for a request, the document after is the kernel's
 `spec_handle` of the one loaded followed by any sequence of internal
-steps at the same instant; for a sweep, the step module's contract. `AddTimer`
+steps at the same instant, what `drain` ensures; for a sweep, what `sweep`
+then `drain` ensure. `AddTimer`
 puts the key for the document's nearest deadline. `Write` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
@@ -409,7 +410,7 @@ document, conditional on the version loaded with the origin, and runs the
 same five actions. That is the server's order, origin then schedule, and
 why a crash between the two loses nothing.
 
-Proved, 245 items, no admits:
+Proved, 251 items, no admits:
 
 - **Catalogue.** Every document in the bucket satisfies the kernel's
   catalogue at its stamp.
@@ -428,9 +429,18 @@ Proved, 245 items, no admits:
 The Catalogue and Timers theorems cover both kinds of document; in
 particular every schedule has a key at or before its next run. The
 Occurrences theorem is why a fire commits the origin before the schedule.
-It rests on one fact the model states as the step's obligation, since the
-catalogue, written from the Lean, does not say it: a step drops no object.
-The kernel's steps never do.
+
+What the model asks of a node's step is exactly what the node's verified
+functions ensure, and nothing else. A request's document is the handler's
+function then `drain`; a sweep's is `sweep` then `drain`; a fire's two are
+`spec_fire` then `drain`, and a schedule's key with nothing due is what
+`schedule_due` answers. `drain` and `sweep` are proved to keep every
+object's key and the schedules; every handler is proved to drop no object
+and to keep the other kind's rows (`lemma_spec_handle_keeps`). From these
+the proof derives what it needs of a step — that a document keeps its
+kind, that no object is lost, that a schedule's rows are the handler's —
+rather than assuming it. The catalogue alone would not give the first two:
+written from the Lean, it allows a step to drop a promise.
 
 All four as corollaries of one invariant that `init` establishes and every
 action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
