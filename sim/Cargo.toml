@@ -15,7 +15,6 @@ path = "src/lib.rs"
 
 [dependencies]
 echod-kernel = { path = "../kernel" }
-echod-fleet = { path = "../fleet" }
 echod-logic = { path = "../logic" }
 echod = { path = "../echod" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }

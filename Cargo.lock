@@ -1076,7 +1076,6 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "clap",
- "echod-fleet",
  "echod-kernel",
  "echod-logic",
  "futures",
@@ -1093,16 +1092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-fleet"
-version = "0.1.0"
-dependencies = [
- "echod-kernel",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
 name = "echod-kernel"
 version = "0.1.0"
 dependencies = [
@@ -1116,7 +1105,6 @@ dependencies = [
 name = "echod-logic"
 version = "0.1.0"
 dependencies = [
- "echod-fleet",
  "echod-kernel",
  "resonate-core",
  "serde",
@@ -1131,7 +1119,6 @@ dependencies = [
  "async-trait",
  "clap",
  "echod",
- "echod-fleet",
  "echod-kernel",
  "echod-logic",
  "resonate-core",
@@ -1140,6 +1127,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "echod-system"
+version = "0.1.0"
+dependencies = [
+ "echod-kernel",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
 ]
 
 [[package]]

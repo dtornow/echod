@@ -5,7 +5,7 @@
 //! that wrote it, and the deadline keys armed for it.
 //!
 //! A node's part of the state is the node core's view (`node::ANode`)
-//! and the commits it has in flight (`txn::ATxn`, with what the model
+//! and the commits it has in flight (`txn::ACommit`, with what the model
 //! sees of each: the version loaded, the documents before and after, the
 //! instant). A node's actions are the core's specification functions: what
 //! the executable node is proved to compute. A commit is the applier's
@@ -37,9 +37,9 @@
 
 use vstd::prelude::*;
 
-use crate::node::*;
-use crate::step::*;
-use crate::txn::*;
+use echod_kernel::commit::*;
+use echod_kernel::node::*;
+use echod_kernel::steps::*;
 use crate::tla::action::*;
 use echod_kernel::external::spec_handle;
 use echod_kernel::internal::spec_fire;
@@ -132,7 +132,7 @@ pub struct Flight {
     /// A fire's commit on the schedule, to follow this one.
     pub then: Option<Pending>,
     /// The node's decision.
-    pub c: ATxn,
+    pub c: ACommit,
     /// The version the store is expected to hold: the one loaded, then,
     /// once written, the one written.
     pub cur: Option<Seq<char>>,

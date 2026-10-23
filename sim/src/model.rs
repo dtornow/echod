@@ -24,20 +24,22 @@ fn create_req(id: &str, timeout_at: u64, t: &std::collections::BTreeMap<String, 
     k::PromiseCreateReq { id: id.to_string(), timeout_at, param: k::Value { headers: vec![], data: data.map(str::to_string) }, tags: tags(t) }
 }
 
-/// Apply `op` at `now` to `s`, drain, and answer as the server would. The
+/// Apply `op` at `now` to `s`, drain, and answer as the node would. The
 /// step is decided no earlier than the document's stamp, the instant of the
-/// last write; a write moves the stamp, as the server's header does, and a
-/// sweep always writes: what it fired, or the rewrite that collects its key.
-/// A schedule's next run is computed from the request's instant, before the
-/// stamp, as the server's dispatch does.
+/// last write; a write moves the stamp, as the node's header does. A sweep
+/// always writes: what it fired, or the rewrite that collects its key. An
+/// advance writes when it lands. A fire writes only what it changed: an
+/// occurrence fired again, by a node that lost the race or came later,
+/// changes nothing and writes nothing. A schedule's next run is computed
+/// from the request's instant, before the stamp, as the dispatch does.
 pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Config, corr: &str) -> (u16, Value) {
     let asked = now;
-    let now = echod_fleet::step::clamp_now(*stamp, now);
+    let now = echod_kernel::steps::clamp_now(*stamp, now);
     let before = canon_state(s);
     let kind = op.kind();
     let out = match op {
         Op::Sweep => {
-            echod_fleet::step::sweep(s, now, cfg);
+            echod_kernel::steps::sweep(s, now, cfg);
             wire::status_res(kind, corr, 200, serde_json::json!({}))
         }
         Op::Fire { schedule, at, promise_id, next } => {
@@ -65,9 +67,14 @@ pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Confi
             wire::response_out(kind, corr, action_kind, &s.handle(&q, now, cfg))
         }
     };
-    echod_fleet::step::drain(s, now, cfg);
+    echod_kernel::steps::drain(s, now, cfg);
     s.outbox.clear();
-    if matches!(op, Op::Sweep | Op::Fire { .. } | Op::Advance { .. }) || canon_state(s) != before {
+    let wrote = match op {
+        Op::Sweep => true,
+        Op::Advance { .. } => out.head.status == 200,
+        _ => canon_state(s) != before,
+    };
+    if wrote {
         *stamp = now;
     }
     (out.head.status as u16, out.data)

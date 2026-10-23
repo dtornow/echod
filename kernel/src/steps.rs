@@ -4,22 +4,21 @@
 //! for.
 //!
 //! The kernel proves each handler and each internal step against the
-//! catalogue; this module composes them. What it adds, and the fleet model
+//! catalogue; this module composes them. What it adds, and the system model
 //! relies on: after a sweep at `now` nothing in the document is due at `now`
 //! (`no_due`), a sweep that fired nothing left the document as it was, and
 //! `next_deadline` is the least deadline of the document (`is_next`).
 
 use vstd::prelude::*;
 
-use echod_kernel::external::*;
-use echod_kernel::internal::*;
-use echod_kernel::properties::*;
-use echod_kernel::store::*;
-use echod_kernel::store_proof::*;
-use echod_kernel::tags::OType;
-use echod_kernel::types::*;
-
-use crate::txn::*;
+use crate::commit::*;
+use crate::external::*;
+use crate::internal::*;
+use crate::properties::*;
+use crate::store::*;
+use crate::store_proof::*;
+use crate::tags::OType;
+use crate::types::*;
 
 verus! {
 
@@ -135,7 +134,7 @@ pub proof fn lemma_no_due(now: nat, d: Doc)
 // ---------------------------------------------------------------------------
 
 /// What `drain` ensures: kernel steps at `now` that leave the schedules and
-/// every object's key as they were. The fleet model's relation for the
+/// every object's key as they were. The system model's relation for the
 /// steps after a handler or a fire.
 pub open spec fn drained(now: nat, a: AState, b: AState) -> bool {
     &&& reach(now, a, b)
@@ -354,7 +353,7 @@ fn objects_next(rows: &Vec<Promise>) -> (r: Option<u64>)
         let ghost before = min;
         let ghost ap = p@;
         let pending = match p.state { PromiseState::Pending => true, _ => false };
-        let internal = match echod_kernel::tags::exec_otype(&p.tags) { OType::Internal => true, _ => false };
+        let internal = match crate::tags::exec_otype(&p.tags) { OType::Internal => true, _ => false };
         if pending && !internal {
             min = note(min, p.timeout_at);
         }

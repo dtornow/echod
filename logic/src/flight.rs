@@ -3,7 +3,7 @@
 //!
 //! Per document, one flight at a time: the rest queue behind it. A flight
 //! loads the document, runs the kernel, drains what the step left owed,
-//! then commits by the verified protocol of `echod_fleet::txn`, each store
+//! then commits by the verified protocol of `echod_kernel::commit`, each store
 //! call between its decisions: the key for the document's nearest deadline
 //! is put before the document, the document is written conditionally on
 //! the version loaded, the key replaced is removed after, the key kept is
@@ -16,7 +16,7 @@
 //! A schedule's key fires on two documents: the schedule's row decides the
 //! occurrence's promise, the kernel's `process_schedule` runs on the row
 //! beside the promise's origin, and the origin is committed first, then
-//! the schedule with the key fired: the fleet model's `Fire`, with its
+//! the schedule with the key fired: the system model's `Fire`, with its
 //! pending half. The fire holds the schedule's slot throughout and takes
 //! the origin's for the first commit; no flight on an origin ever waits
 //! for a schedule's slot, so none of this waits in a circle.
@@ -24,16 +24,16 @@
 //! The cache holds the last document this node read or wrote for an
 //! origin. It is never used without asking the store: every load
 //! revalidates with `If-None-Match`, and the body is used only when the
-//! store says the version held is current (the fleet's revalidation
+//! store says the version held is current (the system's revalidation
 //! theorem). Every version read or written, and every entry dropped, is
 //! reported to the core, so what it decides on is what the cache holds. A
 //! schedule's document is not cached.
 
 use std::collections::{HashMap, VecDeque};
 
-use echod_fleet::node::Key;
-use echod_fleet::step;
-use echod_fleet::txn::Txn;
+use echod_kernel::node::Key;
+use echod_kernel::steps;
+use echod_kernel::commit::Commit as Plan;
 use echod_kernel::{self as k, Occurrence, OutboxEntry, Promise, Schedule, ScheduleTimeoutReq, State as KState};
 use resonate_core::{util, Unavailable};
 
@@ -78,16 +78,16 @@ pub(crate) struct Working<R: Row> {
     pub etag: Option<Etag>,
 }
 
-/// A commit in progress: the verified decisions, and the store call
-/// between them that is waited on.
-pub(crate) struct Commit<R: Row> {
+/// A commit in progress: the verified plan, and the store call between
+/// its decisions that is waited on.
+pub(crate) struct Committing<R: Row> {
     w: Working<R>,
     rows: Vec<R>,
     changed: Vec<R>,
     changed_any: bool,
     now: u64,
     fired: Option<FiredKey>,
-    txn: Txn,
+    plan: Plan,
     step: Step,
 }
 
@@ -138,14 +138,14 @@ struct FireCtx {
 enum Phase {
     Idle,
     Loading { op: OpId, revalidating: Option<Cached> },
-    Origin { commit: Commit<Promise>, done: Done },
-    Schedule { commit: Commit<Schedule>, done: Done },
+    Origin { commit: Committing<Promise>, done: Done },
+    Schedule { commit: Committing<Schedule>, done: Done },
     FireLoadingSchedule { op: OpId },
     FireWaitingOrigin(FireCtx),
     FireLoadingOrigin { op: OpId, revalidating: Option<Cached>, ctx: FireCtx },
-    FireIdle { commit: Commit<Schedule> },
-    FireOrigin { commit: Commit<Promise>, ctx: FireCtx, schedules: Vec<Schedule>, outbox: Vec<OutboxEntry>, t: u64 },
-    FireSchedule { commit: Commit<Schedule> },
+    FireIdle { commit: Committing<Schedule> },
+    FireOrigin { commit: Committing<Promise>, ctx: FireCtx, schedules: Vec<Schedule>, outbox: Vec<OutboxEntry>, t: u64 },
+    FireSchedule { commit: Committing<Schedule> },
 }
 
 impl Phase {
@@ -494,18 +494,18 @@ impl State {
     /// the kernel being proved for an instant at or after it; then the
     /// drain. A lost race runs this again on what it re-read, so the step
     /// decides from the state it is given, which every kernel handler does.
-    fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Commit<R>, Done) {
+    fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
         let mut state = R::state_of(&w.loaded.rows);
-        let now = step::clamp_now(w.loaded.stamp, work.now());
+        let now = steps::clamp_now(w.loaded.stamp, work.now());
         let (response, did) = match work {
             Work::Request { req, .. } => (Some(state.handle(req, now, &self.kcfg)), false),
             Work::Sweep { .. } => {
-                let did = step::sweep(&mut state, now, &self.kcfg);
+                let did = steps::sweep(&mut state, now, &self.kcfg);
                 (None, did)
             }
             Work::Fire { .. } => (None, false),
         };
-        step::drain(&mut state, now, &self.kcfg);
+        steps::drain(&mut state, now, &self.kcfg);
         let rows = R::rows_of(&state);
         let fired = match work {
             Work::Sweep { fired, .. } => Some(fired.clone()),
@@ -601,9 +601,9 @@ impl State {
     fn fire_decide(&mut self, mut f: Flight, ws: Working<Schedule>) {
         let Work::Fire { schedule, fired, now } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
         let (id, fired, now) = (schedule.clone(), fired.clone(), *now);
-        let t1 = step::clamp_now(ws.loaded.stamp, now);
+        let t1 = steps::clamp_now(ws.loaded.stamp, now);
         // the decision is the step module's: a row due at the instant, or none
-        let due = step::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
+        let due = steps::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
         let Some(c) = due else {
             // a sweep of the schedule's document that finds nothing due
             let rows = ws.loaded.rows.clone();
@@ -654,11 +654,11 @@ impl State {
     fn fire_run(&mut self, mut f: Flight, ctx: FireCtx, wo: Working<Promise>) {
         let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
         let id = schedule.clone();
-        let t = step::clamp_now(wo.loaded.stamp, ctx.t1);
+        let t = steps::clamp_now(wo.loaded.stamp, ctx.t1);
         let req = ScheduleTimeoutReq { schedule: id, occurrences: vec![Occurrence { at: ctx.at, promise_id: ctx.promise_id.clone() }], next_run_at: ctx.next };
         let mut state = KState { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
         state.process_schedule(&req, t, &self.kcfg);
-        step::drain(&mut state, t, &self.kcfg);
+        steps::drain(&mut state, t, &self.kcfg);
         self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         let mut commit = self.commit_new(wo, state.objects, t, false, None);
         match self.commit_advance(f.id, &mut commit, None) {
@@ -715,25 +715,25 @@ impl State {
     /// The decisions before the first store call: the rows that changed,
     /// the nearest deadline, and the verified `prepare`. `did` is whether a
     /// sweep fired anything; `fired` the key whose firing this is.
-    fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, now: u64, did: bool, fired: Option<FiredKey>) -> Commit<R> {
+    fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, now: u64, did: bool, fired: Option<FiredKey>) -> Committing<R> {
         let changed = doc::changed(&w.loaded.rows, &rows);
         let changed_any = did || !changed.is_empty() || rows.len() != w.loaded.rows.len();
-        let deadline = step::next_deadline(&R::state_of(&rows));
+        let deadline = steps::next_deadline(&R::state_of(&rows));
         let etag = w.etag.as_ref().map(|e| e.0.clone());
-        let txn = self.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
-        Commit { w, rows, changed, changed_any, now, fired, txn, step: Step::Start }
+        let plan = self.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
+        Committing { w, rows, changed, changed_any, now, fired, plan, step: Step::Start }
     }
 
     /// Drive a commit: `answer` is the store's answer to the call the
     /// commit waits on, if it waits on one. Returns with the next call
     /// issued, or the commit over.
-    fn commit_advance<R: Row>(&mut self, fid: FlightId, c: &mut Commit<R>, answer: Option<StoreOutcome>) -> Progress {
+    fn commit_advance<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, answer: Option<StoreOutcome>) -> Progress {
         let me = self.cfg.node_id.clone();
         match std::mem::replace(&mut c.step, Step::Over) {
             Step::Start => {
                 if c.changed_any {
                     // (1) the key for the new deadline, before the state that arms it
-                    if let Some(at) = c.txn.arm_at() {
+                    if let Some(at) = c.plan.arm_at() {
                         let key = Key { origin: c.w.target.clone(), at, token: self.token() };
                         let name = self.key_name(&key, &me);
                         let op = self.store(StoreCall::Put { key: name.clone(), body: Vec::new() }, Owner::Flight(fid));
@@ -755,7 +755,7 @@ impl State {
             Step::PuttingKey { key, name, .. } => match answer {
                 Some(StoreOutcome::Done) => {
                     self.timers.wheel.arm(key.at, name);
-                    c.txn.armed(key);
+                    c.plan.armed(key);
                     // (2) the document
                     self.issue_write(fid, c, false);
                     Progress::Issued
@@ -776,14 +776,14 @@ impl State {
                         return self.delete_fired(fid, c);
                     }
                     // (3) the key replaced, or no longer needed
-                    if let Some(key) = c.txn.to_disarm() {
+                    if let Some(key) = c.plan.to_disarm() {
                         let name = self.key_name(&key, &me);
                         let op = self.store(StoreCall::Delete { key: name.clone() }, Owner::Flight(fid));
                         c.step = Step::DeletingPrevious { op, key, name };
                         return Progress::Issued;
                     }
                     // (4) the key kept, with the version written
-                    self.core.finish(&c.txn, &etag.0);
+                    self.core.finish(&c.plan, &etag.0);
                     self.delete_fired(fid, c)
                 }
                 Some(StoreOutcome::Failed(e)) => Progress::Failed(e),
@@ -797,7 +797,7 @@ impl State {
                     _ => {}
                 }
                 let etag = c.w.etag.clone().unwrap_or_else(|| Etag(String::new()));
-                self.core.finish(&c.txn, &etag.0);
+                self.core.finish(&c.plan, &etag.0);
                 self.delete_fired(fid, c)
             }
             Step::DeletingFired { key, name, .. } => match answer {
@@ -817,7 +817,7 @@ impl State {
 
     /// (5) the key fired: the write that just landed fences every commit
     /// that armed it and has not written yet.
-    fn delete_fired<R: Row>(&mut self, fid: FlightId, c: &mut Commit<R>) -> Progress {
+    fn delete_fired<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>) -> Progress {
         let Some(f) = c.fired.clone() else { return Progress::Done(Fired::Kept) };
         self.core.collected(&c.w.target, &f.key);
         let name = self.key_name(&f.key, &f.by);
@@ -828,7 +828,7 @@ impl State {
 
     /// Write the document at a new version, conditionally on the version
     /// loaded: the rows the step changed appended, or the whole document.
-    fn issue_write<R: Row>(&mut self, fid: FlightId, c: &mut Commit<R>, idle: bool) {
+    fn issue_write<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, idle: bool) {
         let header = Header { stamp: c.now, nonce: self.token() };
         let changed: &[R] = if idle { &[] } else { &c.changed };
         let (call, mode, row_count, bytes) = match &c.w.etag {

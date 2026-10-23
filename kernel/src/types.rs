@@ -537,7 +537,7 @@ pub struct ScheduleTimeoutReq {
     pub next_run_at: u64,
 }
 
-/// Any request: what the fleet model carries into a step, and what `handle`
+/// Any request: what the system model carries into a step, and what `handle`
 /// dispatches on.
 pub enum Request {
     PromiseGet(PromiseGetReq),
@@ -681,7 +681,7 @@ pub struct TaskFenceRes { pub status: u16, pub action: Option<TaskFenceInnerRes>
 #[cfg(verus_keep_ghost)]
 pub type ATaskFenceRes = TaskFenceResSpec;
 
-/// Any response: what `handle` answers, and what the fleet model records.
+/// Any response: what `handle` answers, and what the system model records.
 pub enum Response {
     Promise(PromiseRes),
     Schedule(ScheduleRes),

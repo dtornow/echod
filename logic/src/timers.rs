@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use echod_fleet::node::Key;
+use echod_kernel::node::Key;
 
 use crate::dispatch::Target;
 use crate::flight::{Firing, Work};

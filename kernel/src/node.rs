@@ -1,20 +1,21 @@
-//! The node core: the state a node keeps about the membership and its cache,
-//! and the decisions it takes from it, as executable Rust with its
-//! specification, in Anvil's shape.
+//! The node: the state a node keeps about the membership, its cache and
+//! the deadline keys it armed, and the decisions it takes from it, as
+//! executable Rust with its specification, in Anvil's shape.
 //!
 //! Every function here is a pure step: it reads and updates this state and
 //! nothing else, and its `ensures` says it computes the specification's
-//! function of the same name on the state's view. The fleet model
-//! (`cluster.rs`) defines a node's actions *as* those specification
-//! functions, so the theorem proved there is about the node this code is.
-//! What stays outside, trusted: the shim that calls these functions in the
-//! right order against the real bucket, and the bucket itself.
+//! function of the same name on the state's view. The system model
+//! (`echod-system`, `model.rs`) defines a node's actions *as* those
+//! specification functions, so the theorems proved there are about the
+//! node this code is. What stays outside, trusted: the control flow that
+//! calls these functions in the right order against the real bucket
+//! (`echod-logic`), and the bucket itself.
 
 use vstd::hash_map::StringHashMap;
 use vstd::prelude::*;
 
 // `str == str` and `String::clone` are the kernel's trusted primitives.
-pub use echod_kernel::types::{clone_string, str_eq};
+pub use crate::types::{clone_string, str_eq};
 
 verus! {
 

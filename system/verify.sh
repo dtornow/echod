@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Verify the fleet with Verus. VERUS_DIR is a Verus source tree with a
+# Verify the system model with Verus. VERUS_DIR is a Verus source tree with a
 # release build in target-verus/release (see BUILD.md in verus-lang/verus).
 #
-# The fleet imports the kernel: its documents are kernel states and its
-# node fires the kernel's sweeper steps. The kernel is verified first and
+# The system imports the kernel: its documents are kernel states and its
+# node's actions are the kernel's node, commit and step functions. The
+# kernel is verified first and
 # exported — its Verus metadata and an rlib compiled by Verus's own rustc —
 # into the kernel's target-verus/, and imported here. `cargo build` is the
 # other compiler: the same sources with the ghost code erased.

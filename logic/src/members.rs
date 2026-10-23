@@ -12,15 +12,15 @@
 //! its members make it the owner.
 //!
 //! None of this is safety. Writes are conditional on the version read, and
-//! `echod-fleet` proves the documents correct and every deadline covered
+//! `echod-system` proves the documents correct and every deadline covered
 //! whichever node acts; a node's cache is used only once a conditional
 //! read has confirmed its version. Membership steers which node caches an
 //! origin and which fires its deadlines: two nodes acting on one origin at
 //! once waste work, and nothing more.
 //!
 //! The state behind the rules, and the decisions, are not here: they are
-//! `echod_fleet::node::NodeCore`, executable Rust verified to compute the
-//! fleet model's specification functions step for step. This module is
+//! `echod_kernel::node::NodeCore`, executable Rust verified to compute the
+//! system model's specification functions step for step. This module is
 //! the shim around that core: it announces, lists, reads the configuration
 //! object and hands the result to `read_config`. Membership is decided on
 //! the fleet's time, the later of a node's clock and the latest
@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use echod_fleet::node::NodeCore;
+use echod_kernel::node::NodeCore;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;

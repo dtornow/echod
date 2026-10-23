@@ -7,8 +7,8 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `kernel/` | `echod-kernel`: the state machine, one object store, one transition per request, verified with Verus against the specification's catalogue |
-| `fleet/` | `echod-fleet`: the fleet as a TLA-style state machine in Verus over the kernel's own states, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
+| `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the sweep and drain, each proved to compute its specification function |
+| `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
 | `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; checked for linearizability against the kernel |
@@ -58,7 +58,7 @@ function: `spec_promise_create(a, req, now)` and its seventeen siblings
 give the abstract state each handler leaves, and each handler `ensures` it
 computes its function. `handle` takes a `Request`, one enum over the
 eighteen, and returns the `Response`; `spec_handle` is its function, state
-and response at once. That is the one name the fleet model uses for a
+and response at once. That is the one name the system model uses for a
 request, and the one call the node makes.
 
 Proved: every catalogue entry, at every step, over the whole store. A step
@@ -78,7 +78,7 @@ Lean text, both because the text is wrong:
 
 `processSchedule` is also a function, `spec_fire`: each occurrence's object
 projected if it exists, else born of the occurrence, then the schedule
-advanced; the fleet model fires a schedule by it. The promise an occurrence
+advanced; the system model fires a schedule by it. The promise an occurrence
 is born with carries the schedule and its own lineage in its tags
 (`spec_stamp`), and a lemma shows the stamp changes neither the timer axis
 nor the type of the tags.
@@ -198,7 +198,7 @@ handed to the router after the commit; delivery is at most once, and a lost
 A deadline is an empty object whose key says what is due, when, a token
 drawn per arm, and the node that armed it, filed under the time bucket (an
 hour by default) its deadline falls in. The commit is the protocol
-`echod-fleet` proves (`txn.rs`, run by `flight.rs`): the key for the
+the kernel's `commit.rs` decides and `echod-system` proves, run by `flight.rs`: the key for the
 document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
@@ -206,7 +206,7 @@ remembered with the version written. A key that fires sweeps its origin;
 the sweep's own write, or, if nothing was due, a rewrite of the document
 at a new version, fences every commit in flight that armed the key, and
 then the key is deleted, whoever armed it. So a deadline a document owes
-always has a key in the bucket, which the fleet proof states and proves.
+always has a key in the bucket, which the system's theorems state and prove.
 
 A schedule's document goes through the same commit, with its next run as
 the deadline it owes. Its key fires on two documents: the row decides the
@@ -253,8 +253,8 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`members.rs`: they are `echod_fleet::node::NodeCore`, executable Rust
-verified to compute the fleet model's specification functions step for
+`members.rs`: they are `echod_kernel::node::NodeCore`, executable Rust
+verified to compute the system model's specification functions step for
 step. `members.rs` is the trusted shim around it: it announces, lists,
 reads the configuration object and hands it to `read_config`; it asks
 `acts`; and `flight.rs` reports every version read or written with
@@ -267,7 +267,7 @@ Clocks are a node's own. No node's clock is assumed to bear any relation to
 another's or to true time, and no safety property rests on one. A clock is
 read for one thing: the instant a step is decided at, where the kernel
 judges what has expired. An earlier design leased ownership on clocks and
-let the owner answer from its cache without asking the store; the fleet
+let the owner answer from its cache without asking the store; the system
 proof needed a bound on skew for that, and the simulation showed stale
 reads the moment the bound was exceeded. The design now asks the store
 on every load, one conditional round trip, and needs no bound.
@@ -375,7 +375,9 @@ The check is linearizability per document against the kernel, an origin's
 or a schedule's: an order of the entries, each within its span, that
 yields every answer seen and ends in the rows the bucket holds, each step
 decided at the later of its instant and the document's stamp as the node
-does; an entry without an answer may be placed or skipped. A fire's first
+does, the stamp moving with every step that writes (a sweep always, a
+fire only when it changed something, an advance when it landed); an entry
+without an answer may be placed or skipped. A fire's first
 half is the kernel's `processSchedule` on the row beside the origin's
 objects; its second half advances the row if it is still at the
 occurrence, and is refused otherwise, as the node's conditional write
@@ -384,44 +386,42 @@ Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
 
-## echod-fleet
+## echod-system
 
-The multi-node system as a state machine, in the shape Anvil gives a
+The whole system as a state machine, in the shape Anvil gives a
 Kubernetes cluster: a state, a `Step` for every action, each action an
 `Action` value — a precondition and a transition over the step's input —
 `init`, `next` as the step's action forward on its input, and Anvil's TLA
 embedding (`verus-tla`, vendored) to state the theorem as `always(inv)`.
 The `Action` values are what the embedding's fairness rules take, for the
-liveness to come. The fleet imports the kernel under
+liveness to come. Nothing in the crate runs: it imports the kernel under
 Verus (`verify.sh` exports the kernel's metadata and imports it), so the
-bucket's documents are the kernel's own states and the kernel's steps enter
-the model with the contracts the kernel proves of them.
+bucket's documents are the kernel's own states and a node's actions are
+the kernel's `node`, `commit` and `steps` functions, with the contracts
+the kernel proves of them.
 
 ```text
-node.rs           the node core: executable Rust, each step ensures its spec function
-txn.rs            the commit's decisions, the same way
-step.rs           sweep, drain, next_deadline, clamp_now: verified over the kernel
-cluster.rs        the state and the nine actions
-cluster_proof.rs  the invariant, one lemma per action, the four theorems
-tla/              the temporal logic, vendored from Anvil's verus-tla
+model.rs      the state and the nine actions
+theorems.rs   the invariant, one lemma per action, the four theorems
+tla/          the temporal logic, vendored from Anvil's verus-tla
 ```
 
-The node core and the commit are what Anvil calls the reconciler: sans-I/O
-step functions. `NodeCore` holds what a node keeps of the configuration
-(epoch, members, the clock at the last read), of its cache (each origin's
-version and when it was filled) and of its deadline keys (the key kept for
-each origin, with the version written with it). `Txn` is one commit's
-decisions: the previous key, whether to arm, what to delete, what to keep.
-Each function `ensures` it equals the specification function of the same
-name on the state's view. The step module verifies the loops the node
-runs around the kernel: `sweep` leaves nothing due at its instant and
-leaves the document as it was if nothing fired; `drain` is kernel steps;
-`next_deadline` is the least deadline; `clamp_now` the later of clock and
-stamp. One primitive of its own is trusted with its meaning stated: FNV-1a
-is a function of the string. `str == str` and `String::clone` are the
-kernel's.
+The node and the commit, in the kernel, are what Anvil calls the
+reconciler: sans-I/O step functions. `NodeCore` (`node.rs`) holds what a
+node keeps of the configuration (epoch, members, the clock at the last
+read), of its cache (each origin's version and when it was filled) and of
+its deadline keys (the key kept for each origin, with the version written
+with it). `Commit` (`commit.rs`) is one commit's decisions: the previous
+key, whether to arm, what to delete, what to keep. Each function `ensures`
+it equals the specification function of the same name on the state's
+view. `steps.rs` verifies the loops the node runs around the kernel:
+`sweep` leaves nothing due at its instant and leaves the document as it
+was if nothing fired; `drain` is kernel steps; `next_deadline` is the
+least deadline; `clamp_now` the later of clock and stamp. One primitive
+is trusted with its meaning stated: FNV-1a is a function of the string,
+as `str == str` and `String::clone` are.
 
-The fleet state: the nodes and the bucket, and beside them a ghost
+The system state: the nodes and the bucket, and beside them a ghost
 history. A node is its core's view, its body cache, whether it is alive,
 its clock, and the commits it has in flight. The bucket has every document
 — an origin's objects or a schedule's row, the kernel's own types — with
@@ -514,9 +514,9 @@ without a round trip; the bound was the one hypothesis the proof carried,
 and the design dropped it: every load asks the store, and the model has
 no real time.
 
-How the proof reaches the running code: the theorems are about the fleet
-model; the model's node actions are the core's, the commit's and the step
-module's specification functions; their executable functions are verified
+How the proof reaches the running code: the theorems are about the system
+model; the model's node actions are the kernel's node, commit and steps
+specification functions; their executable functions are verified
 to compute those functions; `echod-logic` keeps its membership, cache and
 deadline-key state in the core and takes its decisions from it, runs
 the step module's loops, and serves every request through the kernel's

@@ -19,10 +19,10 @@
 
 use vstd::prelude::*;
 
-use crate::node::*;
-use crate::step::*;
-use crate::txn::*;
-use crate::cluster::*;
+use echod_kernel::commit::*;
+use echod_kernel::node::*;
+use echod_kernel::steps::*;
+use crate::model::*;
 use crate::tla::defs::*;
 use crate::tla::rules::*;
 use echod_kernel::external::spec_handle;

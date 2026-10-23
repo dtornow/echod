@@ -58,7 +58,7 @@ pub open spec fn touches_only(a: AState, b: AState, ids: spec_fn(Seq<char>) -> b
 // Each `spec_*` is the handler's meaning: the state it leaves and the
 // response it gives, in the vocabulary of `object.rs`. The executable
 // handler below ensures it computes its `spec_*`, and `external_proof`
-// proves the catalogue of each `spec_*`. The fleet model carries requests
+// proves the catalogue of each `spec_*`. The system model carries requests
 // into steps through these.
 
 /// `readObject` as a function of the state: the object at `id`, projected
@@ -564,7 +564,7 @@ pub open spec fn is_schedule_request(req: ARequest) -> bool {
 }
 
 /// Any request, as a function of the abstract state: the handler for its
-/// kind. What the fleet model carries a request into a step through.
+/// kind. What the system model carries a request into a step through.
 pub open spec fn spec_handle(a: AState, req: ARequest, now: nat) -> (AState, AResponse) {
     match req {
         ARequest::PromiseGet(q) => { let (b, r) = spec_promise_get(a, q, now); (b, AResponse::Promise(r)) }

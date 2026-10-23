@@ -1,12 +1,12 @@
 [package]
-name = "echod-fleet"
-description = "The fleet as a TLA-style state machine in Verus: nodes, the bucket, clocks, crashes; and the proof that ownership is exclusive and trusted caches are current."
+name = "echod-system"
+description = "The system as a TLA-style state machine in Verus, over the kernel: nodes, the bucket, clocks, crashes; and its theorems. Proof only."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "echod_fleet"
+name = "echod_system"
 path = "src/lib.rs"
 
 [dependencies]

@@ -542,6 +542,12 @@ async fn check(world: &World) -> Report {
             Verdict::NotLinearizable { origin, steps, detail } => {
                 report.search_steps += steps;
                 report.failures.push(format!("origin {origin}: not linearizable after {steps} steps: {detail}"));
+                // `ECHOD_SIM_DUMP=1`: the origin's whole history, one entry per line
+                if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
+                    for e in es {
+                        eprintln!("{} {:>6} {:>13}..{:<13} now={} {:<8} {:?} -> {}", origin, e.id, e.invoke, e.ret, e.now, e.client, e.op, e.outcome.as_ref().map(|(s, d)| format!("{s} {d}")).unwrap_or_else(|| "?".into()));
+                    }
+                }
             }
             Verdict::Undecided { origin, steps } => {
                 report.search_steps += steps;
@@ -565,7 +571,7 @@ async fn check(world: &World) -> Report {
         let rows = echod_logic::doc::decode::<echod_kernel::Promise>(&bytes).map(|l| l.rows).unwrap_or_default();
         let origin = key.trim_start_matches("wf/");
         let origin = echod_logic::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
-        if let Some(d) = echod_fleet::step::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
+        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
             if !armed.contains(&(origin.clone(), d)) {
                 report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
             }
@@ -576,7 +582,7 @@ async fn check(world: &World) -> Report {
         let rows = echod_logic::doc::decode::<echod_kernel::Schedule>(&bytes).map(|l| l.rows).unwrap_or_default();
         let id = key.trim_start_matches("sched/");
         let id = echod_logic::keys::decode_key(id).unwrap_or_else(|| id.to_string());
-        if let Some(d) = echod_fleet::step::next_deadline(&echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }) {
+        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }) {
             if !armed.contains(&(format!("sched:{id}"), d)) {
                 report.failures.push(format!("schedule {id}: owes its next run at {d} and the bucket holds no key for it"));
             }

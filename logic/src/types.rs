@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use echod_fleet::node::Key;
+use echod_kernel::node::Key;
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::Unavailable;
 

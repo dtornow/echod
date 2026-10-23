@@ -71,7 +71,7 @@ shows the panels with data.
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate
   them, so those handlers are verified but never simulated.
-- **Clippy.** The kernel and the fleet carry clippy's style warnings
+- **Clippy.** The kernel and the system carry clippy's style warnings
   (`&Vec` parameters, `match` on one pattern) that Verus's shape wants;
   decide which to allow in `lib.rs`.
 - **README.** Nothing outside DESIGN.md mentions `/metrics` yet.

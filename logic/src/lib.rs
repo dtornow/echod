@@ -22,15 +22,15 @@
 //! timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
 //! ```
 //!
-//! What stays verified beneath: the kernel runs every step, the fleet's
-//! `NodeCore` and `Txn` take every decision about membership, cache and
-//! deadline keys, and the fleet's step module runs the sweep and the drain.
+//! What stays verified beneath, all of it the kernel's: `handle` runs every
+//! request, `NodeCore` and `Commit` take every decision about membership,
+//! cache and deadline keys, and `steps` runs the sweep and the drain.
 //! The core is the shim the proof stops at, now with nothing in it but
 //! the order of calls.
 
 use std::collections::HashMap;
 
-use echod_fleet::node::{Key, NodeCore};
+use echod_kernel::node::{Key, NodeCore};
 use echod_kernel::Config as KernelConfig;
 use resonate_core::types::RequestEnvelope;
 

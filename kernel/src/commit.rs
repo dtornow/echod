@@ -1,10 +1,10 @@
 //! A commit, as the node decides it: which deadline key to arm before the
 //! document is written, which to remove after, and which to remember.
 //!
-//! The applier runs the store operations; this is the decision between
-//! them, in Anvil's shape: each function computes its specification
-//! function on the state's view. The fleet model defines a node's commit
-//! actions as these functions.
+//! The control flow (`echod-logic`) runs the store calls; this is the
+//! decision between them, in Anvil's shape: each function computes its
+//! specification function on the state's view. The system model defines
+//! a node's commit actions as these functions.
 //!
 //! The rules: a key is armed for the document's nearest deadline unless the
 //! node remembers a key for that very instant, armed with the very version
@@ -18,12 +18,12 @@
 use vstd::prelude::*;
 
 use crate::node::*;
-use echod_kernel::types::*;
+use crate::types::*;
 
 verus! {
 
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
-pub struct Txn {
+pub struct Commit {
     pub origin: String,
     /// The nearest deadline of the document as it will be written.
     pub deadline: Option<u64>,
@@ -39,7 +39,7 @@ pub struct Txn {
     pub armed_now: Option<Key>,
 }
 
-pub struct ATxn {
+pub struct ACommit {
     pub origin: Origin,
     pub deadline: Option<nat>,
     pub changed: bool,
@@ -49,10 +49,10 @@ pub struct ATxn {
     pub armed_now: Option<AKey>,
 }
 
-impl View for Txn {
-    type V = ATxn;
-    open spec fn view(&self) -> ATxn {
-        ATxn {
+impl View for Commit {
+    type V = ACommit;
+    open spec fn view(&self) -> ACommit {
+        ACommit {
             origin: self.origin@,
             deadline: opt_nat(self.deadline),
             changed: self.changed,
@@ -72,32 +72,32 @@ impl View for Txn {
 /// is the one remembered for `o` if it was armed with that very version
 /// and is not the key being fired; a key is armed if the document changed,
 /// owes a deadline, and the previous key is not at that instant.
-pub open spec fn spec_prepare(n: ANode, o: Origin, etag: Option<Seq<char>>, deadline: Option<nat>, changed: bool, fired: Option<AKey>) -> ATxn {
+pub open spec fn spec_prepare(n: ANode, o: Origin, etag: Option<Seq<char>>, deadline: Option<nat>, changed: bool, fired: Option<AKey>) -> ACommit {
     let previous = if n.armed.contains_key(o) && Some(n.armed[o].etag) == etag && Some(n.armed[o].key) != fired { Some(n.armed[o].key) } else { None };
     let rearm = changed && match deadline {
         None => false,
         Some(d) => match previous { Some(p) => p.at != d, None => true },
     };
-    ATxn { origin: o, deadline, changed, fired, previous, rearm, armed_now: None }
+    ACommit { origin: o, deadline, changed, fired, previous, rearm, armed_now: None }
 }
 
-pub open spec fn spec_armed(t: ATxn, k: AKey) -> ATxn {
-    ATxn { armed_now: Some(k), ..t }
+pub open spec fn spec_armed(t: ACommit, k: AKey) -> ACommit {
+    ACommit { armed_now: Some(k), ..t }
 }
 
 /// After the write: the previous key, when it was replaced or the document
 /// owes no deadline any more.
-pub open spec fn spec_to_disarm(t: ATxn) -> Option<AKey> {
+pub open spec fn spec_to_disarm(t: ACommit) -> Option<AKey> {
     if t.changed && (t.deadline is None || t.rearm) { t.previous } else { None }
 }
 
 /// After the write: the key the node remembers for the origin.
-pub open spec fn spec_keep(t: ATxn) -> Option<AKey> {
+pub open spec fn spec_keep(t: ACommit) -> Option<AKey> {
     if t.deadline is None { None } else if t.rearm { t.armed_now } else { t.previous }
 }
 
 /// After the write, at version `etag`: remember the key kept with that version.
-pub open spec fn spec_finish(n: ANode, t: ATxn, etag: Seq<char>) -> ANode {
+pub open spec fn spec_finish(n: ANode, t: ACommit, etag: Seq<char>) -> ANode {
     match spec_keep(t) {
         Some(k) => spec_set_armed(n, t.origin, Some(AArmed { key: k, etag })),
         None => spec_set_armed(n, t.origin, None),
@@ -109,7 +109,7 @@ pub open spec fn spec_finish(n: ANode, t: ATxn, etag: Seq<char>) -> ANode {
 // ---------------------------------------------------------------------------
 
 impl NodeCore {
-    pub fn prepare(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Txn)
+    pub fn prepare(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Commit)
         ensures t@ == spec_prepare(self@, origin@, opt_str(etag), opt_nat(deadline), changed, opt_key(fired)),
     {
         let previous: Option<Key> = match self.armed.get(origin) {
@@ -130,11 +130,11 @@ impl NodeCore {
             None => false,
             Some(d) => match &previous { Some(p) => p.at != d, None => true },
         };
-        Txn { origin: origin.to_string(), deadline, changed, fired, previous, rearm, armed_now: None }
+        Commit { origin: origin.to_string(), deadline, changed, fired, previous, rearm, armed_now: None }
     }
 
     /// After the write, at version `etag`: remember the key kept with it.
-    pub fn finish(&mut self, t: &Txn, etag: &String)
+    pub fn finish(&mut self, t: &Commit, etag: &String)
         ensures final(self)@ == spec_finish(old(self)@, t@, etag@),
     {
         let keep: Option<Key> = match t.deadline {
@@ -166,7 +166,7 @@ pub open spec fn opt_str(o: Option<&String>) -> Option<Seq<char>> {
     }
 }
 
-impl Txn {
+impl Commit {
     /// The instant to arm a key at, if one must be armed.
     pub fn arm_at(&self) -> (r: Option<u64>)
         ensures opt_nat(r) == (if self@.rearm { self@.deadline } else { None }),
