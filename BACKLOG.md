@@ -27,19 +27,19 @@ visible.
 
 Run echod under Antithesis. Two parts:
 
-- **Instrumentation.** Antithesis-style assertions in the server and
+- **Instrumentation.** Antithesis-style assertions in the node and
   the simulator: `assert_always` for the invariants the proofs give us
   (one writer per origin, no stale read, every armed deadline fires
   once), `assert_sometimes` for the paths we want reached (a commit
   that races, a configuration change under load, a timer kept because
-  the delete failed, a forward that comes back unavailable), and
+  the delete failed, a listing that fails and is retried), and
   `assert_reachable` on the request kinds the soaks keep reporting as
   missing. The Antithesis SDK's assertions are no-ops outside the
   platform, so they can live in the code permanently.
 - **Workload.** A workload definition: the container image, the
   compose of nodes plus a store, the client driver that issues the
   protocol's requests and checks the answers, and the fault
-  configuration (crashes, partitions, clock jumps, store outages,
+  configuration (crashes, clock jumps, store outages,
   matching what `echod-sim` inflicts). The checker in `echod-sim`
   should be reusable as the workload's oracle rather than rewritten.
 
@@ -71,7 +71,7 @@ shows the panels with data.
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate
   them, so those handlers are verified but never simulated.
-- **Clippy.** The server crate has two constructors with more than
-  seven arguments (`Applier::new`, `Nodes::new`), two `map_or` that
-  should be `is_none_or`, and a large-variant enum in `doc.rs`.
+- **Clippy.** The kernel and the fleet carry clippy's style warnings
+  (`&Vec` parameters, `match` on one pattern) that Verus's shape wants;
+  decide which to allow in `lib.rs`.
 - **README.** Nothing outside DESIGN.md mentions `/metrics` yet.

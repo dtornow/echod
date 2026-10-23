@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use echod_server::store::{Etag, MemoryStore, ObjectStoreStore, Read, Store, StoreError};
+use echod::store::{Etag, MemoryStore, ObjectStoreStore, Read, Store, StoreError};
 
 struct Backend {
     name: &'static str,
@@ -36,7 +36,7 @@ async fn backends() -> Vec<Backend> {
     if let Ok(url) = std::env::var("ECHOD_STORE") {
         let endpoint = std::env::var("ECHOD_ENDPOINT").ok();
         let region = std::env::var("ECHOD_REGION").ok();
-        let s = ObjectStoreStore::from_url(&format!("{}/{}", url.trim_end_matches('/'), format!("test-{nonce}")), endpoint.as_deref(), region.as_deref()).unwrap();
+        let s = ObjectStoreStore::from_url(&format!("{}/test-{nonce}", url.trim_end_matches('/')), endpoint.as_deref(), region.as_deref()).unwrap();
         out.push(Backend { name: "object_store url", store: Arc::new(s), content_addressed: url.starts_with("s3") });
     }
     out

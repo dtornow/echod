@@ -1,4 +1,4 @@
-//! Create a bucket on an S3 API: `cargo run -p echod-server --example mkbucket -- <bucket> <endpoint> [region]`.
+//! Create a bucket on an S3 API: `cargo run -p echod --example mkbucket -- <bucket> <endpoint> [region]`.
 //! Credentials come from the environment. For emulators that have no bucket yet.
 
 #[tokio::main]

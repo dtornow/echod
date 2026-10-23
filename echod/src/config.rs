@@ -3,7 +3,7 @@
 use clap::Parser;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "echod-server", about = "A Resonate server over an S3 bucket", version)]
+#[command(name = "echod", about = "A Resonate server over an S3 bucket", version)]
 pub struct Config {
     /// The store, as a URL: `s3://bucket/prefix`, `gs://bucket`,
     /// `az://container`, `file:///dir`, `memory:///`. Without it and without a
@@ -76,10 +76,6 @@ pub struct Config {
     #[arg(long, env = "ECHOD_CACHE_BYTES", default_value_t = 256 * 1024 * 1024)]
     pub cache_bytes: u64,
 
-    /// Forward a request for an origin another node owns to that node.
-    #[arg(long, env = "ECHOD_FORWARD", default_value_t = true, action = clap::ArgAction::Set)]
-    pub forward: bool,
-
     /// Debug mode: the clock is the request's `resonate:debug_time`, and no
     /// loop runs on wall time.
     #[arg(long, env = "ECHOD_DEBUG", default_value_t = false)]
@@ -106,12 +102,30 @@ impl Config {
             node_ttl_ms: 2_000,
             cache_entries: 1_000,
             cache_bytes: 16 * 1024 * 1024,
-            forward: true,
             debug: false,
         }
     }
 
-    pub fn kernel(&self) -> echod_kernel::Config {
-        echod_kernel::Config { retry_timeout: self.retry_timeout, compact: self.compact }
+    /// This node's URL as the workers reach it.
+    pub fn node_url(&self) -> String {
+        self.url.clone().unwrap_or_else(|| format!("http://{}", self.bind.replace("0.0.0.0", "127.0.0.1")))
+    }
+
+    /// The core's dials: these, and what the store says of itself.
+    pub fn logic(&self, node_id: String, appendable: bool) -> echod_logic::Config {
+        echod_logic::Config {
+            node_id,
+            url: self.node_url(),
+            prefix: self.prefix.clone(),
+            compact: self.compact,
+            appendable,
+            retry_timeout: self.retry_timeout,
+            timer_bucket_ms: self.timer_bucket_ms,
+            heartbeat_ms: self.heartbeat_ms,
+            node_ttl_ms: self.node_ttl_ms,
+            cache_entries: self.cache_entries,
+            cache_bytes: self.cache_bytes,
+            debug: self.debug,
+        }
     }
 }

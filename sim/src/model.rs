@@ -6,7 +6,7 @@
 //! and a model step compare as `(status, data)` exactly.
 
 use echod_kernel as k;
-use echod_server::wire;
+use echod_logic::wire;
 use serde_json::Value;
 
 use crate::workload::Op;

@@ -29,5 +29,5 @@ if [ -z "${ECHOD_STORE:-}" ]; then
   trap 'kill $pid 2>/dev/null; rm -rf "$root"' EXIT
   export ECHOD_STORE=s3://echod ECHOD_REGION=us-east-1
 fi
-cargo test -p echod-server --test store "$@"
-cargo test -p echod-server --test e2e "$@"
+cargo test -p echod --test store "$@"
+cargo test -p echod --test e2e "$@"

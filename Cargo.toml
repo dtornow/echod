@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "fleet", "server", "sim"]
+members = ["kernel", "fleet", "logic", "echod", "sim"]
 
 [workspace.package]
 version = "0.1.0"

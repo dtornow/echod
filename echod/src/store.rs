@@ -10,38 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-/// An object's version, as the store reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Etag(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreError {
-    /// Someone else wrote first. Re-read, re-decide, never replay.
-    PreconditionFailed,
-    /// No answer at all.
-    Unavailable(String),
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StoreError::PreconditionFailed => f.write_str("precondition failed"),
-            StoreError::Unavailable(m) => write!(f, "store unavailable: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-/// What a read returned.
-#[derive(Debug, Clone)]
-pub enum Read {
-    /// The object, its version, and its size in bytes.
-    Body(Vec<u8>, Etag),
-    /// Still the version the caller held.
-    NotModified,
-    Absent,
-}
+pub use echod_logic::types::{Etag, Read, StoreError};
+use echod_logic::types::{StoreCall, StoreOutcome};
 
 #[async_trait]
 pub trait Store: Send + Sync {
@@ -81,6 +51,49 @@ pub trait Store: Send + Sync {
     async fn ready(&self) -> bool;
 }
 
+/// One call the core asked for, made on `store`, as the core wants it
+/// answered.
+pub async fn call(store: &dyn Store, c: StoreCall) -> StoreOutcome {
+    match c {
+        StoreCall::Get { key } => match store.get(&key).await {
+            Ok(r) => StoreOutcome::Got(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::GetIfNoneMatch { key, etag } => match store.get_if_none_match(&key, &etag).await {
+            Ok(r) => StoreOutcome::Read(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::PutIfMatch { key, body, etag } => match store.put_if_match(&key, body, &etag).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::PutIfNoneMatch { key, body } => match store.put_if_none_match(&key, body).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::AppendIfMatch { key, offset, body, etag } => match store.append_if_match(&key, offset, body, &etag).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::Put { key, body } => match store.put(&key, body).await {
+            Ok(()) => StoreOutcome::Done,
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::Delete { key } => match store.delete(&key).await {
+            Ok(()) => StoreOutcome::Done,
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::List { prefix, max_keys } => match store.list(&prefix, max_keys).await {
+            Ok(r) => StoreOutcome::Listed(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::ListPrefixes { prefix } => match store.list_prefixes(&prefix).await {
+            Ok(r) => StoreOutcome::Listed(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // In memory
 // ---------------------------------------------------------------------------
@@ -117,7 +130,7 @@ impl MemoryStore {
     /// again yields the same version. A writer that must move the version
     /// changes the bytes.
     fn etag(body: &[u8]) -> Etag {
-        Etag(format!("{:016x}", crate::keys::fnv1a(&String::from_utf8_lossy(body))))
+        Etag(format!("{:016x}", echod_logic::keys::fnv1a(&String::from_utf8_lossy(body))))
     }
 
     /// Every key, for tests.
@@ -620,7 +633,3 @@ pub async fn open(cfg: &crate::Config) -> Result<Arc<dyn Store>, String> {
     }
 }
 
-/// A store failure as the port's one error.
-pub fn unavailable_err(e: StoreError) -> resonate_core::Unavailable {
-    resonate_core::Unavailable::new(e.to_string())
-}

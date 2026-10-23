@@ -8,10 +8,8 @@
 //! promises there are.
 //!
 //! ```text
-//! requests     echod_requests_total{kind,route,status}          every request, by what it was,
-//!              echod_request_duration_seconds{kind,route}        where it ran, and how it ended
-//! peers        echod_forwards_total{outcome}                     requests sent to the owner node
-//!              echod_forward_duration_seconds
+//! requests     echod_requests_total{kind,status}                every request, by what it was and
+//!              echod_request_duration_seconds{kind}              how it ended
 //! messages     echod_messages_total{kind,outcome}                pushes to workers
 //!              echod_message_duration_seconds
 //! store        echod_store_operations_total{op,object,outcome}  every call on the bucket: the
@@ -51,7 +49,10 @@ use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::Registry;
 
-use crate::keys::KeySpace;
+use echod_logic::keys::KeySpace;
+use echod_logic::types::Note;
+use echod_logic::Snapshot;
+
 use crate::store::{Etag, Read, Store, StoreError};
 
 /// The content type of what `encode` produces.
@@ -77,17 +78,6 @@ macro_rules! label {
             }
         }
     };
-}
-
-label! {
-    /// Where a request ran: here for its own client, here for another node
-    /// that relayed it, or at the owner it was forwarded to.
-    Route { Local => "local", Relayed => "relayed", Forwarded => "forwarded" }
-}
-
-label! {
-    /// How a call to another node ended.
-    ForwardOutcome { Answered => "answered", Unavailable => "unavailable" }
 }
 
 label! {
@@ -127,47 +117,7 @@ label! {
 }
 
 label! {
-    WriteMode { Create => "create", Rewrite => "rewrite", Append => "append" }
-}
-
-label! {
-    /// How an attempt to commit a step ended: it landed; it lost a race on
-    /// the document and was re-decided; the store failed; or the races ran
-    /// out.
-    CommitOutcome { Committed => "committed", Raced => "raced", Failed => "failed", Exhausted => "exhausted" }
-}
-
-label! {
-    /// What a lookup in the document cache cost. `revalidated`: a
-    /// conditional read confirmed the version held, and the body in memory
-    /// was used. `refreshed`: the conditional read brought a newer version.
-    /// `absent`: the document is gone from the bucket. `miss`: nothing was
-    /// held; a full read.
-    CacheResult { Revalidated => "revalidated", Refreshed => "refreshed", Absent => "absent", Miss => "miss" }
-}
-
-label! {
     Outcome { Ok => "ok", Failed => "failed" }
-}
-
-label! {
-    ConfigWrite { Written => "written", Conflict => "conflict", Failed => "failed" }
-}
-
-label! {
-    TimerKind { Origin => "origin", Schedule => "schedule" }
-}
-
-label! {
-    /// What became of a fired key: deleted after its sweep committed; kept,
-    /// to fire again, because the delete failed; the sweep failed; or it
-    /// was deferred because this node does not act on its target right now.
-    FireOutcome { Deleted => "deleted", Kept => "kept", Failed => "failed", Deferred => "deferred" }
-}
-
-label! {
-    /// A sweep fired something, found nothing due, or did not commit.
-    SweepOutcome { Fired => "fired", Idle => "idle", Failed => "failed" }
 }
 
 /// The request kinds the protocol defines; anything else is `other`, so a
@@ -212,19 +162,12 @@ pub fn message_kind(kind: &str) -> MessageKind {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RequestLabels {
     pub kind: &'static str,
-    pub route: Route,
     pub status: u16,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RequestTiming {
     pub kind: &'static str,
-    pub route: Route,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct ForwardLabels {
-    pub outcome: ForwardOutcome,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -248,17 +191,17 @@ pub struct StoreTiming {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ModeLabels {
-    pub mode: WriteMode,
+    pub mode: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct CommitLabels {
-    pub outcome: CommitOutcome,
+    pub outcome: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct CacheLabels {
-    pub result: CacheResult,
+    pub result: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -268,42 +211,28 @@ pub struct OutcomeLabels {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ConfigWriteLabels {
-    pub outcome: ConfigWrite,
+    pub outcome: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct FireLabels {
-    pub kind: TimerKind,
-    pub outcome: FireOutcome,
+    pub kind: &'static str,
+    pub outcome: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TimerKindLabels {
-    pub kind: TimerKind,
+    pub kind: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct SweepLabels {
-    pub outcome: SweepOutcome,
+    pub outcome: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct BuildLabels {
     version: &'static str,
-}
-
-/// What the gauges read at scrape time: the state the node is in now, not
-/// a count of what happened. Supplied by whoever owns the state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Snapshot {
-    pub cache_entries: u64,
-    pub cache_bytes: u64,
-    pub cache_evictions: u64,
-    pub epoch: u64,
-    pub members: u64,
-    pub fresh: bool,
-    pub acting: bool,
-    pub timers_armed: u64,
 }
 
 type SnapshotFn = Box<dyn Fn() -> Snapshot + Send + Sync>;
@@ -349,8 +278,6 @@ pub struct Metrics {
     snapshot: Arc<Mutex<Option<SnapshotFn>>>,
     pub requests: Family<RequestLabels, Counter>,
     pub request_duration: Family<RequestTiming, Histogram>,
-    pub forwards: Family<ForwardLabels, Counter>,
-    pub forward_duration: Histogram,
     pub messages: Family<MessageLabels, Counter>,
     pub message_duration: Histogram,
     pub store_operations: Family<StoreLabels, Counter>,
@@ -389,14 +316,9 @@ impl Metrics {
         let snapshot: Arc<Mutex<Option<SnapshotFn>>> = Arc::new(Mutex::new(None));
 
         let requests = Family::<RequestLabels, Counter>::default();
-        registry.register("echod_requests", "Requests, by kind, where they ran, and the status answered", requests.clone());
+        registry.register("echod_requests", "Requests, by kind and the status answered", requests.clone());
         let request_duration = Family::<RequestTiming, Histogram>::new_with_constructor(latency);
         registry.register_with_unit("echod_request_duration", "Time from receiving a request to answering it", prometheus_client::registry::Unit::Seconds, request_duration.clone());
-
-        let forwards = Family::<ForwardLabels, Counter>::default();
-        registry.register("echod_forwards", "Requests forwarded to the node that owns their origin", forwards.clone());
-        let forward_duration = latency();
-        registry.register_with_unit("echod_forward_duration", "Round trip of a request forwarded to another node", prometheus_client::registry::Unit::Seconds, forward_duration.clone());
 
         let messages = Family::<MessageLabels, Counter>::default();
         registry.register("echod_messages", "Messages pushed to workers", messages.clone());
@@ -442,8 +364,6 @@ impl Metrics {
             snapshot,
             requests,
             request_duration,
-            forwards,
-            forward_duration,
             messages,
             message_duration,
             store_operations,
@@ -474,15 +394,10 @@ impl Metrics {
         out
     }
 
-    pub fn request(&self, kind: &str, route: Route, status: u16, started: Instant) {
+    pub fn request(&self, kind: &str, status: u16, started: Instant) {
         let kind = kind_label(kind);
-        self.requests.get_or_create(&RequestLabels { kind, route, status }).inc();
-        self.request_duration.get_or_create(&RequestTiming { kind, route }).observe(started.elapsed().as_secs_f64());
-    }
-
-    pub fn forward(&self, outcome: ForwardOutcome, started: Instant) {
-        self.forwards.get_or_create(&ForwardLabels { outcome }).inc();
-        self.forward_duration.observe(started.elapsed().as_secs_f64());
+        self.requests.get_or_create(&RequestLabels { kind, status }).inc();
+        self.request_duration.get_or_create(&RequestTiming { kind }).observe(started.elapsed().as_secs_f64());
     }
 
     pub fn message(&self, kind: &str, outcome: MessageOutcome, started: Instant) {
@@ -495,43 +410,42 @@ impl Metrics {
         self.store_duration.get_or_create(&StoreTiming { op, object }).observe(started.elapsed().as_secs_f64());
     }
 
-    pub fn document_write(&self, mode: WriteMode, bytes: usize) {
-        self.document_writes.get_or_create(&ModeLabels { mode }).inc();
-        self.document_bytes.observe(bytes as f64);
-    }
-
-    pub fn commit(&self, outcome: CommitOutcome) {
-        self.commits.get_or_create(&CommitLabels { outcome }).inc();
-    }
-
-    pub fn cache(&self, result: CacheResult) {
-        self.cache_lookups.get_or_create(&CacheLabels { result }).inc();
-    }
-
-    pub fn membership_refresh(&self, ok: bool) {
-        self.membership_refreshes.get_or_create(&OutcomeLabels { outcome: if ok { Outcome::Ok } else { Outcome::Failed } }).inc();
-    }
-
-    pub fn configuration_change(&self) {
-        self.configuration_changes.inc();
-    }
-
-    pub fn configuration_write(&self, outcome: ConfigWrite) {
-        self.configuration_writes.get_or_create(&ConfigWriteLabels { outcome }).inc();
-    }
-
-    /// A key fired: what became of it, and how late it was, in ms.
-    pub fn timer_fire(&self, kind: TimerKind, outcome: FireOutcome, lag_ms: u64) {
-        self.timer_fires.get_or_create(&FireLabels { kind, outcome }).inc();
-        self.timer_lag.get_or_create(&TimerKindLabels { kind }).observe(lag_ms as f64 / 1000.0);
-    }
-
-    pub fn timer_listing(&self, ok: bool) {
-        self.timer_listings.get_or_create(&OutcomeLabels { outcome: if ok { Outcome::Ok } else { Outcome::Failed } }).inc();
-    }
-
-    pub fn sweep(&self, outcome: SweepOutcome) {
-        self.sweeps.get_or_create(&SweepLabels { outcome }).inc();
+    /// What the core counts, as it notes it. The observed and logged notes
+    /// are not counted: their values are names.
+    pub fn note(&self, n: &Note) {
+        let ok = |ok: bool| if ok { Outcome::Ok } else { Outcome::Failed };
+        match n {
+            Note::DocumentWrite { mode, bytes } => {
+                self.document_writes.get_or_create(&ModeLabels { mode: mode.as_str() }).inc();
+                self.document_bytes.observe(*bytes as f64);
+            }
+            Note::Commit(outcome) => {
+                self.commits.get_or_create(&CommitLabels { outcome: outcome.as_str() }).inc();
+            }
+            Note::Cache(result) => {
+                self.cache_lookups.get_or_create(&CacheLabels { result: result.as_str() }).inc();
+            }
+            Note::MembershipRefresh { ok: o } => {
+                self.membership_refreshes.get_or_create(&OutcomeLabels { outcome: ok(*o) }).inc();
+            }
+            Note::ConfigurationChange => {
+                self.configuration_changes.inc();
+            }
+            Note::ConfigurationWrite(outcome) => {
+                self.configuration_writes.get_or_create(&ConfigWriteLabels { outcome: outcome.as_str() }).inc();
+            }
+            Note::TimerFire { kind, outcome, lag_ms } => {
+                self.timer_fires.get_or_create(&FireLabels { kind: kind.as_str(), outcome: outcome.as_str() }).inc();
+                self.timer_lag.get_or_create(&TimerKindLabels { kind: kind.as_str() }).observe(*lag_ms as f64 / 1000.0);
+            }
+            Note::TimerListing { ok: o } => {
+                self.timer_listings.get_or_create(&OutcomeLabels { outcome: ok(*o) }).inc();
+            }
+            Note::Sweep(outcome) => {
+                self.sweeps.get_or_create(&SweepLabels { outcome: outcome.as_str() }).inc();
+            }
+            _ => {}
+        }
     }
 }
 

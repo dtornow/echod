@@ -50,7 +50,7 @@ pub fn check_origin(origin: &str, entries: &[Entry], final_state: &k::State, cfg
             if model::canon_state(&frame.state) == want_final {
                 return Verdict::Linearizable { steps };
             }
-            last_mismatch = format!("every answer explained, but the order leaves other rows than the bucket holds");
+            last_mismatch = "every answer explained, but the order leaves other rows than the bucket holds".to_string();
             stack.pop();
             continue;
         }
@@ -147,5 +147,5 @@ fn compact(v: &Value) -> String {
 }
 
 fn hash(v: &Value) -> u64 {
-    echod_server::keys::fnv1a(&v.to_string())
+    echod_logic::keys::fnv1a(&v.to_string())
 }

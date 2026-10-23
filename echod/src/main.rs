@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use echod_server::{gateway, store, Config, Server};
+use echod::{gateway, store, Config, Node};
 use resonate_core::ResonateServer;
 
 #[tokio::main]
@@ -15,7 +15,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let server = Server::new(cfg.clone(), store);
+    let server = Node::new(cfg.clone(), store);
     if let Err(e) = server.init(cfg.debug).await {
         tracing::error!(error = %e, "could not start");
         std::process::exit(1);
@@ -28,7 +28,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    tracing::info!(node = %server.nodes().id(), url = %server.nodes().url(), %addr, "serving");
+    tracing::info!(node = %server.id(), url = %server.url(), %addr, "serving");
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("stopping");
     let _ = server.stop().await;

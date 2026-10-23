@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 pub trait Row: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
     fn id(&self) -> &str;
     fn state_of(rows: &[Self]) -> State;
+    /// The rows of a document from a kernel state: its objects, or its
+    /// schedules.
+    fn rows_of(s: &State) -> Vec<Self>;
     /// The rows as an origin's, which the node's cache holds; `None` for a
     /// schedule's, which it does not.
     fn promises(rows: &[Self]) -> Option<Vec<Promise>>;
@@ -34,6 +37,9 @@ impl Row for Promise {
     fn state_of(rows: &[Self]) -> State {
         State { objects: rows.to_vec(), schedules: Vec::new(), outbox: Vec::new() }
     }
+    fn rows_of(s: &State) -> Vec<Self> {
+        s.objects.clone()
+    }
     fn promises(rows: &[Self]) -> Option<Vec<Promise>> {
         Some(rows.to_vec())
     }
@@ -45,6 +51,9 @@ impl Row for Schedule {
     }
     fn state_of(rows: &[Self]) -> State {
         State { objects: Vec::new(), schedules: rows.to_vec(), outbox: Vec::new() }
+    }
+    fn rows_of(s: &State) -> Vec<Self> {
+        s.schedules.clone()
     }
     fn promises(_rows: &[Self]) -> Option<Vec<Promise>> {
         None

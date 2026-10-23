@@ -108,7 +108,7 @@ impl Op {
             Op::Fire { promise_id, .. } => promise_id.clone(),
             Op::Sweep => String::new(),
         };
-        echod_server::keys::origin_of(&id).to_string()
+        echod_logic::keys::origin_of(&id).to_string()
     }
 
     fn state_str(s: k::PromiseState) -> &'static str {
@@ -207,8 +207,8 @@ impl Generator {
     /// Another promise of the same origin the client has seen as awaitable,
     /// if it has; else any other promise of the origin.
     fn awaitable_sibling(&self, id: &str, seen: &Seen, rng: &mut Rng) -> String {
-        let origin = echod_server::keys::origin_of(id);
-        let known: Vec<&String> = seen.external.iter().filter(|p| p.as_str() != id && echod_server::keys::origin_of(p) == origin).collect();
+        let origin = echod_logic::keys::origin_of(id);
+        let known: Vec<&String> = seen.external.iter().filter(|p| p.as_str() != id && echod_logic::keys::origin_of(p) == origin).collect();
         if !known.is_empty() && rng.percent(80) {
             return (*rng.pick(&known)).clone();
         }
@@ -217,7 +217,7 @@ impl Generator {
 
     /// Another promise of the same origin, never `id` itself.
     fn sibling(&self, id: &str, rng: &mut Rng) -> String {
-        let origin = echod_server::keys::origin_of(id);
+        let origin = echod_logic::keys::origin_of(id);
         for _ in 0..8 {
             let s = format!("{}:{}", origin, 1 + rng.below(self.promises_per_origin));
             if s != id {

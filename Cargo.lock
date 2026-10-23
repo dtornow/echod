@@ -1068,6 +1068,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "clap",
+ "echod-fleet",
+ "echod-kernel",
+ "echod-logic",
+ "futures",
+ "object_store",
+ "prometheus-client",
+ "reqwest 0.12.28",
+ "resonate-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "echod-fleet"
 version = "0.1.0"
 dependencies = [
@@ -1088,27 +1113,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-server"
+name = "echod-logic"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "axum",
- "clap",
  "echod-fleet",
  "echod-kernel",
- "futures",
- "object_store",
- "prometheus-client",
- "reqwest 0.12.28",
  "resonate-core",
  "serde",
  "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
  "validator",
 ]
 
@@ -1118,9 +1130,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
+ "echod",
  "echod-fleet",
  "echod-kernel",
- "echod-server",
+ "echod-logic",
  "resonate-core",
  "serde",
  "serde_json",

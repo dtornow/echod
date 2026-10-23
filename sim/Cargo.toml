@@ -1,6 +1,6 @@
 [package]
 name = "echod-sim"
-description = "Deterministic simulation of echod-server: one seed, no wall clock, no sockets; checked for linearizability against the kernel."
+description = "Deterministic simulation of echod: one seed, no wall clock, no sockets; checked for linearizability against the kernel."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 echod-kernel = { path = "../kernel" }
 echod-fleet = { path = "../fleet" }
-echod-server = { path = "../server" }
+echod-logic = { path = "../logic" }
+echod = { path = "../echod" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }

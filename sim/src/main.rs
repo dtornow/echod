@@ -3,7 +3,7 @@ use echod_sim::sim::{run, Options};
 use echod_sim::store::Faults;
 
 #[derive(Parser)]
-#[command(name = "echod-sim", about = "echod-server under deterministic simulation")]
+#[command(name = "echod-sim", about = "echod under deterministic simulation")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -40,9 +40,6 @@ struct Knobs {
     /// Chance per chaos tick that a node joins.
     #[arg(long, default_value_t = 8)]
     join: u64,
-    /// Chance per chaos tick that two nodes are partitioned for a while.
-    #[arg(long, default_value_t = 10)]
-    partition: u64,
     /// Chance per chaos tick that a node loses the store for a while.
     #[arg(long, default_value_t = 10)]
     outage: u64,
@@ -74,7 +71,6 @@ impl Knobs {
             crash_percent: self.crash,
             stop_percent: self.stop,
             join_percent: self.join,
-            partition_percent: self.partition,
             outage_percent: self.outage,
             jump_percent: self.jump,
             skew_ms: self.skew,
@@ -122,9 +118,9 @@ fn main() {
             for seed in from..from + seeds {
                 let r = run(knobs.options(seed));
                 println!(
-                    "seed {seed}: {} entries={} sweeps={} fires={} crash/stop/join/part/out/jump={}/{}/{}/{}/{}/{} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
+                    "seed {seed}: {} entries={} sweeps={} fires={} crash/stop/join/out/jump={}/{}/{}/{}/{} overlap={} store={} (unavail {} lost {} conflict {}) msgs={}+{} steps={}{}",
                     if r.ok { "ok" } else { "FAILED" },
-                    r.entries, r.sweeps, r.fires, r.crashes, r.stops, r.joins, r.partitions, r.outages, r.jumps, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
+                    r.entries, r.sweeps, r.fires, r.crashes, r.stops, r.joins, r.outages, r.jumps, r.overlapping_pairs, r.store_operations, r.store_unavailable, r.store_lost_acks, r.store_conflicts, r.executes, r.unblocks, r.search_steps,
                     if r.kinds_missing.is_empty() { String::new() } else { format!(" missing={:?}", r.kinds_missing) }
                 );
                 for f in &r.failures {

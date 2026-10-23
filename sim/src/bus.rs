@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use echod_kernel::PromiseState;
-use echod_server::env::Clock;
-use echod_server::keys::{origin_of, KeySpace};
-use echod_server::store::{MemoryStore, Store};
+use echod::env::Clock;
+use echod::store::{MemoryStore, Store};
+use echod_logic::keys::{origin_of, KeySpace};
 use resonate_core::types::Message;
 use resonate_core::{ResonateRouter, Unavailable};
 
@@ -45,7 +45,7 @@ impl RecordingBus {
 
     async fn rows(&self, origin: &str) -> Vec<echod_kernel::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_server::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
+            Ok(Some((bytes, _))) => echod_logic::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
             _ => Vec::new(),
         }
     }

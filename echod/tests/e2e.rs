@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use axum::routing::post;
 use axum::{Json, Router};
-use echod_server::store::{MemoryStore, ObjectStoreStore, Store};
-use echod_server::{gateway, Config, Server};
+use echod::store::{MemoryStore, ObjectStoreStore, Store};
+use echod::{gateway, Config, Node as Server};
 use resonate_core::ResonateServer;
 use serde_json::{json, Value};
 
@@ -118,7 +118,7 @@ impl Node {
     async fn acting(&self) {
         let start = Instant::now();
         while !self.server.acting() {
-            assert!(start.elapsed() < Duration::from_secs(10), "{} never came to act", self.server.nodes().id());
+            assert!(start.elapsed() < Duration::from_secs(10), "{} never came to act", self.server.id());
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -307,11 +307,11 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     // what the operator sees of all that
     let text = node.metrics().await;
     assert!(text.ends_with("# EOF\n"), "OpenMetrics ends with EOF");
-    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",route="local",status="200"} "#) >= 1.0, "{text}");
-    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",route="local",status="400"} "#) >= 1.0);
-    assert!(sample(&text, r#"echod_requests_total{kind="other",route="local",status="400"} "#) >= 1.0, "an unknown kind is counted as other");
-    assert!(sample(&text, r#"echod_requests_total{kind="promise.search",route="local",status="403"} "#) >= 1.0);
-    assert!(sample(&text, r#"echod_request_duration_seconds_count{kind="promise.create",route="local"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",status="200"} "#) >= 1.0, "{text}");
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.create",status="400"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_requests_total{kind="other",status="400"} "#) >= 1.0, "an unknown kind is counted as other");
+    assert!(sample(&text, r#"echod_requests_total{kind="promise.search",status="403"} "#) >= 1.0);
+    assert!(sample(&text, r#"echod_request_duration_seconds_count{kind="promise.create"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_store_operations_total{op="put_if_none_match",object="document",outcome="ok"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_store_operations_total{op="put",object="timer",outcome="ok"} "#) >= 1.0, "deadline keys were put");
     assert!(sample(&text, r#"echod_store_operations_total{op="put",object="node",outcome="ok"} "#) >= 1.0, "the node announced itself");
@@ -350,7 +350,7 @@ async fn one_node_appending() {
     one_node(Arc::clone(&store) as Arc<dyn Store>, 64, "").await;
     // the document is a log: more rows than promises
     let (bytes, _) = store.get("wf/a").await.unwrap().unwrap();
-    let loaded = echod_server::doc::decode::<echod_kernel::Promise>(&bytes).unwrap();
+    let loaded = echod_logic::doc::decode::<echod_kernel::Promise>(&bytes).unwrap();
     assert_eq!(loaded.rows.len(), 2);
     assert!(loaded.row_count > 2, "{} rows", loaded.row_count);
 }
@@ -415,31 +415,35 @@ async fn two_nodes() {
 
     // they find each other: a configuration naming both
     let start = Instant::now();
-    while a.server.nodes().members().members.len() < 2 || b.server.nodes().members().members.len() < 2 || !a.server.acting() || !b.server.acting() {
+    while a.server.membership().members.len() < 2 || b.server.membership().members.len() < 2 || !a.server.acting() || !b.server.acting() {
         assert!(start.elapsed() < Duration::from_secs(10), "nodes never met");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     // every origin has one owner, and both nodes agree on it
-    let owner = a.server.nodes().owner("x").unwrap().id;
-    assert_eq!(owner, b.server.nodes().owner("x").unwrap().id);
+    let owner = a.server.owner("x").unwrap();
+    assert_eq!(owner, b.server.owner("x").unwrap());
     let (own, other) = if owner == "a" { (&a, &b) } else { (&b, &a) };
 
-    // a request to the other node is answered by the owner
+    // either node serves a request: the write is conditional, and the
+    // other node's cache revalidates before it is used
     let (status, headers, _) = other.send("promise.create", json!({ "id": "x:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } })).await;
     assert_eq!(status, 200);
-    assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(owner.as_str()));
-    let (status, headers, _) = own.send("promise.get", json!({ "id": "x:1" })).await;
+    assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(other.server.id()));
+    let (status, headers, data) = own.send("promise.get", json!({ "id": "x:1" })).await;
     assert_eq!(status, 200);
     assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(owner.as_str()));
+    assert_eq!(data["promise"]["state"], "pending");
+    let (status, _, data) = other.send("promise.settle", json!({ "id": "x:1", "state": "resolved" })).await;
+    assert_eq!(status, 200, "{data}");
+    let (status, _, data) = own.send("promise.get", json!({ "id": "x:1" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(data["promise"]["state"], "resolved", "the owner's cache was revalidated");
 
-    // the other node counts a forward, the owner a relay
     let (ot, wt) = (other.metrics().await, own.metrics().await);
-    assert_eq!(sample(&ot, r#"echod_requests_total{kind="promise.create",route="forwarded",status="200"} "#), 1.0, "{ot}");
-    assert_eq!(sample(&ot, r#"echod_forwards_total{outcome="answered"} "#), 1.0);
-    assert_eq!(sample(&ot, "echod_forward_duration_seconds_count "), 1.0);
-    assert_eq!(sample(&wt, r#"echod_requests_total{kind="promise.create",route="relayed",status="200"} "#), 1.0, "{wt}");
-    assert_eq!(sample(&wt, r#"echod_requests_total{kind="promise.get",route="local",status="200"} "#), 1.0);
+    assert_eq!(sample(&ot, r#"echod_requests_total{kind="promise.create",status="200"} "#), 1.0, "{ot}");
+    assert_eq!(sample(&wt, r#"echod_requests_total{kind="promise.get",status="200"} "#), 2.0);
+    assert!(sample(&wt, r#"echod_cache_lookups_total{result="refreshed"} "#) >= 1.0, "{wt}");
     assert_eq!(sample(&wt, "echod_members "), 2.0);
     assert!(sample(&wt, r#"echod_configuration_writes_total{outcome="written"} "#) + sample(&ot, r#"echod_configuration_writes_total{outcome="written"} "#) >= 1.0, "someone wrote the configuration");
 
@@ -465,7 +469,7 @@ async fn two_nodes() {
         a
     };
     let start = Instant::now();
-    while survivor.server.nodes().members().members.len() > 1 {
+    while survivor.server.membership().members.len() > 1 {
         assert!(start.elapsed() < Duration::from_secs(3), "the dead node never left");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -473,7 +477,7 @@ async fn two_nodes() {
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
     let (status, headers, data) = survivor.send("promise.get", json!({ "id": "x:1" })).await;
     assert_eq!(status, 200);
-    assert_eq!(headers.get("x-echod-node").cloned(), Some(survivor.server.nodes().id()));
-    assert_eq!(data["promise"]["state"], "pending");
+    assert_eq!(headers.get("x-echod-node").map(String::as_str), Some(survivor.server.id()));
+    assert_eq!(data["promise"]["state"], "resolved");
     survivor.stop().await;
 }

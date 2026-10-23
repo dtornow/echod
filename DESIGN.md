@@ -9,13 +9,15 @@ durable executions in V8. Built inside out, from the stored data up.
 |---|---|
 | `kernel/` | `echod-kernel`: the state machine, one object store, one transition per request, verified with Verus against the specification's catalogue |
 | `fleet/` | `echod-fleet`: the fleet as a TLA-style state machine in Verus over the kernel's own states, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
-| `server/` | `echod-server`: the `ResonateServer`, the kernel over documents in an S3 bucket, committed with conditional writes; the trusted shim and the binary |
-| `sim/` | `echod-sim`: the server under deterministic simulation, one seed, no wall clock, no sockets; checked for linearizability against the kernel |
+| `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
+| `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
+| `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; checked for linearizability against the kernel |
 
-The first two are proved; the third is the shim the proof stops at; the
-fourth is the evidence for the shim. The server depends on `resonate-core`
-for the traits and protocol types. Origin: `resonate-server-blob` and
-`resonate-plugin-echod`.
+The first two are proved; the third is the shim the proof stops at, with
+nothing in it but the order of calls; the fourth performs what the third
+asks; the fifth is the evidence for both. The core and the node depend on
+`resonate-core` for the traits and protocol types. Origin:
+`resonate-server-blob` and `resonate-plugin-echod`.
 
 ## echod-kernel
 
@@ -57,7 +59,7 @@ give the abstract state each handler leaves, and each handler `ensures` it
 computes its function. `handle` takes a `Request`, one enum over the
 eighteen, and returns the `Response`; `spec_handle` is its function, state
 and response at once. That is the one name the fleet model uses for a
-request, and the one call the server makes.
+request, and the one call the node makes.
 
 Proved: every catalogue entry, at every step, over the whole store. A step
 proves the entries at the ids it wrote; the frame lemma proves the rest. One
@@ -90,22 +92,69 @@ below it, so that no `u64` sum overflows.
 `cargo build` compiles the kernel with the ghost code erased; `verify.sh`
 runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 
-## echod-server
+## echod-logic and echod
+
+The node is two crates, in the shape `celld` gives a node: a decision core
+that does no I/O, and an executor that does nothing else.
 
 ```text
-config.rs     the dials
-keys.rs       where everything lives under the bucket
-store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
-doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
-wire.rs       the kernel's vocabulary to the protocol's and back
-nodes.rs      the nodes: announce, heartbeat, list, and who owns what
-applier.rs    one step against one document, serialised and committed; the fire across two
-timers.rs     deadlines as objects, fired by the owner
-push.rs       messages out: HTTP push, and the router in front of it
-server.rs     the ResonateServer: dispatch, forwarding, lifecycle
-gateway.rs    POST /, GET /ready and GET /metrics
-metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets only
+logic/
+  types.rs      the vocabulary: events, store calls and outcomes, effects, notes
+  config.rs     the dials
+  keys.rs       where everything lives under the bucket
+  doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
+  wire.rs       the kernel's vocabulary to the protocol's and back
+  cache.rs      what a node remembers: documents by LRU under a byte budget
+  dispatch.rs   the envelope to the kernel's request, and the document it runs on
+  flight.rs     one step on one document, from load to commit, one store call at a time; the fire across two
+  members.rs    the nodes: announce, list, read the configuration, write the next epoch
+  timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
+echod/
+  config.rs     the dials, as flags and environment
+  store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
+  env.rs        the clock and the listener, as ports
+  node.rs       the executor: the core's effects, performed; the ResonateServer
+  push.rs       messages out: HTTP push, and the router in front of it
+  gateway.rs    POST /, GET /ready and GET /metrics
+  metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets only
 ```
+
+### The core
+
+`State` is everything a node holds: the verified `NodeCore` with its view
+of the membership, its cache's versions and its armed keys; the cache;
+the flights in progress on documents; the membership refresh; the timer
+wheel and the listings. `on_event` is the only step. It is told one thing
+at a time, `Event`: the node starts; a request came in; a store call it
+issued has its answer; time passed; the node stops. It answers with
+`Effect`s: make this call on the store and tell me under this op id;
+answer this request; push this message; wake me after this long; note
+this. Every event carries the node's clock as the executor read it; the
+core never reads one. Nothing in it waits, sleeps, locks or spawns, so
+the same events in the same order give the same effects, which is what
+`logic/tests/core.rs` checks with a bucket that is a map and a clock that
+is a number: a promise created, timed out by its sweep, its listener told,
+its key collected, and a schedule fired into its origin, with no runtime
+under it.
+
+A store call leaves as a submission under an op id and comes back as a
+completion under the same id; the core keeps, per id, which machine waits
+for it, and an answer nobody waits for is dropped. Three machines wait:
+a *flight*, one step on one document (`flight.rs`); the membership
+refresh (`members.rs`); a timer listing (`timers.rs`). Each is an explicit
+phase with the data it carries, advanced by the answer it waited on until
+it issues the next call or ends. Per document one flight runs at a time
+and the rest queue behind it; a fire holds the schedule's slot and takes
+the origin's for its first commit, and since no flight on an origin ever
+waits for a schedule's slot, none of this waits in a circle.
+
+The executor (`node.rs`) is one `State` behind one lock. `apply` takes
+the lock, runs the step, drops the lock, and performs what came out: a
+store call is spawned and its answer applied as a completion; a reply
+wakes the request waiting on it; a message is pushed; a wake resets the
+one timer; a note goes to the metrics, the log, and whoever listens. The
+simulation supplies the clock and the listener; everything else it
+supplies is the store.
 
 ### The bucket
 
@@ -149,7 +198,7 @@ handed to the router after the commit; delivery is at most once, and a lost
 A deadline is an empty object whose key says what is due, when, a token
 drawn per arm, and the node that armed it, filed under the time bucket (an
 hour by default) its deadline falls in. The commit is the protocol
-`echod-fleet` proves (`node/txn.rs`, run by `applier.rs`): the key for the
+`echod-fleet` proves (`txn.rs`, run by `flight.rs`): the key for the
 document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
@@ -187,10 +236,14 @@ conditional writes carry; membership steers three things:
   load balancer that applies the same function over `members` sends every
   request for an origin to the node that caches it and fires its deadlines.
   A node *acts* as owner of an origin when its view is fresh (read within a
-  TTL, by its own clock) and its members make it the owner. A node that is
-  not the owner forwards; if the owner cannot be reached, or the view is
-  stale, it serves the request itself. Two nodes acting on one origin at
-  once waste work: one of them loses the conditional write and re-reads.
+  TTL, by its own clock) and its members make it the owner. Nodes do not
+  talk to each other: a request that reaches a node that is not the owner
+  is served there, revalidating the cache first. Two nodes acting on one
+  origin at once waste work: one of them loses the conditional write and
+  re-reads. An earlier design forwarded such a request to the owner over
+  HTTP; that was the one channel between nodes besides the bucket, and it
+  went with the split of the core from the executor: everything a node
+  does, it does through the store.
 - **Cache.** Each node caches the documents it read or wrote, with their
   ETags, least recently used out, bounded by entries and by bytes. An
   entry is never used without asking the store: every load is a conditional
@@ -200,13 +253,13 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`nodes.rs`: they are `echod_fleet::node::NodeCore`, executable Rust
+`members.rs`: they are `echod_fleet::node::NodeCore`, executable Rust
 verified to compute the fleet model's specification functions step for
-step. `nodes.rs` is the trusted shim around it: it announces, lists, reads
-the configuration object and hands it to `read_config`; it asks `acts`;
-and `applier.rs` reports every version read or written with `filled` and
-every entry dropped, evicted or forgotten with `forget`, so what the core
-decides on is what the cache holds. Membership is decided on the fleet's
+step. `members.rs` is the trusted shim around it: it announces, lists,
+reads the configuration object and hands it to `read_config`; it asks
+`acts`; and `flight.rs` reports every version read or written with
+`filled` and every entry dropped, evicted or forgotten with `forget`, so
+what the core decides on is what the cache holds. Membership is decided on the fleet's
 time, the later of a node's clock and the latest announcement it listed,
 which absorbs a clock that steps back or runs slow.
 
@@ -262,7 +315,7 @@ a revalidation that found the version current.
 ### Observability
 
 `GET /metrics` is OpenMetrics text (`prometheus-client`), one registry per
-server. The rule for every label: its values are a closed set the server
+node. The rule for every label: its values are a closed set the node
 decides. No origin, promise id, key, address, node id or error text is ever
 a label; a request kind is a label only if the protocol defines it, anything
 else is `other`. So the number of series is a small constant however many
@@ -272,8 +325,7 @@ What is counted, and why:
 
 | metric | labels | tells an operator |
 |---|---|---|
-| `echod_requests_total`, `echod_request_duration_seconds` | `kind`, `route` (`local`, `relayed`: run here for another node, `forwarded`: sent to the owner), `status` | the protocol's traffic, where it ran, how it ended, how long it took |
-| `echod_forwards_total`, `echod_forward_duration_seconds` | `outcome` (`answered`, `unavailable`) | the node-to-node hop |
+| `echod_requests_total`, `echod_request_duration_seconds` | `kind`, `status` | the protocol's traffic, how it ended, how long it took |
 | `echod_messages_total`, `echod_message_duration_seconds` | `kind` (`execute`, `unblock`), `outcome` (`delivered`, `unroutable`, `failed`) | pushes to workers |
 | `echod_store_operations_total`, `echod_store_operation_duration_seconds` | `op` (the port's nine calls), `object` (`document`, `schedule`, `timer`, `node`, `members`), `outcome` (`ok`, `not_modified`, `absent`, `conflict`, `failed`) | every call on the bucket: how many, of what, on what, and how it ended. `conflict` is a conditional write the store refused: CAS'ed out. `failed` on a write is the third outcome of the fleet model: the write may or may not have landed |
 | `echod_document_writes_total`, `echod_document_bytes` | `mode` (`create`, `rewrite`, `append`) | how documents are written and how big they are |
@@ -290,28 +342,30 @@ What is counted, and why:
 
 The store is observed by a decorator over the port (`MeteredStore`), so
 every backend is measured the same way and the object's kind comes from
-the key's place in the bucket, not from the caller. The gauges are read
-when scraped, from the node's state as it is then. Logs carry the names
-the metrics leave out: an origin, a key, an address, an error.
+the key's place in the bucket, not from the caller. What the core counts
+it says as a `Note`, carrying a value from one of its closed sets; the
+executor turns the note into the metric. The gauges are read when
+scraped, from the node's state as it is then. Logs carry the names the
+metrics leave out: an origin, a key, an address, an error; they too are
+notes.
 
 ### Simulation
 
-`echod-sim` runs several servers over one in-memory store on one thread
+`echod-sim` runs several nodes over one in-memory store on one thread
 under tokio's paused clock, so time moves only between tasks and the same
 seed replays the same run. The simulation owns every port: a reference
 clock the clients stamp requests with, and per node a clock with its own
 skew, drift and the jumps the run inflicts, backwards included — no bound,
-since the servers assume none; a store that
+since the nodes assume none; a store that
 answers nothing, loses acks or refuses conditional writes by seeded
 percentages and waits a seeded latency, and per node a store that can be cut
-off entirely; the peers (a forwarded request is a call), with partitions
-between chosen pairs; a bus that checks every message against the bucket.
-A chaos task crashes nodes, stops them cleanly, starts new ones, partitions
-pairs, cuts nodes off the store and jumps their clocks, by any amount:
+off entirely; a bus that checks every message against the bucket.
+A chaos task crashes nodes, stops them cleanly, starts new ones,
+cuts nodes off the store and jumps their clocks, by any amount:
 the checker expects linearizability whatever the clocks do. Clients issue every
 request kind over a few origins; every attempt is a history entry, since an
 attempt that got no answer may have taken effect. Sweeps and fires enter
-the history through an observer port: a fire as two entries, the first on
+the history through the notes port: a fire as two entries, the first on
 the occurrence's origin with the schedule's row as the node loaded it,
 the second on the schedule's document, each spanning its own commit.
 Clients create, read and delete a few schedules firing every few seconds
@@ -320,11 +374,11 @@ into the origins the clients work on, so fires collide with requests.
 The check is linearizability per document against the kernel, an origin's
 or a schedule's: an order of the entries, each within its span, that
 yields every answer seen and ends in the rows the bucket holds, each step
-decided at the later of its instant and the document's stamp as the server
+decided at the later of its instant and the document's stamp as the node
 does; an entry without an answer may be placed or skipped. A fire's first
 half is the kernel's `processSchedule` on the row beside the origin's
 objects; its second half advances the row if it is still at the
-occurrence, and is refused otherwise, as the server's conditional write
+occurrence, and is refused otherwise, as the node's conditional write
 would be.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
@@ -359,7 +413,7 @@ version and when it was filled) and of its deadline keys (the key kept for
 each origin, with the version written with it). `Txn` is one commit's
 decisions: the previous key, whether to arm, what to delete, what to keep.
 Each function `ensures` it equals the specification function of the same
-name on the state's view. The step module verifies the loops the server
+name on the state's view. The step module verifies the loops the node
 runs around the kernel: `sweep` leaves nothing due at its instant and
 leaves the document as it was if nothing fired; `drain` is kernel steps;
 `next_deadline` is the least deadline; `clamp_now` the later of clock and
@@ -398,7 +452,7 @@ contents — or unknown, where the bucket applied it or did not,
 nondeterministically, and the node, told only that it failed, forgets
 what it cached and gives the commit up; what landed stays. Deletes may
 fail silently. Any live node may act on any origin: which does is the
-server's routing, and the theorems hold whoever does.
+node's routing, and the theorems hold whoever does.
 
 A schedule's key fires on two documents. `Prepare` on the promise's
 origin, with the work `Fire`, loads the schedule's document too, decides
@@ -407,7 +461,7 @@ pending in the flight: what it loaded and at which version, what it
 writes, its deadline, the key fired. When the origin's commit is done, by
 `DelTimer` or `Done`, the pending half becomes a commit on the schedule's
 document, conditional on the version loaded with the origin, and runs the
-same five actions. That is the server's order, origin then schedule, and
+same five actions. That is the node's order, origin then schedule, and
 why a crash between the two loses nothing.
 
 Proved, 251 items, no admits:
@@ -424,7 +478,7 @@ Proved, 251 items, no admits:
 - **Occurrences.** Every occurrence a schedule has fired has its promise:
   a row whose last run is `t` has the promise its template expands to at
   `t` in the bucket, in its origin's document. The expansion is a function
-  of template, schedule and instant, trusted to be the server's.
+  of template, schedule and instant, trusted to be the node's.
 
 The Catalogue and Timers theorems cover both kinds of document; in
 particular every schedule has a key at or before its next run. The
@@ -463,25 +517,27 @@ no real time.
 How the proof reaches the running code: the theorems are about the fleet
 model; the model's node actions are the core's, the commit's and the step
 module's specification functions; their executable functions are verified
-to compute those functions; `echod-server` keeps its membership, cache and
+to compute those functions; `echod-logic` keeps its membership, cache and
 deadline-key state in the core and takes its decisions from it, runs
 the step module's loops, and serves every request through the kernel's
 `handle`: the dispatch turns the envelope into a `Request`, makes one
 call, and renders the `Response`, so the request the model's `Prepare`
-carries is the request the server runs. That is Anvil's shape of refinement: functional,
-per step, with a trusted shim. The shim here is `nodes.rs`, `applier.rs`
-and `timers.rs`: that the configuration handed to `read_config` is the
-object read, that every version read or written is reported, that the
-store operations are issued in the protocol's order with the decisions
-the core made, that the document decoded is the one written, and that the
-bucket behaves as the model's: conditional writes on versions, one version
-per content. The S3 model's fidelity and liveness are not proved.
+carries is the request the node runs. That is Anvil's shape of refinement: functional,
+per step, with a trusted shim. The shim here is `flight.rs`, `members.rs`
+and `timers.rs`, and it is now a pure function of its events: that the
+configuration handed to `read_config` is the object read, that every
+version read or written is reported, that the store calls are issued in
+the protocol's order with the decisions the core made, that the document
+decoded is the one written. What stays outside it, in `echod`, is that
+the executor performs every effect and feeds back every answer, and that
+the bucket behaves as the model's: conditional writes on versions, one
+version per content. The S3 model's fidelity and liveness are not proved.
 
 ### The SDKs
 
-`examples/ts` runs the TypeScript SDK against the server. The SDK's default
+`examples/ts` runs the TypeScript SDK against the node. The SDK's default
 message source long-polls; `examples/ts/push.ts` is the push side, an HTTP
 listener plugged into the SDK's `HttpNetwork` as its adapter, so the worker's
 address is a URL. One concession in `wire.rs`: the SDK creates a sleep as a
-timer with a target, which the specification refuses; the server drops the
+timer with a target, which the specification refuses; the node drops the
 target, and the timer is armed on its own as the specification arms it.

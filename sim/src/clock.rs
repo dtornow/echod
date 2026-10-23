@@ -1,12 +1,12 @@
 //! Virtual time. Under tokio's paused clock, `Instant` advances only when
 //! every task is idle, and then straight to the next timer. `SimClock` reads
-//! it through the server's `Clock` port: the reference every client stamps
+//! it through the node's `Clock` port: the reference every client stamps
 //! its requests with. `NodeClock` is what a node sees: the reference plus a
 //! fixed skew, a drift that grows with time, and the jumps the run inflicts,
 //! backwards included. Nothing a node does with its clock may make the state
 //! wrong; the membership rules and the per-origin clamp are what it tests.
 
-use echod_server::env::Clock;
+use echod::env::Clock;
 
 pub struct SimClock {
     base_ms: u64,

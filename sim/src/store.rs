@@ -5,13 +5,13 @@
 //! seed: an operation answers nothing (`unavailable`); a write lands and is
 //! reported as failed (`lost_ack`); a conditional write is refused although
 //! nothing moved (`conflict`). Each is a case the real service produces, and
-//! each has a repair the server must get right.
+//! each has a repair the node must get right.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use echod_server::store::{Etag, MemoryStore, Read, Store, StoreError};
+use echod::store::{Etag, MemoryStore, Read, Store, StoreError};
 
 use crate::rng::Rng;
 

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use crate::doc::Loaded;
-use crate::store::Etag;
+use crate::types::Etag;
 
 /// A document this node has seen, and the version it saw.
 #[derive(Clone)]
