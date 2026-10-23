@@ -11,7 +11,7 @@
 //! the executable node is proved to compute. A commit is the applier's
 //! protocol, one store round trip per action. `Prepare` loads and decides,
 //! and touches nothing. `AddTimer` puts the key for the document's nearest
-//! deadline. `Write` puts the document, conditionally on the version
+//! deadline. `Process` puts the document, conditionally on the version
 //! loaded. `DelTimer` deletes the key replaced and the key fired, and the
 //! node remembers the key kept. `Done` closes a commit that changed
 //! nothing. Each put carries the store's answer, `Outcome`: applied,
@@ -19,7 +19,7 @@
 //! and the node, told only that it failed, gives the commit up. A fired key
 //! that found nothing due is collected only after a conditional rewrite of
 //! the document, which fences any commit that armed it and has not written
-//! yet; that rewrite is `Write` of an unchanged document.
+//! yet; that rewrite is `Process` of an unchanged document.
 //!
 //! Around the core, the model keeps what the node does not see — whether it
 //! is alive and its clock — and the kernel's steps as what the node's
@@ -303,7 +303,7 @@ pub enum Step {
     /// The document is put, conditionally on the version loaded, at a new
     /// version: the commit of a changed document, or the rewrite that
     /// collects a fired key behind an unchanged one.
-    Write(Id, Origin, Seq<char>, Outcome),
+    Process(Id, Origin, Seq<char>, Outcome),
     /// After the write: the key replaced and the key fired are deleted, each
     /// if the delete went through, and the node remembers the key kept.
     DelTimer(Id, Origin, bool, bool),
@@ -735,7 +735,7 @@ pub open spec fn add_timer(s: Cluster, i: Id, o: Origin, k: AKey, out: Outcome) 
 
 /// The document's put: the commit of a changed document, or the rewrite
 /// that collects a fired key behind an unchanged one.
-pub open spec fn write_doc(s: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome) -> Option<Cluster> {
+pub open spec fn process_doc(s: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome) -> Option<Cluster> {
     let n = s.nodes[i];
     if s.nodes.contains_key(i) && n.txns.contains_key(o) && n.txns[o].c.changed {
         match out {
@@ -820,10 +820,10 @@ pub open spec fn add_timer_action() -> Action<Cluster, (Id, Origin, AKey, Outcom
     }
 }
 
-pub open spec fn write_action() -> Action<Cluster, (Id, Origin, Seq<char>, Outcome), ()> {
+pub open spec fn process_action() -> Action<Cluster, (Id, Origin, Seq<char>, Outcome), ()> {
     Action {
-        precondition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; write_doc(s, i, o, e, out) is Some },
-        transition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; (write_doc(s, i, o, e, out).unwrap(), ()) },
+        precondition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; process_doc(s, i, o, e, out) is Some },
+        transition: |input: (Id, Origin, Seq<char>, Outcome), s: Cluster| { let i = input.0; let o = input.1; let e = input.2; let out = input.3; (process_doc(s, i, o, e, out).unwrap(), ()) },
     }
 }
 
@@ -851,7 +851,7 @@ pub open spec fn next_step(s: Cluster, s2: Cluster, st: Step) -> bool {
         Step::Forget(i, o) => forget_action().forward((i, o))(s, s2),
         Step::Prepare(i, o, t, work, new, did, deadline) => prepare_action().forward((i, o, t, work, new, did, deadline))(s, s2),
         Step::AddTimer(i, o, k, out) => add_timer_action().forward((i, o, k, out))(s, s2),
-        Step::Write(i, o, e, out) => write_action().forward((i, o, e, out))(s, s2),
+        Step::Process(i, o, e, out) => process_action().forward((i, o, e, out))(s, s2),
         Step::DelTimer(i, o, prev, fired) => del_timer_action().forward((i, o, prev, fired))(s, s2),
         Step::Done(i, o) => done_action().forward((i, o))(s, s2),
     }

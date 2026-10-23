@@ -1808,8 +1808,8 @@ proof fn lemma_add_timer(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, out
 
 /// The document's put, by outcome: a changed document commits, an
 /// unchanged one collects.
-proof fn lemma_write_doc(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome)
-    requires inv()(s), write_doc(s, i, o, e, out) == Some(s2),
+proof fn lemma_process_doc(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome)
+    requires inv()(s), process_doc(s, i, o, e, out) == Some(s2),
     ensures inv()(s2),
 {
     let n = s.nodes[i];
@@ -1853,7 +1853,7 @@ pub proof fn lemma_next(s: Cluster, s2: Cluster)
         Step::Forget(i, o) => lemma_forget(s, s2, i, o),
         Step::Prepare(i, o, t, work, new, did, deadline) => lemma_prepare(s, s2, i, o, t, work, new, did, deadline),
         Step::AddTimer(i, o, k, out) => lemma_add_timer(s, s2, i, o, k, out),
-        Step::Write(i, o, e, out) => lemma_write_doc(s, s2, i, o, e, out),
+        Step::Process(i, o, e, out) => lemma_process_doc(s, s2, i, o, e, out),
         Step::DelTimer(i, o, prev, fired) => lemma_del_timer(s, s2, i, o, prev, fired),
         Step::Done(i, o) => lemma_done(s, s2, i, o),
     }

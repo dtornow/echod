@@ -386,12 +386,12 @@ touches nothing: for a request, the document after is the kernel's
 `spec_handle` of the one loaded followed by any sequence of internal
 steps at the same instant, what `drain` ensures; for a sweep, what `sweep`
 then `drain` ensure. `AddTimer`
-puts the key for the document's nearest deadline. `Write` puts the
+puts the key for the document's nearest deadline. `Process` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
 one. `DelTimer` deletes the key replaced and the key fired, and the node
 remembers the key kept. `Done` closes a request that changed nothing,
-with no round trip. A request's response joins a ghost log at `Write`
+with no round trip. A request's response joins a ghost log at `Process`
 or at `Done`, when the client is answered. Each put carries the store's
 answer: applied, refused by its condition — both decided by the bucket's
 contents — or unknown, where the bucket applied it or did not,
