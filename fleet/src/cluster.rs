@@ -101,14 +101,13 @@ impl Store {
     }
 }
 
-/// Where a commit is.
+/// Where a commit is: the last of its actions taken. After `Prepare`
+/// nothing is in the store; after `AddTimer` the key for the new deadline
+/// is; after `Process` the document is.
 pub enum Phase {
-    /// Decided, nothing in the store yet.
-    Decided,
-    /// The key for the new deadline is in the store.
-    Armed,
-    /// The document is in the store.
-    Written,
+    Prepare,
+    AddTimer,
+    Process,
 }
 
 /// The second half of a fire: the schedule's commit, decided with the
@@ -448,7 +447,7 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
             loaded,
             new,
             t,
-            phase: Phase::Decided,
+            phase: Phase::Prepare,
             seq0: s.hist.counter,
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
@@ -462,10 +461,10 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
 pub open spec fn arm(s: Cluster, i: Id, o: Origin, k: AKey) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && x.c.rearm
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && x.c.rearm
         && k.origin == o && Some(k.at) == x.c.deadline && !s.hist.armer.contains_key(k)
     {
-        let x2 = Flight { c: spec_armed(x.c, k), phase: Phase::Armed, ..x };
+        let x2 = Flight { c: spec_armed(x.c, k), phase: Phase::AddTimer, ..x };
         Some(Cluster {
             nodes: s.nodes.insert(i, Node { txns: n.txns.insert(o, x2), ..n }),
             store: Store { timers: s.store.timers.insert(k), ..s.store },
@@ -506,7 +505,7 @@ pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
 }
 
 pub open spec fn ready(x: Flight) -> bool {
-    x.c.changed && (if x.c.rearm { x.phase is Armed } else { x.phase is Decided })
+    x.c.changed && (if x.c.rearm { x.phase is AddTimer } else { x.phase is Prepare })
 }
 
 pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cluster> {
@@ -515,7 +514,7 @@ pub open spec fn commit(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cl
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && ready(x)
         && s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e)
     {
-        let x2 = Flight { cur: Some(e), phase: Phase::Written, ..x };
+        let x2 = Flight { cur: Some(e), phase: Phase::Process, ..x };
         let keeper = match spec_keep(x.c) {
             Some(k) => s.hist.keeper.insert(o, k),
             None => s.hist.keeper.remove(o),
@@ -550,7 +549,7 @@ pub open spec fn commit_fail(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 pub open spec fn disarm(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written && spec_to_disarm(x.c) is Some {
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Process && spec_to_disarm(x.c) is Some {
         let p = spec_to_disarm(x.c).unwrap();
         Some(Cluster { store: Store { timers: s.store.timers.remove(p), ..s.store }, ..s })
     } else {
@@ -570,7 +569,7 @@ pub open spec fn continued(s: Cluster, core: ANode, p: Pending, t: nat) -> Fligh
         loaded: p.loaded,
         new: p.new,
         t,
-        phase: Phase::Decided,
+        phase: Phase::Prepare,
         seq0: s.hist.counter,
         letag: p.cur,
         lseq: match p.cur { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
@@ -594,7 +593,7 @@ pub open spec fn after(s: Cluster, core: ANode, n: Node, o: Origin) -> Map<Origi
 pub open spec fn finish(s: Cluster, i: Id, o: Origin, deleted: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written && x.cur is Some
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Process && x.cur is Some
         && (deleted ==> x.c.fired is Some)
     {
         let core1 = spec_finish(n.core, x.c, x.cur.unwrap());
@@ -617,7 +616,7 @@ pub open spec fn finish(s: Cluster, i: Id, o: Origin, deleted: bool) -> Option<C
 pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is Some
         && s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e)
     {
         let k = x.c.fired.unwrap();
@@ -641,7 +640,7 @@ pub open spec fn collect(s: Cluster, i: Id, o: Origin, e: Seq<char>) -> Option<C
 pub open spec fn collect_fail(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is Some
         && s.store.etag(o) != x.cur
     {
         Some(Cluster { nodes: s.nodes.insert(i, Node { core: spec_forget(n.core, o), txns: n.txns.remove(o), ..n }), ..s })
@@ -653,7 +652,7 @@ pub open spec fn collect_fail(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
 pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is None {
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is None {
         Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), log: answered(s, o, x), ..s })
     } else {
         None
@@ -678,7 +677,7 @@ pub open spec fn arm_unknown(s: Cluster, i: Id, o: Origin, k: AKey, landed: bool
     } else {
         let n = s.nodes[i];
         let x = n.txns[o];
-        if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && x.c.rearm { Some(give_up(s, i, o)) } else { None }
+        if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && x.c.rearm { Some(give_up(s, i, o)) } else { None }
     }
 }
 
@@ -701,7 +700,7 @@ pub open spec fn commit_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, land
 pub open spec fn collect_unknown(s: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Decided && !x.c.changed && x.c.fired is Some
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is Some
         && (landed ==> s.store.etag(o) == x.cur && !s.hist.versions.contains_key(e))
     {
         let (store, hist) = if landed {
@@ -759,7 +758,7 @@ pub open spec fn process_doc(s: Cluster, i: Id, o: Origin, e: Seq<char>, out: Ou
 pub open spec fn del_timer(s: Cluster, i: Id, o: Origin, prev: bool, fired: bool) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
-    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Written
+    if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Process
         && (prev ==> spec_to_disarm(x.c) is Some)
     {
         let s1 = if prev { disarm(s, i, o).unwrap() } else { s };
