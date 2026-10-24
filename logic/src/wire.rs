@@ -113,6 +113,11 @@ pub fn nat(v: i64, field: &str) -> Result<u64, String> {
 }
 
 pub fn create_in(d: &w::PromiseCreateData) -> Result<k::PromiseCreateReq, String> {
+    if let Some(addr) = d.tags.get("resonate:target") {
+        if !resonate_core::is_valid_address(addr) {
+            return Err("Invalid resonate:target address".to_string());
+        }
+    }
     Ok(k::PromiseCreateReq {
         id: d.id.clone(),
         timeout_at: nat(d.timeout_at, "timeoutAt")?,
@@ -156,7 +161,7 @@ pub fn message_out(e: &k::OutboxEntry, server_url: &str) -> (String, w::Message)
     (e.address.clone(), msg)
 }
 
-/// What a status says when the kernel gives no more than the number.
+/// What a status says when nothing more is known of why.
 pub fn reason(status: u16) -> &'static str {
     match status {
         400 => "Bad request",
@@ -168,24 +173,94 @@ pub fn reason(status: u16) -> &'static str {
     }
 }
 
-/// An envelope: `data` for a successful status, a reason string otherwise,
+/// The status a kernel response carries.
+pub fn status_of(r: &k::Response) -> u16 {
+    match r {
+        k::Response::Promise(p) => p.status,
+        k::Response::Schedule(c) => c.status,
+        k::Response::Status(st) => st.status,
+        k::Response::TaskGet(g) => g.status,
+        k::Response::TaskClaim(c) => c.status,
+        k::Response::TaskFence(f) => f.status,
+    }
+}
+
+fn object<'a>(s: &'a k::State, id: &str) -> Option<&'a k::Promise> {
+    s.objects.iter().find(|p| p.id == id)
+}
+
+/// Why a request was refused, in the words the reference server uses: by
+/// kind and status, and where one status has several causes, by the
+/// state the step left, which the refusing checks did not change. The
+/// kernel proves the status; the words are the protocol's courtesy.
+pub fn reason_for(kind: &str, req: &k::Request, status: u16, s: &k::State) -> String {
+    let text = match (kind, status) {
+        ("promise.get" | "promise.settle", 404) => "Promise not found",
+        ("promise.register_callback" | "promise.register_listener", 404) => "Awaited promise not found",
+        ("promise.register_callback", 422) => match req {
+            k::Request::PromiseRegisterCallback(c) => match object(s, &c.awaiter) {
+                None => "Awaiter promise not found",
+                Some(w) if k::tags::exec_otype(&w.tags) != k::tags::OType::Runnable => "Awaiter promise has no resonate:target tag",
+                Some(_) => "Awaited promise is not awaitable",
+            },
+            _ => "Awaited promise is not awaitable",
+        },
+        ("promise.register_listener", 422) => "Awaited promise is not awaitable",
+        ("task.get" | "task.acquire" | "task.release" | "task.fulfill" | "task.suspend" | "task.fence" | "task.halt" | "task.continue", 404) => "Task not found",
+        ("task.create", 409) => "Already exists",
+        ("task.create", 422) => "The promise does not have a resonate:target tag",
+        ("task.acquire", 409) => match req {
+            k::Request::TaskAcquire(a) => match object(s, &a.id).and_then(|p| p.task.as_ref()) {
+                Some(t) if t.state == k::TaskState::Pending => "Version mismatch",
+                _ => "Task is not pending",
+            },
+            _ => "Task is not pending",
+        },
+        ("task.release" | "task.fulfill", 409) => "Task version mismatch or invalid state",
+        ("task.suspend", 409) => "Task is not acquired or version mismatch",
+        ("task.suspend", 422) => match req {
+            k::Request::TaskSuspend(q) if q.actions.iter().any(|a| object(s, &a.awaited).is_none()) => "Awaited promise not found",
+            _ => "Awaited promise is not awaitable",
+        },
+        ("task.fence", 409) => "Version mismatch",
+        ("task.halt", 409) => "Task is fulfilled",
+        ("task.continue", 409) => "Task is not halted",
+        ("schedule.get" | "schedule.delete", 404) => "Schedule not found",
+        _ => reason(status),
+    };
+    text.to_string()
+}
+
+/// An envelope: `data` for a successful status, the reason otherwise,
 /// which is what every client expects of an error.
 pub fn reply(kind: &str, corr_id: &str, status: u16, data: Value) -> w::ResponseEnvelope {
-    let data = if status >= 400 { Value::String(reason(status).to_string()) } else { data };
+    reply_with(kind, corr_id, status, data, None)
+}
+
+fn reply_with(kind: &str, corr_id: &str, status: u16, data: Value, why: Option<&str>) -> w::ResponseEnvelope {
+    let data = if status >= 400 { Value::String(why.unwrap_or(reason(status)).to_string()) } else { data };
     w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), status as i32, data)
 }
 
 pub fn promise_res(kind: &str, corr_id: &str, r: &k::PromiseRes) -> w::ResponseEnvelope {
+    promise_res_with(kind, corr_id, r, None)
+}
+
+fn promise_res_with(kind: &str, corr_id: &str, r: &k::PromiseRes, why: Option<&str>) -> w::ResponseEnvelope {
     match &r.promise {
-        Some(p) => reply(kind, corr_id, r.status, json!({ "promise": promise_out(p) })),
-        None => reply(kind, corr_id, r.status, json!({})),
+        Some(p) => reply_with(kind, corr_id, r.status, json!({ "promise": promise_out(p) }), why),
+        None => reply_with(kind, corr_id, r.status, json!({}), why),
     }
 }
 
 pub fn claim_res(kind: &str, corr_id: &str, r: &k::TaskClaimRes) -> w::ResponseEnvelope {
+    claim_res_with(kind, corr_id, r, None)
+}
+
+fn claim_res_with(kind: &str, corr_id: &str, r: &k::TaskClaimRes, why: Option<&str>) -> w::ResponseEnvelope {
     match (&r.task, &r.promise) {
-        (Some(t), Some(p)) => reply(kind, corr_id, r.status, json!({ "task": task_out(t), "promise": promise_out(p), "preload": Value::Array(vec![]) })),
-        _ => reply(kind, corr_id, r.status, json!({})),
+        (Some(t), Some(p)) => reply_with(kind, corr_id, r.status, json!({ "task": task_out(t), "promise": promise_out(p), "preload": Value::Array(vec![]) }), why),
+        _ => reply_with(kind, corr_id, r.status, json!({}), why),
     }
 }
 
@@ -194,29 +269,43 @@ pub fn status_res(kind: &str, corr_id: &str, status: u16, data: Value) -> w::Res
 }
 
 /// Any kernel response as the protocol's envelope. A fence's inner action is
-/// rendered under its own kind; a suspend carries an empty preload.
-pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &k::Response) -> w::ResponseEnvelope {
+/// rendered under its own kind; a suspend carries an empty preload. `why`
+/// is the reason a refusal carries, when known.
+pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &k::Response, why: Option<&str>) -> w::ResponseEnvelope {
     match r {
-        k::Response::Promise(p) => promise_res(kind, corr, p),
+        k::Response::Promise(p) => promise_res_with(kind, corr, p, why),
         k::Response::Schedule(c) => match &c.schedule {
-            Some(sc) => status_res(kind, corr, c.status, json!({ "schedule": schedule_out(sc) })),
-            None => status_res(kind, corr, c.status, json!({})),
+            Some(sc) => reply_with(kind, corr, c.status, json!({ "schedule": schedule_out(sc) }), why),
+            None => reply_with(kind, corr, c.status, json!({}), why),
         },
         k::Response::Status(st) => {
             let data = if kind == "task.suspend" { json!({ "preload": [] }) } else { json!({}) };
-            status_res(kind, corr, st.status, data)
+            reply_with(kind, corr, st.status, data, why)
         }
         k::Response::TaskGet(g) => match &g.task {
-            Some(t) => status_res(kind, corr, g.status, json!({ "task": task_out(t) })),
-            None => status_res(kind, corr, g.status, json!({})),
+            Some(t) => reply_with(kind, corr, g.status, json!({ "task": task_out(t) }), why),
+            None => reply_with(kind, corr, g.status, json!({}), why),
         },
-        k::Response::TaskClaim(c) => claim_res(kind, corr, c),
+        k::Response::TaskClaim(c) => claim_res_with(kind, corr, c, why),
         k::Response::TaskFence(f) => match &f.action {
             Some(k::TaskFenceInnerRes::Create(p)) | Some(k::TaskFenceInnerRes::Settle(p)) => {
-                let inner = promise_res(action_kind.unwrap_or(""), corr, p);
-                status_res(kind, corr, f.status, json!({ "action": inner, "preload": [] }))
+                let inner_kind = action_kind.unwrap_or("");
+                let inner_why = (p.status >= 400).then(|| match (inner_kind, p.status) {
+                    ("promise.settle", 404) | ("promise.create", 404) => "Promise not found",
+                    _ => reason(p.status),
+                });
+                let inner = promise_res_with(inner_kind, corr, p, inner_why);
+                reply_with(kind, corr, f.status, json!({ "action": inner, "preload": [] }), why)
             }
-            None => status_res(kind, corr, f.status, json!({})),
+            None => reply_with(kind, corr, f.status, json!({}), why),
         },
     }
+}
+
+/// A kernel response rendered with its reason: what the node answers, and
+/// what the simulator's model answers, so the two compare as equal.
+pub fn render(kind: &str, corr: &str, action_kind: Option<&str>, req: &k::Request, r: &k::Response, after: &k::State) -> w::ResponseEnvelope {
+    let status = status_of(r);
+    let why = (status >= 400).then(|| reason_for(kind, req, status, after));
+    response_out(kind, corr, action_kind, r, why.as_deref())
 }

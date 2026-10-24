@@ -408,11 +408,15 @@ every divergence by class with the first example; a snapshot divergence
 ends the episode, since the states have parted.
 
 What is compared modulo known differences: `preload` (echod answers an
-empty one), `head.serverUrl` in execute messages, an internal promise past
-its deadline (projected as expired in both, as the reference's harness
-does), and the error reason strings, which the protocol leaves to the
-server: echod says the status's generic reason, the reference says why;
-these are reported as a table, not as divergences. One more is a
+empty one), `head.serverUrl` in execute messages, and an internal promise
+past its deadline (projected as expired in both, as the reference's
+harness does). Error reasons are compared word for word: the kernel
+proves the status, and `wire::reason_for` says why in the reference's
+words, by kind and status, and where one status has several causes (a
+callback's awaiter missing, or not a task, or the awaited not awaitable)
+by the state the step left, which the refusing checks did not change.
+The simulator's model renders its answers through the same function, so
+the checker compares like with like. One more is a
 deviation of the reference from the specification: on fulfilling a task
 it deletes that task from every promise's callbacks, pending ones
 included, which the catalogue's `monotone_promise_callbacks_grow_while_pending`
@@ -428,8 +432,7 @@ stream: echod does not serve them.
 
 Run over four seeds to their coverage plateaus, 164,800 steps in all,
 every response, message and snapshot agreed modulo the above; the two
-reference deviations were the only divergence classes found, and the
-error reason strings the only other difference.
+reference deviations were the only divergence classes found.
 
 ### The accordant model
 

@@ -121,6 +121,8 @@ enum Progress {
 /// What a committed step answers with.
 struct Done {
     response: Option<k::Response>,
+    /// Why the request was refused, in the protocol's words, if it was.
+    why: Option<String>,
     outbox: Vec<OutboxEntry>,
     did: bool,
 }
@@ -503,13 +505,18 @@ impl State {
     fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
         let mut state = R::state_of(&w.loaded.rows);
         let now = steps::clamp_now(w.loaded.stamp, work.now());
-        let (response, did) = match work {
-            Work::Request { req, .. } => (Some(state.handle(req, now, &self.kcfg)), false),
+        let (response, why, did) = match work {
+            Work::Request { req, kind, .. } => {
+                let r = state.handle(req, now, &self.kcfg);
+                let status = crate::wire::status_of(&r);
+                let why = (status >= 400).then(|| crate::wire::reason_for(kind, req, status, &state));
+                (Some(r), why, false)
+            }
             Work::Sweep { .. } => {
                 let did = steps::sweep(&mut state, now, &self.kcfg);
-                (None, did)
+                (None, None, did)
             }
-            Work::Fire { .. } => (None, false),
+            Work::Fire { .. } => (None, None, false),
         };
         steps::drain(&mut state, now, &self.kcfg);
         let rows = R::rows_of(&state);
@@ -518,7 +525,7 @@ impl State {
             _ => None,
         };
         let commit = self.commit_new(w, rows, now, did, fired);
-        (commit, Done { response, outbox: state.outbox, did })
+        (commit, Done { response, why, outbox: state.outbox, did })
     }
 
     /// A committed step: the messages out, the answer back.
@@ -529,7 +536,7 @@ impl State {
         }
         match &f.work {
             Work::Request { id, kind, corr, action_kind, .. } => {
-                let resp = done.response.as_ref().map(|r| crate::wire::response_out(kind, corr, action_kind.as_deref(), r));
+                let resp = done.response.as_ref().map(|r| crate::wire::response_out(kind, corr, action_kind.as_deref(), r, done.why.as_deref()));
                 let response = resp.ok_or_else(|| Unavailable::new("no answer"));
                 self.emit(Effect::Reply { id: *id, response });
             }

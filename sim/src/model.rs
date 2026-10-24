@@ -64,7 +64,8 @@ pub fn step(s: &mut k::State, stamp: &mut u64, op: &Op, now: u64, cfg: &k::Confi
         }
         _ => {
             let (q, action_kind) = request_of(op, asked).expect("a client's request");
-            wire::response_out(kind, corr, action_kind, &s.handle(&q, now, cfg))
+            let r = s.handle(&q, now, cfg);
+            wire::render(kind, corr, action_kind, &q, &r, s)
         }
     };
     echod_kernel::steps::drain(s, now, cfg);

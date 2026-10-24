@@ -49,7 +49,14 @@ pub struct Decoded {
 
 /// Parse and validate a request's `data`.
 fn parse<T: DeserializeOwned + Validate>(data: &serde_json::Value) -> Result<T, String> {
-    let v: T = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid request data: {e}"))?;
+    let v: T = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid request: {e}"))?;
+    v.validate().map_err(|e| w::format_validation_errors(&e))?;
+    Ok(v)
+}
+
+/// Parse and validate a fence's action data.
+fn parse_action<T: DeserializeOwned + Validate>(data: &serde_json::Value) -> Result<T, String> {
+    let v: T = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid action data: {e}"))?;
     v.validate().map_err(|e| w::format_validation_errors(&e))?;
     Ok(v)
 }
@@ -117,7 +124,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         "promise.register_listener" => {
             let d = parsed!(w::PromiseRegisterListenerData);
             if !resonate_core::is_valid_address(&d.address) {
-                return err(400, "Address must be a URI with a scheme");
+                return err(400, "Invalid listener address");
             }
             (k::Request::PromiseRegisterListener(k::PromiseRegisterListenerReq { awaited: d.awaited, address: d.address }), None, None)
         }
@@ -189,15 +196,15 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 }
             }
             let action = match d.action.kind.as_str() {
-                "promise.create" => match parse::<w::PromiseCreateData>(&d.action.data).and_then(|c| wire::create_in(&c)) {
+                "promise.create" => match parse_action::<w::PromiseCreateData>(&d.action.data).and_then(|c| wire::create_in(&c)) {
                     Ok(c) => k::TaskFenceAction::Create(c),
                     Err(m) => return err(400, &m),
                 },
-                "promise.settle" => match parse::<w::PromiseSettleData>(&d.action.data) {
+                "promise.settle" => match parse_action::<w::PromiseSettleData>(&d.action.data) {
                     Ok(c) => k::TaskFenceAction::Settle(wire::settle_in_req(&c)),
                     Err(m) => return err(400, &m),
                 },
-                other => return err(400, &format!("Unsupported fence action: {other}")),
+                _ => return err(400, "Invalid fence action kind"),
             };
             (k::Request::TaskFence(k::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind))
         }
@@ -226,6 +233,11 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "schedule.create" => {
             let d = parsed!(w::ScheduleCreateData);
+            if let Some(addr) = d.promise_tags.get("resonate:target") {
+                if !resonate_core::is_valid_address(addr) {
+                    return err(400, "Invalid resonate:target address");
+                }
+            }
             if !util::is_valid_cron(&d.cron) {
                 return err(400, "Invalid cron expression");
             }
@@ -251,8 +263,8 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             (k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
         }
         "promise.search" | "task.search" | "schedule.search" => return err(403, "Search operations are not supported"),
-        "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are not supported"),
-        _ => return err(400, &format!("Unknown request kind: {kind}")),
+        "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are disabled"),
+        _ => return err(400, &format!("Unknown operation: {kind}")),
     };
     // A request about a schedule is served on its document; the rest on
     // their id's origin.

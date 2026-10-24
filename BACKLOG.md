@@ -70,10 +70,6 @@ shows the panels with data.
 - **Preload.** `task.acquire`, `task.suspend` and `task.fence` answer an
   empty `preload`; the reference returns up to a limit of the promises
   the task may read next.
-- **Error reasons.** echod answers the status's generic reason
-  ("Not found", "Conflict"); the reference says why ("Task is not
-  halted"). The protocol fixes the status, not the words, but the words
-  are what a user reads. A table by kind and status would cover most.
 
 ## Smaller items
 

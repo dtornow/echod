@@ -22,7 +22,8 @@
 //! messages (each stamps its own URL), and an internal promise past its
 //! deadline is projected as expired in both snapshots, as the reference's
 //! harness does, since echod expires it when it sweeps and the reference
-//! when it is next read. One more, where the reference departs from the
+//! when it is next read. Error reasons are compared word for word unless
+//! `--lax-reasons` tables them instead. One more, where the reference departs from the
 //! specification: when a task is fulfilled the reference deletes it from
 //! every promise's callbacks, pending ones included, which the catalogue's
 //! `monotone_promise_callbacks_grow_while_pending` forbids; echod removes
@@ -87,9 +88,9 @@ struct Cli {
     /// Print every request.
     #[arg(long, default_value_t = false)]
     trace: bool,
-    /// Count a differing error reason as a divergence.
+    /// Report a differing error reason as a table entry, not a divergence.
     #[arg(long, default_value_t = false)]
-    strict_reasons: bool,
+    lax_reasons: bool,
     /// Keep the callbacks of fulfilled tasks in the comparison.
     #[arg(long, default_value_t = false)]
     strict_callbacks: bool,
@@ -467,7 +468,7 @@ impl<'a> Run<'a> {
                 if reason_only {
                     let e = self.reasons.entry((kind.to_string(), sa, da.as_str().unwrap_or("").to_string())).or_insert_with(|| (db.as_str().unwrap_or("").to_string(), 0));
                     e.1 += 1;
-                    if self.cli.strict_reasons {
+                    if !self.cli.lax_reasons {
                         let detail = format!("request {kind} now={now} {data}\n  reference: {sa} {da}\n  echod:     {sb} {db}");
                         stop |= self.record(seed, total, kind, "reason", &[], detail) && self.cli.stop;
                     }
