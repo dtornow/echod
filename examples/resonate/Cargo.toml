@@ -6,7 +6,7 @@ description = "The Resonate server protocol as an accordant model, written in Ve
 
 [dependencies]
 accordant = { path = "../.." }
-vstd = "=0.0.0-2026-10-04-0306"
+vstd = "=0.0.0-2026-10-11-0230"
 chrono = "0.4"
 cron = "0.12"
 

@@ -18,8 +18,8 @@ The model's interface (`Model`, with `spec` twins of `external` and
 
 ## Running it
 
-Checked with Verus `0.2026.10.04.fc7d32e` (a rolling release from
-github.com/verus-lang/verus), which needs Rust toolchain 1.98.1:
+Checked with Verus `0.2026.10.13.96607e2` (a rolling release from
+github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `vstd` is pinned to the matching crates.io release:
 
 ```
 cargo verus verify -p accordant
