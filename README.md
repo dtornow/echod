@@ -24,6 +24,7 @@ under crashes, outages, lost acks and clock jumps.
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
 | [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, checked for linearizability against the kernel |
+| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; every response, message and snapshot compared |
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |
 
@@ -43,7 +44,12 @@ cargo test --workspace                  # unit and end-to-end tests, in memory
 (cd system && ./verify.sh)              # the system model under Verus, importing the kernel
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001
+cargo run --release -p echod-diff -- --resonate <path to a resonate binary> --seeds 4   # the differential
 ```
+
+The differential wants the reference server built from `resonatehq/resonate`
+(`impl/server/core`, `cargo build --release --bin resonate`); it starts it
+and echod in debug mode and drives both over HTTP.
 
 `verify.sh` wants a Verus source tree with a release build in `VERUS_DIR`
 (default `~/verus-lang/verus/source`) and z3 beside it. `cargo build` is

@@ -386,6 +386,42 @@ Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
 
+### Differential
+
+`echod-diff` runs echod against the Resonate reference server, both as
+processes answering HTTP, on one seeded request stream: the reference's
+own differential's (its `diff/port.rs`), the same operation mix over the
+same small pools of ids, steered towards the operations not yet covered.
+Time is `head.debug_time` and moves only through `debug.tick`, which both
+servers honour in debug mode; echod answers `debug.tick`, `debug.snap` and
+`debug.reset` from `logic/debug.rs`, as machines over store calls like
+everything else: a tick sweeps every origin at the instant and fires every
+schedule due, again and again until none is, as the timers would have had
+the clock passed through every instant on the way.
+
+Every step sends one request to each server in turn and compares the
+response, the messages pushed to the harness's worker while it was
+answered (the sink is given a quiet moment, since echod pushes after it
+answers), and the `debug.snap` of the whole state afterwards. A run stops
+at its coverage plateau or at a step cap, over several seeds, and reports
+every divergence by class with the first example; a snapshot divergence
+ends the episode, since the states have parted.
+
+What is compared modulo known differences: `preload` (echod answers an
+empty one), `head.serverUrl` in execute messages, an internal promise past
+its deadline (projected as expired in both, as the reference's harness
+does), and the error reason strings, which the protocol leaves to the
+server: echod says the status's generic reason, the reference says why;
+these are reported as a table, not as divergences. One more is a
+deviation of the reference from the specification: on fulfilling a task
+it deletes that task from every promise's callbacks, pending ones
+included, which the catalogue's `monotone_promise_callbacks_grow_while_pending`
+forbids. echod removes a callback only when it is consumed, as the
+specification's `processCallback` does, so such callbacks are dropped
+from both snapshots before the comparison (`--strict-callbacks` keeps
+them). The search operations are not in the stream: echod does not serve
+them.
+
 ## echod-system
 
 The whole system as a state machine, in the shape Anvil gives a

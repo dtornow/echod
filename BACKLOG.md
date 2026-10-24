@@ -60,6 +60,21 @@ acting, timer lag, and the wheel.
 Done: `docker compose up` in `dashboards/` against a running cluster
 shows the panels with data.
 
+## Parity with the reference
+
+`echod-diff` shows what is left between echod and the reference server:
+
+- **Search.** `promise.search`, `task.search` and `schedule.search` are
+  refused with 403. A search over documents in a bucket is a listing
+  and a scan; whether to serve it at all is a design decision.
+- **Preload.** `task.acquire`, `task.suspend` and `task.fence` answer an
+  empty `preload`; the reference returns up to a limit of the promises
+  the task may read next.
+- **Error reasons.** echod answers the status's generic reason
+  ("Not found", "Conflict"); the reference says why ("Task is not
+  halted"). The protocol fixes the status, not the words, but the words
+  are what a user reads. A table by kind and status would cover most.
+
 ## Smaller items
 
 - **Checker time on long histories.** Some seeds (5003 with three

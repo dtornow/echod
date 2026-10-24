@@ -222,3 +222,44 @@ fn the_same_events_give_the_same_effects() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn the_debug_operations_own_the_clock() {
+    let mut h = Harness::new("n1");
+    h.state = State::new({
+        let mut cfg = Config::memory("n1");
+        cfg.debug = true;
+        cfg
+    });
+    h.apply(Event::Start { clock: h.clock, loops: false });
+    let far = h.clock + 10_000;
+    let (status, _) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } }));
+    assert_eq!(status, 200);
+    let (status, _) = h.request("promise.register_listener", json!({ "awaited": "a:1", "address": "http://worker/" }));
+    assert_eq!(status, 200);
+
+    // the snapshot: the promise, its deadline, its listener
+    let (status, snap) = h.request("debug.snap", json!({}));
+    assert_eq!(status, 200, "{snap}");
+    assert_eq!(snap["promises"].as_array().map(Vec::len), Some(1));
+    assert_eq!(snap["promiseTimeouts"][0]["timeout"].as_u64(), Some(far));
+    assert_eq!(snap["listeners"][0]["id"], "a:1");
+    assert_eq!(snap["tasks"].as_array().map(Vec::len), Some(0));
+
+    // the tick: time moves, the sweep runs, the listener hears
+    let (status, data) = h.request("debug.tick", json!({ "time": far + 1 }));
+    assert_eq!(status, 200, "{data}");
+    let (_, snap) = h.request("debug.snap", json!({}));
+    assert_eq!(snap["promises"][0]["state"], "rejected_timedout", "{snap}");
+    assert!(snap["promiseTimeouts"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(h.sent.len(), 1, "{:?}", h.sent);
+
+    // the reset: nothing left
+    let (status, _) = h.request("debug.reset", json!({}));
+    assert_eq!(status, 200);
+    assert!(h.keys("wf/").is_empty());
+    let (status, _) = h.request("promise.get", json!({ "id": "a:1" }));
+    assert_eq!(status, 404);
+    let (_, snap) = h.request("debug.snap", json!({}));
+    assert!(snap["promises"].as_array().is_some_and(Vec::is_empty));
+}

@@ -340,11 +340,11 @@ impl State {
         match entry {
             TimerEntry::Origin { origin, deadline, token, by } => {
                 let fired = FiredKey { key: Key { origin: origin.clone(), at: deadline, token }, by };
-                self.submit(Target::Origin(origin), Work::Sweep { fired, now }, Some(firing));
+                self.submit(Target::Origin(origin), Work::Sweep { fired: Some(fired), now }, Some(firing), false);
             }
             TimerEntry::Schedule { id, deadline, token, by } => {
                 let fired = FiredKey { key: Key { origin: format!("sched:{id}"), at: deadline, token }, by };
-                self.submit(Target::Schedule(id.clone()), Work::Fire { schedule: id, fired, now }, Some(firing));
+                self.submit(Target::Schedule(id.clone()), Work::Fire { schedule: id, fired: Some(fired), now }, Some(firing), false);
             }
         }
     }

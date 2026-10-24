@@ -1,0 +1,20 @@
+[package]
+name = "echod-diff"
+description = "Differential fuzzing of echod against the Resonate reference server, both over HTTP: one seeded request stream, every response, message and snapshot compared."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "echod-diff"
+path = "src/main.rs"
+
+[dependencies]
+echod-sim = { path = "../sim" }
+resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
+axum = { version = "0.7", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

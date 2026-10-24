@@ -47,8 +47,10 @@ use crate::{unavailable, Owner, State};
 /// What a flight does.
 pub(crate) enum Work {
     Request { id: RequestId, kind: String, corr: String, req: k::Request, action_kind: Option<String>, now: u64 },
-    Sweep { fired: FiredKey, now: u64 },
-    Fire { schedule: String, fired: FiredKey, now: u64 },
+    /// `fired` is the key whose firing this is; none for a sweep or a fire
+    /// a test asked for.
+    Sweep { fired: Option<FiredKey>, now: u64 },
+    Fire { schedule: String, fired: Option<FiredKey>, now: u64 },
 }
 
 impl Work {
@@ -167,10 +169,14 @@ struct Flight {
     attempt: u32,
     phase: Phase,
     firing: Option<Firing>,
+    /// Started by `debug.tick`, which hears how it ended.
+    debug: bool,
+    /// A sweep that fired nothing, or a fire that found nothing due.
+    idle: bool,
 }
 
 enum Queued {
-    Work(Box<(Target, Work, Option<Firing>)>),
+    Work(Box<(Target, Work, Option<Firing>, bool)>),
     Waiter(FlightId),
 }
 
@@ -203,7 +209,7 @@ impl State {
     // -----------------------------------------------------------------------
 
     /// Run `work` on `target`, after whatever is on it already.
-    pub(crate) fn submit(&mut self, target: Target, work: Work, firing: Option<Firing>) {
+    pub(crate) fn submit(&mut self, target: Target, work: Work, firing: Option<Firing>, debug: bool) {
         let name = target.name();
         if let Work::Sweep { now, .. } = &work {
             let flight = self.next_flight;
@@ -211,17 +217,17 @@ impl State {
         }
         let slot = self.flights.slots.entry(name).or_default();
         if slot.busy.is_some() {
-            slot.queue.push_back(Queued::Work(Box::new((target, work, firing))));
+            slot.queue.push_back(Queued::Work(Box::new((target, work, firing, debug))));
             return;
         }
-        self.start(target, work, firing);
+        self.start(target, work, firing, debug);
     }
 
-    fn start(&mut self, target: Target, work: Work, firing: Option<Firing>) {
+    fn start(&mut self, target: Target, work: Work, firing: Option<Firing>, debug: bool) {
         let id = self.next_flight;
         self.next_flight += 1;
         self.flights.slots.entry(target.name()).or_default().busy = Some(id);
-        let f = Flight { id, target, work, attempt: 0, phase: Phase::Idle, firing };
+        let f = Flight { id, target, work, attempt: 0, phase: Phase::Idle, firing, debug, idle: false };
         self.begin(f);
     }
 
@@ -234,8 +240,8 @@ impl State {
                 self.flights.slots.remove(name);
             }
             Some(Queued::Work(q)) => {
-                let (target, work, firing) = *q;
-                self.start(target, work, firing);
+                let (target, work, firing, debug) = *q;
+                self.start(target, work, firing, debug);
             }
             Some(Queued::Waiter(fid)) => {
                 slot.busy = Some(fid);
@@ -508,7 +514,7 @@ impl State {
         steps::drain(&mut state, now, &self.kcfg);
         let rows = R::rows_of(&state);
         let fired = match work {
-            Work::Sweep { fired, .. } => Some(fired.clone()),
+            Work::Sweep { fired, .. } => fired.clone(),
             _ => None,
         };
         let commit = self.commit_new(w, rows, now, did, fired);
@@ -533,6 +539,8 @@ impl State {
             }
             Work::Fire { .. } => {}
         }
+        let mut f = f;
+        f.idle = !done.did;
         self.finish(f, Ok(fired));
     }
 
@@ -578,6 +586,9 @@ impl State {
             let now = self.now();
             self.timer_fired(firing, now, r);
         }
+        if f.debug {
+            self.debug_flight_done(&f.work, f.idle);
+        }
     }
 
     pub(crate) fn send(&mut self, e: &OutboxEntry) {
@@ -606,9 +617,10 @@ impl State {
         let due = steps::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
         let Some(c) = due else {
             // a sweep of the schedule's document that finds nothing due
+            f.idle = true;
             let rows = ws.loaded.rows.clone();
             self.note(Note::SweepBegin { flight: f.id, target: ws.target.clone(), now: t1 });
-            let mut commit = self.commit_new(ws, rows, t1, false, Some(fired));
+            let mut commit = self.commit_new(ws, rows, t1, false, fired);
             match self.commit_advance(f.id, &mut commit, None) {
                 Progress::Issued => {
                     f.phase = Phase::FireIdle { commit };
@@ -690,7 +702,7 @@ impl State {
         let (id, fired) = (schedule.clone(), fired.clone());
         self.note(Note::AdvanceBegin { flight: f.id, schedule: id, now: t, at: ctx.at, next: ctx.next });
         let FireCtx { ws, .. } = ctx;
-        let mut commit = self.commit_new(ws, schedules, t, false, Some(fired));
+        let mut commit = self.commit_new(ws, schedules, t, false, fired);
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
                 f.phase = Phase::FireSchedule { commit };
