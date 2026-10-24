@@ -437,7 +437,8 @@ origin at a time.
 
 Run over four seeds to their coverage plateaus, 164,800 steps in all,
 every response, message and snapshot agreed modulo the above; the two
-reference deviations were the only divergence classes found.
+reference deviations were the only divergence classes found. Rerun after
+the detached create (two seeds, 63,200 steps), the same.
 
 ### The accordant model
 
