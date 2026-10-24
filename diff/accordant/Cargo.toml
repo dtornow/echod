@@ -1,0 +1,24 @@
+[package]
+name = "echod-accordant"
+description = "echod driven over HTTP by the Resonate model of dtornow/accordant, every recorded trace checked against it."
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# A workspace of its own: accordant pins a vstd the kernel does not, and
+# cargo allows one.
+[workspace]
+
+[[bin]]
+name = "echod-accordant"
+path = "src/main.rs"
+
+[dependencies]
+accordant = { git = "https://github.com/dtornow/accordant", rev = "8e55cdfb78aaf8674aa2497fe14a088674eeb408" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "8e55cdfb78aaf8674aa2497fe14a088674eeb408", package = "resonate" }
+resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
+axum = { version = "0.7", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

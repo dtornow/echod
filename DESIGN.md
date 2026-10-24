@@ -422,6 +422,32 @@ from both snapshots before the comparison (`--strict-callbacks` keeps
 them). The search operations are not in the stream: echod does not serve
 them.
 
+### The accordant model
+
+`diff/accordant` drives echod with the Resonate model of
+`dtornow/accordant`, an executable specification in Verus of the protocol
+as the C# specification had it, and checks every recorded trace against
+it: an execution of the model must produce exactly the observations,
+with the model's internal work (a deadline, a lease, a resume) placed
+where the checker likes. A run resets echod and takes the model's own
+actions, the ones it suggests from the state it reads back through
+`debug.snap` (fences at the held and a stale version, the clock to just
+before and at each deadline, a settle while a task awaits) or random
+ones; a request is sent with the run's clock as `head.debug_time`, a clock
+move is handed to echod as `debug.tick`, and every `execute` the sink
+receives is a dispatch. Then the model's finishing reads. The marks of the
+execution that explains an accepted trace are the coverage.
+
+Where that model and the Lean specification echod follows say different
+things by design, the driver translates or abstains: `task.create` on an
+existing id answers both records in the Lean specification and the task's
+alone in the C# one (read as the model types it); a fence creating a
+promise in another origin, the C# detached create, is refused by the Lean
+specification and by echod (not sent); and the model's `task.create` has
+no branch for a deadline already passed, which the Lean specification and
+echod have (not sent). Nothing else is translated: the statuses, the
+records, the dispatches and their timing are compared as they are.
+
 ## echod-system
 
 The whole system as a state machine, in the shape Anvil gives a

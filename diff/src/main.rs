@@ -36,21 +36,19 @@
 //! ```
 
 mod gen;
+mod harness;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::routing::post;
-use axum::{Json, Router};
 use clap::Parser;
 use echod_sim::rng::Rng;
-use resonate_core::types::PROTOCOL_VERSION;
 use serde_json::{json, Value};
 
 use crate::gen::{Ids, Model, ALL_OPS};
+use crate::harness::{free_port, spawn_echod, spawn_reference, start_sink, Client, Server, Sink};
 
 #[derive(Parser, Debug)]
 #[command(name = "echod-diff", about = "echod against the Resonate reference server, over HTTP")]
@@ -94,104 +92,6 @@ struct Cli {
     /// Where the servers' logs go.
     #[arg(long, default_value = "target/echod-diff")]
     logs: PathBuf,
-}
-
-// ---------------------------------------------------------------------------
-// The processes, the sink, the client
-// ---------------------------------------------------------------------------
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-struct Server {
-    name: &'static str,
-    url: String,
-    child: Child,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn spawn(name: &'static str, mut cmd: Command, url: String, logs: &PathBuf) -> Server {
-    std::fs::create_dir_all(logs).expect("a log directory");
-    let out = std::fs::File::create(logs.join(format!("{name}.log"))).expect("a log file");
-    let err = out.try_clone().expect("a log file");
-    // The servers push to the sink on localhost: no proxy may stand between.
-    for v in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
-        cmd.env_remove(v);
-    }
-    let child = cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err)).stdin(Stdio::null()).spawn().unwrap_or_else(|e| panic!("cannot start {name}: {e}"));
-    Server { name, url, child }
-}
-
-/// The messages pushed to the harness's worker, in the order they came.
-#[derive(Default)]
-struct Sink {
-    got: Mutex<Vec<Value>>,
-}
-
-impl Sink {
-    fn count(&self) -> usize {
-        self.got.lock().unwrap().len()
-    }
-    fn take(&self) -> Vec<Value> {
-        self.got.lock().unwrap().drain(..).collect()
-    }
-}
-
-async fn start_sink(sink: Arc<Sink>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}/", listener.local_addr().unwrap().port());
-    let app = Router::new().route(
-        "/",
-        post(move |Json(v): Json<Value>| {
-            let sink = Arc::clone(&sink);
-            async move {
-                sink.got.lock().unwrap().push(v);
-                axum::http::StatusCode::OK
-            }
-        }),
-    );
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    url
-}
-
-struct Client {
-    http: reqwest::Client,
-}
-
-impl Client {
-    fn new() -> Self {
-        Self { http: reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().expect("an HTTP client") }
-    }
-
-    async fn send(&self, s: &Server, kind: &str, data: &Value, now: i64, corr: &str) -> (u16, Value) {
-        let body = json!({ "kind": kind, "head": { "corrId": corr, "version": PROTOCOL_VERSION, "resonate:debug_time": now }, "data": data });
-        let resp = self.http.post(&s.url).json(&body).send().await.unwrap_or_else(|e| panic!("{}: no answer for {kind}: {e}", s.name));
-        let status = resp.status().as_u16();
-        let v: Value = resp.json().await.unwrap_or_else(|e| panic!("{}: not an envelope for {kind}: {e}", s.name));
-        let head_status = v["head"]["status"].as_u64().map(|s| s as u16).unwrap_or(status);
-        (head_status, v["data"].clone())
-    }
-
-    async fn wait_ready(&self, s: &Server) {
-        let start = Instant::now();
-        loop {
-            let body = json!({ "kind": "promise.get", "head": { "corrId": "ready", "version": PROTOCOL_VERSION, "resonate:debug_time": 1 }, "data": { "id": "ready:probe" } });
-            if let Ok(r) = self.http.post(&s.url).json(&body).send().await {
-                if r.status().as_u16() < 500 {
-                    return;
-                }
-            }
-            assert!(start.elapsed() < Duration::from_secs(60), "{} did not come up at {}", s.name, s.url);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,15 +517,9 @@ async fn main() {
     let worker = start_sink(Arc::clone(&sink)).await;
 
     let p1 = free_port();
-    let p2 = free_port();
     let server_url = format!("http://localhost:{p1}");
-    let mut cmd = Command::new(&cli.resonate);
-    cmd.args(["dev", "--debug", "--level", "warn", "--server-bind", "127.0.0.1", "--server-port", &p1.to_string(), "--server-url", &server_url, "--tasks-retry-timeout", "30000", "--console-enabled", "false", "--observability-metrics-enabled", "false", "--transports-http-poll-enabled", "false"]);
-    let reference = spawn("resonate", cmd, format!("http://127.0.0.1:{p1}/"), &cli.logs);
-    let mut cmd = Command::new(&cli.echod);
-    cmd.args(["--debug", "--bind", &format!("127.0.0.1:{p2}"), "--url", &server_url, "--node-id", "diff", "--retry-timeout", "30000", "--compact", "0"]);
-    cmd.env("RUST_LOG", "warn");
-    let echod = spawn("echod", cmd, format!("http://127.0.0.1:{p2}/"), &cli.logs);
+    let reference = spawn_reference(&cli.resonate, p1, &server_url, &cli.logs);
+    let echod = spawn_echod(&cli.echod, &server_url, 30_000, &cli.logs);
 
     let client = Client::new();
     client.wait_ready(&reference).await;
