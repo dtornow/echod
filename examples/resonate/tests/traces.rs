@@ -881,6 +881,11 @@ fn the_wire_rules_are_refusals() {
     let hb = |ids: &[&str]| Request::HeartbeatTask { pid: "w".into(), tasks: ids.iter().map(|id| TaskRef { id: (*id).into(), version: 1 }).collect() };
     t.step("heartbeat across origins → 400", hb(&["a:t", "b:t"]), st(400));
     t.step("heartbeat in one origin → 200", hb(&["a:t"]), st(200));
+    // The rules come before the fence's check: a stale fence with a bad action is 400, not 409.
+    let bad = Create { id: "a:d".into(), timeout_at: FAR, data: None, tags: Tags { delay: Some(now), ..PLAIN } };
+    t.step("stale fence, delayed create without a target → 400", fence("a:t", 9, Fenced::Create(bad.clone())), st(400));
+    t.step("missing task, detached delayed create → 400", fence("a:ghost", 0, Fenced::Create(Create { id: "d:d".into(), ..bad })), st(400));
+    t.step("d:d not created", get("d:d"), st(404));
 }
 
 #[test]

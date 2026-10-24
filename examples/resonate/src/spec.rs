@@ -874,6 +874,22 @@ impl Resonate {
         if *action.target() == *id {
             return status(400, mk("fence: targets its own task (400)"), s);
         }
+        // The wire rules on the action come before the fence's check, as the
+        // reference server's validators do.
+        match action {
+            Fenced::Create(c) => match c.tags.delay {
+                Some(d) => {
+                    if d >= c.timeout_at {
+                        return status(400, mk("create: delay past the deadline (400)"), s);
+                    }
+                    if !c.tags.target {
+                        return status(400, mk("create: delay without a target (400)"), s);
+                    }
+                },
+                None => {},
+            },
+            Fenced::Settle(_) => {},
+        }
         match action {
             Fenced::Settle(st) => {
                 if !same_origin(&st.id, id) {
