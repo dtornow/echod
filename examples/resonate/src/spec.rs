@@ -32,6 +32,11 @@
 //!   already "maybe".
 //! - Clock and version arithmetic saturates instead of overflowing.
 //! - Not ported: the searches (501 in Lean), `preload`, and `task.poll`.
+//! - The reference server's wire rules, which the Lean specification leaves to
+//!   the protocol layer, are here too, as 400s: a delay needs a target and
+//!   ends before the deadline, a task.create's action carries no delay, a
+//!   schedule's id has no `:` and its promises a target, a heartbeat's tasks
+//!   share an origin.
 //!
 //! The detached create: a fence whose create targets another origin runs the
 //! create first, as a request of its own in that origin, and then the fence's
@@ -587,6 +592,17 @@ impl Resonate {
         if req.tags.timer && req.tags.target {
             return status(400, mk("create: timer with target (400)"), s);
         }
+        match req.tags.delay {
+            Some(d) => {
+                if d >= req.timeout_at {
+                    return status(400, mk("create: delay past the deadline (400)"), s);
+                }
+                if !req.tags.target {
+                    return status(400, mk("create: delay without a target (400)"), s);
+                }
+            },
+            None => {},
+        }
         match s.promises.get(&req.id) {
             Some(p) => {
                 proof {
@@ -714,6 +730,10 @@ impl Resonate {
     fn task_create(&self, pid: &String, ttl: Time, req: &Create, s: &Server, now: Time) -> Vec<Out> {
         if !req.tags.target || req.tags.timer {
             return status(400, mk("task.create: not runnable, or a timer (400)"), s);
+        }
+        match req.tags.delay {
+            Some(_) => return status(400, mk("task.create: action with a delay (400)"), s),
+            None => {},
         }
         match s.promises.get(&req.id) {
             Some(p) => {
@@ -900,6 +920,17 @@ impl Resonate {
     }
 
     fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Server, now: Time) -> Vec<Out> {
+        let mut i = 1;
+        while i < refs.len()
+            invariant
+                1 <= i,
+            decreases refs.len() - i,
+        {
+            if !same_origin(&refs[i].id, &refs[0].id) {
+                return status(400, mk("heartbeat: tasks in several origins (400)"), s);
+            }
+            i += 1;
+        }
         let mut n = copy_server(s);
         let mut work = Vec::new();
         let mut extended = false;
@@ -935,6 +966,12 @@ impl Resonate {
     }
 
     fn schedule_create(&self, req: &ScheduleCreate, s: &Server, now: Time) -> Vec<Out> {
+        if has_colon(&req.id) {
+            return status(400, mk("schedule: id with a colon (400)"), s);
+        }
+        if !req.promise_tags.target {
+            return status(400, mk("schedule: promises without a target (400)"), s);
+        }
         if req.promise_tags.timer && req.promise_tags.target {
             return status(400, mk("schedule: timer with target (400)"), s);
         }

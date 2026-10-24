@@ -187,6 +187,13 @@ pub fn settable(s: &String) -> (r: Option<crate::spec::PState>)
     }
 }
 
+/// Whether an id holds a `:`: the reference server keeps it as the separator
+/// between an origin and the rest, so a schedule's id may not have one.
+#[verifier::external_body]
+pub fn has_colon(id: &String) -> bool {
+    id.contains(':')
+}
+
 /// A cron expression the reference server's engine accepts: five fields, or
 /// six to seven with seconds (and a year).
 #[verifier::external_body]

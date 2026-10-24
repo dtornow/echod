@@ -21,6 +21,8 @@ pub const MARKS: &[&str] = &[
     "callback: one of them settled (echo)",
     "continue: no such task (404)",
     "continue: not halted (409)",
+    "create: delay past the deadline (400)",
+    "create: delay without a target (400)",
     "create: id exists (echo)",
     "create: timer with target (400)",
     "delete schedule: none (404)",
@@ -47,6 +49,7 @@ pub const MARKS: &[&str] = &[
     "halt: no such task (404)",
     "halt: task done (409)",
     "heartbeat: nothing held by this worker",
+    "heartbeat: tasks in several origins (400)",
     "lease expired",
     "lease extended",
     "listener registered",
@@ -67,8 +70,10 @@ pub const MARKS: &[&str] = &[
     "schedule fired",
     "schedule fired past the occurrence's deadline",
     "schedule: id exists (echo)",
+    "schedule: id with a colon (400)",
     "schedule: invalid cron (400)",
     "schedule: occurrence exists",
+    "schedule: promises without a target (400)",
     "schedule: timer with target (400)",
     "settle: already settled (echo)",
     "settle: no such promise (404)",
@@ -93,6 +98,7 @@ pub const MARKS: &[&str] = &[
     "task released",
     "task resumed",
     "task suspended",
+    "task.create: action with a delay (400)",
     "task.create: not runnable, or a timer (400)",
     "task.create: pending task acquired",
     "task.create: promise exists, not a target (422)",
@@ -118,8 +124,12 @@ fn settle(id: &Id) -> Settle {
     Settle { id: id.clone(), state: "resolved".into(), data: Some("v".into()) }
 }
 
+/// A schedule whose occurrences are tasks in the origin its id names:
+/// `sa` fires into `a`. (A schedule's id has no `:`, so it cannot carry an
+/// origin of its own the way a promise id does.)
 fn schedule(id: &Id, cron: &str, timeout: Time) -> ScheduleCreate {
-    ScheduleCreate { id: id.clone(), cron: cron.into(), promise_id: format!("{}:{{{{.id}}}}.{{{{.timestamp}}}}", origin(id)), promise_timeout: timeout, promise_param: None, promise_tags: PLAIN }
+    let into = id.strip_prefix('s').unwrap_or(id);
+    ScheduleCreate { id: id.clone(), cron: cron.into(), promise_id: format!("{into}:{{{{.id}}}}.{{{{.timestamp}}}}"), promise_timeout: timeout, promise_param: None, promise_tags: Tags { target: true, ..PLAIN } }
 }
 
 fn heartbeat(pid: &str, refs: &[(&Id, u32)]) -> Request {
@@ -196,9 +206,15 @@ impl Explore for Resonate {
                 }
             }
         }
-        if held.len() >= 2 {
-            let pid = s.tasks.get(held[0].0).and_then(|t| t.pid.clone()).unwrap_or_default();
-            push(Action::Request(heartbeat(&pid, &held[..2])), "heartbeat two tasks at once");
+        for (i, a) in held.iter().enumerate() {
+            if let Some(b) = held[i + 1..].iter().find(|b| origin(b.0) == origin(a.0)) {
+                let pid = s.tasks.get(a.0).and_then(|t| t.pid.clone()).unwrap_or_default();
+                push(Action::Request(heartbeat(&pid, &[*a, *b])), "heartbeat two tasks at once");
+                break;
+            }
+        }
+        if let (Some(a), Some(b)) = (held.iter().find(|t| origin(t.0) == "a"), held.iter().find(|t| origin(t.0) == "b")) {
+            push(Action::Request(heartbeat("w1", &[*a, *b])), "heartbeat across origins");
         }
         for (id, p) in s.promises.iter() {
             if p.state == PState::Pending {
@@ -274,8 +290,8 @@ impl Explore for Resonate {
 /// The ids random requests use.
 pub const IDS: &[&str] = &["a:1", "a:2", "a:3", "b:1", "b:2"];
 
-/// The schedule ids random requests use.
-pub const SCHEDULES: &[&str] = &["a:s", "b:s"];
+/// The schedule ids random requests use: `sa` fires into origin `a`.
+pub const SCHEDULES: &[&str] = &["sa", "sb"];
 
 /// A clock move, or a request from a small pool of ids, versions and times;
 /// `pick(n)` chooses among `n`. `clock`: the system's clock.
@@ -308,7 +324,9 @@ fn random_action(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Action<Re
         16 => {
             let sid = SCHEDULES[pick(SCHEDULES.len())].to_string();
             let cron = ["* * * * * *", "*/5 * * * * *", "0 * * * * *", "* * * * *", "bogus"][pick(5)];
-            Request::CreateSchedule(ScheduleCreate { id: sid.clone(), cron: cron.into(), promise_id: format!("{}:{{{{.id}}}}.{{{{.timestamp}}}}", origin(&sid)), promise_timeout: pick(3000) as Time, promise_param: None, promise_tags: tags(pick) })
+            let mut c = schedule(&sid, cron, pick(3000) as Time);
+            c.promise_tags = Tags { target: pick(6) != 0, ..tags(pick) };
+            Request::CreateSchedule(c)
         }
         17 => Request::GetSchedule(SCHEDULES[pick(SCHEDULES.len())].to_string()),
         18 => Request::DeleteSchedule(SCHEDULES[pick(SCHEDULES.len())].to_string()),

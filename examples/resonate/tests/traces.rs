@@ -513,8 +513,8 @@ fn partitioning_never_changes_a_verdict() {
                 7 => Request::GetTask(id),
                 8 => Request::HaltTask(id),
                 9 => Request::ContinueTask(id),
-                10 => Request::CreateSchedule(ScheduleCreate { id: format!("{}:s", &id[..1]), cron: "* * * * * *".into(), promise_id: format!("{}:{{{{.id}}}}.{{{{.timestamp}}}}", &id[..1]), promise_timeout: rng.next(3_000), promise_param: None, promise_tags: PLAIN }),
-                11 => Request::DeleteSchedule(format!("{}:s", &id[..1])),
+                10 => Request::CreateSchedule(ScheduleCreate { id: format!("s{}", &id[..1]), cron: "* * * * * *".into(), promise_id: format!("{}:{{{{.id}}}}.{{{{.timestamp}}}}", &id[..1]), promise_timeout: rng.next(3_000), promise_param: None, promise_tags: Tags { target: true, ..PLAIN } }),
+                11 => Request::DeleteSchedule(format!("s{}", &id[..1])),
                 _ => Request::GetPromise(id),
             };
             let mut events = if call == 0 { vec![clock(now)] } else { Vec::new() };
@@ -823,42 +823,64 @@ fn a_task_counts_what_settled_while_it_ran() {
 fn schedules_fire_on_their_cron() {
     let now = 1_000_000; // 1000 s
     let mut t = Trace::new(now);
-    t.step("invalid cron → 400", schedule("ex:bad", "bogus", "ex:x", 1_500, PLAIN), st(400));
-    t.step("timer with target → 400", schedule("ex:bad", "* * * * * *", "ex:x", 1_500, Tags { target: true, timer: true, ..PLAIN }), st(400));
-    let every_second = schedule("ex:s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, PLAIN);
+    let targeted = Tags { target: true, ..PLAIN };
+    t.step("id with a colon → 400", schedule("ex:bad", "* * * * * *", "ex:x", 1_500, targeted), st(400));
+    t.step("promises without a target → 400", schedule("bad", "* * * * * *", "ex:x", 1_500, PLAIN), st(400));
+    t.step("invalid cron → 400", schedule("bad", "bogus", "ex:x", 1_500, targeted), st(400));
+    t.step("timer with target → 400", schedule("bad", "* * * * * *", "ex:x", 1_500, Tags { target: true, timer: true, ..PLAIN }), st(400));
+    let every_second = schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, targeted);
     let r = t.step("create s", every_second.clone(), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_001_000 && c.last_run_at.is_none()));
-    t.step("get s", Request::GetSchedule("ex:s".into()), |x| *x == r);
+    t.step("get s", Request::GetSchedule("s".into()), |x| *x == r);
     t.step("create s again → echo", every_second, |x| *x == r);
-    t.step("get missing → 404", Request::GetSchedule("ex:none".into()), st(404));
+    t.step("get missing → 404", Request::GetSchedule("none".into()), st(404));
     t.step("run-1001000 not yet", get("ex:run-1001000"), st(404));
     t.tick(1_000_999);
     t.step("run-1001000 still not yet", get("ex:run-1001000"), st(404));
     t.tick(1_001_000);
     let r = t.step("run-1001000 created at its instant", get("ex:run-1001000"), promise(PState::Pending, None));
     assert!(matches!(r, Response::Promise(p) if p.created_at == 1_001_000 && p.timeout_at == 1_002_500 && p.param.as_deref() == Some("p")));
-    t.step("s advanced", Request::GetSchedule("ex:s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_001_000) && c.next_run_at == 1_002_000));
+    t.c.receive(execute("ex:run-1001000", 0)).unwrap();
+    t.step("s advanced", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_001_000) && c.next_run_at == 1_002_000));
     // A jump over three occurrences fires all three, each as of its instant.
     t.tick(1_004_000);
     let r = t.step("run-1002000 born in the past, already timed out", get("ex:run-1002000"), promise(PState::TimedOut, None));
     assert!(matches!(r, Response::Promise(p) if p.created_at == 1_002_000 && p.settled_at == Some(1_003_500)));
+    assert!(t.c.receive(execute("ex:run-1002000", 0)).is_err(), "a task born done is not offered");
     t.step("run-1003000 pending", get("ex:run-1003000"), promise(PState::Pending, None));
     t.step("run-1004000 pending", get("ex:run-1004000"), promise(PState::Pending, None));
-    t.step("s advanced to 1005000", Request::GetSchedule("ex:s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
-    t.step("delete s", Request::DeleteSchedule("ex:s".into()), st(200));
-    t.step("delete s again → 404", Request::DeleteSchedule("ex:s".into()), st(404));
+    t.c.receive(execute("ex:run-1004000", 0)).unwrap();
+    t.step("s advanced to 1005000", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
+    t.step("delete s", Request::DeleteSchedule("s".into()), st(200));
+    t.step("delete s again → 404", Request::DeleteSchedule("s".into()), st(404));
     t.tick(1_006_000);
     t.step("run-1005000 never fired", get("ex:run-1005000"), st(404));
 
-    // Occurrences with a target are tasks, offered to a worker.
-    t.step("create w (targeted occurrences)", schedule("ex:w", "*/5 * * * * *", "ex:job-{{.timestamp}}", 60_000, Tags { target: true, ..PLAIN }), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_010_000));
-    t.tick(1_010_000);
-    t.c.receive(execute("ex:job-1010000", 0)).unwrap();
-    t.step("acquire the occurrence", acquire("ex:job-1010000", 0, "w"), task(TState::Acquired, 1));
     // An occurrence whose id is taken is left alone.
-    t.step("take the next id first", create("ex:job-1015000", FAR, "mine").op(), st(200));
-    t.tick(1_015_000);
-    t.step("the occurrence found it", get("ex:job-1015000"), |r| matches!(r, Response::Promise(p) if p.param.as_deref() == Some("mine") && !p.tags.target));
-    t.step("w advanced anyway", Request::GetSchedule("ex:w".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_015_000) && c.next_run_at == 1_020_000));
+    t.step("create w", schedule("w", "*/5 * * * * *", "ex:job-{{.timestamp}}", 60_000, targeted), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_010_000));
+    t.step("take the next id first", create("ex:job-1010000", FAR, "mine").op(), st(200));
+    t.tick(1_010_000);
+    t.step("the occurrence found it", get("ex:job-1010000"), |r| matches!(r, Response::Promise(p) if p.param.as_deref() == Some("mine") && !p.tags.target));
+    t.step("w advanced anyway", Request::GetSchedule("w".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_010_000) && c.next_run_at == 1_015_000));
+}
+
+/// The reference server's wire rules, as 400s.
+#[test]
+fn the_wire_rules_are_refusals() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    let delayed = |id: &str, target: bool, delay: Time| Request::CreatePromise(Create { id: id.into(), timeout_at: now + 1_000, data: None, tags: Tags { target, delay: Some(delay), ..PLAIN } });
+    t.step("delay without a target → 400", delayed("ex:d1", false, now + 10), st(400));
+    t.step("delay at the deadline → 400", delayed("ex:d2", true, now + 1_000), st(400));
+    t.step("delay before the deadline → 200", delayed("ex:d3", true, now + 999), promise(PState::Pending, None));
+    let tc = Request::CreateTask { pid: "w".into(), ttl: 10, action: Create { id: "ex:t".into(), timeout_at: FAR, data: None, tags: Tags { target: true, delay: Some(now + 1), ..PLAIN } } };
+    t.step("task.create with a delay → 400", tc, st(400));
+    t.step("create a:t +target", create("a:t", FAR, "w").target().op(), st(200));
+    t.step("create b:t +target", create("b:t", FAR, "w").target().op(), st(200));
+    t.step("acquire a:t", acquire("a:t", 0, "w"), st(200));
+    t.step("acquire b:t", acquire("b:t", 0, "w"), st(200));
+    let hb = |ids: &[&str]| Request::HeartbeatTask { pid: "w".into(), tasks: ids.iter().map(|id| TaskRef { id: (*id).into(), version: 1 }).collect() };
+    t.step("heartbeat across origins → 400", hb(&["a:t", "b:t"]), st(400));
+    t.step("heartbeat in one origin → 200", hb(&["a:t"]), st(200));
 }
 
 #[test]
@@ -902,15 +924,15 @@ fn a_halt_may_land_before_or_after_a_concurrent_continue() {
 fn a_schedule_recreated_during_its_delete_keeps_its_time() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
-    let s = schedule("ex:s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, PLAIN);
+    let s = schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, Tags { target: true, ..PLAIN });
     let first = t.step("create s", s.clone(), st(200));
     t.tick(now + 500);
-    t.invoke(10, Request::DeleteSchedule("ex:s".into()));
+    t.invoke(10, Request::DeleteSchedule("s".into()));
     t.invoke(11, s);
     t.tick(now + 999);
     t.ret(10, Response::Status(200));
     let Response::Schedule(c) = first else { panic!() };
     let again = Schedule { created_at: now + 500, next_run_at: 1_001_000, ..c };
     t.ret(11, Response::Schedule(again.clone()));
-    t.step("get s → created anew at +500", Request::GetSchedule("ex:s".into()), |r| *r == Response::Schedule(again.clone()));
+    t.step("get s → created anew at +500", Request::GetSchedule("s".into()), |r| *r == Response::Schedule(again.clone()));
 }

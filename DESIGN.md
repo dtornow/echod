@@ -181,7 +181,7 @@ The model that checks a trace can also produce one.
   by default). They change nothing. `accordant::marks(m, init, &trace, &cert)`
   collects the marks on the outcomes a certificate takes: coverage of the spec,
   which behaviors a trace is explained by. The Resonate spec marks every branch
-  (`mk("...")`, 89 in all); `resonate::MARKS` lists them so a report can show
+  (`mk("...")`, 95 in all); `resonate::MARKS` lists them so a report can show
   the ones nothing reached, and a test keeps the list in step with the spec.
 
 `examples/resonate/examples/fuzz/` uses it: drive a server (the spec, or the
@@ -198,8 +198,8 @@ cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug sta
 
 | server | mode | runs KO | marks reached |
 |---|---|---|---|
-| spec | random | 0 | 77/89 |
-| spec | guided | 0 | 83/89 |
+| spec | random | 0 | 78/95 |
+| spec | guided | 0 | 86/95 |
 | fence ignores the version | random | 15 | |
 | a lease never expires | random | 38 | |
 
@@ -626,7 +626,15 @@ create a promise in another origin.
 | `nextCron`, `expand` (opaque) | trusted (`collections.rs`): the reference server's cron engine |
 | `taskFence` refusing every cross-origin fence | a cross-origin settle is 400; a cross-origin create runs first, as a request of its own in its origin, then the fence's check decides the answer: a detached workflow, which a stale fence still starts |
 
-Not ported: the searches (501 in Lean), `preload`, and `task.poll`.
+Not ported: the searches (501 in Lean), `preload`, and `task.poll`. The
+reference server's wire rules, which the Lean specification leaves to the
+protocol layer, are in the model as 400s: a delay needs a target and ends
+before the deadline, a task.create's action carries no delay, a schedule's id
+has no `:` and its promises a target, a heartbeat's tasks share an origin.
+Where the reference server and the Lean specification part, the model follows
+the specification: a timer created with a target is refused (the reference
+runs it as a task), and a detached create may name any id (the reference
+allows a root id alone).
 
 Origins: the only request that may cross origins is the detached create. A
 cross-origin fence-settle, `register_callback` or `suspend` is 400. Those
