@@ -419,8 +419,17 @@ included, which the catalogue's `monotone_promise_callbacks_grow_while_pending`
 forbids. echod removes a callback only when it is consumed, as the
 specification's `processCallback` does, so such callbacks are dropped
 from both snapshots before the comparison (`--strict-callbacks` keeps
-them). The search operations are not in the stream: echod does not serve
-them.
+them). A second one: on a callback registered on a promise already
+settled, the reference resumes the awaiter at once, where the
+specification's `promiseRegisterCallback` answers the record and changes
+nothing; it shows in a task's `resumes` count, dropped likewise
+(`--strict-resumes` keeps it). The search operations are not in the
+stream: echod does not serve them.
+
+Run over four seeds to their coverage plateaus, 164,800 steps in all,
+every response, message and snapshot agreed modulo the above; the two
+reference deviations were the only divergence classes found, and the
+error reason strings the only other difference.
 
 ### The accordant model
 

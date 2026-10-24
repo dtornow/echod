@@ -28,8 +28,12 @@
 //! `monotone_promise_callbacks_grow_while_pending` forbids; echod removes
 //! a callback only when it is consumed, as the specification's internal
 //! step does. Such callbacks are dropped from both snapshots before the
-//! comparison, and `--strict-callbacks` keeps them. Everything else must
-//! be identical.
+//! comparison, and `--strict-callbacks` keeps them. And on a callback
+//! registered on a promise already settled, the reference resumes the
+//! awaiter at once, where the specification's `promiseRegisterCallback`
+//! answers the record and changes nothing; a task's `resumes` count is
+//! where that shows, so it is dropped from both snapshots too, and
+//! `--strict-resumes` keeps it. Everything else must be identical.
 //!
 //! ```text
 //! echod-diff --resonate <bin> --echod target/release/echod --seeds 5
@@ -89,6 +93,9 @@ struct Cli {
     /// Keep the callbacks of fulfilled tasks in the comparison.
     #[arg(long, default_value_t = false)]
     strict_callbacks: bool,
+    /// Keep the tasks' resume counts in the comparison.
+    #[arg(long, default_value_t = false)]
+    strict_resumes: bool,
     /// Where the servers' logs go.
     #[arg(long, default_value = "target/echod-diff")]
     logs: PathBuf,
@@ -142,7 +149,16 @@ fn normalize_msgs(mut msgs: Vec<Value>) -> Vec<Value> {
 
 /// A snapshot as compared: messages dropped, every list sorted, and the
 /// internal promises past their deadline projected as expired.
-fn normalize_snap(mut snap: Value, now: i64, strict_callbacks: bool) -> Value {
+fn normalize_snap(mut snap: Value, now: i64, strict_callbacks: bool, strict_resumes: bool) -> Value {
+    if !strict_resumes {
+        if let Some(ts) = snap.get_mut("tasks").and_then(|v| v.as_array_mut()) {
+            for t in ts.iter_mut() {
+                if let Some(o) = t.as_object_mut() {
+                    o.remove("resumes");
+                }
+            }
+        }
+    }
     if !strict_callbacks {
         let fulfilled: HashSet<String> = snap["tasks"].as_array().map(|ts| ts.iter().filter(|t| t["state"].as_str() == Some("fulfilled")).filter_map(|t| t["id"].as_str().map(str::to_string)).collect()).unwrap_or_default();
         if let Some(cbs) = snap.get_mut("callbacks").and_then(|v| v.as_array_mut()) {
@@ -471,8 +487,8 @@ impl<'a> Run<'a> {
                     stop |= self.record(seed, total, kind, "messages", &paths, detail) && self.cli.stop;
                 }
                 let (a, b) = self.snaps(now).await;
-                let strict = self.cli.strict_callbacks;
-                let (a, b) = (normalize_snap(a, now, strict), normalize_snap(b, now, strict));
+                let (sc, sr) = (self.cli.strict_callbacks, self.cli.strict_resumes);
+                let (a, b) = (normalize_snap(a, now, sc, sr), normalize_snap(b, now, sc, sr));
                 if a != b {
                     let mut paths = Vec::new();
                     diff_paths(&a, &b, "", &mut paths);
