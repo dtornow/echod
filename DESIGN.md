@@ -203,13 +203,14 @@ cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug sta
 | fence ignores the version | random | 15 | |
 | a lease never expires | random | 38 | |
 
-The six marks guided runs miss need a fence on a held task to settle a
-sibling, a task resumed while suspended with its promise still live after a
-redispatch, or a timer promise created past its deadline by a schedule: chains
-the suggestions reach rarely in 30 requests. "Lease expired" takes a chain (a
-task released, re-acquired with a short lease, the clock past its end before
-the promise's deadline) that random requests rarely assemble; the memory
-across runs is what makes guided runs reach it.
+The six marks guided runs miss: a settle or fulfill with a state that is not
+a settled one (no suggestion sends one), an awaited promise named twice, a
+schedule's occurrence finding its id taken, a target without a task (the
+unreachable branch), and a suspended task resumed by the settle of a promise it
+awaits, a chain (suspend, then that settle before the task's own deadline) 30
+requests rarely assemble. "Lease expired" takes a chain too (a task released,
+re-acquired with a short lease, the clock past its end before the promise's
+deadline); the memory across runs is what makes guided runs reach it.
 
 Not done yet: shrinking. A KO trace is reported as found (30–60 events); a
 shrinker would edit a failing run's recorded choices (delete, lower) and drive
