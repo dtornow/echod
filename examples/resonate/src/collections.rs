@@ -1,5 +1,6 @@
 //! What the spec trusts: persistent maps and sets as Verus maps and sets, a copy
-//! that is a copy, and three string helpers. Everything here is `external_body`:
+//! that is a copy, string helpers, and the reference server's cron engine.
+//! Everything here is `external_body`:
 //! Verus takes the `ensures` on trust and checks every use against them. Keep
 //! it small; everything else in the crate is verified.
 
@@ -59,6 +60,14 @@ impl<V: Clone + std::hash::Hash> PMap<V> {
             final(self)@ == old(self)@.insert(k@, v),
     {
         self.inner.insert(k, v);
+    }
+
+    #[verifier::external_body]
+    pub fn remove(&mut self, k: &String)
+        ensures
+            final(self)@ == old(self)@.remove(k@),
+    {
+        self.inner.remove(k.as_str());
     }
 
     /// A copy, in constant time: the map is persistent.
@@ -178,10 +187,28 @@ pub fn settable(s: &String) -> (r: Option<crate::spec::PState>)
     }
 }
 
-/// The literal id of the worker the server acquires a task for on `task.create`.
+/// A cron expression the reference server's engine accepts: five fields, or
+/// six to seven with seconds (and a year).
 #[verifier::external_body]
-pub fn worker_self() -> String {
-    "worker-self".to_string()
+pub fn cron_valid(cron: &String) -> bool {
+    crate::model::cron_valid(cron)
+}
+
+/// Lean's `nextCron`: the first instant strictly after `after` the cron names,
+/// as the reference server computes it (whole seconds, in milliseconds).
+#[verifier::external_body]
+pub fn next_cron(cron: &String, after: u64) -> (r: u64)
+    ensures
+        r > after,
+{
+    crate::model::next_cron(cron, after)
+}
+
+/// Lean's `expand`: the schedule's promise id template with `{{.id}}` the
+/// schedule's id and `{{.timestamp}}` the occurrence's instant.
+#[verifier::external_body]
+pub fn expand(template: &String, id: &String, at: u64) -> String {
+    crate::model::expand(template, id, at)
 }
 
 } // verus!

@@ -23,8 +23,8 @@ impl Trace {
     fn new(now: Time) -> Self {
         let shadow = Config { certify: true, ..Config::default() };
         let mut t = Trace {
-            c: Checker::with_partitions(Resonate, Server::default(), Config::default()),
-            shadow: Certified(Checker::with_footprints(Resonate, Server::default(), shadow)),
+            c: Checker::with_partitions(Resonate::default(), Server::default(), Config::default()),
+            shadow: Certified(Checker::with_footprints(Resonate::default(), Server::default(), shadow)),
             next: 0,
         };
         t.tick(now);
@@ -80,7 +80,7 @@ impl Trace {
 // --------------------------------------------------------------- builders
 
 fn create(id: &str, timeout_at: Time, data: &str) -> Create {
-    Create { id: id.into(), timeout_at, data: Some(data.into()), external: false, target: false, timer: false }
+    Create { id: id.into(), timeout_at, data: Some(data.into()), tags: PLAIN }
 }
 
 /// Builders for a create request.
@@ -92,11 +92,11 @@ trait CreateExt {
 
 impl CreateExt for Create {
     fn external(mut self) -> Self {
-        self.external = true;
+        self.tags.external = true;
         self
     }
     fn target(mut self) -> Self {
-        self.target = true;
+        self.tags.target = true;
         self
     }
     fn op(self) -> Request {
@@ -128,6 +128,12 @@ fn fulfill(id: &str, version: u32, state: &str, data: &str) -> Request {
     Request::FulfillTask { id: id.into(), version, state: state.into(), data: Some(data.into()) }
 }
 
+fn task_create(id: &str, timeout_at: Time, data: &str, target: bool) -> Request {
+    let mut c = create(id, timeout_at, data);
+    c.tags.target = target;
+    Request::CreateTask { pid: "worker-self".into(), ttl: 3_600_000, action: c }
+}
+
 fn fence(id: &str, version: u32, action: Fenced) -> Request {
     Request::FenceTask { id: id.into(), version, action }
 }
@@ -155,8 +161,9 @@ fn promise(state: PState, value: Option<&'static str>) -> impl Fn(&Response) -> 
     move |r| matches!(r, Response::Promise(p) if p.state == state && p.value.as_deref() == value)
 }
 
+/// A task record, alone or beside its promise.
 fn task(state: TState, version: u32) -> impl Fn(&Response) -> bool {
-    move |r| matches!(r, Response::Task(t) if t.state == state && t.version == version)
+    move |r| matches!(r, Response::Task(t) | Response::Both(_, t) if t.state == state && t.version == version)
 }
 
 const FAR: Time = 9_000_000_000_000;
@@ -211,13 +218,13 @@ fn task_layer() {
     t.step("acquire wrong version → 409", acquire("ex:t2", 9, "worker-1"), st(409));
     t.step("acquire missing → 404", acquire("ex:ghostTask", 0, "worker-1"), st(404));
 
-    let tc = |target| Request::CreateTask { id: "ex:tc1".into(), timeout_at: now + 100_000, data: Some("self".into()), target };
-    t.step("task.create tc1 → acquired v1", tc(true), |r| matches!(r, Response::Created(_, t) if t.version == 1));
+    let tc = |target| task_create("ex:tc1", now + 100_000, "self", target);
+    t.step("task.create tc1 → acquired v1", tc(true), |r| matches!(r, Response::Both(_, t) if t.version == 1));
     t.step("task.create tc1 dup → 409", tc(true), st(409));
     t.step("task.create no-target → 400", tc(false), st(400));
     t.step("fulfill tc1", fulfill("ex:tc1", 1, "resolved", "ok"), st(200));
     t.step("create plain p1", create("ex:p1", now + 100_000, "p").op(), st(200));
-    let over = Request::CreateTask { id: "ex:p1".into(), timeout_at: now + 100_000, data: None, target: true };
+    let over = task_create("ex:p1", now + 100_000, "", true);
     t.step("task.create over plain promise → 422", over, st(422));
 }
 
@@ -309,7 +316,7 @@ fn lease_and_heartbeat() {
     t.step("create H", create("H", FAR, "w").target().op(), st(200));
     t.step("acquire H ttl 5000", acquire_ttl("H", 0, "wH", 5_000), task(TState::Acquired, 1));
     t.tick(1_008_000);
-    let hb = |pid: &str, version| Request::HeartbeatTask { id: "H".into(), version, pid: pid.into() };
+    let hb = |pid: &str, version| Request::HeartbeatTask { pid: pid.into(), tasks: vec![TaskRef { id: "H".into(), version }] };
     t.step("heartbeat H → lease to 1013000", hb("wH", 1), st(200));
     t.tick(1_012_000);
     t.step("acquire H → 409 (heartbeat kept it)", acquire_ttl("H", 1, "wX", 5_000), st(409));
@@ -403,7 +410,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
     c.clock(now)?;
     for o in 0..origins {
         let id = format!("o{o}:p");
-        let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, external: false, target: false, timer: false };
+        let p = Create { id: id.clone(), timeout_at: now + 1_000, data: None, tags: PLAIN };
         let r = c.allowed(&Request::CreatePromise(p.clone())).remove(0);
         c.call(o, Request::CreatePromise(p), r)?;
         c.invoke(1_000 + o, Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }))?;
@@ -415,7 +422,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
 #[test]
 fn partitions_keep_independent_origins_apart() {
     let t0 = std::time::Instant::now();
-    let mut c = unanswered_settles(Checker::with_partitions(Resonate, Server::default(), settles_cfg()), 20).unwrap();
+    let mut c = unanswered_settles(Checker::with_partitions(Resonate::default(), Server::default(), settles_cfg()), 20).unwrap();
     println!("partitioned: {:?}, width {}, {:?}", c.stats, c.width(), t0.elapsed());
     assert_eq!(c.factors().len(), 20);
     assert!(c.factors().iter().all(|f| f.nodes.len() == 2));
@@ -430,7 +437,7 @@ fn partitions_keep_independent_origins_apart() {
     assert!(c.factors().iter().all(|f| f.nodes.len() == 1));
 
     let t0 = std::time::Instant::now();
-    let v = unanswered_settles(Checker::with_footprints(Resonate, Server::default(), settles_cfg()), 20)
+    let v = unanswered_settles(Checker::with_footprints(Resonate::default(), Server::default(), settles_cfg()), 20)
         .err()
         .expect("one profile of 2^20 candidates");
     println!("unpartitioned: {} {:?}", v.reason, t0.elapsed());
@@ -485,8 +492,8 @@ fn partitioning_never_changes_a_verdict() {
     for seed in 1..=40 {
         let mut rng = Lcg(seed);
         let now = 1_000_000;
-        let mut on = Checker::with_partitions(Resonate, Server::default(), Config::default());
-        let mut off = Checker::with_footprints(Resonate, Server::default(), Config::default());
+        let mut on = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
+        let mut off = Checker::with_footprints(Resonate::default(), Server::default(), Config::default());
         let mut open: Vec<(CallId, Request)> = Vec::new();
         let mut at = now;
         let mut all = Vec::new();
@@ -494,16 +501,20 @@ fn partitioning_never_changes_a_verdict() {
         for call in 0..60u64 {
             let id = ids[rng.next(ids.len() as u64) as usize].to_string();
             let other = ids[rng.next(ids.len() as u64) as usize].to_string();
-            let op = match rng.next(9) {
-                0 => Request::CreatePromise(Create { id, timeout_at: at + 500 + rng.next(3_000), data: None, external: rng.next(2) == 0, target: rng.next(2) == 0, timer: false }),
+            let op = match rng.next(13) {
+                0 => Request::CreatePromise(Create { id, timeout_at: at + 500 + rng.next(3_000), data: None, tags: Tags { target: rng.next(2) == 0, external: rng.next(2) == 0, ..PLAIN } }),
                 1 => Request::SettlePromise(Settle { id, state: "resolved".into(), data: None }),
                 2 => Request::AcquireTask { id, version: rng.next(3) as u32, pid: "w".into(), ttl: 1_000 },
                 3 => Request::FulfillTask { id, version: rng.next(3) as u32, state: "resolved".into(), data: None },
                 4 => Request::SuspendTask { id, version: rng.next(3) as u32, awaited: vec![other] },
                 5 => Request::RegisterCallback { awaited: id, awaiter: other },
                 6 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Settle(Settle { id: other, state: "resolved".into(), data: None }) },
-                7 if rng.next(2) == 0 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: at + rng.next(3_000), data: None, external: false, target: rng.next(2) == 0, timer: false }) },
+                7 if rng.next(2) == 0 => Request::FenceTask { id, version: rng.next(3) as u32, action: Fenced::Create(Create { id: format!("{other}x"), timeout_at: at + rng.next(3_000), data: None, tags: Tags { target: rng.next(2) == 0, ..PLAIN } }) },
                 7 => Request::GetTask(id),
+                8 => Request::HaltTask(id),
+                9 => Request::ContinueTask(id),
+                10 => Request::CreateSchedule(ScheduleCreate { id: format!("{}:s", &id[..1]), cron: "* * * * * *".into(), promise_id: format!("{}:{{{{.id}}}}.{{{{.timestamp}}}}", &id[..1]), promise_timeout: rng.next(3_000), promise_param: None, promise_tags: PLAIN }),
+                11 => Request::DeleteSchedule(format!("{}:s", &id[..1])),
                 _ => Request::GetPromise(id),
             };
             let mut events = if call == 0 { vec![clock(now)] } else { Vec::new() };
@@ -553,21 +564,21 @@ fn partitioning_never_changes_a_verdict() {
         }
         // The whole history (bogus responses make it invalid), online and depth
         // first: the same verdict.
-        let online = Checker::with_footprints(Resonate, Server::default(), Config::default()).check_history(&all).is_ok();
-        let mut dfs = Checker::with_footprints(Resonate, Server::default(), Config { certify: true, ..Config::default() });
+        let online = Checker::with_footprints(Resonate::default(), Server::default(), Config::default()).check_history(&all).is_ok();
+        let mut dfs = Checker::with_footprints(Resonate::default(), Server::default(), Config { certify: true, ..Config::default() });
         let deep = dfs.check_complete(&all).is_ok();
         assert_eq!(online, deep, "seed {seed}: online={online} depth-first={deep}");
         if deep {
             dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
         }
-        let mut split = Checker::with_partitions(Resonate, Server::default(), Config::default());
+        let mut split = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
         assert_eq!(split.check_complete(&all).is_ok(), deep, "seed {seed}: depth first by partition");
         // What the online checker accepted, event by event, is a valid history:
         // depth first must accept it too, and certify it.
-        let mut dfs = Checker::with_footprints(Resonate, Server::default(), Config { certify: true, ..Config::default() });
+        let mut dfs = Checker::with_footprints(Resonate::default(), Server::default(), Config { certify: true, ..Config::default() });
         dfs.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: accepted events rejected depth first: {v}"));
         dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
-        let mut split = Checker::with_partitions(Resonate, Server::default(), Config::default());
+        let mut split = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
         split.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: by partition: {v}"));
     }
 }
@@ -632,7 +643,7 @@ fn check_takes_calls_dispatches_and_clock_moves() {
     let mut t = Trace::new(now);
     let create_r = create("ex:r", now + 10_000, "r").target().op();
     let created = t.c.allowed(&create_r).remove(0); // the pending record
-    let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
+    let mut c = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
     let trace = vec![
         clock(now),
         Event::Invoke { call: 1, req: create_r },
@@ -664,4 +675,242 @@ fn workflows_keep_a_single_explanation() {
         t.step("fulfill x", fulfill(&x, 2, "resolved", "ok"), st(200));
     }
     assert_eq!(t.c.stats.max_width, 1, "{:?}", t.c.stats);
+}
+
+// ------------------------------------------ what the Lean specification adds
+
+fn unblock(address: &str, p: PromiseRec) -> Dispatch {
+    Dispatch::Unblock { address: address.into(), promise: p }
+}
+
+fn schedule(id: &str, cron: &str, template: &str, timeout: Time, tags: Tags) -> Request {
+    Request::CreateSchedule(ScheduleCreate { id: id.into(), cron: cron.into(), promise_id: template.into(), promise_timeout: timeout, promise_param: Some("p".into()), promise_tags: tags })
+}
+
+#[test]
+fn halt_and_continue() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    t.step("acquire t → v1", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
+    t.step("halt t", Request::HaltTask("ex:t".into()), st(200));
+    t.step("task.get t → halted", get_task("ex:t"), task(TState::Halted, 1));
+    t.step("fulfill a halted task → 409", fulfill("ex:t", 1, "resolved", "x"), st(409));
+    t.step("acquire a halted task → 409", acquire("ex:t", 1, "w"), st(409));
+    t.step("heartbeat a halted task → 200, nothing kept", Request::HeartbeatTask { pid: "w".into(), tasks: vec![TaskRef { id: "ex:t".into(), version: 1 }] }, st(200));
+    t.step("halt again → 200", Request::HaltTask("ex:t".into()), st(200));
+    assert!(t.c.receive(execute("ex:t", 1)).is_err(), "a halted task is not offered");
+    t.step("continue t", Request::ContinueTask("ex:t".into()), st(200));
+    t.step("task.get t → pending", get_task("ex:t"), task(TState::Pending, 1));
+    t.c.receive(execute("ex:t", 1)).unwrap();
+    t.step("continue a pending task → 409", Request::ContinueTask("ex:t".into()), st(409));
+    t.step("re-acquire t → v2", acquire("ex:t", 1, "w"), task(TState::Acquired, 2));
+    t.step("fulfill t", fulfill("ex:t", 2, "resolved", "done"), st(200));
+    t.step("halt a fulfilled task → 409", Request::HaltTask("ex:t".into()), st(409));
+    t.step("halt missing → 404", Request::HaltTask("ex:ghost".into()), st(404));
+    t.step("continue missing → 404", Request::ContinueTask("ex:ghost".into()), st(404));
+    t.step("create p (no task)", create("ex:p", FAR, "x").op(), st(200));
+    t.step("halt a promise without a task → 404", Request::HaltTask("ex:p".into()), st(404));
+}
+
+#[test]
+fn a_pending_task_is_offered_again_every_retry_timeout() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "offered once so far");
+    t.tick(now + 4_999);
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "not yet");
+    t.tick(now + 5_000);
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    // The retry due at +10s runs when the clock reaches +15s, and the next is
+    // five seconds after it ran, not after it was due: one more offer.
+    t.tick(now + 15_000);
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "one more offer");
+    t.tick(now + 20_000);
+    t.c.receive(execute("ex:t", 0)).unwrap();
+    t.step("acquire t → v1", acquire("ex:t", 0, "w"), task(TState::Acquired, 1));
+    t.tick(now + 30_000);
+    assert!(t.c.receive(execute("ex:t", 0)).is_err(), "an acquired task is not offered");
+}
+
+#[test]
+fn a_delayed_task_is_first_offered_at_its_delay() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    let c = Create { id: "ex:d".into(), timeout_at: FAR, data: None, tags: Tags { target: true, delay: Some(now + 1_000), ..PLAIN } };
+    t.step("create d +target, delayed", Request::CreatePromise(c), promise(PState::Pending, None));
+    assert!(t.c.receive(execute("ex:d", 0)).is_err(), "not before its delay");
+    t.tick(now + 1_000);
+    t.c.receive(execute("ex:d", 0)).unwrap();
+}
+
+#[test]
+fn listeners_are_told_once_when_the_promise_settles() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    t.step("create p (external)", create("ex:p", FAR, "x").external().op(), st(200));
+    let listen = |a: &str| Request::RegisterListener { awaited: "ex:p".into(), address: a.into() };
+    t.step("listener 1 → 200", listen("http://l/1"), promise(PState::Pending, None));
+    t.step("listener 2 → 200", listen("poll://w"), promise(PState::Pending, None));
+    t.step("listener 1 again → 200", listen("http://l/1"), promise(PState::Pending, None));
+    t.step("bad address → 400", listen("not a url"), st(400));
+    t.step("create q (internal)", create("ex:q", FAR, "x").op(), st(200));
+    t.step("listener on internal → 422", Request::RegisterListener { awaited: "ex:q".into(), address: "http://l/1".into() }, st(422));
+    let Response::Promise(settled) = t.step("settle p", Request::SettlePromise(settle("ex:p", "resolved", "v")), promise(PState::Resolved, Some("v"))) else { panic!() };
+    t.c.receive(unblock("http://l/1", settled.clone())).unwrap();
+    t.c.receive(unblock("poll://w", settled.clone())).unwrap();
+    assert!(t.c.receive(unblock("http://l/1", settled.clone())).is_err(), "told once");
+    t.step("listener on a settled promise → 200", listen("http://l/late"), promise(PState::Resolved, Some("v")));
+    assert!(t.c.receive(unblock("http://l/late", settled)).is_err(), "nothing to tell later");
+
+    t.step("create e (external, 1s)", create("ex:e", now + 1_000, "x").external().op(), st(200));
+    t.step("listener on e", Request::RegisterListener { awaited: "ex:e".into(), address: "http://l/e".into() }, st(200));
+    t.tick(now + 1_000);
+    let Response::Promise(timed_out) = t.step("e timed out", get("ex:e"), promise(PState::TimedOut, None)) else { panic!() };
+    t.c.receive(unblock("http://l/e", timed_out)).unwrap();
+}
+
+#[test]
+fn task_create_in_every_state() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    let both = |p: PState, ts: TState, v: u32| move |r: &Response| matches!(r, Response::Both(pr, tr) if pr.state == p && tr.state == ts && tr.version == v);
+    t.step("task.create past its deadline → born done", task_create("ex:old", now - 1, "x", true), both(PState::TimedOut, TState::Fulfilled, 0));
+    let r = t.step("task.create old again → echo", task_create("ex:old", now - 1, "x", true), both(PState::TimedOut, TState::Fulfilled, 0));
+    assert!(matches!(r, Response::Both(p, _) if p.created_at == now - 1 && p.settled_at == Some(now - 1)));
+    assert!(t.c.receive(execute("ex:old", 0)).is_err(), "never offered");
+    t.step("create p +target (pending)", create("ex:p", FAR, "w").target().op(), st(200));
+    t.c.receive(execute("ex:p", 0)).unwrap();
+    t.step("task.create over a pending task → acquired v1", task_create("ex:p", FAR, "w", true), both(PState::Pending, TState::Acquired, 1));
+    t.step("task.create over an acquired task → 409", task_create("ex:p", FAR, "w", true), st(409));
+    t.step("release p", Request::ReleaseTask { id: "ex:p".into(), version: 1 }, st(200));
+    t.step("task.create over a pending task → acquired v2", task_create("ex:p", FAR, "w", true), both(PState::Pending, TState::Acquired, 2));
+    t.step("halt p", Request::HaltTask("ex:p".into()), st(200));
+    t.step("task.create over a halted task → 409", task_create("ex:p", FAR, "w", true), st(409));
+    let timer = Request::CreateTask { pid: "w".into(), ttl: 10, action: Create { id: "ex:tt".into(), timeout_at: FAR, data: None, tags: Tags { target: true, timer: true, ..PLAIN } } };
+    t.step("task.create a timer → 400", timer, st(400));
+}
+
+#[test]
+fn a_task_counts_what_settled_while_it_ran() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    t.step("create a", create("ex:a", FAR, "x").external().op(), st(200));
+    t.step("create b", create("ex:b", FAR, "x").external().op(), st(200));
+    t.step("create r +target", create("ex:r", FAR, "r").target().op(), st(200));
+    t.step("acquire r → v1", acquire("ex:r", 0, "w"), task(TState::Acquired, 1));
+    t.step("callback a → r", callback("ex:a", "ex:r"), st(200));
+    t.step("callback b → r", callback("ex:b", "ex:r"), st(200));
+    t.step("settle a", Request::SettlePromise(settle("ex:a", "resolved", "v")), st(200));
+    let resumes = |n: u32| move |r: &Response| matches!(r, Response::Task(t) if t.resumes == n);
+    t.step("task.get r → one resume noted", get_task("ex:r"), resumes(1));
+    t.step("suspend r on b → 200 (clears the count)", suspend("ex:r", 1, &["ex:b"]), st(200));
+    t.step("settle b", Request::SettlePromise(settle("ex:b", "resolved", "v")), st(200));
+    t.step("task.get r → pending with one resume", get_task("ex:r"), |r| matches!(r, Response::Task(t) if t.state == TState::Pending && t.resumes == 1));
+    t.c.receive(execute("ex:r", 1)).unwrap();
+    t.step("acquire r → v2, count cleared", acquire("ex:r", 1, "w"), |r| matches!(r, Response::Both(_, t) if t.version == 2 && t.resumes == 0));
+
+    t.step("create c", create("ex:c", FAR, "x").external().op(), st(200));
+    t.step("settle c", Request::SettlePromise(settle("ex:c", "resolved", "v")), st(200));
+    t.step("suspend r on settled c → 300", suspend("ex:r", 2, &["ex:c"]), st(300));
+    t.step("task.get r → still acquired", get_task("ex:r"), task(TState::Acquired, 2));
+}
+
+#[test]
+fn schedules_fire_on_their_cron() {
+    let now = 1_000_000; // 1000 s
+    let mut t = Trace::new(now);
+    t.step("invalid cron → 400", schedule("ex:bad", "bogus", "ex:x", 1_500, PLAIN), st(400));
+    t.step("timer with target → 400", schedule("ex:bad", "* * * * * *", "ex:x", 1_500, Tags { target: true, timer: true, ..PLAIN }), st(400));
+    let every_second = schedule("ex:s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, PLAIN);
+    let r = t.step("create s", every_second.clone(), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_001_000 && c.last_run_at.is_none()));
+    t.step("get s", Request::GetSchedule("ex:s".into()), |x| *x == r);
+    t.step("create s again → echo", every_second, |x| *x == r);
+    t.step("get missing → 404", Request::GetSchedule("ex:none".into()), st(404));
+    t.step("run-1001000 not yet", get("ex:run-1001000"), st(404));
+    t.tick(1_000_999);
+    t.step("run-1001000 still not yet", get("ex:run-1001000"), st(404));
+    t.tick(1_001_000);
+    let r = t.step("run-1001000 created at its instant", get("ex:run-1001000"), promise(PState::Pending, None));
+    assert!(matches!(r, Response::Promise(p) if p.created_at == 1_001_000 && p.timeout_at == 1_002_500 && p.param.as_deref() == Some("p")));
+    t.step("s advanced", Request::GetSchedule("ex:s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_001_000) && c.next_run_at == 1_002_000));
+    // A jump over three occurrences fires all three, each as of its instant.
+    t.tick(1_004_000);
+    let r = t.step("run-1002000 born in the past, already timed out", get("ex:run-1002000"), promise(PState::TimedOut, None));
+    assert!(matches!(r, Response::Promise(p) if p.created_at == 1_002_000 && p.settled_at == Some(1_003_500)));
+    t.step("run-1003000 pending", get("ex:run-1003000"), promise(PState::Pending, None));
+    t.step("run-1004000 pending", get("ex:run-1004000"), promise(PState::Pending, None));
+    t.step("s advanced to 1005000", Request::GetSchedule("ex:s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
+    t.step("delete s", Request::DeleteSchedule("ex:s".into()), st(200));
+    t.step("delete s again → 404", Request::DeleteSchedule("ex:s".into()), st(404));
+    t.tick(1_006_000);
+    t.step("run-1005000 never fired", get("ex:run-1005000"), st(404));
+
+    // Occurrences with a target are tasks, offered to a worker.
+    t.step("create w (targeted occurrences)", schedule("ex:w", "*/5 * * * * *", "ex:job-{{.timestamp}}", 60_000, Tags { target: true, ..PLAIN }), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_010_000));
+    t.tick(1_010_000);
+    t.c.receive(execute("ex:job-1010000", 0)).unwrap();
+    t.step("acquire the occurrence", acquire("ex:job-1010000", 0, "w"), task(TState::Acquired, 1));
+    // An occurrence whose id is taken is left alone.
+    t.step("take the next id first", create("ex:job-1015000", FAR, "mine").op(), st(200));
+    t.tick(1_015_000);
+    t.step("the occurrence found it", get("ex:job-1015000"), |r| matches!(r, Response::Promise(p) if p.param.as_deref() == Some("mine") && !p.tags.target));
+    t.step("w advanced anyway", Request::GetSchedule("ex:w".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_015_000) && c.next_run_at == 1_020_000));
+}
+
+#[test]
+fn a_detached_create_lands_before_the_fence_is_checked() {
+    let mut t = Trace::new(1_000_000);
+    t.step("create a:t +target", create("a:t", FAR, "w").target().op(), st(200));
+    t.step("acquire a:t → v1", acquire("a:t", 0, "w"), st(200));
+    t.step("stale detached create → 409", fence("a:t", 9, Fenced::Create(create("d:x", FAR, "x").target())), st(409));
+    t.step("d:x exists all the same", get("d:x"), promise(PState::Pending, None));
+    t.c.receive(execute("d:x", 0)).unwrap();
+    t.step("detached create from a missing task → 404", fence("a:ghost", 0, Fenced::Create(create("d:y", FAR, "y"))), st(404));
+    t.step("d:y exists all the same", get("d:y"), promise(PState::Pending, None));
+    t.step("detached create at the held version → 200", fence("a:t", 1, Fenced::Create(create("d:z", FAR, "z"))), promise(PState::Pending, None));
+    t.step("same-origin stale fence creates nothing", fence("a:t", 9, Fenced::Create(create("a:n", FAR, "n"))), st(409));
+    t.step("a:n not created", get("a:n"), st(404));
+}
+
+// ------------------------------------------- the same answer, before or after
+
+/// A halt of a halted task answers 200 and changes nothing; after a concurrent
+/// continue it answers 200 and halts the task again. Both orders are
+/// candidates until a read decides.
+#[test]
+fn a_halt_may_land_before_or_after_a_concurrent_continue() {
+    for (last, want) in [("continue", TState::Pending), ("halt", TState::Halted)] {
+        let mut t = Trace::new(1_000_000);
+        t.step("create t +target", create("ex:t", FAR, "w").target().op(), st(200));
+        t.step("halt t", Request::HaltTask("ex:t".into()), st(200));
+        t.invoke(10, Request::HaltTask("ex:t".into()));
+        t.invoke(11, Request::ContinueTask("ex:t".into()));
+        t.ret(10, Response::Status(200));
+        t.ret(11, Response::Status(200));
+        t.step(&format!("task.get t → the {last} came last"), get_task("ex:t"), task(want, 0));
+    }
+}
+
+/// A create of a schedule that exists echoes it; after its concurrent delete
+/// it creates it anew, as of the clock at that time, which a later clock move
+/// must not disturb.
+#[test]
+fn a_schedule_recreated_during_its_delete_keeps_its_time() {
+    let now = 1_000_000;
+    let mut t = Trace::new(now);
+    let s = schedule("ex:s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, PLAIN);
+    let first = t.step("create s", s.clone(), st(200));
+    t.tick(now + 500);
+    t.invoke(10, Request::DeleteSchedule("ex:s".into()));
+    t.invoke(11, s);
+    t.tick(now + 999);
+    t.ret(10, Response::Status(200));
+    let Response::Schedule(c) = first else { panic!() };
+    let again = Schedule { created_at: now + 500, next_run_at: 1_001_000, ..c };
+    t.ret(11, Response::Schedule(again.clone()));
+    t.step("get s → created anew at +500", Request::GetSchedule("ex:s".into()), |r| *r == Response::Schedule(again.clone()));
 }

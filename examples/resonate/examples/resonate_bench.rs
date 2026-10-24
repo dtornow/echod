@@ -17,7 +17,7 @@ use resonate::*;
 const FAR: Time = 1_000_000_000;
 
 fn create(id: &str, timeout_at: Time, external: bool, target: bool) -> Request {
-    Request::CreatePromise(Create { id: id.into(), timeout_at, data: None, external, target, timer: false })
+    Request::CreatePromise(Create { id: id.into(), timeout_at, data: None, tags: Tags { target, external, ..PLAIN } })
 }
 
 /// One workflow on a fresh pair, as Lean's `workflow i t0 t1`.
@@ -48,7 +48,7 @@ fn fanout(n: u64) -> Vec<(Request, Time)> {
 /// Runs the script against the model, taking a successful answer where the
 /// model allows one: the trace an honest server would produce.
 fn record(script: &[(Request, Time)]) -> Vec<Event<Request, Response, Dispatch>> {
-    let mut c = Checker::with_partitions(Resonate, Server::default(), Config::default());
+    let mut c = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
     let mut trace = Vec::new();
     let mut now = 0;
     for (call, (op, t)) in (0u64..).zip(script) {
@@ -78,11 +78,11 @@ fn check(trace: &[Event<Request, Response, Dispatch>], footprints: bool, mode: M
     let t0 = Instant::now();
     let cfg = Config { footprints, max_explore: 10_000_000, max_width: 1 << 20, ..Config::default() };
     if mode == Mode::Partitioned {
-        let mut c = Checker::with_partitions(Resonate, Server::default(), cfg);
+        let mut c = Checker::with_partitions(Resonate::default(), Server::default(), cfg);
         let ok = c.check(trace.iter().cloned()).is_ok();
         return (ok, t0.elapsed(), c.stats.clone());
     }
-    let mut c = Checker::with_footprints(Resonate, Server::default(), cfg);
+    let mut c = Checker::with_footprints(Resonate::default(), Server::default(), cfg);
     let ok = match mode {
         Mode::Certified => c.check_certified(trace.iter().cloned()).map_err(|v| eprintln!("{v}")).is_ok(),
         _ => c.check(trace.iter().cloned()).is_ok(),

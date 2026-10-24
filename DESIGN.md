@@ -77,11 +77,12 @@ message is delivered at most once, in any order, at any time after it was sent,
 or never; an unreceived message is optional, so it never forces a split.
 Receiving a message no explanation has sent yet forces the internal work that
 could send it, searched on the message's keys (`Footprint::dispatch_touches`).
-Resonate uses this for `Dispatch::Execute { id, version }`, sent by the step that
-makes a task pending: created with a target, resumed, reclaimed after its lease,
-or released. Sending from that step, rather than from a separate "dispatch
-later" step, matters: a separate step may or may not have run before any later
-request, which doubles the explanations per task.
+Resonate uses this for `Dispatch::Execute { id, version }`, sent by the retry
+step of a pending task: due at once when the task becomes pending (created with
+a target, resumed, reclaimed after its lease, released, continued), then every
+`retry_timeout`. The step is a timer at its due instant, so it runs before any
+later request is observed and never doubles the explanations; and for
+`Dispatch::Unblock { address, promise }`, sent to a settled promise's listeners.
 
 `ExternalOutcome` is one thing the system may do when a request takes effect: the
 response, the next state, and the internal work it starts. `external` returns
@@ -180,7 +181,7 @@ The model that checks a trace can also produce one.
   by default). They change nothing. `accordant::marks(m, init, &trace, &cert)`
   collects the marks on the outcomes a certificate takes: coverage of the spec,
   which behaviors a trace is explained by. The Resonate spec marks every branch
-  (`mk("...")`, 65 in all); `resonate::MARKS` lists them so a report can show
+  (`mk("...")`, 89 in all); `resonate::MARKS` lists them so a report can show
   the ones nothing reached, and a test keeps the list in step with the spec.
 
 `examples/resonate/examples/fuzz/` uses it: drive a server (the spec, or the
@@ -193,21 +194,22 @@ have fired.
 cargo run --release -p resonate --example fuzz -- 300 [--requests 30] [--bug stale-fence|lease-forever]
 ```
 
-300 runs of 30 requests:
+200 runs of 30 requests:
 
 | server | mode | runs KO | marks reached |
 |---|---|---|---|
-| spec | random | 0 | 45/65 |
-| spec | guided | 0 | 53/65 |
-| fence ignores the version | random | 43 | |
-| fence ignores the version | guided | 91 | |
-| a lease never expires | random | 0 | |
-| a lease never expires | guided | 29 | |
+| spec | random | 0 | 77/89 |
+| spec | guided | 0 | 83/89 |
+| fence ignores the version | random | 15 | |
+| a lease never expires | random | 38 | |
 
-"Lease expired" is reached in no random run and 44 guided ones. It takes a
-chain (a task released, re-acquired with a short lease, the clock past its end
-before the promise's deadline) that random requests rarely assemble. Without
-the memory across runs, guided runs reach it once in 300.
+The six marks guided runs miss need a fence on a held task to settle a
+sibling, a task resumed while suspended with its promise still live after a
+redispatch, or a timer promise created past its deadline by a schedule: chains
+the suggestions reach rarely in 30 requests. "Lease expired" takes a chain (a
+task released, re-acquired with a short lease, the clock past its end before
+the promise's deadline) that random requests rarely assemble; the memory
+across runs is what makes guided runs reach it.
 
 Not done yet: shrinking. A KO trace is reported as found (30–60 events); a
 shrinker would edit a failing run's recorded choices (delete, lower) and drive
@@ -514,6 +516,18 @@ mechanisms keep it small, and all eight are in the prototype.
    (`examples/resonate/tests/traces.rs`, `independent_promises_keep_the_profile_narrow`: failed
    after 47 s before, 400 nodes and 0.02 s after). Writes in flight across
    independent keys still multiply; partitions (next item) handle that.
+   An early answer is a possibility, not the only explanation: a request that
+   changes nothing in the state it was first tried in may change something
+   after other work on its keys, with the same answer (a create of a schedule
+   that exists while its delete is in flight; a halt of a halted task while a
+   continue is). So a `Return` an early answer admits is also searched for the
+   call taking effect later, and both are candidates until a read decides
+   (`tests/idempotent.rs`). Work fired on the way commutes past the return, so
+   the early answer counts only where it first admits the return: at the root,
+   after owed work, or where the node fired from did not admit it. A clock
+   move, likewise, may come after an effectful call whose outcome does not
+   depend on the time yet, but would after another pending item on its keys
+   has fired (the delete, then the create): such calls are in the move's seed.
 6. **Partitioned profiles.** A spec that defines `part(key)`, `restrict` and
    `join` gets its profile stored as independent *factors*, one per group of
    partitions. The full profile is their product, but it is never built. An
@@ -591,30 +605,37 @@ still walks every entry. The incremental hash is what fixes time.
 
 ## Resonate on this model
 
-| Resonate (C#) | Rust |
+The model is the Lean specification of `resonatehq/resonate`
+(`spec/spec/02-abstract`), the whole protocol: promises with callbacks and
+listeners, tasks with leases, resumes and redispatch, halt and continue, and
+schedules. It began as a port of the C# spec (resonatehq/resonate-accordant),
+whose traces it still passes, and keeps one liberty of that spec: a fence may
+create a promise in another origin.
+
+| Lean specification | Rust |
 |---|---|
-| `ServerState { Promises, Tasks, Now }` | `Server { promises, tasks }`; the clock is the checker's, passed in as `now` |
-| `AdvanceClock` request | `Event::Clock { at }` in the trace; no request |
-| `Handler<CreatePromise>(PromiseCreate)` | an `Op::CreatePromise { .. }` arm in `apply` |
-| internal steps | `type Internal = BTreeSet<Id>`: "process these objects". `internal` does whatever is due on them, read from the state and the clock |
-| promise `TimeoutAt` + `Project(now)` | `.timer(timeout_at, on(&[id]))`; the projection becomes a real transition at the deadline |
-| `ResumeTriggers` → `AsyncOperation.Create(isTerminal: !Fireable, ...)` | `.later(on(&[awaited, awaiter]))` when the awaited promise settles |
-| `LeaseTriggers`, `RetryTriggers` | `.timer(expires, on(&[id]))` when the lease starts or is extended; retries not ported |
-| `ServerOperation` + `IndefiniteFailures` duplicating outcomes | nothing: an unanswered call is already "maybe" |
-| `PollLiveness(terminal)` | the poll that sees the terminal state is a read like any other; no idle bound |
-| `debug.messages` (execute/unblock) | `execute` is a server-sent `Dispatch::Execute { id, version }`, checked with `receive`; `unblock` for listeners is not modeled yet |
-| footprint | promise id plus awaiter ids for callbacks |
+| `ServerState { objects, schedules, outbox }` | `Server { promises, tasks, schedules }`; the clock is the checker's, passed in as `now`; the outbox is what the steps `send` |
+| `readObject` with `project now` | the deadline is a timer step that settles the promise (and fulfills its task); a pending promise is always live |
+| `ServerConfig.retryTimeout` | `Resonate { retry_timeout }`, the model's one parameter |
+| internal steps enabled by the state, fired by a fair scheduler | each is work the step that enables it starts: `Timer(at, Objects(ids))` at the instant it falls due, `Later` when due at once; `internal` does whatever is due on the ids, in the order Lean's steps become enabled |
+| `processCallback`, `resumeOne` | `.later(Objects([awaited, awaiter]))` when the awaited settles: a suspended awaiter resumes and its retry is due; a running one notes the resume |
+| `processListener` | `Dispatch::Unblock { address, promise }` from the step on the settled promise |
+| `processLeaseTimeout`, `processRetryTimeout` | a timer at the lease's end makes the task pending with its retry due; the retry step sends `Execute` and arms the next, `retry_timeout` later |
+| `processSchedule`, `occurrences`, `fireOccurrence` | `Fire { schedule, at, promise }`, a timer at `nextRunAt`: one occurrence, created as of its instant (born settled when its deadline has passed by `now`), then the next armed. Overdue timers run before anything is observed, so a clock jump fires every occurrence up to `now`, as Lean does in one step |
+| `nextCron`, `expand` (opaque) | trusted (`collections.rs`): the reference server's cron engine |
+| `taskFence` refusing every cross-origin fence | a cross-origin settle is 400; a cross-origin create runs first, as a request of its own in its origin, then the fence's check decides the answer: a detached workflow, which a stale fence still starts |
 
-Origins: the only request that may cross origins is a fence that creates a
-promise in another origin, which starts a detached workflow. A cross-origin
-fence-settle, `register_callback` or `suspend` is 400. Those refusals are made on
-the ids alone, so their footprint stays in one origin and doesn't merge
-anything. The C# spec and the server allow cross-origin fence-settles. The Lean
-spec refuses every cross-origin fence, the detached create included.
+Not ported: the searches (501 in Lean), `preload`, and `task.poll`.
 
-The port is the `resonate` crate (`examples/resonate/src/spec.rs`, written in Verus; traces in `examples/resonate/tests/traces.rs`, from
-`ExampleTraces.cs` and `LeaseAndTimeoutTests.cs`). Not ported: the
-`egress` capability (retry timeouts) and `debug.messages`.
+Origins: the only request that may cross origins is the detached create. A
+cross-origin fence-settle, `register_callback` or `suspend` is 400. Those
+refusals are made on the ids alone, so their footprint stays in one origin and
+doesn't merge anything. A schedule's occurrences land in the origin its
+template names; `CreateSchedule` touches that origin, so the partitions merge.
+
+The model is the `resonate` crate (`examples/resonate/src/spec.rs`, written in
+Verus; traces in `examples/resonate/tests/traces.rs`, from `ExampleTraces.cs`
+and `LeaseAndTimeoutTests.cs` and for what the Lean specification adds).
 
 ## Resonate in Verus
 
@@ -631,8 +652,9 @@ Planting a bug (an expired promise created at `now`) fails verification.
 
 What it trusts is in `collections.rs`: persistent maps and sets seen as Verus
 maps and sets (wrappers over the checker's own `HashedMap` and a `BTreeSet`, so
-the checker is as fast as before), a derived `Clone` being a copy, and three
-string helpers (an id's origin, URL validation, settle-state names). The glue to
+the checker is as fast as before), a derived `Clone` being a copy, string
+helpers (an id's origin, URL validation, settle-state names) and the cron engine
+(`nextCron`, `expand`, which the Lean specification leaves opaque). The glue to
 the checker (`model.rs`) is plain Rust; it converts outcomes and computes
 footprints and partitions, and decides nothing about what the server does.
 
@@ -664,8 +686,9 @@ Ranked by how much each one hurt.
    unchanged" without a state would be shorter and cheaper.
 4. **One step was written in four places**: the enum variant, its `step` arm,
    its `fairness` arm and its `step_keys` arm. *Since fixed:* timing moved into
-   `Sched` at the spawn site, and Resonate's internal step is now just the set
-   of ids it processes, so there is one `internal` function and no per-kind arms.
+   `Sched` at the spawn site, and Resonate's internal step is the set of ids it
+   processes (or a schedule's occurrence), so there is one `internal` function
+   and no per-kind arms.
 5a. **Checking enabledness is expensive.** The checker asks whether a step is
    enabled by calling `step()`, which builds full successor states only for them
    to be discarded. In a wide search that dominates the run time. A separate,
@@ -697,7 +720,8 @@ What got better:
 - **Responses are values.** No mock generators, and `allowed(op)` lists what the
   spec permits, which is how the traces state their expectations without a server.
 - **Exhaustive matching.** Adding an op or step without handling it doesn't compile.
-- **Smaller.** 711 lines including docs, against 1,062 for `Spec/*.cs`.
+- **Smaller.** 711 lines including docs for what `Spec/*.cs` covered, against
+  its 1,062; 1,381 now, for the whole Lean specification.
 
 Porting also found three checker bugs, all fixed:
 - **Exclusive deadlines:** a read at the exact deadline could miss the timer.
@@ -721,7 +745,7 @@ Porting also found three checker bugs, all fixed:
 - `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, deferred independent jobs.
-- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
+- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`, and its frame), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
 - `examples/tigerbeetle/`: TigerBeetle's state machine. `lean/` has it as a Lean `Model`, with a proof that debits never exceed credits (built by `lean/lakefile.toml`); `src/` has its data model in Rust, not yet a `Model`.
 - `examples/porcupine/`: Porcupine's etcd and key-value histories, checked against its Go checker's verdicts (`cargo run --release --example porcupine -- all [--dfs] [--certify]`; `fetch.sh` gets the histories).
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the clock, never early, in deadline order after a jump.

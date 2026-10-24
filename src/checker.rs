@@ -925,7 +925,7 @@ impl<S: Engine> Checker<S> {
             m.pending.insert(Pending::External { call: probe, req: op.clone(), early: BTreeSet::new() });
             let owed = self.owed_for(&m, Some((probe, None)));
             let relevant = if self.cfg.footprints { self.relevant(&m, &owed, Touches::Only(Vec::new())) } else { Touches::Everything };
-            let _ = self.search(m, &relevant, &mut explored, |x| {
+            let _ = self.search(m, &relevant, &mut explored, |_, x| {
                 for i in &x.pending {
                     let found: Vec<&Re<S>> = match i {
                         Pending::Settled { call, resp } if *call == probe => vec![resp],
@@ -1263,7 +1263,7 @@ impl<S: Engine> Checker<S> {
             // may come after any number of such moves, each a candidate.
             let relevant = if !self.cfg.footprints { Touches::Everything } else { self.relevant(&n, &owed, self.clock_seed(&n, *at)) };
             let mut out = Vec::new();
-            self.search(n, &relevant, explored, |m| {
+            self.search(n, &relevant, explored, |_, m| {
                 if !self.owes(m, e) {
                     out.extend(self.consume(m, e)?);
                 }
@@ -1271,7 +1271,17 @@ impl<S: Engine> Checker<S> {
             })?;
             return Ok(out);
         }
-        if owed.is_empty() && !unsent(&n) {
+        // The call a return answers: it may take effect later than an early
+        // answer places it (below), so its keys are always relevant.
+        let returning: Option<(&CallId, &Re<S>, P<S>)> = match e {
+            Ev::Return(call, res) => n
+                .pending
+                .iter()
+                .find(|i| matches!(i, Pending::External { call: c, .. } if c == call))
+                .map(|i| (call, res, i.clone())),
+            _ => None,
+        };
+        if owed.is_empty() && !unsent(&n) && returning.is_none() {
             return self.consume(&n, e);
         }
         let relevant = if !self.cfg.footprints {
@@ -1281,12 +1291,39 @@ impl<S: Engine> Checker<S> {
                 Ev::Receive(msg) => self.engine.dispatch_keys(msg),
                 _ => Touches::Only(Vec::new()),
             };
+            let mut owed = owed;
+            if let Some((_, _, item)) = &returning {
+                if !owed.contains(&item) {
+                    owed.push(item);
+                }
+            }
             self.relevant(&n, &owed, seed)
         };
         let mut out = Vec::new();
-        self.search(n, &relevant, explored, |m| {
+        let admitted = |m: &Node<S>| {
+            returning.as_ref().is_some_and(|(call, res, _)| {
+                m.pending.iter().any(|i| matches!(i, Pending::External { call: c, early, .. } if c == *call && early.contains(*res)))
+            })
+        };
+        self.search(n, &relevant, explored, |parent, m| {
             // Keep firing while something is owed, or the message isn't sent yet.
             if self.owes(m, e) || unsent(m) {
+                return Ok(true);
+            }
+            // A return an early answer admits may also be the call taking
+            // effect later: a request that changes nothing in the state it was
+            // first tried in (a create of an id that exists, a halt of a halted
+            // task) and would change something after other work on its keys,
+            // with the same answer. Both are candidates, so the search goes on
+            // until the call is placed. Work fired in between commutes past the
+            // return, so an early answer counts where it first admits it: at
+            // the root, after work that was owed, or where the node fired from
+            // did not admit it yet.
+            if admitted(m) {
+                let fresh = parent.is_none_or(|p| self.owes(p, e) || unsent(p) || !admitted(p));
+                if fresh {
+                    out.extend(self.consume(m, e)?);
+                }
                 return Ok(true);
             }
             out.extend(self.consume(m, e)?);
@@ -1303,6 +1340,14 @@ impl<S: Engine> Checker<S> {
     fn clock_seed(&self, n: &Node<S>, at: Time) -> Touches<S::Key> {
         let model = self.engine.model();
         let mut keys = Vec::new();
+        // Whether another item that can fire shares a key with `item`: what
+        // `item` does may then depend on the time once that other one has
+        // fired, though it doesn't now (a create of a schedule that exists,
+        // with its delete in flight).
+        let shared = |item: &P<S>| {
+            let mine = self.keys(item);
+            n.pending.iter().any(|other| !std::ptr::eq(other, item) && self.can_fire(other) && intersects(&mine, &self.keys(other)))
+        };
         for item in &n.pending {
             let differs = match item {
                 Pending::Internal { sched: Sched::Timer(t, _), .. } if *t <= at => true,
@@ -1310,6 +1355,7 @@ impl<S: Engine> Checker<S> {
                     let (a, b) = (model.external(req, &n.state, self.now), model.external(req, &n.state, at));
                     a.len() != b.len()
                         || a.iter().zip(&b).any(|(x, y)| !x.work.is_empty() || x.next != y.next || x.resp != y.resp || x.send != y.send)
+                        || (!read_only::<S>(&a, &n.state) && shared(item))
                 }
                 Pending::Internal { sched, .. } if self.can_fire(item) => {
                     let (a, b) = (model.internal(sched.req(), &n.state, self.now), model.internal(sched.req(), &n.state, at));
@@ -1340,18 +1386,19 @@ impl<S: Engine> Checker<S> {
         n: Node<S>,
         relevant: &Touches<S::Key>,
         explored: &mut usize,
-        mut visit: impl FnMut(&Node<S>) -> Result<bool, String>,
+        mut visit: impl FnMut(Option<&Node<S>>, &Node<S>) -> Result<bool, String>,
     ) -> Result<(), String> {
         let mut visited: HashSet<Node<S>> = HashSet::from([n.clone()]);
-        let mut queue = VecDeque::from([n]);
-        while let Some(m) = queue.pop_front() {
+        let mut queue: VecDeque<(Option<Node<S>>, Node<S>)> = VecDeque::from([(None, n)]);
+        while let Some((parent, m)) = queue.pop_front() {
             *explored += 1;
             if *explored > self.cfg.max_explore {
                 return Err(format!("{GAVE_UP}explored more than {} nodes", self.cfg.max_explore));
             }
             let first = self.earliest_overdue(&m);
             let m = if first.is_none() { self.saturate(m, relevant) } else { m };
-            if !visit(&m)? {
+            // `visit` sees the node fired from (as visited: saturated) and this one.
+            if !visit(parent.as_ref(), &m)? {
                 continue;
             }
             for item in &m.pending {
@@ -1373,7 +1420,7 @@ impl<S: Engine> Checker<S> {
                 }
                 for m2 in self.fire(&m, item) {
                     if visited.insert(m2.clone()) {
-                        queue.push_back(m2);
+                        queue.push_back((Some(m.clone()), m2));
                     }
                 }
             }

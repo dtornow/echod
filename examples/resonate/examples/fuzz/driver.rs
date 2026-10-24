@@ -48,14 +48,14 @@ impl Model for Server {
             },
             _ => op.clone(),
         };
-        Model::external(&Resonate, &op, s, now)
+        Model::external(&Resonate::default(), &op, s, now)
             .into_iter()
             .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work, send: o.send, marks: o.marks })
             .collect()
     }
 
     fn internal(&self, ids: &Internal, s: &Self::State, now: Time) -> Vec<InternalOutcome<Self>> {
-        let outs = Model::internal(&Resonate, ids, s, now);
+        let outs = Model::internal(&Resonate::default(), ids, s, now);
         if self.bug == Bug::LeaseForever && outs.iter().any(|o| !o.send.is_empty()) {
             return vec![InternalOutcome::same(s)];
         }
@@ -67,15 +67,15 @@ impl Model for Server {
 /// what a client sends.
 impl Explore for Server {
     fn suggest(&self, s: &Self::State, now: Time) -> Vec<(Action<Request>, &'static str)> {
-        Resonate.suggest(s, now)
+        Resonate::default().suggest(s, now)
     }
 
     fn arbitrary(&self, s: &Self::State, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
-        Resonate.arbitrary(s, now, pick)
+        Resonate::default().arbitrary(s, now, pick)
     }
 
     fn finish(&self, s: &Self::State, now: Time) -> Vec<Action<Request>> {
-        Resonate.finish(s, now)
+        Resonate::default().finish(s, now)
     }
 }
 
@@ -92,11 +92,11 @@ pub enum Outcome {
 /// partitioned and depth-first checkers (only meaningful when the trace came
 /// from the spec itself, where every trace is valid).
 pub fn check(trace: &Trace, cross: bool) -> Outcome {
-    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(Resonate, resonate::Server::default(), Config { certify: true, ..Config::default() });
+    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(Resonate::default(), resonate::Server::default(), Config { certify: true, ..Config::default() });
     let verdict = c.check_certified(trace.clone());
     if cross {
-        let mut g = Checker::with_partitions(Resonate, resonate::Server::default(), Config::default());
-        let mut d = Checker::with_footprints(Resonate, resonate::Server::default(), Config::default());
+        let mut g = Checker::with_partitions(Resonate::default(), resonate::Server::default(), Config::default());
+        let mut d = Checker::with_footprints(Resonate::default(), resonate::Server::default(), Config::default());
         for (name, r) in [("partitioned", g.check(trace.clone()).map(|_| ())), ("depth-first", d.check_complete(trace).map(|_| ()))] {
             if let Err(mut v) = r {
                 v.reason = format!("{name} checker: {}", v.reason);
@@ -105,7 +105,7 @@ pub fn check(trace: &Trace, cross: bool) -> Outcome {
         }
     }
     match Verdict::from(verdict) {
-        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate, resonate::Server::default(), trace, &cert).expect("the certificate replays")),
+        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate::default(), resonate::Server::default(), trace, &cert).expect("the certificate replays")),
         Verdict::Ko(v) => Outcome::Ko(v),
         Verdict::Unknown(v) => Outcome::Unknown(v),
     }
