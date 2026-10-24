@@ -212,6 +212,7 @@ pub open spec fn request_target(req: ARequest) -> Option<Origin> {
         ARequest::TaskHalt(q) => Some(origin(q.id)),
         ARequest::TaskContinue(q) => Some(origin(q.id)),
         ARequest::TaskFence(q) => Some(origin(q.id)),
+        ARequest::TaskFenceCheck(q) => Some(origin(q.id)),
         ARequest::TaskHeartbeat(q) => if q.tasks.len() > 0 { Some(origin(q.tasks[0].id)) } else { None },
         ARequest::TaskSuspend(q) => Some(origin(q.id)),
     }

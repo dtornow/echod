@@ -400,6 +400,30 @@ pub open spec fn spec_task_fence(a: AState, req: ATaskFenceReq, now: nat) -> (AS
 }
 
 
+/// `task.fence` with no action: the check alone. A fence whose create targets
+/// another origin runs the create first, as a request of its own on that
+/// origin's document, and then this on the task's: the two documents commit one
+/// at a time, the create before the check, so a stale fence still leaves the
+/// promise created and answers its 409.
+pub open spec fn spec_task_fence_check(a: AState, req: ATaskFenceCheckReq, now: nat) -> (AState, AStatusRes) {
+    if !a.has_task(req.id) {
+        (a, AStatusRes { status: 404 })
+    } else {
+        let b = spec_read_task(a, req.id, now);
+        let p = b.objects[req.id];
+        match p.task {
+            None => (b, AStatusRes { status: 404 }),
+            Some(t) => {
+                if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != req.version {
+                    (b, AStatusRes { status: 409 })
+                } else {
+                    (b, AStatusRes { status: 200 })
+                }
+            }
+        }
+    }
+}
+
 // --- task.heartbeat: a fold over the refs ---
 
 /// Some ref among the first `k` names `x`.
@@ -583,6 +607,7 @@ pub open spec fn spec_handle(a: AState, req: ARequest, now: nat) -> (AState, ARe
         ARequest::TaskHalt(q) => { let (b, r) = spec_task_halt(a, q, now); (b, AResponse::Status(r)) }
         ARequest::TaskContinue(q) => { let (b, r) = spec_task_continue(a, q, now); (b, AResponse::Status(r)) }
         ARequest::TaskFence(q) => { let (b, r) = spec_task_fence(a, q, now); (b, AResponse::TaskFence(r)) }
+        ARequest::TaskFenceCheck(q) => { let (b, r) = spec_task_fence_check(a, q, now); (b, AResponse::Status(r)) }
         ARequest::TaskHeartbeat(q) => { let (b, r) = spec_task_heartbeat(a, q, now); (b, AResponse::Status(r)) }
         ARequest::TaskSuspend(q) => { let (b, r) = spec_task_suspend(a, q, now); (b, AResponse::Status(r)) }
     }
@@ -615,6 +640,7 @@ impl State {
             Request::TaskHalt(q) => Response::Status(self.task_halt(q, now, cfg)),
             Request::TaskContinue(q) => Response::Status(self.task_continue(q, now, cfg)),
             Request::TaskFence(q) => Response::TaskFence(self.task_fence(q, now, cfg)),
+            Request::TaskFenceCheck(q) => Response::Status(self.task_fence_check(q, now, cfg)),
             Request::TaskHeartbeat(q) => Response::Status(self.task_heartbeat(q, now, cfg)),
             Request::TaskSuspend(q) => Response::Status(self.task_suspend(q, now, cfg)),
         }
@@ -1450,6 +1476,40 @@ impl State {
         };
         proof { lemma_fence_legal(now as nat, a, a1, self@, req.id@, target@); }
         TaskFenceRes { status: 200, action: Some(inner) }
+    }
+
+    /// `task.fence` with no action: the check alone, for a fence whose create
+    /// ran first on another origin's document.
+    pub fn task_fence_check(&mut self, req: &TaskFenceCheckReq, now: u64, cfg: &Config) -> (r: StatusRes)
+        requires
+            pre(*old(self), now, *cfg),
+        ensures
+            post(*old(self), *final(self), now),
+            final(self)@ == spec_task_fence_check(old(self)@, req@, now as nat).0,
+            r@ == spec_task_fence_check(old(self)@, req@, now as nat).1,
+            r.status == 200 || r.status == 404 || r.status == 409,
+    {
+        let ghost a = self@;
+        let i = match self.read_task_object(&req.id, now) {
+            None => {
+                proof { crate::properties_proof::lemma_noop(now as nat, a); }
+                return StatusRes { status: 404 };
+            }
+            Some(i) => i,
+        };
+        proof {
+            self.lemma_object_at(i as int);
+            lemma_project_legal(now as nat, a, self@, req.id@);
+            assert(self@ == spec_read_task(a, req.id@, now as nat));
+        }
+        let (state, version) = match &self.objects[i].task {
+            None => { return StatusRes { status: 404 }; }
+            Some(t) => (t.state, t.version),
+        };
+        if state != TaskState::Acquired || self.objects[i].state != PromiseState::Pending || version != req.version {
+            return StatusRes { status: 409 };
+        }
+        StatusRes { status: 200 }
     }
 
     /// `task.heartbeat`.

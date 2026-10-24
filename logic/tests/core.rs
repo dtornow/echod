@@ -263,3 +263,49 @@ fn the_debug_operations_own_the_clock() {
     let (_, snap) = h.request("debug.snap", json!({}));
     assert!(snap["promises"].as_array().is_some_and(Vec::is_empty));
 }
+
+/// A fence whose create targets another origin: the create commits first, on
+/// its own document, then the fence's check on the task's. A stale fence
+/// still leaves the promise created, and answers its 409; a settle in
+/// another origin is refused outright.
+#[test]
+fn a_detached_create_lands_before_the_fence_is_checked() {
+    let mut h = Harness::new("n1");
+    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.advance(100);
+    let far = h.clock + 100_000;
+    let (status, _) = h.request("promise.create", json!({ "id": "a:t", "timeoutAt": far, "tags": { "resonate:target": "poll://w" } }));
+    assert_eq!(status, 200);
+    let (status, data) = h.request("task.acquire", json!({ "id": "a:t", "version": 0, "pid": "w", "ttl": 60_000 }));
+    assert_eq!(status, 200, "{data}");
+    let create = |id: &str| json!({ "kind": "promise.create", "head": {}, "data": { "id": id, "timeoutAt": far, "tags": {} } });
+
+    let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("d:x") }));
+    assert_eq!(status, 409, "{data}");
+    assert_eq!(data, json!("Version mismatch"));
+    let (status, data) = h.request("promise.get", json!({ "id": "d:x" }));
+    assert_eq!(status, 200, "a stale detached create still lands: {data}");
+    assert_eq!(data["promise"]["state"], "pending");
+
+    let (status, data) = h.request("task.fence", json!({ "id": "a:ghost", "version": 0, "action": create("d:y") }));
+    assert_eq!(status, 404, "{data}");
+    let (status, _) = h.request("promise.get", json!({ "id": "d:y" }));
+    assert_eq!(status, 200, "a detached create from a missing task lands too");
+
+    let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": create("d:z") }));
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["action"]["head"]["status"], 200);
+    assert_eq!(data["action"]["data"]["promise"]["id"], "d:z");
+    assert_eq!(data["preload"], json!([]));
+    assert_eq!(h.keys("wf/").len(), 2, "two origins' documents: {:?}", h.keys("wf/"));
+
+    let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("a:n") }));
+    assert_eq!(status, 409, "{data}");
+    let (status, _) = h.request("promise.get", json!({ "id": "a:n" }));
+    assert_eq!(status, 404, "a same-origin stale fence creates nothing");
+
+    let settle = json!({ "kind": "promise.settle", "head": {}, "data": { "id": "d:z", "state": "resolved", "value": {} } });
+    let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": settle }));
+    assert_eq!(status, 400, "{data}");
+    assert_eq!(data, json!("Action must belong to the task's origin"));
+}

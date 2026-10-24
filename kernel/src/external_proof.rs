@@ -1498,6 +1498,17 @@ pub proof fn lemma_spec_promise_settle_touches(now: nat, a: AState, req: APromis
 {
 }
 
+pub proof fn lemma_spec_task_fence_check(now: nat, a: AState, req: ATaskFenceCheckReq)
+    requires inv(now, a),
+    ensures spec_post(now, a, spec_task_fence_check(a, req, now).0),
+{
+    if !a.has_task(req.id) {
+        crate::properties_proof::lemma_noop(now, a);
+    } else {
+        lemma_spec_read_task(now, a, req.id);
+    }
+}
+
 pub proof fn lemma_spec_task_fence(now: nat, a: AState, req: ATaskFenceReq)
     requires inv(now, a),
     ensures spec_post(now, a, spec_task_fence(a, req, now).0),
@@ -2024,6 +2035,7 @@ pub proof fn lemma_spec_handle_keeps(now: nat, a: AState, req: ARequest)
                 ATaskFenceAction::Settle(c) => { lemma_read_keeps(now, s, c.id); lemma_keeps_trans(a, s, spec_read(s, c.id, now)); }
             }
         }
+        ARequest::TaskFenceCheck(q) => { lemma_read_keeps(now, a, q.id); }
         ARequest::TaskHeartbeat(q) => { lemma_heartbeat_fold_keeps(now, a, q.pid, q.tasks, q.tasks.len() as int); }
         ARequest::TaskSuspend(q) => {
             let id = q.id;
@@ -2081,6 +2093,7 @@ pub proof fn lemma_spec_handle(now: nat, a: AState, req: ARequest)
         ARequest::TaskHalt(q) => lemma_spec_task_halt(now, a, q),
         ARequest::TaskContinue(q) => lemma_spec_task_continue(now, a, q),
         ARequest::TaskFence(q) => lemma_spec_task_fence(now, a, q),
+        ARequest::TaskFenceCheck(q) => lemma_spec_task_fence_check(now, a, q),
         ARequest::TaskHeartbeat(q) => lemma_spec_task_heartbeat(now, a, q),
         ARequest::TaskSuspend(q) => lemma_spec_task_suspend(now, a, q),
     }

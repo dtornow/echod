@@ -620,6 +620,7 @@ proof fn lemma_sched_request_runs(s: Cluster, o: Origin, req: ARequest, t: nat, 
         ARequest::TaskHalt(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskContinue(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskFence(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFenceCheck(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskHeartbeat(q) => { if q.tasks.len() > 0 { lemma_origin_not_sched(q.tasks[0].id); } }
         ARequest::TaskSuspend(q) => { lemma_origin_not_sched(q.id); }
     }
@@ -645,6 +646,7 @@ proof fn lemma_sched_request_is(req: ARequest, o: Origin)
         ARequest::TaskHalt(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskContinue(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskFence(q) => { lemma_origin_not_sched(q.id); }
+        ARequest::TaskFenceCheck(q) => { lemma_origin_not_sched(q.id); }
         ARequest::TaskHeartbeat(q) => { if q.tasks.len() > 0 { lemma_origin_not_sched(q.tasks[0].id); } }
         ARequest::TaskSuspend(q) => { lemma_origin_not_sched(q.id); }
     }

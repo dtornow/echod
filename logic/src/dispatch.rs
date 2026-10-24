@@ -45,6 +45,9 @@ pub struct Decoded {
     pub target: Target,
     pub request: k::Request,
     pub action_kind: Option<String>,
+    /// A second request, on another document, once the first has
+    /// committed: a detached create's fence check on the task's origin.
+    pub then: Option<(Target, k::Request)>,
 }
 
 /// Parse and validate a request's `data`.
@@ -59,6 +62,25 @@ fn parse_action<T: DeserializeOwned + Validate>(data: &serde_json::Value) -> Res
     let v: T = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid action data: {e}"))?;
     v.validate().map_err(|e| w::format_validation_errors(&e))?;
     Ok(v)
+}
+
+/// Parse and validate a fence. The reference's validator keeps every action
+/// in the task's origin, but a create of a root; here any create may cross
+/// origins (a detached workflow, committed on its own document first), and a
+/// settle that does is refused by `decode` in the reference's words.
+fn parse_fence(data: &serde_json::Value) -> Result<w::TaskFenceData, String> {
+    let v: w::TaskFenceData = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid request: {e}"))?;
+    match v.validate() {
+        Ok(()) => Ok(v),
+        Err(errors) => {
+            let only_origin = errors.errors().values().all(|kind| matches!(kind, validator::ValidationErrorsKind::Field(es) if es.iter().all(|e| e.code == "origin_mismatch")));
+            if only_origin {
+                Ok(v)
+            } else {
+                Err(w::format_validation_errors(&errors))
+            }
+        }
+    }
 }
 
 /// The document a request is about. `None` for a request that has none.
@@ -101,6 +123,9 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             }
         };
     }
+    // A fence whose create targets another origin: the create goes first,
+    // on its own document, then the fence's check on the task's.
+    let mut detached: Option<(String, k::Request)> = None;
     let (q, schedule, action_kind): (k::Request, Option<String>, Option<String>) = match kind.as_str() {
         "promise.get" => {
             let d = parsed!(w::PromiseGetData);
@@ -183,18 +208,14 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             (k::Request::TaskSuspend(k::TaskSuspendReq { id: d.id, version, actions }), None, None)
         }
         "task.fence" => {
-            let d = parsed!(w::TaskFenceData);
+            let d = match parse_fence(&req.data) {
+                Ok(d) => d,
+                Err(m) => return err(400, &m),
+            };
             let version = match wire::nat(d.version, "version") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            // A fence and its action commit as one write on one document,
-            // so the action must live in the task's origin.
-            if let Some(aid) = d.action.data.get("id").and_then(|v| v.as_str()) {
-                if origin_of(aid) != origin_of(&d.id) {
-                    return err(400, "Action must belong to the task's origin");
-                }
-            }
             let action = match d.action.kind.as_str() {
                 "promise.create" => match parse_action::<w::PromiseCreateData>(&d.action.data).and_then(|c| wire::create_in(&c)) {
                     Ok(c) => k::TaskFenceAction::Create(c),
@@ -206,7 +227,20 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 },
                 _ => return err(400, "Invalid fence action kind"),
             };
-            (k::Request::TaskFence(k::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind))
+            // A fence and its action commit as one write on one document, so
+            // a settle must live in the task's origin. A create in another
+            // origin is a detached workflow: it commits first, on its own
+            // document, and the fence's check follows on the task's.
+            match action {
+                k::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
+                    detached = Some((origin_of(&c.id).to_string(), k::Request::TaskFenceCheck(k::TaskFenceCheckReq { id: d.id.clone(), version })));
+                    (k::Request::PromiseCreate(c), None, Some(d.action.kind))
+                }
+                k::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
+                    return err(400, "Action must belong to the task's origin");
+                }
+                action => (k::Request::TaskFence(k::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind)),
+            }
         }
         "task.heartbeat" => {
             let d = parsed!(w::TaskHeartbeatData);
@@ -268,10 +302,11 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
     };
     // A request about a schedule is served on its document; the rest on
     // their id's origin.
-    let target = match (schedule, origin) {
-        (Some(id), _) => Target::Schedule(id),
-        (None, Some(o)) => Target::Origin(o),
-        (None, None) => return err(400, "Request data does not name an id"),
+    let (target, then) = match (schedule, origin, detached) {
+        (Some(id), _, _) => (Target::Schedule(id), None),
+        (None, Some(task_origin), Some((create_origin, check))) => (Target::Origin(create_origin), Some((Target::Origin(task_origin), check))),
+        (None, Some(o), None) => (Target::Origin(o), None),
+        (None, None, _) => return err(400, "Request data does not name an id"),
     };
-    Ok(Decoded { target, request: q, action_kind })
+    Ok(Decoded { target, request: q, action_kind, then })
 }

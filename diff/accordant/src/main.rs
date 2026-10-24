@@ -2,37 +2,34 @@
 //! over HTTP, and every trace checked against that model.
 //!
 //! The model (`accordant`'s `examples/resonate`) is an executable
-//! specification in Verus of the Resonate protocol as the C# spec had it:
-//! what every request does, what runs on its own (a deadline, a lease, a
-//! resume), what the server dispatches. Its fuzz example drives the model
-//! itself; this drives echod. A run resets echod, then takes the model's
-//! own actions (`Explore::suggest`, steered by what the model has seen
-//! least, or `Explore::arbitrary`, random) one at a time: a request is sent
-//! with the run's clock as `head.debug_time` and its answer recorded; a
-//! clock move is recorded and then handed to echod as `debug.tick`, so the
-//! sweep runs at the instant the model's timers fire; every `execute` the
-//! sink receives is recorded as a dispatch. Then the model's `finish`
-//! actions: read everything, move the clock past every deadline, read
-//! again. The trace is checked with certificates, and the marks of the
-//! execution that explains it are the coverage.
+//! specification in Verus of the Resonate protocol as the Lean specification
+//! has it: what every request does, what runs on its own (a deadline, a lease,
+//! a resume, a redispatch, a schedule's occurrence), what the server sends.
+//! Its fuzz example drives the model itself; this drives echod. A run resets
+//! echod, then takes the model's own actions (`Explore::suggest`, steered by
+//! what the model has seen least, or `Explore::arbitrary`, random) one at a
+//! time: a request is sent with the run's clock as `head.debug_time` and its
+//! answer recorded; a clock move is recorded and then handed to echod as
+//! `debug.tick`, so the sweep runs at the instant the model's timers fire;
+//! every `execute` and `unblock` the sink receives is recorded as a dispatch.
+//! Then the model's `finish` actions: read everything, delete the schedules,
+//! move the clock past every deadline, read again. The trace is checked with
+//! certificates, and the marks of the execution that explains it are the
+//! coverage.
 //!
-//! What is dropped before checking: `unblock` messages (the model has no
-//! listener dispatch), `preload` and the records the model does not carry.
-//! echod runs with a retry timeout no run reaches, since the model has no
-//! redispatch of an unclaimed task. Two places where the model, a port of
-//! the C# specification, and echod, which follows the Lean one, say
-//! different things by design are translated or left out: `task.create`
-//! on an existing id answers both records in the Lean specification and
-//! the task's alone in the C# one, so the answer is read as the model
-//! types it; and a fence that creates a promise in another origin (the C#
-//! spec's detached create) is refused by the Lean specification and by
-//! echod, so such fences are not sent. One more: the model's `task.create`
-//! has no branch for a deadline already passed, which `promise.create` has
-//! (born settled, the task fulfilled); echod has it for both, as the Lean
-//! specification does, so a `task.create` past its deadline is not sent.
+//! The model and echod are meant to say the same thing everywhere, so
+//! nothing is translated: a fence that creates a promise in another origin
+//! (a detached workflow, the create first and then the fence's check) is sent
+//! as any other request, and `task.create` in every state too. One request is
+//! not sent: a timer created with a target (by a create, a fence or a
+//! schedule), which echod accepts with the target dropped (a concession to
+//! the SDKs' sleep) and the model refuses, as the Lean specification does. What is dropped before checking: `preload`
+//! and the records the model does not carry (a promise's param and value are
+//! strings here, not values with headers). echod runs with the model's retry
+//! timeout, so redispatches happen in both at the same instants.
 //!
 //! ```text
-//! echod-accordant --echod ../../target/release/echod [--runs 200] [--requests 30]
+//! echod-accordant --echod ../../target/release/echod [--runs 200] [--requests 30] [--retry-timeout 5000]
 //! ```
 
 #[path = "../../src/harness.rs"]
@@ -45,7 +42,7 @@ use std::time::Duration;
 
 use accordant::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
 use clap::Parser;
-use resonate::{Create, Dispatch, Fenced, PMap, PSet, PState, Promise, PromiseRec, Request, Resonate, Response, Server as Model, TState, Tags, Task, TaskRec, MARKS, TASK_CREATE_TTL};
+use resonate::{Create, Dispatch, Fenced, PMap, PSet, PState, Promise, PromiseRec, Request, Resonate, Response, Schedule, Server as Model, TState, Tags, Task, TaskRec, MARKS};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
@@ -64,6 +61,10 @@ struct Cli {
     /// The first seed.
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// How long a pending task waits before it is offered again, ms: echod's
+    /// `--retry-timeout` and the model's `retry_timeout`.
+    #[arg(long, default_value_t = 5_000)]
+    retry_timeout: u64,
     /// How long the sink must stay quiet before a step's messages are taken, ms.
     #[arg(long, default_value_t = 10)]
     quiet_ms: u64,
@@ -77,24 +78,26 @@ struct Cli {
 type Trace = Vec<Event<Request, Response, Dispatch>>;
 
 const T0: u64 = 1_000_000;
-const WORKER_SELF: &str = "worker-self";
 
 // ---------------------------------------------------------------------------
 // The model's vocabulary on the wire
 // ---------------------------------------------------------------------------
 
-fn tags(target: bool, external: bool, timer: bool, worker: &str) -> Value {
-    let mut t = serde_json::Map::new();
-    if target {
-        t.insert("resonate:target".into(), json!(worker));
+fn tags(t: &Tags, worker: &str) -> Value {
+    let mut m = serde_json::Map::new();
+    if t.target {
+        m.insert("resonate:target".into(), json!(worker));
     }
-    if external {
-        t.insert("resonate:external".into(), json!("true"));
+    if t.external {
+        m.insert("resonate:external".into(), json!("true"));
     }
-    if timer {
-        t.insert("resonate:timer".into(), json!("true"));
+    if t.timer {
+        m.insert("resonate:timer".into(), json!("true"));
     }
-    Value::Object(t)
+    if let Some(d) = t.delay {
+        m.insert("resonate:delay".into(), json!(d.to_string()));
+    }
+    Value::Object(m)
 }
 
 fn value(data: &Option<String>) -> Value {
@@ -105,7 +108,7 @@ fn value(data: &Option<String>) -> Value {
 }
 
 fn create_data(c: &Create, worker: &str) -> Value {
-    json!({ "id": c.id, "timeoutAt": c.timeout_at, "param": value(&c.data), "tags": tags(c.target, c.external, c.timer, worker) })
+    json!({ "id": c.id, "timeoutAt": c.timeout_at, "param": value(&c.data), "tags": tags(&c.tags, worker) })
 }
 
 /// The request as the protocol carries it: kind and data.
@@ -117,14 +120,11 @@ fn encode(req: &Request, worker: &str) -> (&'static str, Value) {
         Request::RegisterCallback { awaited, awaiter } => ("promise.register_callback", json!({ "awaited": awaited, "awaiter": awaiter })),
         Request::RegisterListener { awaited, address } => ("promise.register_listener", json!({ "awaited": awaited, "address": address })),
         Request::GetTask(id) => ("task.get", json!({ "id": id })),
-        Request::CreateTask { id, timeout_at, data, target } => (
-            "task.create",
-            json!({ "pid": WORKER_SELF, "ttl": TASK_CREATE_TTL, "action": { "kind": "promise.create", "head": {}, "data": { "id": id, "timeoutAt": timeout_at, "param": value(data), "tags": tags(*target, false, false, worker) } } }),
-        ),
+        Request::CreateTask { pid, ttl, action } => ("task.create", json!({ "pid": pid, "ttl": ttl, "action": { "kind": "promise.create", "head": {}, "data": create_data(action, worker) } })),
         Request::AcquireTask { id, version, pid, ttl } => ("task.acquire", json!({ "id": id, "version": version, "pid": pid, "ttl": ttl })),
         Request::ReleaseTask { id, version } => ("task.release", json!({ "id": id, "version": version })),
         Request::FulfillTask { id, version, state, data } => ("task.fulfill", json!({ "id": id, "version": version, "action": { "kind": "promise.settle", "head": {}, "data": { "id": id, "state": state, "value": value(data) } } })),
-        Request::HeartbeatTask { id, version, pid } => ("task.heartbeat", json!({ "pid": pid, "tasks": [{ "id": id, "version": version }] })),
+        Request::HeartbeatTask { pid, tasks } => ("task.heartbeat", json!({ "pid": pid, "tasks": tasks.iter().map(|t| json!({ "id": t.id, "version": t.version })).collect::<Vec<_>>() })),
         Request::SuspendTask { id, version, awaited } => (
             "task.suspend",
             json!({ "id": id, "version": version, "actions": awaited.iter().map(|a| json!({ "kind": "promise.register_callback", "head": {}, "data": { "awaited": a, "awaiter": id } })).collect::<Vec<_>>() }),
@@ -136,6 +136,14 @@ fn encode(req: &Request, worker: &str) -> (&'static str, Value) {
             };
             ("task.fence", json!({ "id": id, "version": version, "action": action }))
         }
+        Request::HaltTask(id) => ("task.halt", json!({ "id": id })),
+        Request::ContinueTask(id) => ("task.continue", json!({ "id": id })),
+        Request::CreateSchedule(c) => (
+            "schedule.create",
+            json!({ "id": c.id, "cron": c.cron, "promiseId": c.promise_id, "promiseTimeout": c.promise_timeout, "promiseParam": value(&c.promise_param), "promiseTags": tags(&c.promise_tags, worker) }),
+        ),
+        Request::GetSchedule(id) => ("schedule.get", json!({ "id": id })),
+        Request::DeleteSchedule(id) => ("schedule.delete", json!({ "id": id })),
     }
 }
 
@@ -155,13 +163,22 @@ fn tstate(s: &str) -> Option<TState> {
         "pending" => TState::Pending,
         "acquired" => TState::Acquired,
         "suspended" => TState::Suspended,
+        "halted" => TState::Halted,
         "fulfilled" => TState::Fulfilled,
         _ => return None,
     })
 }
 
+fn tags_in(t: &Value) -> Tags {
+    Tags {
+        target: !t["resonate:target"].is_null(),
+        external: t["resonate:external"].as_str() == Some("true"),
+        timer: t["resonate:timer"].as_str() == Some("true"),
+        delay: t["resonate:delay"].as_str().and_then(|d| d.parse().ok()),
+    }
+}
+
 fn prec(p: &Value) -> Option<PromiseRec> {
-    let t = &p["tags"];
     Some(PromiseRec {
         id: p["id"].as_str()?.to_string(),
         state: pstate(p["state"].as_str()?)?,
@@ -170,18 +187,37 @@ fn prec(p: &Value) -> Option<PromiseRec> {
         timeout_at: p["timeoutAt"].as_u64()?,
         created_at: p["createdAt"].as_u64()?,
         settled_at: p["settledAt"].as_u64(),
-        tags: Tags { target: !t["resonate:target"].is_null(), external: t["resonate:external"].as_str() == Some("true"), timer: t["resonate:timer"].as_str() == Some("true") },
+        tags: tags_in(&p["tags"]),
     })
 }
 
 fn trec(t: &Value) -> Option<TaskRec> {
-    Some(TaskRec { id: t["id"].as_str()?.to_string(), state: tstate(t["state"].as_str()?)?, version: t["version"].as_u64()? as u32, pid: t["pid"].as_str().map(str::to_string), ttl: t["ttl"].as_u64() })
+    Some(TaskRec {
+        id: t["id"].as_str()?.to_string(),
+        state: tstate(t["state"].as_str()?)?,
+        version: t["version"].as_u64()? as u32,
+        pid: t["pid"].as_str().map(str::to_string),
+        ttl: t["ttl"].as_u64(),
+        resumes: t["resumes"].as_u64().unwrap_or(0) as u32,
+    })
 }
 
-/// The answer as the model types it. A record the model does not know
-/// (a halted task) is a status. `existed`: whether a `task.create` found
-/// its id, which decides between the model's two shapes for it.
-fn decode(kind: &str, status: u16, data: &Value, existed: bool) -> Response {
+fn srec(c: &Value) -> Option<Schedule> {
+    Some(Schedule {
+        id: c["id"].as_str()?.to_string(),
+        cron: c["cron"].as_str()?.to_string(),
+        promise_id: c["promiseId"].as_str()?.to_string(),
+        promise_timeout: c["promiseTimeout"].as_u64()?,
+        promise_param: c["promiseParam"]["data"].as_str().map(str::to_string),
+        promise_tags: tags_in(&c["promiseTags"]),
+        created_at: c["createdAt"].as_u64()?,
+        next_run_at: c["nextRunAt"].as_u64()?,
+        last_run_at: c["lastRunAt"].as_u64(),
+    })
+}
+
+/// The answer as the model types it.
+fn decode(kind: &str, status: u16, data: &Value) -> Response {
     if status != 200 {
         return Response::Status(status);
     }
@@ -195,11 +231,17 @@ fn decode(kind: &str, status: u16, data: &Value, existed: bool) -> Response {
         }
     }
     let body = if kind == "task.fence" { &data["action"]["data"] } else { data };
+    if kind.starts_with("schedule.") {
+        return match srec(&body["schedule"]) {
+            Some(c) => Response::Schedule(c),
+            None => Response::Status(status),
+        };
+    }
     match (prec(&body["promise"]), trec(&body["task"])) {
-        (Some(p), Some(t)) if kind == "task.create" && !existed => Response::Created(p, t),
-        (_, Some(t)) if matches!(kind, "task.get" | "task.acquire" | "task.create") => Response::Task(t),
-        (Some(p), _) => Response::Promise(p),
-        _ => Response::Status(status),
+        (Some(p), Some(t)) => Response::Both(p, t),
+        (None, Some(t)) => Response::Task(t),
+        (Some(p), None) => Response::Promise(p),
+        (None, None) => Response::Status(status),
     }
 }
 
@@ -212,23 +254,36 @@ fn model_state(snap: &Value) -> Model {
             callbacks.entry(a.to_string()).or_default().push(w.to_string());
         }
     }
+    let mut listeners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for l in snap["listeners"].as_array().into_iter().flatten() {
+        if let (Some(id), Some(a)) = (l["id"].as_str(), l["address"].as_str()) {
+            listeners.entry(id.to_string()).or_default().push(a.to_string());
+        }
+    }
     for p in snap["promises"].as_array().into_iter().flatten() {
         let Some(r) = prec(p) else { continue };
         let mut cbs = PSet::empty();
         for w in callbacks.get(&r.id).into_iter().flatten() {
             cbs.insert(w.clone());
         }
+        let mut ls = PSet::empty();
+        for a in listeners.get(&r.id).into_iter().flatten() {
+            ls.insert(a.clone());
+        }
         promises.insert(
             r.id.clone(),
-            Promise { state: r.state, value: r.value, param: r.param, timeout_at: r.timeout_at, created_at: r.created_at, settled_at: r.settled_at, target: r.tags.target, external_tag: r.tags.external, timer_tag: r.tags.timer, callbacks: cbs },
+            Promise { state: r.state, value: r.value, param: r.param, timeout_at: r.timeout_at, created_at: r.created_at, settled_at: r.settled_at, tags: r.tags, callbacks: cbs, listeners: ls },
         );
     }
     let mut leases: BTreeMap<String, u64> = BTreeMap::new();
+    let mut retries: BTreeMap<String, u64> = BTreeMap::new();
     for t in snap["taskTimeouts"].as_array().into_iter().flatten() {
-        if t["type"].as_u64() == Some(1) {
-            if let (Some(id), Some(at)) = (t["id"].as_str(), t["timeout"].as_u64()) {
-                leases.insert(id.to_string(), at);
-            }
+        if let (Some(id), Some(at)) = (t["id"].as_str(), t["timeout"].as_u64()) {
+            match t["type"].as_u64() {
+                Some(1) => leases.insert(id.to_string(), at),
+                Some(0) => retries.insert(id.to_string(), at),
+                _ => None,
+            };
         }
     }
     let mut tasks: PMap<Task> = PMap::empty();
@@ -238,9 +293,17 @@ fn model_state(snap: &Value) -> Model {
             (Some(at), Some(ttl)) => at.saturating_sub(ttl),
             _ => 0,
         };
-        tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at });
+        // the count is what the record carries; the ids are not
+        let resumes = (0..r.resumes).map(|i| format!("resume-{i}")).collect();
+        tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at, retry_at: retries.get(&r.id).copied(), resumes });
     }
-    Model { promises, tasks }
+    let mut schedules: PMap<Schedule> = PMap::empty();
+    for c in snap["schedules"].as_array().into_iter().flatten() {
+        if let Some(c) = srec(c) {
+            schedules.insert(c.id.clone(), c);
+        }
+    }
+    Model { promises, tasks, schedules }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,12 +315,13 @@ struct Driver {
     echod: Server,
     sink: Arc<Sink>,
     worker: String,
+    model: Resonate,
     quiet_ms: u64,
     corr: u64,
 }
 
 impl Driver {
-    async fn drain(&self) -> Vec<Value> {
+    async fn drain(&self) -> Vec<(String, Value)> {
         let mut last = self.sink.count();
         let mut quiet = 0;
         while quiet < 2 {
@@ -270,16 +334,19 @@ impl Driver {
                 quiet = 0;
             }
         }
-        self.sink.take()
+        self.sink.take_addressed()
     }
 
-    /// Everything the sink got, as the model's dispatches; `unblock`s are not its.
+    /// Everything the sink got, as the model's dispatches.
     async fn dispatches(&self) -> Vec<Dispatch> {
         self.drain()
             .await
             .into_iter()
-            .filter(|m| m["kind"] == "execute")
-            .filter_map(|m| Some(Dispatch::Execute { id: m["data"]["task"]["id"].as_str()?.to_string(), version: m["data"]["task"]["version"].as_u64()? as u32 }))
+            .filter_map(|(address, m)| match m["kind"].as_str()? {
+                "execute" => Some(Dispatch::Execute { id: m["data"]["task"]["id"].as_str()?.to_string(), version: m["data"]["task"]["version"].as_u64()? as u32 }),
+                "unblock" => Some(Dispatch::Unblock { address, promise: prec(&m["data"]["promise"])? }),
+                _ => None,
+            })
             .collect()
     }
 
@@ -295,10 +362,39 @@ impl Driver {
         model_state(&data)
     }
 
-    /// One action: taken, and everything observed appended to the trace.
-    /// `state` is the model's state before it, as the snapshot gave it.
-    async fn act(&mut self, a: Action<Request>, state: &Model, now: &mut u64, call: &mut u64, trace: &mut Trace) {
+    /// echod's one concession to the SDKs as they are: a timer created with a
+    /// target (a sleep) is accepted with its target dropped, where the Lean
+    /// specification and the model refuse it. Such creates are not sent.
+    fn conceded(a: &Action<Request>) -> bool {
+        let timer_with_target = |c: &Create| c.tags.timer && c.tags.target;
         match a {
+            Action::Request(Request::CreatePromise(c)) => timer_with_target(c),
+            Action::Request(Request::FenceTask { action: Fenced::Create(c), .. }) => timer_with_target(c),
+            Action::Request(Request::CreateSchedule(c)) => c.promise_tags.timer && c.promise_tags.target,
+            _ => false,
+        }
+    }
+
+    /// A listener's address the sink answers at: the model's addresses under
+    /// `http://listener/` are given the sink's host, so the unblock comes back
+    /// and names the address it went to. Other schemes are left as they are:
+    /// nothing receives them, which the model allows.
+    fn addressed(&self, a: Action<Request>) -> Action<Request> {
+        match a {
+            Action::Request(Request::RegisterListener { awaited, address }) if address.starts_with("http://listener/") => {
+                let address = format!("{}{}", self.worker, address.trim_start_matches("http://"));
+                Action::Request(Request::RegisterListener { awaited, address })
+            }
+            a => a,
+        }
+    }
+
+    /// One action: taken, and everything observed appended to the trace.
+    async fn act(&mut self, a: Action<Request>, now: &mut u64, call: &mut u64, trace: &mut Trace) {
+        if Self::conceded(&a) {
+            return;
+        }
+        match self.addressed(a) {
             Action::Clock(at) => {
                 if at <= *now {
                     return;
@@ -313,14 +409,10 @@ impl Driver {
             }
             Action::Request(req) => {
                 *call += 1;
-                let existed = match &req {
-                    Request::CreateTask { id, .. } => state.promises.contains_key(id),
-                    _ => false,
-                };
                 let (kind, data) = encode(&req, &self.worker);
                 trace.push(Event::Invoke { call: *call, req: req.clone() });
                 let (status, body) = self.send(kind, &data, *now).await;
-                let res = decode(kind, status, &body, existed);
+                let res = decode(kind, status, &body);
                 // what the request made the server send comes before its answer
                 // is observed, as the model has it: the dispatch is the step's
                 for d in self.dispatches().await {
@@ -343,47 +435,25 @@ impl Driver {
         for _ in 0..requests {
             let state = self.snap(now).await;
             let a = if guided {
-                let suggested: Vec<(Action<Request>, &'static str)> = Resonate.suggest(&state, now).into_iter().filter(|(a, _)| !detached(a) && !stillborn(a, now)).collect();
+                let suggested = self.model.suggest(&state, now);
                 // one time in four, anything; otherwise a suggestion taken least
                 if suggested.is_empty() || choices.pick(4) == 0 {
-                    Resonate.arbitrary(&state, now, &mut |n| choices.pick(n))
+                    self.model.arbitrary(&state, now, &mut |n| choices.pick(n))
                 } else {
                     let labels: Vec<&'static str> = suggested.iter().map(|(_, why)| *why).collect();
                     suggested[choices.pick_labeled(&labels)].0.clone()
                 }
             } else {
-                Resonate.arbitrary(&state, now, &mut |n| choices.pick(n))
+                self.model.arbitrary(&state, now, &mut |n| choices.pick(n))
             };
-            if detached(&a) || stillborn(&a, now) {
-                continue;
-            }
-            self.act(a, &state, &mut now, &mut call, &mut trace).await;
+            self.act(a, &mut now, &mut call, &mut trace).await;
         }
         let state = self.snap(now).await;
-        for a in Resonate.finish(&state, now) {
-            self.act(a, &state, &mut now, &mut call, &mut trace).await;
+        for a in self.model.finish(&state, now) {
+            self.act(a, &mut now, &mut call, &mut trace).await;
         }
         trace
     }
-}
-
-/// A fence that creates a promise in another origin: the C# spec's detached
-/// create, which the Lean specification and echod refuse.
-fn detached(a: &Action<Request>) -> bool {
-    match a {
-        Action::Request(Request::FenceTask { id, action: Fenced::Create(c), .. }) => origin(id) != origin(&c.id),
-        _ => false,
-    }
-}
-
-/// A task created already past its deadline: a branch the model does not
-/// have.
-fn stillborn(a: &Action<Request>, now: u64) -> bool {
-    matches!(a, Action::Request(Request::CreateTask { timeout_at, .. }) if *timeout_at <= now)
-}
-
-fn origin(id: &str) -> &str {
-    id.split_once(':').map_or(id, |(o, _)| o)
 }
 
 // ---------------------------------------------------------------------------
@@ -396,10 +466,11 @@ enum Outcome {
     Unknown(Violation),
 }
 
-fn check(trace: &Trace) -> Outcome {
-    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(Resonate, Model::default(), Config { certify: true, ..Config::default() });
+fn check(model: &Resonate, trace: &Trace) -> Outcome {
+    let m = Resonate { retry_timeout: model.retry_timeout };
+    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
     match Verdict::from(c.check_certified(trace.clone())) {
-        Verdict::Ok(cert) => Outcome::Ok(marks(&Resonate, Model::default(), trace, &cert).expect("the certificate replays")),
+        Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
         Verdict::Ko(v) => Outcome::Ko(v),
         Verdict::Unknown(v) => Outcome::Unknown(v),
     }
@@ -424,15 +495,15 @@ async fn main() {
     let cli = Cli::parse();
     let sink = Arc::new(Sink::default());
     let worker = start_sink(Arc::clone(&sink)).await;
-    // no redispatch within any run: the model has none
-    let echod = spawn_echod(&cli.echod, "http://localhost:8001", 1_000_000_000_000, &cli.logs);
+    let echod = spawn_echod(&cli.echod, "http://localhost:8001", cli.retry_timeout, &cli.logs);
     let client = Client::new();
     client.wait_ready(&echod).await;
     eprintln!("[accordant] echod at {}, worker at {worker}", echod.url);
-    let mut d = Driver { client, echod, sink, worker, quiet_ms: cli.quiet_ms, corr: 0 };
+    let model = Resonate { retry_timeout: cli.retry_timeout };
+    let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();
-    println!("{} runs of {} requests each against echod\n", cli.runs, cli.requests);
+    println!("{} runs of {} requests each against echod, retry timeout {} ms\n", cli.runs, cli.requests, cli.retry_timeout);
     println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>14}", "mode", "ok", "ko", "unknown", "marks", "first ko (seed)");
     let mut examples: Vec<String> = Vec::new();
     let mut kos_total = 0;
@@ -446,7 +517,7 @@ async fn main() {
             if cli.trace {
                 eprintln!("[run seed={seed} guided={guided}]\n{}", show(&trace, trace.len()));
             }
-            match check(&trace) {
+            match check(&d.model, &trace) {
                 Outcome::Ok(seen) => {
                     ok += 1;
                     for m in seen {
@@ -488,9 +559,9 @@ async fn main() {
             examples.push(format!("[{mode}] {n} run(s) stop at: {class}\n{example}"));
         }
     }
-    println!("\n{:<45} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");
+    println!("\n{:<50} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");
     for (m, [a, b]) in &table {
-        println!("{m:<45} {a:>7} {b:>7}");
+        println!("{m:<50} {a:>7} {b:>7}");
     }
     for e in &examples {
         println!("\n{e}");

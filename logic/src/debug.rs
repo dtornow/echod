@@ -11,9 +11,9 @@
 //! machine over store calls like everything else here; the sweeps and
 //! fires are ordinary flights that report back when they end.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use echod_kernel::{self as k, Promise};
+use echod_kernel::{self as k, Promise, Schedule};
 use resonate_core::types::{RequestEnvelope, ResponseEnvelope};
 use serde_json::{json, Value};
 
@@ -35,8 +35,9 @@ enum Reset {
 }
 
 enum Snap {
-    Listing { op: OpId },
-    Reading { pending: HashSet<OpId>, promises: Vec<Promise> },
+    /// The listings out (origins and schedules), the document reads out
+    /// (`true` marks a schedule's), and the rows read so far.
+    Gathering { ops: HashSet<OpId>, pending: HashMap<OpId, bool>, promises: Vec<Promise>, schedules: Vec<Schedule> },
 }
 
 enum Tick {
@@ -68,9 +69,10 @@ impl State {
                 self.debug.current = Some(Op::Reset { id, kind, corr, phase: Reset::Listing { op } });
             }
             "debug.snap" => {
-                let prefix = format!("{}wf/", self.keys_prefix());
-                let op = self.store(StoreCall::List { prefix, max_keys: usize::MAX }, Owner::Debug);
-                self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Listing { op } });
+                let mut ops = HashSet::new();
+                ops.insert(self.store(StoreCall::List { prefix: format!("{}wf/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
+                ops.insert(self.store(StoreCall::List { prefix: format!("{}sched/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
+                self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Gathering { ops, pending: HashMap::new(), promises: Vec::new(), schedules: Vec::new() } });
             }
             "debug.tick" => {
                 let Some(time) = envelope.data.get("time").and_then(|v| v.as_i64()) else {
@@ -114,8 +116,9 @@ impl State {
     pub(crate) fn debug_completed(&mut self, op: OpId, outcome: StoreOutcome) {
         let Some(current) = self.debug.current.take() else { return };
         let expected = match &current {
-            Op::Reset { phase: Reset::Listing { op: o }, .. } | Op::Snap { phase: Snap::Listing { op: o }, .. } => *o == op,
-            Op::Reset { phase: Reset::Deleting { pending }, .. } | Op::Snap { phase: Snap::Reading { pending, .. }, .. } => pending.contains(&op),
+            Op::Reset { phase: Reset::Listing { op: o }, .. } => *o == op,
+            Op::Snap { phase: Snap::Gathering { ops, pending, .. }, .. } => ops.contains(&op) || pending.contains_key(&op),
+            Op::Reset { phase: Reset::Deleting { pending }, .. } => pending.contains(&op),
             Op::Tick { phase: Tick::Listing { ops, .. }, .. } => ops.contains(&op),
             Op::Tick { .. } => false,
         };
@@ -150,33 +153,40 @@ impl State {
                 _ => self.debug_fail(id, kind, corr, unexpected()),
             },
             Op::Snap { id, kind, corr, phase } => match (phase, outcome) {
-                (Snap::Listing { .. }, StoreOutcome::Listed(keys)) => {
-                    let mut pending = HashSet::new();
-                    for key in keys {
-                        pending.insert(self.store(StoreCall::Get { key }, Owner::Debug));
-                    }
-                    if pending.is_empty() {
-                        self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, snapshot(&[])));
-                    } else {
-                        self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Reading { pending, promises: Vec::new() } });
-                    }
-                }
-                (Snap::Reading { mut pending, mut promises }, StoreOutcome::Got(got)) => {
-                    pending.remove(&op);
-                    if let Some((bytes, _)) = got {
-                        match doc::decode::<Promise>(&bytes) {
-                            Ok(loaded) => promises.extend(loaded.rows),
-                            Err(e) => return self.debug_fail(id, kind, corr, StoreError::Unavailable(e)),
+                (Snap::Gathering { mut ops, mut pending, mut promises, mut schedules }, outcome) => {
+                    match outcome {
+                        StoreOutcome::Listed(keys) => {
+                            ops.remove(&op);
+                            for key in keys {
+                                let schedule = self.keys.class_of(&key) == Some("sched");
+                                pending.insert(self.store(StoreCall::Get { key }, Owner::Debug), schedule);
+                            }
                         }
+                        StoreOutcome::Got(got) => {
+                            let schedule = pending.remove(&op).unwrap_or(false);
+                            if let Some((bytes, _)) = got {
+                                if schedule {
+                                    match doc::decode::<Schedule>(&bytes) {
+                                        Ok(loaded) => schedules.extend(loaded.rows),
+                                        Err(e) => return self.debug_fail(id, kind, corr, StoreError::Unavailable(e)),
+                                    }
+                                } else {
+                                    match doc::decode::<Promise>(&bytes) {
+                                        Ok(loaded) => promises.extend(loaded.rows),
+                                        Err(e) => return self.debug_fail(id, kind, corr, StoreError::Unavailable(e)),
+                                    }
+                                }
+                            }
+                        }
+                        StoreOutcome::Failed(e) => return self.debug_fail(id, kind, corr, e),
+                        _ => return self.debug_fail(id, kind, corr, unexpected()),
                     }
-                    if pending.is_empty() {
-                        self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, snapshot(&promises)));
+                    if ops.is_empty() && pending.is_empty() {
+                        self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, snapshot(&promises, &schedules)));
                     } else {
-                        self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Reading { pending, promises } });
+                        self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Gathering { ops, pending, promises, schedules } });
                     }
                 }
-                (_, StoreOutcome::Failed(e)) => self.debug_fail(id, kind, corr, e),
-                _ => self.debug_fail(id, kind, corr, unexpected()),
             },
             Op::Tick { id, kind, corr, time, phase } => match (phase, outcome) {
                 (Tick::Listing { mut ops, mut origins, mut schedules }, StoreOutcome::Listed(keys)) => {
@@ -282,7 +292,10 @@ impl State {
 /// The protocol's `Snapshot` of a set of promise rows: the records, the
 /// callbacks and listeners they hold, their tasks, and the deadlines they
 /// owe. Messages are never queued here: they are routed as they arise.
-fn snapshot(promises: &[Promise]) -> Value {
+fn snapshot(promises: &[Promise], schedules: &[Schedule]) -> Value {
+    let mut schedules: Vec<&Schedule> = schedules.iter().collect();
+    schedules.sort_by(|a, b| a.id.cmp(&b.id));
+    let schedules: Vec<Value> = schedules.iter().map(|c| serde_json::to_value(crate::wire::schedule_out(c)).unwrap_or(Value::Null)).collect();
     let mut promises: Vec<&Promise> = promises.iter().collect();
     promises.sort_by(|a, b| a.id.cmp(&b.id));
     let records: Vec<Value> = promises.iter().map(|p| serde_json::to_value(crate::wire::promise_record(p)).unwrap_or(Value::Null)).collect();
@@ -319,6 +332,7 @@ fn snapshot(promises: &[Promise]) -> Value {
         "listeners": listeners,
         "tasks": tasks,
         "taskTimeouts": task_timeouts,
+        "schedules": schedules,
         "messages": [],
     })
 }

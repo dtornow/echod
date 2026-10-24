@@ -70,6 +70,15 @@ shows the panels with data.
 - **Preload.** `task.acquire`, `task.suspend` and `task.fence` answer an
   empty `preload`; the reference returns up to a limit of the promises
   the task may read next.
+- **Detached creates.** A fence creating a promise in another origin: the
+  reference allows a root id alone and checks the fence first; echod allows
+  any id and creates first, then checks (DESIGN, "The detached create").
+  `echod-diff` does not generate them; `echod-accordant` does.
+- **A targeted timer.** The reference runs it as a task; the Lean
+  specification and the accordant model refuse it; echod drops the target
+  (an SDK's sleep). `echod-accordant` does not send one.
+- **The simulator's model** is one origin at a time, so it does not
+  generate detached creates either.
 
 ## Smaller items
 

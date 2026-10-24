@@ -46,11 +46,25 @@ use crate::{unavailable, Owner, State};
 
 /// What a flight does.
 pub(crate) enum Work {
-    Request { id: RequestId, kind: String, corr: String, req: k::Request, action_kind: Option<String>, now: u64 },
+    Request { id: RequestId, kind: String, corr: String, req: k::Request, action_kind: Option<String>, now: u64, stage: Stage },
     /// `fired` is the key whose firing this is; none for a sweep or a fire
     /// a test asked for.
     Sweep { fired: Option<FiredKey>, now: u64 },
     Fire { schedule: String, fired: Option<FiredKey>, now: u64 },
+}
+
+/// Where a request stands when it spans two documents: a fence whose create
+/// targets another origin (a detached workflow) commits the create on that
+/// origin first, then the fence's check on the task's, and answers as one
+/// fence. A request on one document is `Whole`.
+pub(crate) enum Stage {
+    Whole,
+    /// The create, with the check to run on the task's document once it has
+    /// committed (taken when it is submitted).
+    Detached { then: Target, check: Option<Box<k::Request>> },
+    /// The check, with the create's answer to fold into the fence's (taken
+    /// when the answer goes out).
+    Check { inner: Option<k::PromiseRes> },
 }
 
 impl Work {
@@ -534,8 +548,32 @@ impl State {
         for e in &done.outbox {
             self.send(e);
         }
-        match &f.work {
-            Work::Request { id, kind, corr, action_kind, .. } => {
+        let mut f = f;
+        match &mut f.work {
+            Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
+                // The create has landed; the fence's check follows on the task's document.
+                match (done.response, check.take()) {
+                    (Some(k::Response::Promise(inner)), Some(check)) => {
+                        let work = Work::Request { id: *id, kind: kind.clone(), corr: corr.clone(), req: *check, action_kind: action_kind.clone(), now: *now, stage: Stage::Check { inner: Some(inner) } };
+                        let then = then.clone();
+                        self.submit(then, work, None, f.debug);
+                    }
+                    _ => self.emit(Effect::Reply { id: *id, response: Err(Unavailable::new("no answer")) }),
+                }
+            }
+            Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
+                // The fence's answer: the check's status, with the create's record inside when it held.
+                let response = match (&done.response, inner.take()) {
+                    (Some(k::Response::Status(st)), Some(inner)) => {
+                        let action = (st.status == 200).then_some(k::TaskFenceInnerRes::Create(inner));
+                        let fence = k::Response::TaskFence(k::TaskFenceRes { status: st.status, action });
+                        Ok(crate::wire::response_out(kind, corr, action_kind.as_deref(), &fence, done.why.as_deref()))
+                    }
+                    _ => Err(Unavailable::new("no answer")),
+                };
+                self.emit(Effect::Reply { id: *id, response });
+            }
+            Work::Request { id, kind, corr, action_kind, stage: Stage::Whole, .. } => {
                 let resp = done.response.as_ref().map(|r| crate::wire::response_out(kind, corr, action_kind.as_deref(), r, done.why.as_deref()));
                 let response = resp.ok_or_else(|| Unavailable::new("no answer"));
                 self.emit(Effect::Reply { id: *id, response });
@@ -546,7 +584,6 @@ impl State {
             }
             Work::Fire { .. } => {}
         }
-        let mut f = f;
         f.idle = !done.did;
         self.finish(f, Ok(fired));
     }

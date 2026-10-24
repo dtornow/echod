@@ -465,6 +465,13 @@ pub struct TaskFenceReq { pub id: String, pub version: u64, pub action: TaskFenc
 #[cfg(verus_keep_ghost)]
 pub type ATaskFenceReq = TaskFenceReqSpec;
 
+/// `task.fence` with no action: the check alone (`task_fence_check`).
+#[make_spec_type]
+pub struct TaskFenceCheckReq { pub id: String, pub version: u64 }
+
+#[cfg(verus_keep_ghost)]
+pub type ATaskFenceCheckReq = TaskFenceCheckReqSpec;
+
 #[make_spec_type]
 pub struct TaskRef { pub id: String, pub version: u64 }
 
@@ -556,6 +563,7 @@ pub enum Request {
     TaskHalt(TaskHaltReq),
     TaskContinue(TaskContinueReq),
     TaskFence(TaskFenceReq),
+    TaskFenceCheck(TaskFenceCheckReq),
     TaskHeartbeat(TaskHeartbeatReq),
     TaskSuspend(TaskSuspendReq),
 }
@@ -578,6 +586,7 @@ pub enum ARequest {
     TaskHalt(ATaskHaltReq),
     TaskContinue(ATaskContinueReq),
     TaskFence(ATaskFenceReq),
+    TaskFenceCheck(ATaskFenceCheckReq),
     TaskHeartbeat(ATaskHeartbeatReq),
     TaskSuspend(ATaskSuspendReq),
 }
@@ -603,6 +612,7 @@ impl View for Request {
             Request::TaskHalt(r) => ARequest::TaskHalt(r@),
             Request::TaskContinue(r) => ARequest::TaskContinue(r@),
             Request::TaskFence(r) => ARequest::TaskFence(r@),
+            Request::TaskFenceCheck(r) => ARequest::TaskFenceCheck(r@),
             Request::TaskHeartbeat(r) => ARequest::TaskHeartbeat(r@),
             Request::TaskSuspend(r) => ARequest::TaskSuspend(r@),
         }

@@ -265,7 +265,11 @@ impl State {
         match dispatch::decode(&envelope, now) {
             Err(resp) => self.emit(Effect::Reply { id, response: Ok(resp) }),
             Ok(d) => {
-                let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now };
+                let stage = match d.then {
+                    Some((then, check)) => flight::Stage::Detached { then, check: Some(Box::new(check)) },
+                    None => flight::Stage::Whole,
+                };
+                let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now, stage };
                 self.submit(d.target, work, None, false);
             }
         }

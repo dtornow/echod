@@ -44,34 +44,42 @@ pub fn spawn(name: &'static str, mut cmd: Command, url: String, logs: &PathBuf) 
     Server { name, url, child }
 }
 
-/// The messages pushed to the harness's worker, in the order they came.
+/// The messages pushed to the harness's worker, in the order they came, each
+/// with the address it was pushed to (the sink answers at every path).
 #[derive(Default)]
 pub struct Sink {
-    pub got: Mutex<Vec<Value>>,
+    pub got: Mutex<Vec<(String, Value)>>,
 }
 
 impl Sink {
     pub fn count(&self) -> usize {
         self.got.lock().unwrap().len()
     }
+    /// The messages, without their addresses.
+    #[allow(dead_code)]
     pub fn take(&self) -> Vec<Value> {
+        self.got.lock().unwrap().drain(..).map(|(_, v)| v).collect()
+    }
+    /// The messages with the address each came to.
+    #[allow(dead_code)]
+    pub fn take_addressed(&self) -> Vec<(String, Value)> {
         self.got.lock().unwrap().drain(..).collect()
     }
 }
 
 pub async fn start_sink(sink: Arc<Sink>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}/", listener.local_addr().unwrap().port());
-    let app = Router::new().route(
-        "/",
-        post(move |Json(v): Json<Value>| {
-            let sink = Arc::clone(&sink);
-            async move {
-                sink.got.lock().unwrap().push(v);
-                axum::http::StatusCode::OK
-            }
-        }),
-    );
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let url = format!("{base}/");
+    let handler = move |uri: axum::http::Uri, Json(v): Json<Value>| {
+        let sink = Arc::clone(&sink);
+        let base = base.clone();
+        async move {
+            sink.got.lock().unwrap().push((format!("{base}{uri}"), v));
+            axum::http::StatusCode::OK
+        }
+    };
+    let app = Router::new().fallback_service(post(handler));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }

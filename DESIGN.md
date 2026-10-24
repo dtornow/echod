@@ -23,7 +23,9 @@ asks; the fifth is the evidence for both. The core and the node depend on
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
 objects, schedules and an outbox; 18 request handlers and 6 internal steps
-(`debug.*` and `*.search` left out); a catalogue of 92 properties. The kernel
+(`debug.*` and `*.search` left out), plus one of this design's own, the
+fence's check with no action, for the detached create; a catalogue of 92
+properties. The kernel
 is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
 on the state it leaves, `legal` on the pair, and for an internal step the two
 sweeper entries.
@@ -38,7 +40,7 @@ object.rs       projection, the per-object edits, birth
 object_proof.rs its two lemmas on `without`
 properties.rs   the catalogue, entry for entry, same names
 properties_proof.rs  its theorems: the frame every step ends with, and the folds
-external.rs     the 18 request handlers
+external.rs     the 18 request handlers, and the fence's check
 external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 internal.rs     the 6 internal steps
 internal_proof.rs  their lemmas
@@ -57,7 +59,7 @@ handler takes the state, the request, `now`, and a `Config`, and is a
 function: `spec_promise_create(a, req, now)` and its seventeen siblings
 give the abstract state each handler leaves, and each handler `ensures` it
 computes its function. `handle` takes a `Request`, one enum over the
-eighteen, and returns the `Response`; `spec_handle` is its function, state
+nineteen, and returns the `Response`; `spec_handle` is its function, state
 and response at once. That is the one name the system model uses for a
 request, and the one call the node makes.
 
@@ -428,7 +430,10 @@ settled, the reference resumes the awaiter at once, where the
 specification's `promiseRegisterCallback` answers the record and changes
 nothing; it shows in a task's `resumes` count, dropped likewise
 (`--strict-resumes` keeps it). The search operations are not in the
-stream: echod does not serve them.
+stream: echod does not serve them. Nor is a fence creating a promise in
+another origin, where the two part by design ("The detached create"
+below); the simulator's workload has none either, its model being one
+origin at a time.
 
 Run over four seeds to their coverage plateaus, 164,800 steps in all,
 every response, message and snapshot agreed modulo the above; the two
@@ -437,28 +442,42 @@ reference deviations were the only divergence classes found.
 ### The accordant model
 
 `diff/accordant` drives echod with the Resonate model of
-`dtornow/accordant`, an executable specification in Verus of the protocol
-as the C# specification had it, and checks every recorded trace against
-it: an execution of the model must produce exactly the observations,
-with the model's internal work (a deadline, a lease, a resume) placed
-where the checker likes. A run resets echod and takes the model's own
-actions, the ones it suggests from the state it reads back through
-`debug.snap` (fences at the held and a stale version, the clock to just
-before and at each deadline, a settle while a task awaits) or random
-ones; a request is sent with the run's clock as `head.debug_time`, a clock
-move is handed to echod as `debug.tick`, and every `execute` the sink
-receives is a dispatch. Then the model's finishing reads. The marks of the
-execution that explains an accepted trace are the coverage.
+`dtornow/accordant`, an executable specification in Verus of the whole
+protocol as the Lean specification has it (promises, callbacks, listeners,
+tasks with leases, resumes and redispatch, halt and continue, schedules),
+and checks every recorded trace against it: an execution of the model must
+produce exactly the observations, with the model's internal work (a
+deadline, a lease, a resume, a retry, an occurrence) placed where the
+checker likes. A run resets echod and takes the model's own actions, the
+ones it suggests from the state it reads back through `debug.snap` (fences
+at the held and a stale version, the clock to just before and at each
+deadline, a settle while a task awaits, a schedule's run) or random ones; a
+request is sent with the run's clock as `head.debug_time`, a clock move is
+handed to echod as `debug.tick`, and every `execute` and `unblock` the sink
+receives is a dispatch, with the address it came to. Then the model's
+finishing reads. The marks of the execution that explains an accepted trace
+are the coverage. echod runs with the model's retry timeout.
 
-Where that model and the Lean specification echod follows say different
-things by design, the driver translates or abstains: `task.create` on an
-existing id answers both records in the Lean specification and the task's
-alone in the C# one (read as the model types it); a fence creating a
-promise in another origin, the C# detached create, is refused by the Lean
-specification and by echod (not sent); and the model's `task.create` has
-no branch for a deadline already passed, which the Lean specification and
-echod have (not sent). Nothing else is translated: the statuses, the
-records, the dispatches and their timing are compared as they are.
+Nothing is translated: a detached create is sent as any other fence, and
+`task.create` in every state. One request is not sent: a timer created with
+a target, which echod accepts with the target dropped (a concession to the
+SDKs' sleep, `wire::create_tags`) and the model refuses, as the Lean
+specification does.
+
+### The detached create
+
+A fence whose create names a promise in another origin starts a detached
+workflow. The two live on different documents, so they cannot commit as
+one write: the create goes first, as a request of its own on its origin's
+document, and the fence's check (`task_fence_check`, the kernel's fence
+with no action) follows on the task's. A stale fence still leaves the
+promise created, and answers its 409; the fence's answer is the check's
+status with the create's record inside when it held. `dispatch::decode`
+splits the request in two (`Decoded::then`), `flight::Stage` carries the
+request through its two commits. A settle in another origin is refused,
+as the reference server refuses it. The reference allows a cross-origin
+create of a root id alone (an id with no `:`), and checks the fence first;
+echod allows any id, and creates first.
 
 ## echod-system
 

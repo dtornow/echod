@@ -168,6 +168,8 @@ fn normalize_snap(mut snap: Value, now: i64, strict_callbacks: bool, strict_resu
     }
     if let Some(o) = snap.as_object_mut() {
         o.remove("messages");
+        // echod's snapshot lists the schedules too; the reference's does not.
+        o.remove("schedules");
         for (_, v) in o.iter_mut() {
             if let Some(a) = v.as_array_mut() {
                 a.sort_by_key(|x| x.to_string());

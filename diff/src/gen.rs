@@ -335,14 +335,17 @@ pub fn build(op: Op, rng: &mut Rng, m: &Model, now: i64, ids: &Ids) -> (&'static
             let acquired = m.tasks_by_state("acquired");
             let (task_id, version) = pick(rng, &acquired).unwrap_or_else(|| (random_task_id(rng), 1));
             let task_origin = task_id.split(':').next().unwrap_or("").to_string();
-            // same origin only: a settle shares the task's origin, a create
-            // shares it too (the reference's default, which echod requires)
+            // same origin only: a settle shares the task's origin, and so does
+            // a create. A create in another origin (a detached workflow) is
+            // where the two servers part by design: the reference allows a
+            // root id alone and checks the fence first, echod allows any id
+            // and creates first (BACKLOG, "Detached creates").
             let pending_p: Vec<String> = m.pending_promise_ids().into_iter().filter(|p| p.split(':').next().unwrap_or("") == task_origin).collect();
             let do_settle = !pending_p.is_empty() && chance(rng, 4) != 0;
             if !do_settle {
                 let new_promise_id = match chance(rng, 8) {
                     0..=4 => format!("{task_origin}:p{}", chance(rng, 8)),
-                    _ => promise_id(chance(rng, 8)),
+                    _ => format!("{task_origin}:q{}", chance(rng, 8)),
                 };
                 let timeout_at = now + rng.range(30_000, 299_999) as i64;
                 (
