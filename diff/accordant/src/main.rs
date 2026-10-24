@@ -185,6 +185,15 @@ fn decode(kind: &str, status: u16, data: &Value, existed: bool) -> Response {
     if status != 200 {
         return Response::Status(status);
     }
+    // a fence answers 200 with its action's own envelope inside; the model
+    // types the fence as that action's status
+    if kind == "task.fence" {
+        if let Some(inner) = data["action"]["head"]["status"].as_u64() {
+            if inner != 200 {
+                return Response::Status(inner as u16);
+            }
+        }
+    }
     let body = if kind == "task.fence" { &data["action"]["data"] } else { data };
     match (prec(&body["promise"]), trec(&body["task"])) {
         (Some(p), Some(t)) if kind == "task.create" && !existed => Response::Created(p, t),
