@@ -65,7 +65,6 @@ pub const MARKS: &[&str] = &[
     "release: no such task (404)",
     "release: not held (409)",
     "resume noted on a running task",
-    "schedule advanced",
     "schedule created",
     "schedule deleted",
     "schedule fired",

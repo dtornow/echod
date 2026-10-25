@@ -21,10 +21,15 @@ struct Trace {
 impl Trace {
     /// Starts with the server's clock at `now`.
     fn new(now: Time) -> Self {
+        Trace::with(Resonate::default(), now)
+    }
+
+    /// Starts with the server's clock at `now`, against `model`.
+    fn with(model: Resonate, now: Time) -> Self {
         let shadow = Config { certify: true, ..Config::default() };
         let mut t = Trace {
-            c: Checker::with_partitions(Resonate::default(), Server::default(), Config::default()),
-            shadow: Certified(Checker::with_footprints(Resonate::default(), Server::default(), shadow)),
+            c: Checker::with_partitions(Resonate { ..model }, Server::default(), Config::default()),
+            shadow: Certified(Checker::with_footprints(model, Server::default(), shadow)),
             next: 0,
         };
         t.tick(now);
@@ -864,6 +869,37 @@ fn schedules_fire_on_their_cron() {
 }
 
 /// The reference server's wire rules, as 400s.
+
+/// With a window, a server that sweeps its schedules may fire an occurrence
+/// any time from its instant to the window's end: a read in between may see
+/// the schedule not yet advanced and the occurrence absent, or both moved.
+/// At the window's end the fire is owed.
+#[test]
+fn a_schedule_may_fire_late_within_the_window() {
+    let now = 1_000_000;
+    let mut t = Trace::with(Resonate { fire_within: 2_500, ..Resonate::default() }, now);
+    let targeted = Tags { target: true, ..PLAIN };
+    t.step("create s", schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 60_000, targeted), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_001_000));
+    t.tick(1_001_500);
+    // Not yet swept: the schedule stands, the occurrence is absent.
+    t.step("s not yet advanced", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at.is_none()));
+    t.step("run-1001000 absent", get("ex:run-1001000"), st(404));
+    t.tick(1_002_200);
+    // Swept now: the occurrence as of its instant, the schedule advanced.
+    let r = t.step("run-1001000 created at its instant", get("ex:run-1001000"), promise(PState::Pending, None));
+    assert!(matches!(r, Response::Promise(p) if p.created_at == 1_001_000));
+    t.c.receive(execute("ex:run-1001000", 0)).unwrap();
+    t.step("s advanced", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_001_000) && c.next_run_at == 1_002_000));
+    // Past the window of the next occurrence, the fire is owed: the
+    // occurrence exists, whatever the sweep did.
+    t.tick(1_004_600);
+    t.step("run-1002000 owed by 1004500", get("ex:run-1002000"), promise(PState::Pending, None));
+    t.rejects("run-1002000 cannot be absent past its window", get("ex:run-1002000"), Response::Status(404));
+    // Within the window of run-1003000 and run-1004000 again: either way.
+    t.step("run-1003000 may be absent", get("ex:run-1003000"), st(404));
+    t.step("run-1004000 may exist", get("ex:run-1004000"), promise(PState::Pending, None));
+    t.step("s advanced to 1005000", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
+}
 #[test]
 fn the_wire_rules_are_refusals() {
     let now = 1_000_000;

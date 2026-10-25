@@ -310,9 +310,6 @@ pub struct Checker<S: Engine> {
     recording: bool,
     /// While recording: the observations so far, which the certificate must show.
     observed: Vec<Event<Ex<S>, Re<S>, Ms<S>>>,
-    /// The model's own simulation order on states, if it has one: see
-    /// [`Checker::dominating`].
-    dominance: Option<Box<dyn Fn(&St<S>, &St<S>) -> bool>>,
     pub stats: Stats,
 }
 
@@ -364,22 +361,8 @@ impl<S: Engine> Checker<S> {
             next_call: 1 << 62,
             recording,
             observed: Vec::new(),
-            dominance: None,
             stats: Stats { max_width: 1, ..Stats::default() },
         }
-    }
-
-    /// Subsume by the model's own order too: `dominates(b, a)` says state `b`
-    /// can show every observation state `a` can, under the same pending work,
-    /// so a candidate in `a` is dropped when one in `b` stands beside it. The
-    /// model vouches for the order; a wrong one costs completeness (a trace the
-    /// model admits is refused), never soundness (an accepted trace still has
-    /// its execution). Typical: a state differing only in when internal work
-    /// may next run, the earlier one dominating, since "from then on" includes
-    /// every later instant.
-    pub fn dominating(mut self, dominates: impl Fn(&St<S>, &St<S>) -> bool + 'static) -> Self {
-        self.dominance = Some(Box::new(dominates));
-        self
     }
 
     pub fn factors(&self) -> &[Factor<S>] {
@@ -1245,7 +1228,7 @@ impl<S: Engine> Checker<S> {
 
         if self.cfg.subsume {
             let before = next.len();
-            next = subsume::<S>(next, &|x| self.optional(x), self.dominance.as_deref());
+            next = subsume::<S>(next, &|x| self.optional(x));
             self.stats.subsumed += before - next.len();
         }
         if next.is_empty() {
@@ -1887,6 +1870,10 @@ fn item_due<O, R, T, G>(item: &Pending<O, R, T, G>) -> Option<Time> {
 }
 
 /// Messages a node may never deliver: dropping them cannot add behaviors.
+fn optional<O, R, T, G>(item: &Pending<O, R, T, G>) -> bool {
+    matches!(item, Pending::Sent { .. })
+}
+
 /// An item with its early answers cleared, so calls compare by identity alone.
 fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) -> Pending<O, R, T, G> {
     match item {
@@ -1895,54 +1882,31 @@ fn skeleton<O: Clone, R: Clone, T: Clone, G: Clone>(item: &Pending<O, R, T, G>) 
     }
 }
 
-/// Work a node may run or leave forever: a `Later` item (it runs when an
-/// observation needs it, or never), a sent message (received, or never).
-/// Holding more of it is holding more options, so a node with a superset
-/// simulates one with a subset, all else equal.
-fn optional<O, R, T, G>(item: &Pending<O, R, T, G>) -> bool {
-    matches!(item, Pending::Sent { .. } | Pending::Internal { sched: Sched::Later(_), .. })
-}
-
-/// Whether node `b` can do everything node `a` can, given the same owed work
-/// (the caller's grouping): at least `a`'s optional work, copy for copy, and at
-/// least `a`'s early answers per call.
+/// Whether node `b` can do everything node `a` can: same state and same owed
+/// work, at least `a`'s optional work, and at least `a`'s early answers per call.
 fn simulates<S: Engine>(b: &Node<S>, a: &Node<S>, optional: &dyn Fn(&P<S>) -> bool) -> bool {
     a.pending.iter().all(|x| match x {
         Pending::External { call, early, .. } => b.pending.iter().any(|y| {
             matches!(y, Pending::External { call: c, early: e, .. } if c == call && early.is_subset(e))
         }),
-        _ if optional(x) => b.pending.contains(x) || b.pending.iter().any(|y| more_of(y, x)),
+        _ if optional(x) => b.pending.contains(x),
         _ => true,
     })
 }
 
-/// Whether `y` is `x` with more copies.
-fn more_of<O: PartialEq, R, T: PartialEq, G: PartialEq>(y: &Pending<O, R, T, G>, x: &Pending<O, R, T, G>) -> bool {
-    match (y, x) {
-        (Pending::Sent { msg: m, count: c }, Pending::Sent { msg: n, count: d }) => m == n && c >= d,
-        (Pending::Internal { sched: s, count: c }, Pending::Internal { sched: t, count: d }) => s == t && c >= d,
-        _ => false,
-    }
-}
-
-/// Keeps only nodes no other node simulates. Nodes are compared on the work
-/// they owe; with `dominates`, a node whose state the model says dominates
-/// another's simulates it too.
-fn subsume<S: Engine>(nodes: Vec<Node<S>>, optional: &dyn Fn(&P<S>) -> bool, dominates: Option<&dyn Fn(&St<S>, &St<S>) -> bool>) -> Vec<Node<S>> {
-    type Group<S> = (Option<Interned<St<S>>>, Vec<P<S>>);
+/// Keeps only nodes no other node simulates.
+fn subsume<S: Engine>(nodes: Vec<Node<S>>, optional: &dyn Fn(&P<S>) -> bool) -> Vec<Node<S>> {
+    type Group<S> = (Interned<St<S>>, Vec<P<S>>);
     let mut groups: HashMap<Group<S>, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
         let owed: Vec<_> = n.pending.iter().filter(|x| !optional(x)).map(skeleton).collect();
-        // under a dominance order, states compare pairwise rather than by identity
-        let state = if dominates.is_some() { None } else { Some(n.state.clone()) };
-        groups.entry((state, owed)).or_default().push(i);
+        groups.entry((n.state.clone(), owed)).or_default().push(i);
     }
-    let same_or_dominates = |b: &Node<S>, a: &Node<S>| b.state == a.state || dominates.is_some_and(|d| d(&b.state, &a.state));
     let mut keep = vec![true; nodes.len()];
     for idx in groups.values().filter(|g| g.len() > 1) {
         for &a in idx {
             for &b in idx {
-                if a != b && keep[b] && same_or_dominates(&nodes[b], &nodes[a]) && simulates(&nodes[b], &nodes[a], optional) {
+                if a != b && keep[b] && simulates(&nodes[b], &nodes[a], optional) {
                     keep[a] = false;
                     break;
                 }

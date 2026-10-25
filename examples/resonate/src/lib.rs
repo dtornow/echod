@@ -31,5 +31,5 @@ pub mod spec;
 
 pub use collections::{PMap, PSet};
 pub use explore::{IDS, MARKS, PLAIN, SCHEDULES};
-pub use model::{dominates, on, Internal, Key};
+pub use model::{on, Internal, Key};
 pub use spec::*;
