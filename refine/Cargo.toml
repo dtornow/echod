@@ -11,8 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 echod-kernel = { path = "../kernel" }
-accordant = { git = "https://github.com/dtornow/accordant", rev = "b9806d8b498e536909a0dba9b5043438855d4503" }
-resonate = { git = "https://github.com/dtornow/accordant", rev = "b9806d8b498e536909a0dba9b5043438855d4503", package = "resonate" }
+accordant = { git = "https://github.com/dtornow/accordant", rev = "e62e2520828fa201312b488887507eb7cd9f7c1a" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "e62e2520828fa201312b488887507eb7cd9f7c1a", package = "resonate" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"

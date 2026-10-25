@@ -19,11 +19,11 @@
 
 use vstd::prelude::*;
 
-use accordant::refinement::{end, matches, refines, shows, simulation};
+use accordant::refinement::{admits, end, matches, refines_under, shows, simulation_under};
 use accordant::semantics::{
-    before, effect, initial, invoke, is_overdue, legal, overdue, project, receive, ret, run, step, tick, valid, Cfg, Config, Execution, ExternalOp, Lab, Label,
+    before, effect, initial, invoke, is_first, is_overdue, legal, overdue, project, ready, receive, req_of, ret, run, start_all, step, tick, valid, Cfg, Config, Execution, ExternalOp, Lab, Label,
 };
-use accordant::{Event, Sched, Time};
+use accordant::{Event, Model, Sched, Time};
 use echod_kernel::steps::{deadline_at, strip};
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
@@ -32,6 +32,7 @@ use resonate::{Dispatch, Internal, Request, Resonate, Response, Server};
 
 use crate::machine::*;
 use crate::sweep::sweep_fn;
+use crate::sweep_proof::{lemma_sweep_idem, lemma_sweep_swept, swept};
 use crate::translate::*;
 
 verus! {
@@ -102,6 +103,8 @@ pub open spec fn timers_cover(internals: Seq<Sched<Internal>>, a: AState, now: T
 /// The forward simulation relation.
 pub open spec fn rel(cfg: Concrete, c: Cfg<Concrete>, s: Cfg<Resonate>) -> bool {
     let swept = sweep_fn(fresh(c.state@), c.now as nat, cfg.retry_timeout as nat);
+    &&& c.now <= MAX_TIME
+    &&& c.state@.objects.dom().finite()
     &&& s.now == c.now
     &&& s.state@ == translate(swept)
     &&& s.externals == c.externals
@@ -115,6 +118,34 @@ pub open spec fn rel(cfg: Concrete, c: Cfg<Concrete>, s: Cfg<Resonate>) -> bool 
 /// the instant, which the store machine refuses anyway.
 pub open spec fn abstract_of(cfg: Concrete) -> Resonate {
     Resonate { retry_timeout: cfg.retry_timeout, fire_within: 0 }
+}
+
+/// The kernel's door on the dial: `Config::wf`.
+pub open spec fn dial_ok(cfg: Concrete) -> bool {
+    0 < cfg.retry_timeout <= MAX_TIME
+}
+
+/// A request inside the kernel's doors: its instants and durations at most
+/// `MAX_TIME`, so that no sum the kernel takes wraps where the model's
+/// saturates.
+pub open spec fn request_bounded(req: RequestV) -> bool {
+    match req {
+        RequestV::CreatePromise(c) => c.timeout_at <= MAX_TIME && (c.tags.delay is Some ==> c.tags.delay.unwrap() <= MAX_TIME),
+        RequestV::CreateTask { ttl, action, .. } => ttl <= MAX_TIME && action.timeout_at <= MAX_TIME && (action.tags.delay is Some ==> action.tags.delay.unwrap() <= MAX_TIME),
+        RequestV::AcquireTask { ttl, .. } => ttl <= MAX_TIME,
+        RequestV::FenceTask { action: FencedV::Create(c), .. } => c.timeout_at <= MAX_TIME && (c.tags.delay is Some ==> c.tags.delay.unwrap() <= MAX_TIME),
+        _ => true,
+    }
+}
+
+/// The labels the theorem is about: the clock stays within the kernel's door
+/// and every request does; silence and the rest are admitted.
+pub open spec fn bounded(l: Lab<Concrete>) -> bool {
+    match l {
+        Label::Obs(Event::Clock { at }) => at <= MAX_TIME,
+        Label::Obs(Event::Invoke { req, .. }) => request_bounded(req@),
+        _ => true,
+    }
 }
 
 /// The empty server, as the model's value with that view.
@@ -138,6 +169,7 @@ pub proof fn init_related(cfg: Concrete)
     let swept = sweep_fn(fresh(c.state@), 0, cfg.retry_timeout as nat);
     lemma_sweep_empty(cfg.retry_timeout as nat);
     assert(swept == concrete_init());
+    assert(c.state@.objects.dom() =~= Set::<Seq<char>>::empty());
     assert(translate(swept).promises =~= Map::<Seq<char>, PromiseV>::empty());
     assert(translate(swept).tasks =~= Map::<Seq<char>, TaskV>::empty());
     assert(s.state@.promises =~= Map::<Seq<char>, PromiseV>::empty());
@@ -310,6 +342,8 @@ pub proof fn matched_receive(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, 
 /// in deadline order, and compute the sweep at that instant.
 pub proof fn matched_tick(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
+        dial_ok(cfg),
+        bounded(l),
         rel(cfg, x, s),
         tick(cfg, x, l, y),
     ensures
@@ -322,6 +356,8 @@ pub proof fn matched_tick(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: 
 /// against the model's twin on the translated state, one lemma per handler.
 pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
+        dial_ok(cfg),
+        bounded(l),
         rel(cfg, x, s),
         effect(cfg, x, l, y),
     ensures
@@ -330,28 +366,81 @@ pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y
     admit();
 }
 
-/// ADMITTED. A concrete sweep runs: a stutter, since the relation already
-/// reads the concrete state swept; needs the sweep idempotent.
+/// A concrete sweep runs: a stutter. The relation reads the concrete state
+/// swept already, and sweeping a swept state changes nothing and sends
+/// nothing (`lemma_sweep_idem`, with `lemma_sweep_swept` for the state the
+/// sweep leaves).
 pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
+        dial_ok(cfg),
         rel(cfg, x, s),
         run(cfg, x, l, y),
     ensures
         exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
 {
-    admit();
+    broadcast use vstd::seq_lib::lemma_multiset_commutative;
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let a = abstract_of(cfg);
+    let t = cfg.retry_timeout as nat;
+    let now = x.now as nat;
+    // the concrete step: the one outcome of the one kind of internal work
+    let i = choose|i: int, j: int|
+        #![trigger x.internals[i], cfg.spec_internal(req_of(x.internals[i]), x.state, x.now)[j]]
+        0 <= i < x.internals.len() && ready(x.now, x.internals[i]) && (overdue(cfg, x) ==> is_first(cfg, x, i)) && {
+            let outs = cfg.spec_internal(req_of(x.internals[i]), x.state, x.now);
+            0 <= j < outs.len() && y == Config {
+                state: outs[j].next,
+                internals: start_all(x.internals.remove(i), outs[j].work, x.now),
+                sent: x.sent + outs[j].send,
+                ..x
+            }
+        };
+    let sw = sweep_fn(fresh(x.state@), now, t);
+    assert(y.state == lift_store(fresh(sw)));
+    assert(y.sent == x.sent + lift_dispatches(sends(sw)));
+    assert(y.now == x.now && y.externals == x.externals);
+    axiom_store_realised(fresh(sw));
+    assert(y.state@ == fresh(sw));
+    // the state the sweep leaves is swept: sweeping it again is the identity
+    assert(fresh(x.state@).objects.dom() == x.state@.objects.dom());
+    lemma_sweep_swept(fresh(x.state@), now, t);
+    assert(swept(fresh(sw), now));
+    lemma_sweep_idem(fresh(sw), now, t);
+    let sw2 = sweep_fn(fresh(y.state@), now, t);
+    assert(sw2 == fresh(sw));
+    assert(sends(sw2) =~= Seq::<DispatchV>::empty()) by {
+        assert(sw2.outbox.dom() =~= Set::<OutboxKey>::empty());
+        vstd::set_lib::lemma_set_empty_equivalency_len::<OutboxKey>(sw2.outbox.dom());
+        assert(sw2.outbox.dom().to_seq().len() == 0);
+    }
+    assert(lift_dispatches(sends(sw2)) =~= Seq::<Dispatch>::empty());
+    assert(y.sent + lift_dispatches(sends(sw2)) =~= y.sent);
+    // the abstract side stands still
+    let mid: Execution<Resonate> = Seq::empty();
+    assert(legal(a, s, mid));
+    assert(project::<Resonate>(mid) =~= shows(l));
+    assert(end::<Resonate>(s, mid) == s);
+    assert(matches(a, s, l, s));
+    // and stays related: same translation, same messages, same deadlines
+    assert(translate(sw2) == translate(sw));
+    assert((y.sent + lift_dispatches(sends(sw2))).to_multiset() == (x.sent + lift_dispatches(sends(sw))).to_multiset());
+    assert(timers_cover(s.internals, sw2, y.now));
+    assert(rel(cfg, y, s));
 }
 
-/// Every concrete step from related configurations is matched by the abstract
-/// model: by the kind of the step.
+/// Every bounded concrete step from related configurations is matched by the
+/// abstract model: by the kind of the step.
 pub proof fn simulation_holds(cfg: Concrete)
+    requires
+        dial_ok(cfg),
     ensures
-        simulation(cfg, abstract_of(cfg), |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s)),
+        simulation_under(cfg, abstract_of(cfg), |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s), |l: Lab<Concrete>| bounded(l)),
 {
     let a = abstract_of(cfg);
     let r = |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s);
+    let ok = |l: Lab<Concrete>| bounded(l);
     assert forall|x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>| #![trigger r(x, s), step(cfg, x, l, y)]
-        r(x, s) && step(cfg, x, l, y) implies exists|t: Cfg<Resonate>| #[trigger] matches(a, s, l, t) && r(y, t) by {
+        r(x, s) && step(cfg, x, l, y) && ok(l) implies exists|t: Cfg<Resonate>| #[trigger] matches(a, s, l, t) && r(y, t) by {
         if invoke(cfg, x, l, y) {
             matched_invoke(cfg, x, l, y, s);
         } else if ret(cfg, x, l, y) {
@@ -373,17 +462,22 @@ pub proof fn simulation_holds(cfg: Concrete)
 
 // --------------------------------------------------------------- the theorem
 
-/// Every trace the store machine can show a client, the Resonate model can.
+/// Every trace the store machine can show a client, within the kernel's
+/// doors (the clock and every request's instants and durations at most
+/// `MAX_TIME`), the Resonate model can show.
 pub proof fn concrete_refines_abstract(cfg: Concrete, trace: Seq<Event<Request, Response, Dispatch>>)
     requires
+        dial_ok(cfg),
+        admits(|l: Lab<Concrete>| bounded(l), trace),
         valid(cfg, lift_store(concrete_init()), trace),
     ensures
         valid(abstract_of(cfg), abstract_init(), trace),
 {
     let r = |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s);
+    let ok = |l: Lab<Concrete>| bounded(l);
     init_related(cfg);
     simulation_holds(cfg);
-    refines(cfg, abstract_of(cfg), r, lift_store(concrete_init()), abstract_init(), trace);
+    refines_under(cfg, abstract_of(cfg), r, ok, lift_store(concrete_init()), abstract_init(), trace);
 }
 
 } // verus!
