@@ -15,10 +15,13 @@ use vstd::prelude::*;
 use echod_kernel::external::with_objects;
 use echod_kernel::internal::{lease_timeout_objects, promise_timeout_objects, retry_due, retry_timeout_objects};
 use echod_kernel::properties::opt_or_zero;
-use echod_kernel::steps::{is_next, strip};
+use echod_kernel::steps::{is_next, lease_deadline, retry_deadline, strip};
 use echod_kernel::store::AState;
 use echod_kernel::tags::target_of;
 use echod_kernel::types::*;
+use resonate::twins::DispatchV;
+
+use crate::translate::message_out;
 
 verus! {
 
@@ -196,6 +199,83 @@ pub open spec fn sweep_fn(a: AState, now: nat, retry_timeout: nat) -> AState {
     let a3 = phase_callbacks(a2, ids, now);
     let a4 = phase_listeners(a3, ids, now);
     phase_retries(a4, ids, now, retry_timeout)
+}
+
+// ------------------------------------------------------------- what is sent
+//
+// The sweep's dispatches as a sequence: what each listener step and each
+// retry step sends, in the order the phases run them. The outbox entries the
+// steps write are the same messages; the sequence is what the machine sends.
+
+/// What one listener step sends: the unblock, if it fires.
+pub open spec fn listener_send(a: AState, x: Seq<char>, address: Seq<char>, now: nat) -> Seq<DispatchV> {
+    if a.objects.contains_key(x) && a.objects[x].project(now).state != PromiseState::Pending && a.objects[x].project(now).listeners.contains(address) {
+        let q = a.objects[x].project(now).remove_listener(address);
+        seq![message_out(AOutboxEntry { address, message: AMessage::Unblock(q.to_record()) })]
+    } else {
+        Seq::empty()
+    }
+}
+
+pub open spec fn listeners_sends(a: AState, x: Seq<char>, addresses: Seq<Seq<char>>, now: nat) -> Seq<DispatchV>
+    decreases addresses.len(),
+{
+    if addresses.len() == 0 {
+        Seq::empty()
+    } else {
+        listeners_sends(a, x, addresses.drop_last(), now) + listener_send(listeners_of(a, x, addresses.drop_last(), now), x, addresses.last(), now)
+    }
+}
+
+pub open spec fn phase_listeners_sends(a: AState, ids: Seq<Seq<char>>, now: nat) -> Seq<DispatchV>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        Seq::empty()
+    } else {
+        let a1 = phase_listeners(a, ids.drop_last(), now);
+        let x = ids.last();
+        phase_listeners_sends(a, ids.drop_last(), now) + (if a1.objects.contains_key(x) { listeners_sends(a1, x, a1.objects[x].listeners, now) } else { Seq::empty() })
+    }
+}
+
+/// What one retry step sends: the offer, if it fires.
+pub open spec fn retry_send(a: AState, id: Seq<char>, now: nat, retry_timeout: nat) -> Seq<DispatchV> {
+    if a.objects.contains_key(id) && retry_due(a.objects[id], now) {
+        let p = a.objects[id];
+        seq![message_out(AOutboxEntry { address: target_of(p.tags), message: AMessage::Execute { task_id: id, version: p.task.unwrap().version } })]
+    } else {
+        Seq::empty()
+    }
+}
+
+pub open spec fn phase_retries_sends(a: AState, ids: Seq<Seq<char>>, now: nat, retry_timeout: nat) -> Seq<DispatchV>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        Seq::empty()
+    } else {
+        phase_retries_sends(a, ids.drop_last(), now, retry_timeout) + retry_send(phase_retries(a, ids.drop_last(), now, retry_timeout), ids.last(), now, retry_timeout)
+    }
+}
+
+/// What the sweep sends: the listeners told, then the tasks offered.
+pub open spec fn sweep_sends(a: AState, now: nat, retry_timeout: nat) -> Seq<DispatchV> {
+    let ids = ids_of(a);
+    let a1 = phase_deadlines(a, ids, now);
+    let a2 = phase_leases(a1, ids, now);
+    let a3 = phase_callbacks(a2, ids, now);
+    let a4 = phase_listeners(a3, ids, now);
+    phase_listeners_sends(a3, ids, now) + phase_retries_sends(a4, ids, now, retry_timeout)
+}
+
+/// The model's deadlines of an object: a pending promise's timeout, whatever
+/// its kind (the model arms a timer for every live promise); a lease's end;
+/// an offer. The kernel's `deadline_at` leaves internal promises out.
+pub open spec fn mdeadline_at(p: APromise, t: nat) -> bool {
+    ||| p.state == PromiseState::Pending && p.timeout_at as nat == t
+    ||| lease_deadline(p) == Some(t)
+    ||| retry_deadline(p) == Some(t)
 }
 
 /// The state's next deadline, if it has one: when the next sweep is due.

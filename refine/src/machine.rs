@@ -10,7 +10,7 @@ use echod_kernel::types::*;
 use resonate::twins::*;
 use resonate::{Dispatch, Request, Response};
 
-use crate::sweep::{next_deadline, sweep_fn};
+use crate::sweep::{next_deadline, sweep_fn, sweep_sends};
 use crate::translate::*;
 
 verus! {
@@ -66,11 +66,6 @@ pub open spec fn fresh(a: AState) -> AState {
     AState { outbox: Map::empty(), ..a }
 }
 
-/// What a state's outbox sends, in some definite order.
-pub open spec fn sends(a: AState) -> Seq<DispatchV> {
-    a.outbox.dom().to_seq().map_values(|k: OutboxKey| message_out(a.outbox[k]))
-}
-
 /// The key a commit arms: a sweep at the state's next deadline.
 pub open spec fn arm(a: AState) -> Seq<Sched<CStep>> {
     match next_deadline(a) {
@@ -83,8 +78,8 @@ pub open spec fn lift_dispatches(ds: Seq<DispatchV>) -> Seq<Dispatch> {
     ds.map_values(|d: DispatchV| lift_dispatch(d))
 }
 
-pub open spec fn outcome(a: AState, resp: ResponseV) -> ExternalOutcomeV<Store, Response, CStep, Dispatch> {
-    ExternalOutcomeV { next: lift_store(fresh(a)), resp: lift_response(resp), work: arm(a), send: lift_dispatches(sends(a)) }
+pub open spec fn outcome(a: AState, resp: ResponseV, send: Seq<DispatchV>) -> ExternalOutcomeV<Store, Response, CStep, Dispatch> {
+    ExternalOutcomeV { next: lift_store(fresh(a)), resp: lift_response(resp), work: arm(a), send: lift_dispatches(send) }
 }
 
 impl Concrete {
@@ -95,20 +90,21 @@ impl Concrete {
     pub open spec fn request(&self, req: RequestV, a0: AState, now: Time) -> ExternalOutcomeV<Store, Response, CStep, Dispatch> {
         let t = self.retry_timeout as nat;
         let a = fresh(a0);
+        let n = now as nat;
         match plan(req) {
-            Plan::Refuse(code) => outcome(a, ResponseV::Status(code)),
+            Plan::Refuse(code) => outcome(a, ResponseV::Status(code), Seq::empty()),
             Plan::One(kreq) => {
-                let (b, r) = spec_handle(sweep_fn(a, now as nat, t), kreq, now as nat);
-                outcome(sweep_fn(b, now as nat, t), response_out(r))
+                let (b, r) = spec_handle(sweep_fn(a, n, t), kreq, n);
+                outcome(sweep_fn(b, n, t), response_out(r), sweep_sends(a, n, t) + sweep_sends(b, n, t))
             },
             Plan::Detached(create, check) => {
-                let (b, r1) = spec_handle(sweep_fn(a, now as nat, t), ARequest::PromiseCreate(create), now as nat);
-                let (c, r2) = spec_handle(sweep_fn(b, now as nat, t), ARequest::TaskFenceCheck(check), now as nat);
+                let (b, r1) = spec_handle(sweep_fn(a, n, t), ARequest::PromiseCreate(create), n);
+                let (c, r2) = spec_handle(sweep_fn(b, n, t), ARequest::TaskFenceCheck(check), n);
                 let resp = match r2 {
                     AResponse::Status(s) => if s.status != 200 { ResponseV::Status(s.status) } else { response_out(r1) },
                     _ => response_out(r1),
                 };
-                outcome(sweep_fn(c, now as nat, t), resp)
+                outcome(sweep_fn(c, n, t), resp, sweep_sends(a, n, t) + sweep_sends(b, n, t) + sweep_sends(c, n, t))
             },
         }
     }
@@ -116,7 +112,7 @@ impl Concrete {
     /// A sweep runs: everything due on the bucket at the clock.
     pub open spec fn sweep(&self, a0: AState, now: Time) -> InternalOutcomeV<Store, CStep, Dispatch> {
         let a = sweep_fn(fresh(a0), now as nat, self.retry_timeout as nat);
-        InternalOutcomeV { next: lift_store(fresh(a)), work: arm(a), send: lift_dispatches(sends(a)) }
+        InternalOutcomeV { next: lift_store(fresh(a)), work: arm(a), send: lift_dispatches(sweep_sends(fresh(a0), now as nat, self.retry_timeout as nat)) }
     }
 }
 

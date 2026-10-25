@@ -23,16 +23,17 @@ use accordant::refinement::{admits, end, matches, refines_under, shows, simulati
 use accordant::semantics::{
     before, effect, initial, invoke, is_first, is_overdue, legal, overdue, project, ready, receive, req_of, ret, run, start_all, step, tick, valid, Cfg, Config, Execution, ExternalOp, Lab, Label,
 };
-use accordant::{Event, Model, Sched, Time};
-use echod_kernel::steps::{deadline_at, strip};
+use accordant::{CallId, Event, Model, Sched, Time};
+use echod_kernel::properties::inv;
+use echod_kernel::steps::{deadline_at, has_deadline, is_next, objects_deadline, strip};
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
 use resonate::twins::*;
 use resonate::{Dispatch, Internal, Request, Resonate, Response, Server};
 
 use crate::machine::*;
-use crate::sweep::sweep_fn;
-use crate::sweep_proof::{lemma_sweep_idem, lemma_sweep_swept, swept};
+use crate::sweep::{mdeadline_at, next_deadline, sweep_fn, sweep_sends};
+use crate::sweep_proof::{callbacks_spent, lemma_inv_empty, lemma_inv_fresh, lemma_sends_idem, lemma_sweep_idem, lemma_sweep_inv, lemma_sweep_swept, lemma_swept_ahead, listeners_spent, swept};
 use crate::translate::*;
 
 verus! {
@@ -83,32 +84,73 @@ pub open spec fn translate(a: AState) -> ServerV {
     }
 }
 
+/// The raw bucket a configuration holds: its outbox emptied, as every step
+/// leaves it.
+pub open spec fn raw_of(c: Cfg<Concrete>) -> AState {
+    fresh(c.state@)
+}
+
 /// The abstract state a concrete one stands for at `now`: swept, translated.
 pub open spec fn abs(a: AState, now: Time, retry_timeout: u64) -> ServerV {
     translate(sweep_fn(fresh(a), now as nat, retry_timeout as nat))
 }
 
 /// The abstract model's pending work, as the relation keeps it: timers only,
-/// none due, and one on `id` at `t` for every deadline `t` the abstract state's
-/// object `id` owes.
+/// none due, and one on `id` at `t` for every deadline `t` the abstract
+/// state's object `id` owes (the model's deadlines: a pending promise's
+/// timeout, whatever its kind; a lease's end; an offer).
 pub open spec fn timers_cover(internals: Seq<Sched<Internal>>, a: AState, now: Time) -> bool {
     &&& forall|i: int| 0 <= i < internals.len() ==> match #[trigger] internals[i] {
         Sched::Timer(t, step) => t > now && (step@ matches InternalV::On(_)),
         Sched::Later(_) => false,
     }
-    &&& forall|id: Seq<char>, t: nat| #[trigger] a.objects.contains_key(id) && #[trigger] deadline_at(a.objects[id], t) ==>
+    &&& forall|id: Seq<char>, t: nat| #[trigger] a.objects.contains_key(id) && #[trigger] mdeadline_at(a.objects[id], t) ==>
         exists|i: int| 0 <= i < internals.len() && #[trigger] internals[i] == Sched::Timer(t as u64, lift_internal(InternalV::On(seq![id])))
+}
+
+/// Some timer is due by `d`.
+pub open spec fn timer_by(internals: Seq<Sched<CStep>>, d: nat) -> bool {
+    exists|i: int| 0 <= i < internals.len() && match #[trigger] internals[i] {
+        Sched::Timer(u, _) => u as nat <= d,
+        Sched::Later(_) => false,
+    }
+}
+
+/// The store machine sweeps before its bucket's next kernel deadline passes:
+/// a sweep is armed no later than it. (So the clock never leaves a kernel
+/// deadline behind unswept; only internal promises, which the kernel arms
+/// no timer for, are read late, and nothing hangs on them.)
+pub open spec fn sweep_armed(c: Cfg<Concrete>) -> bool {
+    match next_deadline(raw_of(c)) {
+        Some(d) => timer_by(c.internals, d),
+        None => true,
+    }
+}
+
+/// Every call in flight is inside the kernel's doors.
+pub open spec fn calls_bounded(ext: Map<CallId, ExternalOp<Request, Response>>) -> bool {
+    forall|call: CallId| #[trigger] ext.contains_key(call) ==> request_bounded(ext[call].req@)
 }
 
 /// The forward simulation relation.
 pub open spec fn rel(cfg: Concrete, c: Cfg<Concrete>, s: Cfg<Resonate>) -> bool {
-    let swept = sweep_fn(fresh(c.state@), c.now as nat, cfg.retry_timeout as nat);
+    let raw = raw_of(c);
+    let t = cfg.retry_timeout as nat;
+    let swept = sweep_fn(raw, c.now as nat, t);
+    // the concrete side's own invariants
     &&& c.now <= MAX_TIME
-    &&& c.state@.objects.dom().finite()
+    &&& raw.objects.dom().finite()
+    &&& raw.schedules == Map::<Seq<char>, ASchedule>::empty()
+    &&& inv(c.now as nat, raw)
+    &&& callbacks_spent(raw)
+    &&& listeners_spent(raw)
+    &&& sweep_armed(c)
+    &&& calls_bounded(c.externals)
+    // the correspondence
     &&& s.now == c.now
     &&& s.state@ == translate(swept)
     &&& s.externals == c.externals
-    &&& s.sent.to_multiset() == (c.sent + lift_dispatches(sends(swept))).to_multiset()
+    &&& (c.sent + lift_dispatches(sweep_sends(raw, c.now as nat, t))).to_multiset().subset_of(s.sent.to_multiset())
     &&& timers_cover(s.internals, swept, c.now)
 }
 
@@ -134,6 +176,7 @@ pub open spec fn request_bounded(req: RequestV) -> bool {
         RequestV::CreateTask { ttl, action, .. } => ttl <= MAX_TIME && action.timeout_at <= MAX_TIME && (action.tags.delay is Some ==> action.tags.delay.unwrap() <= MAX_TIME),
         RequestV::AcquireTask { ttl, .. } => ttl <= MAX_TIME,
         RequestV::FenceTask { action: FencedV::Create(c), .. } => c.timeout_at <= MAX_TIME && (c.tags.delay is Some ==> c.tags.delay.unwrap() <= MAX_TIME),
+        RequestV::CreateSchedule(_) | RequestV::GetSchedule(_) | RequestV::DeleteSchedule(_) => false,
         _ => true,
     }
 }
@@ -162,22 +205,34 @@ pub proof fn init_related(cfg: Concrete)
     ensures
         rel(cfg, initial::<Concrete>(lift_store(concrete_init())), initial::<Resonate>(abstract_init())),
 {
+    broadcast use vstd::multiset::group_multiset_axioms;
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
     let c = initial::<Concrete>(lift_store(concrete_init()));
     let s = initial::<Resonate>(abstract_init());
     axiom_store_realised(concrete_init());
     axiom_realised(empty_v(), ResponseV::Status(0), InternalV::On(Seq::empty()), DispatchV::Execute { id: Seq::empty(), version: 0 });
-    let swept = sweep_fn(fresh(c.state@), 0, cfg.retry_timeout as nat);
+    let raw = raw_of(c);
+    assert(raw == concrete_init());
+    let swept = sweep_fn(raw, 0, cfg.retry_timeout as nat);
     lemma_sweep_empty(cfg.retry_timeout as nat);
     assert(swept == concrete_init());
-    assert(c.state@.objects.dom() =~= Set::<Seq<char>>::empty());
+    assert(raw.objects.dom() =~= Set::<Seq<char>>::empty());
     assert(translate(swept).promises =~= Map::<Seq<char>, PromiseV>::empty());
     assert(translate(swept).tasks =~= Map::<Seq<char>, TaskV>::empty());
     assert(s.state@.promises =~= Map::<Seq<char>, PromiseV>::empty());
     assert(s.state@.tasks =~= Map::<Seq<char>, TaskV>::empty());
     assert(s.state@.schedules =~= Map::<Seq<char>, ScheduleV>::empty());
-    assert(sends(swept) =~= Seq::<DispatchV>::empty());
-    assert(c.sent + lift_dispatches(sends(swept)) =~= Seq::<Dispatch>::empty());
-    assert forall|id: Seq<char>, t: nat| #[trigger] swept.objects.contains_key(id) && #[trigger] deadline_at(swept.objects[id], t) implies false by {}
+    lemma_inv_empty(0);
+    assert(sweep_armed(c)) by {
+        if next_deadline(raw) is Some {
+            let d = choose|t: nat| is_next(strip(raw), t);
+            assert(has_deadline(strip(raw), d));
+            assert(false);
+        }
+    }
+    lemma_sends_idem(raw, 0, cfg.retry_timeout as nat);
+    assert(c.sent + lift_dispatches(sweep_sends(raw, 0, cfg.retry_timeout as nat)) =~= Seq::<Dispatch>::empty());
+    assert forall|id: Seq<char>, t: nat| #[trigger] swept.objects.contains_key(id) && #[trigger] mdeadline_at(swept.objects[id], t) implies false by {}
 }
 
 /// Sweeping the empty bucket leaves it empty.
@@ -248,6 +303,7 @@ pub proof fn one_step(a: Resonate, s: Cfg<Resonate>, l: Lab<Resonate>, t: Cfg<Re
 /// A client sends a request: the same step on both sides.
 pub proof fn matched_invoke(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
+        bounded(l),
         rel(cfg, x, s),
         invoke(cfg, x, l, y),
     ensures
@@ -260,6 +316,13 @@ pub proof fn matched_invoke(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y
             no_overdue(cfg, x, s);
             assert(invoke(a, s, l, t));
             one_step(a, s, l, t);
+            assert(calls_bounded(y.externals)) by {
+                assert forall|k: CallId| #[trigger] y.externals.contains_key(k) implies request_bounded(y.externals[k].req@) by {
+                    if k != call {
+                        assert(x.externals.contains_key(k));
+                    }
+                }
+            }
             assert(rel(cfg, y, t));
         },
         _ => {
@@ -308,16 +371,18 @@ pub proof fn matched_receive(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, 
     let a = abstract_of(cfg);
     match l {
         Label::Obs(Event::Receive { msg }) => {
-            let swept = sweep_fn(fresh(x.state@), x.now as nat, cfg.retry_timeout as nat);
-            let extra = lift_dispatches(sends(swept));
+            let raw = raw_of(x);
+            let extra = lift_dispatches(sweep_sends(raw, x.now as nat, cfg.retry_timeout as nat));
             let i = choose|i: int| 0 <= i < x.sent.len() && #[trigger] x.sent[i] == msg && y == Config { sent: x.sent.remove(i), ..x };
             // the message is among the abstract's sent
             assert(x.sent.contains(msg));
             assert((x.sent + extra).contains(msg)) by {
                 assert((x.sent + extra)[i] == msg);
             }
-            assert((x.sent + extra).to_multiset().count(msg) > 0);
-            assert(s.sent.to_multiset().count(msg) > 0);
+            let m1 = (x.sent + extra).to_multiset();
+            let m2 = s.sent.to_multiset();
+            assert(m1.count(msg) > 0);
+            assert(m2.count(msg) > 0);
             assert(s.sent.contains(msg));
             let j = choose|j: int| 0 <= j < s.sent.len() && #[trigger] s.sent[j] == msg;
             let t = Config { sent: s.sent.remove(j), ..s };
@@ -326,10 +391,15 @@ pub proof fn matched_receive(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, 
                 assert(0 <= j < s.sent.len() && s.sent[j] == msg && t == Config { sent: s.sent.remove(j), ..s });
             }
             one_step(a, s, l, t);
-            // what is left: the same multiset, less one of this message
-            assert(t.sent.to_multiset() == s.sent.to_multiset().remove(msg));
+            // what is left: one of this message fewer on each side
+            assert(t.sent.to_multiset() == m2.remove(msg));
             assert(y.sent.to_multiset() == x.sent.to_multiset().remove(msg));
-            assert((y.sent + extra).to_multiset() =~= (x.sent + extra).to_multiset().remove(msg));
+            assert((y.sent + extra).to_multiset() =~= m1.remove(msg));
+            assert(m1.remove(msg).subset_of(m2.remove(msg))) by {
+                assert forall|v: Dispatch| m1.remove(msg).count(v) <= m2.remove(msg).count(v) by {
+                    assert(m1.count(v) <= m2.count(v));
+                }
+            }
             assert(rel(cfg, y, t));
         },
         _ => {
@@ -368,8 +438,8 @@ pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y
 
 /// A concrete sweep runs: a stutter. The relation reads the concrete state
 /// swept already, and sweeping a swept state changes nothing and sends
-/// nothing (`lemma_sweep_idem`, with `lemma_sweep_swept` for the state the
-/// sweep leaves).
+/// nothing (`lemma_sweep_idem`, `lemma_sends_idem`, with `lemma_sweep_swept`
+/// for the state the sweep leaves).
 pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
         dial_ok(cfg),
@@ -384,7 +454,7 @@ pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: C
     let t = cfg.retry_timeout as nat;
     let now = x.now as nat;
     // the concrete step: the one outcome of the one kind of internal work
-    let i = choose|i: int, j: int|
+    let (i, j) = choose|i: int, j: int|
         #![trigger x.internals[i], cfg.spec_internal(req_of(x.internals[i]), x.state, x.now)[j]]
         0 <= i < x.internals.len() && ready(x.now, x.internals[i]) && (overdue(cfg, x) ==> is_first(cfg, x, i)) && {
             let outs = cfg.spec_internal(req_of(x.internals[i]), x.state, x.now);
@@ -395,26 +465,51 @@ pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: C
                 ..x
             }
         };
-    let sw = sweep_fn(fresh(x.state@), now, t);
+    let raw = raw_of(x);
+    let sw = sweep_fn(raw, now, t);
+    let emitted = sweep_sends(raw, now, t);
     assert(y.state == lift_store(fresh(sw)));
-    assert(y.sent == x.sent + lift_dispatches(sends(sw)));
+    assert(y.sent == x.sent + lift_dispatches(emitted));
+    assert(y.internals == start_all(x.internals.remove(i), arm(sw), x.now));
     assert(y.now == x.now && y.externals == x.externals);
     axiom_store_realised(fresh(sw));
     assert(y.state@ == fresh(sw));
+    let raw2 = raw_of(y);
+    assert(raw2 == fresh(sw));
     // the state the sweep leaves is swept: sweeping it again is the identity
-    assert(fresh(x.state@).objects.dom() == x.state@.objects.dom());
-    lemma_sweep_swept(fresh(x.state@), now, t);
+    lemma_sweep_swept(raw, now, t);
     assert(swept(fresh(sw), now));
-    lemma_sweep_idem(fresh(sw), now, t);
-    let sw2 = sweep_fn(fresh(y.state@), now, t);
-    assert(sw2 == fresh(sw));
-    assert(sends(sw2) =~= Seq::<DispatchV>::empty()) by {
-        assert(sw2.outbox.dom() =~= Set::<OutboxKey>::empty());
-        vstd::set_lib::lemma_set_empty_equivalency_len::<OutboxKey>(sw2.outbox.dom());
-        assert(sw2.outbox.dom().to_seq().len() == 0);
+    lemma_sweep_idem(raw2, now, t);
+    lemma_sends_idem(raw2, now, t);
+    let sw2 = sweep_fn(raw2, now, t);
+    assert(sw2 == raw2);
+    assert(lift_dispatches(sweep_sends(raw2, now, t)) =~= Seq::<Dispatch>::empty());
+    assert(y.sent + lift_dispatches(sweep_sends(raw2, now, t)) =~= y.sent);
+    // the concrete side's invariants carry over
+    lemma_sweep_inv(raw, now, t);
+    lemma_inv_fresh(now, sw);
+    assert(inv(now, raw2));
+    assert(raw2.objects.dom() =~= raw.objects.dom());
+    assert(sweep_armed(y)) by {
+        match next_deadline(raw2) {
+            Some(d) => {
+                assert(strip(raw2) == strip(sw));
+                assert(is_next(strip(sw), d));
+                assert(has_deadline(strip(sw), d));
+                assert(objects_deadline(sw.objects, d));
+                let id = choose|id: Seq<char>| #[trigger] sw.objects.contains_key(id) && deadline_at(sw.objects[id], d);
+                lemma_swept_ahead(sw, now);
+                assert(d > now);
+                assert(d <= u64::MAX);
+                assert(arm(sw) == seq![Sched::Timer(d as u64, CStep::Sweep)]);
+                let n = x.internals.remove(i).len();
+                assert(y.internals.len() == n + 1);
+                assert(y.internals[n as int] == Sched::Timer(d as u64, CStep::Sweep));
+                assert(timer_by(y.internals, d));
+            },
+            None => {},
+        }
     }
-    assert(lift_dispatches(sends(sw2)) =~= Seq::<Dispatch>::empty());
-    assert(y.sent + lift_dispatches(sends(sw2)) =~= y.sent);
     // the abstract side stands still
     let mid: Execution<Resonate> = Seq::empty();
     assert(legal(a, s, mid));
@@ -423,7 +518,7 @@ pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: C
     assert(matches(a, s, l, s));
     // and stays related: same translation, same messages, same deadlines
     assert(translate(sw2) == translate(sw));
-    assert((y.sent + lift_dispatches(sends(sw2))).to_multiset() == (x.sent + lift_dispatches(sends(sw))).to_multiset());
+    assert((y.sent + lift_dispatches(sweep_sends(raw2, now, t))).to_multiset() == (x.sent + lift_dispatches(emitted)).to_multiset());
     assert(timers_cover(s.internals, sw2, y.now));
     assert(rel(cfg, y, s));
 }
