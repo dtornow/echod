@@ -316,6 +316,19 @@ nothing and an observed step shows its event; a legal execution that shows the
 trace is the witness `valid` asks for. `cargo verus verify -p accordant`
 checks all of it: 30 verified, 0 errors, no `assume` or `admit`.
 
+Trace inclusion between two models (`src/refinement.rs`, specification and
+proof only): `refines(c, a, r, ci, ai, trace)` ensures `valid(a, ai, trace)`
+from `valid(c, ci, trace)`, given `r` a forward simulation (`simulation`):
+`r` holds between the initial configurations, and every concrete step from
+related configurations is matched (`matches`) by a legal run of abstract
+steps that shows the same event, or nothing for a stutter, and ends in a
+related configuration. The two models share request, response and dispatch
+types, so a trace of one is a trace of the other. Proved by induction over
+the concrete execution, with `project` and `legal` distributing over
+concatenation; 6 items, no `assume` or `admit`. It is the frame for
+`concrete_refines_abstract`: a store machine (the bucket as state, verified
+document handlers after a sweep as `external`) against the Resonate model.
+
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
 (`spec_external`, `spec_internal`) and the method's `ensures` ties
 the two: `external` returns the vector whose sequence `spec_external` says. The
