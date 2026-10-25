@@ -24,7 +24,7 @@ use crate::spec::*;
 pub enum Internal {
     On(BTreeSet<Id>),
     Fire { schedule: Id, at: Time, promise: Id },
-    Advance { schedule: Id, at: Time },
+    Advance { schedule: Id, at: Time, promise: Id },
 }
 
 pub fn on(ids: &[&str]) -> Internal {
@@ -155,7 +155,7 @@ fn step(s: Step) -> Internal {
     match s {
         Step::Objects(ids) => Internal::On(ids.into_iter().collect()),
         Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
-        Step::Advance { schedule, at } => Internal::Advance { schedule, at },
+        Step::Advance { schedule, at, promise } => Internal::Advance { schedule, at, promise },
     }
 }
 
@@ -187,7 +187,7 @@ impl Model for Resonate {
                 Resonate::internal(self, &ids, s, now)
             }
             Internal::Fire { schedule, at, promise } => Resonate::fire(self, schedule, *at, promise, s, now),
-            Internal::Advance { schedule, at } => Resonate::advance(self, schedule, *at, s, now),
+            Internal::Advance { schedule, at, promise } => Resonate::advance(self, schedule, *at, promise, s, now),
         };
         if o.pending {
             return Vec::new(); // not yet: the work stays

@@ -382,9 +382,10 @@ pub enum Step {
     /// Fire the occurrence of `schedule` at `at`, which creates `promise`
     /// (`expand` of its template), and arm the next.
     Fire { schedule: Id, at: Time, promise: Id },
-    /// Record the run at `at` on `schedule` and arm the next: the second half
-    /// of a fire that a sweeping server commits apart from the first.
-    Advance { schedule: Id, at: Time },
+    /// Record the run at `at` on `schedule`, whose occurrence is `promise`,
+    /// and arm the next: the second half of a fire that a sweeping server
+    /// commits apart from the first.
+    Advance { schedule: Id, at: Time, promise: Id },
 }
 
 /// Internal work to start, and when it runs. As `accordant::Sched`.
@@ -491,7 +492,7 @@ fn copy_step(s: &Step) -> Step {
     match s {
         Step::Objects(ids) => Step::Objects(ids.clone()),
         Step::Fire { schedule, at, promise } => Step::Fire { schedule: schedule.clone(), at: *at, promise: promise.clone() },
-        Step::Advance { schedule, at } => Step::Advance { schedule: schedule.clone(), at: *at },
+        Step::Advance { schedule, at, promise } => Step::Advance { schedule: schedule.clone(), at: *at, promise: promise.clone() },
     }
 }
 
@@ -1451,7 +1452,10 @@ impl Resonate {
             Some(c) => c,
             None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
         };
-        if c.next_run_at != at_ {
+        // Not this occurrence: the schedule moved on, or was deleted and
+        // created again under another template (same template: the same
+        // occurrence, and this work does what the new schedule's would).
+        if c.next_run_at != at_ || expand(&c.promise_id, schedule, at_) != *promise {
             return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
         }
         if now < at_ {
@@ -1503,7 +1507,7 @@ impl Resonate {
             Resonate::record_run(&mut n, c, schedule, at_);
             self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
         } else {
-            let step = Step::Advance { schedule: schedule.clone(), at: at_ };
+            let step = Step::Advance { schedule: schedule.clone(), at: at_, promise: promise.clone() };
             work.push(Work::Later(copy_step(&step)));
             work.push(Work::Timer(at_.saturating_add(self.fire_within), step));
         }
@@ -1522,12 +1526,12 @@ impl Resonate {
     /// on `schedule` and the next occurrence armed. A schedule that is gone,
     /// or has moved on (the fire refired and advanced already), is left as it
     /// is.
-    pub fn advance(&self, schedule: &Id, at_: Time, s: &Server, now: Time) -> InOut {
+    pub fn advance(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> InOut {
         let c = match s.schedules.get(schedule) {
             Some(c) => c,
             None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
         };
-        if c.next_run_at != at_ {
+        if c.next_run_at != at_ || expand(&c.promise_id, schedule, at_) != *promise {
             return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
         }
         if now < at_ {
