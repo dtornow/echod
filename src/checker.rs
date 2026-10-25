@@ -490,6 +490,15 @@ impl<S: Engine> Checker<S> {
         self.check(trace.iter().cloned())
     }
 
+    /// Tells the checker which calls will never be answered, ahead of feeding
+    /// the observations one by one: what [`Checker::check_history`] learns from
+    /// a whole history, for a caller that has the history but feeds it
+    /// itself. Such a call may take effect at any point or never, and a
+    /// candidate that still has it in flight subsumes one that applied it.
+    pub fn never_answered(&mut self, calls: impl IntoIterator<Item = CallId>) {
+        self.orphans.extend(calls);
+    }
+
     /// Calls the history invokes and never answers.
     fn mark_orphans(&mut self, trace: &[Event<Ex<S>, Re<S>, Ms<S>>]) {
         let mut open = HashSet::new();
