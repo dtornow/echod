@@ -19,6 +19,9 @@ struct Knobs {
     operations: u64,
     #[arg(long, default_value_t = 6)]
     origins: u64,
+    /// Clients create, read and delete schedules too.
+    #[arg(long, default_value_t = false)]
+    schedules: bool,
     /// Per store operation: no answer.
     #[arg(long, default_value_t = 2)]
     unavailable: u64,
@@ -79,6 +82,7 @@ impl Knobs {
             clients: self.clients,
             operations: self.operations,
             origins: self.origins,
+            schedules: self.schedules,
             faults: Faults { unavailable_percent: self.unavailable, lost_ack_percent: self.lost_ack, conflict_percent: self.conflict, latency_ms: self.latency },
             crash_percent: self.crash,
             stop_percent: self.stop,

@@ -71,6 +71,10 @@ impl Seen {
 pub struct Generator {
     pub origins: u64,
     pub promises_per_origin: u64,
+    /// Whether clients create, read and delete schedules at all. Off while
+    /// the rest of the protocol is being squared with the model: a schedule's
+    /// occurrence is the one step a client cannot read off the clock.
+    pub schedules: bool,
     /// Promise timeouts fall within `now + 1 ..= now + timeout_ms`.
     pub timeout_ms: u64,
     /// Task leases fall within `1 ..= ttl_ms`.
@@ -173,7 +177,7 @@ impl Generator {
     }
 
     pub fn next(&self, rng: &mut Rng, seen: &Seen, now: u64) -> Request {
-        if rng.percent(4) {
+        if self.schedules && rng.percent(4) {
             return self.schedule(rng);
         }
         let roll = rng.below(100);

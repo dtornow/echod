@@ -33,6 +33,8 @@ pub struct Options {
     pub operations: u64,
     pub origins: u64,
     pub promises_per_origin: u64,
+    /// Whether clients touch schedules (`--schedules`).
+    pub schedules: bool,
     pub faults: Faults,
     /// Every `chaos_every_ms`, each of these is rolled once, in percent:
     /// a node is killed and replaced; a node stops cleanly; a node joins; a
@@ -92,6 +94,7 @@ impl Default for Options {
             // the in-flight writes on one origin widen the checker's profile
             origins: 6,
             promises_per_origin: 3,
+            schedules: false,
             faults: Faults { unavailable_percent: 2, lost_ack_percent: 2, conflict_percent: 2, latency_ms: 20 },
             crash_percent: 10,
             stop_percent: 5,
@@ -339,7 +342,7 @@ impl World {
     }
 
     async fn client(self: Arc<Self>, name: String, mut rng: Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
+        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
         let mut seen = Seen::default();
         while self.issued.fetch_add(1, Ordering::Relaxed) < self.opts.operations {
             let now = self.clock.now();
@@ -408,14 +411,16 @@ impl World {
     /// The finishing reads: every id the run may have named, read once the
     /// run has settled, so what the bucket holds is what the model shows.
     async fn final_reads(&self, rng: &mut Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
+        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
         let mut reads = Vec::new();
         for id in gen.ids() {
             reads.push(Request::GetPromise(id.clone()));
             reads.push(Request::GetTask(id));
         }
-        for id in SCHEDULES {
-            reads.push(Request::GetSchedule(id.to_string()));
+        if self.opts.schedules {
+            for id in SCHEDULES {
+                reads.push(Request::GetSchedule(id.to_string()));
+            }
         }
         for req in reads {
             self.issue("final", req, rng).await;
