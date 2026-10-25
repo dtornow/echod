@@ -11,6 +11,7 @@ use crate::spec::*;
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `spec.rs`.
 pub const MARKS: &[&str] = &[
+    "task.create: version at its cap (409)",
     "acquire: no such task (404)",
     "acquire: not pending, or stale version (409)",
     "callback registered",

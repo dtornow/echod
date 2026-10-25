@@ -399,9 +399,9 @@ pub open spec fn sat_mul(a: Time, b: Time) -> Time {
     if a * b > u64::MAX { u64::MAX } else { (a * b) as Time }
 }
 
-pub open spec fn sat_add32(a: u32, b: u32) -> u32 {
-    if a + b > u32::MAX { u32::MAX } else { (a + b) as u32 }
-}
+/// The last version a task can take: an acquire at it is refused (409), as
+/// the servers refuse one at their own door.
+pub const MAX_VERSION: u32 = u32::MAX;
 
 pub open spec fn status_v(code: u16, s: ServerV) -> Seq<OutV> {
     seq![OutV { resp: ResponseV::Status(code), next: s, work: Seq::empty(), send: Seq::empty() }]
@@ -450,8 +450,10 @@ pub open spec fn trec_v(id: Chars, t: TaskV) -> TaskRecV {
     TaskRecV { id, state: t.state, version: t.version, pid: t.pid, ttl: t.ttl, resumes }
 }
 
+/// Done: the lease and the offer gone, with the lease's start. (The lease's
+/// start lives only while the task is held.)
 pub open spec fn fulfilled_v(t: TaskV) -> TaskV {
-    TaskV { state: TState::Fulfilled, pid: None, ttl: None, retry_at: None, resumes: Seq::empty(), ..t }
+    TaskV { state: TState::Fulfilled, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t }
 }
 
 pub open spec fn acquired_v(t: TaskV, version: u32, pid: Chars, ttl: Time, now: Time) -> TaskV {
@@ -460,7 +462,7 @@ pub open spec fn acquired_v(t: TaskV, version: u32, pid: Chars, ttl: Time, now: 
 
 /// Back to pending, to be offered again at `at`.
 pub open spec fn released_v(t: TaskV, at: Time) -> TaskV {
-    TaskV { state: TState::Pending, pid: None, ttl: None, retry_at: Some(at), ..t }
+    TaskV { state: TState::Pending, pid: None, ttl: None, acquired_at: 0, retry_at: Some(at), ..t }
 }
 
 pub open spec fn lease_expires_v(t: TaskV) -> Time {
@@ -654,8 +656,10 @@ pub open spec fn task_create_v(pid: Chars, ttl: Time, req: CreateV, s: ServerV, 
             let t = s.tasks[req.id];
             match t.state {
                 TState::Fulfilled => echo_v(ResponseV::Both(prec_v(req.id, p), trec_v(req.id, t)), s),
-                TState::Pending => {
-                    let u = acquired_v(t, sat_add32(t.version, 1), pid, ttl, now);
+                TState::Pending => if t.version >= MAX_VERSION {
+                    status_v(409, s)
+                } else {
+                    let u = acquired_v(t, (t.version + 1) as u32, pid, ttl, now);
                     one_v(
                         ResponseV::Both(prec_v(req.id, p), trec_v(req.id, u)),
                         ServerV { tasks: s.tasks.insert(req.id, u), ..s },
@@ -699,10 +703,10 @@ pub open spec fn acquire_task_v(id: Chars, version: u32, pid: Chars, ttl: Time, 
     } else {
         let t = s.tasks[id];
         let p = s.promises[id];
-        if t.state != TState::Pending || !live_v(p) || t.version != version {
+        if t.state != TState::Pending || !live_v(p) || t.version != version || t.version >= MAX_VERSION {
             status_v(409, s)
         } else {
-            let u = acquired_v(t, sat_add32(t.version, 1), pid, ttl, now);
+            let u = acquired_v(t, (t.version + 1) as u32, pid, ttl, now);
             one_v(
                 ResponseV::Both(prec_v(id, p), trec_v(id, u)),
                 ServerV { tasks: s.tasks.insert(id, u), ..s },
@@ -835,7 +839,7 @@ pub open spec fn suspend_task_v(id: Chars, version: u32, ids: Seq<Chars>, s: Ser
                     // The task stays acquired and runs on; what it was told has been seen.
                     one_v(ResponseV::Status(300), ServerV { tasks: s.tasks.insert(id, TaskV { resumes: Seq::empty(), ..t }), ..s }, Seq::empty(), Seq::empty())
                 } else {
-                    let u = TaskV { state: TState::Suspended, pid: None, ttl: None, retry_at: None, resumes: Seq::empty(), ..t };
+                    let u = TaskV { state: TState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t };
                     one_v(
                         ResponseV::Status(200),
                         ServerV { promises: with_callbacks(s.promises, ids, id), tasks: s.tasks.insert(id, u), ..s },
@@ -914,7 +918,7 @@ pub open spec fn halt_task_v(id: Chars, s: ServerV) -> Seq<OutV> {
             TState::Fulfilled => status_v(409, s),
             TState::Halted => status_v(200, s),
             _ => {
-                let u = TaskV { state: TState::Halted, pid: None, ttl: None, retry_at: None, ..t };
+                let u = TaskV { state: TState::Halted, pid: None, ttl: None, acquired_at: 0, retry_at: None, ..t };
                 one_v(ResponseV::Status(200), ServerV { tasks: s.tasks.insert(id, u), ..s }, Seq::empty(), Seq::empty())
             },
         }

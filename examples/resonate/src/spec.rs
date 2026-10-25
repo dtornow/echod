@@ -66,6 +66,7 @@
 use vstd::prelude::*;
 
 use crate::collections::*;
+use crate::twins::MAX_VERSION;
 
 verus! {
 
@@ -159,6 +160,7 @@ impl Task {
         self.state = TState::Fulfilled;
         self.pid = None;
         self.ttl = None;
+        self.acquired_at = 0;
         self.retry_at = None;
         self.resumes = Vec::new();
     }
@@ -178,6 +180,7 @@ impl Task {
         self.state = TState::Pending;
         self.pid = None;
         self.ttl = None;
+        self.acquired_at = 0;
         self.retry_at = Some(at);
     }
 
@@ -814,9 +817,12 @@ impl Resonate {
                 return match t.state {
                     TState::Fulfilled => echo(Response::Both(prec(&req.id, p), trec(&req.id, t)), mk("task.create: task done (echo)"), s),
                     TState::Pending => {
+                        if t.version >= MAX_VERSION {
+                            return status(409, mk("task.create: version at its cap (409)"), s);
+                        }
                         let mut n = copy_server(s);
                         let mut u = copy(t);
-                        u.acquire(t.version.saturating_add(1), pid.clone(), ttl, now);
+                        u.acquire(t.version + 1, pid.clone(), ttl, now);
                         let rec = Response::Both(prec(&req.id, p), trec(&req.id, &u));
                         n.tasks.insert(req.id.clone(), u);
                         let mut work = Vec::new();
@@ -915,6 +921,7 @@ impl Resonate {
         u.state = TState::Suspended;
         u.pid = None;
         u.ttl = None;
+        u.acquired_at = 0;
         u.retry_at = None;
         u.resumes = Vec::new();
         n.tasks.insert(id.clone(), u);
@@ -1154,12 +1161,12 @@ impl Resonate {
                     Some(p) => p,
                     None => return status(404, mk("acquire: no such task (404)"), s),  // unreachable
                 };
-                if t.state != TState::Pending || !p.live() || t.version != *version {
+                if t.state != TState::Pending || !p.live() || t.version != *version || t.version >= MAX_VERSION {
                     return status(409, mk("acquire: not pending, or stale version (409)"), s);
                 }
                 let mut n = copy_server(s);
                 let mut u = copy(t);
-                u.acquire(t.version.saturating_add(1), pid.clone(), *ttl, now);
+                u.acquire(t.version + 1, pid.clone(), *ttl, now);
                 let rec = Response::Both(prec(id, p), trec(id, &u));
                 n.tasks.insert(id.clone(), u);
                 let mut work = Vec::new();
@@ -1216,6 +1223,7 @@ impl Resonate {
                         u.state = TState::Halted;
                         u.pid = None;
                         u.ttl = None;
+                        u.acquired_at = 0;
                         u.retry_at = None;
                         n.tasks.insert(id.clone(), u);
                         one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) })
