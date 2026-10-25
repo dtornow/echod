@@ -29,4 +29,5 @@ pub mod machine;
 pub mod translate;
 pub mod sweep;
 pub mod sweep_proof;
+pub mod canon;
 pub mod theorem;
