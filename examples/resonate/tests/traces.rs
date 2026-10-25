@@ -899,6 +899,22 @@ fn a_schedule_may_fire_late_within_the_window() {
     t.step("run-1003000 may be absent", get("ex:run-1003000"), st(404));
     t.step("run-1004000 may exist", get("ex:run-1004000"), promise(PState::Pending, None));
     t.step("s advanced to 1005000", Request::GetSchedule("s".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
+    t.step("delete s", Request::DeleteSchedule("s".into()), st(200));
+
+    // A sweeping server commits the occurrence, then the schedule: in between
+    // the occurrence exists and the schedule still expects it. The run is
+    // recorded by the window's end.
+    t.tick(1_010_000);
+    t.step("create u", schedule("u", "*/5 * * * * *", "ex:job-{{.timestamp}}", 60_000, targeted), |r| matches!(r, Response::Schedule(c) if c.next_run_at == 1_015_000));
+    t.tick(1_016_000);
+    t.step("job-1015000 exists", get("ex:job-1015000"), promise(PState::Pending, None));
+    t.step("u not yet advanced", Request::GetSchedule("u".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at.is_none() && c.next_run_at == 1_015_000));
+    t.tick(1_017_600);
+    t.step("u advanced by 1017500", Request::GetSchedule("u".into()), |r| matches!(r, Response::Schedule(c) if c.last_run_at == Some(1_015_000) && c.next_run_at == 1_020_000));
+    t.rejects("u cannot still expect 1015000 past the window", Request::GetSchedule("u".into()), Response::Schedule(Schedule {
+        id: "u".into(), cron: "*/5 * * * * *".into(), promise_id: "ex:job-{{.timestamp}}".into(), promise_timeout: 60_000, promise_param: None,
+        promise_tags: targeted, created_at: 1_010_000, next_run_at: 1_015_000, last_run_at: None,
+    }));
 }
 #[test]
 fn the_wire_rules_are_refusals() {

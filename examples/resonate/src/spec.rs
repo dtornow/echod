@@ -33,8 +33,12 @@
 //!   advanced and the occurrence absent. Here the fire is work due at
 //!   `nextRunAt` and owed `fire_within` later: "later" work from the instant,
 //!   and a timer at the bound. With `fire_within` zero it is a timer at the
-//!   instant, exact; a server that sweeps its schedules every so often is
-//!   given its sweep as the bound.
+//!   instant, exact, and one step, as Lean's `processSchedule` is. A server
+//!   that sweeps its schedules every so often is given its sweep as the
+//!   bound, and fires in the two commits such a server makes, the occurrence
+//!   first and the run recorded after (`Step::Advance`), the second owed by
+//!   the same bound: a client may see the occurrence while the schedule still
+//!   expects it, which Lean's one step never shows.
 //! - The model's two dials: the redispatch cadence
 //!   (`ServerConfig.retryTimeout`), `Resonate::retry_timeout`, and
 //!   `Resonate::fire_within`.
@@ -378,6 +382,9 @@ pub enum Step {
     /// Fire the occurrence of `schedule` at `at`, which creates `promise`
     /// (`expand` of its template), and arm the next.
     Fire { schedule: Id, at: Time, promise: Id },
+    /// Record the run at `at` on `schedule` and arm the next: the second half
+    /// of a fire that a sweeping server commits apart from the first.
+    Advance { schedule: Id, at: Time },
 }
 
 /// Internal work to start, and when it runs. As `accordant::Sched`.
@@ -484,6 +491,7 @@ fn copy_step(s: &Step) -> Step {
     match s {
         Step::Objects(ids) => Step::Objects(ids.clone()),
         Step::Fire { schedule, at, promise } => Step::Fire { schedule: schedule.clone(), at: *at, promise: promise.clone() },
+        Step::Advance { schedule, at } => Step::Advance { schedule: schedule.clone(), at: *at },
     }
 }
 
@@ -1431,12 +1439,13 @@ impl Resonate {
 
     /// A schedule's occurrence at `at` fires, from `at` on: the promise it
     /// names is created, if absent, as of `at`; the schedule records the run
-    /// and arms the next. The clock may be past `at` (the server got to it
-    /// late, or jumped over several occurrences): a promise whose deadline
-    /// has passed by `now` is born settled, as Lean's read-time projection
-    /// would show it, and starts nothing. A schedule that is gone, or no
-    /// longer expects this occurrence, fires nothing; before its instant it
-    /// cannot fire yet.
+    /// and arms the next, at once when fires are exact, else by a step of its
+    /// own (`advance`) owed within the window. The clock may be past `at`
+    /// (the server got to it late, or jumped over several occurrences): a
+    /// promise whose deadline has passed by `now` is born settled, as Lean's
+    /// read-time projection would show it, and starts nothing. A schedule
+    /// that is gone, or no longer expects this occurrence, fires nothing;
+    /// before its instant it cannot fire yet.
     pub fn fire(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> InOut {
         let c = match s.schedules.get(schedule) {
             Some(c) => c,
@@ -1490,13 +1499,45 @@ impl Resonate {
             }
             marks.push(if live_now { mk("schedule fired") } else { mk("schedule fired past the occurrence's deadline") });
         }
-        let next = next_cron(&c.cron, at_);
+        if self.fire_within == 0 {
+            Resonate::record_run(&mut n, c, schedule, at_);
+            self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
+        } else {
+            let step = Step::Advance { schedule: schedule.clone(), at: at_ };
+            work.push(Work::Later(copy_step(&step)));
+            work.push(Work::Timer(at_.saturating_add(self.fire_within), step));
+        }
+        InOut { next: n, work, send: Vec::new(), marks, pending: false }
+    }
+
+    /// The schedule records its run at `at` and arms the next.
+    fn record_run(n: &mut Server, c: &Schedule, schedule: &Id, at_: Time) {
         let mut d = copy(c);
         d.last_run_at = Some(at_);
-        d.next_run_at = next;
+        d.next_run_at = next_cron(&c.cron, at_);
         n.schedules.insert(schedule.clone(), d);
-        self.arm_fire(&mut work, schedule, next, &c.promise_id);
-        InOut { next: n, work, send: Vec::new(), marks, pending: false }
+    }
+
+    /// The second half of a sweeping server's fire: the run at `at` recorded
+    /// on `schedule` and the next occurrence armed. A schedule that is gone,
+    /// or has moved on (the fire refired and advanced already), is left as it
+    /// is.
+    pub fn advance(&self, schedule: &Id, at_: Time, s: &Server, now: Time) -> InOut {
+        let c = match s.schedules.get(schedule) {
+            Some(c) => c,
+            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
+        };
+        if c.next_run_at != at_ {
+            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
+        }
+        if now < at_ {
+            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: true };
+        }
+        let mut n = copy_server(s);
+        let mut work = Vec::new();
+        Resonate::record_run(&mut n, c, schedule, at_);
+        self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
+        InOut { next: n, work, send: Vec::new(), marks: marked(mk("schedule advanced")), pending: false }
     }
 }
 

@@ -69,6 +69,7 @@ pub const MARKS: &[&str] = &[
     "schedule deleted",
     "schedule fired",
     "schedule fired past the occurrence's deadline",
+    "schedule advanced",
     "schedule: id exists (echo)",
     "schedule: id with a colon (400)",
     "schedule: invalid cron (400)",

@@ -14,7 +14,8 @@ use crate::spec::*;
 /// times out, a task past its lease is reclaimed, a suspended task whose awaited
 /// promise settled resumes, a pending task due for a retry is dispatched, a
 /// settled promise's listeners are told). What is due is read from the state and
-/// the clock, not from the step. `Fire`: a schedule's occurrence.
+/// the clock, not from the step. `Fire`: a schedule's occurrence; `Advance`:
+/// its run recorded, when a sweeping server commits that apart.
 ///
 /// The step names every object it may touch, so its footprint is exact. A
 /// promise deadline, a lease end or a retry is `{id}`; a resume is `{awaited,
@@ -23,6 +24,7 @@ use crate::spec::*;
 pub enum Internal {
     On(BTreeSet<Id>),
     Fire { schedule: Id, at: Time, promise: Id },
+    Advance { schedule: Id, at: Time },
 }
 
 pub fn on(ids: &[&str]) -> Internal {
@@ -153,6 +155,7 @@ fn step(s: Step) -> Internal {
     match s {
         Step::Objects(ids) => Internal::On(ids.into_iter().collect()),
         Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
+        Step::Advance { schedule, at } => Internal::Advance { schedule, at },
     }
 }
 
@@ -184,6 +187,7 @@ impl Model for Resonate {
                 Resonate::internal(self, &ids, s, now)
             }
             Internal::Fire { schedule, at, promise } => Resonate::fire(self, schedule, *at, promise, s, now),
+            Internal::Advance { schedule, at } => Resonate::advance(self, schedule, *at, s, now),
         };
         if o.pending {
             return Vec::new(); // not yet: the work stays
@@ -239,6 +243,7 @@ impl Footprint for Resonate {
         match step {
             Internal::On(ids) => Touches::Only(ids.iter().map(|id| Key::Object(id.clone())).collect()),
             Internal::Fire { schedule, promise, .. } => Touches::Only(vec![Key::Schedule(schedule.clone()), Key::Object(promise.clone())]),
+            Internal::Advance { schedule, .. } => Touches::one(Key::Schedule(schedule.clone())),
         }
     }
 
