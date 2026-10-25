@@ -1467,4 +1467,191 @@ pub proof fn tr_due(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate, wor
     }
 }
 
+
+/// `On(ids)`: the kernel's steps compute the model's step on the translated
+/// state, send the same up to order, and the work the model starts is read off
+/// the objects: a resume per callback and an unblock note per settled
+/// promise, a timer per offer re-armed, none of it due before now.
+pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
+    requires
+        inv(now as nat, b),
+        leases_from_ttl(b),
+        0 < cfg.retry_timeout <= MAX_TIME,
+        now <= MAX_TIME,
+        ids.no_duplicates(),
+    ensures
+        ({
+            let n = now as nat;
+            let rt = cfg.retry_timeout as nat;
+            let b2 = k_on(b, ids, n, rt);
+            let o = on_v(cfg, ids, translate(b), now);
+            &&& translate(b2) == o.next
+            &&& o.send.to_multiset() == k_on_sends(b, ids, n, rt).to_multiset()
+            &&& inv(n, b2)
+            &&& leases_from_ttl(b2)
+            &&& b2.objects.dom() == b.objects.dom()
+            &&& b2.schedules == b.schedules
+            // the work
+            &&& forall|i: int| 0 <= i < o.work.len() ==> match #[trigger] o.work[i] {
+                Sched::Later(InternalV::On(_)) => true,
+                Sched::Timer(t, InternalV::On(_)) => t > now,
+                _ => false,
+            }
+            &&& forall|i: int| 0 <= i < o.work.len() && (#[trigger] o.work[i]) is Later ==> spawned(b, ids, n, o.work[i])
+            &&& forall|x: Seq<char>, w: Seq<char>| ids.contains(x) && #[trigger] b.objects.contains_key(x) && b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= now
+                && #[trigger] b.objects[x].callbacks.contains(w) ==> o.work.contains(later2_v(x, w))
+            &&& forall|x: Seq<char>| ids.contains(x) && #[trigger] b.objects.contains_key(x) && b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= now
+                && b.objects[x].listeners.len() > 0 ==> o.work.contains(Sched::Later(InternalV::On(seq![x])))
+            // the objects
+            &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) && !ids.contains(id) ==> b2.objects[id] == b.objects[id]
+            &&& forall|id: Seq<char>| ids.contains(id) && #[trigger] b.objects.contains_key(id) ==> {
+                let p = b.objects[id];
+                let q = b2.objects[id];
+                &&& q.project(n) == q
+                &&& q.state == p.project(n).state
+                &&& q.timeout_at == p.timeout_at
+                &&& (q.state == PromiseState::Pending ==> p.state == PromiseState::Pending && q.timeout_at > now)
+                &&& (q.state != PromiseState::Pending ==> q.listeners.len() == 0)
+                &&& !lease_due(q, n)
+                &&& !retry_due(q, n)
+                &&& (forall|w: Seq<char>| ids.contains(w) ==> !(q.state != PromiseState::Pending && #[trigger] q.callbacks.contains(w)))
+                &&& (q.task is Some ==> {
+                    let t2 = q.task.unwrap();
+                    &&& (t2.lease_timeout_at is Some ==> p.task is Some && p.task.unwrap().lease_timeout_at == t2.lease_timeout_at && t2.lease_timeout_at.unwrap() > now)
+                    &&& (t2.retry_timeout_at is Some ==> t2.retry_timeout_at.unwrap() > now
+                        && (o.work.contains(at_v(t2.retry_timeout_at.unwrap(), id)) || (p.task is Some && p.task.unwrap().retry_timeout_at == t2.retry_timeout_at)))
+                })
+            }
+        }),
+{
+    broadcast use vstd::seq_lib::lemma_multiset_commutative;
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let n = now as nat;
+    let rt = cfg.retry_timeout as nat;
+    let s0 = translate(b);
+    // phase 1
+    tr_deadlines(b, ids, now, Seq::empty());
+    let b1 = phase_deadlines(b, ids, n);
+    let (n1, work1) = deadlines_fold(ids, s0, Seq::empty(), now);
+    assert forall|i: int| 0 <= i < ids.len() && b1.objects.contains_key(#[trigger] ids[i]) implies b1.objects[ids[i]].project(n) == b1.objects[ids[i]] by {
+        assert(ids.contains(ids[i]));
+        echod_kernel::external_proof::lemma_project_idem(b.objects[ids[i]], n);
+    }
+    // phase 2
+    tr_resumes(b1, ids, ids, now);
+    let b1r = k_resumes(b1, ids, ids, n);
+    let n2 = resumes_fold(ids, ids, n1, now);
+    assert(translate(b1r) == n2);
+    assert forall|i: int| 0 <= i < ids.len() && b1r.objects.contains_key(#[trigger] ids[i]) implies b1r.objects[ids[i]].project(n) == b1r.objects[ids[i]] by {
+        assert(b1.objects[ids[i]].project(n) == b1.objects[ids[i]]);
+    }
+    // phase 3
+    tr_due(b1r, ids, now, cfg, work1, Seq::empty());
+    let b2 = k_due(b1r, ids, n, rt);
+    let (n3, work3, send3) = due_fold(cfg, ids, n2, work1, Seq::empty(), now);
+    assert(k_on(b, ids, n, rt) == b2);
+    let o = on_v(cfg, ids, s0, now);
+    assert(o.next == n3 && o.work == work3 && o.send == send3);
+    assert(k_on_sends(b, ids, n, rt) == k_due_sends(b1r, ids, n, rt));
+    assert((Seq::<DispatchV>::empty() + k_due_sends(b1r, ids, n, rt)) =~= k_due_sends(b1r, ids, n, rt));
+    assert(b2.objects.dom() =~= b.objects.dom());
+    // the work: the Laters from phase 1, the timers from phase 3
+    assert forall|i: int| 0 <= i < work3.len() implies (match #[trigger] work3[i] {
+        Sched::Later(InternalV::On(_)) => true,
+        Sched::Timer(t, InternalV::On(_)) => t > now,
+        _ => false,
+    }) && (work3[i] is Later ==> spawned(b, ids, n, work3[i])) by {
+        if i < work1.len() {
+            assert(work3[i] == work1[i]);
+            assert(spawned(b, ids, n, work1[i]));
+            let x = choose|x: Seq<char>| ids.contains(x) && #[trigger] b.objects.contains_key(x) && b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= n && (
+                work1[i] == Sched::Later(InternalV::On(seq![x])) || exists|w: Seq<char>| #[trigger] b.objects[x].callbacks.contains(w) && work1[i] == later2_v(x, w));
+        } else {
+            let id = choose|id: Seq<char>| ids.contains(id) && #[trigger] b1r.objects.contains_key(id) && b2.objects[id].task is Some
+                && b2.objects[id].task.unwrap().retry_timeout_at is Some && #[trigger] work3[i] == at_v(b2.objects[id].task.unwrap().retry_timeout_at.unwrap(), id);
+            assert(b2.objects[id].task.unwrap().retry_timeout_at.unwrap() > now);
+        }
+    }
+    assert forall|x: Seq<char>, w: Seq<char>| ids.contains(x) && #[trigger] b.objects.contains_key(x) && b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= now
+        && #[trigger] b.objects[x].callbacks.contains(w) implies work3.contains(later2_v(x, w)) by {
+        let i = choose|i: int| 0 <= i < work1.len() && work1[i] == later2_v(x, w);
+        assert(work3[i] == later2_v(x, w));
+    }
+    assert forall|x: Seq<char>| ids.contains(x) && #[trigger] b.objects.contains_key(x) && b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= now
+        && b.objects[x].listeners.len() > 0 implies work3.contains(Sched::Later(InternalV::On(seq![x]))) by {
+        let i = choose|i: int| 0 <= i < work1.len() && work1[i] == Sched::Later(InternalV::On(seq![x]));
+        assert(work3[i] == Sched::Later(InternalV::On(seq![x])));
+    }
+    // the objects
+    assert forall|id: Seq<char>| ids.contains(id) && #[trigger] b.objects.contains_key(id) implies {
+        let p = b.objects[id];
+        let q = b2.objects[id];
+        &&& q.project(n) == q
+        &&& q.state == p.project(n).state
+        &&& q.timeout_at == p.timeout_at
+        &&& (q.state == PromiseState::Pending ==> p.state == PromiseState::Pending && q.timeout_at > now)
+        &&& (q.state != PromiseState::Pending ==> q.listeners.len() == 0)
+        &&& !lease_due(q, n)
+        &&& !retry_due(q, n)
+        &&& (forall|w: Seq<char>| ids.contains(w) ==> !(q.state != PromiseState::Pending && #[trigger] q.callbacks.contains(w)))
+        &&& (q.task is Some ==> {
+            let t2 = q.task.unwrap();
+            &&& (t2.lease_timeout_at is Some ==> p.task is Some && p.task.unwrap().lease_timeout_at == t2.lease_timeout_at && t2.lease_timeout_at.unwrap() > now)
+            &&& (t2.retry_timeout_at is Some ==> t2.retry_timeout_at.unwrap() > now
+                && (work3.contains(at_v(t2.retry_timeout_at.unwrap(), id)) || (p.task is Some && p.task.unwrap().retry_timeout_at == t2.retry_timeout_at)))
+        })
+    } by {
+        let p = b.objects[id];
+        let p1 = b1.objects[id];
+        let pr = b1r.objects[id];
+        let q = b2.objects[id];
+        assert(p1 == p.project(n));
+        lemma_projected_obj(p1, n);
+        assert(pr.state == p1.state && pr.timeout_at == p1.timeout_at);
+        assert(q.state == pr.state && q.timeout_at == pr.timeout_at && q.callbacks == pr.callbacks);
+        if q.state == PromiseState::Pending {
+            assert(p1.state == PromiseState::Pending);
+            assert(p.state == PromiseState::Pending);
+            assert(p1.timeout_at > now);
+        }
+        assert forall|w: Seq<char>| ids.contains(w) implies !(q.state != PromiseState::Pending && #[trigger] q.callbacks.contains(w)) by {
+            let i = choose|i: int| 0 <= i < ids.len() && ids[i] == id;
+            let j = choose|j: int| 0 <= j < ids.len() && ids[j] == w;
+            assert(!awaits(b1r, ids[i], ids[j], n));
+            assert(pr.project(n) == pr);
+        }
+        match q.task {
+            None => {},
+            Some(t2) => {
+                assert(pr.task is Some);
+                let tr = pr.task.unwrap();
+                assert(p1.task is Some);
+                let t1 = p1.task.unwrap();
+                match p.task {
+                    None => {
+                        assert(p1.task is None);
+                    },
+                    Some(t0) => {
+                        assert(t1 == t0.view_through(p.project_promise(n)));
+                        if t2.lease_timeout_at is Some {
+                            assert(t2.lease_timeout_at == tr.lease_timeout_at);
+                            assert(tr.lease_timeout_at == t1.lease_timeout_at);
+                            assert(t1 == t0);
+                        }
+                        if t2.retry_timeout_at is Some {
+                            if t2.retry_timeout_at == tr.retry_timeout_at {
+                                assert(tr.retry_timeout_at == t1.retry_timeout_at || (tr.retry_timeout_at is Some && tr.retry_timeout_at.unwrap() <= now));
+                                assert(tr.retry_timeout_at == t1.retry_timeout_at);
+                                assert(t1 == t0);
+                            } else {
+                                assert(work3.contains(at_v(t2.retry_timeout_at.unwrap(), id)));
+                            }
+                        }
+                    },
+                }
+            },
+        }
+    }
+}
+
 } // verus!
