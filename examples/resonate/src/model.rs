@@ -23,6 +23,12 @@ use crate::spec::*;
 pub enum Internal {
     On(BTreeSet<Id>),
     Fire { schedule: Id, at: Time, promise: Id },
+    /// The run recorded: the second half of a fire a reporting server does
+    /// in two steps (`Resonate::reported`).
+    Advance { schedule: Id, at: Time },
+    /// What these objects owe besides what the clock makes due: a reporting
+    /// server's step after each request and fire.
+    Drain(BTreeSet<Id>),
 }
 
 pub fn on(ids: &[&str]) -> Internal {
@@ -140,12 +146,42 @@ pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {
     template.replace("{{.id}}", id).replace("{{.timestamp}}", &at.to_string())
 }
 
+// ------------------------------------------------------------- the dominance
+
+/// Whether server state `b` can show every observation `a` can, under the same
+/// pending work: equal, except that a task of `b` may be due for its retry
+/// earlier than the same task of `a`. The retry runs any time from `retry_at`
+/// on and sets the next from the clock, not from the old value, and nothing a
+/// client reads carries `retry_at`; so the earlier due is the more capable
+/// state. For `Checker::dominating`: the candidates a late sweep leaves (the
+/// lease reclaimed at this clock move or that one) then collapse to one.
+pub fn dominates(b: &Server, a: &Server) -> bool {
+    b.promises == a.promises
+        && b.schedules == a.schedules
+        && b.tasks.iter().count() == a.tasks.iter().count()
+        && b.tasks.iter().all(|(id, tb)| {
+            a.tasks.get(id).is_some_and(|ta| {
+                tb.state == ta.state
+                    && tb.version == ta.version
+                    && tb.pid == ta.pid
+                    && tb.ttl == ta.ttl
+                    && tb.acquired_at == ta.acquired_at
+                    && tb.resumes == ta.resumes
+                    && match (tb.retry_at, ta.retry_at) {
+                        (Some(x), Some(y)) => x <= y,
+                        (x, y) => x == y,
+                    }
+            })
+        })
+}
+
 // ------------------------------------------------------------------ the traits
 
 impl Default for Resonate {
-    /// Lean's `ServerConfig.retryTimeout`: 5000.
+    /// Lean's `ServerConfig.retryTimeout`, 5000; steps run the instant they
+    /// are enabled.
     fn default() -> Self {
-        Resonate { retry_timeout: 5_000 }
+        Resonate { retry_timeout: 5_000, reported: false }
     }
 }
 
@@ -153,6 +189,8 @@ fn step(s: Step) -> Internal {
     match s {
         Step::Objects(ids) => Internal::On(ids.into_iter().collect()),
         Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
+        Step::Advance { schedule, at } => Internal::Advance { schedule, at },
+        Step::Drain(ids) => Internal::Drain(ids.into_iter().collect()),
     }
 }
 
@@ -171,6 +209,25 @@ impl Model for Resonate {
     type Dispatch = Dispatch;
 
     fn external(&self, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Self>> {
+        // A reporting server reads an object as of the clock and keeps the
+        // reading: a promise past its deadline is settled in its document by
+        // the request that read it. The objects a request reads are its
+        // footprint.
+        let read: Option<Vec<Id>> = match (self.reported, op) {
+            (true, Request::Step(_)) | (false, _) => None,
+            (true, _) => match self.external_touches(op) {
+                Touches::Only(keys) => Some(keys.into_iter().filter_map(|k| if let Key::Object(id) = k { Some(id) } else { None }).collect()),
+                Touches::Everything => None,
+            },
+        };
+        let cleared;
+        let s = match read {
+            Some(ids) if !ids.is_empty() => {
+                cleared = Resonate::clear(self, &ids, s, now);
+                &cleared
+            }
+            _ => s,
+        };
         Resonate::external(self, op, s, now)
             .into_iter()
             .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
@@ -184,7 +241,12 @@ impl Model for Resonate {
                 Resonate::internal(self, &ids, s, now)
             }
             Internal::Fire { schedule, at, promise } => Resonate::fire(self, schedule, *at, promise, s, now),
+            Internal::Advance { schedule, at } => Resonate::advance(self, schedule, *at, s, now),
+            Internal::Drain(ids) => Resonate::step(self, &Step::Drain(ids.iter().cloned().collect()), s, now),
         };
+        if o.pending {
+            return Vec::new(); // not yet: the work stays
+        }
         vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
     }
 }
@@ -229,13 +291,15 @@ impl Footprint for Resonate {
                 None => Touches::Everything,
             },
             Request::GetSchedule(id) | Request::DeleteSchedule(id) => Touches::one(Key::Schedule(id.clone())),
+            Request::Step(st) => self.internal_touches(&step(st.clone())),
         }
     }
 
     fn internal_touches(&self, step: &Internal) -> Touches<Key> {
         match step {
-            Internal::On(ids) => Touches::Only(ids.iter().map(|id| Key::Object(id.clone())).collect()),
+            Internal::On(ids) | Internal::Drain(ids) => Touches::Only(ids.iter().map(|id| Key::Object(id.clone())).collect()),
             Internal::Fire { schedule, promise, .. } => Touches::Only(vec![Key::Schedule(schedule.clone()), Key::Object(promise.clone())]),
+            Internal::Advance { schedule, .. } => Touches::one(Key::Schedule(schedule.clone())),
         }
     }
 

@@ -83,6 +83,8 @@ a target, resumed, reclaimed after its lease, released, continued), then every
 `retry_timeout`. The step is a timer at its due instant, so it runs before any
 later request is observed and never doubles the explanations; and for
 `Dispatch::Unblock { address, promise }`, sent to a settled promise's listeners.
+A server that runs such steps late, when it gets to them, reports them
+instead (`Resonate::reported`, below).
 
 `ExternalOutcome` is one thing the system may do when a request takes effect: the
 response, the next state, and the internal work it starts. `external` returns
@@ -507,6 +509,18 @@ mechanisms keep it small, and all eight are in the prototype.
 4. **Subsumption (antichains).** Optional work (a call the history says never
    returns) can always be skipped, so a node simulates any node with the same
    state and owed work but a subset of its optional work. Likewise for early answers (next item). The weaker node is discarded.
+   `Later` work is optional too: it runs when an observation needs it, or
+   never, so holding more of it (another item, another copy) is holding more
+   options, and a node with a superset simulates one with a subset, all else
+   equal. A model may add an order of its own: `Checker::dominating(f)` takes
+   `f(b, a)`, the model's word that state `b` can show every observation `a`
+   can under the same pending work; such a `b` subsumes `a`. Resonate's
+   `dominates` is equality up to a task's `retry_at`, the earlier dominating:
+   a retry runs from its due instant on and sets the next from the clock, and
+   no response carries the field. A wrong order costs completeness, never
+   soundness. Both serve a model whose work may run late, where a reclaim at
+   this clock move or the next leaves candidates differing only in when the
+   retry is due.
 5. **Reads don't branch.** Linearizing a call whose outcomes leave the state
    unchanged only decides its answer. So instead of splitting the profile into
    "answered early" and "not yet", the call keeps the set of answers it could
@@ -617,12 +631,13 @@ create a promise in another origin.
 |---|---|
 | `ServerState { objects, schedules, outbox }` | `Server { promises, tasks, schedules }`; the clock is the checker's, passed in as `now`; the outbox is what the steps `send` |
 | `readObject` with `project now` | the deadline is a timer step that settles the promise (and fulfills its task); a pending promise is always live |
-| `ServerConfig.retryTimeout` | `Resonate { retry_timeout }`, the model's one parameter |
-| internal steps enabled by the state, fired by a fair scheduler | each is work the step that enables it starts: `Timer(at, Objects(ids))` at the instant it falls due, `Later` when due at once; `internal` does whatever is due on the ids, in the order Lean's steps become enabled |
+| `ServerConfig.retryTimeout` | `Resonate { retry_timeout, .. }`; the other dial, `reported`, is not Lean's (below) |
+| internal steps enabled by the state, fired by a fair scheduler | each is work the step that enables it starts: `Timer(at, Objects(ids))` at the instant it falls due, `Later` when due at once; `internal` does whatever is due on the ids, in the order Lean's steps become enabled. The timer is exact: one scheduler among those Lean allows, which runs a step the instant it is enabled, so a client never sees a lease held past its end |
 | `processCallback`, `resumeOne` | `.later(Objects([awaited, awaiter]))` when the awaited settles: a suspended awaiter resumes and its retry is due; a running one notes the resume |
 | `processListener` | `Dispatch::Unblock { address, promise }` from the step on the settled promise |
 | `processLeaseTimeout`, `processRetryTimeout` | a timer at the lease's end makes the task pending with its retry due; the retry step sends `Execute` and arms the next, `retry_timeout` later |
 | `processSchedule`, `occurrences`, `fireOccurrence` | `Fire { schedule, at, promise }`, a timer at `nextRunAt`: one occurrence, created as of its instant (born settled when its deadline has passed by `now`), then the next armed. Overdue timers run before anything is observed, so a clock jump fires every occurrence up to `now`, as Lean does in one step |
+| a server whose scheduler is not that one | `Resonate { reported: true }`: the model arms no work of its own and takes each step as a request, `Request::Step`, at the instant the server says it ran it (`Objects(ids)`: everything due on them, round after round, as a sweep draining a document; `Drain(ids)`: the same without what the clock alone makes due, what such a server does after each request; `Fire`, then `Advance { schedule, at }`: the two halves of an occurrence, which it commits apart). A promise past its deadline settles when a request reads it, Lean's projection kept as the server keeps it in its document, or when a sweep gets to it. A client may then read a lease held past its end, or a schedule not yet advanced after its occurrence, and the model shows what the server showed. echod's simulator checks this way (`tests/reported.rs`) |
 | `nextCron`, `expand` (opaque) | trusted (`collections.rs`): the reference server's cron engine |
 | `taskFence` refusing every cross-origin fence | a cross-origin settle is 400; a cross-origin create runs first, as a request of its own in its origin, then the fence's check decides the answer: a detached workflow, which a stale fence still starts |
 

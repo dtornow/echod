@@ -19,12 +19,22 @@
 //!   it falls due, or "later" when it is due at once. A step is "process these
 //!   objects": whatever is due on them happens, in the order Lean's steps
 //!   would be enabled (a deadline before the resumes it fires, a resume before
-//!   the redispatch it arms).
+//!   the redispatch it arms). The timer is exact: the model's scheduler runs a
+//!   step the instant it is enabled, one scheduler among those Lean allows,
+//!   and a client never sees a lease held past its end.
 //! - A schedule's occurrences fire one at a time: the timer at `nextRunAt`
 //!   fires that occurrence and arms the next. Lean fires every occurrence up
 //!   to `now` in one step; overdue timers run before anything else is observed,
 //!   so a client sees the same.
-//! - The redispatch cadence (`ServerConfig.retryTimeout`) is the model's one
+//! - A server whose scheduler is not that one (it sweeps when it gets to it,
+//!   and a client may read in between) can report its steps instead: with
+//!   `Resonate::reported`, the model arms no work of its own and takes each
+//!   step as a request, `Request::Step`, at the instant the server says it
+//!   ran it. A promise past its deadline then settles when a request reads
+//!   it (Lean's projection, kept, as such a server keeps it in its
+//!   documents) or a sweep gets to it; the callbacks and listeners it owes
+//!   are served from then on.
+//! - The redispatch cadence (`ServerConfig.retryTimeout`) is the model's
 //!   parameter, `Resonate::retry_timeout`.
 //! - Lean's `nextCron`, `occurrences` and `expand` are opaque. Here they are
 //!   trusted (`collections.rs`): the cron engine of the reference server.
@@ -276,6 +286,13 @@ pub enum Request {
     CreateSchedule(ScheduleCreate),
     GetSchedule(Id),
     DeleteSchedule(Id),
+    /// Not a client's request: a step of the server's own, reported by a
+    /// server that runs them when it gets to them (`Resonate::reported`).
+    /// `Objects`: everything due on these objects, until nothing is (a
+    /// sweep); `Drain`: what they owe besides what the clock makes due;
+    /// `Fire`: the occurrence, without the run recorded; `Advance`: the run
+    /// recorded. Always 200.
+    Step(Step),
 }
 
 // --------------------------------------------------------------- responses
@@ -359,13 +376,21 @@ fn trec(id: &Id, t: &Task) -> TaskRec {
 // ------------------------------------------------------------------ outcomes
 
 /// Internal work: the objects a step processes, or a schedule's occurrence.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Step {
     /// Process these objects: whatever is due on them happens.
     Objects(Vec<Id>),
     /// Fire the occurrence of `schedule` at `at`, which creates `promise`
     /// (`expand` of its template), and arm the next.
     Fire { schedule: Id, at: Time, promise: Id },
+    /// Record the run of `schedule` at `at` and arm the next: the second half
+    /// of a fire a reporting server does in two steps.
+    Advance { schedule: Id, at: Time },
+    /// Serve what these objects owe that the clock alone did not make due:
+    /// the resumes and unblocks of settled promises, the redispatch of
+    /// pending tasks; not a deadline, not a lease's end. What a reporting
+    /// server does after each request and each fire.
+    Drain(Vec<Id>),
 }
 
 /// Internal work to start, and when it runs. As `accordant::Sched`.
@@ -386,18 +411,28 @@ pub struct Out {
     pub marks: Vec<&'static str>,
 }
 
-/// The effect of internal work. As `accordant::InternalOutcome`.
+/// The effect of internal work. As `accordant::InternalOutcome`; `pending`
+/// says the work cannot run yet (nothing on its objects is due, something
+/// will be) and stays as it is.
 pub struct InOut {
     pub next: Server,
     pub work: Vec<Work>,
     pub send: Vec<Dispatch>,
     pub marks: Vec<&'static str>,
+    pub pending: bool,
 }
 
-/// The server, with its one dial: how long a pending task waits before it is
-/// offered to a worker again (Lean's `ServerConfig.retryTimeout`).
+/// The server, with its dials: how long a pending task waits before it is
+/// offered to a worker again (Lean's `ServerConfig.retryTimeout`); and whether
+/// the server reports its own steps. Not reported, the model runs each step
+/// (a lease's end, a retry, a resume, a listener's unblock, a schedule's
+/// occurrence) the instant it is enabled. Reported, it runs none of them on
+/// its own, deadlines aside, and takes them in as `Request::Step` at the
+/// instants the server ran them: a server that sweeps when it gets to a
+/// document, and lets a client read in between, is checked that way.
 pub struct Resonate {
     pub retry_timeout: Time,
+    pub reported: bool,
 }
 
 fn one(o: Out) -> (r: Vec<Out>)
@@ -462,6 +497,36 @@ fn at(t: Time, id: &Id) -> Work {
     Work::Timer(t, Step::Objects(ids1(id)))
 }
 
+impl Resonate {
+    /// Arms `w`, unless the server reports its steps: then they come in as
+    /// requests, and the model starts nothing of its own.
+    fn arm(&self, work: &mut Vec<Work>, w: Work) {
+        if !self.reported {
+            work.push(w);
+        }
+    }
+
+    /// The work a settled promise starts: one resume per stored callback (the
+    /// awaited promise and its awaiter), and its listeners' unblocks.
+    fn settled_work(&self, p: &Promise, awaited: &Id) -> Vec<Work> {
+        let awaiters = p.callbacks.to_vec();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < awaiters.len()
+            invariant
+                i <= awaiters.len(),
+            decreases awaiters.len() - i,
+        {
+            self.arm(&mut out, Work::Later(Step::Objects(ids2(awaited, &awaiters[i]))));
+            i += 1;
+        }
+        if p.listeners.to_vec().len() > 0 {
+            self.arm(&mut out, Work::Later(Step::Objects(ids1(awaited))));
+        }
+        out
+    }
+}
+
 /// Settles `id` and fulfills its task, if any.
 fn settle(s: &mut Server, id: &Id, state: PState, value: Option<String>, at: Time) {
     match s.promises.get(id) {
@@ -484,26 +549,6 @@ fn settle(s: &mut Server, id: &Id, state: PState, value: Option<String>, at: Tim
         },
         None => {},
     }
-}
-
-/// The work a settled promise starts: one resume per stored callback (the
-/// awaited promise and its awaiter), and its listeners' unblocks.
-fn settled_work(p: &Promise, awaited: &Id) -> Vec<Work> {
-    let awaiters = p.callbacks.to_vec();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < awaiters.len()
-        invariant
-            i <= awaiters.len(),
-        decreases awaiters.len() - i,
-    {
-        out.push(Work::Later(Step::Objects(ids2(awaited, &awaiters[i]))));
-        i += 1;
-    }
-    if p.listeners.to_vec().len() > 0 {
-        out.push(Work::Later(Step::Objects(ids1(awaited))));
-    }
-    out
 }
 
 fn contains(ids: &Vec<Id>, id: &Id) -> bool {
@@ -638,7 +683,7 @@ impl Resonate {
         n.promises.insert(req.id.clone(), p);
         let mut work = Vec::new();
         if live {
-            work.push(at(req.timeout_at, &req.id));
+            self.arm(&mut work, at(req.timeout_at, &req.id));
         }
         if req.tags.target {
             // A live targeted promise's task is runnable: offered to a worker
@@ -652,7 +697,7 @@ impl Resonate {
             let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() };
             n.tasks.insert(req.id.clone(), task);
             if live {
-                work.push(at(due, &req.id));
+                self.arm(&mut work, at(due, &req.id));
             }
         }
         proof {
@@ -695,7 +740,7 @@ impl Resonate {
         if !p.live() {
             return echo(Response::Promise(prec(&req.id, p)), mk("settle: already settled (echo)"), s);
         }
-        let work = settled_work(p, &req.id);
+        let work = self.settled_work(p, &req.id);
         let mut n = copy_server(s);
         settle(&mut n, &req.id, state, copy(&req.data), now);
         let res = match n.promises.get(&req.id) {
@@ -753,7 +798,7 @@ impl Resonate {
                         let rec = Response::Both(prec(&req.id, p), trec(&req.id, &u));
                         n.tasks.insert(req.id.clone(), u);
                         let mut work = Vec::new();
-                        work.push(at(now.saturating_add(ttl), &req.id));
+                        self.arm(&mut work, at(now.saturating_add(ttl), &req.id));
                         one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
                     },
                     _ => status(409, mk("task.create: task held, suspended or halted (409)"), s),
@@ -778,8 +823,8 @@ impl Resonate {
         if live {
             // Acquired by the caller right away: nothing to dispatch.
             t.acquire(1, pid.clone(), ttl, now);
-            work.push(at(req.timeout_at, &req.id));
-            work.push(at(now.saturating_add(ttl), &req.id));
+            self.arm(&mut work, at(req.timeout_at, &req.id));
+            self.arm(&mut work, at(now.saturating_add(ttl), &req.id));
         }
         let res = Response::Both(prec(&req.id, &p), trec(&req.id, &t));
         let mut n = copy_server(s);
@@ -968,7 +1013,7 @@ impl Resonate {
                         u.acquired_at = now;
                         let expires = u.lease_expires();
                         n.tasks.insert(r.id.clone(), u);
-                        work.push(at(expires, &r.id));
+                        self.arm(&mut work, at(expires, &r.id));
                         extended = true;
                     }
                 },
@@ -1014,7 +1059,7 @@ impl Resonate {
         let mut n = copy_server(s);
         n.schedules.insert(req.id.clone(), c);
         let mut work = Vec::new();
-        work.push(Work::Timer(next, Step::Fire { schedule: req.id.clone(), at: next, promise: expand(&req.promise_id, &req.id, next) }));
+        self.arm(&mut work, Work::Timer(next, Step::Fire { schedule: req.id.clone(), at: next, promise: expand(&req.promise_id, &req.id, next) }));
         one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("schedule created")) })
     }
 
@@ -1096,7 +1141,7 @@ impl Resonate {
                 let rec = Response::Both(prec(id, p), trec(id, &u));
                 n.tasks.insert(id.clone(), u);
                 let mut work = Vec::new();
-                work.push(at(now.saturating_add(*ttl), id));
+                self.arm(&mut work, at(now.saturating_add(*ttl), id));
                 one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task acquired")) })
             },
             Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
@@ -1107,7 +1152,7 @@ impl Resonate {
                     u.release(now);
                     n.tasks.insert(id.clone(), u);
                     let mut work = Vec::new();
-                    work.push(at(now, id));
+                    self.arm(&mut work, at(now, id));
                     one(Out { resp: Response::Status(200), next: n, work, send: Vec::new(), marks: marked(mk("task released")) })
                 },
             },
@@ -1121,7 +1166,7 @@ impl Resonate {
                     Ok(_) => {},
                 }
                 let work = match s.promises.get(id) {
-                    Some(p) => settled_work(p, id),
+                    Some(p) => self.settled_work(p, id),
                     None => Vec::new(),
                 };
                 let mut n = copy_server(s);
@@ -1173,7 +1218,7 @@ impl Resonate {
                 u.retry_at = Some(now);
                 n.tasks.insert(id.clone(), u);
                 let mut work = Vec::new();
-                work.push(at(now, id));
+                self.arm(&mut work, at(now, id));
                 one(Out { resp: Response::Status(200), next: n, work, send: Vec::new(), marks: marked(mk("task continued")) })
             },
             Request::CreateSchedule(c) => self.schedule_create(c, s, now),
@@ -1189,7 +1234,74 @@ impl Resonate {
                     one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule deleted")) })
                 },
             },
+            Request::Step(st) => {
+                let o = self.step(st, s, now);
+                one(Out { resp: Response::Status(200), next: o.next, work: o.work, send: o.send, marks: o.marks })
+            },
         }
+    }
+
+    /// A step the server reports it ran at `now`. Objects: everything due on
+    /// them, round after round until a round does nothing, as a sweep that
+    /// drains a document does (a resume makes a retry due in the same step).
+    /// Drain: the same without what the clock makes due. Fire and Advance:
+    /// the two halves of an occurrence.
+    pub fn step(&self, st: &Step, s: &Server, now: Time) -> InOut {
+        match st {
+            Step::Objects(ids) => self.rounds(ids, s, now, true),
+            Step::Drain(ids) => self.rounds(ids, s, now, false),
+            Step::Fire { schedule, at, promise } => self.fire(schedule, *at, promise, s, now),
+            Step::Advance { schedule, at } => self.advance(schedule, *at, s, now),
+        }
+    }
+
+    fn rounds(&self, ids: &Vec<Id>, s: &Server, now: Time, clock: bool) -> InOut {
+        let mut cur = copy_server(s);
+        let mut work = Vec::new();
+        let mut send = Vec::new();
+        let mut marks = Vec::new();
+        let mut rounds: u64 = 0;
+        while rounds <= 64
+            decreases 65 - rounds,
+        {
+            rounds += 1;
+            let o = self.internal_with(ids, &cur, now, clock);
+            let did = o.marks.len() > 0;
+            cur = o.next;
+            work.append(&mut { o.work });
+            send.append(&mut { o.send });
+            marks.append(&mut { o.marks });
+            if !did {
+                break;
+            }
+        }
+        InOut { next: cur, work, send, marks, pending: false }
+    }
+
+    /// The objects brought up to the clock as a reporting server does when
+    /// a request reads them: a promise past its deadline settles (Lean's
+    /// projection, kept). Nothing else: a lease's end waits for a sweep.
+    pub fn clear(&self, ids: &Vec<Id>, s: &Server, now: Time) -> Server {
+        let mut n = copy_server(s);
+        let mut i = 0;
+        while i < ids.len()
+            invariant
+                i <= ids.len(),
+            decreases ids.len() - i,
+        {
+            let id = &ids[i];
+            match s.promises.get(id) {
+                Some(p) => {
+                    if p.live() && now >= p.timeout_at {
+                        let state = if p.tags.timer { PState::Resolved } else { PState::TimedOut };
+                        settle(&mut n, id, state, None, p.timeout_at);
+                    }
+                },
+                None => {},
+            }
+            i += 1;
+        }
+        n
     }
 
     /// A suspended task resumes when a promise it awaits has settled; any
@@ -1237,10 +1349,20 @@ impl Resonate {
     /// settled promise's listeners are told; a pending task whose retry is due
     /// is offered to a worker, and the next retry armed.
     pub fn internal(&self, ids: &Vec<Id>, s: &Server, now: Time) -> InOut {
+        self.internal_with(ids, s, now, true)
+    }
+
+    /// As [`Resonate::internal`]; without `clock`, what the clock alone makes
+    /// due (a deadline, a lease's end) is left as it is.
+    pub fn internal_with(&self, ids: &Vec<Id>, s: &Server, now: Time, clock: bool) -> InOut {
         let mut n = copy_server(s);
         let mut work = Vec::new();
         let mut send = Vec::new();
         let mut marks = Vec::new();
+        // Whether something on these objects falls due later: a live promise's
+        // deadline, a lease's end, a retry. Then a step that did nothing is
+        // not done: not yet.
+        let mut waits = false;
         // A promise past its deadline times out (a timer promise resolves).
         let mut i = 0;
         while i < ids.len()
@@ -1251,10 +1373,13 @@ impl Resonate {
             let id = &ids[i];
             match s.promises.get(id) {
                 Some(p) => {
-                    if p.live() && now >= p.timeout_at {
+                    if clock && p.live() && now < p.timeout_at {
+                        waits = true;
+                    }
+                    if clock && p.live() && now >= p.timeout_at {
                         let state = if p.tags.timer { PState::Resolved } else { PState::TimedOut };
                         marks.push(if p.tags.timer { mk("timer promise resolved") } else { mk("promise timed out") });
-                        let r = settled_work(p, id);
+                        let r = self.settled_work(p, id);
                         settle(&mut n, id, state, None, p.timeout_at);
                         push_all(&mut work, &r);
                     }
@@ -1300,11 +1425,13 @@ impl Resonate {
             // A task past its lease is reclaimed, to be offered again at once.
             match n.tasks.get(id) {
                 Some(t) => {
-                    if t.state == TState::Acquired && now >= t.lease_expires() {
+                    if clock && t.state == TState::Acquired && now >= t.lease_expires() {
                         let mut u = copy(t);
                         u.release(now);
                         n.tasks.insert(id.clone(), u);
                         marks.push(mk("lease expired"));
+                    } else if clock && t.state == TState::Acquired {
+                        waits = true;
                     }
                 },
                 None => {},
@@ -1354,30 +1481,38 @@ impl Resonate {
                         let version = u.version;
                         n.tasks.insert(id.clone(), u);
                         send.push(Dispatch::Execute { id: id.clone(), version });
-                        work.push(at(again, id));
+                        self.arm(&mut work, at(again, id));
                         marks.push(mk("task dispatched"));
+                    } else if t.state == TState::Pending && live && t.retry_at.is_some() {
+                        waits = true;
                     }
                 },
                 None => {},
             }
             i += 1;
         }
-        InOut { next: n, work, send, marks }
+        let did = marks.len() > 0;
+        InOut { next: n, work, send, marks, pending: !did && waits }
     }
 
     /// A schedule's occurrence at `at` fires: the promise it names is created,
-    /// if absent, as of `at`; the schedule records the run and arms the next.
-    /// The clock may be past `at` (a jump over several occurrences): a promise
-    /// whose deadline has passed by `now` is born settled, as Lean's read-time
-    /// projection would show it, and starts nothing. A schedule that is gone,
-    /// or no longer expects this occurrence, fires nothing.
+    /// if absent, as of `at`; the schedule records the run and arms the next
+    /// (a reporting server records the run in a step of its own, `advance`).
+    /// The clock may be past `at` (a jump over several occurrences, or a
+    /// server late to it): a promise whose deadline has passed by `now` is
+    /// born settled, as Lean's read-time projection would show it, and starts
+    /// nothing. A schedule that is gone, or no longer expects this occurrence,
+    /// fires nothing.
     pub fn fire(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> InOut {
         let c = match s.schedules.get(schedule) {
             Some(c) => c,
-            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new() },
+            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
         };
         if c.next_run_at != at_ {
-            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new() };
+            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
+        }
+        if now < at_ {
+            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: true };
         }
         let mut marks = Vec::new();
         let mut work = Vec::new();
@@ -1405,7 +1540,7 @@ impl Resonate {
             };
             n.promises.insert(promise.clone(), p);
             if live_now {
-                work.push(at(timeout_at, promise));
+                self.arm(&mut work, at(timeout_at, promise));
             }
             if tags.target && !tags.timer {
                 let due = match tags.delay {
@@ -1416,10 +1551,13 @@ impl Resonate {
                 let retry_at = if live_now { Some(due) } else { None };
                 n.tasks.insert(promise.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() });
                 if live_now {
-                    work.push(at(due, promise));
+                    self.arm(&mut work, at(due, promise));
                 }
             }
             marks.push(if live_now { mk("schedule fired") } else { mk("schedule fired past the occurrence's deadline") });
+        }
+        if self.reported {
+            return InOut { next: n, work, send: Vec::new(), marks, pending: false };
         }
         let next = next_cron(&c.cron, at_);
         let mut d = copy(c);
@@ -1427,7 +1565,31 @@ impl Resonate {
         d.next_run_at = next;
         n.schedules.insert(schedule.clone(), d);
         work.push(Work::Timer(next, Step::Fire { schedule: schedule.clone(), at: next, promise: expand(&c.promise_id, schedule, next) }));
-        InOut { next: n, work, send: Vec::new(), marks }
+        InOut { next: n, work, send: Vec::new(), marks, pending: false }
+    }
+
+    /// The run of `schedule` at `at` recorded and the next occurrence armed:
+    /// the second half of a fire, for a reporting server. A schedule that is
+    /// gone, or no longer expects this occurrence (deleted and created again
+    /// in between), advances nothing.
+    pub fn advance(&self, schedule: &Id, at_: Time, s: &Server, now: Time) -> InOut {
+        let _ = now;
+        let c = match s.schedules.get(schedule) {
+            Some(c) => c,
+            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
+        };
+        if c.next_run_at != at_ {
+            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
+        }
+        let mut n = copy_server(s);
+        let mut work = Vec::new();
+        let next = next_cron(&c.cron, at_);
+        let mut d = copy(c);
+        d.last_run_at = Some(at_);
+        d.next_run_at = next;
+        n.schedules.insert(schedule.clone(), d);
+        self.arm(&mut work, Work::Timer(next, Step::Fire { schedule: schedule.clone(), at: next, promise: expand(&c.promise_id, schedule, next) }));
+        InOut { next: n, work, send: Vec::new(), marks: marked(mk("schedule advanced")), pending: false }
     }
 }
 
