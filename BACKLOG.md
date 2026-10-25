@@ -100,23 +100,31 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **`concrete_refines_abstract`.** Every trace of a store machine (the
+- **`concrete_refines_abstract`.** Every trace of the store machine (the
   bucket as state, the verified document handlers after a sweep as the
   request step, sweeps as internal work) is a trace of the Resonate model.
   What exists: accordant's `refines` (`src/refinement.rs`), trace
   inclusion from a forward simulation, proved; the model's functional
   specification (`examples/resonate/src/twins.rs`), so the abstract side
-  of the statement is definite. What remains, in order: the concrete
-  machine as a second `Model` (a crate verified with `cargo verus`, which
-  verifies the kernel: 280 items), with the wire rules of `dispatch.rs`
-  and a functional sweep over the kernel's step functions (three of the
-  six are functional, `callback` and `listener` are shapes and need
-  twins, `sweep` and `drain` are relational and need a fold in the
-  model's phase order); the relation, the abstract state the sweep of
-  the concrete one; the simulation, one commutation lemma per handler
-  across the two type vocabularies. Schedules out until the fire's shape
-  is settled. Then echod's own system model against the store machine,
-  where the clocks and the stamps live.
+  of the statement is definite; the store machine as a second `Model`
+  (`refine/`, verified with `cargo verus`, which verifies the kernel too),
+  with the wire rules of `dispatch.rs` as `translate.rs` and a functional
+  sweep over the kernel's step functions (`sweep.rs`: three of the six are
+  the kernel's own functions, `callback` and `listener` written out from
+  the shapes the kernel states, the phases in the model's order); the
+  relation `rel` (the abstract state is the sweep of the concrete one,
+  translated; the calls the same; the abstract has sent what the concrete
+  has plus what the sweep sends; a timer for every deadline, none due);
+  the theorem from `refines`, with the initial case proved. What remains
+  is `simulation_holds`, admitted: invoke, return and receive as
+  bookkeeping on `rel`; the tick as the lemma that the sweep at the new
+  clock is what the abstract timers due by then compute; the request as
+  one commutation lemma per handler, `spec_handle` after a sweep against
+  the twin on the translated state. Known not to go through as things
+  stand: a targeted timer (the wire strips the target, the model answers
+  400), which the simulator does not send. Schedules out until the fire's
+  shape is settled. Then echod's own system model against the store
+  machine, where the clocks and the stamps live.
 
 ## Smaller items
 
