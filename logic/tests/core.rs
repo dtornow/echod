@@ -210,6 +210,54 @@ fn a_schedule_fires_into_its_origin() {
     assert_eq!(status, 404);
 }
 
+/// A bucket is listed ahead of the clock, and again once the clock has left
+/// it: a key another node armed into it in between, for a target this node
+/// owns, is found then rather than at the next membership change.
+#[test]
+fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
+    let mut h = Harness::new("n1");
+    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.advance(100);
+    let bucket_ms = 1_000; // the harness's `timer_bucket_ms`
+    let current = h.clock - h.clock % bucket_ms;
+    let listed = |h: &Harness, b: u64| h.notes.iter().filter(|n| matches!(n, Note::BucketLoaded { bucket, .. } if *bucket == b)).count();
+    // the full load reached the next bucket; nothing more while the clock
+    // stays in this one
+    h.advance(bucket_ms / 2);
+    assert_eq!(listed(&h, current), 0);
+    // the clock leaves the bucket: it is listed once more, and the horizon
+    // moves on by one
+    h.advance(bucket_ms / 2 + 10);
+    assert_eq!(listed(&h, current), 1, "the bucket just closed is listed again");
+    assert_eq!(listed(&h, current + 2 * bucket_ms), 1, "and the horizon moved on");
+}
+
+/// A schedule deleted and created again under the same id fires again: the
+/// new document's next run gets a key of its own, whatever key the old one
+/// left behind.
+#[test]
+fn a_schedule_recreated_after_its_delete_fires_again() {
+    let mut h = Harness::new("n1");
+    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.advance(100);
+    let (status, _) = h.request("schedule.create", json!({ "id": "tick", "cron": "*/2 * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
+    assert_eq!(status, 200);
+    let (status, _) = h.request("schedule.delete", json!({ "id": "tick" }));
+    assert_eq!(status, 200);
+    h.advance(300);
+    let fired = h.notes.iter().filter(|n| matches!(n, Note::FireBegin { .. })).count();
+    assert_eq!(fired, 0, "a deleted schedule does not fire");
+    let (status, data) = h.request("schedule.create", json!({ "id": "tick", "cron": "*/2 * * * * *", "promiseId": "tock-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
+    assert_eq!(status, 200, "{data}");
+    let next = data["schedule"]["nextRunAt"].as_u64().unwrap();
+    h.advance(next - h.clock + 100);
+    h.advance(2_100);
+    assert!(h.notes.iter().any(|n| matches!(n, Note::FireBegin { .. })), "the recreated schedule fired; keys {:?}", h.keys("t/"));
+    let (status, data) = h.request("schedule.get", json!({ "id": "tick" }));
+    assert_eq!(status, 200);
+    assert!(data["schedule"]["lastRunAt"].is_number(), "{data}");
+}
+
 #[test]
 fn the_same_events_give_the_same_effects() {
     let run = || {

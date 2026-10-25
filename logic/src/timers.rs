@@ -103,12 +103,15 @@ enum Listing {
     Buckets { pending: HashMap<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError> },
     /// One more bucket, as the clock reached it.
     Extend { op: OpId, bucket: u64 },
+    /// A bucket the clock has left, listed again: another node may have armed
+    /// a key into it for a target this node owns after this node listed it.
+    Relist { op: OpId, bucket: u64 },
 }
 
 impl Listing {
     fn expects(&self, op: OpId) -> bool {
         match self {
-            Listing::Prefixes { op: o, .. } | Listing::Extend { op: o, .. } => *o == op,
+            Listing::Prefixes { op: o, .. } | Listing::Extend { op: o, .. } | Listing::Relist { op: o, .. } => *o == op,
             Listing::Buckets { pending, .. } => pending.contains_key(&op),
         }
     }
@@ -120,6 +123,13 @@ pub(crate) struct Timers {
     /// The start of the last bucket this node has listed. `None` until the
     /// first full load succeeds; nothing fires before that.
     loaded_through: Option<u64>,
+    /// The start of the last bucket listed again after the clock left it.
+    /// A key armed into a bucket by another node, for a target this node
+    /// owns, after this node listed the bucket ahead of the clock, is found
+    /// when the bucket closes: so a deadline is swept within a bucket or two
+    /// of falling due, whoever armed it.
+    closed_through: Option<u64>,
+    bucket_ms: u64,
     reload_pending: bool,
     listing: Option<Listing>,
     backoff_until: Option<u64>,
@@ -129,7 +139,7 @@ pub(crate) struct Timers {
 
 impl Timers {
     pub fn new() -> Self {
-        Self { wheel: TimerWheel::new(), started: false, loaded_through: None, reload_pending: false, listing: None, backoff_until: None, inflight: 0, backlog: VecDeque::new() }
+        Self { wheel: TimerWheel::new(), started: false, loaded_through: None, closed_through: None, bucket_ms: 0, reload_pending: false, listing: None, backoff_until: None, inflight: 0, backlog: VecDeque::new() }
     }
 
     /// The earliest instant the timers want to look at the clock: a
@@ -148,7 +158,9 @@ impl Timers {
         if self.reload_pending {
             return Some(now);
         }
-        [self.wheel.nearest(), self.loaded_through.map(|t| t.max(now))].into_iter().flatten().min()
+        // the next bucket to close, two bucket starts past the last closed
+        let closing = self.closed_through.map(|c| c.saturating_add(2 * self.bucket_ms).max(now));
+        [self.wheel.nearest(), self.loaded_through.map(|t| t.max(now)), closing].into_iter().flatten().min()
     }
 }
 
@@ -171,6 +183,7 @@ impl State {
     /// The first configuration is read: load, then fire from the wheel.
     pub(crate) fn timers_start(&mut self, now: u64) {
         self.timers.started = true;
+        self.timers.bucket_ms = self.keys.bucket_ms();
         self.timers.reload_pending = true;
         self.timers_run(now);
     }
@@ -198,6 +211,11 @@ impl State {
             let bucket = through + self.keys.bucket_ms();
             let op = self.store(StoreCall::List { prefix: self.keys.bucket_prefix(bucket), max_keys: usize::MAX }, Owner::Timers);
             self.timers.listing = Some(Listing::Extend { op, bucket });
+        } else if let Some(bucket) = self.timers.closed_through.map(|c| c + self.keys.bucket_ms()).filter(|b| *b < self.keys.bucket_of(now)) {
+            // The clock left a bucket this node listed ahead of time: list it
+            // once more, for what others armed into it since.
+            let op = self.store(StoreCall::List { prefix: self.keys.bucket_prefix(bucket), max_keys: usize::MAX }, Owner::Timers);
+            self.timers.listing = Some(Listing::Relist { op, bucket });
         } else if self.timers.loaded_through.is_some() {
             self.fire_due(now);
         }
@@ -282,11 +300,25 @@ impl State {
                 StoreOutcome::Failed(e) => self.listing_failed(e, now),
                 _ => self.listing_failed(unexpected(), now),
             },
+            Listing::Relist { bucket, .. } => match outcome {
+                StoreOutcome::Listed(keys) => {
+                    let n = self.take_bucket(keys);
+                    self.note(Note::BucketLoaded { bucket, deadlines: n });
+                    self.note(Note::TimerListing { ok: true });
+                    self.timers.closed_through = Some(bucket);
+                    self.timers_run(now);
+                }
+                StoreOutcome::Failed(e) => self.listing_failed(e, now),
+                _ => self.listing_failed(unexpected(), now),
+            },
         }
     }
 
     fn reloaded(&mut self, horizon: u64, loaded: usize, now: u64) {
         self.timers.loaded_through = Some(horizon);
+        // the full load covered every bucket up to now; the current one is
+        // listed again when it closes
+        self.timers.closed_through = Some(self.keys.bucket_of(now).saturating_sub(self.keys.bucket_ms()));
         self.timers.reload_pending = false;
         self.note(Note::TimerListing { ok: true });
         self.note(Note::TimersLoaded { deadlines: loaded, wheel: self.timers.wheel.len(), epoch: self.core.epoch });

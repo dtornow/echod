@@ -605,7 +605,14 @@ Proved, 251 items, no admits:
   of template, schedule and instant, trusted to be the node's.
 
 The Catalogue and Timers theorems cover both kinds of document; in
-particular every schedule has a key at or before its next run. The
+particular every schedule has a key at or before its next run. That a
+key is also fired is the node's liveness, not proved: a node lists each
+bucket once ahead of the clock and fires what it owns from its wheel, so a
+key another node arms into a bucket already listed, for a target this node
+owns, would wait for the next membership change; the node lists a bucket
+once more when the clock leaves it, which bounds the wait by a bucket or
+two (`timers.rs`, `Listing::Relist`). The simulator found the gap through
+a schedule created on one node and owned by another, never fired. The
 Occurrences theorem is why a fire commits the origin before the schedule.
 
 What the model asks of a node's step is exactly what the node's verified

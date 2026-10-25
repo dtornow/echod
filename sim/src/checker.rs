@@ -95,6 +95,22 @@ pub fn check(trace: &Trace, retry_timeout: u64, fire_within: u64, budget: u64) -
         cfg.max_width = w;
     }
     let mut c: Checker<Grouped<Resonate>> = Checker::with_partitions(Resonate { retry_timeout, fire_within }, Server::default(), cfg);
+    // The history is whole: a call it never answers may have taken effect at
+    // any point or never, and a candidate still holding it subsumes one that
+    // applied it.
+    let mut open = std::collections::BTreeSet::new();
+    for e in trace {
+        match e {
+            Event::Invoke { call, .. } => {
+                open.insert(*call);
+            }
+            Event::Return { call, .. } => {
+                open.remove(call);
+            }
+            _ => {}
+        }
+    }
+    c.never_answered(open);
     // `ECHOD_SIM_PROGRESS=n`: a line every n events, for where the time goes.
     let progress: Option<usize> = std::env::var("ECHOD_SIM_PROGRESS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0);
     let started = std::time::Instant::now();
