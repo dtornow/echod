@@ -19,8 +19,10 @@
 
 use vstd::prelude::*;
 
-use accordant::refinement::{refines, simulation};
-use accordant::semantics::{initial, valid, Cfg, Config, ExternalOp};
+use accordant::refinement::{end, matches, refines, shows, simulation};
+use accordant::semantics::{
+    before, effect, initial, invoke, is_overdue, legal, overdue, project, receive, ret, run, step, tick, valid, Cfg, Config, Execution, ExternalOp, Lab, Label,
+};
 use accordant::{Event, Sched, Time};
 use echod_kernel::steps::{deadline_at, strip};
 use echod_kernel::store::AState;
@@ -159,14 +161,214 @@ pub proof fn lemma_sweep_empty(retry_timeout: nat)
     assert(crate::sweep::ids_of(a) =~= Seq::<Seq<char>>::empty());
 }
 
-/// ADMITTED. Every concrete step from related configurations is matched by
-/// the abstract model: the content of the refinement, step kind by step kind
-/// and handler by handler.
+// ------------------------------------------------------------ the step cases
+
+/// No abstract timer is due: the relation keeps them all ahead of the clock.
+pub proof fn no_overdue(cfg: Concrete, x: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+    ensures
+        !overdue(abstract_of(cfg), s),
+{
+    let a = abstract_of(cfg);
+    assert forall|i: int| !is_overdue(a, s, i) by {
+        if 0 <= i < s.internals.len() {
+            match s.internals[i] {
+                Sched::Timer(t, _) => {
+                    assert(t > x.now);
+                }
+                Sched::Later(_) => {}
+            }
+        }
+    }
+}
+
+/// A run of one step, from `s` to `t`, shows what it shows.
+pub proof fn one_step(a: Resonate, s: Cfg<Resonate>, l: Lab<Resonate>, t: Cfg<Resonate>)
+    requires
+        step(a, s, l, t),
+    ensures
+        matches(a, s, l, t),
+{
+    let mid: Execution<Resonate> = seq![(l, t)];
+    assert(legal(a, s, mid)) by {
+        assert forall|i: int| 0 <= i < mid.len() implies #[trigger] step(a, before::<Resonate>(s, mid, i), mid[i].0, mid[i].1) by {
+            assert(i == 0);
+            assert(before::<Resonate>(s, mid, 0) == s);
+        }
+    }
+    assert(mid.drop_last() =~= Seq::<(Lab<Resonate>, Cfg<Resonate>)>::empty());
+    assert(mid.last() == (l, t));
+    assert(project::<Resonate>(mid.drop_last()) =~= Seq::<Event<Request, Response, Dispatch>>::empty());
+    match l {
+        Label::Obs(e) => {
+            assert(project::<Resonate>(mid) =~= Seq::<Event<Request, Response, Dispatch>>::empty().push(e));
+            assert(shows(l) =~= Seq::<Event<Request, Response, Dispatch>>::empty().push(e));
+        },
+        Label::Silent => {
+            assert(project::<Resonate>(mid) =~= Seq::<Event<Request, Response, Dispatch>>::empty());
+            assert(shows(l) =~= Seq::<Event<Request, Response, Dispatch>>::empty());
+        },
+    }
+    assert(end::<Resonate>(s, mid) == t);
+}
+
+/// A client sends a request: the same step on both sides.
+pub proof fn matched_invoke(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        invoke(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    let a = abstract_of(cfg);
+    match l {
+        Label::Obs(Event::Invoke { call, req }) => {
+            let t = Config { externals: s.externals.insert(call, ExternalOp { req, res: None }), ..s };
+            no_overdue(cfg, x, s);
+            assert(invoke(a, s, l, t));
+            one_step(a, s, l, t);
+            assert(rel(cfg, y, t));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+}
+
+/// A client receives its response: the same step on both sides.
+pub proof fn matched_ret(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        ret(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    let a = abstract_of(cfg);
+    match l {
+        Label::Obs(Event::Return { call, res }) => {
+            let t = Config { externals: s.externals.remove(call), ..s };
+            no_overdue(cfg, x, s);
+            assert(ret(a, s, l, t));
+            one_step(a, s, l, t);
+            assert(rel(cfg, y, t));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+}
+
+/// A client receives a dispatch: the abstract side holds every message the
+/// concrete side has sent, so it has this one too.
+pub proof fn matched_receive(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        receive(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+    broadcast use vstd::seq_lib::lemma_multiset_commutative;
+    broadcast use vstd::seq_lib::to_multiset_remove;
+    broadcast use vstd::seq_lib::to_multiset_contains;
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let a = abstract_of(cfg);
+    match l {
+        Label::Obs(Event::Receive { msg }) => {
+            let swept = sweep_fn(fresh(x.state@), x.now as nat, cfg.retry_timeout as nat);
+            let extra = lift_dispatches(sends(swept));
+            let i = choose|i: int| 0 <= i < x.sent.len() && #[trigger] x.sent[i] == msg && y == Config { sent: x.sent.remove(i), ..x };
+            // the message is among the abstract's sent
+            assert(x.sent.contains(msg));
+            assert((x.sent + extra).contains(msg)) by {
+                assert((x.sent + extra)[i] == msg);
+            }
+            assert((x.sent + extra).to_multiset().count(msg) > 0);
+            assert(s.sent.to_multiset().count(msg) > 0);
+            assert(s.sent.contains(msg));
+            let j = choose|j: int| 0 <= j < s.sent.len() && #[trigger] s.sent[j] == msg;
+            let t = Config { sent: s.sent.remove(j), ..s };
+            no_overdue(cfg, x, s);
+            assert(receive(a, s, l, t)) by {
+                assert(0 <= j < s.sent.len() && s.sent[j] == msg && t == Config { sent: s.sent.remove(j), ..s });
+            }
+            one_step(a, s, l, t);
+            // what is left: the same multiset, less one of this message
+            assert(t.sent.to_multiset() == s.sent.to_multiset().remove(msg));
+            assert(y.sent.to_multiset() == x.sent.to_multiset().remove(msg));
+            assert((y.sent + extra).to_multiset() =~= (x.sent + extra).to_multiset().remove(msg));
+            assert(rel(cfg, y, t));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+}
+
+/// ADMITTED. The clock moves: the abstract timers due by the new instant run,
+/// in deadline order, and compute the sweep at that instant.
+pub proof fn matched_tick(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        tick(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    admit();
+}
+
+/// ADMITTED. A request takes effect: the kernel's handler after a sweep
+/// against the model's twin on the translated state, one lemma per handler.
+pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        effect(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    admit();
+}
+
+/// ADMITTED. A concrete sweep runs: a stutter, since the relation already
+/// reads the concrete state swept; needs the sweep idempotent.
+pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
+    requires
+        rel(cfg, x, s),
+        run(cfg, x, l, y),
+    ensures
+        exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
+{
+    admit();
+}
+
+/// Every concrete step from related configurations is matched by the abstract
+/// model: by the kind of the step.
 pub proof fn simulation_holds(cfg: Concrete)
     ensures
         simulation(cfg, abstract_of(cfg), |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s)),
 {
-    admit();
+    let a = abstract_of(cfg);
+    let r = |c: Cfg<Concrete>, s: Cfg<Resonate>| rel(cfg, c, s);
+    assert forall|x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>| #![trigger r(x, s), step(cfg, x, l, y)]
+        r(x, s) && step(cfg, x, l, y) implies exists|t: Cfg<Resonate>| #[trigger] matches(a, s, l, t) && r(y, t) by {
+        if invoke(cfg, x, l, y) {
+            matched_invoke(cfg, x, l, y, s);
+        } else if ret(cfg, x, l, y) {
+            matched_ret(cfg, x, l, y, s);
+        } else if receive(cfg, x, l, y) {
+            matched_receive(cfg, x, l, y, s);
+        } else if tick(cfg, x, l, y) {
+            matched_tick(cfg, x, l, y, s);
+        } else if effect(cfg, x, l, y) {
+            matched_effect(cfg, x, l, y, s);
+        } else {
+            assert(run(cfg, x, l, y));
+            matched_run(cfg, x, l, y, s);
+        }
+        let t = choose|t: Cfg<Resonate>| #[trigger] matches(a, s, l, t) && rel(cfg, y, t);
+        assert(r(y, t));
+    }
 }
 
 // --------------------------------------------------------------- the theorem
