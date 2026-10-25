@@ -552,8 +552,8 @@ pub proof fn lemma_callbacks_exact(a: AState, ids: Seq<Seq<char>>, now: nat)
 /// are sent their unblocks, and `x` keeps the listeners not in `l`.
 pub proof fn lemma_listeners_of_exact(a: AState, x: Seq<char>, l: Seq<Seq<char>>, now: nat)
     requires
-        projected(a, now),
         a.objects.contains_key(x),
+        a.objects[x].project(now) == a.objects[x],
         a.objects[x].state != PromiseState::Pending,
         no_dups(l),
         forall|i: int| 0 <= i < l.len() ==> a.objects[x].listeners.contains(#[trigger] l[i]),
@@ -562,7 +562,7 @@ pub proof fn lemma_listeners_of_exact(a: AState, x: Seq<char>, l: Seq<Seq<char>>
             let b = listeners_of(a, x, l, now);
             &&& b.objects.dom() == a.objects.dom()
             &&& b.schedules == a.schedules
-            &&& projected(b, now)
+            &&& b.objects[x].project(now) == b.objects[x]
             &&& b.objects[x] == APromise { listeners: spent(a.objects[x].listeners, l), ..a.objects[x] }
             &&& forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) && w != x ==> b.objects[w] == a.objects[w]
             &&& listeners_sends(a, x, l, now) == l.map_values(|address: Seq<char>| unblock_of(a.objects[x], address))
@@ -608,7 +608,6 @@ pub proof fn lemma_listeners_of_exact(a: AState, x: Seq<char>, l: Seq<Seq<char>>
         assert(b.objects.dom() =~= a.objects.dom());
         lemma_project_lists(px, now, px.callbacks, q.listeners);
         assert(q.project(now) == q);
-        assert(projected(b, now));
         // the unblock carries x's record
         lemma_record_lists(a.objects[x], q.callbacks, q.listeners, q.task);
         assert(q.to_record() == a.objects[x].to_record());
@@ -684,6 +683,13 @@ pub proof fn lemma_listeners_exact(a: AState, ids: Seq<Seq<char>>, now: nat)
                 assert(b == listeners_of(a1, x, l, now));
                 lemma_spent_all(l);
                 assert(listeners_sends(a1, x, l, now) =~= f(x));
+                assert(projected(b, now)) by {
+                    assert forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) implies b.objects[id].project(now) == b.objects[id] by {
+                        if id != x {
+                            assert(b.objects[id] == a1.objects[id]);
+                        }
+                    }
+                }
                 assert forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) implies b.objects[id] == APromise {
                     listeners: if ids.contains(id) && a.objects[id].state != PromiseState::Pending { Seq::empty() } else { a.objects[id].listeners },
                     ..a.objects[id]
