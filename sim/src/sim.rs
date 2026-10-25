@@ -88,7 +88,9 @@ impl Default for Options {
             servers: 2,
             clients: 3,
             operations: 200,
-            origins: 3,
+            // as the command line: three clients over six origins; over three,
+            // the in-flight writes on one origin widen the checker's profile
+            origins: 6,
             promises_per_origin: 3,
             faults: Faults { unavailable_percent: 2, lost_ack_percent: 2, conflict_percent: 2, latency_ms: 20 },
             crash_percent: 10,
