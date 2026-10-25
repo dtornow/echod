@@ -43,18 +43,24 @@ struct Knobs {
     /// Chance per chaos tick that a node loses the store for a while.
     #[arg(long, default_value_t = 10)]
     outage: u64,
-    /// Chance per chaos tick that a node's clock jumps, either way.
-    #[arg(long, default_value_t = 15)]
+    /// Chance per chaos tick that a node's clock jumps, either way. Off, as
+    /// is every clock chaos: the checker's model keeps one clock, so a node
+    /// on a clock of its own would be reported, not tested.
+    #[arg(long, default_value_t = 0)]
     jump: u64,
     /// A node's clock is off by up to this many ms, either way.
-    #[arg(long, default_value_t = 150)]
+    #[arg(long, default_value_t = 0)]
     skew: u64,
     /// A clock jump moves a node's clock by up to this many ms, either way.
     #[arg(long, default_value_t = 300)]
     jump_ms: u64,
     /// A node's clock drifts by up to this many parts per million.
-    #[arg(long, default_value_t = 5_000)]
+    #[arg(long, default_value_t = 0)]
     drift: u64,
+    /// The checker's budget: nodes to explore, at most. For a failing seed,
+    /// `ECHOD_SIM_DUMP=1` prints the trace up to the event and the steps the
+    /// nodes reported; `ECHOD_SIM_PROGRESS=n` a line every n events;
+    /// `ECHOD_SIM_WIDTH=n` gives up at a narrower profile and shows it.
     #[arg(long, default_value_t = 2_000_000)]
     budget: u64,
 }

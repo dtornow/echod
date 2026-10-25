@@ -5,17 +5,13 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
-# A workspace of its own: accordant pins a vstd the kernel does not, and
-# cargo allows one.
-[workspace]
-
 [[bin]]
 name = "echod-accordant"
 path = "src/main.rs"
 
 [dependencies]
-accordant = { git = "https://github.com/dtornow/accordant", rev = "36388e8a7147579c40a73c8e79cf3b07ad07fd97" }
-resonate = { git = "https://github.com/dtornow/accordant", rev = "36388e8a7147579c40a73c8e79cf3b07ad07fd97", package = "resonate" }
+accordant = { git = "https://github.com/dtornow/accordant", rev = "3c148fb54991513c6ca926d6dfca6613572bc07a" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "3c148fb54991513c6ca926d6dfca6613572bc07a", package = "resonate" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 axum = { version = "0.7", features = ["json"] }
 clap = { version = "4", features = ["derive"] }

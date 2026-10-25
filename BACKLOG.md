@@ -77,16 +77,32 @@ shows the panels with data.
 - **A targeted timer.** The reference runs it as a task; the Lean
   specification and the accordant model refuse it; echod drops the target
   (an SDK's sleep). `echod-accordant` does not send one.
-- **The simulator's model** is one origin at a time, so it does not
-  generate detached creates either.
+- **Steps when the node gets to them.** A lease is reclaimed, a retry
+  dispatched, a schedule's occurrence fired and its run recorded (two
+  commits, two documents) by the sweep that gets to the document, not
+  at the instant each falls due; a client reading in between sees the
+  lease held, the retry not sent, the occurrence without its run. The
+  Lean specification's steps are enabled at the instant and fired by a
+  fair scheduler, which admits this; the accordant model's are exact
+  timers, and `echod-sim` checks against it with `reported`, where the
+  node's steps are the model's at the instants the node reports.
+  `echod-accordant` and `echod-diff` move the clock with `debug.tick`,
+  which lets every due step land before the next request.
+- **Stamps are decision instants.** A step's `created_at`, `settled_at`,
+  `acquired_at` and the like are the instant the node decided it at, and
+  the write lands later; a concurrent read of the document between the
+  two sees the promise absent though its `created_at` precedes the read.
+  One server with one clock, as the Lean specification has it, cannot
+  show that. `echod-sim` places such a read at the stamp of the version
+  it saw (DESIGN, "Simulation"); the reference server stamps before it
+  commits too.
 
 ## Smaller items
 
-- **Checker time on long histories.** Some seeds (5003 with three
-  servers and 1500 operations, for one) take about nine minutes in the
-  checker, on a history the simulation produced in seconds. Either a
-  per-origin budget that reports "not checked" instead of running on,
-  or a faster search. The nightly soak needs this bounded.
+- **Checker time on long histories.** Resolved by the move to accordant's
+  checker with the node's steps reported: the profile stays at width 1
+  and a seed checks in tens of milliseconds. The budget (`--budget`) and
+  width limit still turn a blowup into a report rather than a hang.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate

@@ -224,18 +224,34 @@ pub enum Note {
     TimerFire { kind: TimerKind, outcome: FireOutcome, lag_ms: u64 },
     TimerListing { ok: bool },
     Sweep(SweepOutcome),
-    // observed: the internal steps, each as a span over its commit
+    // observed: the steps on `target`, each decided and then committed or
+    // not. `now` is the clock the kernel ran at: the request's
+    // `head.debug_time`, or the node's clock for a step of its own, or the
+    // document's stamp if that is later. `seq` is the document's version the
+    // step made (`wrote`), or saw (a step that wrote nothing: nothing on the
+    // document was due at its instant): it orders the steps decided at one
+    // instant. `nonce` is the one the step's write
+    // carries in its header, by which the write can be told to have landed
+    // when its acknowledgement was lost. `ids` are the objects the step ran
+    // on, the document's rows after it; none on a schedule's document. An
+    // end that is not committed may still have landed (a lost
+    // acknowledgement), or not (a lost race); a step with no end was cut
+    // short.
+    /// A request's step decided: `corr` is the request's correlation id.
+    /// Twice for a detached create (the create, then the fence's check).
+    RequestBegin { flight: FlightId, corr: String, target: String, now: u64, seq: u64, wrote: bool, nonce: u64, ids: Option<Vec<String>> },
+    RequestEnd { flight: FlightId, committed: bool },
     /// A sweep of `target` at `now` starts.
-    SweepBegin { flight: FlightId, target: String, now: u64 },
+    SweepBegin { flight: FlightId, target: String, now: u64, seq: u64, wrote: bool, nonce: u64, ids: Option<Vec<String>> },
     SweepEnd { flight: FlightId, committed: bool },
     /// A schedule fires on `origin` at `now`: the row as loaded, the
     /// occurrence, the promise it expands to, the run after. The first
-    /// half of a fire.
-    FireBegin { flight: FlightId, origin: String, now: u64, row: Box<echod_kernel::Schedule>, at: u64, promise_id: String, next: u64 },
+    /// half of a fire; `ids` are the origin's objects after it.
+    FireBegin { flight: FlightId, origin: String, now: u64, seq: u64, nonce: u64, ids: Vec<String>, row: Box<echod_kernel::Schedule>, at: u64, promise_id: String, next: u64 },
     FireEnd { flight: FlightId, committed: bool },
     /// The second half: the schedule advanced past the occurrence at `at`
     /// to `next`, on its own document.
-    AdvanceBegin { flight: FlightId, schedule: String, now: u64, at: u64, next: u64 },
+    AdvanceBegin { flight: FlightId, schedule: String, target: String, now: u64, seq: u64, nonce: u64, at: u64, next: u64 },
     AdvanceEnd { flight: FlightId, committed: bool },
     // logged
     ConfigurationRead { epoch: u64, members: Vec<String> },

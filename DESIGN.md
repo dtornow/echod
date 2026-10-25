@@ -11,7 +11,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; checked for linearizability against the kernel |
+| `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; every run checked against the Resonate model of `dtornow/accordant` |
 
 The first two are proved; the third is the shim the proof stops at, with
 nothing in it but the order of calls; the fourth performs what the third
@@ -172,7 +172,9 @@ nodes/<id>                               a node's announcement: id, url, at
 
 One origin is one object, JSON lines: one kernel `Promise` per row, in
 commit order, serialised by serde as the kernel declares it. A task is a
-field of its promise. There is no enclosing document and no header.
+field of its promise. There is no enclosing document; each write puts a
+header line first, carrying the instant the step was decided at (the
+stamp), a nonce, and the write's number in the object's history.
 
 The document is the fold of the rows by id, last row wins — the kernel's
 `fold_by`, whose lemmas prove any one-row-per-id rendering replays to the
@@ -349,44 +351,61 @@ it says as a `Note`, carrying a value from one of its closed sets; the
 executor turns the note into the metric. The gauges are read when
 scraped, from the node's state as it is then. Logs carry the names the
 metrics leave out: an origin, a key, an address, an error; they too are
-notes.
+notes. So are the steps themselves, each as decided and then as committed
+or not, with the instant, the document's version, the write's nonce and
+the objects: what the simulator checks against the model (below).
 
 ### Simulation
 
 `echod-sim` runs several nodes over one in-memory store on one thread
 under tokio's paused clock, so time moves only between tasks and the same
-seed replays the same run. The simulation owns every port: a reference
-clock the clients stamp requests with, and per node a clock with its own
-skew, drift and the jumps the run inflicts, backwards included — no bound,
-since the nodes assume none; a store that
+seed replays the same run. The simulation owns every port: one clock the
+clients stamp requests with and the nodes read (a node can be given skew,
+drift and jumps, backwards included, but the run leaves them off: the
+model it is checked against keeps one clock, and a node on a clock of its
+own would be reported, not tested); a store that
 answers nothing, loses acks or refuses conditional writes by seeded
 percentages and waits a seeded latency, and per node a store that can be cut
-off entirely; a bus that checks every message against the bucket.
-A chaos task crashes nodes, stops them cleanly, starts new ones,
-cuts nodes off the store and jumps their clocks, by any amount:
-the checker expects linearizability whatever the clocks do. Clients issue every
-request kind over a few origins; every attempt is a history entry, since an
-attempt that got no answer may have taken effect. Sweeps and fires enter
-the history through the notes port: a fire as two entries, the first on
-the occurrence's origin with the schedule's row as the node loaded it,
-the second on the schedule's document, each spanning its own commit.
+off entirely; a bus that records every message as the model's dispatch and
+checks it against the bucket. A chaos task crashes nodes, stops them
+cleanly, starts new ones and cuts nodes off the store. Clients issue every
+request kind over a few origins, as the model types them; every attempt is
+a history entry, since an attempt that got no answer may have taken effect.
 Clients create, read and delete a few schedules firing every few seconds
-into the origins the clients work on, so fires collide with requests.
+into the origins the clients work on, so fires collide with requests. The
+run ends with a read of every id, so what the bucket holds is what the
+model holds.
 
-The check is linearizability per document against the kernel, an origin's
-or a schedule's: an order of the entries, each within its span, that
-yields every answer seen and ends in the rows the bucket holds, each step
-decided at the later of its instant and the document's stamp as the node
-does, the stamp moving with every step that writes (a sweep always, a
-fire only when it changed something, an advance when it landed); an entry
-without an answer may be placed or skipped. A fire's first
-half is the kernel's `processSchedule` on the row beside the origin's
-objects; its second half advances the row if it is still at the
-occurrence, and is refused otherwise, as the node's conditional write
-would be.
-Besides that: every deadline a document owes has a key, every `execute`
-names a task that exists and every `unblock` a settled promise, every kind
-answered 200 at least once, and the history overlapped.
+The check is the Resonate model of `dtornow/accordant`, the whole protocol
+as the Lean specification has it, with its checker (`checker.rs`): some
+execution of the model must show exactly what the clients saw and the bus
+carried. The model runs with `reported`: a node sweeps a document when it
+gets to it, and a client may read in between, so the model arms no work of
+its own and takes each step the node reports through the
+notes port (`RequestBegin`/`End`, `SweepBegin`/`End`, `FireBegin`/`End`,
+`AdvanceBegin`/`End`) as a call of its own, `Request::Step`, at the instant
+the node decided it: a request's own drain after the request (the resumes,
+unblocks and redispatches it left to do), a sweep (everything due, a
+deadline or a lease's end too), a fire's two halves. A promise past its
+deadline settles when a request reads it, as the kernel keeps the
+projection in the document, or when a sweep gets to it. The note names the instant, the document's version the
+step made or saw, the nonce its write carries and the objects it ran on.
+A request's call sits at that instant too, invoke and return, so the model
+has one place to put it. Two steps on one document at one instant are
+ordered by the version each made or saw. A step whose write the node did
+not see land may have landed all the same (a lost acknowledgement, a
+crash): the store says, by the nonce, and the step is in the trace or not;
+a request whose step never landed and never answered took no effect and is
+left out. A step that wrote nothing sits at the stamp of the version it
+saw rather than at its own instant: a write decided earlier may land
+later, and a read in between saw the document without it; nothing on the
+document was due at the read's instant (the read's sweep would have
+written), so the model answers the same at the stamp, where the write has
+not happened yet either (`checker.rs`). Besides that: every deadline a
+document owes has a key, every `execute` names a task that exists and
+every `unblock` a settled promise, every kind answered 200 at least once,
+and the history overlapped. Twenty seeds check in well under a second each
+(`soak`); the kernel-based checker this replaced took minutes on some.
 
 ### Differential
 

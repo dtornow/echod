@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "system", "logic", "echod", "sim", "diff"]
-# Its own workspace: it builds against accordant's pin of vstd, not the kernel's.
-exclude = ["diff/accordant"]
+members = ["kernel", "system", "logic", "echod", "sim", "diff", "diff/accordant"]
 
 [workspace.package]
 version = "0.1.0"

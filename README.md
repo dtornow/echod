@@ -12,8 +12,9 @@ to a document is the kernel, proved against the specification's catalogue of
 deadline keys is the kernel too, each decision proved to compute its
 specification. What several nodes do to one bucket is the system model,
 proved safe whatever the clocks do. What the proof stops at, the shim between
-the verified core and S3, a deterministic simulator holds to the same kernel
-under crashes, outages, lost acks and clock jumps.
+the verified core and S3, a deterministic simulator holds to the Resonate
+model of [dtornow/accordant](https://github.com/dtornow/accordant) under
+crashes, outages and lost acks.
 
 ## Layout
 
@@ -23,7 +24,7 @@ under crashes, outages, lost acks and clock jumps.
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, checked for linearizability against the kernel |
+| [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, every run checked against the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant) |
 | [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; every response, message and snapshot compared. `diff/accordant/`: echod driven by the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant), every trace checked against it |
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |

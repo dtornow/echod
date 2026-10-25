@@ -61,27 +61,33 @@ impl Row for Schedule {
 }
 
 /// What was read: the folded rows, how many rows the object holds, the
-/// bytes it holds, so an append knows its offset, and the stamp of the last
-/// write.
+/// bytes it holds, so an append knows its offset, the stamp of the last
+/// write, and how many writes the document has seen.
 #[derive(Clone)]
 pub struct Loaded<R: Row = Promise> {
     pub rows: Vec<R>,
     pub row_count: usize,
     pub bytes: u64,
     pub stamp: u64,
+    pub seq: u64,
 }
 
 impl<R: Row> Loaded<R> {
     pub fn empty() -> Self {
-        Self { rows: vec![], row_count: 0, bytes: 0, stamp: 0 }
+        Self { rows: vec![], row_count: 0, bytes: 0, stamp: 0, seq: 0 }
     }
 }
 
+/// The line a write puts first: the instant the step was decided at, a
+/// nonce, and the write's number in the document's history (the previous
+/// header's plus one), which orders two steps decided at one instant.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Header {
     pub stamp: u64,
     pub nonce: u64,
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Deserialize)]
@@ -97,12 +103,16 @@ pub fn decode<R: Row>(bytes: &[u8]) -> Result<Loaded<R>, String> {
     let mut rows: Vec<R> = Vec::new();
     let mut count = 0usize;
     let mut stamp = 0u64;
+    let mut seq = 0u64;
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
         }
         match serde_json::from_slice::<Line<R>>(line).map_err(|e| format!("bad row: {e}"))? {
-            Line::Header(h) => stamp = stamp.max(h.stamp),
+            Line::Header(h) => {
+                stamp = stamp.max(h.stamp);
+                seq = seq.max(h.seq);
+            }
             Line::Row(p) => {
                 count += 1;
                 match rows.iter().position(|q| q.id() == p.id()) {
@@ -112,7 +122,7 @@ pub fn decode<R: Row>(bytes: &[u8]) -> Result<Loaded<R>, String> {
             }
         }
     }
-    Ok(Loaded { rows, row_count: count, bytes: bytes.len() as u64, stamp })
+    Ok(Loaded { rows, row_count: count, bytes: bytes.len() as u64, stamp, seq })
 }
 
 /// The header, then the rows, one line each, newline-terminated.

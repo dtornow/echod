@@ -11,25 +11,29 @@
 //! clock.rs     virtual time: tokio's paused clock, read through the Clock port
 //! store.rs     an in-memory S3 that misbehaves on request
 //! bus.rs       a bus that records every message and checks it against the bucket
-//! history.rs   what each client and each internal step saw, with virtual timestamps
+//! history.rs   what each client saw and what the nodes did, with virtual timestamps
 //! workload.rs  the requests a run issues, and how they are generated
-//! model.rs     the specification: the kernel, one operation at a time
-//! checker.rs   linearizability of a history against the model, per document
+//! checker.rs   the run as a trace of the Resonate model, checked by accordant
 //! sim.rs       the run: nodes over one store, clients, crashes, then the checks
 //! ```
 //!
-//! What a run checks: that the recorded history is equivalent to some
-//! sequential execution of the kernel which also leaves the state the bucket
-//! holds; that every deadline a document owes has a key; that every message
-//! names state that is really there; and that the run exercised what it
-//! claims to have exercised.
+//! The specification a run is checked against is the Resonate model of
+//! `dtornow/accordant`, the whole protocol as the Lean specification has it,
+//! and the checker is accordant's: some execution of the model must show
+//! exactly what the clients saw and the bus carried, with the nodes' own
+//! steps (a sweep, a fire) where the nodes report them (`checker.rs`). The
+//! run ends with a read of every id, so the state the bucket holds is what
+//! the model holds too. Besides: every deadline a document owes has a key;
+//! every message names state that is really there; and the run exercised
+//! what it claims to have exercised.
 
 pub mod bus;
 pub mod checker;
 pub mod clock;
 pub mod history;
-pub mod model;
 pub mod rng;
 pub mod sim;
 pub mod store;
+#[path = "../../diff/accordant/src/wire.rs"]
+pub mod wire;
 pub mod workload;
