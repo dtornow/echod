@@ -38,14 +38,27 @@ pub open spec fn matches<X, R, D, A: Model<External = X, Response = R, Dispatch 
         legal(a, s, mid) && project::<A>(mid) == shows(l) && end::<A>(s, mid) == t
 }
 
-/// `r` is a forward simulation from concrete `c` to abstract `a`: every
-/// concrete step from a related configuration is matched by abstract steps
-/// that lead to a related one.
+/// `r` is a forward simulation from concrete `c` to abstract `a`, for steps
+/// whose labels `ok` admits: every such concrete step from a related
+/// configuration is matched by abstract steps that lead to a related one.
+pub open spec fn simulation_under<X, R, D, C: Model<External = X, Response = R, Dispatch = D>, A: Model<External = X, Response = R, Dispatch = D>>(
+    c: C, a: A, r: spec_fn(Cfg<C>, Cfg<A>) -> bool, ok: spec_fn(Label<X, R, D>) -> bool,
+) -> bool {
+    forall|x: Cfg<C>, l: Label<X, R, D>, y: Cfg<C>, s: Cfg<A>| #![trigger r(x, s), step(c, x, l, y)]
+        r(x, s) && step(c, x, l, y) && ok(l) ==> exists|t: Cfg<A>| #[trigger] matches(a, s, l, t) && r(y, t)
+}
+
+/// A forward simulation for every step.
 pub open spec fn simulation<X, R, D, C: Model<External = X, Response = R, Dispatch = D>, A: Model<External = X, Response = R, Dispatch = D>>(
     c: C, a: A, r: spec_fn(Cfg<C>, Cfg<A>) -> bool,
 ) -> bool {
-    forall|x: Cfg<C>, l: Label<X, R, D>, y: Cfg<C>, s: Cfg<A>| #![trigger r(x, s), step(c, x, l, y)]
-        r(x, s) && step(c, x, l, y) ==> exists|t: Cfg<A>| #[trigger] matches(a, s, l, t) && r(y, t)
+    simulation_under(c, a, r, |l: Label<X, R, D>| true)
+}
+
+/// Every label of an execution that shows `trace` is admitted by `ok`: its
+/// observed events are the trace's, and `ok` admits silence.
+pub open spec fn admits<X, R, D>(ok: spec_fn(Label<X, R, D>) -> bool, trace: Seq<Event<X, R, D>>) -> bool {
+    ok(Label::Silent) && forall|i: int| 0 <= i < trace.len() ==> #[trigger] ok(Label::Obs(trace[i]))
 }
 
 // ------------------------------------------------------------- executions
@@ -113,15 +126,50 @@ pub proof fn lemma_end_add<M: Model>(first: Cfg<M>, s1: Execution<M>, s2: Execut
 
 // --------------------------------------------------------------- the theorem
 
+/// Every label of a legal execution showing `trace` is admitted, when `ok`
+/// admits the trace: a step's label is silent or one of the trace's events.
+proof fn lemma_labels_admitted<X, R, D, C: Model<External = X, Response = R, Dispatch = D>>(
+    ok: spec_fn(Label<X, R, D>) -> bool, trace: Seq<Event<X, R, D>>, steps: Execution<C>, k: int,
+)
+    requires
+        admits(ok, trace),
+        project::<C>(steps) == trace,
+        0 <= k < steps.len(),
+    ensures
+        ok(steps[k].0),
+{
+    match steps[k].0 {
+        Label::Silent => {}
+        Label::Obs(e) => {
+            // the event is the trace's: project keeps every observed label, in order
+            lemma_project_add::<C>(steps.take(k + 1), steps.skip(k + 1));
+            assert(steps.take(k + 1) + steps.skip(k + 1) =~= steps);
+            lemma_project_add::<C>(steps.take(k), seq![steps[k]]);
+            assert(steps.take(k) + seq![steps[k]] =~= steps.take(k + 1));
+            let one: Execution<C> = seq![steps[k]];
+            assert(one.drop_last() =~= Seq::<(Lab<C>, Cfg<C>)>::empty());
+            assert(one.last() == steps[k]);
+            assert(project::<C>(one.drop_last()) =~= Seq::<Event<X, R, D>>::empty());
+            assert(project::<C>(one) =~= Seq::<Event<X, R, D>>::empty().push(e));
+            assert(project::<C>(one) =~= seq![e]);
+            let j = project::<C>(steps.take(k)).len() as int;
+            assert(project::<C>(steps.take(k + 1)) =~= project::<C>(steps.take(k)).push(e));
+            assert(trace[j] == e);
+            assert(0 <= j < trace.len());
+        }
+    }
+}
+
 /// The first `k` concrete steps are matched: some abstract execution from
 /// `initial(ai)` shows what they show and ends related to where they end.
 proof fn lemma_simulate<X, R, D, C: Model<External = X, Response = R, Dispatch = D>, A: Model<External = X, Response = R, Dispatch = D>>(
-    c: C, a: A, r: spec_fn(Cfg<C>, Cfg<A>) -> bool, ci: C::State, ai: A::State, steps: Execution<C>, k: int,
+    c: C, a: A, r: spec_fn(Cfg<C>, Cfg<A>) -> bool, ok: spec_fn(Label<X, R, D>) -> bool, ci: C::State, ai: A::State, steps: Execution<C>, k: int,
 )
     requires
         r(initial::<C>(ci), initial::<A>(ai)),
-        simulation(c, a, r),
+        simulation_under(c, a, r, ok),
         legal(c, initial::<C>(ci), steps),
+        forall|i: int| 0 <= i < steps.len() ==> #[trigger] ok(steps[i].0),
         0 <= k <= steps.len(),
     ensures
         exists|asteps: Execution<A>| #![trigger legal(a, initial::<A>(ai), asteps)]
@@ -138,7 +186,7 @@ proof fn lemma_simulate<X, R, D, C: Model<External = X, Response = R, Dispatch =
         assert(project::<A>(asteps) =~= project::<C>(steps.take(0)));
         assert(legal(a, afirst, asteps));
     } else {
-        lemma_simulate(c, a, r, ci, ai, steps, k - 1);
+        lemma_simulate(c, a, r, ok, ci, ai, steps, k - 1);
         let asteps = choose|asteps: Execution<A>| #![trigger legal(a, afirst, asteps)]
             legal(a, afirst, asteps)
             && project::<A>(asteps) == project::<C>(steps.take(k - 1))
@@ -148,6 +196,7 @@ proof fn lemma_simulate<X, R, D, C: Model<External = X, Response = R, Dispatch =
         let y = steps[k - 1].1;
         let s = end::<A>(afirst, asteps);
         assert(step(c, x, l, y));
+        assert(ok(l));
         let t = choose|t: Cfg<A>| #[trigger] matches(a, s, l, t) && r(y, t);
         let mid = choose|mid: Execution<A>| #![trigger legal(a, s, mid)]
             legal(a, s, mid) && project::<A>(mid) == shows(l) && end::<A>(s, mid) == t;
@@ -174,6 +223,36 @@ proof fn lemma_simulate<X, R, D, C: Model<External = X, Response = R, Dispatch =
     }
 }
 
+/// Every trace the concrete model can show that `ok` admits, the abstract
+/// model can show: trace inclusion on those traces, from a forward
+/// simulation on the steps they are made of.
+pub proof fn refines_under<X, R, D, C: Model<External = X, Response = R, Dispatch = D>, A: Model<External = X, Response = R, Dispatch = D>>(
+    c: C, a: A, r: spec_fn(Cfg<C>, Cfg<A>) -> bool, ok: spec_fn(Label<X, R, D>) -> bool, ci: C::State, ai: A::State, trace: Seq<Event<X, R, D>>,
+)
+    requires
+        r(initial::<C>(ci), initial::<A>(ai)),
+        simulation_under(c, a, r, ok),
+        admits(ok, trace),
+        valid(c, ci, trace),
+    ensures
+        valid(a, ai, trace),
+{
+    let first = initial::<C>(ci);
+    let steps = choose|steps: Execution<C>| #![trigger legal(c, first, steps), project::<C>(steps)]
+        legal(c, first, steps) && project::<C>(steps) == trace;
+    assert forall|i: int| 0 <= i < steps.len() implies #[trigger] ok(steps[i].0) by {
+        lemma_labels_admitted::<X, R, D, C>(ok, trace, steps, i);
+    }
+    lemma_simulate(c, a, r, ok, ci, ai, steps, steps.len() as int);
+    assert(steps.take(steps.len() as int) =~= steps);
+    let afirst = initial::<A>(ai);
+    let asteps = choose|asteps: Execution<A>| #![trigger legal(a, afirst, asteps)]
+        legal(a, afirst, asteps)
+        && project::<A>(asteps) == project::<C>(steps.take(steps.len() as int))
+        && r(before::<C>(first, steps, steps.len() as int), end::<A>(afirst, asteps));
+    assert(legal(a, afirst, asteps) && project::<A>(asteps) == trace);
+}
+
 /// Every trace the concrete model can show, the abstract model can show:
 /// trace inclusion, from a forward simulation.
 pub proof fn refines<X, R, D, C: Model<External = X, Response = R, Dispatch = D>, A: Model<External = X, Response = R, Dispatch = D>>(
@@ -186,17 +265,9 @@ pub proof fn refines<X, R, D, C: Model<External = X, Response = R, Dispatch = D>
     ensures
         valid(a, ai, trace),
 {
-    let first = initial::<C>(ci);
-    let steps = choose|steps: Execution<C>| #![trigger legal(c, first, steps), project::<C>(steps)]
-        legal(c, first, steps) && project::<C>(steps) == trace;
-    lemma_simulate(c, a, r, ci, ai, steps, steps.len() as int);
-    assert(steps.take(steps.len() as int) =~= steps);
-    let afirst = initial::<A>(ai);
-    let asteps = choose|asteps: Execution<A>| #![trigger legal(a, afirst, asteps)]
-        legal(a, afirst, asteps)
-        && project::<A>(asteps) == project::<C>(steps.take(steps.len() as int))
-        && r(before::<C>(first, steps, steps.len() as int), end::<A>(afirst, asteps));
-    assert(legal(a, afirst, asteps) && project::<A>(asteps) == trace);
+    let ok = |l: Label<X, R, D>| true;
+    assert(admits(ok, trace));
+    refines_under(c, a, r, ok, ci, ai, trace);
 }
 
 } // verus!
