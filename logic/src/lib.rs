@@ -53,7 +53,7 @@ pub mod wire;
 
 pub use config::Config;
 pub use dispatch::Target;
-pub use types::{Effect, Event, FlightId, Note};
+pub use types::{Effect, Event, Note};
 
 /// Who waits for a store call's answer.
 pub(crate) enum Owner {

@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use accordant::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
 use clap::Parser;
-use resonate::{dominates, Create, Dispatch, Fenced, Request, Resonate, Response, Server as Model, MARKS};
+use resonate::{Create, Dispatch, Fenced, Request, Resonate, Response, Server as Model, MARKS};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
@@ -242,8 +242,8 @@ enum Outcome {
 }
 
 fn check(model: &Resonate, trace: &Trace) -> Outcome {
-    let m = Resonate { retry_timeout: model.retry_timeout, reported: false };
-    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() }).dominating(dominates);
+    let m = Resonate { retry_timeout: model.retry_timeout, fire_within: 0 };
+    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
     match Verdict::from(c.check_certified(trace.clone())) {
         Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
         Verdict::Ko(v) => Outcome::Ko(v),
@@ -274,7 +274,8 @@ async fn main() {
     let client = Client::new();
     client.wait_ready(&echod).await;
     eprintln!("[accordant] echod at {}, worker at {worker}", echod.url);
-    let model = Resonate { retry_timeout: cli.retry_timeout, reported: false };
+    // `debug.tick` lets every due step land before the next request: fires are exact.
+    let model = Resonate { retry_timeout: cli.retry_timeout, fire_within: 0 };
     let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();

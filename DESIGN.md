@@ -74,12 +74,16 @@ Lean text, both because the text is wrong:
   nothing: `P2` still held it. Seven steps; the sweep goes to three. Proved
   without the freshness conjunct.
 - `processSchedule` creates a promise as of its occurrence `t`. For
-  `t + promiseTimeout <= now` that is a pending task on a promise dead at
-  `now`, which `preserved_no_dead_dispatch` forbids. The kernel births such a
-  promise dead, the state Lean reaches on the next touch.
+  `t + promiseTimeout <= now` that is a pending task beside a promise stored
+  pending but dead at `now`, which `preserved_no_dead_dispatch` as first
+  written forbade; the specification now admits a birth whose stored promise
+  is pending, and the kernel stores it as Lean does, `created_at` the
+  occurrence, for every read to project (the reference server stamps the
+  same). An earlier kernel birthed it dead at its deadline, which a client
+  could tell apart.
 
 `processSchedule` is also a function, `spec_fire`: each occurrence's object
-projected if it exists, else born of the occurrence, then the schedule
+left as it is if it exists, else born of the occurrence, then the schedule
 advanced; the system model fires a schedule by it. The promise an occurrence
 is born with carries the schedule and its own lineage in its tags
 (`spec_stamp`), and a lemma shows the stamp changes neither the timer axis
@@ -183,9 +187,20 @@ replays its object.
 
 ### Writing
 
-A request loads the document, runs the kernel handler, drains what the step
-left owed (callbacks and listeners of settled promises, retries now due),
-and writes the rows that changed. The step is decided at the later of the
+A request loads the document, sweeps it at the request's instant and runs
+the kernel handler on the swept document, drains what the step left owed
+(callbacks and listeners of settled promises, retries now due), and writes
+the rows that changed. The Lean specification projects a promise past its
+deadline and a lease past its end on every read (`Object.project`): a
+client never sees either as still ahead. The kernel keeps the promise's
+projection in the document and leaves the lease to the sweep, and `decide`
+sweeps before it handles (`flight.rs`), so the handler sees what a
+projecting read would. A task's offers run on a grid anchored where it came
+to be pending, `due + n·retryTimeout` (the kernel's `next_offer`, Lean's
+`nextOffer`): a retry the sweep gets to late is rearmed where an exact
+timer would have put it, a lease reclaimed is retried from its end, a task
+resumed from the awaited promise's settlement. What a step writes does not
+depend on when the node ran it. The step is decided at the later of the
 node's clock and the document's stamp — the instant of the last write,
 carried in the object's header — so every step on a document is decided no
 earlier than the one before, which is what the kernel is proved for. Every
@@ -379,33 +394,29 @@ model holds.
 The check is the Resonate model of `dtornow/accordant`, the whole protocol
 as the Lean specification has it, with its checker (`checker.rs`): some
 execution of the model must show exactly what the clients saw and the bus
-carried. The model runs with `reported`: a node sweeps a document when it
-gets to it, and a client may read in between, so the model arms no work of
-its own and takes each step the node reports through the
-notes port (`RequestBegin`/`End`, `SweepBegin`/`End`, `FireBegin`/`End`,
-`AdvanceBegin`/`End`) as a call of its own, `Request::Step`, at the instant
-the node decided it: a request's own drain after the request (the resumes,
-unblocks and redispatches it left to do), a sweep (everything due, a
-deadline or a lease's end too), a fire's two halves. A promise past its
-deadline settles when a request reads it, as the kernel keeps the
-projection in the document, or when a sweep gets to it. The note names the instant, the document's version the
-step made or saw, the nonce its write carries and the objects it ran on.
-A request's call sits at that instant too, invoke and return, so the model
-has one place to put it. Two steps on one document at one instant are
-ordered by the version each made or saw. A step whose write the node did
-not see land may have landed all the same (a lost acknowledgement, a
-crash): the store says, by the nonce, and the step is in the trace or not;
-a request whose step never landed and never answered took no effect and is
-left out. A step that wrote nothing sits at the stamp of the version it
-saw rather than at its own instant: a write decided earlier may land
-later, and a read in between saw the document without it; nothing on the
-document was due at the read's instant (the read's sweep would have
-written), so the model answers the same at the stamp, where the write has
-not happened yet either (`checker.rs`). Besides that: every deadline a
-document owes has a key, every `execute` names a task that exists and
-every `unblock` a settled promise, every kind answered 200 at least once,
-and the history overlapped. Twenty seeds check in well under a second each
-(`soak`); the kernel-based checker this replaced took minutes on some.
+carried, the model's internal work (a deadline, a lease's end, a resume, a
+retry, an occurrence) placed where the checker likes. The trace is what a
+client could record: every request as an invoke at the instant it was sent
+(its `head.debug_time`, which is the instant the node decides it at) and a
+return where its answer came, every message the bus carried as a receive,
+and the clock moving to the instants the nodes stamp at, the requests'
+and, through the notes port, the nodes' own sweeps and fires; a return or
+a receive moves the clock nowhere, since every instant the clock visits
+while a call is open is one more place the model may land its effect.
+Nothing else of the nodes' account enters. What makes the check hold is
+the protocol: a lease past its end reads as lost and a task's offers are
+on a grid (above), so the model's exact timers and the node's sweeps agree
+on every state a client can see. The one step that is not a projection, a
+schedule's occurrence, the model fires anywhere from its instant to
+`fire_within` later, two timer buckets here (`Options::fire_within`), the
+bound within which a node gets to a key. Clients are routed to an origin's
+owner, as a load balancer over the members would route them, which
+serialises an origin's requests behind one flight; `--misroute` sends a
+share elsewhere, where a read may miss a write the owner decided and has
+not landed, whose stamp precedes the read, which one clock cannot show.
+Besides that: every deadline a document owes has a key, every `execute`
+names a task that exists and every `unblock` a settled promise, every kind
+answered 200 at least once, and the history overlapped.
 
 ### Differential
 

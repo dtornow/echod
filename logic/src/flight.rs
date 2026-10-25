@@ -102,9 +102,6 @@ pub(crate) struct Committing<R: Row> {
     changed: Vec<R>,
     changed_any: bool,
     now: u64,
-    /// The header's nonce, decided with the step so the step's note can
-    /// carry it.
-    nonce: u64,
     fired: Option<FiredKey>,
     plan: Plan,
     step: Step,
@@ -230,6 +227,10 @@ impl State {
     /// Run `work` on `target`, after whatever is on it already.
     pub(crate) fn submit(&mut self, target: Target, work: Work, firing: Option<Firing>, debug: bool) {
         let name = target.name();
+        if let Work::Sweep { now, .. } = &work {
+            let flight = self.next_flight;
+            self.note(Note::SweepBegin { flight, target: name.clone(), now: *now });
+        }
         let slot = self.flights.slots.entry(name).or_default();
         if slot.busy.is_some() {
             slot.queue.push_back(Queued::Work(Box::new((target, work, firing, debug))));
@@ -486,7 +487,7 @@ impl State {
 
     /// Run the flight's step on an origin's document and start its commit.
     fn run_origin(&mut self, mut f: Flight, w: Working<Promise>) {
-        let (commit, done) = self.decide(f.id, &f.work, w);
+        let (commit, done) = self.decide(&f.work, w);
         let mut commit = commit;
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
@@ -499,7 +500,7 @@ impl State {
     }
 
     fn run_schedule(&mut self, mut f: Flight, w: Working<Schedule>) {
-        let (commit, done) = self.decide(f.id, &f.work, w);
+        let (commit, done) = self.decide(&f.work, w);
         let mut commit = commit;
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
@@ -515,11 +516,18 @@ impl State {
     /// the kernel being proved for an instant at or after it; then the
     /// drain. A lost race runs this again on what it re-read, so the step
     /// decides from the state it is given, which every kernel handler does.
-    fn decide<R: Row>(&mut self, fid: FlightId, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
+    fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
         let mut state = R::state_of(&w.loaded.rows);
         let now = steps::clamp_now(w.loaded.stamp, work.now());
         let (response, why, did) = match work {
             Work::Request { req, kind, .. } => {
+                // Every request first sweeps its document: every lease and
+                // deadline on it is read against the clock, as the Lean
+                // specification's `Object.project` reads them, so the handler
+                // sees a document on which nothing is due. A client never sees
+                // a lease held past its end. The sweep's changes ride the
+                // request's write; an idle sweep writes nothing.
+                let _ = steps::sweep(&mut state, now, &self.kcfg);
                 let r = state.handle(req, now, &self.kcfg);
                 let status = crate::wire::status_of(&r);
                 let why = (status >= 400).then(|| crate::wire::reason_for(kind, req, status, &state));
@@ -537,26 +545,13 @@ impl State {
             Work::Sweep { fired, .. } => fired.clone(),
             _ => None,
         };
-        let ids = R::promises(&rows).map(|ps| ps.iter().map(|p| p.id.clone()).collect::<Vec<_>>());
         let commit = self.commit_new(w, rows, now, did, fired);
-        // the version this step makes, or the one it saw if it writes nothing
-        let wrote = commit.changed_any || commit.fired.is_some();
-        let seq = if wrote { commit.w.loaded.seq + 1 } else { commit.w.loaded.seq };
-        let (target, nonce) = (commit.w.target.clone(), commit.nonce);
-        match work {
-            Work::Request { corr, .. } => self.note(Note::RequestBegin { flight: fid, corr: corr.clone(), target, now, seq, wrote, nonce, ids }),
-            Work::Sweep { .. } => self.note(Note::SweepBegin { flight: fid, target, now, seq, wrote, nonce, ids }),
-            Work::Fire { .. } => {}
-        }
         (commit, Done { response, why, outbox: state.outbox, did })
     }
 
     /// A committed step: the messages out, the answer back.
     fn committed(&mut self, f: Flight, done: Done, fired: Fired) {
         self.note(Note::Commit(CommitOutcome::Committed));
-        if let Work::Request { .. } = &f.work {
-            self.note(Note::RequestEnd { flight: f.id, committed: true });
-        }
         for e in &done.outbox {
             self.send(e);
         }
@@ -606,9 +601,6 @@ impl State {
         if let Target::Origin(o) = &f.target {
             // A write that may or may not have landed: trust nothing cached.
             self.forget(&o.clone());
-        }
-        if let Work::Request { .. } = &f.work {
-            self.note(Note::RequestEnd { flight: f.id, committed: false });
         }
         match e {
             StoreError::PreconditionFailed => {
@@ -678,9 +670,8 @@ impl State {
             // a sweep of the schedule's document that finds nothing due
             f.idle = true;
             let rows = ws.loaded.rows.clone();
-            let (target, seq) = (ws.target.clone(), ws.loaded.seq + 1);
+            self.note(Note::SweepBegin { flight: f.id, target: ws.target.clone(), now: t1 });
             let mut commit = self.commit_new(ws, rows, t1, false, fired);
-            self.note(Note::SweepBegin { flight: f.id, target, now: t1, seq, wrote: true, nonce: commit.nonce, ids: None });
             match self.commit_advance(f.id, &mut commit, None) {
                 Progress::Issued => {
                     f.phase = Phase::FireIdle { commit };
@@ -731,10 +722,8 @@ impl State {
         let mut state = KState { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
         state.process_schedule(&req, t, &self.kcfg);
         steps::drain(&mut state, t, &self.kcfg);
-        let ids = state.objects.iter().map(|p| p.id.clone()).collect();
-        let seq = wo.loaded.seq + 1;
+        self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         let mut commit = self.commit_new(wo, state.objects, t, false, None);
-        self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, seq, nonce: commit.nonce, ids, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
                 f.phase = Phase::FireOrigin { commit, ctx, schedules: state.schedules, outbox: state.outbox, t };
@@ -762,10 +751,9 @@ impl State {
     fn fire_advance(&mut self, mut f: Flight, ctx: FireCtx, schedules: Vec<Schedule>, t: u64) {
         let Work::Fire { schedule, fired, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
         let (id, fired) = (schedule.clone(), fired.clone());
-        let (target, seq) = (ctx.ws.target.clone(), ctx.ws.loaded.seq + 1);
-        let FireCtx { ws, at, next, .. } = ctx;
+        self.note(Note::AdvanceBegin { flight: f.id, schedule: id, now: t, at: ctx.at, next: ctx.next });
+        let FireCtx { ws, .. } = ctx;
         let mut commit = self.commit_new(ws, schedules, t, false, fired);
-        self.note(Note::AdvanceBegin { flight: f.id, schedule: id, target, now: t, seq, nonce: commit.nonce, at, next });
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
                 f.phase = Phase::FireSchedule { commit };
@@ -796,8 +784,7 @@ impl State {
         let deadline = steps::next_deadline(&R::state_of(&rows));
         let etag = w.etag.as_ref().map(|e| e.0.clone());
         let plan = self.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
-        let nonce = self.token();
-        Committing { w, rows, changed, changed_any, now, nonce, fired, plan, step: Step::Start }
+        Committing { w, rows, changed, changed_any, now, fired, plan, step: Step::Start }
     }
 
     /// Drive a commit: `answer` is the store's answer to the call the
@@ -845,7 +832,7 @@ impl State {
                     // an origin's document is remembered as written; a schedule's is not cached
                     if let Some(rows) = R::promises(&c.rows) {
                         let filled_at = self.now();
-                        self.remember(&c.w.target, Cached { loaded: Loaded { rows, row_count, bytes, stamp: c.now, seq: c.w.loaded.seq + 1 }, etag: etag.clone(), filled_at });
+                        self.remember(&c.w.target, Cached { loaded: Loaded { rows, row_count, bytes, stamp: c.now }, etag: etag.clone(), filled_at });
                     }
                     c.w.etag = Some(etag.clone());
                     if idle {
@@ -905,7 +892,7 @@ impl State {
     /// Write the document at a new version, conditionally on the version
     /// loaded: the rows the step changed appended, or the whole document.
     fn issue_write<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, idle: bool) {
-        let header = Header { stamp: c.now, nonce: c.nonce, seq: c.w.loaded.seq + 1 };
+        let header = Header { stamp: c.now, nonce: self.token() };
         let changed: &[R] = if idle { &[] } else { &c.changed };
         let (call, mode, row_count, bytes) = match &c.w.etag {
             None => {

@@ -161,11 +161,12 @@ pub struct Node {
     pub txns: Map<Origin, Flight>,
 }
 
-/// What a step is for: a request; the sweep behind a fired key; or the
-/// fire behind a schedule's key — the schedule, the promise its occurrence
-/// expands to, the run after, and the schedule document's deadline after.
+/// What a step is for: a request, with the document as the sweep before its
+/// handler left it; the sweep behind a fired key; or the fire behind a
+/// schedule's key — the schedule, the promise its occurrence expands to, the
+/// run after, and the schedule document's deadline after.
 pub enum Work {
-    Request(ARequest),
+    Request(ARequest, Doc),
     Sweep(AKey),
     Fire(AKey, Seq<char>, Seq<char>, u64, Option<nat>),
 }
@@ -401,15 +402,19 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
     let n = s.nodes[i];
     let loaded = s.store.doc(o);
     let changed = did || new != loaded;
-    let fired = match work { Work::Sweep(k) => Some(k), Work::Request(_) => None, Work::Fire(..) => None };
+    let fired = match work { Work::Sweep(k) => Some(k), Work::Request(..) => None, Work::Fire(..) => None };
     if s.nodes.contains_key(i) && n.alive && free(n, o)
         && t >= n.clock && t >= s.store.stamp(o) && t <= MAX_TIME
         && (match work {
             // a sweep: `sweep` then `drain`; on a schedule's document, `schedule_due` found nothing due
             Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did)
                 && (is_sched(o) ==> schedules_idle(t, loaded.schedules)),
-            // a request: its handler, then `drain`
-            Work::Request(req) => !did && request_target(req) == Some(o) && kreach_from(t, spec_handle(full(loaded), req, t).0, new),
+            // a request: `sweep` (every lease and deadline on the document read
+            // against the clock, as Lean's `Object.project` reads them), then
+            // its handler on the swept document, then `drain`
+            Work::Request(req, m) => !did && request_target(req) == Some(o)
+                && (exists |d: bool| #[trigger] swept_by(t, full(loaded), full(m), d))
+                && kreach_from(t, spec_handle(full(m), req, t).0, new),
             Work::Fire(k, sid, pid, next, deadline_s) => {
                 let st = sched_target(sid);
                 let sd = s.store.doc(st);
@@ -500,7 +505,7 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
 /// response the kernel gave it on the document it loaded.
 pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
     match x.work {
-        Work::Request(req) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(x.loaded), req, x.t).1 }),
+        Work::Request(req, m) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(m), req, x.t).1 }),
         _ => s.log,
     }
 }

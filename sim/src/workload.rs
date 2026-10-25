@@ -32,7 +32,6 @@ pub fn target_of(req: &Request) -> String {
         Request::HeartbeatTask { tasks, .. } => tasks.first().map(|t| origin(&t.id)).unwrap_or_default(),
         Request::CreateSchedule(c) => format!("sched:{}", c.id),
         Request::GetSchedule(id) | Request::DeleteSchedule(id) => format!("sched:{id}"),
-        Request::Step(_) => unreachable!("a server's own step is not issued"),
     }
 }
 

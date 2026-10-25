@@ -1,6 +1,6 @@
 //! The run: nodes over one store, clients, crashes, then the checks.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,12 +9,12 @@ use echod::env::{Clock, Notes};
 use echod::store::{MemoryStore, Store};
 use echod::{Config, Node as Server};
 use echod_logic::keys::{KeySpace, TimerEntry};
-use echod_logic::{FlightId, Note};
+use echod_logic::Note;
 use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use resonate_core::ResonateServer;
 use serde::Serialize;
 
-use resonate::{Request, Step};
+use resonate::Request;
 
 use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};
@@ -43,6 +43,8 @@ pub struct Options {
     pub join_percent: u64,
     pub outage_percent: u64,
     pub jump_percent: u64,
+    /// Requests sent to a node other than the origin's owner, in percent.
+    pub misroute_percent: u64,
     pub chaos_every_ms: u64,
     /// How long an outage lasts, at most.
     pub disruption_ms: u64,
@@ -69,6 +71,16 @@ pub struct Options {
     pub budget: u64,
 }
 
+impl Options {
+    /// How long after its instant a schedule's occurrence is owed, for the
+    /// checker: a node gets to a deadline when its wheel reaches it, and to one
+    /// another node armed when it lists the bucket, so within a bucket or two,
+    /// as its clock reads them.
+    pub fn fire_within(&self) -> u64 {
+        2 * self.timer_bucket_ms + 2 * self.skew_ms + self.jump_ms
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -84,6 +96,7 @@ impl Default for Options {
             join_percent: 8,
             outage_percent: 10,
             jump_percent: 15,
+            misroute_percent: 0,
             chaos_every_ms: 500,
             disruption_ms: 2_500,
             // Clock chaos off: the checker's model keeps one clock (`checker.rs`).
@@ -125,8 +138,6 @@ pub struct Report {
     pub store_conflicts: u64,
     pub executes: u64,
     pub unblocks: u64,
-    /// The nodes' steps that landed, in the checker's trace.
-    pub steps: usize,
     /// Events in the checker's trace.
     pub events: usize,
     /// Nodes the checker explored.
@@ -134,99 +145,27 @@ pub struct Report {
     pub failures: Vec<String>,
 }
 
-/// The nodes' steps enter the history through the notes port: each begins
-/// when decided and ends when its commit is known, paired by flight. A
-/// request's step is the request's own sweep after it; a fire is the
-/// occurrence and then its origin's sweep, then the advance on the
-/// schedule's document. Sweeps and fires are counted.
+/// The nodes' own steps enter the history through the notes port: the
+/// instant each was decided at is a clock move the checker must know of
+/// (a document's stamp may rest on it), and the sweeps and fires are counted.
 struct StepNotes {
     history: Arc<History>,
     sweeps: AtomicU64,
     fires: AtomicU64,
-    /// Steps decided and not yet ended, by node and flight (flight ids are a
-    /// node's own).
-    begun: Mutex<HashMap<(String, FlightId), Begun>>,
-}
-
-struct Begun {
-    now: u64,
-    target: String,
-    seq: u64,
-    wrote: bool,
-    nonce: u64,
-    ids: Option<Vec<String>>,
-    what: What,
-}
-
-enum What {
-    Request(u64),
-    Sweep,
-    Fire { schedule: String, at: u64, promise: String },
-    Advance { schedule: String, at: u64 },
-}
-
-impl StepNotes {
-    fn begin(&self, node: &str, flight: FlightId, b: Begun) {
-        self.begun.lock().unwrap().insert((node.to_string(), flight), b);
-    }
-
-    fn end(&self, node: &str, flight: FlightId, committed: bool) {
-        let Some(b) = self.begun.lock().unwrap().remove(&(node.to_string(), flight)) else { return };
-        self.record(b, committed);
-    }
-
-    /// The steps begun and never ended (the node died first): the store
-    /// says whether they landed.
-    fn flush(&self) {
-        let begun: Vec<Begun> = std::mem::take(&mut *self.begun.lock().unwrap()).into_values().collect();
-        for b in begun {
-            self.record(b, false);
-        }
-    }
-
-    fn record(&self, b: Begun, committed: bool) {
-        // a step on a document with no objects yet has nothing to run on
-        let ids = b.ids.filter(|ids| !ids.is_empty());
-        let step = |step: Option<Step>, request: Option<u64>| self.history.step(b.now, &b.target, b.seq, b.wrote, step, request, b.nonce, committed);
-        match b.what {
-            // a request, then the drain of its document: what the request
-            // left to do, not what the clock made due
-            What::Request(entry) => step(ids.map(Step::Drain), Some(entry)),
-            // a sweep does everything due; one on a schedule's document runs
-            // nothing of the model's, but its write stamps a version the
-            // reads of it sit at
-            What::Sweep => step(ids.map(Step::Objects), None),
-            What::Fire { schedule, at, promise } => {
-                step(Some(Step::Fire { schedule, at, promise }), None);
-                step(ids.map(Step::Drain), None);
-            }
-            What::Advance { schedule, at } => step(Some(Step::Advance { schedule, at }), None),
-        }
-    }
 }
 
 impl Notes for StepNotes {
-    fn note(&self, node: &str, n: &Note) {
+    fn note(&self, _node: &str, n: &Note) {
         match n {
-            Note::RequestBegin { flight, corr, target, now, seq, wrote, nonce, ids } => {
-                if let Some(entry) = History::entry_of(corr) {
-                    self.begin(node, *flight, Begun { now: *now, target: target.clone(), seq: *seq, wrote: *wrote, nonce: *nonce, ids: ids.clone(), what: What::Request(entry) });
-                }
-            }
-            Note::SweepBegin { flight, target, now, seq, wrote, nonce, ids } => {
+            Note::SweepBegin { now, .. } => {
+                self.history.mark(*now);
                 self.sweeps.fetch_add(1, Ordering::Relaxed);
-                self.begin(node, *flight, Begun { now: *now, target: target.clone(), seq: *seq, wrote: *wrote, nonce: *nonce, ids: ids.clone(), what: What::Sweep });
             }
-            Note::FireBegin { flight, origin, now, seq, nonce, ids, row, at, promise_id, .. } => {
+            Note::FireBegin { now, .. } => {
+                self.history.mark(*now);
                 self.fires.fetch_add(1, Ordering::Relaxed);
-                let what = What::Fire { schedule: row.id.clone(), at: *at, promise: promise_id.clone() };
-                self.begin(node, *flight, Begun { now: *now, target: origin.clone(), seq: *seq, wrote: true, nonce: *nonce, ids: Some(ids.clone()), what });
             }
-            Note::AdvanceBegin { flight, schedule, target, now, seq, nonce, at, .. } => {
-                let what = What::Advance { schedule: schedule.clone(), at: *at };
-                self.begin(node, *flight, Begun { now: *now, target: target.clone(), seq: *seq, wrote: true, nonce: *nonce, ids: None, what });
-            }
-            Note::RequestEnd { flight, committed } | Note::SweepEnd { flight, committed } | Note::FireEnd { flight, committed } | Note::AdvanceEnd { flight, committed } => self.end(node, *flight, *committed),
+            Note::AdvanceBegin { now, .. } => self.history.mark(*now),
             _ => {}
         }
     }
@@ -387,7 +326,13 @@ impl World {
         if live.is_empty() {
             return None;
         }
-        let i = if rng.percent(80) { (echod_logic::keys::fnv1a(origin) % live.len() as u64) as usize } else { rng.below(live.len() as u64) as usize };
+        // As a load balancer over the members would: the origin's owner,
+        // which serialises the origin's requests behind one flight. A
+        // misrouted request is served by any node, after revalidating its
+        // cache; a read there may miss a write the owner has decided and
+        // not yet landed, whose stamp precedes the read, which the model's
+        // one clock cannot show.
+        let i = if rng.percent(self.opts.misroute_percent) { rng.below(live.len() as u64) as usize } else { (echod_logic::keys::fnv1a(origin) % live.len() as u64) as usize };
         Some(Arc::clone(&live[i].server))
     }
 
@@ -397,18 +342,23 @@ impl World {
         while self.issued.fetch_add(1, Ordering::Relaxed) < self.opts.operations {
             let now = self.clock.now();
             let req = gen.next(&mut rng, &seen, now);
-            if let Some(data) = self.issue(&name, req, now, &mut rng).await {
+            if let Some(data) = self.issue(&name, req, &mut rng).await {
                 seen.note(&data);
             }
             tokio::time::sleep(Duration::from_millis(rng.range(0, self.opts.think_ms))).await;
         }
     }
 
-    /// One request, decided at `now`, retried until answered. Every attempt
-    /// is its own entry: one that got no answer may have taken effect, and a
-    /// retry of it is not the same operation again (an acquire retried after
-    /// a lost answer is refused). The answer's data, if one came.
-    async fn issue(&self, name: &str, req: Request, now: u64, rng: &mut Rng) -> Option<serde_json::Value> {
+    /// One request, retried until answered, backing off as a client does (a
+    /// node cut off from the store answers nothing useful for seconds, and
+    /// every attempt in that time is one more call the checker must place).
+    /// Every attempt is its own entry and carries its own instant as
+    /// `debug_time`, the clock when it was sent: one that got no answer may
+    /// have taken effect, and a retry of it is not the same operation again
+    /// (an acquire retried after a lost answer is refused), nor is it decided
+    /// as of the first attempt's instant, which a server on its own clock
+    /// would not do either. The answer's data, if one came.
+    async fn issue(&self, name: &str, req: Request, rng: &mut Rng) -> Option<serde_json::Value> {
         let target = target_of(&req);
         let (kind, data) = encode(&req, WORKER);
         let mut attempts = 0;
@@ -421,7 +371,8 @@ impl World {
                 }
                 continue;
             };
-            let entry = self.history.begin(name, req.clone(), now, self.clock.now());
+            let now = self.clock.now();
+            let entry = self.history.begin(name, req.clone(), now, now);
             self.history.attempt(entry);
             let envelope = RequestEnvelope {
                 kind: kind.to_string(),
@@ -441,10 +392,12 @@ impl World {
                 }
                 Err(_) => {
                     self.history.end(entry, self.clock.now(), None);
-                    if attempts >= 200 {
+                    if attempts >= 30 {
                         return None;
                     }
-                    tokio::time::sleep(Duration::from_millis(rng.range(1, 50))).await;
+                    // 50 ms, doubling to a second, with jitter
+                    let base = (50u64 << (attempts - 1).min(5)).min(1_000);
+                    tokio::time::sleep(Duration::from_millis(base + rng.range(1, 50))).await;
                 }
             }
         }
@@ -463,8 +416,7 @@ impl World {
             reads.push(Request::GetSchedule(id.to_string()));
         }
         for req in reads {
-            let now = self.clock.now();
-            self.issue("final", req, now, rng).await;
+            self.issue("final", req, rng).await;
         }
     }
 }
@@ -491,7 +443,7 @@ async fn simulate(opts: Options) -> Report {
         clock,
         bus,
         history: Arc::clone(&history),
-        notes: Arc::new(StepNotes { history, sweeps: AtomicU64::new(0), fires: AtomicU64::new(0), begun: Mutex::new(HashMap::new()) }),
+        notes: Arc::new(StepNotes { history, sweeps: AtomicU64::new(0), fires: AtomicU64::new(0) }),
         keys,
         fleet: Mutex::new(Fleet::default()),
         issued: AtomicU64::new(0),
@@ -610,20 +562,9 @@ async fn check(world: &World) -> Report {
     }
 
     // The run as a trace of the model, checked by accordant.
-    // The steps that landed: the ones the node saw commit, and the ones
-    // whose write the store took although the node never learnt of it.
-    world.notes.flush();
-    let all = world.history.steps();
-    if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
-        for s in &all {
-            eprintln!("step {s:?} landed={}", world.store.has_landed(s.nonce));
-        }
-    }
-    let steps: Vec<_> = all.into_iter().filter(|s| s.committed || world.store.has_landed(s.nonce)).collect();
-    report.steps = steps.len();
-    let trace = checker::trace(&entries, &steps, &sent);
+    let trace = checker::trace(&entries, &world.history.marks(), &sent);
     report.events = trace.len();
-    match checker::check(&trace, opts.retry_timeout_ms, opts.budget) {
+    match checker::check(&trace, opts.retry_timeout_ms, opts.fire_within(), opts.budget) {
         Verdict::Ok { explored } => report.search_steps = explored as u64,
         Verdict::Ko(v) => {
             report.failures.push(format!("no execution of the model explains event {} of {}: {}: {}", v.index, trace.len(), v.event, v.reason));

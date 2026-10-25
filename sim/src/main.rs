@@ -57,6 +57,12 @@ struct Knobs {
     /// A node's clock drifts by up to this many parts per million.
     #[arg(long, default_value_t = 0)]
     drift: u64,
+    /// Requests sent to a node other than the origin's owner, in percent:
+    /// served there all the same, as a misrouted request is. Off: a read
+    /// there may miss a write the owner decided and has not landed, whose
+    /// stamp precedes the read, which the model's one clock cannot show.
+    #[arg(long, default_value_t = 0)]
+    misroute: u64,
     /// The checker's budget: nodes to explore, at most. For a failing seed,
     /// `ECHOD_SIM_DUMP=1` prints the trace up to the event and the steps the
     /// nodes reported; `ECHOD_SIM_PROGRESS=n` a line every n events;
@@ -82,6 +88,7 @@ impl Knobs {
             skew_ms: self.skew,
             jump_ms: self.jump_ms,
             drift_ppm: self.drift,
+            misroute_percent: self.misroute,
             budget: self.budget,
             ..Options::default()
         }

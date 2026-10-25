@@ -1,16 +1,14 @@
-//! What each client saw, and what the nodes did, with virtual timestamps.
+//! What each client saw, with virtual timestamps; and the instants the
+//! nodes' own steps were decided at.
 //!
-//! A client's entry spans from the first attempt to the answer. A request
-//! answered with "no answer" is retried with the same instant until it is
-//! answered, which every operation admits, so the span is the only window in
-//! which the operation can have taken effect. A node's step (a request's,
-//! a sweep, a fire, an advance) is recorded as the node reports it through
-//! the notes port: the instant it was decided at, the document's version it
-//! made or saw, and whether its write landed.
+//! An entry spans from the first attempt to the answer. A request answered
+//! with "no answer" is retried with the same instant until it is answered,
+//! which every operation admits, so the span is the only window in which the
+//! operation can have taken effect.
 
 use std::sync::Mutex;
 
-use resonate::{Request, Step};
+use resonate::Request;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
@@ -18,7 +16,8 @@ pub struct Entry {
     pub id: u64,
     pub client: String,
     pub req: Request,
-    /// The instant the client sent it at: `head.debug_time`.
+    /// The instant the client sent this attempt at, `head.debug_time`: the
+    /// instant the node decides it at. A retry carries its own.
     pub now: u64,
     pub invoke: u64,
     pub ret: u64,
@@ -27,37 +26,15 @@ pub struct Entry {
     pub attempts: u32,
 }
 
-/// A step a node took, as it reported it.
-#[derive(Clone, Debug)]
-pub struct StepRec {
-    /// The order the node reported it in.
-    pub order: u64,
-    /// The instant it was decided at.
-    pub now: u64,
-    /// The document it ran on, and the version it made (`wrote`) or saw (a
-    /// step that wrote nothing): two steps on one document at one instant
-    /// are ordered by it.
-    pub target: String,
-    pub seq: u64,
-    pub wrote: bool,
-    /// The model's step, if the document holds objects: none on a
-    /// schedule's document for a request there, whose step is the request.
-    pub step: Option<Step>,
-    /// The request whose step this is, if a request's.
-    pub request: Option<u64>,
-    /// The nonce its write carries, by which the store tells whether a write
-    /// the node saw fail, or never saw answered, landed all the same.
-    pub nonce: u64,
-    /// Whether the node saw its write land.
-    pub committed: bool,
-}
-
 #[derive(Default)]
 pub struct History {
     entries: Mutex<Vec<Entry>>,
     next: std::sync::atomic::AtomicU64,
     open: Mutex<std::collections::BTreeMap<u64, Entry>>,
-    steps: Mutex<Vec<StepRec>>,
+    /// The instants a node decided a step of its own at (a sweep, a fire):
+    /// clock moves the checker must know of, since a document's stamp may
+    /// come to rest on one and a later request be decided at it.
+    marks: Mutex<Vec<u64>>,
 }
 
 impl History {
@@ -86,17 +63,9 @@ impl History {
         }
     }
 
-    /// The entry a correlation id names, if it is one of ours.
-    pub fn entry_of(corr: &str) -> Option<u64> {
-        corr.strip_prefix('c').and_then(|n| n.parse().ok())
-    }
-
-    /// A node took a step; `order` is assigned here, in report order.
-    #[allow(clippy::too_many_arguments)]
-    pub fn step(&self, now: u64, target: &str, seq: u64, wrote: bool, step: Option<Step>, request: Option<u64>, nonce: u64, committed: bool) {
-        let mut steps = self.steps.lock().unwrap();
-        let order = steps.len() as u64;
-        steps.push(StepRec { order, now, target: target.to_string(), seq, wrote, step, request, nonce, committed });
+    /// A node decided a step of its own at `now`.
+    pub fn mark(&self, now: u64) {
+        self.marks.lock().unwrap().push(now);
     }
 
     /// Entries never closed: a client killed mid-request. They are closed at
@@ -114,7 +83,10 @@ impl History {
         v
     }
 
-    pub fn steps(&self) -> Vec<StepRec> {
-        self.steps.lock().unwrap().clone()
+    pub fn marks(&self) -> Vec<u64> {
+        let mut v = self.marks.lock().unwrap().clone();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 }

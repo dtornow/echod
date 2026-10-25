@@ -580,14 +580,20 @@ proof fn lemma_swept_object(now: nat, s0: AState, s1: AState, s2: AState, s3: AS
                     assert(false);
                 } else {
                     if retry_due(p2, now) {
-                        // re-offered: the retry is `rt` ahead of `now`, and the sum fits
-                        assert(t3 == p2.task.unwrap().rearm(now, rt));
+                        // re-offered: the next offer on the task's grid, after `now`
+                        // and at most `rt` ahead, and the sum fits
+                        let t2 = p2.task.unwrap();
+                        assert(t3 == t2.rearm(now, rt));
+                        let due = crate::properties::opt_or_zero(t2.retry_timeout_at);
+                        crate::object::lemma_next_offer(due, now, rt);
                         assert(now + rt <= 2 * (MAX_TIME as nat));
-                        assert(t3.retry_timeout_at == Some((now + rt) as u64));
-                        assert(t == now + rt);
+                        assert(t3.retry_timeout_at == Some(crate::object::next_offer(due, now, rt) as u64));
+                        assert(t == crate::object::next_offer(due, now, rt));
                     } else {
                         if lease_due(p1, now) {
-                            assert(p2.task.unwrap().retry_timeout_at == Some(now as u64));
+                            // reclaimed: its first offer is due at the lease's end, already passed
+                            let end = p1.task.unwrap().lease_timeout_at.unwrap();
+                            assert(p2.task.unwrap().retry_timeout_at == Some(end));
                             assert(retry_due(p2, now));
                             assert(false);
                         }

@@ -39,6 +39,10 @@ impl APromise {
     }
 
     /// `Object.project`: the promise projected, and the task viewed through it.
+    /// Lean's projection reads the task's lease against the clock too
+    /// (`TaskObject.lapse`); here that reading is the sweep's, which the node
+    /// runs on the document before every request (`logic::flight::decide`),
+    /// so a handler sees what Lean's read would show.
     pub open spec fn project(self, now: nat) -> APromise {
         let p = self.project_promise(now);
         APromise {
@@ -157,8 +161,10 @@ impl ATask {
     }
 
     /// `resumeOne` on a suspended task.
-    pub open spec fn wake(self, awaited: Seq<char>, now: nat) -> ATask {
-        ATask { state: TaskState::Pending, resumes: seq![awaited], retry_timeout_at: Some(now as u64), ..self }
+    /// `resumeOne` on a suspended task: pending, its first offer due at
+    /// `since`, the instant the awaited promise settled (Lean's `since`).
+    pub open spec fn wake(self, awaited: Seq<char>, since: nat) -> ATask {
+        ATask { state: TaskState::Pending, resumes: seq![awaited], retry_timeout_at: Some(since as u64), ..self }
     }
 
     /// `resumeOne` on a task that is not suspended.
@@ -166,8 +172,9 @@ impl ATask {
         if self.resumes.contains(awaited) { self } else { ATask { resumes: self.resumes.push(awaited), ..self } }
     }
 
+    /// `processRetryTimeout`'s write: the next offer on the task's grid.
     pub open spec fn rearm(self, now: nat, retry_timeout: nat) -> ATask {
-        ATask { retry_timeout_at: Some((now + retry_timeout) as u64), ..self }
+        ATask { retry_timeout_at: Some(next_offer(crate::properties::opt_or_zero(self.retry_timeout_at), now, retry_timeout) as u64), ..self }
     }
 }
 
@@ -193,6 +200,37 @@ impl ATask {
         } else {
             self
         }
+    }
+
+}
+
+/// Lean's `nextOffer`: the first instant on the grid `due + k·t` strictly after
+/// `now`. Anchored at `due`, the instant the task was last offered, so the
+/// value does not depend on when the retry step ran: a server late to it
+/// re-offers the task once and lands where an on-time one would have. With
+/// `t = 0` (which `Config::wf` rules out) it is `due` itself.
+pub open spec fn next_offer(due: nat, now: nat, t: nat) -> nat {
+    if t == 0 || now < due { due } else { (due + t * ((now - due) / (t as int) + 1)) as nat }
+}
+
+/// The grid's two facts: the next offer is after `now`, and no more than one
+/// interval after it (or at `due`, when `due` is still ahead).
+pub proof fn lemma_next_offer(due: nat, now: nat, t: nat)
+    requires
+        t > 0,
+    ensures
+        now < next_offer(due, now, t),
+        next_offer(due, now, t) <= (if now < due { due } else { now + t }),
+{
+    if now >= due {
+        let x = (now - due) as int;
+        let d = t as int;
+        let q = x / d;
+        let r = x % d;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x, d);
+        vstd::arithmetic::div_mod::lemma_mod_pos_bound(x, d);
+        assert(d * (q + 1) == d * q + d) by (nonlinear_arith);
+        assert(d * q == x - r);
     }
 }
 
@@ -472,9 +510,9 @@ impl Promise {
         }
     }
 
-    pub fn task_wake(&mut self, awaited: &String, now: u64)
+    pub fn task_wake(&mut self, awaited: &String, since: u64)
         requires old(self).task is Some,
-        ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().wake(awaited@, now as nat)),
+        ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().wake(awaited@, since as nat)),
     {
         match &mut self.task {
             Some(t) => {
@@ -483,7 +521,7 @@ impl Promise {
                 v.push(awaited.clone());
                 assert(v.deep_view() =~= seq![awaited@]);
                 t.resumes = v;
-                t.retry_timeout_at = Some(now);
+                t.retry_timeout_at = Some(since);
             }
             None => {}
         }
@@ -504,12 +542,25 @@ impl Promise {
     }
 
     pub fn task_rearm(&mut self, now: u64, retry_timeout: u64)
-        requires old(self).task is Some, now + retry_timeout <= u64::MAX,
+        requires
+            old(self).task is Some,
+            0 < retry_timeout,
+            now + retry_timeout <= u64::MAX,
+            crate::properties::opt_or_zero(old(self).task.unwrap().retry_timeout_at) <= u64::MAX,
         ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().rearm(now as nat, retry_timeout as nat)),
     {
         match &mut self.task {
             Some(t) => {
-                t.retry_timeout_at = Some(now + retry_timeout);
+                let due: u64 = match t.retry_timeout_at { Some(d) => d, None => 0 };
+                proof { lemma_next_offer(due as nat, now as nat, retry_timeout as nat); }
+                let next: u64 = if now < due {
+                    due
+                } else {
+                    let k = (now - due) / retry_timeout;
+                    assert(retry_timeout as int * (k as int + 1) == retry_timeout as int * (k as int) + retry_timeout as int) by (nonlinear_arith);
+                    due + retry_timeout * (k + 1)
+                };
+                t.retry_timeout_at = Some(next);
             }
             None => {}
         }

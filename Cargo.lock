@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accordant"
 version = "0.1.0"
-source = "git+https://github.com/dtornow/accordant?rev=3c148fb54991513c6ca926d6dfca6613572bc07a#3c148fb54991513c6ca926d6dfca6613572bc07a"
+source = "git+https://github.com/dtornow/accordant?rev=609f8c00ca6d1105a6c0e1de9ae014c63bae3e8c#609f8c00ca6d1105a6c0e1de9ae014c63bae3e8c"
 dependencies = [
  "imbl",
  "vstd",
@@ -2589,7 +2589,7 @@ dependencies = [
 [[package]]
 name = "resonate"
 version = "0.1.0"
-source = "git+https://github.com/dtornow/accordant?rev=3c148fb54991513c6ca926d6dfca6613572bc07a#3c148fb54991513c6ca926d6dfca6613572bc07a"
+source = "git+https://github.com/dtornow/accordant?rev=609f8c00ca6d1105a6c0e1de9ae014c63bae3e8c#609f8c00ca6d1105a6c0e1de9ae014c63bae3e8c"
 dependencies = [
  "accordant",
  "chrono",

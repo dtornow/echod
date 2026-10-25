@@ -737,14 +737,22 @@ proof fn lemma_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: 
                 assert(no_due(t, x.loaded));
             }
         }
-        Work::Request(req) => {
+        Work::Request(req, m) => {
+            // the sweep keeps the catalogue, the schedules and the objects' keys;
             // the handler keeps the catalogue and the shape; the drain keeps both from there
-            let h = spec_handle(full(x.loaded), req, t).0;
-            lemma_spec_handle(t, full(x.loaded), req);
-            echod_kernel::external_proof::lemma_spec_handle_keeps(t, full(x.loaded), req);
+            let d = choose |d: bool| #[trigger] swept_by(t, full(x.loaded), full(m), d);
+            lemma_reach_inv(t, full(x.loaded), full(m));
+            assert(m.schedules == x.loaded.schedules);
+            assert(m.objects.dom() == x.loaded.objects.dom());
+            let h = spec_handle(full(m), req, t).0;
+            lemma_spec_handle(t, full(m), req);
+            echod_kernel::external_proof::lemma_spec_handle_keeps(t, full(m), req);
             lemma_kreach_from_inv(t, h, x.new);
             if is_sched(o) {
                 lemma_sched_request_is(req, o);
+                // a schedule's document holds no objects: the sweep left it as it was
+                assert(m.objects =~= x.loaded.objects);
+                assert(full(m) == full(x.loaded));
                 assert(h.objects == x.loaded.objects);
                 assert(x.new.objects.dom() == x.loaded.objects.dom());
                 lemma_sched_request_runs(s, o, req, t, x.new);

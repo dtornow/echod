@@ -1292,7 +1292,7 @@ impl State {
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             lemma_projected_task_identity(now as nat, a, x);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now as nat))));
-            lemma_release_legal(now as nat, a, self@, x);
+            lemma_release_legal(now as nat, a, self@, x, now as nat);
             assert(self@.objects =~= spec_task_release(a, req@, now as nat).0.objects);
         }
         StatusRes { status: 200 }

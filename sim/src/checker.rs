@@ -1,139 +1,71 @@
 //! A run as a trace of the Resonate model, checked by `accordant`.
 //!
 //! The history becomes the checker's trace: every request a client made is
-//! an `Invoke` and, if it was answered, a `Return`; every step a node took
-//! is a call of its own, `Request::Step`, at the instant the node decided
-//! it; every message the bus carried is a `Receive`; and the clock moves
-//! (`Clock`) at every instant something happened. The checker then asks
-//! whether some execution of the model shows exactly these observations.
-//! The model is partitioned by origin, as the documents are.
+//! an `Invoke` at the instant it was sent (its `head.debug_time`, the
+//! earliest the node decides it at, which its retries keep) and, if it was
+//! answered, a `Return` at the instant the answer came; every message the
+//! bus carried is a `Receive`; and the clock moves (`Clock`) at every
+//! instant something happened, the nodes' own steps included. The checker
+//! then asks whether some execution of the model, with its internal work (a
+//! deadline, a lease, a resume, a retry, a schedule's occurrence) placed
+//! where the checker likes, shows exactly these observations. Nothing of the
+//! nodes' own account enters but the instants: the check is black-box. The
+//! model is partitioned by origin, as the documents are.
 //!
-//! The model runs with `reported`: a node sweeps a document when it gets to
-//! it, and a client may read in between, so the model arms no work of its
-//! own and takes each step as the node reports it (`Note::*Begin`,
-//! `Note::*End`): a request's own drain after the request (what the request
-//! left to do: resumes, unblocks, redispatches), a sweep (everything due:
-//! deadlines and leases too), a fire's two halves. A promise past its
-//! deadline settles when a request reads it, as the node keeps the reading
-//! in its document, or when a sweep gets to it. A step whose write the node
-//! did not see land may have landed all the same (a lost acknowledgement, a
-//! crash): the store says, by the nonce the write carries, and the step is
-//! in the trace or not.
-//!
-//! Where a call sits. A node decides a request at one instant, the kernel's
-//! `now`: `head.debug_time`, the instant the client sent it at, or the
-//! document's stamp if that is later; and it reports the instant. The trace
-//! puts the call's `Invoke` and `Return` both there, so the model has one
-//! place to put it: a run's clients overlap freely, and the checker would
-//! otherwise weigh every clock move in every span. Two steps on one
-//! document at one instant are ordered by the document's version each made
-//! or saw. A call answered without a step (refused at the door) keeps its
-//! span, from the instant it was sent to the instant it was answered. The
-//! instants are the node's claims, and the check is that the claims,
-//! together, are an execution of the model.
-//!
-//! A step that wrote nothing sits at the stamp of the version it saw, not
-//! at its own instant. Its own instant may be later than that of a write it
-//! did not see, decided earlier and landed later (a create sent at 1627
-//! lands at 1650; a read sent at 1641 saw the document without it), and the
-//! model's clock cannot go back to take the write after the read. Nothing
-//! on the document was due at the step's instant, else the step's sweep
-//! would have written; so the model answers the same at the stamp, where
-//! the write has not happened yet either.
-//!
-//! One clock. The stamp a request is clamped to is an instant some step was
+//! One clock. A request is decided at its `head.debug_time`, or at the
+//! document's stamp if that is later; the stamp is an instant some step was
 //! decided at, which the trace carries as a clock move. So the run's nodes
 //! must keep the one clock too: with skew, drift or jumps a node sweeps at
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use std::collections::BTreeMap;
-
 use accordant::{Checker, Config, Event, Grouped, Violation};
-use resonate::{dominates, Dispatch, Request, Resonate, Response, Server};
+use resonate::{Dispatch, Request, Resonate, Response, Server};
 
 use crate::bus::Sent;
-use crate::history::{Entry, StepRec};
+use crate::history::Entry;
 use crate::wire::{decode, encode};
 use crate::workload::WORKER;
 
 pub type Trace = Vec<Event<Request, Response, Dispatch>>;
 
-/// Call ids for the nodes' steps, past any entry's.
-const STEP_CALLS: u64 = 1 << 40;
-
-/// The trace, from what the run recorded: the entries, the steps that
-/// landed, the messages.
-pub fn trace(entries: &[Entry], steps: &[StepRec], sent: &[Sent]) -> Trace {
-    let mut steps: Vec<StepRec> = steps.to_vec();
-    // A step that wrote nothing sits at the stamp of the version it saw: the
-    // instant of the write that made it (the empty document's is 0).
-    let stamps: BTreeMap<(String, u64), u64> = steps.iter().filter(|s| s.wrote).map(|s| ((s.target.clone(), s.seq), s.now)).collect();
-    for s in steps.iter_mut() {
-        if !s.wrote {
-            s.now = stamps.get(&(s.target.clone(), s.seq)).copied().unwrap_or(0);
-        }
-    }
-    // Two steps on one document at one instant, in the order of the
-    // versions they made or saw, the write before what saw it: the node
-    // reports them as their commits come back, which may be the other way
-    // round.
-    let mut groups: BTreeMap<(u64, String), Vec<usize>> = BTreeMap::new();
-    for (i, s) in steps.iter().enumerate() {
-        groups.entry((s.now, s.target.clone())).or_default().push(i);
-    }
-    for idx in groups.values().filter(|g| g.len() > 1) {
-        let mut orders: Vec<u64> = idx.iter().map(|&i| steps[i].order).collect();
-        orders.sort_unstable();
-        let mut by_seq: Vec<usize> = idx.clone();
-        by_seq.sort_by_key(|&i| (steps[i].seq, !steps[i].wrote, steps[i].order));
-        for (i, order) in by_seq.into_iter().zip(orders) {
-            steps[i].order = order;
-        }
-    }
-
-    // (instant, slot, rank, id, event): a request at the slot of its step,
-    // invoke then return, then the step itself; a message received after
-    // everything at its instant; a call without a step first, and its
-    // answer last, at theirs. A call without a step and without an answer
-    // took no effect: it is left out.
-    const FIRST: u64 = 0;
-    const LAST: u64 = u64::MAX;
-    let mut items: Vec<(u64, u64, u8, u64, Event<Request, Response, Dispatch>)> = Vec::new();
-    let mut of_entry: BTreeMap<u64, Vec<&StepRec>> = BTreeMap::new();
-    for s in &steps {
-        if let Some(e) = s.request {
-            of_entry.entry(e).or_default().push(s);
-        }
-    }
+/// The trace, from what the run recorded.
+pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
+    // (instant, rank, event): at one instant, returns and receives before
+    // invokes, so a call never returns before it is invoked in the trace
+    // order and a message is received where the clock had already reached.
+    // The clock moves to the instants the nodes stamp at: a request's
+    // `debug_time`, its invoke, and the nodes' own steps (`marks`). A return
+    // or a receive moves it nowhere: nothing is stamped at those instants,
+    // and every instant the clock visits while a call is open is one more
+    // place the model may land its effect.
+    let mut items: Vec<(u64, u8, u64, Event<Request, Response, Dispatch>)> = Vec::new();
     for e in entries {
-        let (from, to) = match (of_entry.get(&e.id), &e.outcome) {
-            // a detached create has two steps, on two documents, in either
-            // order of instants: the call spans them
-            (Some(ss), _) => (ss.iter().map(|s| (s.now, s.order)).min().unwrap(), ss.iter().map(|s| (s.now, s.order)).max().unwrap()),
-            (None, Some(_)) => ((e.now, FIRST), (e.ret.max(e.now), LAST)),
-            (None, None) => continue,
-        };
-        items.push((from.0, from.1, 0, e.id, Event::Invoke { call: e.id, req: e.req.clone() }));
+        items.push((e.now, 2, e.id, Event::Invoke { call: e.id, req: e.req.clone() }));
         if let Some((status, data)) = &e.outcome {
             let (kind, _) = encode(&e.req, WORKER);
-            items.push((to.0, to.1, 1, e.id, Event::Return { call: e.id, res: decode(kind, *status, data) }));
+            items.push((e.ret.max(e.now), 3, e.id, Event::Return { call: e.id, res: decode(kind, *status, data) }));
         }
     }
-    for s in &steps {
-        let Some(step) = &s.step else { continue };
-        let call = STEP_CALLS + s.order;
-        items.push((s.now, s.order, 2, call, Event::Invoke { call, req: Request::Step(step.clone()) }));
-        items.push((s.now, s.order, 3, call, Event::Return { call, res: Response::Status(200) }));
-    }
     for (i, s) in sent.iter().enumerate() {
-        items.push((s.at, LAST, 4, i as u64, Event::Receive { msg: s.msg.clone() }));
+        items.push((s.at, 1, i as u64, Event::Receive { msg: s.msg.clone() }));
     }
-    items.sort_by_key(|(t, slot, rank, id, _)| (*t, *slot, *rank, *id));
+    items.sort_by_key(|(t, rank, id, _)| (*t, *rank, *id));
+    let mut marks = marks.to_vec();
+    marks.sort_unstable();
     let mut out = Vec::new();
     let mut clock: Option<u64> = None;
-    for (t, _, _, _, e) in items {
-        if clock.is_none_or(|c| t > c) {
+    let mut mi = 0;
+    for (t, rank, _, e) in items {
+        // the nodes' own instants up to here, then this one if it is an invoke
+        while mi < marks.len() && marks[mi] <= t {
+            if clock.is_none_or(|c| marks[mi] > c) {
+                out.push(Event::Clock { at: marks[mi] });
+                clock = Some(marks[mi]);
+            }
+            mi += 1;
+        }
+        if rank == 2 && clock.is_none_or(|c| t > c) {
             out.push(Event::Clock { at: t });
             clock = Some(t);
         }
@@ -153,15 +85,16 @@ pub enum Verdict {
 }
 
 /// The trace against the model, partitioned by origin, with `budget` nodes
-/// to explore at most. `retry_timeout`: the nodes' and the model's.
-pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
+/// to explore at most. `retry_timeout`: the nodes' and the model's;
+/// `fire_within`: how long after its instant a schedule's occurrence is owed,
+/// the nodes' sweep.
+pub fn check(trace: &Trace, retry_timeout: u64, fire_within: u64, budget: u64) -> Verdict {
     let mut cfg = Config { max_explore: budget as usize, ..Config::default() };
     // `ECHOD_SIM_WIDTH=n`: give up at a narrower profile, to see what it holds.
     if let Some(w) = std::env::var("ECHOD_SIM_WIDTH").ok().and_then(|v| v.parse().ok()) {
         cfg.max_width = w;
     }
-    let model = Resonate { retry_timeout, reported: true };
-    let mut c: Checker<Grouped<Resonate>> = Checker::with_partitions(model, Server::default(), cfg).dominating(dominates);
+    let mut c: Checker<Grouped<Resonate>> = Checker::with_partitions(Resonate { retry_timeout, fire_within }, Server::default(), cfg);
     // `ECHOD_SIM_PROGRESS=n`: a line every n events, for where the time goes.
     let progress: Option<usize> = std::env::var("ECHOD_SIM_PROGRESS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0);
     let started = std::time::Instant::now();
@@ -187,8 +120,6 @@ pub fn show(trace: &Trace, upto: usize) -> String {
     let mut out = String::new();
     for (i, e) in trace.iter().enumerate().take(upto + 1) {
         let line = match e {
-            Event::Invoke { call, req: Request::Step(st) } => format!("step {:>4} → {st:?}", call - STEP_CALLS),
-            Event::Return { call, .. } if *call >= STEP_CALLS => format!("step {:>4} ←", call - STEP_CALLS),
             Event::Invoke { call, req } => format!("call {call:>4} → {req:?}"),
             Event::Return { call, res } => format!("call {call:>4} ← {res:?}"),
             Event::Receive { msg } => format!("          ⇐ {msg:?}"),

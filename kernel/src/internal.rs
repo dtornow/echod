@@ -67,10 +67,11 @@ pub open spec fn lease_due(p: APromise, now: nat) -> bool {
     &&& p.timeout_at > now
 }
 
-/// `processLeaseTimeout`: a due lease returns the task to pending.
+/// `processLeaseTimeout`: a due lease returns the task to pending, its first
+/// offer due at the lease's end (what a read already projects, `lapse`).
 pub open spec fn lease_timeout_objects(a: AState, id: Seq<char>, now: nat) -> Map<Seq<char>, APromise> {
     if a.objects.contains_key(id) && lease_due(a.objects[id], now) {
-        a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().release(now)))
+        a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().release(a.objects[id].task.unwrap().lease_timeout_at.unwrap() as nat)))
     } else {
         a.objects
     }
@@ -144,23 +145,23 @@ impl State {
             Some(i) => i,
         };
         proof { self.lemma_object_at(i as int); }
-        let due = match &self.objects[i].task {
+        let (due, end) = match &self.objects[i].task {
             None => { return; }
             Some(t) => match t.lease_timeout_at {
                 None => { return; }
-                Some(d) => t.state == TaskState::Acquired && d <= now,
+                Some(d) => (t.state == TaskState::Acquired && d <= now, d),
             },
         };
         if !due || self.objects[i].state != PromiseState::Pending || self.objects[i].timeout_at <= now {
             return;
         }
         let ghost before = self.objects@;
-        self.objects[i].task_release(now);
+        self.objects[i].task_release(end);
         proof {
             let x = req.id@;
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
-            assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now as nat))));
-            lemma_release_legal(now as nat, a, self@, x);
+            assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(end as nat))));
+            lemma_release_legal(now as nat, a, self@, x, end as nat);
             lemma_internal_one(now as nat, a, self@, x);
         }
     }
@@ -329,7 +330,9 @@ impl State {
         };
         let ghost before2 = self.objects@;
         if state == TaskState::Suspended {
-            self.objects[j].task_wake(&req.awaited, now);
+            // the resumed task's first offer: when the awaited settled
+            let since = match self.objects[i].settled_at { Some(t) => t, None => 0 };
+            self.objects[j].task_wake(&req.awaited, since);
         } else if state != TaskState::Fulfilled {
             self.objects[j].task_buffer(&req.awaited);
         }
@@ -415,15 +418,15 @@ impl State {
             };
             assert(occs[k as int] == o@);
             assert(creq@ == occ_req(sched, occs[k as int]));
-            match self.read_object(&o.promise_id, now) {
-                Some(_) => {
+            match self.find_object(&o.promise_id) {
+                Some(i) => {
+                    proof { self.lemma_object_at(i as int); }
                     assert(self@ == fire_step(now as nat, s0, sched, occs[k as int]));
                 }
                 None => {
-                    let birth = if creq.timeout_at > now { o.at } else { now };
-                    let p = create_promise(&creq, birth);
+                    let p = create_promise(&creq, o.at);
                     self.push_object(p);
-                    assert(birth as nat == birth_of(occs[k as int], sched, now as nat));
+                    assert(p@ == born_occurrence(sched, occs[k as int]));
                     assert(self@ == fire_step(now as nat, s0, sched, occs[k as int]));
                 }
             }
@@ -471,12 +474,12 @@ pub open spec fn occ_req(c: ASchedule, o: AOccurrence) -> APromiseCreateReq {
 
 /// One occurrence fired: the object projected if it exists, else born of
 /// the occurrence.
-pub open spec fn fire_step(now: nat, a: AState, c: ASchedule, o: AOccurrence) -> AState {
+pub open spec fn fire_step(_now: nat, a: AState, c: ASchedule, o: AOccurrence) -> AState {
     let x = o.promise_id;
     if a.objects.contains_key(x) {
-        with_objects(a, a.objects.insert(x, a.objects[x].project(now)))
+        a
     } else {
-        with_objects(a, a.objects.insert(x, spec_create(occ_req(c, o), birth_of(o, c, now))))
+        with_objects(a, a.objects.insert(x, born_occurrence(c, o)))
     }
 }
 
@@ -499,19 +502,22 @@ pub open spec fn spec_fire(a: AState, sid: Seq<char>, occs: Seq<AOccurrence>, ne
     }
 }
 
-/// When the occurrence's promise is born: at the occurrence if it is still
-/// live at `now`, else at `now`, dead.
-pub open spec fn birth_of(o: AOccurrence, c: ASchedule, now: nat) -> nat {
-    if occ_req(c, o).timeout_at > now { o.at as nat } else { now }
+/// The occurrence's promise as the firing leaves it: created as of the
+/// occurrence's own instant, as Lean's `fireOccurrence` creates it at `t`,
+/// whenever the server gets to it. One whose deadline has passed by then is
+/// stored pending, as Lean stores it; every read projects it, settled at that
+/// deadline and created at the occurrence.
+pub open spec fn born_occurrence(c: ASchedule, o: AOccurrence) -> APromise {
+    spec_create(occ_req(c, o), o.at as nat)
 }
 
-/// What firing leaves at `x`: an existing object projected, or a promise born
+/// What firing leaves at `x`: an existing object as it was, or a promise born
 /// of one of the occurrences that expand to `x`.
-pub open spec fn fire_shape(now: nat, a: AState, b: AState, c: ASchedule, occs: Seq<AOccurrence>, x: Seq<char>) -> bool {
+pub open spec fn fire_shape(_now: nat, a: AState, b: AState, c: ASchedule, occs: Seq<AOccurrence>, x: Seq<char>) -> bool {
     &&& b.objects.contains_key(x)
-    &&& a.objects.contains_key(x) ==> b.objects[x] == a.objects[x].project(now)
+    &&& a.objects.contains_key(x) ==> b.objects[x] == a.objects[x]
     &&& !a.objects.contains_key(x) ==> exists|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
-        && b.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now))
+        && b.objects[x] == born_occurrence(c, occs[j])
 }
 
 /// What the callback drain leaves at the awaiter.
@@ -523,7 +529,7 @@ pub open spec fn resumed_shape(now: nat, a: AState, b: AState, x: Seq<char>, y: 
         ||| b.objects[y] == p && p.task is None
         ||| b.objects[y] == m && (m.task is None || m.task.unwrap().state == TaskState::Fulfilled)
         ||| (m.task is Some && m.task.unwrap().state == TaskState::Suspended
-                && b.objects[y] == m.with_task(m.task.unwrap().wake(x, now)))
+                && b.objects[y] == m.with_task(m.task.unwrap().wake(x, crate::properties::opt_or_zero(a.objects[x].project(now).settled_at))))
         ||| (m.task is Some && m.task.unwrap().state != TaskState::Suspended && m.task.unwrap().state != TaskState::Fulfilled
                 && b.objects[y] == m.with_task(m.task.unwrap().buffer(x)))
     }

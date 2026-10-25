@@ -95,6 +95,8 @@ pub proof fn lemma_retry_legal(now: nat, a: AState, b: AState, id: Seq<char>, rt
     let u = t.rearm(now, rt);
     let q = p.with_task(u);
     assert(b.objects[id] == q);
+    // the next offer is after `now`, at most `rt` ahead
+    crate::object::lemma_next_offer(crate::properties::opt_or_zero(t.retry_timeout_at), now, rt);
     assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
         b.objects.contains_key(w) && b.objects[w].tags == a.objects[w].tags
         && forall|z: Seq<char>| a.objects[w].callbacks.contains(z) ==> #[trigger] b.objects[w].callbacks.contains(z) by {
@@ -283,7 +285,7 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
                 if b.objects[y] == py && py.task is None {
                 } else if b.objects[y] == my && (my.task is None || my.task.unwrap().state == TaskState::Fulfilled) {
                 } else if my.task is Some && my.task.unwrap().state == TaskState::Suspended
-                    && b.objects[y] == my.with_task(my.task.unwrap().wake(x, now)) {
+                    && b.objects[y] == my.with_task(my.task.unwrap().wake(x, crate::properties::opt_or_zero(a.objects[x].project(now).settled_at))) {
                     assert(b.objects[y].task.unwrap().resumes == seq![x]);
                     assert(b.objects[y].task.unwrap().resumes[0] == x);
                 } else {
@@ -314,11 +316,12 @@ pub proof fn lemma_callback_legal(now: nat, a: AState, b: AState, x: Seq<char>, 
             lemma_project_trans_obj(now, a, b, y);
             lemma_project_inv_obj_lost(now, a, b, y, y);
         } else if my.task is Some && my.task.unwrap().state == TaskState::Suspended
-            && b.objects[y] == my.with_task(my.task.unwrap().wake(x, now)) {
+            && b.objects[y] == my.with_task(my.task.unwrap().wake(x, crate::properties::opt_or_zero(a.objects[x].project(now).settled_at))) {
             lemma_projected_task_identity(now, a, y);
             assert(my == py);
+            let since = crate::properties::opt_or_zero(a.objects[x].project(now).settled_at);
             let t = py.task.unwrap();
-            let u = t.wake(x, now);
+            let u = t.wake(x, since);
             let qy = py.with_task(u);
             assert(b.objects[y] == qy);
             assert(u.resumes == seq![x]);
@@ -488,7 +491,7 @@ pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule
         c.promise_timeout <= MAX_TIME as nat,
         o.at <= now,
         now <= MAX_TIME,
-        b.objects == a.objects.insert(o.promise_id, spec_create(occ_req(c, o), birth_of(o, c, now))),
+        b.objects == a.objects.insert(o.promise_id, born_occurrence(c, o)),
         b.schedules == a.schedules,
         b.outbox == a.outbox,
     ensures
@@ -498,37 +501,14 @@ pub proof fn lemma_fire_birth_legal(now: nat, a: AState, b: AState, c: ASchedule
 {
     lemma_inv_pointwise(now, a);
     let req = occ_req(c, o);
-    let t = birth_of(o, c, now);
     crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, o.promise_id);
     assert(req.timeout_at <= 2 * (MAX_TIME as nat));
-    assert(t <= now);
-    assert(req.timeout_at <= t || req.timeout_at > now);
-    lemma_born_obj(now, t, a, b, req);
+    lemma_born_obj(now, o.at as nat, a, b, req);
     assert forall|w: Seq<char>, z: Seq<char>| #[trigger] a.objects.contains_key(w)
         && #[trigger] a.objects[w].callbacks.contains(z)
         implies b.objects.contains_key(w) && b.objects[w].callbacks.contains(z) by {}
     crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == o.promise_id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
     assert(seq![o][0] == o);
-}
-
-/// Projecting again an object the firing already touched leaves the shape.
-pub proof fn lemma_fire_project_idem(now: nat, a: AState, s0: AState, b: AState, c: ASchedule, occs: Seq<AOccurrence>, x: Seq<char>)
-    requires
-        fire_shape(now, a, s0, c, occs, x),
-        b.objects.contains_key(x),
-        b.objects[x] == s0.objects[x].project(now),
-    ensures
-        fire_shape(now, a, b, c, occs, x),
-{
-    if a.objects.contains_key(x) {
-        crate::external_proof::lemma_project_idem(a.objects[x], now);
-    } else {
-        let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
-            && s0.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
-        let q = spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
-        // a promise born live is ahead of `now`; one born dead is settled: both fixed by projection
-        assert(q.project(now) == q);
-    }
 }
 
 /// The first `k` occurrences fired: the catalogue holds, nothing else
@@ -559,7 +539,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<AOccur
         let x = o.promise_id;
         let b = fire_step(now, s0, c, o);
         if s0.objects.contains_key(x) {
-            lemma_project_legal(now, s0, b, x);
+            assert(b == s0);
             if !occ_touched(occs, k - 1, x) {
                 assert(crate::external::unchanged_at(a, s0, x));
             }
@@ -574,11 +554,7 @@ pub proof fn lemma_fire_fold(now: nat, a: AState, c: ASchedule, occs: Seq<AOccur
         }
         assert forall|y: Seq<char>| #[trigger] occ_touched(occs, k, y) implies fire_shape(now, a, b, c, occs, y) by {
             if y == x {
-                if s0.objects.contains_key(x) {
-                    if occ_touched(occs, k - 1, x) {
-                        lemma_fire_project_idem(now, a, s0, b, c, occs, x);
-                    }
-                } else {
+                if !s0.objects.contains_key(x) {
                     assert(0 <= k - 1 < occs.len() && occs[k - 1].promise_id == x);
                 }
             } else {
@@ -686,18 +662,19 @@ pub proof fn lemma_fire_legal(now: nat, a: AState, a2: AState, b: AState, sid: S
     assert forall|x: Seq<char>| #[trigger] occ_of(occs, x) implies inv_obj(now, b, x) && trans_obj(now, a, b, x) by {
         assert(fire_shape(now, a, a2, c, occs, x));
         if a.objects.contains_key(x) {
-            lemma_project_inv_obj(now, a, b, x);
-            lemma_project_trans_obj(now, a, b, x);
+            assert(b.objects[x] == a.objects[x]);
+            assert(inv_obj(now, a, x));
+            assert(inv_obj(now, b, x));
+            crate::properties_proof::lemma_trans_obj_unchanged(now, a, b, x);
         } else {
             let j = choose|j: int| 0 <= j < occs.len() && #[trigger] occs[j].promise_id == x
-                && a2.objects[x] == spec_create(occ_req(c, occs[j]), birth_of(occs[j], c, now));
+                && a2.objects[x] == born_occurrence(c, occs[j]);
             let req = occ_req(c, occs[j]);
-            let t = birth_of(occs[j], c, now);
             assert(inv_sched(now, a, sid));
             assert(c.promise_timeout <= MAX_TIME as nat);
             crate::tags_proof::lemma_stamp_timer(c.promise_tags, c.id, occs[j].promise_id);
             assert(req.timeout_at <= 2 * (MAX_TIME as nat));
-            lemma_born_obj(now, t, a, b, req);
+            lemma_born_obj(now, occs[j].at as nat, a, b, req);
         }
     }
     assert forall|x: Seq<char>| !occ_of(occs, x) implies

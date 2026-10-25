@@ -538,10 +538,19 @@ pub open spec fn task_pair_at(b: AState, id: Seq<char>, p: APromise, none_case: 
     }
 }
 
-pub open spec fn monotone_task_version_increases_only_on_acquisition_at(_now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
+/// Lean's `TaskObject.lapsed`: an acquired task whose lease has ended by
+/// `now`. A read shows it pending, so one request may take it over: the
+/// stored row goes from acquired to acquired, one version up, in one step.
+pub open spec fn lapsed(t: ATask, now: nat) -> bool {
+    t.state == TaskState::Acquired && match t.lease_timeout_at { Some(d) => d <= now, None => false }
+}
+
+pub open spec fn monotone_task_version_increases_only_on_acquisition_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
         if t.state == TaskState::Pending && u.state == TaskState::Acquired {
             u.version == t.version + 1
+        } else if lapsed(t, now) && u.state == TaskState::Acquired {
+            u.version == t.version || u.version == t.version + 1
         } else {
             u.version == t.version
         })
@@ -702,7 +711,7 @@ pub open spec fn preserved_task_lease_holder_stable(now: nat, a: AState, b: ASta
         preserved_task_lease_holder_stable_at(now, b, id, a.objects[id])
 }
 
-pub open spec fn consistent_task_lease_fields_move_together_at(_now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
+pub open spec fn consistent_task_lease_fields_move_together_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask| {
         ||| (u.pid == t.pid && u.ttl == t.ttl && u.lease_timeout_at == t.lease_timeout_at)
         ||| (t.state != TaskState::Acquired && u.state == TaskState::Acquired
@@ -710,6 +719,8 @@ pub open spec fn consistent_task_lease_fields_move_together_at(_now: nat, b: ASt
         ||| (t.state == TaskState::Acquired && u.state != TaskState::Acquired
                 && u.pid is None && u.ttl is None && u.lease_timeout_at is None)
         ||| (t.state == TaskState::Acquired && u.state == TaskState::Acquired && u.pid == t.pid && u.ttl == t.ttl)
+        ||| (lapsed(t, now) && u.state == TaskState::Acquired && u.version == t.version + 1
+                && u.pid is Some && u.ttl is Some && u.lease_timeout_at is Some)
     })
 }
 pub open spec fn consistent_task_lease_fields_move_together(now: nat, a: AState, b: AState) -> bool {
@@ -735,22 +746,40 @@ pub open spec fn consistent_task_resumes_cleared_only_on_dispatch_or_park(now: n
         consistent_task_resumes_cleared_only_on_dispatch_or_park_at(now, b, id, a.objects[id])
 }
 
+pub open spec fn granted(now: nat, u: ATask) -> bool {
+    u.pid is Some && u.ttl is Some
+        && u.lease_timeout_at == Some((now + opt_or_zero(u.ttl)) as u64)
+        && u.retry_timeout_at is None && u.resumes.len() == 0
+}
+
 pub open spec fn consistent_task_acquisition_is_atomic_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
-        !(t.state != TaskState::Acquired && u.state == TaskState::Acquired)
-            || (t.state == TaskState::Pending && t.version < u.version
-                && u.pid is Some && u.ttl is Some
-                && u.lease_timeout_at == Some((now + opt_or_zero(u.ttl)) as u64)
-                && u.retry_timeout_at is None && u.resumes.len() == 0))
+        (!(t.state != TaskState::Acquired && u.state == TaskState::Acquired)
+            || (t.state == TaskState::Pending && t.version < u.version && granted(now, u)))
+        // a lapsed lease taken over in one step: the same grant, from the lapsed row
+        && (!(lapsed(t, now) && u.state == TaskState::Acquired && u.version != t.version)
+            || (u.version == t.version + 1 && granted(now, u))))
 }
 pub open spec fn consistent_task_acquisition_is_atomic(now: nat, a: AState, b: AState) -> bool {
     forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==>
         consistent_task_acquisition_is_atomic_at(now, b, id, a.objects[id])
 }
 
+/// A task that comes to be pending is due for an offer at once: at `now` for
+/// a release or a continue; at the lease's end, already passed, for a lease
+/// that lapsed (or already offered by the same step and armed ahead); at the
+/// awaited promise's settlement, already passed, for a resume.
 pub open spec fn consistent_task_pending_entry_arms_retry_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
-        !(t.state != TaskState::Pending && u.state == TaskState::Pending) || u.retry_timeout_at == Some(now as u64))
+        !(t.state != TaskState::Pending && u.state == TaskState::Pending)
+            || match u.retry_timeout_at {
+                Some(r) => {
+                    ||| r == now
+                    ||| (lapsed(t, now) && (t.lease_timeout_at == Some(r) || now < r))
+                    ||| (t.state == TaskState::Suspended && r <= now)
+                },
+                None => false,
+            })
 }
 pub open spec fn consistent_task_pending_entry_arms_retry(now: nat, a: AState, b: AState) -> bool {
     forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==>
@@ -781,7 +810,8 @@ pub open spec fn monotone_task_retry_rearm_advances(now: nat, a: AState, b: ASta
 pub open spec fn consistent_task_wake_records_resume_at(now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
     task_pair_at(b, id, p, true, |t: ATask, u: ATask|
         !(t.state == TaskState::Suspended && u.state == TaskState::Pending)
-            || (u.resumes.len() != 0 && u.retry_timeout_at == Some(now as u64) && u.version == t.version))
+            || (u.resumes.len() != 0 && u.version == t.version
+                && match u.retry_timeout_at { Some(r) => r <= now, None => false }))
 }
 pub open spec fn consistent_task_wake_records_resume(now: nat, a: AState, b: AState) -> bool {
     forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==>
@@ -823,7 +853,7 @@ pub open spec fn preserved_timedout_is_server_owned(now: nat, a: AState, b: ASta
 
 pub open spec fn preserved_no_dead_dispatch_at(now: nat, a: AState, id: Seq<char>, q: APromise) -> bool {
     task_at(q, |u: ATask| u.state != TaskState::Pending
-        || (match a.task_of(id) { Some(t) => t.state == TaskState::Pending, None => false })
+        || (match a.task_of(id) { Some(t) => t.state == TaskState::Pending, None => q.state == PromiseState::Pending })
         || q.project_promise(now).state == PromiseState::Pending)
 }
 pub open spec fn preserved_no_dead_dispatch(now: nat, a: AState, b: AState) -> bool {

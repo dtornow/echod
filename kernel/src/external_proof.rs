@@ -55,8 +55,9 @@ pub proof fn lemma_project_many(now: nat, a: AState, b: AState, ids: spec_fn(Seq
     crate::properties_proof::lemma_step(now, a, b, ids, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
-/// A promise born at `t <= now` on a fresh id obeys the catalogue at its id,
-/// provided it is either dead at birth or still live at `now`.
+/// A promise born at `t <= now` on a fresh id obeys the catalogue at its id:
+/// dead at birth, still live at `now`, or (a schedule's occurrence the server
+/// got to late) stored pending past a deadline every read projects.
 pub proof fn lemma_born_obj(now: nat, t: nat, a: AState, b: AState, req: APromiseCreateReq)
     requires
         inv(now, a),
@@ -64,7 +65,6 @@ pub proof fn lemma_born_obj(now: nat, t: nat, a: AState, b: AState, req: APromis
         !crate::tags::timer_targeted(req.tags),
         req.timeout_at <= 2 * (MAX_TIME as nat),
         t <= now,
-        req.timeout_at <= t || req.timeout_at > now,
         b.objects.contains_key(req.id),
         b.objects[req.id] == spec_create(req, t),
     ensures
@@ -573,8 +573,9 @@ pub proof fn lemma_acquire_legal(now: nat, a: AState, b: AState, id: Seq<char>, 
     crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
 }
 
-/// `task.release`, and the lease timeout.
-pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
+/// `task.release` (`at == now`), and the lease timeout (`at` the lease's end,
+/// the anchor of the task's retry grid: Lean's `TaskObject.lapse`).
+pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>, at: nat)
     requires
         inv(now, a),
         a.objects.contains_key(id),
@@ -582,7 +583,9 @@ pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
         a.objects[id].task.unwrap().state == TaskState::Acquired,
         a.objects[id].state == PromiseState::Pending,
         a.objects[id].timeout_at > now,
-        b.objects == a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().release(now))),
+        at <= now,
+        at == now || a.objects[id].task.unwrap().lease_timeout_at == Some(at as u64),
+        b.objects == a.objects.insert(id, a.objects[id].with_task(a.objects[id].task.unwrap().release(at))),
         b.schedules == a.schedules,
         b.outbox == a.outbox,
     ensures
@@ -593,7 +596,7 @@ pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     assert(inv_obj(now, a, id));
     let p = a.objects[id];
     let t = p.task.unwrap();
-    let u = t.release(now);
+    let u = t.release(at);
     let q = p.with_task(u);
     assert(b.objects[id] == q);
     assert forall|w: Seq<char>| #[trigger] a.objects.contains_key(w) implies
@@ -606,6 +609,9 @@ pub proof fn lemma_release_legal(now: nat, a: AState, b: AState, id: Seq<char>)
     lemma_task_edit_frame(now, a, b, id);
     assert(q.project_promise(now) == q);
     assert forall|i: int| 0 <= i < t.resumes.len() implies u.resumes.contains(#[trigger] t.resumes[i]) by {}
+    if at != now {
+        assert(crate::properties::lapsed(t, now));
+    }
     assert(inv_obj(now, b, id));
     assert(trans_obj(now, a, b, id));
     crate::properties_proof::lemma_step(now, a, b, |x: Seq<char>| x == id, |x: Seq<char>| false, |k: OutboxKey| false, |x: Seq<char>| false);
@@ -1428,7 +1434,7 @@ pub proof fn lemma_spec_task_release(now: nat, a: AState, req: ATaskReleaseReq)
                     lemma_projected_task_identity(now, a, x);
                     let c = spec_task_release(a, req, now).0;
                     assert(c.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(now))));
-                    lemma_release_legal(now, a, c, x);
+                    lemma_release_legal(now, a, c, x, now);
                 }
             }
         }

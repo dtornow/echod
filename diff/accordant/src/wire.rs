@@ -38,7 +38,6 @@ pub fn create_data(c: &Create, worker: &str) -> Value {
 /// The request as the protocol carries it: kind and data.
 pub fn encode(req: &Request, worker: &str) -> (&'static str, Value) {
     match req {
-        Request::Step(_) => unreachable!("a server's own step is not sent"),
         Request::CreatePromise(c) => ("promise.create", create_data(c, worker)),
         Request::GetPromise(id) => ("promise.get", json!({ "id": id })),
         Request::SettlePromise(s) => ("promise.settle", json!({ "id": s.id, "state": s.state, "value": value(&s.data) })),

@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     fn doc(bytes: u64, v: &str) -> Cached {
-        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes, stamp: 0, seq: 0 }, etag: Etag(v.to_string()), filled_at: 0 }
+        Cached { loaded: Loaded { rows: vec![], row_count: 0, bytes, stamp: 0 }, etag: Etag(v.to_string()), filled_at: 0 }
     }
 
     #[test]

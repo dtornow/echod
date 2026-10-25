@@ -40,32 +40,11 @@ pub struct FaultyStore {
     faults: Faults,
     rng: Mutex<Rng>,
     counters: Mutex<Counters>,
-    /// The header nonces of the document writes that landed, acknowledged
-    /// or not: what tells a step whose acknowledgement was lost from one
-    /// whose write was.
-    landed: Mutex<std::collections::HashSet<u64>>,
-}
-
-/// The nonce of the header a document write begins with, if it is one.
-fn header_nonce(body: &[u8]) -> Option<u64> {
-    let line = body.split(|b| *b == b'\n').next()?;
-    serde_json::from_slice::<echod_logic::doc::Header>(line).ok().map(|h| h.nonce)
 }
 
 impl FaultyStore {
-    /// Whether the write with this header nonce landed.
-    pub fn has_landed(&self, nonce: u64) -> bool {
-        self.landed.lock().unwrap().contains(&nonce)
-    }
-
-    fn landed<T>(&self, r: &Result<T, StoreError>, nonce: Option<u64>) {
-        if let (Ok(_), Some(n)) = (r, nonce) {
-            self.landed.lock().unwrap().insert(n);
-        }
-    }
-
     pub fn new(inner: Arc<MemoryStore>, faults: Faults, rng: Rng) -> Self {
-        Self { inner, faults, rng: Mutex::new(rng), counters: Mutex::new(Counters::default()), landed: Mutex::new(Default::default()) }
+        Self { inner, faults, rng: Mutex::new(rng), counters: Mutex::new(Counters::default()) }
     }
 
     pub fn counters(&self) -> Counters {
@@ -140,9 +119,7 @@ impl Store for FaultyStore {
         if let Some(e) = self.conflict() {
             return Err(e);
         }
-        let nonce = header_nonce(&body);
         let r = self.inner.put_if_match(key, body, etag).await;
-        self.landed(&r, nonce);
         self.lost_ack(r)
     }
 
@@ -154,9 +131,7 @@ impl Store for FaultyStore {
         if let Some(e) = self.conflict() {
             return Err(e);
         }
-        let nonce = header_nonce(&body);
         let r = self.inner.put_if_none_match(key, body).await;
-        self.landed(&r, nonce);
         self.lost_ack(r)
     }
 
@@ -168,9 +143,7 @@ impl Store for FaultyStore {
         if let Some(e) = self.conflict() {
             return Err(e);
         }
-        let nonce = header_nonce(&body);
         let r = self.inner.append_if_match(key, offset, body, etag).await;
-        self.landed(&r, nonce);
         self.lost_ack(r)
     }
 
