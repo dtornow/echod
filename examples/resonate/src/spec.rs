@@ -388,6 +388,24 @@ pub enum Step {
     Advance { schedule: Id, at: Time, promise: Id },
 }
 
+/// An internal step, as the checker schedules it. `On`: the server processes
+/// these objects and does whatever is due on them (a promise past its deadline
+/// times out, a task past its lease is reclaimed, a suspended task whose
+/// awaited promise settled resumes, a pending task due for a retry is
+/// dispatched, a settled promise's listeners are told). What is due is read
+/// from the state and the clock, not from the step. `Fire`: a schedule's
+/// occurrence; `Advance`: its run recorded, when a sweeping server commits
+/// that apart. The ids of `On` are sorted and distinct, so two steps on the
+/// same objects are the same step.
+///
+/// The step names every object it may touch, so its footprint is exact.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Internal {
+    On(Vec<Id>),
+    Fire { schedule: Id, at: Time, promise: Id },
+    Advance { schedule: Id, at: Time, promise: Id },
+}
+
 /// Internal work to start, and when it runs. As `accordant::Sched`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Work {

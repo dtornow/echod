@@ -3,32 +3,20 @@
 //! request touches and which origin a key belongs to, and holds the cron
 //! engine the spec trusts. None of it decides what the server does.
 
-use std::collections::BTreeSet;
-
 use accordant::{ExternalOutcome, Footprint, InternalOutcome, Model, Partitioned, Sched, Time, Touches};
 
 use crate::spec::*;
 
-/// An internal step, as the checker schedules it. `On`: the server processes
-/// these objects and does whatever is due on them (a promise past its deadline
-/// times out, a task past its lease is reclaimed, a suspended task whose awaited
-/// promise settled resumes, a pending task due for a retry is dispatched, a
-/// settled promise's listeners are told). What is due is read from the state and
-/// the clock, not from the step. `Fire`: a schedule's occurrence; `Advance`:
-/// its run recorded, when a sweeping server commits that apart.
-///
-/// The step names every object it may touch, so its footprint is exact. A
-/// promise deadline, a lease end or a retry is `{id}`; a resume is `{awaited,
-/// awaiter}`; a fire is the schedule and the promise it creates.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Internal {
-    On(BTreeSet<Id>),
-    Fire { schedule: Id, at: Time, promise: Id },
-    Advance { schedule: Id, at: Time, promise: Id },
+/// The step on these objects: sorted and distinct, so the same objects make
+/// the same step.
+pub fn on(ids: &[&str]) -> Internal {
+    canonical(ids.iter().map(|i| i.to_string()).collect())
 }
 
-pub fn on(ids: &[&str]) -> Internal {
-    Internal::On(ids.iter().map(|i| i.to_string()).collect())
+fn canonical(mut ids: Vec<Id>) -> Internal {
+    ids.sort();
+    ids.dedup();
+    Internal::On(ids)
 }
 
 /// What a footprint names: a promise with its task, a schedule, or a whole
@@ -153,7 +141,7 @@ impl Default for Resonate {
 
 fn step(s: Step) -> Internal {
     match s {
-        Step::Objects(ids) => Internal::On(ids.into_iter().collect()),
+        Step::Objects(ids) => canonical(ids),
         Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
         Step::Advance { schedule, at, promise } => Internal::Advance { schedule, at, promise },
     }
@@ -166,34 +154,26 @@ fn sched(w: Work) -> Sched<Internal> {
     }
 }
 
-impl Model for Resonate {
-    type State = Server;
-    type External = Request;
-    type Response = Response;
-    type Internal = Internal;
-    type Dispatch = Dispatch;
+/// `Model::external`, outside Verus: the verified handlers' outcomes, as the
+/// checker's types. The `Model` impl itself, with its spec twins, is in
+/// `twins.rs`.
+pub(crate) fn external_glue(m: &Resonate, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Resonate>> {
+    Resonate::external(m, op, s, now)
+        .into_iter()
+        .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
+        .collect()
+}
 
-    fn external(&self, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Self>> {
-        Resonate::external(self, op, s, now)
-            .into_iter()
-            .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
-            .collect()
+pub(crate) fn internal_glue(m: &Resonate, step: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Resonate>> {
+    let o = match step {
+        Internal::On(ids) => Resonate::internal(m, ids, s, now),
+        Internal::Fire { schedule, at, promise } => Resonate::fire(m, schedule, *at, promise, s, now),
+        Internal::Advance { schedule, at, promise } => Resonate::advance(m, schedule, *at, promise, s, now),
+    };
+    if o.pending {
+        return Vec::new(); // not yet: the work stays
     }
-
-    fn internal(&self, step: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Self>> {
-        let o = match step {
-            Internal::On(ids) => {
-                let ids: Vec<Id> = ids.iter().cloned().collect();
-                Resonate::internal(self, &ids, s, now)
-            }
-            Internal::Fire { schedule, at, promise } => Resonate::fire(self, schedule, *at, promise, s, now),
-            Internal::Advance { schedule, at, promise } => Resonate::advance(self, schedule, *at, promise, s, now),
-        };
-        if o.pending {
-            return Vec::new(); // not yet: the work stays
-        }
-        vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
-    }
+    vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
 }
 
 impl Footprint for Resonate {

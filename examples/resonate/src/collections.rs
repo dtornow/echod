@@ -167,16 +167,36 @@ pub fn same_origin(a: &String, b: &String) -> (r: bool)
     crate::model::origin(a) == crate::model::origin(b)
 }
 
+/// Any absolute URL, as the spec sees it: what `address_valid` decides.
+pub uninterp spec fn spec_address_valid(addr: Seq<char>) -> bool;
+
 /// Any absolute URL: a scheme, a colon, and a non-empty rest with no whitespace.
 #[verifier::external_body]
-pub fn address_valid(addr: &String) -> bool {
+pub fn address_valid(addr: &String) -> (r: bool)
+    ensures
+        r == spec_address_valid(addr@),
+{
     crate::model::address_valid(addr)
+}
+
+/// The state a client may settle a promise to, by name; never `Pending`.
+pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::spec::PState> {
+    if s == "resolved"@ {
+        Some(crate::spec::PState::Resolved)
+    } else if s == "rejected"@ {
+        Some(crate::spec::PState::Rejected)
+    } else if s == "rejected_canceled"@ {
+        Some(crate::spec::PState::Canceled)
+    } else {
+        None
+    }
 }
 
 /// The state a client may settle a promise to, by name; never `Pending`.
 #[verifier::external_body]
 pub fn settable(s: &String) -> (r: Option<crate::spec::PState>)
     ensures
+        r == spec_settable(s@),
         r != Some(crate::spec::PState::Pending),
 {
     match s.as_str() {
@@ -190,15 +210,38 @@ pub fn settable(s: &String) -> (r: Option<crate::spec::PState>)
 /// Whether an id holds a `:`: the reference server keeps it as the separator
 /// between an origin and the rest, so a schedule's id may not have one.
 #[verifier::external_body]
-pub fn has_colon(id: &String) -> bool {
+pub fn has_colon(id: &String) -> (r: bool)
+    ensures
+        r == spec_has_colon(id@),
+{
     id.contains(':')
 }
+
+pub open spec fn spec_has_colon(id: Seq<char>) -> bool {
+    exists|i: int| 0 <= i < id.len() && id[i] == ':'
+}
+
+/// A cron the engine accepts, as the spec sees it.
+pub uninterp spec fn spec_cron_valid(cron: Seq<char>) -> bool;
 
 /// A cron expression the reference server's engine accepts: five fields, or
 /// six to seven with seconds (and a year).
 #[verifier::external_body]
-pub fn cron_valid(cron: &String) -> bool {
+pub fn cron_valid(cron: &String) -> (r: bool)
+    ensures
+        r == spec_cron_valid(cron@),
+{
     crate::model::cron_valid(cron)
+}
+
+/// Lean's `nextCron`, as the spec sees it: strictly after `after`.
+pub uninterp spec fn spec_next_cron(cron: Seq<char>, after: u64) -> u64;
+
+#[verifier::external_body]
+pub proof fn axiom_next_cron_after(cron: Seq<char>, after: u64)
+    ensures
+        spec_next_cron(cron, after) > after,
+{
 }
 
 /// Lean's `nextCron`: the first instant strictly after `after` the cron names,
@@ -206,15 +249,22 @@ pub fn cron_valid(cron: &String) -> bool {
 #[verifier::external_body]
 pub fn next_cron(cron: &String, after: u64) -> (r: u64)
     ensures
+        r == spec_next_cron(cron@, after),
         r > after,
 {
     crate::model::next_cron(cron, after)
 }
 
+/// Lean's `expand`, as the spec sees it.
+pub uninterp spec fn spec_expand(template: Seq<char>, id: Seq<char>, at: u64) -> Seq<char>;
+
 /// Lean's `expand`: the schedule's promise id template with `{{.id}}` the
 /// schedule's id and `{{.timestamp}}` the occurrence's instant.
 #[verifier::external_body]
-pub fn expand(template: &String, id: &String, at: u64) -> String {
+pub fn expand(template: &String, id: &String, at: u64) -> (r: String)
+    ensures
+        r@ == spec_expand(template@, id@, at),
+{
     crate::model::expand(template, id, at)
 }
 

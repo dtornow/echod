@@ -329,6 +329,16 @@ concatenation; 6 items, no `assume` or `admit`. It is the frame for
 `concrete_refines_abstract`: a store machine (the bucket as state, verified
 document handlers after a sweep as `external`) against the Resonate model.
 
+Resonate's twins are written down (`examples/resonate/src/twins.rs`): the
+whole protocol as spec functions over the state's view (ids as `Seq<char>`,
+the persistent maps as `Map`, the sets as `Set`), one per handler and one
+per internal step, `ext` and `int` at the top, lifted to the model's own
+types by `choose` under one axiom (`axiom_realised`: every view is some
+value's). The `Model` impl lives beside them, inside `verus!`; its
+executable methods are the old glue, `external_body`, so the checker's
+verdicts speak about these twins on the same trust as before. Proving each
+executable handler equal to its twin is what removes it, handler by handler.
+
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
 (`spec_external`, `spec_internal`) and the method's `ensures` ties
 the two: `external` returns the vector whose sequence `spec_external` says. The

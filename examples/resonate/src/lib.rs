@@ -28,8 +28,9 @@ pub mod collections;
 mod explore;
 mod model;
 pub mod spec;
+pub mod twins;
 
 pub use collections::{PMap, PSet};
 pub use explore::{IDS, MARKS, PLAIN, SCHEDULES};
-pub use model::{on, Internal, Key};
+pub use model::{on, Key};
 pub use spec::*;
