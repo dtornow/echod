@@ -31,4 +31,5 @@ pub mod sweep;
 pub mod sweep_proof;
 pub mod canon;
 pub mod absorb;
+pub mod onstep;
 pub mod theorem;

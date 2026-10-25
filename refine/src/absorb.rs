@@ -248,6 +248,13 @@ pub open spec fn first_awaited(b: AState, x: Seq<char>, w: Seq<char>, ids: Seq<S
     forall|i: int, j: int| #![trigger ids[i], ids[j]] 0 <= i < j < ids.len() && ids[j] == x ==> !awaits(b, ids[i], w, now)
 }
 
+/// `w` is done, or not a task: a resume leaves it as it is, whatever the order.
+pub open spec fn done(b: AState, w: Seq<char>, now: nat) -> bool {
+    ||| !b.objects.contains_key(w)
+    ||| b.objects[w].project(now).task is None
+    ||| b.objects[w].project(now).task.unwrap().state == TaskState::Fulfilled
+}
+
 pub proof fn lemma_resumed_first(b: AState, b2: AState, w: Seq<char>, x: Seq<char>, ids: Seq<Seq<char>>, t: ATask, now: nat)
     requires
         ids.no_duplicates(),
@@ -820,7 +827,7 @@ pub proof fn lemma_callback_form_w(b: AState, x: Seq<char>, w: Seq<char>, ids: S
         b.objects.contains_key(w),
         ids.no_duplicates(),
         ids.contains(x),
-        first_awaited(b, x, w, ids, now),
+        first_awaited(b, x, w, ids, now) || done(b, w, now),
     ensures
         c4(callback_fn(b, x, w, now), w, ids, now) == c4(b, w, ids, now),
 {
@@ -843,6 +850,8 @@ pub proof fn lemma_callback_form_w(b: AState, x: Seq<char>, w: Seq<char>, ids: S
                 lemma_resumed_fulfilled(b, w, ids, c12(q, now).task.unwrap(), now);
                 lemma_resumed_fulfilled(b2, w, ids, c12(q, now).task.unwrap(), now);
             } else {
+                assert(!done(b, w, now));
+                assert(first_awaited(b, x, w, ids, now));
                 assert(q.state == PromiseState::Pending);
                 lemma_project_pending_task(q, now, tk2);
                 let c = c12(q, now);
@@ -877,7 +886,7 @@ pub proof fn absorb_callback(b: AState, x: Seq<char>, w: Seq<char>, now: nat, t:
         b.objects.contains_key(x),
         b.objects[x].project(now).state != PromiseState::Pending,
         b.objects[x].callbacks.contains(w),
-        first_awaited(b, x, w, ids_of(b), now),
+        first_awaited(b, x, w, ids_of(b), now) || done(b, w, now),
     ensures
         ({
             let b2 = callback_fn(b, x, w, now);
@@ -923,6 +932,106 @@ pub proof fn absorb_callback(b: AState, x: Seq<char>, w: Seq<char>, now: nat, t:
     }
     assert(forms_agree(b, b2, ids, now));
     lemma_agree_sends(b, b2, now, t);
+}
+
+
+/// Any one callback step is absorbed, when the awaiter is resumed by the first
+/// of its settled awaiteds or is done: a step not due is a projection of `x`.
+pub proof fn absorb_callback_any(b: AState, x: Seq<char>, w: Seq<char>, now: nat, t: nat)
+    requires
+        inv(now, b),
+        0 < t <= MAX_TIME,
+        b.objects.dom().finite(),
+        awaits(b, x, w, now) ==> first_awaited(b, x, w, ids_of(b), now) || done(b, w, now),
+    ensures
+        ({
+            let b2 = callback_fn(b, x, w, now);
+            &&& inv(now, b2)
+            &&& b2.objects.dom() == b.objects.dom()
+            &&& b2.schedules == b.schedules
+            &&& sweep_fn(b2, now, t).objects == sweep_fn(b, now, t).objects
+            &&& sweep_fn(b2, now, t).schedules == sweep_fn(b, now, t).schedules
+            &&& sweep_sends(b2, now, t) == sweep_sends(b, now, t)
+        }),
+{
+    let b2 = callback_fn(b, x, w, now);
+    lemma_callback_inv(b, x, w, now);
+    if b.objects.contains_key(x) {
+        let p = b.objects[x].project(now);
+        lemma_insert_same(with_objects(b, b.objects.insert(x, p)), x);
+        if p.state == PromiseState::Pending || !p.callbacks.contains(w) {
+            let b1 = with_objects(b, b.objects.insert(x, p));
+            assert(b2 == b1);
+            assert(b1 == with_objects(b, promise_timeout_objects(b, x, now)));
+            assert(b1.objects.dom() =~= b.objects.dom());
+            lemma_project_inv(b, x, now);
+            absorb_project(b, x, now, now, t);
+            lemma_sweep_canon(b, now, t);
+            lemma_sweep_canon(b1, now, t);
+        } else {
+            assert(awaits(b, x, w, now));
+            absorb_callback(b, x, w, now, t);
+            lemma_callback_reads(b, x, w, now);
+            lemma_sweep_canon(b, now, t);
+            lemma_sweep_canon(b2, now, t);
+        }
+    } else {
+        assert(b2 == b);
+    }
+}
+
+/// A callback step only takes awaits away and leaves who is done as it is.
+pub proof fn lemma_callback_mono(b: AState, x: Seq<char>, w: Seq<char>, now: nat)
+    requires
+        inv(now, b),
+    ensures
+        ({
+            let b2 = callback_fn(b, x, w, now);
+            &&& b2.objects.dom() == b.objects.dom()
+            &&& forall|y: Seq<char>, z: Seq<char>| #[trigger] awaits(b2, y, z, now) ==> awaits(b, y, z, now)
+            &&& forall|z: Seq<char>| #[trigger] done(b2, z, now) == done(b, z, now)
+            &&& forall|y: Seq<char>| #[trigger] b.objects.contains_key(y) && y != x && y != w ==> b2.objects[y] == b.objects[y]
+            &&& forall|y: Seq<char>| #[trigger] b.objects.contains_key(y) ==> b2.objects[y].project(now).state == b.objects[y].project(now).state
+        }),
+{
+    let b2 = callback_fn(b, x, w, now);
+    if b.objects.contains_key(x) {
+        let p = b.objects[x].project(now);
+        echod_kernel::external_proof::lemma_project_idem(b.objects[x], now);
+        lemma_insert_same(with_objects(b, b.objects.insert(x, p)), x);
+        if p.state == PromiseState::Pending || !p.callbacks.contains(w) {
+            let b1 = with_objects(b, b.objects.insert(x, p));
+            assert(b2 == b1);
+            assert(b1.objects.dom() =~= b.objects.dom());
+            assert forall|y: Seq<char>, z: Seq<char>| #[trigger] awaits(b2, y, z, now) implies awaits(b, y, z, now) by {}
+            assert forall|z: Seq<char>| #[trigger] done(b2, z, now) == done(b, z, now) by {}
+        } else {
+            lemma_callback_reads(b, x, w, now);
+            assert forall|y: Seq<char>, z: Seq<char>| #[trigger] awaits(b2, y, z, now) implies awaits(b, y, z, now) by {
+                if y == x && z == w {
+                    assert(!awaits(b2, x, w, now));
+                }
+            }
+            assert forall|z: Seq<char>| #[trigger] done(b2, z, now) == done(b, z, now) by {
+                if z == w && b.objects.contains_key(w) {
+                    let q = b.objects[w].project(now);
+                    match q.task {
+                        None => {},
+                        Some(tk) => {
+                            let tk2 = resume_step(tk, x, since(b, x, now));
+                            assert(b2.objects[w] == q.with_task(tk2));
+                            assert(b2.objects[w].project(now) == b2.objects[w]);
+                            assert((tk2.state == TaskState::Fulfilled) == (tk.state == TaskState::Fulfilled));
+                        },
+                    }
+                } else if z == x {
+                    assert(b2.objects[x].project(now).task == b.objects[x].project(now).task);
+                }
+            }
+        }
+    } else {
+        assert(b2 == b);
+    }
 }
 
 } // verus!
