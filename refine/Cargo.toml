@@ -1,0 +1,24 @@
+[package]
+name = "echod-refine"
+description = "The store machine: the bucket as state and the verified document handlers after a sweep as the request step, as an accordant Model; and its refinement of the Resonate model. Proof only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_refine"
+path = "src/lib.rs"
+
+[dependencies]
+echod-kernel = { path = "../kernel" }
+accordant = { git = "https://github.com/dtornow/accordant", rev = "b9806d8b498e536909a0dba9b5043438855d4503" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "b9806d8b498e536909a0dba9b5043438855d4503", package = "resonate" }
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

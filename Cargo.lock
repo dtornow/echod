@@ -1162,6 +1162,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-refine"
+version = "0.1.0"
+dependencies = [
+ "accordant",
+ "echod-kernel",
+ "resonate",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-sim"
 version = "0.1.0"
 dependencies = [
