@@ -101,11 +101,16 @@ pub open spec fn abs(a: AState, now: Time, retry_timeout: u64) -> ServerV {
 /// timeout, whatever its kind; a lease's end; an offer).
 pub open spec fn timers_cover(internals: Seq<Sched<Internal>>, a: AState, now: Time) -> bool {
     &&& forall|i: int| 0 <= i < internals.len() ==> match #[trigger] internals[i] {
-        Sched::Timer(t, step) => t > now && (step@ matches InternalV::On(_)),
+        Sched::Timer(t, step) => t > now && (step@ matches InternalV::On(ids) && ids.no_duplicates() && ids.len() == 1),
         Sched::Later(_) => false,
     }
     &&& forall|id: Seq<char>, t: nat| #[trigger] a.objects.contains_key(id) && #[trigger] mdeadline_at(a.objects[id], t) ==>
         exists|i: int| 0 <= i < internals.len() && #[trigger] internals[i] == Sched::Timer(t as u64, lift_internal(InternalV::On(seq![id])))
+}
+
+/// A timer on `id` at `t` is pending.
+pub open spec fn mdeadline_at_timer(internals: Seq<Sched<Internal>>, id: Seq<char>, t: nat) -> bool {
+    exists|i: int| 0 <= i < internals.len() && #[trigger] internals[i] == Sched::Timer(t as u64, lift_internal(InternalV::On(seq![id])))
 }
 
 /// Some timer is due by `d`.

@@ -1001,6 +1001,7 @@ pub proof fn tr_callbacks_of(b: AState, x: Seq<char>, aw: Seq<Seq<char>>, now: u
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) ==> b2.objects[id].state == b.objects[id].state
                 && b2.objects[id].timeout_at == b.objects[id].timeout_at && b2.objects[id].listeners == b.objects[id].listeners
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) && id != x ==> b2.objects[id].callbacks == b.objects[id].callbacks
+            &&& b.objects.contains_key(x) ==> forall|c: Seq<char>| #[trigger] b2.objects[x].callbacks.contains(c) ==> b.objects[x].callbacks.contains(c)
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) ==> (b2.objects[id].task is Some == b.objects[id].task is Some) && (b2.objects[id].task is Some ==> {
                 let t2 = b2.objects[id].task.unwrap();
                 let t = b.objects[id].task.unwrap();
@@ -1031,6 +1032,11 @@ pub proof fn tr_callbacks_of(b: AState, x: Seq<char>, aw: Seq<Seq<char>>, now: u
             let p = b1.objects[x];
             assert(p.project(n) == p);
             assert(b2.objects[x] == p || b2.objects[x] == p.remove_callback(w));
+            assert forall|c: Seq<char>| #[trigger] b2.objects[x].callbacks.contains(c) implies b.objects[x].callbacks.contains(c) by {
+                if b2.objects[x] == p.remove_callback(w) {
+                    lemma_without_contains(p.callbacks, w, c);
+                }
+            }
             assert(b2.objects[x].task == p.task);
             assert(b2.objects[x].state == p.state && b2.objects[x].listeners == p.listeners && b2.objects[x].timeout_at == p.timeout_at);
             if b.objects.contains_key(w) && w != x {
@@ -1096,6 +1102,7 @@ pub proof fn tr_resumes(b: AState, awaiteds: Seq<Seq<char>>, all: Seq<Seq<char>>
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) ==> b2.objects[id].state == b.objects[id].state
                 && b2.objects[id].timeout_at == b.objects[id].timeout_at && b2.objects[id].listeners == b.objects[id].listeners
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) && !awaiteds.contains(id) ==> b2.objects[id].callbacks == b.objects[id].callbacks
+            &&& forall|id: Seq<char>, c: Seq<char>| #[trigger] b.objects.contains_key(id) && #[trigger] b2.objects[id].callbacks.contains(c) ==> b.objects[id].callbacks.contains(c)
             &&& forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) ==> (b2.objects[id].task is Some == b.objects[id].task is Some) && (b2.objects[id].task is Some ==> {
                 let t2 = b2.objects[id].task.unwrap();
                 let t = b.objects[id].task.unwrap();
@@ -1125,6 +1132,13 @@ pub proof fn tr_resumes(b: AState, awaiteds: Seq<Seq<char>>, all: Seq<Seq<char>>
         }
         assert forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) && !awaiteds.contains(id) implies b2.objects[id].callbacks == b.objects[id].callbacks by {
             lemma_contains_split(awaiteds, id);
+        }
+        assert forall|id: Seq<char>, c: Seq<char>| #[trigger] b.objects.contains_key(id) && #[trigger] b2.objects[id].callbacks.contains(c) implies b.objects[id].callbacks.contains(c) by {
+            if id == x {
+                assert(b1.objects[x].callbacks.contains(c));
+            } else {
+                assert(b2.objects[id].callbacks == b1.objects[id].callbacks);
+            }
         }
         assert forall|i: int, j: int| 0 <= i < awaiteds.len() && 0 <= j < all.len() implies !awaits(b2, #[trigger] awaiteds[i], #[trigger] all[j], n) by {
             if i < awaiteds.len() - 1 {
@@ -1494,7 +1508,7 @@ pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
             // the work
             &&& forall|i: int| 0 <= i < o.work.len() ==> match #[trigger] o.work[i] {
                 Sched::Later(InternalV::On(_)) => true,
-                Sched::Timer(t, InternalV::On(_)) => t > now,
+                Sched::Timer(t, InternalV::On(wi)) => t > now && wi.len() == 1,
                 _ => false,
             }
             &&& forall|i: int| 0 <= i < o.work.len() && (#[trigger] o.work[i]) is Later ==> spawned(b, ids, n, o.work[i])
@@ -1515,6 +1529,7 @@ pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
                 &&& !lease_due(q, n)
                 &&& !retry_due(q, n)
                 &&& (forall|w: Seq<char>| ids.contains(w) ==> !(q.state != PromiseState::Pending && #[trigger] q.callbacks.contains(w)))
+                &&& (forall|c: Seq<char>| #[trigger] q.callbacks.contains(c) ==> p.callbacks.contains(c))
                 &&& (q.task is Some ==> {
                     let t2 = q.task.unwrap();
                     &&& (t2.lease_timeout_at is Some ==> p.task is Some && p.task.unwrap().lease_timeout_at == t2.lease_timeout_at && t2.lease_timeout_at.unwrap() > now)
@@ -1558,7 +1573,7 @@ pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
     // the work: the Laters from phase 1, the timers from phase 3
     assert forall|i: int| 0 <= i < work3.len() implies (match #[trigger] work3[i] {
         Sched::Later(InternalV::On(_)) => true,
-        Sched::Timer(t, InternalV::On(_)) => t > now,
+        Sched::Timer(t, InternalV::On(wi)) => t > now && wi.len() == 1,
         _ => false,
     }) && (work3[i] is Later ==> spawned(b, ids, n, work3[i])) by {
         if i < work1.len() {
@@ -1594,6 +1609,7 @@ pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
         &&& !lease_due(q, n)
         &&& !retry_due(q, n)
         &&& (forall|w: Seq<char>| ids.contains(w) ==> !(q.state != PromiseState::Pending && #[trigger] q.callbacks.contains(w)))
+        &&& (forall|c: Seq<char>| #[trigger] q.callbacks.contains(c) ==> p.callbacks.contains(c))
         &&& (q.task is Some ==> {
             let t2 = q.task.unwrap();
             &&& (t2.lease_timeout_at is Some ==> p.task is Some && p.task.unwrap().lease_timeout_at == t2.lease_timeout_at && t2.lease_timeout_at.unwrap() > now)
@@ -1606,6 +1622,11 @@ pub proof fn tr_on(b: AState, ids: Seq<Seq<char>>, now: u64, cfg: Resonate)
         let pr = b1r.objects[id];
         let q = b2.objects[id];
         assert(p1 == p.project(n));
+        assert(p1.callbacks == p.callbacks);
+        assert forall|c: Seq<char>| #[trigger] q.callbacks.contains(c) implies p.callbacks.contains(c) by {
+            assert(pr.callbacks.contains(c));
+            assert(p1.callbacks.contains(c));
+        }
         lemma_projected_obj(p1, n);
         assert(pr.state == p1.state && pr.timeout_at == p1.timeout_at);
         assert(q.state == pr.state && q.timeout_at == pr.timeout_at && q.callbacks == pr.callbacks);

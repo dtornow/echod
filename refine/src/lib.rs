@@ -33,4 +33,5 @@ pub mod canon;
 pub mod absorb;
 pub mod onstep;
 pub mod trans;
+pub mod drain;
 pub mod theorem;
