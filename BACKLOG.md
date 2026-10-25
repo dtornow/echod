@@ -100,6 +100,24 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
+- **`concrete_refines_abstract`.** Every trace of a store machine (the
+  bucket as state, the verified document handlers after a sweep as the
+  request step, sweeps as internal work) is a trace of the Resonate model.
+  What exists: accordant's `refines` (`src/refinement.rs`), trace
+  inclusion from a forward simulation, proved; the model's functional
+  specification (`examples/resonate/src/twins.rs`), so the abstract side
+  of the statement is definite. What remains, in order: the concrete
+  machine as a second `Model` (a crate verified with `cargo verus`, which
+  verifies the kernel: 280 items), with the wire rules of `dispatch.rs`
+  and a functional sweep over the kernel's step functions (three of the
+  six are functional, `callback` and `listener` are shapes and need
+  twins, `sweep` and `drain` are relational and need a fold in the
+  model's phase order); the relation, the abstract state the sweep of
+  the concrete one; the simulation, one commutation lemma per handler
+  across the two type vocabularies. Schedules out until the fire's shape
+  is settled. Then echod's own system model against the store machine,
+  where the clocks and the stamps live.
+
 ## Smaller items
 
 - **Checker time on long histories.** The black-box trace leaves the
