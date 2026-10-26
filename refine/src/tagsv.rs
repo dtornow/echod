@@ -8,7 +8,7 @@ use echod_kernel::object::first_dispatch;
 use echod_kernel::tags::*;
 use echod_kernel::tags_proof::lemma_tags_get_append;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::Tags;
 
 use crate::theorem::promise_v;

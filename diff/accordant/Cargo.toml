@@ -10,8 +10,8 @@ name = "echod-accordant"
 path = "src/main.rs"
 
 [dependencies]
-accordant = { git = "https://github.com/dtornow/accordant", rev = "3c101b79dd97775a65ed903801b88dec6853719e" }
-resonate = { git = "https://github.com/dtornow/accordant", rev = "3c101b79dd97775a65ed903801b88dec6853719e", package = "resonate" }
+accordant = { git = "https://github.com/dtornow/accordant", rev = "b256619c508f516973e5a5f94552bb922ccec233" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "b256619c508f516973e5a5f94552bb922ccec233", package = "resonate" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 axum = { version = "0.7", features = ["json"] }
 clap = { version = "4", features = ["derive"] }

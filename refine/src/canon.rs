@@ -17,7 +17,7 @@ use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::store::AState;
 use echod_kernel::tags::target_of;
 use echod_kernel::types::*;
-use resonate::twins::DispatchV;
+use resonate::spec::DispatchV;
 
 use crate::sweep::*;
 use crate::sweep_proof::*;

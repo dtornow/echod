@@ -19,7 +19,7 @@ use echod_kernel::properties::{inv, inv_obj};
 use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{Dispatch, Internal, Resonate, Server};
 
 use crate::absorb::*;
@@ -380,7 +380,7 @@ pub proof fn lemma_resonate_internal(a: Resonate, step: Internal, st: Server, no
             &&& a.spec_internal(step, st, now)[0] == lift_inout(o)
         }),
 {
-    let o = resonate::twins::int(a, step@, st@, now);
+    let o = resonate::spec::int(a, step@, st@, now);
     assert(o == on_v(a, on_ids(step), st@, now));
     assert(!o.pending);
 }

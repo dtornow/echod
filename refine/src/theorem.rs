@@ -26,7 +26,7 @@ use echod_kernel::properties::inv;
 use echod_kernel::steps::{deadline_at, has_deadline, is_next, objects_deadline, strip};
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{Dispatch, Internal, Request, Resonate, Response, Server};
 
 use crate::machine::*;

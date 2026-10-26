@@ -13,7 +13,7 @@ use echod_kernel::internal::lease_timeout_objects;
 use echod_kernel::properties::inv;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::DispatchV;
+use resonate::spec::DispatchV;
 
 use crate::absorb::*;
 use crate::canon::*;

@@ -16,7 +16,7 @@ use echod_kernel::steps::{deadline_at, has_deadline, is_next, objects_deadline, 
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
 use resonate::collections::{spec_address_valid, spec_settable};
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{Dispatch, Internal, Request, Resonate, Response};
 
 use crate::drain::*;

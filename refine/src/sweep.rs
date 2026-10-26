@@ -19,7 +19,7 @@ use echod_kernel::steps::{is_next, lease_deadline, retry_deadline, strip};
 use echod_kernel::store::AState;
 use echod_kernel::tags::target_of;
 use echod_kernel::types::*;
-use resonate::twins::DispatchV;
+use resonate::spec::DispatchV;
 
 use crate::translate::message_out;
 

@@ -13,7 +13,7 @@ use echod_kernel::properties::{inv, inv_obj, no_dups, opt_or_zero};
 use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{PState, Resonate, TState, Time};
 
 use accordant::Sched;

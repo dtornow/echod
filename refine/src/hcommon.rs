@@ -12,7 +12,7 @@ use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::steps::{lease_deadline, retry_deadline};
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::PState;
 
 use crate::drain::pending_due;

@@ -7,7 +7,7 @@ use accordant::{ExternalOutcome, InternalOutcome, Model, Sched, Time};
 use echod_kernel::external::spec_handle;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{Dispatch, Request, Response};
 
 use crate::sweep::{next_deadline, sweep_fn, sweep_sends};

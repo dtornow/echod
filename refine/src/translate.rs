@@ -7,7 +7,7 @@ use vstd::prelude::*;
 use echod_kernel::tags::{tags_get, tags_has};
 use echod_kernel::types::*;
 use resonate::collections::{spec_address_valid, spec_settable};
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{PState, TState, Tags};
 
 verus! {

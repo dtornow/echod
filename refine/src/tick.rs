@@ -18,7 +18,7 @@ use echod_kernel::steps::{deadline_at, has_deadline, is_next, lease_deadline, ob
 use echod_kernel::store::AState;
 use echod_kernel::tags::OType;
 use echod_kernel::types::*;
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{Dispatch, Resonate};
 
 use crate::absorb::*;

@@ -7,7 +7,7 @@ use echod_kernel::external::*;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
 use resonate::collections::{spec_address_valid, spec_settable};
-use resonate::twins::*;
+use resonate::spec::*;
 use resonate::{PState, Resonate, TState};
 
 use echod_kernel::external_proof::*;
@@ -453,7 +453,7 @@ pub proof fn h_task_create(cfg: Resonate, a: AState, pid: Chars, ttl: u64, actio
             assert(p.task is Some);
             let t = p.task.unwrap();
             assert(s.tasks.contains_key(id) && s.tasks[id] == task_v(t));
-            assert((t.version >= echod_kernel::types::MAX_VERSION) == (task_v(t).version >= resonate::twins::MAX_VERSION));
+            assert((t.version >= echod_kernel::types::MAX_VERSION) == (task_v(t).version >= resonate::spec::MAX_VERSION));
             if t.state == TaskState::Fulfilled {
                 lemma_trec(t, id);
                 let res = ResponseV::Both(prec_v(id, promise_v(p)), trec_v(id, task_v(t)));
@@ -595,7 +595,7 @@ pub proof fn h_task_acquire(cfg: Resonate, a: AState, id: Chars, version: u32, p
         assert(s.promises.contains_key(id));
         lemma_live(p);
         lemma_version(t, version);
-        assert((t.version >= echod_kernel::types::MAX_VERSION) == (task_v(t).version >= resonate::twins::MAX_VERSION));
+        assert((t.version >= echod_kernel::types::MAX_VERSION) == (task_v(t).version >= resonate::spec::MAX_VERSION));
         if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version as u64 || t.version >= echod_kernel::types::MAX_VERSION {
             assert(spec_handle(a, kreq, n) == (a, AResponse::TaskClaim(claim_err(409))));
             assert(acquire_task_v(id, version, pid, ttl, s, now) == status_v(409, s));
@@ -913,7 +913,7 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
                 assert(cread == a);
                 lemma_spec_task_suspend(n, a, q0);
                 if echod_kernel::external::any_settled(a, acts, n) {
-                    assert(resonate::twins::any_settled(ids, s));
+                    assert(resonate::spec::any_settled(ids, s));
                     let q = p.with_task(t.clear_resumes());
                     let b = with_objects(a, a.objects.insert(id, q));
                     assert(spec_handle(a, kreq, n) == (b, AResponse::Status(AStatusRes { status: 300 })));
@@ -930,8 +930,8 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
                     assert forall|tt: nat| #[trigger] mdeadline_at(q, tt) && tt > now implies mdeadline_at(p, tt) by {}
                     lemma_h_one_object(a, b, id, q, ResponseV::Status(300), o, now);
                 } else {
-                    assert(!resonate::twins::any_settled(ids, s)) by {
-                        if resonate::twins::any_settled(ids, s) {
+                    assert(!resonate::spec::any_settled(ids, s)) by {
+                        if resonate::spec::any_settled(ids, s) {
                             let j = choose|j: int| 0 <= j < ids.len() && !live_v(s.promises[#[trigger] ids[j]]);
                             assert(a.objects[acts[j].awaited].project(n).state != PromiseState::Pending);
                         }
