@@ -334,10 +334,19 @@ whole protocol as spec functions over the state's view (ids as `Seq<char>`,
 the persistent maps as `Map`, the sets as `Set`), one per handler and one
 per internal step, `ext` and `int` at the top, lifted to the model's own
 types by `choose` under one axiom (`axiom_realised`: every view is some
-value's). The `Model` impl lives beside them, inside `verus!`; its
-executable methods are the old glue, `external_body`, so the checker's
-verdicts speak about these twins on the same trust as before. Proving each
-executable handler equal to its twin is what removes it, handler by handler.
+value's). Every executable handler in `exec.rs` is verified to compute its
+twin (`promise_create` ensures `outs_v(outs@) == promise_create_v(req@, s@,
+now)`, and so on for the 18 requests, the internal step and the schedule
+steps), and the `Model` impl beside the twins is verified too: `external`
+runs the handler and converts its outcomes, and its `ensures` is the trait's.
+So the checker's verdicts, which speak about the code, speak about the twins
+with no glue in between, and a refinement theorem against the twins is a
+theorem about the checked code. What this rests on, besides `collections.rs`
+as before: that a value is its view (`axiom_string_ext`, `axiom_vec_ext`,
+`axiom_pmap_ext`, `axiom_pset_ext`: two strings, vectors, maps or sets with
+the same view are the same value, which is what their `PartialEq` decides),
+and that a set's elements come out in one order (`pset_seq`), which the
+twins use and never look into.
 
 The `Model` trait (`src/lib.rs`, in `verus!`) gives each method a `spec` twin
 (`spec_external`, `spec_internal`) and the method's `ensures` ties
@@ -687,9 +696,11 @@ What it trusts is in `collections.rs`: persistent maps and sets seen as Verus
 maps and sets (wrappers over the checker's own `HashedMap` and a `BTreeSet`, so
 the checker is as fast as before), a derived `Clone` being a copy, string
 helpers (an id's origin, URL validation, settle-state names) and the cron engine
-(`nextCron`, `expand`, which the Lean specification leaves opaque). The glue to
-the checker (`model.rs`) is plain Rust; it converts outcomes and computes
-footprints and partitions, and decides nothing about what the server does.
+(`nextCron`, `expand`, which the Lean specification leaves opaque), and the
+axioms at its end (a value is its view; a set's elements come out in one
+order). The glue to the checker (`model.rs`) is plain Rust; it computes
+footprints and partitions, and decides nothing about what the server does:
+the `Model` impl itself is verified (`spec.rs`).
 
 What writing it in Verus changed: closures and iterator chains became loops;
 internal work is a `Vec` of ids inside the spec (a set at the checker); clock and
@@ -778,7 +789,7 @@ Porting also found three checker bugs, all fixed:
 - `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, deferred independent jobs.
-- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/exec.rs` is the server as it runs (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`, and its frame), `src/spec.rs` the same handlers as `spec fn` twins over the state's view, which the trace semantics and refinement proofs are stated over, `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
+- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/exec.rs` is the server as it runs (verified: no panics or overflow anywhere, every handler equal to its twin, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`, and its frame), `src/spec.rs` the same handlers as `spec fn` twins over the state's view, which the trace semantics and refinement proofs are stated over, with the verified `Model` impl, `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
 - `examples/tigerbeetle/`: TigerBeetle's state machine. `lean/` has it as a Lean `Model`, with a proof that debits never exceed credits (built by `lean/lakefile.toml`); `src/` has its data model in Rust, not yet a `Model`.
 - `examples/porcupine/`: Porcupine's etcd and key-value histories, checked against its Go checker's verdicts (`cargo run --release --example porcupine -- all [--dfs] [--certify]`; `fetch.sh` gets the histories).
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the clock, never early, in deadline order after a jump.

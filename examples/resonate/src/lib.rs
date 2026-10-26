@@ -24,7 +24,8 @@
     clippy::collapsible_match,
     clippy::match_like_matches_macro,
     clippy::vec_init_then_push,
-    clippy::len_zero
+    clippy::len_zero,
+    non_shorthand_field_patterns
 )]
 
 pub mod collections;

@@ -1,8 +1,14 @@
 //! What the spec trusts: persistent maps and sets as Verus maps and sets, a copy
 //! that is a copy, string helpers, and the reference server's cron engine.
-//! Everything here is `external_body`:
+//! Everything here is `external_body` or an axiom:
 //! Verus takes the `ensures` on trust and checks every use against them. Keep
 //! it small; everything else in the crate is verified.
+//!
+//! The axioms at the end say two things of the types as built. A value is
+//! its view: two strings, vectors, maps or sets with the same view are the
+//! same value, which is what their `PartialEq` decides and what the checker
+//! compares. And a set's elements come out in one order (`pset_seq`): the
+//! `BTreeSet`'s, which the spec never looks into.
 
 use std::collections::BTreeSet;
 
@@ -137,11 +143,11 @@ impl PSet {
         self.inner.remove(k.as_str());
     }
 
-    /// Every element, in order, each once.
+    /// Every element, in order, each once: `pset_seq` of the set.
     #[verifier::external_body]
     pub fn to_vec(&self) -> (r: Vec<String>)
         ensures
-            forall|i: int| 0 <= i < r.len() ==> #[trigger] self@.contains(r[i]@),
+            r@.map_values(|s: String| s@) == pset_seq(self@),
     {
         self.inner.iter().cloned().collect()
     }
@@ -267,6 +273,51 @@ pub fn expand(template: &String, id: &String, at: u64) -> (r: String)
 {
     crate::model::expand(template, id, at)
 }
+
+// ------------------------------------------------------------------- axioms
+
+/// A set's elements, in the set's order, each once. Which order is the
+/// `BTreeSet`'s; the spec only ever uses that there is one.
+pub uninterp spec fn pset_seq(s: Set<Seq<char>>) -> Seq<Seq<char>>;
+
+pub broadcast axiom fn axiom_pset_seq(s: Set<Seq<char>>)
+    ensures
+        (#[trigger] pset_seq(s)).to_set() == s,
+        pset_seq(s).no_duplicates(),
+        pset_seq(s).len() == s.len(),
+;
+
+/// A string is its characters.
+pub axiom fn axiom_string_ext(a: String, b: String)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+;
+
+/// A vector is its elements.
+pub axiom fn axiom_vec_ext<T>(a: Vec<T>, b: Vec<T>)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+;
+
+/// A map is its entries.
+pub axiom fn axiom_pmap_ext<V>(a: PMap<V>, b: PMap<V>)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+;
+
+/// A set is its elements.
+pub axiom fn axiom_pset_ext(a: PSet, b: PSet)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+;
 
 } // verus!
 

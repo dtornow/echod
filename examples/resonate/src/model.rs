@@ -1,22 +1,16 @@
-//! The glue between the verified spec and the checker: plain Rust, outside
-//! Verus. It converts outcomes to `accordant`'s types, says which keys a
-//! request touches and which origin a key belongs to, and holds the cron
-//! engine the spec trusts. None of it decides what the server does.
+//! The glue between the verified model and the checker: plain Rust, outside
+//! Verus. It says which keys a request touches and which origin a key belongs
+//! to, and holds the cron engine the spec trusts. None of it decides what the
+//! server does: the `Model` impl itself is verified, in `spec.rs`.
 
-use accordant::{ExternalOutcome, Footprint, InternalOutcome, Model, Partitioned, Sched, Time, Touches};
+use accordant::{Footprint, Partitioned, Touches};
 
 use crate::exec::*;
 
-/// The step on these objects: sorted and distinct, so the same objects make
-/// the same step.
+/// The step on these objects, as the model names it: the awaited promise
+/// first, then its awaiter.
 pub fn on(ids: &[&str]) -> Internal {
-    canonical(ids.iter().map(|i| i.to_string()).collect())
-}
-
-fn canonical(mut ids: Vec<Id>) -> Internal {
-    ids.sort();
-    ids.dedup();
-    Internal::On(ids)
+    Internal::On(ids.iter().map(|i| i.to_string()).collect())
 }
 
 /// What a footprint names: a promise with its task, a schedule, or a whole
@@ -137,43 +131,6 @@ impl Default for Resonate {
     fn default() -> Self {
         Resonate { retry_timeout: 5_000, fire_within: 0 }
     }
-}
-
-fn step(s: Step) -> Internal {
-    match s {
-        Step::Objects(ids) => canonical(ids),
-        Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
-        Step::Advance { schedule, at, promise } => Internal::Advance { schedule, at, promise },
-    }
-}
-
-fn sched(w: Work) -> Sched<Internal> {
-    match w {
-        Work::Later(s) => Sched::Later(step(s)),
-        Work::Timer(at, s) => Sched::Timer(at, step(s)),
-    }
-}
-
-/// `Model::external`, outside Verus: the verified handlers' outcomes, as the
-/// checker's types. The `Model` impl itself, with its spec twins, is in
-/// `spec.rs`.
-pub(crate) fn external_glue(m: &Resonate, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Resonate>> {
-    Resonate::external(m, op, s, now)
-        .into_iter()
-        .map(|o| ExternalOutcome { next: o.next, resp: o.resp, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks })
-        .collect()
-}
-
-pub(crate) fn internal_glue(m: &Resonate, step: &Internal, s: &Server, now: Time) -> Vec<InternalOutcome<Resonate>> {
-    let o = match step {
-        Internal::On(ids) => Resonate::internal(m, ids, s, now),
-        Internal::Fire { schedule, at, promise } => Resonate::fire(m, schedule, *at, promise, s, now),
-        Internal::Advance { schedule, at, promise } => Resonate::advance(m, schedule, *at, promise, s, now),
-    };
-    if o.pending {
-        return Vec::new(); // not yet: the work stays
-    }
-    vec![InternalOutcome { next: o.next, work: o.work.into_iter().map(sched).collect(), send: o.send, marks: o.marks }]
 }
 
 impl Footprint for Resonate {

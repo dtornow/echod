@@ -4,16 +4,20 @@
 //! (`accordant::semantics`) is stated over, so `valid(Resonate, ..)` says
 //! something definite, and a refinement theorem has a side to land on.
 //!
-//! The executable handlers (`exec.rs`) are the same protocol written to run;
-//! the `Model` glue here is `external_body`, as before: the checker's verdicts
-//! speak about these twins on trust that the executable code computes them.
-//! Proving that equality, handler by handler, is the step that removes the
-//! trust.
+//! The executable handlers (`exec.rs`) are the same protocol written to run,
+//! and each is verified to compute its twin here (its `ensures`). The `Model`
+//! impl at the end is verified too: so the checker's verdicts, which speak
+//! about the code, speak about these twins, with nothing in between.
 //!
 //! Views: ids and strings as `Seq<char>`, the persistent maps as `Map`, the
 //! sets as `Set`. A value of the model's own types with a given view is
 //! obtained by `choose`; that every view is realised by some value is the one
-//! axiom this module adds (`axiom_realised`), true of the types as built.
+//! axiom this module adds (`axiom_realised`), true of the types as built; that
+//! a value is its view (`collections.rs`) makes the choice the value itself.
+
+// Outside Verus (`cargo build`) the spec functions and proofs are erased, and
+// the imports they use with them.
+#![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
 use vstd::prelude::*;
 
@@ -375,6 +379,45 @@ impl View for Internal {
     }
 }
 
+impl View for Step {
+    type V = InternalV;
+
+    open spec fn view(&self) -> InternalV {
+        match self {
+            Step::Objects(ids) => InternalV::On(strs(ids@)),
+            Step::Fire { schedule, at, promise } => InternalV::Fire { schedule: schedule@, at: *at, promise: promise@ },
+            Step::Advance { schedule, at, promise } => InternalV::Advance { schedule: schedule@, at: *at, promise: promise@ },
+        }
+    }
+}
+
+impl View for Work {
+    type V = Sched<InternalV>;
+
+    open spec fn view(&self) -> Sched<InternalV> {
+        match self {
+            Work::Later(s) => Sched::Later(s@),
+            Work::Timer(t, s) => Sched::Timer(*t, s@),
+        }
+    }
+}
+
+/// An internal item of the checker's, as a view.
+pub open spec fn sched_v(s: Sched<Internal>) -> Sched<InternalV> {
+    match s {
+        Sched::Later(r) => Sched::Later(r@),
+        Sched::Timer(t, r) => Sched::Timer(t, r@),
+    }
+}
+
+pub open spec fn works(v: Seq<Work>) -> Seq<Sched<InternalV>> {
+    v.map_values(|w: Work| w@)
+}
+
+pub open spec fn sends(v: Seq<Dispatch>) -> Seq<DispatchV> {
+    v.map_values(|d: Dispatch| d@)
+}
+
 // ------------------------------------------------------------------ outcomes
 
 pub struct OutV {
@@ -389,6 +432,146 @@ pub struct InOutV {
     pub work: Seq<Sched<InternalV>>,
     pub send: Seq<DispatchV>,
     pub pending: bool,
+}
+
+impl View for Out {
+    type V = OutV;
+
+    open spec fn view(&self) -> OutV {
+        OutV { resp: self.resp@, next: self.next@, work: works(self.work@), send: sends(self.send@) }
+    }
+}
+
+impl View for InOut {
+    type V = InOutV;
+
+    open spec fn view(&self) -> InOutV {
+        InOutV { next: self.next@, work: works(self.work@), send: sends(self.send@), pending: self.pending }
+    }
+}
+
+pub open spec fn outs_v(v: Seq<Out>) -> Seq<OutV> {
+    v.map_values(|o: Out| o@)
+}
+
+// ------------------------------------------------------- views, under maps
+
+pub broadcast proof fn lemma_mv_empty<A, B>(f: spec_fn(A) -> B)
+    ensures
+        #[trigger] Seq::<A>::empty().map_values(f) == Seq::<B>::empty(),
+{
+    assert(Seq::<A>::empty().map_values(f) =~= Seq::<B>::empty());
+}
+
+pub broadcast proof fn lemma_mv_push<A, B>(v: Seq<A>, x: A, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] v.push(x).map_values(f) == v.map_values(f).push(f(x)),
+{
+    assert(v.push(x).map_values(f) =~= v.map_values(f).push(f(x)));
+}
+
+pub broadcast proof fn lemma_mv_add<A, B>(a: Seq<A>, b: Seq<A>, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] (a + b).map_values(f) == a.map_values(f) + b.map_values(f),
+{
+    assert((a + b).map_values(f) =~= a.map_values(f) + b.map_values(f));
+}
+
+pub broadcast proof fn lemma_mv_take<A, B>(v: Seq<A>, i: int, f: spec_fn(A) -> B)
+    requires
+        0 <= i <= v.len(),
+    ensures
+        #[trigger] v.take(i).map_values(f) == v.map_values(f).take(i),
+{
+    assert(v.take(i).map_values(f) =~= v.map_values(f).take(i));
+}
+
+pub broadcast proof fn lemma_map_values_insert<A, B>(m: Map<Chars, A>, k: Chars, v: A, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] m.insert(k, v).map_values(f) == m.map_values(f).insert(k, f(v)),
+{
+    assert(m.insert(k, v).map_values(f) =~= m.map_values(f).insert(k, f(v)));
+}
+
+pub broadcast proof fn lemma_map_values_remove<A, B>(m: Map<Chars, A>, k: Chars, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] m.remove(k).map_values(f) == m.map_values(f).remove(k),
+{
+    assert(m.remove(k).map_values(f) =~= m.map_values(f).remove(k));
+}
+
+pub broadcast proof fn lemma_strs_len(v: Seq<String>)
+    ensures
+        #[trigger] strs(v).len() == v.len(),
+{
+}
+
+pub broadcast proof fn lemma_strs_index(v: Seq<String>, i: int)
+    requires
+        0 <= i < v.len(),
+    ensures
+        #[trigger] strs(v)[i] == v[i]@,
+{
+}
+
+pub broadcast proof fn lemma_works_len(v: Seq<Work>)
+    ensures
+        #[trigger] works(v).len() == v.len(),
+{
+}
+
+pub broadcast proof fn lemma_works_index(v: Seq<Work>, i: int)
+    requires
+        0 <= i < v.len(),
+    ensures
+        #[trigger] works(v)[i] == v[i]@,
+{
+}
+
+pub broadcast proof fn lemma_sends_len(v: Seq<Dispatch>)
+    ensures
+        #[trigger] sends(v).len() == v.len(),
+{
+}
+
+pub broadcast proof fn lemma_sends_index(v: Seq<Dispatch>, i: int)
+    requires
+        0 <= i < v.len(),
+    ensures
+        #[trigger] sends(v)[i] == v[i]@,
+{
+}
+
+pub broadcast proof fn lemma_outs_len(v: Seq<Out>)
+    ensures
+        #[trigger] outs_v(v).len() == v.len(),
+{
+}
+
+pub broadcast proof fn lemma_outs_index(v: Seq<Out>, i: int)
+    requires
+        0 <= i < v.len(),
+    ensures
+        #[trigger] outs_v(v)[i] == v[i]@,
+{
+}
+
+pub broadcast group group_views {
+    lemma_strs_len,
+    lemma_strs_index,
+    lemma_works_len,
+    lemma_works_index,
+    lemma_sends_len,
+    lemma_sends_index,
+    lemma_outs_len,
+    lemma_outs_index,
+    lemma_mv_empty,
+    lemma_mv_push,
+    lemma_mv_add,
+    lemma_mv_take,
+    lemma_map_values_insert,
+    lemma_map_values_remove,
+    axiom_pset_seq,
 }
 
 pub open spec fn sat_add(a: Time, b: Time) -> Time {
@@ -503,7 +686,7 @@ pub open spec fn settle_v(s: ServerV, id: Chars, state: PState, value: Option<Ch
 /// The work a settled promise starts: one resume per stored callback, and its
 /// listeners' unblocks.
 pub open spec fn settled_work_v(p: PromiseV, awaited: Chars) -> Seq<Sched<InternalV>> {
-    let resumes = p.callbacks.to_seq().map_values(|w: Chars| later2_v(awaited, w));
+    let resumes = pset_seq(p.callbacks).map_values(|w: Chars| later2_v(awaited, w));
     if p.listeners.len() > 0 {
         resumes.push(Sched::Later(InternalV::On(seq![awaited])))
     } else {
@@ -596,7 +779,7 @@ pub open spec fn promise_settle_v(req: SettleV, s: ServerV, now: Time) -> Seq<Ou
     }
 }
 
-pub open spec fn register_callback_v(awaited: Chars, awaiter: Chars, s: ServerV) -> Seq<OutV> {
+pub open spec fn promise_register_callback_v(awaited: Chars, awaiter: Chars, s: ServerV) -> Seq<OutV> {
     if awaited == awaiter || origin(awaited) != origin(awaiter) {
         status_v(400, s)
     } else if !s.promises.contains_key(awaited) {
@@ -620,7 +803,7 @@ pub open spec fn register_callback_v(awaited: Chars, awaiter: Chars, s: ServerV)
     }
 }
 
-pub open spec fn register_listener_v(awaited: Chars, address: Chars, s: ServerV) -> Seq<OutV> {
+pub open spec fn promise_register_listener_v(awaited: Chars, address: Chars, s: ServerV) -> Seq<OutV> {
     if !spec_address_valid(address) {
         status_v(400, s)
     } else if !s.promises.contains_key(awaited) {
@@ -695,7 +878,7 @@ pub open spec fn task_create_v(pid: Chars, ttl: Time, req: CreateV, s: ServerV, 
     }
 }
 
-pub open spec fn acquire_task_v(id: Chars, version: u32, pid: Chars, ttl: Time, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_acquire_v(id: Chars, version: u32, pid: Chars, ttl: Time, s: ServerV, now: Time) -> Seq<OutV> {
     if !s.tasks.contains_key(id) {
         status_v(404, s)
     } else if !s.promises.contains_key(id) {
@@ -717,7 +900,7 @@ pub open spec fn acquire_task_v(id: Chars, version: u32, pid: Chars, ttl: Time, 
     }
 }
 
-pub open spec fn release_task_v(id: Chars, version: u32, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_release_v(id: Chars, version: u32, s: ServerV, now: Time) -> Seq<OutV> {
     match held_v(s, id, version) {
         Err(code) => status_v(code, s),
         Ok(t) => one_v(
@@ -729,7 +912,7 @@ pub open spec fn release_task_v(id: Chars, version: u32, s: ServerV, now: Time) 
     }
 }
 
-pub open spec fn fulfill_task_v(id: Chars, version: u32, state: Chars, data: Option<Chars>, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_fulfill_v(id: Chars, version: u32, state: Chars, data: Option<Chars>, s: ServerV, now: Time) -> Seq<OutV> {
     match spec_settable(state) {
         None => status_v(400, s),
         Some(st) => match held_v(s, id, version) {
@@ -751,13 +934,13 @@ pub open spec fn one_origin(refs: Seq<TaskRefV>) -> bool {
 
 /// The heartbeat's tasks, one after the other: a held task whose holder is
 /// `pid` has its lease extended from `now`, and its end rearmed.
-pub open spec fn heartbeat_fold(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, n: ServerV, work: Seq<Sched<InternalV>>, extended: bool, now: Time) -> (ServerV, Seq<Sched<InternalV>>, bool)
+pub open spec fn task_heartbeat_fold(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, n: ServerV, work: Seq<Sched<InternalV>>, extended: bool, now: Time) -> (ServerV, Seq<Sched<InternalV>>, bool)
     decreases refs.len(),
 {
     if refs.len() == 0 {
         (n, work, extended)
     } else {
-        let (n1, work1, ext1) = heartbeat_fold(pid, refs.drop_last(), s, n, work, extended, now);
+        let (n1, work1, ext1) = task_heartbeat_fold(pid, refs.drop_last(), s, n, work, extended, now);
         let r = refs.last();
         match held_v(s, r.id, r.version) {
             Ok(t) => {
@@ -774,11 +957,11 @@ pub open spec fn heartbeat_fold(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, n: 
     }
 }
 
-pub open spec fn heartbeat_v(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_heartbeat_v(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, now: Time) -> Seq<OutV> {
     if !one_origin(refs) {
         status_v(400, s)
     } else {
-        let (n, work, _) = heartbeat_fold(pid, refs, s, s, Seq::empty(), false, now);
+        let (n, work, _) = task_heartbeat_fold(pid, refs, s, s, Seq::empty(), false, now);
         one_v(ResponseV::Status(200), n, work, Seq::empty())
     }
 }
@@ -820,7 +1003,7 @@ pub open spec fn with_callbacks(promises: Map<Chars, PromiseV>, ids: Seq<Chars>,
     }
 }
 
-pub open spec fn suspend_task_v(id: Chars, version: u32, ids: Seq<Chars>, s: ServerV) -> Seq<OutV> {
+pub open spec fn task_suspend_v(id: Chars, version: u32, ids: Seq<Chars>, s: ServerV) -> Seq<OutV> {
     if ids.len() == 0 || ids.contains(id) {
         status_v(400, s)
     } else if !distinct(ids) {
@@ -861,7 +1044,7 @@ pub open spec fn fenced_target(a: FencedV) -> Chars {
 
 /// A fence that creates a promise in another origin: the create first, as a
 /// request of its own, then the fence's check decides the answer.
-pub open spec fn detached_create_v(id: Chars, version: u32, c: CreateV, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_fence_detached_v(id: Chars, version: u32, c: CreateV, s: ServerV, now: Time) -> Seq<OutV> {
     let outs = promise_create_v(c, s, now);
     let o = outs[0];
     match held_v(o.next, id, version) {
@@ -870,7 +1053,7 @@ pub open spec fn detached_create_v(id: Chars, version: u32, c: CreateV, s: Serve
     }
 }
 
-pub open spec fn fence_task_v(id: Chars, version: u32, action: FencedV, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_fence_v(id: Chars, version: u32, action: FencedV, s: ServerV, now: Time) -> Seq<OutV> {
     if fenced_target(action) == id {
         status_v(400, s)
     } else if (match action {
@@ -897,7 +1080,7 @@ pub open spec fn fence_task_v(id: Chars, version: u32, action: FencedV, s: Serve
             },
             FencedV::Create(c) => {
                 if origin(c.id) != origin(id) {
-                    detached_create_v(id, version, c, s, now)
+                    task_fence_detached_v(id, version, c, s, now)
                 } else {
                     match held_v(s, id, version) {
                         Err(code) => status_v(code, s),
@@ -909,7 +1092,7 @@ pub open spec fn fence_task_v(id: Chars, version: u32, action: FencedV, s: Serve
     }
 }
 
-pub open spec fn halt_task_v(id: Chars, s: ServerV) -> Seq<OutV> {
+pub open spec fn task_halt_v(id: Chars, s: ServerV) -> Seq<OutV> {
     if !s.tasks.contains_key(id) {
         status_v(404, s)
     } else {
@@ -925,7 +1108,7 @@ pub open spec fn halt_task_v(id: Chars, s: ServerV) -> Seq<OutV> {
     }
 }
 
-pub open spec fn continue_task_v(id: Chars, s: ServerV, now: Time) -> Seq<OutV> {
+pub open spec fn task_continue_v(id: Chars, s: ServerV, now: Time) -> Seq<OutV> {
     if !s.tasks.contains_key(id) {
         status_v(404, s)
     } else {
@@ -980,7 +1163,7 @@ pub open spec fn schedule_create_v(cfg: Resonate, req: ScheduleCreateV, s: Serve
     }
 }
 
-pub open spec fn delete_schedule_v(id: Chars, s: ServerV) -> Seq<OutV> {
+pub open spec fn schedule_delete_v(id: Chars, s: ServerV) -> Seq<OutV> {
     if !s.schedules.contains_key(id) {
         status_v(404, s)
     } else {
@@ -998,29 +1181,29 @@ pub open spec fn ext(cfg: Resonate, op: RequestV, s: ServerV, now: Time) -> Seq<
             status_v(404, s)
         },
         RequestV::SettlePromise(st) => promise_settle_v(st, s, now),
-        RequestV::RegisterCallback { awaited, awaiter } => register_callback_v(awaited, awaiter, s),
-        RequestV::RegisterListener { awaited, address } => register_listener_v(awaited, address, s),
+        RequestV::RegisterCallback { awaited, awaiter } => promise_register_callback_v(awaited, awaiter, s),
+        RequestV::RegisterListener { awaited, address } => promise_register_listener_v(awaited, address, s),
         RequestV::GetTask(id) => if s.tasks.contains_key(id) {
             echo_v(ResponseV::Task(trec_v(id, s.tasks[id])), s)
         } else {
             status_v(404, s)
         },
         RequestV::CreateTask { pid, ttl, action } => task_create_v(pid, ttl, action, s, now),
-        RequestV::AcquireTask { id, version, pid, ttl } => acquire_task_v(id, version, pid, ttl, s, now),
-        RequestV::ReleaseTask { id, version } => release_task_v(id, version, s, now),
-        RequestV::FulfillTask { id, version, state, data } => fulfill_task_v(id, version, state, data, s, now),
-        RequestV::HeartbeatTask { pid, tasks } => heartbeat_v(pid, tasks, s, now),
-        RequestV::SuspendTask { id, version, awaited } => suspend_task_v(id, version, awaited, s),
-        RequestV::FenceTask { id, version, action } => fence_task_v(id, version, action, s, now),
-        RequestV::HaltTask(id) => halt_task_v(id, s),
-        RequestV::ContinueTask(id) => continue_task_v(id, s, now),
+        RequestV::AcquireTask { id, version, pid, ttl } => task_acquire_v(id, version, pid, ttl, s, now),
+        RequestV::ReleaseTask { id, version } => task_release_v(id, version, s, now),
+        RequestV::FulfillTask { id, version, state, data } => task_fulfill_v(id, version, state, data, s, now),
+        RequestV::HeartbeatTask { pid, tasks } => task_heartbeat_v(pid, tasks, s, now),
+        RequestV::SuspendTask { id, version, awaited } => task_suspend_v(id, version, awaited, s),
+        RequestV::FenceTask { id, version, action } => task_fence_v(id, version, action, s, now),
+        RequestV::HaltTask(id) => task_halt_v(id, s),
+        RequestV::ContinueTask(id) => task_continue_v(id, s, now),
         RequestV::CreateSchedule(c) => schedule_create_v(cfg, c, s, now),
         RequestV::GetSchedule(id) => if s.schedules.contains_key(id) {
             echo_v(ResponseV::Schedule(s.schedules[id]), s)
         } else {
             status_v(404, s)
         },
-        RequestV::DeleteSchedule(id) => delete_schedule_v(id, s),
+        RequestV::DeleteSchedule(id) => schedule_delete_v(id, s),
     }
 }
 
@@ -1118,7 +1301,7 @@ pub open spec fn due_fold(cfg: Resonate, ids: Seq<Chars>, n: ServerV, work: Seq<
         let (n3, send3) = if told {
             let p = n2.promises[id];
             let rec = prec_v(id, p);
-            let unblocks = p.listeners.to_seq().map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
+            let unblocks = pset_seq(p.listeners).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
             (ServerV { promises: n2.promises.insert(id, PromiseV { listeners: Set::empty(), ..p }), ..n2 }, send1 + unblocks)
         } else {
             (n2, send1)
@@ -1322,6 +1505,352 @@ pub proof fn axiom_realised(v: ServerV, r: ResponseV, i: InternalV, d: DispatchV
 {
 }
 
+// --------------------------------------------------- a value is its view
+
+pub proof fn lemma_ostr_ext(a: Option<String>, b: Option<String>)
+    requires
+        ostr(a) == ostr(b),
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Some(x), Some(y)) => axiom_string_ext(x, y),
+        _ => {},
+    }
+}
+
+pub proof fn lemma_strs_ext(a: Vec<String>, b: Vec<String>)
+    requires
+        strs(a@) == strs(b@),
+    ensures
+        a == b,
+{
+    broadcast use group_views;
+    assert(strs(a@).len() == a@.len());
+    assert(strs(b@).len() == b@.len());
+    assert forall|i: int| 0 <= i < a@.len() implies a@[i] == b@[i] by {
+        assert(strs(a@)[i] == a@[i]@);
+        assert(strs(b@)[i] == b@[i]@);
+        axiom_string_ext(a@[i], b@[i]);
+    }
+    assert(a@ =~= b@);
+    axiom_vec_ext(a, b);
+}
+
+pub proof fn lemma_promise_ext(a: Promise, b: Promise)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    lemma_ostr_ext(a.value, b.value);
+    lemma_ostr_ext(a.param, b.param);
+    axiom_pset_ext(a.callbacks, b.callbacks);
+    axiom_pset_ext(a.listeners, b.listeners);
+}
+
+pub proof fn lemma_task_ext(a: Task, b: Task)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    lemma_ostr_ext(a.pid, b.pid);
+    lemma_strs_ext(a.resumes, b.resumes);
+}
+
+pub proof fn lemma_schedule_ext(a: Schedule, b: Schedule)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    axiom_string_ext(a.cron, b.cron);
+    axiom_string_ext(a.promise_id, b.promise_id);
+    lemma_ostr_ext(a.promise_param, b.promise_param);
+}
+
+pub proof fn lemma_promises_ext(a: PMap<Promise>, b: PMap<Promise>)
+    requires
+        a@.map_values(|p: Promise| p@) == b@.map_values(|p: Promise| p@),
+    ensures
+        a == b,
+{
+    let f = |p: Promise| p@;
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        lemma_promise_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_tasks_ext(a: PMap<Task>, b: PMap<Task>)
+    requires
+        a@.map_values(|t: Task| t@) == b@.map_values(|t: Task| t@),
+    ensures
+        a == b,
+{
+    let f = |t: Task| t@;
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        lemma_task_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_schedules_ext(a: PMap<Schedule>, b: PMap<Schedule>)
+    requires
+        a@.map_values(|c: Schedule| c@) == b@.map_values(|c: Schedule| c@),
+    ensures
+        a == b,
+{
+    let f = |c: Schedule| c@;
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        lemma_schedule_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_server_ext(a: Server, b: Server)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    lemma_promises_ext(a.promises, b.promises);
+    lemma_tasks_ext(a.tasks, b.tasks);
+    lemma_schedules_ext(a.schedules, b.schedules);
+}
+
+pub proof fn lemma_prec_ext(a: PromiseRec, b: PromiseRec)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    lemma_ostr_ext(a.param, b.param);
+    lemma_ostr_ext(a.value, b.value);
+}
+
+pub proof fn lemma_trec_ext(a: TaskRec, b: TaskRec)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    lemma_ostr_ext(a.pid, b.pid);
+}
+
+pub proof fn lemma_response_ext(a: Response, b: Response)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Response::Status(_), Response::Status(_)) => {},
+        (Response::Promise(p), Response::Promise(q)) => lemma_prec_ext(p, q),
+        (Response::Task(t), Response::Task(u)) => lemma_trec_ext(t, u),
+        (Response::Both(p, t), Response::Both(q, u)) => {
+            lemma_prec_ext(p, q);
+            lemma_trec_ext(t, u);
+        },
+        (Response::Schedule(c), Response::Schedule(d)) => lemma_schedule_ext(c, d),
+        _ => {},
+    }
+}
+
+pub proof fn lemma_internal_ext(a: Internal, b: Internal)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Internal::On(x), Internal::On(y)) => lemma_strs_ext(x, y),
+        (Internal::Fire { schedule: s1, promise: p1, .. }, Internal::Fire { schedule: s2, promise: p2, .. }) => {
+            axiom_string_ext(s1, s2);
+            axiom_string_ext(p1, p2);
+        },
+        (Internal::Advance { schedule: s1, promise: p1, .. }, Internal::Advance { schedule: s2, promise: p2, .. }) => {
+            axiom_string_ext(s1, s2);
+            axiom_string_ext(p1, p2);
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Dispatch::Execute { id: x, .. }, Dispatch::Execute { id: y, .. }) => axiom_string_ext(x, y),
+        (Dispatch::Unblock { address: x, promise: p }, Dispatch::Unblock { address: y, promise: q }) => {
+            axiom_string_ext(x, y);
+            lemma_prec_ext(p, q);
+        },
+        _ => {},
+    }
+}
+
+// ----------------------------------------------- the lift of a value's view
+
+pub proof fn lemma_lift_server(s: Server)
+    ensures
+        lift_server(s@) == s,
+{
+    axiom_realised(s@, ResponseV::Status(0), InternalV::On(Seq::empty()), DispatchV::Execute { id: Seq::empty(), version: 0 });
+    lemma_server_ext(lift_server(s@), s);
+}
+
+pub proof fn lemma_lift_response(r: Response)
+    ensures
+        lift_response(r@) == r,
+{
+    axiom_realised(ServerV { promises: Map::empty(), tasks: Map::empty(), schedules: Map::empty() }, r@, InternalV::On(Seq::empty()), DispatchV::Execute { id: Seq::empty(), version: 0 });
+    lemma_response_ext(lift_response(r@), r);
+}
+
+pub proof fn lemma_lift_internal(i: Internal)
+    ensures
+        lift_internal(i@) == i,
+{
+    axiom_realised(ServerV { promises: Map::empty(), tasks: Map::empty(), schedules: Map::empty() }, ResponseV::Status(0), i@, DispatchV::Execute { id: Seq::empty(), version: 0 });
+    lemma_internal_ext(lift_internal(i@), i);
+}
+
+pub proof fn lemma_lift_dispatch(d: Dispatch)
+    ensures
+        lift_dispatch(d@) == d,
+{
+    axiom_realised(ServerV { promises: Map::empty(), tasks: Map::empty(), schedules: Map::empty() }, ResponseV::Status(0), InternalV::On(Seq::empty()), d@);
+    lemma_dispatch_ext(lift_dispatch(d@), d);
+}
+
+pub proof fn lemma_lift_sched(w: Sched<Internal>)
+    ensures
+        lift_sched(sched_v(w)) == w,
+{
+    match w {
+        Sched::Later(r) => lemma_lift_internal(r),
+        Sched::Timer(_, r) => lemma_lift_internal(r),
+    }
+}
+
+/// The checker's outcome built from an `Out` is the lift of the `Out`'s view.
+pub proof fn lemma_lift_out(o: ExternalOutcomeV<Server, Response, Internal, Dispatch>, v: OutV)
+    requires
+        o.next@ == v.next,
+        o.resp@ == v.resp,
+        o.work.map_values(|w: Sched<Internal>| sched_v(w)) == v.work,
+        o.send.map_values(|d: Dispatch| d@) == v.send,
+    ensures
+        lift_out(v) == o,
+{
+    lemma_lift_server(o.next);
+    lemma_lift_response(o.resp);
+    assert forall|j: int| 0 <= j < o.work.len() implies #[trigger] lift_sched(v.work[j]) == o.work[j] by {
+        lemma_lift_sched(o.work[j]);
+    }
+    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
+    assert forall|j: int| 0 <= j < o.send.len() implies #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
+        lemma_lift_dispatch(o.send[j]);
+    }
+    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
+}
+
+pub proof fn lemma_lift_inout(o: InternalOutcomeV<Server, Internal, Dispatch>, v: InOutV)
+    requires
+        o.next@ == v.next,
+        o.work.map_values(|w: Sched<Internal>| sched_v(w)) == v.work,
+        o.send.map_values(|d: Dispatch| d@) == v.send,
+    ensures
+        lift_inout(v) == o,
+{
+    lemma_lift_server(o.next);
+    assert forall|j: int| 0 <= j < o.work.len() implies #[trigger] lift_sched(v.work[j]) == o.work[j] by {
+        lemma_lift_sched(o.work[j]);
+    }
+    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
+    assert forall|j: int| 0 <= j < o.send.len() implies #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
+        lemma_lift_dispatch(o.send[j]);
+    }
+    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
+}
+
+// ------------------------------------------------------------- the model
+
+fn step(s: Step) -> (r: Internal)
+    ensures
+        r@ == s@,
+{
+    match s {
+        Step::Objects(ids) => Internal::On(ids),
+        Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
+        Step::Advance { schedule, at, promise } => Internal::Advance { schedule, at, promise },
+    }
+}
+
+fn sched(w: Work) -> (r: Sched<Internal>)
+    ensures
+        sched_v(r) == w@,
+{
+    match w {
+        Work::Later(s) => Sched::Later(step(s)),
+        Work::Timer(at, s) => Sched::Timer(at, step(s)),
+    }
+}
+
+/// The work an outcome starts, as the checker's items.
+fn items(mut w: Vec<Work>) -> (r: Vec<Sched<Internal>>)
+    ensures
+        r@.map_values(|x: Sched<Internal>| sched_v(x)) == works(w@),
+{
+    let ghost all = w@;
+    let mut r: Vec<Sched<Internal>> = Vec::new();
+    while w.len() > 0
+        invariant
+            r@.len() + w@.len() == all.len(),
+            w@ == all.skip(r@.len() as int),
+            r@.map_values(|x: Sched<Internal>| sched_v(x)) == works(all.take(r@.len() as int)),
+        decreases w@.len(),
+    {
+        broadcast use group_views;
+        let ghost k = r@.len() as int;
+        let x = w.remove(0);
+        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+        assert(all.take(k + 1) =~= all.take(k).push(all[k]));
+        r.push(sched(x));
+    }
+    assert(all.take(all.len() as int) =~= all);
+    r
+}
+
 impl Model for Resonate {
     type State = Server;
 
@@ -1342,16 +1871,68 @@ impl Model for Resonate {
         if o.pending { Seq::empty() } else { seq![lift_inout(o)] }
     }
 
-    /// The glue: trusted to compute `spec_external`, as it was before the
-    /// twins were written down.
-    #[verifier::external_body]
     fn external(&self, op: &Request, s: &Server, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        crate::model::external_glue(self, op, s, now)
+        let mut outs = self.request(op, s, now);
+        let ghost all = outs@;
+        let ghost twin = ext(*self, op@, s@, now);
+        assert(twin == outs_v(all));
+        let mut r: Vec<ExternalOutcome<Resonate>> = Vec::new();
+        while outs.len() > 0
+            invariant
+                twin == outs_v(all),
+                r@.len() + outs@.len() == all.len(),
+                outs@ == all.skip(r@.len() as int),
+                forall|j: int| 0 <= j < r@.len() ==> {
+                    let o = #[trigger] r@[j];
+                    ExternalOutcomeV { next: o.next, resp: o.resp, work: o.work@, send: o.send@ } == lift_out(all[j]@)
+                },
+            decreases outs@.len(),
+        {
+            let ghost k = r@.len() as int;
+            let o = outs.remove(0);
+            assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+            assert(o == all[k]);
+            let Out { resp, next, work, send, marks } = o;
+            let work = items(work);
+            let e = ExternalOutcome { next, resp, work, send, marks };
+            proof {
+                lemma_lift_out(ExternalOutcomeV { next: e.next, resp: e.resp, work: e.work@, send: e.send@ }, all[k]@);
+            }
+            r.push(e);
+        }
+        proof {
+            assert(r@.len() == all.len());
+            assert forall|i: int| 0 <= i < r@.len() implies {
+                let o = #[trigger] r@[i];
+                ExternalOutcomeV { next: o.next, resp: o.resp, work: o.work@, send: o.send@ } == self.spec_external(*op, *s, now)[i]
+            } by {
+                assert(self.spec_external(*op, *s, now)[i] == lift_out(twin[i]));
+                assert(twin[i] == all[i]@);
+            }
+        }
+        r
     }
 
-    #[verifier::external_body]
     fn internal(&self, step: &Internal, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
-        crate::model::internal_glue(self, step, s, now)
+        let o = match step {
+            Internal::On(ids) => self.objects(ids, s, now),
+            Internal::Fire { schedule, at, promise } => self.fire(schedule, *at, promise, s, now),
+            Internal::Advance { schedule, at, promise } => self.advance(schedule, *at, promise, s, now),
+        };
+        assert(o@ == int(*self, step@, s@, now));
+        let mut r: Vec<InternalOutcome<Resonate>> = Vec::new();
+        if o.pending {
+            return r;
+        }
+        let ghost v = o@;
+        let InOut { next, work, send, marks, pending: _ } = o;
+        let work = items(work);
+        let e = InternalOutcome { next, work, send, marks };
+        proof {
+            lemma_lift_inout(InternalOutcomeV { next: e.next, work: e.work@, send: e.send@ }, v);
+        }
+        r.push(e);
+        r
     }
 }
 
