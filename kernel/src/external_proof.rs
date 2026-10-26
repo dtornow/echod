@@ -1351,7 +1351,7 @@ pub proof fn lemma_spec_task_create(now: nat, a: AState, req: ATaskCreateReq)
                 None => {}
                 Some(t) => {
                     if t.state == TaskState::Fulfilled {
-                    } else if t.state != TaskState::Pending || t.version >= MAX_TIME {
+                    } else if t.state != TaskState::Pending || t.version >= MAX_VERSION {
                     } else {
                         lemma_projected_task_identity(now, a, x);
                         let c = spec_task_create(a, req, now).0;
@@ -1378,7 +1378,7 @@ pub proof fn lemma_spec_task_acquire(now: nat, a: AState, req: ATaskAcquireReq)
         match p.task {
             None => {}
             Some(t) => {
-                if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != req.version || t.version >= MAX_TIME {
+                if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != req.version || t.version >= MAX_VERSION {
                 } else {
                     lemma_projected_task_identity(now, a, x);
                     let c = spec_task_acquire(a, req, now).0;

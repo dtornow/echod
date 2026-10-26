@@ -23,6 +23,11 @@ verus! {
 /// of two never leaves `u64`. 2^62 milliseconds is 146 million years.
 pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
 
+/// The last version a task can take: an acquire at it is refused (409), as
+/// the protocol's servers refuse one at their own door. The wire carries a
+/// version as a `u32`; the kernel's `u64` never exceeds it.
+pub const MAX_VERSION: u64 = u32::MAX as u64;
+
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
@@ -246,7 +251,7 @@ impl ATask {
             id: id,
             state: self.state,
             version: self.version,
-            resumes: self.resumes.len() as u64,
+            resumes: if self.resumes.len() > u64::MAX { u64::MAX } else { self.resumes.len() as u64 },
             ttl: self.ttl,
             pid: self.pid,
         }

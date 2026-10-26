@@ -246,7 +246,7 @@ pub open spec fn spec_task_create(a: AState, req: ATaskCreateReq, now: nat) -> (
                 Some(t) => {
                     if t.state == TaskState::Fulfilled {
                         (b, claim_of(p))
-                    } else if t.state != TaskState::Pending || t.version >= MAX_TIME {
+                    } else if t.state != TaskState::Pending || t.version >= MAX_VERSION {
                         (b, claim_err(409))
                     } else {
                         let c = with_objects(b, b.objects.insert(act.id, p.with_task(t.acquire(req.pid, req.ttl as nat, now))));
@@ -269,7 +269,7 @@ pub open spec fn spec_task_acquire(a: AState, req: ATaskAcquireReq, now: nat) ->
         match p.task {
             None => (b, claim_err(404)),
             Some(t) => {
-                if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != req.version || t.version >= MAX_TIME {
+                if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != req.version || t.version >= MAX_VERSION {
                     (b, claim_err(409))
                 } else {
                     let c = with_objects(b, b.objects.insert(req.id, p.with_task(t.acquire(req.pid, req.ttl as nat, now))));
@@ -1138,7 +1138,7 @@ impl State {
                     let trec = match &self.objects[i].task { Some(t) => Some(t.to_record(&self.objects[i].id)), None => None };
                     return TaskClaimRes { status: 200, task: trec, promise: Some(rec) };
                 }
-                if state != TaskState::Pending || version >= MAX_TIME {
+                if state != TaskState::Pending || version >= MAX_VERSION {
                     return TaskClaimRes { status: 409, task: None, promise: None };
                 }
                 let ghost before = self.objects@;
@@ -1190,7 +1190,7 @@ impl State {
             Some(t) => (t.state, t.version),
         };
         if state != TaskState::Pending || self.objects[i].state != PromiseState::Pending
-            || version != req.version || version >= MAX_TIME {
+            || version != req.version || version >= MAX_VERSION {
             return TaskClaimRes { status: 409, task: None, promise: None };
         }
         let ghost before = self.objects@;
