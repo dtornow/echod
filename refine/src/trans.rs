@@ -13,6 +13,7 @@ use echod_kernel::properties::{inv, inv_obj, no_dups, opt_or_zero};
 use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
+use resonate::collections::{axiom_pset_seq, pset_seq};
 use resonate::spec::*;
 use resonate::{PState, Resonate, TState, Time};
 
@@ -419,7 +420,7 @@ pub proof fn tr_listeners(b: AState, id: Seq<char>, now: nat)
             let b2 = listeners_of(b, id, b.objects[id].listeners, now);
             &&& translate(b2) == (if told { ServerV { promises: n.promises.insert(id, PromiseV { listeners: Set::empty(), ..p }), ..n } } else { n })
             &&& listeners_sends(b, id, b.objects[id].listeners, now).to_multiset() == (
-                if told { p.listeners.to_seq().map_values(|a: Chars| DispatchV::Unblock { address: a, promise: prec_v(id, p) }) } else { Seq::<DispatchV>::empty() }).to_multiset()
+                if told { pset_seq(p.listeners).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: prec_v(id, p) }) } else { Seq::<DispatchV>::empty() }).to_multiset()
         }),
 {
     broadcast use Seq::to_set_ensures;
@@ -453,10 +454,9 @@ pub proof fn tr_listeners(b: AState, id: Seq<char>, now: nat)
                 assert(translate(b2).tasks =~= n.tasks);
             }
             assert(l.no_duplicates());
-            l.to_set().lemma_to_seq_no_duplicates();
-            l.to_set().lemma_to_seq_to_set_id();
+            axiom_pset_seq(l.to_set());
             assert(vstd::relations::injective(f));
-            lemma_map_nodup_same_set(l, l.to_set().to_seq(), f);
+            lemma_map_nodup_same_set(l, pset_seq(l.to_set()), f);
         } else {
             assert(l =~= Seq::<Seq<char>>::empty());
             assert(q == p0);
@@ -917,8 +917,8 @@ pub proof fn tr_deadlines(b: AState, ids: Seq<Seq<char>>, now: u64, work: Seq<Sc
                 let sw = settled_work_v(p, x);
                 assert(work1 == work0 + sw);
                 assert(b.objects[x].state == PromiseState::Pending && b.objects[x].timeout_at <= now);
-                let cbs = p.callbacks.to_seq();
-                p.callbacks.lemma_to_seq_to_set_id();
+                let cbs = pset_seq(p.callbacks);
+                axiom_pset_seq(p.callbacks);
                 let resumes = cbs.map_values(|w: Chars| later2_v(x, w));
                 assert forall|i: int| work0.len() <= i < work1.len() implies spawned(b, ids, n, work1[i]) by {
                     let j = i - work0.len();
@@ -1170,7 +1170,7 @@ pub open spec fn due_step(cfg: Resonate, id: Chars, n1: ServerV, work1: Seq<Sche
     let (n3, send3) = if told {
         let p = n2.promises[id];
         let rec = prec_v(id, p);
-        let unblocks = p.listeners.to_seq().map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
+        let unblocks = pset_seq(p.listeners).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
         (ServerV { promises: n2.promises.insert(id, PromiseV { listeners: Set::empty(), ..p }), ..n2 }, send1 + unblocks)
     } else {
         (n2, send1)
@@ -1264,7 +1264,7 @@ pub proof fn tr_due_one(b: AState, id: Seq<char>, now: u64, cfg: Resonate, work:
     let (n3, send3) = if told {
         let p = n2.promises[id];
         let rec = prec_v(id, p);
-        let unblocks = p.listeners.to_seq().map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
+        let unblocks = pset_seq(p.listeners).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
         (ServerV { promises: n2.promises.insert(id, PromiseV { listeners: Set::empty(), ..p }), ..n2 }, send + unblocks)
     } else {
         (n2, send)

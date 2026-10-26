@@ -260,18 +260,18 @@ pub proof fn h_register_callback(cfg: Resonate, a: AState, awaited: Chars, await
     lemma_translate_reads(a, y);
     axiom_origin(x);
     axiom_origin(y);
-    assert(ext(cfg, req, s, now) == register_callback_v(x, y, s));
+    assert(ext(cfg, req, s, now) == promise_register_callback_v(x, y, s));
     if x == y || !echod_kernel::types::same_origin_spec(x, y) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 400, promise: None })));
-        assert(register_callback_v(x, y, s) == status_v(400, s));
+        assert(promise_register_callback_v(x, y, s) == status_v(400, s));
         lemma_h_noop(a, ResponseV::Status(400), now);
     } else if !a.objects.contains_key(x) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 404, promise: None })));
-        assert(register_callback_v(x, y, s) == status_v(404, s));
+        assert(promise_register_callback_v(x, y, s) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else if !a.objects.contains_key(y) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 422, promise: None })));
-        assert(register_callback_v(x, y, s) == status_v(422, s));
+        assert(promise_register_callback_v(x, y, s) == status_v(422, s));
         lemma_h_noop(a, ResponseV::Status(422), now);
     } else {
         lemma_object_facts(a, x, now);
@@ -286,7 +286,7 @@ pub proof fn h_register_callback(cfg: Resonate, a: AState, awaited: Chars, await
         let res = ResponseV::Promise(prec_v(x, promise_v(p)));
         if w.otype() != OType::Runnable || !p.otype().awaitable() {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 422, promise: None })));
-            assert(register_callback_v(x, y, s) == status_v(422, s));
+            assert(promise_register_callback_v(x, y, s) == status_v(422, s));
             lemma_h_noop(a, ResponseV::Status(422), now);
         } else if p.state == PromiseState::Pending && w.state == PromiseState::Pending {
             let q = p.add_callback(y);
@@ -306,13 +306,13 @@ pub proof fn h_register_callback(cfg: Resonate, a: AState, awaited: Chars, await
                 }
             }
             assert(translate(b) == next);
-            assert(register_callback_v(x, y, s) == one_v(res, next, Seq::empty(), Seq::empty()));
+            assert(promise_register_callback_v(x, y, s) == one_v(res, next, Seq::empty(), Seq::empty()));
             let o = OutV { resp: res, next, work: Seq::empty(), send: Seq::empty() };
             assert forall|tt: nat| #[trigger] mdeadline_at(q, tt) && tt > now implies mdeadline_at(p, tt) by {}
             lemma_h_one_object(a, b, x, q, res, o, now);
         } else {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 200, promise: Some(p.to_record()) })));
-            assert(register_callback_v(x, y, s) == echo_v(res, s));
+            assert(promise_register_callback_v(x, y, s) == echo_v(res, s));
             lemma_h_noop(a, res, now);
         }
     }
@@ -334,10 +334,10 @@ pub proof fn h_register_listener(cfg: Resonate, a: AState, awaited: Chars, addre
     let kreq = ARequest::PromiseRegisterListener(q0);
     lemma_swept_read(a, x, now);
     lemma_translate_reads(a, x);
-    assert(ext(cfg, req, s, now) == register_listener_v(x, address, s));
+    assert(ext(cfg, req, s, now) == promise_register_listener_v(x, address, s));
     if !a.objects.contains_key(x) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 404, promise: None })));
-        assert(register_listener_v(x, address, s) == status_v(404, s));
+        assert(promise_register_listener_v(x, address, s) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, x, now);
@@ -348,7 +348,7 @@ pub proof fn h_register_listener(cfg: Resonate, a: AState, awaited: Chars, addre
         let res = ResponseV::Promise(prec_v(x, promise_v(p)));
         if !p.otype().awaitable() {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 422, promise: None })));
-            assert(register_listener_v(x, address, s) == status_v(422, s));
+            assert(promise_register_listener_v(x, address, s) == status_v(422, s));
             lemma_h_noop(a, ResponseV::Status(422), now);
         } else if p.state == PromiseState::Pending {
             let q = p.add_listener(address);
@@ -368,13 +368,13 @@ pub proof fn h_register_listener(cfg: Resonate, a: AState, awaited: Chars, addre
                 }
             }
             assert(translate(b) == next);
-            assert(register_listener_v(x, address, s) == one_v(res, next, Seq::empty(), Seq::empty()));
+            assert(promise_register_listener_v(x, address, s) == one_v(res, next, Seq::empty(), Seq::empty()));
             let o = OutV { resp: res, next, work: Seq::empty(), send: Seq::empty() };
             assert forall|tt: nat| #[trigger] mdeadline_at(q, tt) && tt > now implies mdeadline_at(p, tt) by {}
             lemma_h_one_object(a, b, x, q, res, o, now);
         } else {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 200, promise: Some(p.to_record()) })));
-            assert(register_listener_v(x, address, s) == echo_v(res, s));
+            assert(promise_register_listener_v(x, address, s) == echo_v(res, s));
             lemma_h_noop(a, res, now);
         }
     }
@@ -580,12 +580,12 @@ pub proof fn h_task_acquire(cfg: Resonate, a: AState, id: Chars, version: u32, p
     let kreq = ARequest::TaskAcquire(q0);
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == acquire_task_v(id, version, pid, ttl, s, now));
+    assert(ext(cfg, req, s, now) == task_acquire_v(id, version, pid, ttl, s, now));
     assert(ttl <= MAX_TIME && ttl >= 1);
     if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::TaskClaim(claim_err(404))));
         assert(!s.tasks.contains_key(id));
-        assert(acquire_task_v(id, version, pid, ttl, s, now) == status_v(404, s));
+        assert(task_acquire_v(id, version, pid, ttl, s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -598,7 +598,7 @@ pub proof fn h_task_acquire(cfg: Resonate, a: AState, id: Chars, version: u32, p
         assert((t.version >= echod_kernel::types::MAX_VERSION) == (task_v(t).version >= resonate::spec::MAX_VERSION));
         if t.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version as u64 || t.version >= echod_kernel::types::MAX_VERSION {
             assert(spec_handle(a, kreq, n) == (a, AResponse::TaskClaim(claim_err(409))));
-            assert(acquire_task_v(id, version, pid, ttl, s, now) == status_v(409, s));
+            assert(task_acquire_v(id, version, pid, ttl, s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             let t2 = t.acquire(pid, ttl as nat, n);
@@ -621,7 +621,7 @@ pub proof fn h_task_acquire(cfg: Resonate, a: AState, id: Chars, version: u32, p
             assert(translate(b) == next);
             assert(sat_add(now, ttl) == now + ttl);
             let work = seq![at_v((now + ttl) as u64, id)];
-            assert(acquire_task_v(id, version, pid, ttl, s, now) == one_v(res, next, work, Seq::empty()));
+            assert(task_acquire_v(id, version, pid, ttl, s, now) == one_v(res, next, work, Seq::empty()));
             let o = OutV { resp: res, next, work, send: Seq::empty() };
             assert(work_shape(b, work)) by {
                 assert(work_ids(work[0]) == seq![id]);
@@ -654,12 +654,12 @@ pub proof fn h_task_release(cfg: Resonate, a: AState, id: Chars, version: u32, n
     let kreq = ARequest::TaskRelease(q0);
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == release_task_v(id, version, s, now));
+    assert(ext(cfg, req, s, now) == task_release_v(id, version, s, now));
     if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 404 })));
         assert(!s.tasks.contains_key(id));
         assert(held_v(s, id, version) == Err::<TaskV, u16>(404));
-        assert(release_task_v(id, version, s, now) == status_v(404, s));
+        assert(task_release_v(id, version, s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -671,7 +671,7 @@ pub proof fn h_task_release(cfg: Resonate, a: AState, id: Chars, version: u32, n
         if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != version as u64 {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 409 })));
             assert(held_v(s, id, version) == Err::<TaskV, u16>(409));
-            assert(release_task_v(id, version, s, now) == status_v(409, s));
+            assert(task_release_v(id, version, s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             assert(held_v(s, id, version) == Ok::<TaskV, u16>(task_v(t)));
@@ -688,7 +688,7 @@ pub proof fn h_task_release(cfg: Resonate, a: AState, id: Chars, version: u32, n
             assert(s.promises.insert(id, promise_v(p)) =~= s.promises);
             assert(translate(b) == next);
             let work = seq![at_v(now, id)];
-            assert(release_task_v(id, version, s, now) == one_v(ResponseV::Status(200), next, work, Seq::empty()));
+            assert(task_release_v(id, version, s, now) == one_v(ResponseV::Status(200), next, work, Seq::empty()));
             let o = OutV { resp: ResponseV::Status(200), next, work, send: Seq::empty() };
             assert(work_covers(work, now, id)) by {
                 assert(work_ids(work[0]) == seq![id]);
@@ -727,12 +727,12 @@ pub proof fn h_task_fulfill(cfg: Resonate, a: AState, id: Chars, version: u32, s
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
     lemma_pstate_roundtrip(pst);
-    assert(ext(cfg, req, s, now) == fulfill_task_v(id, version, state, data, s, now));
+    assert(ext(cfg, req, s, now) == task_fulfill_v(id, version, state, data, s, now));
     if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 404, promise: None })));
         assert(!s.tasks.contains_key(id));
         assert(held_v(s, id, version) == Err::<TaskV, u16>(404));
-        assert(fulfill_task_v(id, version, state, data, s, now) == status_v(404, s));
+        assert(task_fulfill_v(id, version, state, data, s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -744,7 +744,7 @@ pub proof fn h_task_fulfill(cfg: Resonate, a: AState, id: Chars, version: u32, s
         if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != version as u64 {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Promise(APromiseRes { status: 409, promise: None })));
             assert(held_v(s, id, version) == Err::<TaskV, u16>(409));
-            assert(fulfill_task_v(id, version, state, data, s, now) == status_v(409, s));
+            assert(task_fulfill_v(id, version, state, data, s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             assert(held_v(s, id, version) == Ok::<TaskV, u16>(task_v(t)));
@@ -757,7 +757,7 @@ pub proof fn h_task_fulfill(cfg: Resonate, a: AState, id: Chars, version: u32, s
             let sv = settle_v(s, id, pst, data, now);
             assert(s.promises.contains_key(id));
             assert(sv.promises.contains_key(id));
-            assert(fulfill_task_v(id, version, state, data, s, now) == one_v(ResponseV::Promise(prec_v(id, sv.promises[id])), sv, settled_work_v(s.promises[id], id), Seq::empty()));
+            assert(task_fulfill_v(id, version, state, data, s, now) == one_v(ResponseV::Promise(prec_v(id, sv.promises[id])), sv, settled_work_v(s.promises[id], id), Seq::empty()));
         }
     }
 }
@@ -778,15 +778,15 @@ pub proof fn h_task_heartbeat(cfg: Resonate, a: AState, pid: Chars, tasks: Seq<T
     let req = RequestV::HeartbeatTask { pid, tasks };
     let refs = tasks.map_values(|r: TaskRefV| ATaskRef { id: r.id, version: r.version as u64 });
     let kreq = ARequest::TaskHeartbeat(ATaskHeartbeatReq { pid, tasks: refs });
-    assert(ext(cfg, req, s, now) == heartbeat_v(pid, tasks, s, now));
+    assert(ext(cfg, req, s, now) == task_heartbeat_v(pid, tasks, s, now));
     let k = tasks.len() as int;
     assert(refs.len() == k);
     crate::hmany::lemma_hb_k(a, pid, tasks, k, now);
     assert(tasks.take(k) =~= tasks);
     let acc = spec_heartbeat_fold(a, pid, refs, k, n);
     assert(spec_handle(a, kreq, n) == (acc, AResponse::Status(AStatusRes { status: 200 })));
-    let (ns, work, e) = heartbeat_fold(pid, tasks, s, s, Seq::empty(), false, now);
-    assert(heartbeat_v(pid, tasks, s, now) == one_v(ResponseV::Status(200), ns, work, Seq::empty()));
+    let (ns, work, e) = task_heartbeat_fold(pid, tasks, s, s, Seq::empty(), false, now);
+    assert(task_heartbeat_v(pid, tasks, s, now) == one_v(ResponseV::Status(200), ns, work, Seq::empty()));
     crate::hmany::lemma_hb_hok(a, acc, work, pid, now);
 }
 
@@ -814,16 +814,16 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
     crate::hmany::lemma_susp_doors(ids, id);
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == suspend_task_v(id, version, ids, s));
+    assert(ext(cfg, req, s, now) == task_suspend_v(id, version, ids, s));
     if !suspend_doors(acts, id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 400 })));
-        assert(suspend_task_v(id, version, ids, s) == status_v(400, s));
+        assert(task_suspend_v(id, version, ids, s) == status_v(400, s));
         lemma_h_noop(a, ResponseV::Status(400), now);
     } else if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 404 })));
         assert(!s.tasks.contains_key(id));
         assert(held_v(s, id, version) == Err::<TaskV, u16>(404));
-        assert(suspend_task_v(id, version, ids, s) == status_v(404, s));
+        assert(task_suspend_v(id, version, ids, s) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -835,7 +835,7 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
         if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != version as u64 {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 409 })));
             assert(held_v(s, id, version) == Err::<TaskV, u16>(409));
-            assert(suspend_task_v(id, version, ids, s) == status_v(409, s));
+            assert(task_suspend_v(id, version, ids, s) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             assert(held_v(s, id, version) == Ok::<TaskV, u16>(task_v(t)));
@@ -889,7 +889,7 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
                 }
                 assert(rd == a);
                 assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 422 })));
-                assert(suspend_task_v(id, version, ids, s) == status_v(422, s));
+                assert(task_suspend_v(id, version, ids, s) == status_v(422, s));
                 lemma_h_noop(a, ResponseV::Status(422), now);
             } else {
                 assert(first_failing(a, acts, na) is None) by {
@@ -925,7 +925,7 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
                     assert(s.promises.insert(id, promise_v(p)) =~= s.promises);
                     let next = ServerV { tasks: s.tasks.insert(id, u), ..s };
                     assert(translate(b) == next);
-                    assert(suspend_task_v(id, version, ids, s) == one_v(ResponseV::Status(300), next, Seq::empty(), Seq::empty()));
+                    assert(task_suspend_v(id, version, ids, s) == one_v(ResponseV::Status(300), next, Seq::empty(), Seq::empty()));
                     let o = OutV { resp: ResponseV::Status(300), next, work: Seq::empty(), send: Seq::empty() };
                     assert forall|tt: nat| #[trigger] mdeadline_at(q, tt) && tt > now implies mdeadline_at(p, tt) by {}
                     lemma_h_one_object(a, b, id, q, ResponseV::Status(300), o, now);
@@ -953,7 +953,7 @@ pub proof fn h_task_suspend(cfg: Resonate, a: AState, id: Chars, version: u32, a
                     assert(translate(d).promises.insert(id, promise_v(p)) =~= translate(d).promises);
                     let next = ServerV { promises: with_callbacks(s.promises, ids, id), tasks: s.tasks.insert(id, u), ..s };
                     assert(translate(b) == next);
-                    assert(suspend_task_v(id, version, ids, s) == one_v(ResponseV::Status(200), next, Seq::empty(), Seq::empty()));
+                    assert(task_suspend_v(id, version, ids, s) == one_v(ResponseV::Status(200), next, Seq::empty(), Seq::empty()));
                     let o = OutV { resp: ResponseV::Status(200), next, work: Seq::empty(), send: Seq::empty() };
                     crate::hmany::lemma_susp_hok(a, d, b, ids, id, q, o, now);
                 }
@@ -982,17 +982,17 @@ pub proof fn h_fence_create(cfg: Resonate, a: AState, id: Chars, version: u32, c
     assert(echod_kernel::types::same_origin_spec(c.id, id));
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == fence_task_v(id, version, FencedV::Create(c), s, now));
+    assert(ext(cfg, req, s, now) == task_fence_v(id, version, FencedV::Create(c), s, now));
     assert(fence_target(fq.action) == c.id);
     if c.id == id {
         assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 400, action: None })));
-        assert(fence_task_v(id, version, FencedV::Create(c), s, now) == status_v(400, s));
+        assert(task_fence_v(id, version, FencedV::Create(c), s, now) == status_v(400, s));
         lemma_h_noop(a, ResponseV::Status(400), now);
     } else if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 404, action: None })));
         assert(!s.tasks.contains_key(id));
         assert(held_v(s, id, version) == Err::<TaskV, u16>(404));
-        assert(fence_task_v(id, version, FencedV::Create(c), s, now) == status_v(404, s));
+        assert(task_fence_v(id, version, FencedV::Create(c), s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -1004,11 +1004,11 @@ pub proof fn h_fence_create(cfg: Resonate, a: AState, id: Chars, version: u32, c
         if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != version as u64 {
             assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 409, action: None })));
             assert(held_v(s, id, version) == Err::<TaskV, u16>(409));
-            assert(fence_task_v(id, version, FencedV::Create(c), s, now) == status_v(409, s));
+            assert(task_fence_v(id, version, FencedV::Create(c), s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             assert(held_v(s, id, version) == Ok::<TaskV, u16>(task_v(t)));
-            assert(fence_task_v(id, version, FencedV::Create(c), s, now) == promise_create_v(c, s, now));
+            assert(task_fence_v(id, version, FencedV::Create(c), s, now) == promise_create_v(c, s, now));
             assert(request_bounded(RequestV::CreatePromise(c)));
             h_promise_create(cfg, a, c, now);
             let (d, r) = spec_promise_create(a, create_in(c), n);
@@ -1040,17 +1040,17 @@ pub proof fn h_fence_settle(cfg: Resonate, a: AState, id: Chars, version: u32, s
     assert(echod_kernel::types::same_origin_spec(st.id, id));
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == fence_task_v(id, version, FencedV::Settle(st), s, now));
+    assert(ext(cfg, req, s, now) == task_fence_v(id, version, FencedV::Settle(st), s, now));
     assert(fence_target(fq.action) == st.id);
     if st.id == id {
         assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 400, action: None })));
-        assert(fence_task_v(id, version, FencedV::Settle(st), s, now) == status_v(400, s));
+        assert(task_fence_v(id, version, FencedV::Settle(st), s, now) == status_v(400, s));
         lemma_h_noop(a, ResponseV::Status(400), now);
     } else if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 404, action: None })));
         assert(!s.tasks.contains_key(id));
         assert(held_v(s, id, version) == Err::<TaskV, u16>(404));
-        assert(fence_task_v(id, version, FencedV::Settle(st), s, now) == status_v(404, s));
+        assert(task_fence_v(id, version, FencedV::Settle(st), s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -1062,11 +1062,11 @@ pub proof fn h_fence_settle(cfg: Resonate, a: AState, id: Chars, version: u32, s
         if t.state != TaskState::Acquired || p.state != PromiseState::Pending || t.version != version as u64 {
             assert(spec_handle(a, kreq, n) == (a, AResponse::TaskFence(ATaskFenceRes { status: 409, action: None })));
             assert(held_v(s, id, version) == Err::<TaskV, u16>(409));
-            assert(fence_task_v(id, version, FencedV::Settle(st), s, now) == status_v(409, s));
+            assert(task_fence_v(id, version, FencedV::Settle(st), s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             assert(held_v(s, id, version) == Ok::<TaskV, u16>(task_v(t)));
-            assert(fence_task_v(id, version, FencedV::Settle(st), s, now) == promise_settle_v(st, s, now));
+            assert(task_fence_v(id, version, FencedV::Settle(st), s, now) == promise_settle_v(st, s, now));
             assert(request_bounded(RequestV::SettlePromise(st)));
             h_promise_settle(cfg, a, st, now);
             let (d, r) = spec_promise_settle(a, sq, n);
@@ -1093,7 +1093,7 @@ pub proof fn h_detached(cfg: Resonate, a: AState, id: Chars, version: u32, c: Cr
     let create = create_in(c);
     let check = ATaskFenceCheckReq { id, version: version as u64 };
     assert(c.id != id);
-    assert(ext(cfg, req, s, now) == detached_create_v(id, version, c, s, now));
+    assert(ext(cfg, req, s, now) == task_fence_detached_v(id, version, c, s, now));
     assert(request_bounded(RequestV::CreatePromise(c)));
     h_promise_create(cfg, a, c, now);
     let outs0 = promise_create_v(c, s, now);
@@ -1160,11 +1160,11 @@ pub proof fn h_task_halt(cfg: Resonate, a: AState, id: Chars, now: u64)
     let kreq = ARequest::TaskHalt(q0);
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == halt_task_v(id, s));
+    assert(ext(cfg, req, s, now) == task_halt_v(id, s));
     if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 404 })));
         assert(!s.tasks.contains_key(id));
-        assert(halt_task_v(id, s) == status_v(404, s));
+        assert(task_halt_v(id, s) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -1173,11 +1173,11 @@ pub proof fn h_task_halt(cfg: Resonate, a: AState, id: Chars, now: u64)
         assert(s.tasks[id] == task_v(t));
         if t.state == TaskState::Fulfilled {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 409 })));
-            assert(halt_task_v(id, s) == status_v(409, s));
+            assert(task_halt_v(id, s) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else if t.state == TaskState::Halted {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 200 })));
-            assert(halt_task_v(id, s) == status_v(200, s));
+            assert(task_halt_v(id, s) == status_v(200, s));
             lemma_h_noop(a, ResponseV::Status(200), now);
         } else {
             let q = p.with_task(t.halt());
@@ -1192,7 +1192,7 @@ pub proof fn h_task_halt(cfg: Resonate, a: AState, id: Chars, now: u64)
             lemma_promise_v_task(p, t.halt());
             assert(s.promises.insert(id, promise_v(p)) =~= s.promises);
             assert(translate(b) == next);
-            assert(halt_task_v(id, s) == one_v(ResponseV::Status(200), next, Seq::empty(), Seq::empty()));
+            assert(task_halt_v(id, s) == one_v(ResponseV::Status(200), next, Seq::empty(), Seq::empty()));
             let o = OutV { resp: ResponseV::Status(200), next, work: Seq::empty(), send: Seq::empty() };
             assert forall|tt: nat| #[trigger] mdeadline_at(q, tt) && tt > now implies mdeadline_at(p, tt) by {
                 assert(lease_deadline(q) is None);
@@ -1217,11 +1217,11 @@ pub proof fn h_task_continue(cfg: Resonate, a: AState, id: Chars, now: u64)
     let kreq = ARequest::TaskContinue(q0);
     lemma_swept_read(a, id, now);
     lemma_translate_reads(a, id);
-    assert(ext(cfg, req, s, now) == continue_task_v(id, s, now));
+    assert(ext(cfg, req, s, now) == task_continue_v(id, s, now));
     if !a.has_task(id) {
         assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 404 })));
         assert(!s.tasks.contains_key(id));
-        assert(continue_task_v(id, s, now) == status_v(404, s));
+        assert(task_continue_v(id, s, now) == status_v(404, s));
         lemma_h_noop(a, ResponseV::Status(404), now);
     } else {
         lemma_object_facts(a, id, now);
@@ -1231,7 +1231,7 @@ pub proof fn h_task_continue(cfg: Resonate, a: AState, id: Chars, now: u64)
         lemma_live(p);
         if t.state != TaskState::Halted || p.state != PromiseState::Pending {
             assert(spec_handle(a, kreq, n) == (a, AResponse::Status(AStatusRes { status: 409 })));
-            assert(continue_task_v(id, s, now) == status_v(409, s));
+            assert(task_continue_v(id, s, now) == status_v(409, s));
             lemma_h_noop(a, ResponseV::Status(409), now);
         } else {
             let q = p.with_task(t.continue_(now as nat));
@@ -1247,7 +1247,7 @@ pub proof fn h_task_continue(cfg: Resonate, a: AState, id: Chars, now: u64)
             assert(s.promises.insert(id, promise_v(p)) =~= s.promises);
             assert(translate(b) == next);
             let work = seq![at_v(now, id)];
-            assert(continue_task_v(id, s, now) == one_v(ResponseV::Status(200), next, work, Seq::empty()));
+            assert(task_continue_v(id, s, now) == one_v(ResponseV::Status(200), next, work, Seq::empty()));
             let o = OutV { resp: ResponseV::Status(200), next, work, send: Seq::empty() };
             // the task is halted, so cleared: no lease to carry
             assert(echod_kernel::properties::task_cleared(t));

@@ -80,8 +80,8 @@ pub proof fn lemma_hb_fold_step(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, now
         refs.len() > 0,
     ensures
         ({
-            let (n1, w1, e1) = heartbeat_fold(pid, refs.drop_last(), s, s, Seq::empty(), false, now);
-            let (n2, w2, e2) = heartbeat_fold(pid, refs, s, s, Seq::empty(), false, now);
+            let (n1, w1, e1) = task_heartbeat_fold(pid, refs.drop_last(), s, s, Seq::empty(), false, now);
+            let (n2, w2, e2) = task_heartbeat_fold(pid, refs, s, s, Seq::empty(), false, now);
             (n2, w2) == hb_model_step(s, n1, w1, pid, refs.last(), now)
         }),
 {
@@ -238,7 +238,7 @@ pub proof fn lemma_hb_k(a: AState, pid: Chars, tasks: Seq<TaskRefV>, k: int, now
             let n = now as nat;
             let refs = tasks.map_values(|r: TaskRefV| ATaskRef { id: r.id, version: r.version as u64 });
             let acc = spec_heartbeat_fold(a, pid, refs, k, n);
-            let (ns, work, e) = heartbeat_fold(pid, tasks.take(k), translate(a), translate(a), Seq::empty(), false, now);
+            let (ns, work, e) = task_heartbeat_fold(pid, tasks.take(k), translate(a), translate(a), Seq::empty(), false, now);
             &&& inv(n, acc)
             &&& translate(acc) == ns
             &&& hb_inv(a, acc, work, pid, now)
@@ -260,7 +260,7 @@ pub proof fn lemma_hb_k(a: AState, pid: Chars, tasks: Seq<TaskRefV>, k: int, now
         assert(prefix.last() == tasks[k - 1]);
         assert(refs[k - 1] == ATaskRef { id: tasks[k - 1].id, version: tasks[k - 1].version as u64 });
         lemma_hb_fold_step(pid, prefix, s, now);
-        let (ns1, work1, e1) = heartbeat_fold(pid, tasks.take(k - 1), s, s, Seq::empty(), false, now);
+        let (ns1, work1, e1) = task_heartbeat_fold(pid, tasks.take(k - 1), s, s, Seq::empty(), false, now);
         lemma_hb_step(a, acc1, work1, pid, tasks[k - 1], now);
         assert(spec_heartbeat_fold(a, pid, refs, k, n) == spec_heartbeat_one(acc1, pid, refs[k - 1], n));
     }

@@ -188,16 +188,16 @@ pub proof fn lemma_refused(cfg: Resonate, a: AState, req: RequestV, now: u64, co
             assert(ext(cfg, req, s, now) == status_v(400, s));
         },
         RequestV::FenceTask { id, version, action } => {
-            assert(ext(cfg, req, s, now) == fence_task_v(id, version, action, s, now));
+            assert(ext(cfg, req, s, now) == task_fence_v(id, version, action, s, now));
             match action {
                 FencedV::Create(c) => {
                     assert(!delay_ok(c));
-                    assert(fence_task_v(id, version, action, s, now) == status_v(400, s));
+                    assert(task_fence_v(id, version, action, s, now) == status_v(400, s));
                 },
                 FencedV::Settle(st) => {
                     assert(spec_settable(st.state) is Some);
                     assert(crate::translate::origin(st.id) != crate::translate::origin(id));
-                    assert(fence_task_v(id, version, action, s, now) == status_v(400, s));
+                    assert(task_fence_v(id, version, action, s, now) == status_v(400, s));
                 },
             }
         },

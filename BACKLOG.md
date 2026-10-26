@@ -127,7 +127,12 @@ shows the panels with data.
   sleep; the protocol refuses it); no schedule. Two trusted statements
   beyond the kernel's and the model's own: the model's `origin` is the
   kernel's (both read before the first `:`), and the simulator's worker
-  address is a URL. What the proof moved: the kernel refuses an acquire
+  address is a URL. The model's side is now checked code: every handler
+  in accordant's `exec.rs` is verified to compute its twin in `spec.rs`,
+  and the model's `Model` impl is verified, so the checker's verdicts and
+  this theorem speak about the same functions, under the model's own
+  axioms (a value is its view; a set's elements come out in one order,
+  `pset_seq`). What the proof moved: the kernel refuses an acquire
   at `u32::MAX` (`MAX_VERSION`), as the servers do, where it refused at
   `MAX_TIME`; a task record's resume count saturates as the wire's does;
   the store machine's plan mirrors the validators' doors on a delay, a

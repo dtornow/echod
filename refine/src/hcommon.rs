@@ -12,6 +12,7 @@ use echod_kernel::properties_proof::lemma_inv_pointwise;
 use echod_kernel::steps::{lease_deadline, retry_deadline};
 use echod_kernel::store::AState;
 use echod_kernel::types::*;
+use resonate::collections::{axiom_pset_seq, pset_seq};
 use resonate::spec::*;
 use resonate::PState;
 
@@ -292,8 +293,8 @@ pub proof fn lemma_settled_work(p: APromise, id: Chars)
 {
     broadcast use Seq::to_set_ensures;
     let pv = promise_v(p);
-    let cs = pv.callbacks.to_seq();
-    pv.callbacks.lemma_to_seq_to_set_id();
+    let cs = pset_seq(pv.callbacks);
+    axiom_pset_seq(pv.callbacks);
     assert(cs.to_set() == p.callbacks.to_set());
     let f = |w: Chars| later2_v(id, w);
     let resumes = cs.map_values(f);

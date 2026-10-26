@@ -25,5 +25,5 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-accordant = { git = "https://github.com/dtornow/accordant", rev = "b256619c508f516973e5a5f94552bb922ccec233" }
-resonate = { git = "https://github.com/dtornow/accordant", rev = "b256619c508f516973e5a5f94552bb922ccec233", package = "resonate" }
+accordant = { git = "https://github.com/dtornow/accordant", rev = "bb48aff9a989b5b3f2b05ef6c1794910f2584bca" }
+resonate = { git = "https://github.com/dtornow/accordant", rev = "bb48aff9a989b5b3f2b05ef6c1794910f2584bca", package = "resonate" }
