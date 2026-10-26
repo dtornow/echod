@@ -555,7 +555,7 @@ fn partitioning_never_changes_a_verdict() {
                 if b {
                     kept.push(e.clone());
                 }
-                // Property 1 (proved for promise_create in src/spec.rs),
+                // Property 1 (proved for promise_create in src/exec.rs),
                 // checked here on the Rust spec itself, for every candidate state.
                 for s in off.states() {
                     for (id, p) in s.promises.iter() {

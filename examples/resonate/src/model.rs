@@ -5,7 +5,7 @@
 
 use accordant::{ExternalOutcome, Footprint, InternalOutcome, Model, Partitioned, Sched, Time, Touches};
 
-use crate::spec::*;
+use crate::exec::*;
 
 /// The step on these objects: sorted and distinct, so the same objects make
 /// the same step.
@@ -156,7 +156,7 @@ fn sched(w: Work) -> Sched<Internal> {
 
 /// `Model::external`, outside Verus: the verified handlers' outcomes, as the
 /// checker's types. The `Model` impl itself, with its spec twins, is in
-/// `twins.rs`.
+/// `spec.rs`.
 pub(crate) fn external_glue(m: &Resonate, op: &Request, s: &Server, now: Time) -> Vec<ExternalOutcome<Resonate>> {
     Resonate::external(m, op, s, now)
         .into_iter()

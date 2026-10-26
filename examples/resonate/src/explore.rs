@@ -1,15 +1,15 @@
 //! Testing glue, outside Verus: the list of the spec's marks, and requests
 //! worth trying next (suggestions). Neither decides what the server does: the
-//! spec marks its own branches (`mk` in `spec.rs`); suggestions are
+//! spec marks its own branches (`mk` in `exec.rs`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
 use accordant::{Action, Explore, Time};
 
 use crate::model::origin;
-use crate::spec::*;
+use crate::exec::*;
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
-/// the ones no run reached. `tests/marks.rs` checks it against `spec.rs`.
+/// the ones no run reached. `tests/marks.rs` checks it against `exec.rs`.
 pub const MARKS: &[&str] = &[
     "task.create: version at its cap (409)",
     "acquire: no such task (404)",

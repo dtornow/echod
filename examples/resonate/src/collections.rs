@@ -180,13 +180,13 @@ pub fn address_valid(addr: &String) -> (r: bool)
 }
 
 /// The state a client may settle a promise to, by name; never `Pending`.
-pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::spec::PState> {
+pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::exec::PState> {
     if s == "resolved"@ {
-        Some(crate::spec::PState::Resolved)
+        Some(crate::exec::PState::Resolved)
     } else if s == "rejected"@ {
-        Some(crate::spec::PState::Rejected)
+        Some(crate::exec::PState::Rejected)
     } else if s == "rejected_canceled"@ {
-        Some(crate::spec::PState::Canceled)
+        Some(crate::exec::PState::Canceled)
     } else {
         None
     }
@@ -194,15 +194,15 @@ pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::spec::PState> {
 
 /// The state a client may settle a promise to, by name; never `Pending`.
 #[verifier::external_body]
-pub fn settable(s: &String) -> (r: Option<crate::spec::PState>)
+pub fn settable(s: &String) -> (r: Option<crate::exec::PState>)
     ensures
         r == spec_settable(s@),
-        r != Some(crate::spec::PState::Pending),
+        r != Some(crate::exec::PState::Pending),
 {
     match s.as_str() {
-        "resolved" => Some(crate::spec::PState::Resolved),
-        "rejected" => Some(crate::spec::PState::Rejected),
-        "rejected_canceled" => Some(crate::spec::PState::Canceled),
+        "resolved" => Some(crate::exec::PState::Resolved),
+        "rejected" => Some(crate::exec::PState::Rejected),
+        "rejected_canceled" => Some(crate::exec::PState::Canceled),
         _ => None,
     }
 }

@@ -1,368 +1,443 @@
-//! The Resonate server protocol, written in Verus: this is the code the checker
-//! runs, and the code the proofs are about. It follows the Lean specification
-//! of `resonatehq/resonate` (`spec/spec/02-abstract/{external,internal}.lean`),
-//! the whole of it: promises, callbacks, listeners, tasks with their leases,
-//! resumes and redispatch, halt and continue, and schedules. It began as a port
-//! of the C# spec (resonatehq/resonate-accordant), and keeps that spec's one
-//! liberty: a fence may create a promise in another origin (a detached
-//! workflow), which the Lean specification refuses.
+//! The functional specification of the model: what each request and each piece
+//! of internal work does, as spec functions over the state's view. These are
+//! the `spec_external` and `spec_internal` twins the trace semantics
+//! (`accordant::semantics`) is stated over, so `valid(Resonate, ..)` says
+//! something definite, and a refinement theorem has a side to land on.
 //!
-//! How the Lean specification's shape becomes a checker model:
-//! - Time is the system's clock, `now`, which the checker keeps and passes to
-//!   every step. The spec reads it and never moves it.
-//! - Lean projects a promise past its deadline on every read. Here the deadline
-//!   is a timer step that settles it, so a pending promise is always live and
-//!   there is no projection. The two agree on everything a client can see.
-//! - Lean projects a promise past its deadline on every read, and a lease past
-//!   its end (`TaskObject.lapse`): the task is pending again. Here both are
-//!   timer steps at the instant, so a pending promise is always live and an
-//!   acquired task always holds its lease, and there is no projection. The two
-//!   agree on everything a client can see.
-//! - Lean's other internal steps are enabled by the state (a callback on a
-//!   settled promise, a retry due) and fired by a fair scheduler. Here each is
-//!   work the step that enables it starts: a timer at the instant it falls due,
-//!   or "later" when it is due at once. A step is "process these objects":
-//!   whatever is due on them happens, in the order Lean's steps would be
-//!   enabled (a deadline before the resumes it fires, a resume before the
-//!   redispatch it arms). What a step writes never depends on when it ran: a
-//!   task's offers are on a grid anchored at the instant it came to be pending
-//!   (Lean's `nextOffer`), a resume at the awaited promise's settlement.
-//! - A schedule's occurrence is a step, not a projection: it creates a
-//!   promise, as of the occurrence's instant. Lean's fair scheduler fires it
-//!   some time from `nextRunAt` on, so a client may read the schedule not yet
-//!   advanced and the occurrence absent. Here the fire is work due at
-//!   `nextRunAt` and owed `fire_within` later: "later" work from the instant,
-//!   and a timer at the bound. With `fire_within` zero it is a timer at the
-//!   instant, exact, and one step, as Lean's `processSchedule` is. A server
-//!   that sweeps its schedules every so often is given its sweep as the
-//!   bound, and fires in the two commits such a server makes, the occurrence
-//!   first and the run recorded after (`Step::Advance`), the second owed by
-//!   the same bound: a client may see the occurrence while the schedule still
-//!   expects it, which Lean's one step never shows.
-//! - The model's two dials: the redispatch cadence
-//!   (`ServerConfig.retryTimeout`), `Resonate::retry_timeout`, and
-//!   `Resonate::fire_within`.
-//! - Lean's `nextCron`, `occurrences` and `expand` are opaque. Here they are
-//!   trusted (`collections.rs`): the cron engine of the reference server.
-//! - Indefinite failures need no duplicated outcomes: an unanswered call is
-//!   already "maybe".
-//! - Clock and version arithmetic saturates instead of overflowing.
-//! - Not ported: the searches (501 in Lean), `preload`, and `task.poll`.
-//! - The reference server's wire rules, which the Lean specification leaves to
-//!   the protocol layer, are here too, as 400s: a delay needs a target and
-//!   ends before the deadline, a task.create's action carries no delay, a
-//!   schedule's id has no `:` and its promises a target, a heartbeat's tasks
-//!   share an origin.
+//! The executable handlers (`exec.rs`) are the same protocol written to run;
+//! the `Model` glue here is `external_body`, as before: the checker's verdicts
+//! speak about these twins on trust that the executable code computes them.
+//! Proving that equality, handler by handler, is the step that removes the
+//! trust.
 //!
-//! The detached create: a fence whose create targets another origin runs the
-//! create first, as a request of its own in that origin, and then the fence's
-//! check on the task. A stale fence still leaves the promise created, and
-//! answers its 409.
-//!
-//! What Verus checks here: no panics and no overflow anywhere, and the
-//! properties stated as `ensures` (see `promise_create`). What it trusts:
-//! `collections.rs`.
+//! Views: ids and strings as `Seq<char>`, the persistent maps as `Map`, the
+//! sets as `Set`. A value of the model's own types with a given view is
+//! obtained by `choose`; that every view is realised by some value is the one
+//! axiom this module adds (`axiom_realised`), true of the types as built.
 
 use vstd::prelude::*;
 
+use accordant::semantics::{ExternalOutcomeV, InternalOutcomeV};
+use accordant::{ExternalOutcome, InternalOutcome, Model, Sched};
+
 use crate::collections::*;
-use crate::twins::MAX_VERSION;
+use crate::exec::*;
 
 verus! {
 
-pub type Id = String;
+// ------------------------------------------------------------------- views
 
-pub type Time = u64;
+pub type Chars = Seq<char>;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum PState {
-    Pending,
-    Resolved,
-    Rejected,
-    Canceled,
-    TimedOut,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum TState {
-    Pending,
-    Acquired,
-    Suspended,
-    Halted,
-    Fulfilled,
-}
-
-/// The tags a promise carries, as the protocol reads them: `resonate:target`
-/// (a task runs it), `resonate:external` or `resonate:scope: global` (awaitable
-/// from outside), `resonate:timer` (resolves at its deadline), `resonate:delay`
-/// (its task is first dispatched no earlier than this).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct Tags {
-    pub target: bool,
-    pub external: bool,
-    pub timer: bool,
-    pub delay: Option<Time>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Promise {
+pub struct PromiseV {
     pub state: PState,
-    pub value: Option<String>,
-    pub param: Option<String>,
+    pub value: Option<Chars>,
+    pub param: Option<Chars>,
     pub timeout_at: Time,
     pub created_at: Time,
     pub settled_at: Option<Time>,
     pub tags: Tags,
-    /// Awaiter ids to resume when this promise settles.
-    pub callbacks: PSet,
-    /// Addresses to send an `unblock` to when this promise settles.
-    pub listeners: PSet,
+    pub callbacks: Set<Chars>,
+    pub listeners: Set<Chars>,
 }
 
-impl Promise {
-    /// Awaitable: Lean's `otype.awaitable`, everything but an internal promise.
-    pub fn external(&self) -> (r: bool)
-        ensures
-            r == (self.tags.target || self.tags.external || self.tags.timer),
-    {
-        self.tags.target || self.tags.external || self.tags.timer
-    }
-
-    /// Pending and before its deadline. The deadline is a timer that fires first
-    /// at its instant, so a pending promise is always live.
-    pub fn live(&self) -> (r: bool)
-        ensures
-            r == (self.state == PState::Pending),
-    {
-        match self.state {
-            PState::Pending => true,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Task {
+pub struct TaskV {
     pub state: TState,
     pub version: u32,
-    pub pid: Option<String>,
+    pub pid: Option<Chars>,
     pub ttl: Option<Time>,
-    /// When the lease started (or was last extended); its end is `acquired_at + ttl`.
     pub acquired_at: Time,
-    /// When a pending task is next offered to a worker (Lean's `retryTimeoutAt`).
     pub retry_at: Option<Time>,
-    /// The awaited promises that settled since the task last ran (Lean's `resumes`).
-    pub resumes: Vec<Id>,
+    pub resumes: Seq<Chars>,
 }
 
-impl Task {
-    fn fulfill(&mut self) {
-        self.state = TState::Fulfilled;
-        self.pid = None;
-        self.ttl = None;
-        self.acquired_at = 0;
-        self.retry_at = None;
-        self.resumes = Vec::new();
-    }
-
-    fn acquire(&mut self, version: u32, pid: String, ttl: Time, now: Time) {
-        self.state = TState::Acquired;
-        self.version = version;
-        self.pid = Some(pid);
-        self.ttl = Some(ttl);
-        self.acquired_at = now;
-        self.retry_at = None;
-        self.resumes = Vec::new();
-    }
-
-    /// Back to pending, to be offered again at `at`.
-    fn release(&mut self, at: Time) {
-        self.state = TState::Pending;
-        self.pid = None;
-        self.ttl = None;
-        self.acquired_at = 0;
-        self.retry_at = Some(at);
-    }
-
-    pub fn lease_expires(&self) -> Time {
-        match self.ttl {
-            Some(ttl) => self.acquired_at.saturating_add(ttl),
-            None => self.acquired_at,
-        }
-    }
-}
-
-/// A schedule: a cron, and the promise each occurrence creates. Also its own
-/// record in a response.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct Schedule {
-    pub id: Id,
-    pub cron: String,
-    /// A template for the occurrence's promise id: `{{.id}}` is the schedule's
-    /// id, `{{.timestamp}}` the occurrence's instant.
-    pub promise_id: String,
+pub struct ScheduleV {
+    pub id: Chars,
+    pub cron: Chars,
+    pub promise_id: Chars,
     pub promise_timeout: Time,
-    pub promise_param: Option<String>,
+    pub promise_param: Option<Chars>,
     pub promise_tags: Tags,
     pub created_at: Time,
     pub next_run_at: Time,
     pub last_run_at: Option<Time>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
-pub struct Server {
-    pub promises: PMap<Promise>,
-    pub tasks: PMap<Task>,
-    pub schedules: PMap<Schedule>,
+pub struct ServerV {
+    pub promises: Map<Chars, PromiseV>,
+    pub tasks: Map<Chars, TaskV>,
+    pub schedules: Map<Chars, ScheduleV>,
 }
 
-fn copy_server(s: &Server) -> (r: Server)
-    ensures
-        r.promises@ == s.promises@,
-        r.tasks@ == s.tasks@,
-        r.schedules@ == s.schedules@,
-{
-    Server { promises: s.promises.copy(), tasks: s.tasks.copy(), schedules: s.schedules.copy() }
-}
-
-// ---------------------------------------------------------------- requests
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct Create {
-    pub id: Id,
+pub struct CreateV {
+    pub id: Chars,
     pub timeout_at: Time,
-    pub data: Option<String>,
+    pub data: Option<Chars>,
     pub tags: Tags,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct Settle {
-    pub id: Id,
-    pub state: String,
-    pub data: Option<String>,
+pub struct SettleV {
+    pub id: Chars,
+    pub state: Chars,
+    pub data: Option<Chars>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Fenced {
-    Create(Create),
-    Settle(Settle),
+pub enum FencedV {
+    Create(CreateV),
+    Settle(SettleV),
 }
 
-impl Fenced {
-    pub fn target(&self) -> &Id {
-        match self {
-            Fenced::Create(c) => &c.id,
-            Fenced::Settle(s) => &s.id,
-        }
-    }
-}
-
-/// A task a heartbeat keeps: its id and the version the worker holds.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct TaskRef {
-    pub id: Id,
+pub struct TaskRefV {
+    pub id: Chars,
     pub version: u32,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct ScheduleCreate {
-    pub id: Id,
-    pub cron: String,
-    pub promise_id: String,
+pub struct ScheduleCreateV {
+    pub id: Chars,
+    pub cron: Chars,
+    pub promise_id: Chars,
     pub promise_timeout: Time,
-    pub promise_param: Option<String>,
+    pub promise_param: Option<Chars>,
     pub promise_tags: Tags,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Request {
-    CreatePromise(Create),
-    GetPromise(Id),
-    SettlePromise(Settle),
-    RegisterCallback { awaited: Id, awaiter: Id },
-    RegisterListener { awaited: Id, address: String },
-    GetTask(Id),
-    /// Create a promise and acquire its task in one step: the caller runs it.
-    CreateTask { pid: String, ttl: Time, action: Create },
-    AcquireTask { id: Id, version: u32, pid: String, ttl: Time },
-    ReleaseTask { id: Id, version: u32 },
-    FulfillTask { id: Id, version: u32, state: String, data: Option<String> },
-    HeartbeatTask { pid: String, tasks: Vec<TaskRef> },
-    SuspendTask { id: Id, version: u32, awaited: Vec<Id> },
-    FenceTask { id: Id, version: u32, action: Fenced },
-    HaltTask(Id),
-    ContinueTask(Id),
-    CreateSchedule(ScheduleCreate),
-    GetSchedule(Id),
-    DeleteSchedule(Id),
+pub enum RequestV {
+    CreatePromise(CreateV),
+    GetPromise(Chars),
+    SettlePromise(SettleV),
+    RegisterCallback { awaited: Chars, awaiter: Chars },
+    RegisterListener { awaited: Chars, address: Chars },
+    GetTask(Chars),
+    CreateTask { pid: Chars, ttl: Time, action: CreateV },
+    AcquireTask { id: Chars, version: u32, pid: Chars, ttl: Time },
+    ReleaseTask { id: Chars, version: u32 },
+    FulfillTask { id: Chars, version: u32, state: Chars, data: Option<Chars> },
+    HeartbeatTask { pid: Chars, tasks: Seq<TaskRefV> },
+    SuspendTask { id: Chars, version: u32, awaited: Seq<Chars> },
+    FenceTask { id: Chars, version: u32, action: FencedV },
+    HaltTask(Chars),
+    ContinueTask(Chars),
+    CreateSchedule(ScheduleCreateV),
+    GetSchedule(Chars),
+    DeleteSchedule(Chars),
 }
 
-// --------------------------------------------------------------- responses
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct PromiseRec {
-    pub id: Id,
+pub struct PromiseRecV {
+    pub id: Chars,
     pub state: PState,
-    pub param: Option<String>,
-    pub value: Option<String>,
+    pub param: Option<Chars>,
+    pub value: Option<Chars>,
     pub timeout_at: Time,
     pub created_at: Time,
     pub settled_at: Option<Time>,
     pub tags: Tags,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct TaskRec {
-    pub id: Id,
+pub struct TaskRecV {
+    pub id: Chars,
     pub state: TState,
     pub version: u32,
-    pub pid: Option<String>,
+    pub pid: Option<Chars>,
     pub ttl: Option<Time>,
-    /// How many awaited promises settled since the task last ran.
     pub resumes: u32,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Response {
-    /// A status with no body we check.
+pub enum ResponseV {
     Status(u16),
-    Promise(PromiseRec),
-    Task(TaskRec),
-    /// `task.create` and `task.acquire`: the promise and the task.
-    Both(PromiseRec, TaskRec),
-    Schedule(Schedule),
+    Promise(PromiseRecV),
+    Task(TaskRecV),
+    Both(PromiseRecV, TaskRecV),
+    Schedule(ScheduleV),
 }
 
-/// What the server sends on its own.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Dispatch {
-    /// A worker should run this task at this version.
-    Execute { id: Id, version: u32 },
-    /// A listener's promise has settled.
-    Unblock { address: String, promise: PromiseRec },
+pub enum DispatchV {
+    Execute { id: Chars, version: u32 },
+    Unblock { address: Chars, promise: PromiseRecV },
 }
 
-impl Response {
-    pub fn status(&self) -> u16 {
-        match self {
-            Response::Status(s) => *s,
-            _ => 200,
+pub enum InternalV {
+    On(Seq<Chars>),
+    Fire { schedule: Chars, at: Time, promise: Chars },
+    Advance { schedule: Chars, at: Time, promise: Chars },
+}
+
+pub open spec fn ostr(o: Option<String>) -> Option<Chars> {
+    match o {
+        Some(s) => Some(s@),
+        None => None,
+    }
+}
+
+pub open spec fn strs(v: Seq<String>) -> Seq<Chars> {
+    v.map_values(|s: String| s@)
+}
+
+impl View for Promise {
+    type V = PromiseV;
+
+    open spec fn view(&self) -> PromiseV {
+        PromiseV {
+            state: self.state,
+            value: ostr(self.value),
+            param: ostr(self.param),
+            timeout_at: self.timeout_at,
+            created_at: self.created_at,
+            settled_at: self.settled_at,
+            tags: self.tags,
+            callbacks: self.callbacks@,
+            listeners: self.listeners@,
         }
     }
 }
 
-fn prec(id: &Id, p: &Promise) -> (r: PromiseRec)
-    ensures
-        r.state == p.state,
-        r.timeout_at == p.timeout_at,
-        r.created_at == p.created_at,
-        r.settled_at == p.settled_at,
-{
-    PromiseRec {
-        id: id.clone(),
+impl View for Task {
+    type V = TaskV;
+
+    open spec fn view(&self) -> TaskV {
+        TaskV {
+            state: self.state,
+            version: self.version,
+            pid: ostr(self.pid),
+            ttl: self.ttl,
+            acquired_at: self.acquired_at,
+            retry_at: self.retry_at,
+            resumes: strs(self.resumes@),
+        }
+    }
+}
+
+impl View for Schedule {
+    type V = ScheduleV;
+
+    open spec fn view(&self) -> ScheduleV {
+        ScheduleV {
+            id: self.id@,
+            cron: self.cron@,
+            promise_id: self.promise_id@,
+            promise_timeout: self.promise_timeout,
+            promise_param: ostr(self.promise_param),
+            promise_tags: self.promise_tags,
+            created_at: self.created_at,
+            next_run_at: self.next_run_at,
+            last_run_at: self.last_run_at,
+        }
+    }
+}
+
+impl View for Server {
+    type V = ServerV;
+
+    open spec fn view(&self) -> ServerV {
+        ServerV {
+            promises: self.promises@.map_values(|p: Promise| p@),
+            tasks: self.tasks@.map_values(|t: Task| t@),
+            schedules: self.schedules@.map_values(|c: Schedule| c@),
+        }
+    }
+}
+
+impl View for Create {
+    type V = CreateV;
+
+    open spec fn view(&self) -> CreateV {
+        CreateV { id: self.id@, timeout_at: self.timeout_at, data: ostr(self.data), tags: self.tags }
+    }
+}
+
+impl View for Settle {
+    type V = SettleV;
+
+    open spec fn view(&self) -> SettleV {
+        SettleV { id: self.id@, state: self.state@, data: ostr(self.data) }
+    }
+}
+
+impl View for Fenced {
+    type V = FencedV;
+
+    open spec fn view(&self) -> FencedV {
+        match self {
+            Fenced::Create(c) => FencedV::Create(c@),
+            Fenced::Settle(s) => FencedV::Settle(s@),
+        }
+    }
+}
+
+impl View for TaskRef {
+    type V = TaskRefV;
+
+    open spec fn view(&self) -> TaskRefV {
+        TaskRefV { id: self.id@, version: self.version }
+    }
+}
+
+impl View for ScheduleCreate {
+    type V = ScheduleCreateV;
+
+    open spec fn view(&self) -> ScheduleCreateV {
+        ScheduleCreateV {
+            id: self.id@,
+            cron: self.cron@,
+            promise_id: self.promise_id@,
+            promise_timeout: self.promise_timeout,
+            promise_param: ostr(self.promise_param),
+            promise_tags: self.promise_tags,
+        }
+    }
+}
+
+impl View for Request {
+    type V = RequestV;
+
+    open spec fn view(&self) -> RequestV {
+        match self {
+            Request::CreatePromise(c) => RequestV::CreatePromise(c@),
+            Request::GetPromise(id) => RequestV::GetPromise(id@),
+            Request::SettlePromise(s) => RequestV::SettlePromise(s@),
+            Request::RegisterCallback { awaited, awaiter } => RequestV::RegisterCallback { awaited: awaited@, awaiter: awaiter@ },
+            Request::RegisterListener { awaited, address } => RequestV::RegisterListener { awaited: awaited@, address: address@ },
+            Request::GetTask(id) => RequestV::GetTask(id@),
+            Request::CreateTask { pid, ttl, action } => RequestV::CreateTask { pid: pid@, ttl: *ttl, action: action@ },
+            Request::AcquireTask { id, version, pid, ttl } => RequestV::AcquireTask { id: id@, version: *version, pid: pid@, ttl: *ttl },
+            Request::ReleaseTask { id, version } => RequestV::ReleaseTask { id: id@, version: *version },
+            Request::FulfillTask { id, version, state, data } => RequestV::FulfillTask { id: id@, version: *version, state: state@, data: ostr(*data) },
+            Request::HeartbeatTask { pid, tasks } => RequestV::HeartbeatTask { pid: pid@, tasks: tasks@.map_values(|r: TaskRef| r@) },
+            Request::SuspendTask { id, version, awaited } => RequestV::SuspendTask { id: id@, version: *version, awaited: strs(awaited@) },
+            Request::FenceTask { id, version, action } => RequestV::FenceTask { id: id@, version: *version, action: action@ },
+            Request::HaltTask(id) => RequestV::HaltTask(id@),
+            Request::ContinueTask(id) => RequestV::ContinueTask(id@),
+            Request::CreateSchedule(c) => RequestV::CreateSchedule(c@),
+            Request::GetSchedule(id) => RequestV::GetSchedule(id@),
+            Request::DeleteSchedule(id) => RequestV::DeleteSchedule(id@),
+        }
+    }
+}
+
+impl View for PromiseRec {
+    type V = PromiseRecV;
+
+    open spec fn view(&self) -> PromiseRecV {
+        PromiseRecV {
+            id: self.id@,
+            state: self.state,
+            param: ostr(self.param),
+            value: ostr(self.value),
+            timeout_at: self.timeout_at,
+            created_at: self.created_at,
+            settled_at: self.settled_at,
+            tags: self.tags,
+        }
+    }
+}
+
+impl View for TaskRec {
+    type V = TaskRecV;
+
+    open spec fn view(&self) -> TaskRecV {
+        TaskRecV { id: self.id@, state: self.state, version: self.version, pid: ostr(self.pid), ttl: self.ttl, resumes: self.resumes }
+    }
+}
+
+impl View for Response {
+    type V = ResponseV;
+
+    open spec fn view(&self) -> ResponseV {
+        match self {
+            Response::Status(c) => ResponseV::Status(*c),
+            Response::Promise(p) => ResponseV::Promise(p@),
+            Response::Task(t) => ResponseV::Task(t@),
+            Response::Both(p, t) => ResponseV::Both(p@, t@),
+            Response::Schedule(c) => ResponseV::Schedule(c@),
+        }
+    }
+}
+
+impl View for Dispatch {
+    type V = DispatchV;
+
+    open spec fn view(&self) -> DispatchV {
+        match self {
+            Dispatch::Execute { id, version } => DispatchV::Execute { id: id@, version: *version },
+            Dispatch::Unblock { address, promise } => DispatchV::Unblock { address: address@, promise: promise@ },
+        }
+    }
+}
+
+impl View for Internal {
+    type V = InternalV;
+
+    open spec fn view(&self) -> InternalV {
+        match self {
+            Internal::On(ids) => InternalV::On(strs(ids@)),
+            Internal::Fire { schedule, at, promise } => InternalV::Fire { schedule: schedule@, at: *at, promise: promise@ },
+            Internal::Advance { schedule, at, promise } => InternalV::Advance { schedule: schedule@, at: *at, promise: promise@ },
+        }
+    }
+}
+
+// ------------------------------------------------------------------ outcomes
+
+pub struct OutV {
+    pub resp: ResponseV,
+    pub next: ServerV,
+    pub work: Seq<Sched<InternalV>>,
+    pub send: Seq<DispatchV>,
+}
+
+pub struct InOutV {
+    pub next: ServerV,
+    pub work: Seq<Sched<InternalV>>,
+    pub send: Seq<DispatchV>,
+    pub pending: bool,
+}
+
+pub open spec fn sat_add(a: Time, b: Time) -> Time {
+    if a + b > u64::MAX { u64::MAX } else { (a + b) as Time }
+}
+
+pub open spec fn sat_mul(a: Time, b: Time) -> Time {
+    if a * b > u64::MAX { u64::MAX } else { (a * b) as Time }
+}
+
+/// The last version a task can take: an acquire at it is refused (409), as
+/// the servers refuse one at their own door.
+pub const MAX_VERSION: u32 = u32::MAX;
+
+pub open spec fn status_v(code: u16, s: ServerV) -> Seq<OutV> {
+    seq![OutV { resp: ResponseV::Status(code), next: s, work: Seq::empty(), send: Seq::empty() }]
+}
+
+pub open spec fn echo_v(res: ResponseV, s: ServerV) -> Seq<OutV> {
+    seq![OutV { resp: res, next: s, work: Seq::empty(), send: Seq::empty() }]
+}
+
+pub open spec fn one_v(resp: ResponseV, next: ServerV, work: Seq<Sched<InternalV>>, send: Seq<DispatchV>) -> Seq<OutV> {
+    seq![OutV { resp, next, work, send }]
+}
+
+/// Work on one object at `at`.
+pub open spec fn at_v(t: Time, id: Chars) -> Sched<InternalV> {
+    Sched::Timer(t, InternalV::On(seq![id]))
+}
+
+pub open spec fn later2_v(a: Chars, b: Chars) -> Sched<InternalV> {
+    Sched::Later(InternalV::On(seq![a, b]))
+}
+
+pub open spec fn external_v(p: PromiseV) -> bool {
+    p.tags.target || p.tags.external || p.tags.timer
+}
+
+pub open spec fn live_v(p: PromiseV) -> bool {
+    p.state == PState::Pending
+}
+
+pub open spec fn prec_v(id: Chars, p: PromiseV) -> PromiseRecV {
+    PromiseRecV {
+        id,
         state: p.state,
-        param: copy(&p.param),
-        value: copy(&p.value),
+        param: p.param,
+        value: p.value,
         timeout_at: p.timeout_at,
         created_at: p.created_at,
         settled_at: p.settled_at,
@@ -370,1204 +445,913 @@ fn prec(id: &Id, p: &Promise) -> (r: PromiseRec)
     }
 }
 
-fn trec(id: &Id, t: &Task) -> TaskRec {
-    let resumes: u32 = if t.resumes.len() > u32::MAX as usize { u32::MAX } else { t.resumes.len() as u32 };
-    TaskRec { id: id.clone(), state: t.state, version: t.version, pid: copy(&t.pid), ttl: t.ttl, resumes }
+pub open spec fn trec_v(id: Chars, t: TaskV) -> TaskRecV {
+    let resumes: u32 = if t.resumes.len() > u32::MAX { u32::MAX } else { t.resumes.len() as u32 };
+    TaskRecV { id, state: t.state, version: t.version, pid: t.pid, ttl: t.ttl, resumes }
 }
 
-// ------------------------------------------------------------------ outcomes
-
-/// Internal work: the objects a step processes, or a schedule's occurrence.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Step {
-    /// Process these objects: whatever is due on them happens.
-    Objects(Vec<Id>),
-    /// Fire the occurrence of `schedule` at `at`, which creates `promise`
-    /// (`expand` of its template), and arm the next.
-    Fire { schedule: Id, at: Time, promise: Id },
-    /// Record the run at `at` on `schedule`, whose occurrence is `promise`,
-    /// and arm the next: the second half of a fire that a sweeping server
-    /// commits apart from the first.
-    Advance { schedule: Id, at: Time, promise: Id },
+/// Done: the lease and the offer gone, with the lease's start. (The lease's
+/// start lives only while the task is held.)
+pub open spec fn fulfilled_v(t: TaskV) -> TaskV {
+    TaskV { state: TState::Fulfilled, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t }
 }
 
-/// An internal step, as the checker schedules it. `On`: the server processes
-/// these objects and does whatever is due on them (a promise past its deadline
-/// times out, a task past its lease is reclaimed, a suspended task whose
-/// awaited promise settled resumes, a pending task due for a retry is
-/// dispatched, a settled promise's listeners are told). What is due is read
-/// from the state and the clock, not from the step. `Fire`: a schedule's
-/// occurrence; `Advance`: its run recorded, when a sweeping server commits
-/// that apart. The ids of `On` are sorted and distinct, so two steps on the
-/// same objects are the same step.
-///
-/// The step names every object it may touch, so its footprint is exact.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Internal {
-    On(Vec<Id>),
-    Fire { schedule: Id, at: Time, promise: Id },
-    Advance { schedule: Id, at: Time, promise: Id },
+pub open spec fn acquired_v(t: TaskV, version: u32, pid: Chars, ttl: Time, now: Time) -> TaskV {
+    TaskV { state: TState::Acquired, version, pid: Some(pid), ttl: Some(ttl), acquired_at: now, retry_at: None, resumes: Seq::empty(), ..t }
 }
 
-/// Internal work to start, and when it runs. As `accordant::Sched`.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Work {
-    Later(Step),
-    Timer(Time, Step),
+/// Back to pending, to be offered again at `at`.
+pub open spec fn released_v(t: TaskV, at: Time) -> TaskV {
+    TaskV { state: TState::Pending, pid: None, ttl: None, acquired_at: 0, retry_at: Some(at), ..t }
 }
 
-/// One possible effect of a request: the response, the next state, the work it
-/// starts, the dispatches it sends. As `accordant::ExternalOutcome`.
-pub struct Out {
-    pub resp: Response,
-    pub next: Server,
-    pub work: Vec<Work>,
-    pub send: Vec<Dispatch>,
-    /// What this outcome does, for coverage. Changes nothing.
-    pub marks: Vec<&'static str>,
-}
-
-/// The effect of internal work. As `accordant::InternalOutcome`; `pending`
-/// says the work cannot run yet (a fire before its instant) and stays as it is.
-pub struct InOut {
-    pub next: Server,
-    pub work: Vec<Work>,
-    pub send: Vec<Dispatch>,
-    pub marks: Vec<&'static str>,
-    pub pending: bool,
-}
-
-/// The server, with its dials: how long a pending task waits before it is
-/// offered to a worker again (Lean's `ServerConfig.retryTimeout`), and how
-/// long after a schedule's `nextRunAt` the occurrence is owed. Zero: it fires
-/// at the instant. A server that gets to its schedules by a sweep fires within
-/// the sweep's period; Lean's fair scheduler, within any bound at all.
-pub struct Resonate {
-    pub retry_timeout: Time,
-    pub fire_within: Time,
-}
-
-fn one(o: Out) -> (r: Vec<Out>)
-    ensures
-        r.len() == 1,
-        r[0] == o,
-{
-    let mut v = Vec::new();
-    v.push(o);
-    v
-}
-
-/// A mark: the name of a branch of the spec, for coverage. Every mark goes
-/// through `mk` with a string literal, so a test can list them from this file.
-fn mk(name: &'static str) -> &'static str {
-    name
-}
-
-fn marked(name: &'static str) -> Vec<&'static str> {
-    let mut v = Vec::new();
-    v.push(name);
-    v
-}
-
-fn status(code: u16, mark: &'static str, s: &Server) -> (r: Vec<Out>)
-    ensures
-        r.len() == 1,
-        r[0].resp == Response::Status(code),
-        r[0].next.promises@ == s.promises@,
-        r[0].next.tasks@ == s.tasks@,
-        r[0].next.schedules@ == s.schedules@,
-{
-    one(Out { resp: Response::Status(code), next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
-}
-
-fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
-    ensures
-        r.len() == 1,
-        r[0].resp == res,
-        r[0].next.promises@ == s.promises@,
-        r[0].next.tasks@ == s.tasks@,
-        r[0].next.schedules@ == s.schedules@,
-{
-    one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
-}
-
-fn ids1(a: &Id) -> Vec<Id> {
-    let mut v = Vec::new();
-    v.push(a.clone());
-    v
-}
-
-fn ids2(a: &Id, b: &Id) -> Vec<Id> {
-    let mut v = Vec::new();
-    v.push(a.clone());
-    v.push(b.clone());
-    v
-}
-
-/// Work on one object at `at`.
-fn at(t: Time, id: &Id) -> Work {
-    Work::Timer(t, Step::Objects(ids1(id)))
-}
-
-fn copy_step(s: &Step) -> Step {
-    match s {
-        Step::Objects(ids) => Step::Objects(ids.clone()),
-        Step::Fire { schedule, at, promise } => Step::Fire { schedule: schedule.clone(), at: *at, promise: promise.clone() },
-        Step::Advance { schedule, at, promise } => Step::Advance { schedule: schedule.clone(), at: *at, promise: promise.clone() },
+pub open spec fn lease_expires_v(t: TaskV) -> Time {
+    match t.ttl {
+        Some(ttl) => sat_add(t.acquired_at, ttl),
+        None => t.acquired_at,
     }
 }
 
 /// Lean's `nextOffer`: the first instant on the grid `due + k·T` strictly
-/// after `now`. Anchored at `due`, so it does not depend on when the retry
-/// step ran; a server late to it re-offers the task once and lands on the
-/// same grid. `T = 0` would give `due` itself (and a step forever enabled);
-/// the model treats it as 1.
-fn next_offer(due: Time, now: Time, t: Time) -> Time {
-    let t = if t == 0 { 1 } else { t };
+/// after `now`. `T = 0` is treated as 1.
+pub open spec fn next_offer_v(due: Time, now: Time, t0: Time) -> Time {
+    let t: Time = if t0 == 0 { 1 } else { t0 };
     if now < due {
         due
     } else {
-        let k = (now - due) / t;
-        due.saturating_add(t.saturating_mul(k.saturating_add(1)))
+        let k: Time = ((now - due) / (t as int)) as Time;
+        sat_add(due, sat_mul(t, sat_add(k, 1)))
     }
 }
 
 /// Settles `id` and fulfills its task, if any.
-fn settle(s: &mut Server, id: &Id, state: PState, value: Option<String>, at: Time) {
-    match s.promises.get(id) {
-        Some(p) => {
-            let mut q = copy(p);
-            q.state = state;
-            q.value = value;
-            q.settled_at = Some(at);
-            s.promises.insert(id.clone(), q);
-        },
-        None => {},
-    }
-    match s.tasks.get(id) {
-        Some(t) => {
-            if t.state != TState::Fulfilled {
-                let mut u = copy(t);
-                u.fulfill();
-                s.tasks.insert(id.clone(), u);
-            }
-        },
-        None => {},
-    }
+pub open spec fn settle_v(s: ServerV, id: Chars, state: PState, value: Option<Chars>, at: Time) -> ServerV {
+    let promises = if s.promises.contains_key(id) {
+        let p = s.promises[id];
+        s.promises.insert(id, PromiseV { state, value, settled_at: Some(at), ..p })
+    } else {
+        s.promises
+    };
+    let tasks = if s.tasks.contains_key(id) && s.tasks[id].state != TState::Fulfilled {
+        s.tasks.insert(id, fulfilled_v(s.tasks[id]))
+    } else {
+        s.tasks
+    };
+    ServerV { promises, tasks, ..s }
 }
 
-/// The work a settled promise starts: one resume per stored callback (the
-/// awaited promise and its awaiter), and its listeners' unblocks.
-fn settled_work(p: &Promise, awaited: &Id) -> Vec<Work> {
-    let awaiters = p.callbacks.to_vec();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < awaiters.len()
-        invariant
-            i <= awaiters.len(),
-        decreases awaiters.len() - i,
-    {
-        out.push(Work::Later(Step::Objects(ids2(awaited, &awaiters[i]))));
-        i += 1;
-    }
-    if p.listeners.to_vec().len() > 0 {
-        out.push(Work::Later(Step::Objects(ids1(awaited))));
-    }
-    out
-}
-
-fn contains(ids: &Vec<Id>, id: &Id) -> bool {
-    let mut i = 0;
-    while i < ids.len()
-        invariant
-            i <= ids.len(),
-        decreases ids.len() - i,
-    {
-        if ids[i] == *id {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-fn push_all(out: &mut Vec<Work>, more: &Vec<Work>) {
-    let mut j = 0;
-    while j < more.len()
-        invariant
-            j <= more.len(),
-        decreases more.len() - j,
-    {
-        out.push(more[j].clone());
-        j += 1;
+/// The work a settled promise starts: one resume per stored callback, and its
+/// listeners' unblocks.
+pub open spec fn settled_work_v(p: PromiseV, awaited: Chars) -> Seq<Sched<InternalV>> {
+    let resumes = p.callbacks.to_seq().map_values(|w: Chars| later2_v(awaited, w));
+    if p.listeners.len() > 0 {
+        resumes.push(Sched::Later(InternalV::On(seq![awaited])))
+    } else {
+        resumes
     }
 }
 
-// ------------------------------------------------------------- property 1
-
-/// created_at <= timeout_at, and if settled, created_at <= settled_at <= timeout_at.
-pub open spec fn times_ok(created_at: Time, settled_at: Option<Time>, timeout_at: Time) -> bool {
-    created_at <= timeout_at && match settled_at {
-        Some(t) => created_at <= t && t <= timeout_at,
-        None => true,
-    }
-}
-
-pub open spec fn promise_ok(p: Promise) -> bool {
-    times_ok(p.created_at, p.settled_at, p.timeout_at)
-}
-
-pub open spec fn server_ok(s: Server) -> bool {
-    forall|k: Seq<char>| #[trigger] s.promises@.contains_key(k) ==> promise_ok(s.promises@[k])
-}
-
-/// Every promise record in a response has the property.
-pub open spec fn response_ok(r: Response) -> bool {
-    match r {
-        Response::Promise(p) => times_ok(p.created_at, p.settled_at, p.timeout_at),
-        Response::Both(p, _) => times_ok(p.created_at, p.settled_at, p.timeout_at),
-        _ => true,
-    }
-}
-
-// --------------------------------------------------------------- handlers
-
-impl Resonate {
-    /// Property 1: every promise `promise_create` creates has it, every
-    /// response has it if the state had it, and every promise that had it keeps it.
-    ///
-    /// Frame: it touches only the promise and task it creates. Every other
-    /// promise and task is as it was, schedules are as they were, and an
-    /// existing id changes nothing.
-    ///
-    /// `fenced`: the create is a fence's action (for the marks). `now` is the
-    /// instant the promise is created at: the clock, or an occurrence's instant
-    /// for a schedule's fire.
-    pub fn promise_create(&self, req: &Create, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            forall|i: int|
-                0 <= i < outs.len() ==> {
-                    &&& (server_ok(*s) ==> server_ok(#[trigger] outs[i].next))
-                    &&& (server_ok(*s) ==> response_ok(outs[i].resp))
-                    &&& (!s.promises@.contains_key(req.id@) && outs[i].next.promises@.contains_key(req.id@)
-                        ==> promise_ok(outs[i].next.promises@[req.id@]))
-                    // the frame
-                    &&& outs[i].next.promises@.remove(req.id@) == s.promises@.remove(req.id@)
-                    &&& outs[i].next.tasks@.remove(req.id@) == s.tasks@.remove(req.id@)
-                    &&& outs[i].next.schedules@ == s.schedules@
-                    &&& (s.promises@.contains_key(req.id@) ==> outs[i].next.promises@ == s.promises@
-                        && outs[i].next.tasks@ == s.tasks@)
-                },
-    {
-        if req.tags.timer && req.tags.target {
-            return status(400, mk("create: timer with target (400)"), s);
-        }
-        match req.tags.delay {
-            Some(d) => {
-                if d >= req.timeout_at {
-                    return status(400, mk("create: delay past the deadline (400)"), s);
-                }
-                if !req.tags.target {
-                    return status(400, mk("create: delay without a target (400)"), s);
-                }
-            },
-            None => {},
-        }
-        match s.promises.get(&req.id) {
-            Some(p) => {
-                proof {
-                    if server_ok(*s) {
-                        assert(promise_ok(s.promises@[req.id@]));
-                    }
-                }
-                return echo(Response::Promise(prec(&req.id, p)), mk("create: id exists (echo)"), s);
-            },
-            None => {},
-        }
-        let live = req.timeout_at > now;
-        let born = if live {
-            PState::Pending
-        } else if req.tags.timer {
-            PState::Resolved
+/// The checks every task.* mutation shares: exists, acquired, own promise live,
+/// version matches.
+pub open spec fn held_v(s: ServerV, id: Chars, version: u32) -> Result<TaskV, u16> {
+    if !s.tasks.contains_key(id) {
+        Err(404)
+    } else {
+        let t = s.tasks[id];
+        let live = s.promises.contains_key(id) && live_v(s.promises[id]);
+        if t.state != TState::Acquired || !live || t.version != version {
+            Err(409)
         } else {
-            PState::TimedOut
-        };
-        let p = Promise {
+            Ok(t)
+        }
+    }
+}
+
+// ------------------------------------------------------------------ handlers
+
+pub open spec fn promise_create_v(req: CreateV, s: ServerV, now: Time) -> Seq<OutV> {
+    if req.tags.timer && req.tags.target {
+        status_v(400, s)
+    } else if req.tags.delay is Some && req.tags.delay.unwrap() >= req.timeout_at {
+        status_v(400, s)
+    } else if req.tags.delay is Some && !req.tags.target {
+        status_v(400, s)
+    } else if s.promises.contains_key(req.id) {
+        echo_v(ResponseV::Promise(prec_v(req.id, s.promises[req.id])), s)
+    } else {
+        let live = req.timeout_at > now;
+        let born = if live { PState::Pending } else if req.tags.timer { PState::Resolved } else { PState::TimedOut };
+        let p = PromiseV {
             state: born,
             value: None,
-            param: copy(&req.data),
+            param: req.data,
             timeout_at: req.timeout_at,
             created_at: if live { now } else { req.timeout_at },
             settled_at: if live { None } else { Some(req.timeout_at) },
             tags: req.tags,
-            callbacks: PSet::empty(),
-            listeners: PSet::empty(),
+            callbacks: Set::empty(),
+            listeners: Set::empty(),
         };
-        let rec = prec(&req.id, &p);
-        let mut n = copy_server(s);
-        n.promises.insert(req.id.clone(), p);
-        let mut work = Vec::new();
-        if live {
-            work.push(at(req.timeout_at, &req.id));
-        }
+        let work0: Seq<Sched<InternalV>> = if live { seq![at_v(req.timeout_at, req.id)] } else { Seq::empty() };
+        let promises = s.promises.insert(req.id, p);
         if req.tags.target {
-            // A live targeted promise's task is runnable: offered to a worker
-            // at once, or at its delay.
             let due = match req.tags.delay {
                 Some(d) => if d > now { d } else { now },
                 None => now,
             };
-            let state = if live { TState::Pending } else { TState::Fulfilled };
-            let retry_at = if live { Some(due) } else { None };
-            let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() };
-            n.tasks.insert(req.id.clone(), task);
-            if live {
-                work.push(at(due, &req.id));
-            }
+            let task = TaskV {
+                state: if live { TState::Pending } else { TState::Fulfilled },
+                version: 0,
+                pid: None,
+                ttl: None,
+                acquired_at: 0,
+                retry_at: if live { Some(due) } else { None },
+                resumes: Seq::empty(),
+            };
+            let work = if live { work0.push(at_v(due, req.id)) } else { work0 };
+            one_v(ResponseV::Promise(prec_v(req.id, p)), ServerV { promises, tasks: s.tasks.insert(req.id, task), ..s }, work, Seq::empty())
+        } else {
+            one_v(ResponseV::Promise(prec_v(req.id, p)), ServerV { promises, ..s }, work0, Seq::empty())
         }
-        proof {
-            if server_ok(*s) {
-                assert forall|k: Seq<char>| #[trigger] n.promises@.contains_key(k) implies promise_ok(
-                    n.promises@[k],
-                ) by {
-                    if k != req.id@ {
-                        assert(s.promises@.contains_key(k));
-                    }
+    }
+}
+
+pub open spec fn promise_settle_v(req: SettleV, s: ServerV, now: Time) -> Seq<OutV> {
+    match spec_settable(req.state) {
+        None => status_v(400, s),
+        Some(state) => {
+            if !s.promises.contains_key(req.id) {
+                status_v(404, s)
+            } else {
+                let p = s.promises[req.id];
+                if !live_v(p) {
+                    echo_v(ResponseV::Promise(prec_v(req.id, p)), s)
+                } else {
+                    let work = settled_work_v(p, req.id);
+                    let n = settle_v(s, req.id, state, req.data, now);
+                    one_v(ResponseV::Promise(prec_v(req.id, n.promises[req.id])), n, work, Seq::empty())
                 }
             }
-        }
-        proof {
-            assert(n.promises@.remove(req.id@) =~= s.promises@.remove(req.id@));
-            assert(n.tasks@.remove(req.id@) =~= s.tasks@.remove(req.id@));
-        }
-        let mut marks = Vec::new();
-        marks.push(match (fenced, live) {
-            (false, true) => mk("promise created"),
-            (false, false) => mk("promise created past its deadline"),
-            (true, true) => mk("fence: promise created"),
-            (true, false) => mk("fence: promise created past its deadline"),
-        });
-        if live && req.tags.target {
-            marks.push(mk("task created pending"));
-        }
-        one(Out { resp: Response::Promise(rec), next: n, work, send: Vec::new(), marks })
+        },
     }
+}
 
-    fn promise_settle(&self, req: &Settle, fenced: bool, s: &Server, now: Time) -> Vec<Out> {
-        let state = match settable(&req.state) {
-            Some(st) => st,
-            None => return status(400, mk("settle: not a settled state (400)"), s),
-        };
-        let p = match s.promises.get(&req.id) {
-            Some(p) => p,
-            None => return status(404, mk("settle: no such promise (404)"), s),
-        };
-        if !p.live() {
-            return echo(Response::Promise(prec(&req.id, p)), mk("settle: already settled (echo)"), s);
+pub open spec fn register_callback_v(awaited: Chars, awaiter: Chars, s: ServerV) -> Seq<OutV> {
+    if awaited == awaiter || origin(awaited) != origin(awaiter) {
+        status_v(400, s)
+    } else if !s.promises.contains_key(awaited) {
+        status_v(404, s)
+    } else if !s.promises.contains_key(awaiter) {
+        status_v(422, s)
+    } else {
+        let p = s.promises[awaited];
+        let w = s.promises[awaiter];
+        if !s.tasks.contains_key(awaiter) || !external_v(p) {
+            status_v(422, s)
+        } else {
+            let res = ResponseV::Promise(prec_v(awaited, p));
+            if !live_v(p) || !live_v(w) {
+                echo_v(res, s)
+            } else {
+                let q = PromiseV { callbacks: p.callbacks.insert(awaiter), ..p };
+                one_v(res, ServerV { promises: s.promises.insert(awaited, q), ..s }, Seq::empty(), Seq::empty())
+            }
         }
-        let work = settled_work(p, &req.id);
-        let mut n = copy_server(s);
-        settle(&mut n, &req.id, state, copy(&req.data), now);
-        let res = match n.promises.get(&req.id) {
-            Some(q) => Response::Promise(prec(&req.id, q)),
-            None => Response::Status(500),  // unreachable: the promise exists
-        };
-        let mut marks = Vec::new();
-        marks.push(if fenced { mk("fence: promise settled") } else { mk("promise settled") });
-        if work.len() > 0 {
-            marks.push(mk("settled with callbacks or listeners"));
-        }
-        one(Out { resp: res, next: n, work, send: Vec::new(), marks })
     }
+}
 
-    /// The checks every task.* mutation shares: exists, acquired, own promise live,
-    /// version matches. `Ok` is the task.
-    fn held<'a>(&self, s: &'a Server, id: &Id, version: u32) -> Result<&'a Task, u16> {
-        let t = match s.tasks.get(id) {
-            Some(t) => t,
-            None => return Err(404),
-        };
-        let live = match s.promises.get(id) {
-            Some(p) => p.live(),
-            None => false,  // unreachable: a task's promise exists
-        };
-        if t.state != TState::Acquired || !live || t.version != version {
-            return Err(409);
+pub open spec fn register_listener_v(awaited: Chars, address: Chars, s: ServerV) -> Seq<OutV> {
+    if !spec_address_valid(address) {
+        status_v(400, s)
+    } else if !s.promises.contains_key(awaited) {
+        status_v(404, s)
+    } else {
+        let p = s.promises[awaited];
+        if !external_v(p) {
+            status_v(422, s)
+        } else {
+            let res = ResponseV::Promise(prec_v(awaited, p));
+            if !live_v(p) {
+                echo_v(res, s)
+            } else {
+                let q = PromiseV { listeners: p.listeners.insert(address), ..p };
+                one_v(res, ServerV { promises: s.promises.insert(awaited, q), ..s }, Seq::empty(), Seq::empty())
+            }
         }
-        Ok(t)
     }
+}
 
-    fn task_create(&self, pid: &String, ttl: Time, req: &Create, s: &Server, now: Time) -> Vec<Out> {
-        if !req.tags.target || req.tags.timer {
-            return status(400, mk("task.create: not runnable, or a timer (400)"), s);
+pub open spec fn task_create_v(pid: Chars, ttl: Time, req: CreateV, s: ServerV, now: Time) -> Seq<OutV> {
+    if !req.tags.target || req.tags.timer {
+        status_v(400, s)
+    } else if req.tags.delay is Some {
+        status_v(400, s)
+    } else if s.promises.contains_key(req.id) {
+        let p = s.promises[req.id];
+        if !p.tags.target {
+            status_v(422, s)
+        } else if !s.tasks.contains_key(req.id) {
+            status_v(409, s)
+        } else {
+            let t = s.tasks[req.id];
+            match t.state {
+                TState::Fulfilled => echo_v(ResponseV::Both(prec_v(req.id, p), trec_v(req.id, t)), s),
+                TState::Pending => if t.version >= MAX_VERSION {
+                    status_v(409, s)
+                } else {
+                    let u = acquired_v(t, (t.version + 1) as u32, pid, ttl, now);
+                    one_v(
+                        ResponseV::Both(prec_v(req.id, p), trec_v(req.id, u)),
+                        ServerV { tasks: s.tasks.insert(req.id, u), ..s },
+                        seq![at_v(sat_add(now, ttl), req.id)],
+                        Seq::empty(),
+                    )
+                },
+                _ => status_v(409, s),
+            }
         }
-        match req.tags.delay {
-            Some(_) => return status(400, mk("task.create: action with a delay (400)"), s),
-            None => {},
-        }
-        match s.promises.get(&req.id) {
-            Some(p) => {
-                if !p.tags.target {
-                    return status(422, mk("task.create: promise exists, not a target (422)"), s);
-                }
-                let t = match s.tasks.get(&req.id) {
-                    Some(t) => t,
-                    None => return status(409, mk("task.create: target without a task (409)"), s),  // unreachable
-                };
-                return match t.state {
-                    TState::Fulfilled => echo(Response::Both(prec(&req.id, p), trec(&req.id, t)), mk("task.create: task done (echo)"), s),
-                    TState::Pending => {
-                        if t.version >= MAX_VERSION {
-                            return status(409, mk("task.create: version at its cap (409)"), s);
-                        }
-                        let mut n = copy_server(s);
-                        let mut u = copy(t);
-                        u.acquire(t.version + 1, pid.clone(), ttl, now);
-                        let rec = Response::Both(prec(&req.id, p), trec(&req.id, &u));
-                        n.tasks.insert(req.id.clone(), u);
-                        let mut work = Vec::new();
-                        work.push(at(now.saturating_add(ttl), &req.id));
-                        one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
-                    },
-                    _ => status(409, mk("task.create: task held, suspended or halted (409)"), s),
-                };
-            },
-            None => {},
-        }
+    } else {
         let live = req.timeout_at > now;
-        let p = Promise {
+        let p = PromiseV {
             state: if live { PState::Pending } else { PState::TimedOut },
             value: None,
-            param: copy(&req.data),
+            param: req.data,
             timeout_at: req.timeout_at,
             created_at: if live { now } else { req.timeout_at },
             settled_at: if live { None } else { Some(req.timeout_at) },
             tags: req.tags,
-            callbacks: PSet::empty(),
-            listeners: PSet::empty(),
+            callbacks: Set::empty(),
+            listeners: Set::empty(),
         };
-        let mut t = Task { state: TState::Fulfilled, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Vec::new() };
-        let mut work = Vec::new();
-        if live {
-            // Acquired by the caller right away: nothing to dispatch.
-            t.acquire(1, pid.clone(), ttl, now);
-            work.push(at(req.timeout_at, &req.id));
-            work.push(at(now.saturating_add(ttl), &req.id));
-        }
-        let res = Response::Both(prec(&req.id, &p), trec(&req.id, &t));
-        let mut n = copy_server(s);
-        n.promises.insert(req.id.clone(), p);
-        n.tasks.insert(req.id.clone(), t);
-        let mark = if live { mk("task created") } else { mk("task created past its deadline") };
-        one(Out { resp: res, next: n, work, send: Vec::new(), marks: marked(mark) })
+        let t0 = TaskV { state: TState::Fulfilled, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty() };
+        let t = if live { acquired_v(t0, 1, pid, ttl, now) } else { t0 };
+        let work: Seq<Sched<InternalV>> = if live { seq![at_v(req.timeout_at, req.id), at_v(sat_add(now, ttl), req.id)] } else { Seq::empty() };
+        one_v(
+            ResponseV::Both(prec_v(req.id, p), trec_v(req.id, t)),
+            ServerV { promises: s.promises.insert(req.id, p), tasks: s.tasks.insert(req.id, t), ..s },
+            work,
+            Seq::empty(),
+        )
     }
+}
 
-    fn task_suspend(&self, id: &Id, version: u32, ids: &Vec<Id>, s: &Server) -> Vec<Out> {
-        if ids.len() == 0 || contains(ids, id) {
-            return status(400, mk("suspend: no awaited, or itself (400)"), s);
-        }
-        let mut i = 0;
-        while i < ids.len()
-            invariant
-                i <= ids.len(),
-            decreases ids.len() - i,
-        {
-            let mut j = i + 1;
-            while j < ids.len()
-                invariant
-                    i < j <= ids.len(),
-                decreases ids.len() - j,
-            {
-                if ids[i] == ids[j] {
-                    return status(400, mk("suspend: awaited twice (400)"), s);
-                }
-                j += 1;
-            }
-            if !same_origin(&ids[i], id) {
-                return status(400, mk("suspend: awaited in another origin (400)"), s);
-            }
-            i += 1;
-        }
-        let t = match self.held(s, id, version) {
-            Err(code) => return status(code, if code == 404 { mk("suspend: no such task (404)") } else { mk("suspend: not held (409)") }, s),
-            Ok(t) => t,
-        };
-        let mut settled = false;
-        let mut i = 0;
-        while i < ids.len()
-            invariant
-                i <= ids.len(),
-            decreases ids.len() - i,
-        {
-            match s.promises.get(&ids[i]) {
-                None => return status(422, mk("suspend: awaited missing (422)"), s),
-                Some(p) => {
-                    if !p.external() {
-                        return status(422, mk("suspend: awaited not external (422)"), s);
-                    }
-                    settled = settled || !p.live();
-                },
-            }
-            i += 1;
-        }
-        let mut n = copy_server(s);
-        let mut u = copy(t);
-        if settled {
-            // The task stays acquired and runs on; what it was told has been seen.
-            u.resumes = Vec::new();
-            n.tasks.insert(id.clone(), u);
-            return one(Out { resp: Response::Status(300), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("suspend: awaited already settled (300)")) });
-        }
-        u.state = TState::Suspended;
-        u.pid = None;
-        u.ttl = None;
-        u.acquired_at = 0;
-        u.retry_at = None;
-        u.resumes = Vec::new();
-        n.tasks.insert(id.clone(), u);
-        let mut i = 0;
-        while i < ids.len()
-            invariant
-                i <= ids.len(),
-            decreases ids.len() - i,
-        {
-            match n.promises.get(&ids[i]) {
-                Some(p) => {
-                    let mut q = copy(p);
-                    q.callbacks.insert(id.clone());
-                    n.promises.insert(ids[i].clone(), q);
-                },
-                None => {},
-            }
-            i += 1;
-        }
-        one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task suspended")) })
-    }
-
-    fn task_fence(&self, id: &Id, version: u32, action: &Fenced, s: &Server, now: Time) -> Vec<Out> {
-        if *action.target() == *id {
-            return status(400, mk("fence: targets its own task (400)"), s);
-        }
-        // The wire rules on the action come before the fence's check, as the
-        // reference server's validators do.
-        match action {
-            Fenced::Create(c) => match c.tags.delay {
-                Some(d) => {
-                    if d >= c.timeout_at {
-                        return status(400, mk("create: delay past the deadline (400)"), s);
-                    }
-                    if !c.tags.target {
-                        return status(400, mk("create: delay without a target (400)"), s);
-                    }
-                },
-                None => {},
-            },
-            Fenced::Settle(_) => {},
-        }
-        match action {
-            Fenced::Settle(st) => {
-                if !same_origin(&st.id, id) {
-                    return status(400, mk("fence: settle in another origin (400)"), s);  // only a create may cross origins
-                }
-            },
-            Fenced::Create(c) => {
-                if !same_origin(&c.id, id) {
-                    return self.detached_create(id, version, c, s, now);
-                }
-            },
-        }
-        match self.held(s, id, version) {
-            Err(code) => return status(code, if code == 404 { mk("fence: no such task (404)") } else { mk("fence: not held, or stale version (409)") }, s),
-            Ok(_) => {},
-        }
-        match action {
-            Fenced::Create(c) => self.promise_create(c, true, s, now),
-            Fenced::Settle(st) => self.promise_settle(st, true, s, now),
+pub open spec fn acquire_task_v(id: Chars, version: u32, pid: Chars, ttl: Time, s: ServerV, now: Time) -> Seq<OutV> {
+    if !s.tasks.contains_key(id) {
+        status_v(404, s)
+    } else if !s.promises.contains_key(id) {
+        status_v(404, s)
+    } else {
+        let t = s.tasks[id];
+        let p = s.promises[id];
+        if t.state != TState::Pending || !live_v(p) || t.version != version || t.version >= MAX_VERSION {
+            status_v(409, s)
+        } else {
+            let u = acquired_v(t, (t.version + 1) as u32, pid, ttl, now);
+            one_v(
+                ResponseV::Both(prec_v(id, p), trec_v(id, u)),
+                ServerV { tasks: s.tasks.insert(id, u), ..s },
+                seq![at_v(sat_add(now, ttl), id)],
+                Seq::empty(),
+            )
         }
     }
+}
 
-    /// A fence that creates a promise in another origin: a detached workflow.
-    /// The create goes first, as a request of its own in its origin; then the
-    /// fence's check on the task decides the answer. A stale fence still
-    /// leaves the promise created.
-    fn detached_create(&self, id: &Id, version: u32, c: &Create, s: &Server, now: Time) -> Vec<Out> {
-        let mut outs = self.promise_create(c, true, s, now);
-        if outs.len() != 1 {
-            return outs;  // unreachable: a create has one outcome
-        }
-        let o = outs.pop().unwrap();
-        let mut marks = o.marks;
-        match self.held(&o.next, id, version) {
-            Err(code) => {
-                marks.push(if code == 404 { mk("fence: detached create, no such task (404)") } else { mk("fence: detached create, not held (409)") });
-                one(Out { resp: Response::Status(code), next: o.next, work: o.work, send: o.send, marks })
-            },
+pub open spec fn release_task_v(id: Chars, version: u32, s: ServerV, now: Time) -> Seq<OutV> {
+    match held_v(s, id, version) {
+        Err(code) => status_v(code, s),
+        Ok(t) => one_v(
+            ResponseV::Status(200),
+            ServerV { tasks: s.tasks.insert(id, released_v(t, now)), ..s },
+            seq![at_v(now, id)],
+            Seq::empty(),
+        ),
+    }
+}
+
+pub open spec fn fulfill_task_v(id: Chars, version: u32, state: Chars, data: Option<Chars>, s: ServerV, now: Time) -> Seq<OutV> {
+    match spec_settable(state) {
+        None => status_v(400, s),
+        Some(st) => match held_v(s, id, version) {
+            Err(code) => status_v(code, s),
             Ok(_) => {
-                marks.push(mk("fence: detached create"));
-                one(Out { resp: o.resp, next: o.next, work: o.work, send: o.send, marks })
+                let work = if s.promises.contains_key(id) { settled_work_v(s.promises[id], id) } else { Seq::empty() };
+                let n = settle_v(s, id, st, data, now);
+                let res = if n.promises.contains_key(id) { ResponseV::Promise(prec_v(id, n.promises[id])) } else { ResponseV::Status(500) };
+                one_v(res, n, work, Seq::empty())
+            },
+        },
+    }
+}
+
+/// Every task after the first is in the first's origin.
+pub open spec fn one_origin(refs: Seq<TaskRefV>) -> bool {
+    forall|i: int| 1 <= i < refs.len() ==> origin(#[trigger] refs[i].id) == origin(refs[0].id)
+}
+
+/// The heartbeat's tasks, one after the other: a held task whose holder is
+/// `pid` has its lease extended from `now`, and its end rearmed.
+pub open spec fn heartbeat_fold(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, n: ServerV, work: Seq<Sched<InternalV>>, extended: bool, now: Time) -> (ServerV, Seq<Sched<InternalV>>, bool)
+    decreases refs.len(),
+{
+    if refs.len() == 0 {
+        (n, work, extended)
+    } else {
+        let (n1, work1, ext1) = heartbeat_fold(pid, refs.drop_last(), s, n, work, extended, now);
+        let r = refs.last();
+        match held_v(s, r.id, r.version) {
+            Ok(t) => {
+                let mine = t.pid is Some && t.pid.unwrap() == pid;
+                if mine {
+                    let u = TaskV { acquired_at: now, ..t };
+                    (ServerV { tasks: n1.tasks.insert(r.id, u), ..n1 }, work1.push(at_v(lease_expires_v(u), r.id)), true)
+                } else {
+                    (n1, work1, ext1)
+                }
+            },
+            Err(_) => (n1, work1, ext1),
+        }
+    }
+}
+
+pub open spec fn heartbeat_v(pid: Chars, refs: Seq<TaskRefV>, s: ServerV, now: Time) -> Seq<OutV> {
+    if !one_origin(refs) {
+        status_v(400, s)
+    } else {
+        let (n, work, _) = heartbeat_fold(pid, refs, s, s, Seq::empty(), false, now);
+        one_v(ResponseV::Status(200), n, work, Seq::empty())
+    }
+}
+
+pub open spec fn distinct(ids: Seq<Chars>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < ids.len() ==> ids[i] != ids[j]
+}
+
+pub open spec fn all_in_origin(ids: Seq<Chars>, id: Chars) -> bool {
+    forall|i: int| 0 <= i < ids.len() ==> origin(#[trigger] ids[i]) == origin(id)
+}
+
+pub open spec fn all_present(ids: Seq<Chars>, s: ServerV) -> bool {
+    forall|i: int| 0 <= i < ids.len() ==> s.promises.contains_key(#[trigger] ids[i])
+}
+
+pub open spec fn all_external(ids: Seq<Chars>, s: ServerV) -> bool {
+    forall|i: int| 0 <= i < ids.len() ==> external_v(s.promises[#[trigger] ids[i]])
+}
+
+pub open spec fn any_settled(ids: Seq<Chars>, s: ServerV) -> bool {
+    exists|i: int| 0 <= i < ids.len() && !live_v(s.promises[#[trigger] ids[i]])
+}
+
+/// `id` registered as a callback on each awaited promise.
+pub open spec fn with_callbacks(promises: Map<Chars, PromiseV>, ids: Seq<Chars>, id: Chars) -> Map<Chars, PromiseV>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        promises
+    } else {
+        let m = with_callbacks(promises, ids.drop_last(), id);
+        let a = ids.last();
+        if m.contains_key(a) {
+            m.insert(a, PromiseV { callbacks: m[a].callbacks.insert(id), ..m[a] })
+        } else {
+            m
+        }
+    }
+}
+
+pub open spec fn suspend_task_v(id: Chars, version: u32, ids: Seq<Chars>, s: ServerV) -> Seq<OutV> {
+    if ids.len() == 0 || ids.contains(id) {
+        status_v(400, s)
+    } else if !distinct(ids) {
+        status_v(400, s)
+    } else if !all_in_origin(ids, id) {
+        status_v(400, s)
+    } else {
+        match held_v(s, id, version) {
+            Err(code) => status_v(code, s),
+            Ok(t) => {
+                if !all_present(ids, s) {
+                    status_v(422, s)
+                } else if !all_external(ids, s) {
+                    status_v(422, s)
+                } else if any_settled(ids, s) {
+                    // The task stays acquired and runs on; what it was told has been seen.
+                    one_v(ResponseV::Status(300), ServerV { tasks: s.tasks.insert(id, TaskV { resumes: Seq::empty(), ..t }), ..s }, Seq::empty(), Seq::empty())
+                } else {
+                    let u = TaskV { state: TState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t };
+                    one_v(
+                        ResponseV::Status(200),
+                        ServerV { promises: with_callbacks(s.promises, ids, id), tasks: s.tasks.insert(id, u), ..s },
+                        Seq::empty(),
+                        Seq::empty(),
+                    )
+                }
             },
         }
     }
+}
 
-    fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Server, now: Time) -> Vec<Out> {
-        let mut i = 1;
-        while i < refs.len()
-            invariant
-                1 <= i,
-            decreases refs.len() - i,
-        {
-            if !same_origin(&refs[i].id, &refs[0].id) {
-                return status(400, mk("heartbeat: tasks in several origins (400)"), s);
-            }
-            i += 1;
-        }
-        let mut n = copy_server(s);
-        let mut work = Vec::new();
-        let mut extended = false;
-        let mut i = 0;
-        while i < refs.len()
-            invariant
-                i <= refs.len(),
-            decreases refs.len() - i,
-        {
-            let r = &refs[i];
-            match self.held(s, &r.id, r.version) {
-                Ok(t) => {
-                    let mine = match &t.pid {
-                        Some(holder) => *holder == *pid,
-                        None => false,
-                    };
-                    if mine {
-                        let mut u = copy(t);
-                        u.acquired_at = now;
-                        let expires = u.lease_expires();
-                        n.tasks.insert(r.id.clone(), u);
-                        work.push(at(expires, &r.id));
-                        extended = true;
-                    }
-                },
-                Err(_) => {},
-            }
-            i += 1;
-        }
-        // Always 200: a heartbeat says nothing about what it kept.
-        let mark = if extended { mk("lease extended") } else { mk("heartbeat: nothing held by this worker") };
-        one(Out { resp: Response::Status(200), next: n, work, send: Vec::new(), marks: marked(mark) })
+pub open spec fn fenced_target(a: FencedV) -> Chars {
+    match a {
+        FencedV::Create(c) => c.id,
+        FencedV::Settle(st) => st.id,
     }
+}
 
-    fn schedule_create(&self, req: &ScheduleCreate, s: &Server, now: Time) -> Vec<Out> {
-        if has_colon(&req.id) {
-            return status(400, mk("schedule: id with a colon (400)"), s);
+/// A fence that creates a promise in another origin: the create first, as a
+/// request of its own, then the fence's check decides the answer.
+pub open spec fn detached_create_v(id: Chars, version: u32, c: CreateV, s: ServerV, now: Time) -> Seq<OutV> {
+    let outs = promise_create_v(c, s, now);
+    let o = outs[0];
+    match held_v(o.next, id, version) {
+        Err(code) => one_v(ResponseV::Status(code), o.next, o.work, o.send),
+        Ok(_) => one_v(o.resp, o.next, o.work, o.send),
+    }
+}
+
+pub open spec fn fence_task_v(id: Chars, version: u32, action: FencedV, s: ServerV, now: Time) -> Seq<OutV> {
+    if fenced_target(action) == id {
+        status_v(400, s)
+    } else if (match action {
+        FencedV::Create(c) => c.tags.delay is Some && c.tags.delay.unwrap() >= c.timeout_at,
+        FencedV::Settle(_) => false,
+    }) {
+        status_v(400, s)
+    } else if (match action {
+        FencedV::Create(c) => c.tags.delay is Some && !c.tags.target,
+        FencedV::Settle(_) => false,
+    }) {
+        status_v(400, s)
+    } else {
+        match action {
+            FencedV::Settle(st) => {
+                if origin(st.id) != origin(id) {
+                    status_v(400, s)
+                } else {
+                    match held_v(s, id, version) {
+                        Err(code) => status_v(code, s),
+                        Ok(_) => promise_settle_v(st, s, now),
+                    }
+                }
+            },
+            FencedV::Create(c) => {
+                if origin(c.id) != origin(id) {
+                    detached_create_v(id, version, c, s, now)
+                } else {
+                    match held_v(s, id, version) {
+                        Err(code) => status_v(code, s),
+                        Ok(_) => promise_create_v(c, s, now),
+                    }
+                }
+            },
         }
-        if !req.promise_tags.target {
-            return status(400, mk("schedule: promises without a target (400)"), s);
+    }
+}
+
+pub open spec fn halt_task_v(id: Chars, s: ServerV) -> Seq<OutV> {
+    if !s.tasks.contains_key(id) {
+        status_v(404, s)
+    } else {
+        let t = s.tasks[id];
+        match t.state {
+            TState::Fulfilled => status_v(409, s),
+            TState::Halted => status_v(200, s),
+            _ => {
+                let u = TaskV { state: TState::Halted, pid: None, ttl: None, acquired_at: 0, retry_at: None, ..t };
+                one_v(ResponseV::Status(200), ServerV { tasks: s.tasks.insert(id, u), ..s }, Seq::empty(), Seq::empty())
+            },
         }
-        if req.promise_tags.timer && req.promise_tags.target {
-            return status(400, mk("schedule: timer with target (400)"), s);
+    }
+}
+
+pub open spec fn continue_task_v(id: Chars, s: ServerV, now: Time) -> Seq<OutV> {
+    if !s.tasks.contains_key(id) {
+        status_v(404, s)
+    } else {
+        let t = s.tasks[id];
+        let live = s.promises.contains_key(id) && live_v(s.promises[id]);
+        if t.state != TState::Halted || !live {
+            status_v(409, s)
+        } else {
+            let u = TaskV { state: TState::Pending, retry_at: Some(now), ..t };
+            one_v(ResponseV::Status(200), ServerV { tasks: s.tasks.insert(id, u), ..s }, seq![at_v(now, id)], Seq::empty())
         }
-        if !cron_valid(&req.cron) {
-            return status(400, mk("schedule: invalid cron (400)"), s);
-        }
-        match s.schedules.get(&req.id) {
-            Some(c) => return echo(Response::Schedule(copy(c)), mk("schedule: id exists (echo)"), s),
-            None => {},
-        }
-        let next = next_cron(&req.cron, now);
-        let c = Schedule {
-            id: req.id.clone(),
-            cron: req.cron.clone(),
-            promise_id: req.promise_id.clone(),
+    }
+}
+
+/// The work that fires `schedule`'s occurrence at `at`: later, from `at` on,
+/// and a timer at `at + fire_within`; with `fire_within` zero, the timer alone.
+pub open spec fn arm_fire_v(cfg: Resonate, schedule: Chars, at: Time, template: Chars) -> Seq<Sched<InternalV>> {
+    let step = InternalV::Fire { schedule, at, promise: spec_expand(template, schedule, at) };
+    let timer = Sched::Timer(sat_add(at, cfg.fire_within), step);
+    if cfg.fire_within > 0 {
+        seq![Sched::Later(step), timer]
+    } else {
+        seq![timer]
+    }
+}
+
+pub open spec fn schedule_create_v(cfg: Resonate, req: ScheduleCreateV, s: ServerV, now: Time) -> Seq<OutV> {
+    if spec_has_colon(req.id) {
+        status_v(400, s)
+    } else if !req.promise_tags.target {
+        status_v(400, s)
+    } else if req.promise_tags.timer && req.promise_tags.target {
+        status_v(400, s)
+    } else if !spec_cron_valid(req.cron) {
+        status_v(400, s)
+    } else if s.schedules.contains_key(req.id) {
+        echo_v(ResponseV::Schedule(s.schedules[req.id]), s)
+    } else {
+        let next = spec_next_cron(req.cron, now);
+        let c = ScheduleV {
+            id: req.id,
+            cron: req.cron,
+            promise_id: req.promise_id,
             promise_timeout: req.promise_timeout,
-            promise_param: copy(&req.promise_param),
+            promise_param: req.promise_param,
             promise_tags: req.promise_tags,
             created_at: now,
             next_run_at: next,
             last_run_at: None,
         };
-        let rec = Response::Schedule(copy(&c));
-        let mut n = copy_server(s);
-        n.schedules.insert(req.id.clone(), c);
-        let mut work = Vec::new();
-        self.arm_fire(&mut work, &req.id, next, &req.promise_id);
-        one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("schedule created")) })
+        one_v(ResponseV::Schedule(c), ServerV { schedules: s.schedules.insert(req.id, c), ..s }, arm_fire_v(cfg, req.id, next, req.promise_id), Seq::empty())
     }
+}
 
-    /// A request takes effect in `s` at time `now`: every allowed outcome.
-    pub fn external(&self, op: &Request, s: &Server, now: Time) -> Vec<Out> {
-        match op {
-            Request::CreatePromise(c) => self.promise_create(c, false, s, now),
-            Request::GetPromise(id) => match s.promises.get(id) {
-                None => status(404, mk("get promise: none (404)"), s),
-                Some(p) => echo(Response::Promise(prec(id, p)), mk("get promise"), s),
-            },
-            Request::SettlePromise(st) => self.promise_settle(st, false, s, now),
-            Request::RegisterCallback { awaited, awaiter } => {
-                if *awaited == *awaiter || !same_origin(awaited, awaiter) {
-                    return status(400, mk("callback: itself or another origin (400)"), s);
-                }
-                let p = match s.promises.get(awaited) {
-                    Some(p) => p,
-                    None => return status(404, mk("callback: no awaited promise (404)"), s),
-                };
-                let w = match s.promises.get(awaiter) {
-                    Some(w) => w,
-                    None => return status(422, mk("callback: no awaiter promise (422)"), s),
-                };
-                if !s.tasks.contains_key(awaiter) || !p.external() {
-                    return status(422, mk("callback: awaiter no task, or awaited not external (422)"), s);
-                }
-                let res = Response::Promise(prec(awaited, p));
-                if !p.live() || !w.live() {
-                    return echo(res, mk("callback: one of them settled (echo)"), s);
-                }
-                let mut n = copy_server(s);
-                let mut q = copy(p);
-                q.callbacks.insert(awaiter.clone());
-                n.promises.insert(awaited.clone(), q);
-                one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("callback registered")) })
-            },
-            Request::RegisterListener { awaited, address } => {
-                if !address_valid(address) {
-                    return status(400, mk("listener: bad address (400)"), s);
-                }
-                let p = match s.promises.get(awaited) {
-                    None => return status(404, mk("listener: no such promise (404)"), s),
-                    Some(p) => p,
-                };
-                if !p.external() {
-                    return status(422, mk("listener: promise not external (422)"), s);
-                }
-                let res = Response::Promise(prec(awaited, p));
-                if !p.live() {
-                    return echo(res, mk("listener: promise settled (echo)"), s);
-                }
-                let mut n = copy_server(s);
-                let mut q = copy(p);
-                q.listeners.insert(address.clone());
-                n.promises.insert(awaited.clone(), q);
-                one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("listener registered")) })
-            },
-            Request::GetTask(id) => match s.tasks.get(id) {
-                None => status(404, mk("get task: none (404)"), s),
-                Some(t) => echo(Response::Task(trec(id, t)), mk("get task"), s),
-            },
-            Request::CreateTask { pid, ttl, action } => self.task_create(pid, *ttl, action, s, now),
-            Request::AcquireTask { id, version, pid, ttl } => {
-                let t = match s.tasks.get(id) {
-                    Some(t) => t,
-                    None => return status(404, mk("acquire: no such task (404)"), s),
-                };
-                let p = match s.promises.get(id) {
-                    Some(p) => p,
-                    None => return status(404, mk("acquire: no such task (404)"), s),  // unreachable
-                };
-                if t.state != TState::Pending || !p.live() || t.version != *version || t.version >= MAX_VERSION {
-                    return status(409, mk("acquire: not pending, or stale version (409)"), s);
-                }
-                let mut n = copy_server(s);
-                let mut u = copy(t);
-                u.acquire(t.version + 1, pid.clone(), *ttl, now);
-                let rec = Response::Both(prec(id, p), trec(id, &u));
-                n.tasks.insert(id.clone(), u);
-                let mut work = Vec::new();
-                work.push(at(now.saturating_add(*ttl), id));
-                one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task acquired")) })
-            },
-            Request::ReleaseTask { id, version } => match self.held(s, id, *version) {
-                Err(code) => status(code, if code == 404 { mk("release: no such task (404)") } else { mk("release: not held (409)") }, s),
-                Ok(t) => {
-                    let mut n = copy_server(s);
-                    let mut u = copy(t);
-                    u.release(now);
-                    n.tasks.insert(id.clone(), u);
-                    let mut work = Vec::new();
-                    work.push(at(now, id));
-                    one(Out { resp: Response::Status(200), next: n, work, send: Vec::new(), marks: marked(mk("task released")) })
-                },
-            },
-            Request::FulfillTask { id, version, state, data } => {
-                let st = match settable(state) {
-                    Some(st) => st,
-                    None => return status(400, mk("fulfill: not a settled state (400)"), s),
-                };
-                match self.held(s, id, *version) {
-                    Err(code) => return status(code, if code == 404 { mk("fulfill: no such task (404)") } else { mk("fulfill: not held (409)") }, s),
-                    Ok(_) => {},
-                }
-                let work = match s.promises.get(id) {
-                    Some(p) => settled_work(p, id),
-                    None => Vec::new(),
-                };
-                let mut n = copy_server(s);
-                settle(&mut n, id, st, copy(data), now);
-                let res = match n.promises.get(id) {
-                    Some(q) => Response::Promise(prec(id, q)),
-                    None => Response::Status(500),  // unreachable: held checked the promise
-                };
-                one(Out { resp: res, next: n, work, send: Vec::new(), marks: marked(mk("task fulfilled")) })
-            },
-            Request::HeartbeatTask { pid, tasks } => self.task_heartbeat(pid, tasks, s, now),
-            Request::SuspendTask { id, version, awaited } => self.task_suspend(id, *version, awaited, s),
-            Request::FenceTask { id, version, action } => self.task_fence(id, *version, action, s, now),
-            Request::HaltTask(id) => {
-                let t = match s.tasks.get(id) {
-                    Some(t) => t,
-                    None => return status(404, mk("halt: no such task (404)"), s),
-                };
-                match t.state {
-                    TState::Fulfilled => status(409, mk("halt: task done (409)"), s),
-                    TState::Halted => status(200, mk("halt: already halted (echo)"), s),
-                    _ => {
-                        let mut n = copy_server(s);
-                        let mut u = copy(t);
-                        u.state = TState::Halted;
-                        u.pid = None;
-                        u.ttl = None;
-                        u.acquired_at = 0;
-                        u.retry_at = None;
-                        n.tasks.insert(id.clone(), u);
-                        one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) })
-                    },
-                }
-            },
-            Request::ContinueTask(id) => {
-                let t = match s.tasks.get(id) {
-                    Some(t) => t,
-                    None => return status(404, mk("continue: no such task (404)"), s),
-                };
-                let live = match s.promises.get(id) {
-                    Some(p) => p.live(),
-                    None => false,
-                };
-                if t.state != TState::Halted || !live {
-                    return status(409, mk("continue: not halted (409)"), s);
-                }
-                let mut n = copy_server(s);
-                let mut u = copy(t);
-                u.state = TState::Pending;
-                u.retry_at = Some(now);
-                n.tasks.insert(id.clone(), u);
-                let mut work = Vec::new();
-                work.push(at(now, id));
-                one(Out { resp: Response::Status(200), next: n, work, send: Vec::new(), marks: marked(mk("task continued")) })
-            },
-            Request::CreateSchedule(c) => self.schedule_create(c, s, now),
-            Request::GetSchedule(id) => match s.schedules.get(id) {
-                None => status(404, mk("get schedule: none (404)"), s),
-                Some(c) => echo(Response::Schedule(copy(c)), mk("get schedule"), s),
-            },
-            Request::DeleteSchedule(id) => match s.schedules.get(id) {
-                None => status(404, mk("delete schedule: none (404)"), s),
-                Some(_) => {
-                    let mut n = copy_server(s);
-                    n.schedules.remove(id);
-                    one(Out { resp: Response::Status(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule deleted")) })
-                },
-            },
+pub open spec fn delete_schedule_v(id: Chars, s: ServerV) -> Seq<OutV> {
+    if !s.schedules.contains_key(id) {
+        status_v(404, s)
+    } else {
+        one_v(ResponseV::Status(200), ServerV { schedules: s.schedules.remove(id), ..s }, Seq::empty(), Seq::empty())
+    }
+}
+
+/// A request takes effect in `s` at time `now`: every allowed outcome.
+pub open spec fn ext(cfg: Resonate, op: RequestV, s: ServerV, now: Time) -> Seq<OutV> {
+    match op {
+        RequestV::CreatePromise(c) => promise_create_v(c, s, now),
+        RequestV::GetPromise(id) => if s.promises.contains_key(id) {
+            echo_v(ResponseV::Promise(prec_v(id, s.promises[id])), s)
+        } else {
+            status_v(404, s)
+        },
+        RequestV::SettlePromise(st) => promise_settle_v(st, s, now),
+        RequestV::RegisterCallback { awaited, awaiter } => register_callback_v(awaited, awaiter, s),
+        RequestV::RegisterListener { awaited, address } => register_listener_v(awaited, address, s),
+        RequestV::GetTask(id) => if s.tasks.contains_key(id) {
+            echo_v(ResponseV::Task(trec_v(id, s.tasks[id])), s)
+        } else {
+            status_v(404, s)
+        },
+        RequestV::CreateTask { pid, ttl, action } => task_create_v(pid, ttl, action, s, now),
+        RequestV::AcquireTask { id, version, pid, ttl } => acquire_task_v(id, version, pid, ttl, s, now),
+        RequestV::ReleaseTask { id, version } => release_task_v(id, version, s, now),
+        RequestV::FulfillTask { id, version, state, data } => fulfill_task_v(id, version, state, data, s, now),
+        RequestV::HeartbeatTask { pid, tasks } => heartbeat_v(pid, tasks, s, now),
+        RequestV::SuspendTask { id, version, awaited } => suspend_task_v(id, version, awaited, s),
+        RequestV::FenceTask { id, version, action } => fence_task_v(id, version, action, s, now),
+        RequestV::HaltTask(id) => halt_task_v(id, s),
+        RequestV::ContinueTask(id) => continue_task_v(id, s, now),
+        RequestV::CreateSchedule(c) => schedule_create_v(cfg, c, s, now),
+        RequestV::GetSchedule(id) => if s.schedules.contains_key(id) {
+            echo_v(ResponseV::Schedule(s.schedules[id]), s)
+        } else {
+            status_v(404, s)
+        },
+        RequestV::DeleteSchedule(id) => delete_schedule_v(id, s),
+    }
+}
+
+// ------------------------------------------------------------ internal work
+
+/// A suspended task resumes when a promise it awaits has settled; any other
+/// task is told, when it next runs. The callback is spent either way.
+pub open spec fn resume_v(n: ServerV, awaited: Chars, awaiter: Chars, now: Time) -> ServerV {
+    let since = if n.promises.contains_key(awaited) && n.promises[awaited].settled_at is Some { n.promises[awaited].settled_at.unwrap() } else { now };
+    let promises = if n.promises.contains_key(awaited) {
+        let p = n.promises[awaited];
+        n.promises.insert(awaited, PromiseV { callbacks: p.callbacks.remove(awaiter), ..p })
+    } else {
+        n.promises
+    };
+    let tasks = if n.tasks.contains_key(awaiter) {
+        let t = n.tasks[awaiter];
+        match t.state {
+            TState::Suspended => n.tasks.insert(awaiter, TaskV { state: TState::Pending, resumes: seq![awaited], retry_at: Some(since), ..t }),
+            TState::Fulfilled => n.tasks,
+            _ => if !t.resumes.contains(awaited) { n.tasks.insert(awaiter, TaskV { resumes: t.resumes.push(awaited), ..t }) } else { n.tasks },
+        }
+    } else {
+        n.tasks
+    };
+    ServerV { promises, tasks, ..n }
+}
+
+/// Phase 1: a promise past its deadline times out (a timer promise resolves),
+/// and starts its resumes and unblocks.
+pub open spec fn deadlines_fold(ids: Seq<Chars>, n: ServerV, work: Seq<Sched<InternalV>>, now: Time) -> (ServerV, Seq<Sched<InternalV>>)
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        (n, work)
+    } else {
+        let (n1, work1) = deadlines_fold(ids.drop_last(), n, work, now);
+        let id = ids.last();
+        if n1.promises.contains_key(id) && live_v(n1.promises[id]) && now >= n1.promises[id].timeout_at {
+            let p = n1.promises[id];
+            let state = if p.tags.timer { PState::Resolved } else { PState::TimedOut };
+            (settle_v(n1, id, state, None, p.timeout_at), work1 + settled_work_v(p, id))
+        } else {
+            (n1, work1)
         }
     }
+}
 
-    /// A suspended task resumes when a promise it awaits has settled; any
-    /// other task is told, when it next runs (Lean's `resumeOne`). The
-    /// callback is spent either way.
-    fn resume(&self, n: &mut Server, awaited: &Id, awaiter: &Id, now: Time, marks: &mut Vec<&'static str>) {
-        // the resumed task's first offer: when the awaited settled (Lean's `since`)
-        let since = match n.promises.get(awaited) {
-            Some(p) => match p.settled_at {
-                Some(t) => t,
-                None => now,
-            },
-            None => now,
+/// Phase 2: every callback among `ids` on a settled promise among `ids` is
+/// spent: its awaiter resumes.
+pub open spec fn resumes_inner(awaited: Chars, awaiters: Seq<Chars>, n: ServerV, now: Time) -> ServerV
+    decreases awaiters.len(),
+{
+    if awaiters.len() == 0 {
+        n
+    } else {
+        let n1 = resumes_inner(awaited, awaiters.drop_last(), n, now);
+        let awaiter = awaiters.last();
+        let due = n1.promises.contains_key(awaited) && !live_v(n1.promises[awaited]) && n1.promises[awaited].callbacks.contains(awaiter);
+        if due { resume_v(n1, awaited, awaiter, now) } else { n1 }
+    }
+}
+
+pub open spec fn resumes_fold(awaiteds: Seq<Chars>, all: Seq<Chars>, n: ServerV, now: Time) -> ServerV
+    decreases awaiteds.len(),
+{
+    if awaiteds.len() == 0 {
+        n
+    } else {
+        let n1 = resumes_fold(awaiteds.drop_last(), all, n, now);
+        resumes_inner(awaiteds.last(), all, n1, now)
+    }
+}
+
+/// Phase 3, per object: a task past its lease is reclaimed, offered again from
+/// the lease's end; a settled promise's listeners are told, once; a pending
+/// task whose retry is due is offered to a worker and the next offer armed.
+pub open spec fn due_fold(cfg: Resonate, ids: Seq<Chars>, n: ServerV, work: Seq<Sched<InternalV>>, send: Seq<DispatchV>, now: Time) -> (ServerV, Seq<Sched<InternalV>>, Seq<DispatchV>)
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        (n, work, send)
+    } else {
+        let (n1, work1, send1) = due_fold(cfg, ids.drop_last(), n, work, send, now);
+        let id = ids.last();
+        // the lease
+        let tasks2 = if n1.tasks.contains_key(id) && n1.tasks[id].state == TState::Acquired && now >= lease_expires_v(n1.tasks[id]) {
+            n1.tasks.insert(id, released_v(n1.tasks[id], lease_expires_v(n1.tasks[id])))
+        } else {
+            n1.tasks
         };
-        match n.promises.get(awaited) {
-            Some(p) => {
-                let mut q = copy(p);
-                q.callbacks.remove(awaiter);
-                n.promises.insert(awaited.clone(), q);
-            },
-            None => {},
-        }
-        match n.tasks.get(awaiter) {
-            Some(t) => {
-                match t.state {
-                    TState::Suspended => {
-                        let mut u = copy(t);
-                        u.state = TState::Pending;
-                        u.resumes = ids1(awaited);
-                        u.retry_at = Some(since);
-                        n.tasks.insert(awaiter.clone(), u);
-                        marks.push(mk("task resumed"));
-                    },
-                    TState::Fulfilled => {},
-                    _ => {
-                        if !contains(&t.resumes, awaited) {
-                            let mut u = copy(t);
-                            u.resumes.push(awaited.clone());
-                            n.tasks.insert(awaiter.clone(), u);
-                            marks.push(mk("resume noted on a running task"));
-                        }
-                    },
-                }
-            },
-            None => {},
+        let n2 = ServerV { tasks: tasks2, ..n1 };
+        // the listeners
+        let told = n2.promises.contains_key(id) && !live_v(n2.promises[id]) && n2.promises[id].listeners.len() > 0;
+        let (n3, send3) = if told {
+            let p = n2.promises[id];
+            let rec = prec_v(id, p);
+            let unblocks = p.listeners.to_seq().map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
+            (ServerV { promises: n2.promises.insert(id, PromiseV { listeners: Set::empty(), ..p }), ..n2 }, send1 + unblocks)
+        } else {
+            (n2, send1)
+        };
+        // the retry
+        let live = n3.promises.contains_key(id) && live_v(n3.promises[id]);
+        let retry = n3.tasks.contains_key(id) && {
+            let t = n3.tasks[id];
+            t.state == TState::Pending && t.retry_at is Some && t.retry_at.unwrap() <= now && live
+        };
+        if retry {
+            let t = n3.tasks[id];
+            let again = next_offer_v(t.retry_at.unwrap(), now, cfg.retry_timeout);
+            (
+                ServerV { tasks: n3.tasks.insert(id, TaskV { retry_at: Some(again), ..t }), ..n3 },
+                work1.push(at_v(again, id)),
+                send3.push(DispatchV::Execute { id, version: t.version }),
+            )
+        } else {
+            (n3, work1, send3)
         }
     }
+}
 
-    /// Internal work on `ids` runs in `s` at time `now`: whatever is due on
-    /// them happens, in the order the Lean specification's steps become
-    /// enabled: a promise past its deadline settles; a callback on a settled
-    /// promise resumes its awaiter; a lease past its end is reclaimed; a
-    /// settled promise's listeners are told; a pending task whose retry is due
-    /// is offered to a worker, and the next retry armed.
-    pub fn internal(&self, ids: &Vec<Id>, s: &Server, now: Time) -> InOut {
-        let mut n = copy_server(s);
-        let mut work = Vec::new();
-        let mut send = Vec::new();
-        let mut marks = Vec::new();
-        // A promise past its deadline times out (a timer promise resolves).
-        let mut i = 0;
-        while i < ids.len()
-            invariant
-                i <= ids.len(),
-            decreases ids.len() - i,
-        {
-            let id = &ids[i];
-            match s.promises.get(id) {
-                Some(p) => {
-                    if p.live() && now >= p.timeout_at {
-                        let state = if p.tags.timer { PState::Resolved } else { PState::TimedOut };
-                        marks.push(if p.tags.timer { mk("timer promise resolved") } else { mk("promise timed out") });
-                        let r = settled_work(p, id);
-                        settle(&mut n, id, state, None, p.timeout_at);
-                        push_all(&mut work, &r);
-                    }
-                },
-                None => {},
-            }
-            i += 1;
-        }
-        // A callback on a settled promise is spent: its awaiter resumes.
-        let mut a = 0;
-        while a < ids.len()
-            invariant
-                a <= ids.len(),
-            decreases ids.len() - a,
-        {
-            let mut w = 0;
-            while w < ids.len()
-                invariant
-                    w <= ids.len(),
-                    a < ids.len(),
-                decreases ids.len() - w,
-            {
-                let awaited = &ids[a];
-                let awaiter = &ids[w];
-                let due = match n.promises.get(awaited) {
-                    Some(p) => !p.live() && p.callbacks.contains(awaiter),
-                    None => false,
+/// Internal work on `ids` runs in `s` at time `now`: whatever is due on them
+/// happens, in the order the Lean specification's steps become enabled.
+pub open spec fn on_v(cfg: Resonate, ids: Seq<Chars>, s: ServerV, now: Time) -> InOutV {
+    let (n1, work1) = deadlines_fold(ids, s, Seq::empty(), now);
+    let n2 = resumes_fold(ids, ids, n1, now);
+    let (n3, work3, send3) = due_fold(cfg, ids, n2, work1, Seq::empty(), now);
+    InOutV { next: n3, work: work3, send: send3, pending: false }
+}
+
+pub open spec fn noop_v(s: ServerV, pending: bool) -> InOutV {
+    InOutV { next: s, work: Seq::empty(), send: Seq::empty(), pending }
+}
+
+pub open spec fn record_run_v(c: ScheduleV, at: Time) -> ScheduleV {
+    ScheduleV { last_run_at: Some(at), next_run_at: spec_next_cron(c.cron, at), ..c }
+}
+
+/// A schedule's occurrence at `at` fires: the promise it names is created, if
+/// absent, as of `at` (born settled when its deadline has passed by `now`);
+/// the run is recorded at once, or by `advance_v` within the window.
+pub open spec fn fire_v(cfg: Resonate, schedule: Chars, at: Time, promise: Chars, s: ServerV, now: Time) -> InOutV {
+    if !s.schedules.contains_key(schedule) {
+        noop_v(s, false)
+    } else {
+        let c = s.schedules[schedule];
+        if c.next_run_at != at || spec_expand(c.promise_id, schedule, at) != promise {
+            noop_v(s, false)
+        } else if now < at {
+            noop_v(s, true)
+        } else {
+            let (n1, work1) = if s.promises.contains_key(promise) {
+                (s, Seq::<Sched<InternalV>>::empty())
+            } else {
+                let timeout_at = sat_add(at, c.promise_timeout);
+                let tags = c.promise_tags;
+                let live_now = timeout_at > now;
+                let live_at = timeout_at > at;
+                let born = if live_now { PState::Pending } else if tags.timer { PState::Resolved } else { PState::TimedOut };
+                let p = PromiseV {
+                    state: born,
+                    value: None,
+                    param: c.promise_param,
+                    timeout_at,
+                    created_at: if live_at { at } else { timeout_at },
+                    settled_at: if live_now { None } else { Some(timeout_at) },
+                    tags,
+                    callbacks: Set::empty(),
+                    listeners: Set::empty(),
                 };
-                if due {
-                    self.resume(&mut n, awaited, awaiter, now, &mut marks);
-                }
-                w += 1;
-            }
-            a += 1;
-        }
-        let mut i = 0;
-        while i < ids.len()
-            invariant
-                i <= ids.len(),
-            decreases ids.len() - i,
-        {
-            let id = &ids[i];
-            // A task past its lease is reclaimed, offered again from the
-            // lease's end on (Lean's `TaskObject.lapse`).
-            match n.tasks.get(id) {
-                Some(t) => {
-                    if t.state == TState::Acquired && now >= t.lease_expires() {
-                        let mut u = copy(t);
-                        u.release(t.lease_expires());
-                        n.tasks.insert(id.clone(), u);
-                        marks.push(mk("lease expired"));
-                    }
-                },
-                None => {},
-            }
-            // A settled promise's listeners are told, once.
-            match n.promises.get(id) {
-                Some(p) => {
-                    if !p.live() {
-                        let addrs = p.listeners.to_vec();
-                        if addrs.len() > 0 {
-                            let rec = prec(id, p);
-                            let mut j = 0;
-                            while j < addrs.len()
-                                invariant
-                                    j <= addrs.len(),
-                                decreases addrs.len() - j,
-                            {
-                                send.push(Dispatch::Unblock { address: addrs[j].clone(), promise: rec.clone() });
-                                j += 1;
-                            }
-                            let mut q = copy(p);
-                            q.listeners = PSet::empty();
-                            n.promises.insert(id.clone(), q);
-                            marks.push(mk("listeners told"));
-                        }
-                    }
-                },
-                None => {},
-            }
-            // A pending task whose retry is due is offered to a worker, and
-            // the next offer armed. Not once its promise is settled: the task
-            // is done.
-            let live = match n.promises.get(id) {
-                Some(p) => p.live(),
-                None => false,
-            };
-            match n.tasks.get(id) {
-                Some(t) => {
-                    let due = match t.retry_at {
-                        Some(r) => r <= now,
-                        None => false,
+                let promises = s.promises.insert(promise, p);
+                let work0: Seq<Sched<InternalV>> = if live_now { seq![at_v(timeout_at, promise)] } else { Seq::empty() };
+                if tags.target && !tags.timer {
+                    let due = match tags.delay {
+                        Some(d) => if d > at { d } else { at },
+                        None => at,
                     };
-                    if t.state == TState::Pending && due && live {
-                        let mut u = copy(t);
-                        let again = match t.retry_at {
-                            Some(r) => next_offer(r, now, self.retry_timeout),
-                            None => now.saturating_add(self.retry_timeout),
-                        };
-                        u.retry_at = Some(again);
-                        let version = u.version;
-                        n.tasks.insert(id.clone(), u);
-                        send.push(Dispatch::Execute { id: id.clone(), version });
-                        work.push(at(again, id));
-                        marks.push(mk("task dispatched"));
-                    }
-                },
-                None => {},
-            }
-            i += 1;
-        }
-        InOut { next: n, work, send, marks, pending: false }
-    }
-
-    /// The work that fires `schedule`'s occurrence at `at`: later, from `at`
-    /// on, and a timer at `at + fire_within`, by which it is owed. Whichever
-    /// runs first fires it; the other finds the schedule moved on and does
-    /// nothing. With `fire_within` zero, the timer alone.
-    fn arm_fire(&self, work: &mut Vec<Work>, schedule: &Id, at_: Time, template: &String) {
-        let step = Step::Fire { schedule: schedule.clone(), at: at_, promise: expand(template, schedule, at_) };
-        if self.fire_within > 0 {
-            work.push(Work::Later(copy_step(&step)));
-        }
-        work.push(Work::Timer(at_.saturating_add(self.fire_within), step));
-    }
-
-    /// A schedule's occurrence at `at` fires, from `at` on: the promise it
-    /// names is created, if absent, as of `at`; the schedule records the run
-    /// and arms the next, at once when fires are exact, else by a step of its
-    /// own (`advance`) owed within the window. The clock may be past `at`
-    /// (the server got to it late, or jumped over several occurrences): a
-    /// promise whose deadline has passed by `now` is born settled, as Lean's
-    /// read-time projection would show it, and starts nothing. A schedule
-    /// that is gone, or no longer expects this occurrence, fires nothing;
-    /// before its instant it cannot fire yet.
-    pub fn fire(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> InOut {
-        let c = match s.schedules.get(schedule) {
-            Some(c) => c,
-            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
-        };
-        // Not this occurrence: the schedule moved on, or was deleted and
-        // created again under another template (same template: the same
-        // occurrence, and this work does what the new schedule's would).
-        if c.next_run_at != at_ || expand(&c.promise_id, schedule, at_) != *promise {
-            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
-        }
-        if now < at_ {
-            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: true };
-        }
-        let mut marks = Vec::new();
-        let mut work = Vec::new();
-        let mut n = copy_server(s);
-        if s.promises.contains_key(promise) {
-            marks.push(mk("schedule: occurrence exists"));
-        } else {
-            let timeout_at = at_.saturating_add(c.promise_timeout);
-            let tags = c.promise_tags;
-            // Born live at `at`, or settled at its deadline: the deadline is
-            // `at` itself when the timeout is zero, else before `now`.
-            let live_now = timeout_at > now;
-            let live_at = timeout_at > at_;
-            let born = if live_now { PState::Pending } else if tags.timer { PState::Resolved } else { PState::TimedOut };
-            let p = Promise {
-                state: born,
-                value: None,
-                param: copy(&c.promise_param),
-                timeout_at,
-                created_at: if live_at { at_ } else { timeout_at },
-                settled_at: if live_now { None } else { Some(timeout_at) },
-                tags,
-                callbacks: PSet::empty(),
-                listeners: PSet::empty(),
+                    let task = TaskV {
+                        state: if live_now { TState::Pending } else { TState::Fulfilled },
+                        version: 0,
+                        pid: None,
+                        ttl: None,
+                        acquired_at: 0,
+                        retry_at: if live_now { Some(due) } else { None },
+                        resumes: Seq::empty(),
+                    };
+                    (ServerV { promises, tasks: s.tasks.insert(promise, task), ..s }, if live_now { work0.push(at_v(due, promise)) } else { work0 })
+                } else {
+                    (ServerV { promises, ..s }, work0)
+                }
             };
-            n.promises.insert(promise.clone(), p);
-            if live_now {
-                work.push(at(timeout_at, promise));
-            }
-            if tags.target && !tags.timer {
-                let due = match tags.delay {
-                    Some(d) => if d > at_ { d } else { at_ },
-                    None => at_,
-                };
-                let state = if live_now { TState::Pending } else { TState::Fulfilled };
-                let retry_at = if live_now { Some(due) } else { None };
-                n.tasks.insert(promise.clone(), Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() });
-                if live_now {
-                    work.push(at(due, promise));
+            if cfg.fire_within == 0 {
+                let d = record_run_v(c, at);
+                InOutV {
+                    next: ServerV { schedules: n1.schedules.insert(schedule, d), ..n1 },
+                    work: work1 + arm_fire_v(cfg, schedule, d.next_run_at, c.promise_id),
+                    send: Seq::empty(),
+                    pending: false,
+                }
+            } else {
+                let step = InternalV::Advance { schedule, at, promise };
+                InOutV {
+                    next: n1,
+                    work: work1 + seq![Sched::Later(step), Sched::Timer(sat_add(at, cfg.fire_within), step)],
+                    send: Seq::empty(),
+                    pending: false,
                 }
             }
-            marks.push(if live_now { mk("schedule fired") } else { mk("schedule fired past the occurrence's deadline") });
         }
-        if self.fire_within == 0 {
-            Resonate::record_run(&mut n, c, schedule, at_);
-            self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
+    }
+}
+
+/// The second half of a sweeping server's fire: the run at `at` recorded and
+/// the next occurrence armed.
+pub open spec fn advance_v(cfg: Resonate, schedule: Chars, at: Time, promise: Chars, s: ServerV, now: Time) -> InOutV {
+    if !s.schedules.contains_key(schedule) {
+        noop_v(s, false)
+    } else {
+        let c = s.schedules[schedule];
+        if c.next_run_at != at || spec_expand(c.promise_id, schedule, at) != promise {
+            noop_v(s, false)
+        } else if now < at {
+            noop_v(s, true)
         } else {
-            let step = Step::Advance { schedule: schedule.clone(), at: at_, promise: promise.clone() };
-            work.push(Work::Later(copy_step(&step)));
-            work.push(Work::Timer(at_.saturating_add(self.fire_within), step));
+            let d = record_run_v(c, at);
+            InOutV {
+                next: ServerV { schedules: s.schedules.insert(schedule, d), ..s },
+                work: arm_fire_v(cfg, schedule, d.next_run_at, c.promise_id),
+                send: Seq::empty(),
+                pending: false,
+            }
         }
-        InOut { next: n, work, send: Vec::new(), marks, pending: false }
+    }
+}
+
+pub open spec fn int(cfg: Resonate, step: InternalV, s: ServerV, now: Time) -> InOutV {
+    match step {
+        InternalV::On(ids) => on_v(cfg, ids, s, now),
+        InternalV::Fire { schedule, at, promise } => fire_v(cfg, schedule, at, promise, s, now),
+        InternalV::Advance { schedule, at, promise } => advance_v(cfg, schedule, at, promise, s, now),
+    }
+}
+
+// ----------------------------------------------- the twins, over the values
+
+/// The value of the model's type with this view. That one exists is
+/// `axiom_realised`: the types are built to hold any finite view.
+pub open spec fn lift_server(v: ServerV) -> Server {
+    choose|x: Server| x@ == v
+}
+
+pub open spec fn lift_response(v: ResponseV) -> Response {
+    choose|x: Response| x@ == v
+}
+
+pub open spec fn lift_internal(v: InternalV) -> Internal {
+    choose|x: Internal| x@ == v
+}
+
+pub open spec fn lift_dispatch(v: DispatchV) -> Dispatch {
+    choose|x: Dispatch| x@ == v
+}
+
+pub open spec fn lift_sched(s: Sched<InternalV>) -> Sched<Internal> {
+    match s {
+        Sched::Later(r) => Sched::Later(lift_internal(r)),
+        Sched::Timer(t, r) => Sched::Timer(t, lift_internal(r)),
+    }
+}
+
+pub open spec fn lift_out(o: OutV) -> ExternalOutcomeV<Server, Response, Internal, Dispatch> {
+    ExternalOutcomeV {
+        next: lift_server(o.next),
+        resp: lift_response(o.resp),
+        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
+        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
+    }
+}
+
+pub open spec fn lift_inout(o: InOutV) -> InternalOutcomeV<Server, Internal, Dispatch> {
+    InternalOutcomeV {
+        next: lift_server(o.next),
+        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
+        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
+    }
+}
+
+/// Every view the twins produce is some value's view. Trusted: the maps and
+/// sets hold any finite contents, strings any characters. Stated for the
+/// views the twins reach (finite, since they come from values).
+#[verifier::external_body]
+pub proof fn axiom_realised(v: ServerV, r: ResponseV, i: InternalV, d: DispatchV)
+    ensures
+        lift_server(v)@ == v,
+        lift_response(r)@ == r,
+        lift_internal(i)@ == i,
+        lift_dispatch(d)@ == d,
+{
+}
+
+impl Model for Resonate {
+    type State = Server;
+
+    type External = Request;
+
+    type Response = Response;
+
+    type Internal = Internal;
+
+    type Dispatch = Dispatch;
+
+    open spec fn spec_external(&self, req: Request, state: Server, now: Time) -> Seq<ExternalOutcomeV<Server, Response, Internal, Dispatch>> {
+        ext(*self, req@, state@, now).map_values(|o: OutV| lift_out(o))
     }
 
-    /// The schedule records its run at `at` and arms the next.
-    fn record_run(n: &mut Server, c: &Schedule, schedule: &Id, at_: Time) {
-        let mut d = copy(c);
-        d.last_run_at = Some(at_);
-        d.next_run_at = next_cron(&c.cron, at_);
-        n.schedules.insert(schedule.clone(), d);
+    open spec fn spec_internal(&self, req: Internal, state: Server, now: Time) -> Seq<InternalOutcomeV<Server, Internal, Dispatch>> {
+        let o = int(*self, req@, state@, now);
+        if o.pending { Seq::empty() } else { seq![lift_inout(o)] }
     }
 
-    /// The second half of a sweeping server's fire: the run at `at` recorded
-    /// on `schedule` and the next occurrence armed. A schedule that is gone,
-    /// or has moved on (the fire refired and advanced already), is left as it
-    /// is.
-    pub fn advance(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> InOut {
-        let c = match s.schedules.get(schedule) {
-            Some(c) => c,
-            None => return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false },
-        };
-        if c.next_run_at != at_ || expand(&c.promise_id, schedule, at_) != *promise {
-            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: false };
-        }
-        if now < at_ {
-            return InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: true };
-        }
-        let mut n = copy_server(s);
-        let mut work = Vec::new();
-        Resonate::record_run(&mut n, c, schedule, at_);
-        self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
-        InOut { next: n, work, send: Vec::new(), marks: marked(mk("schedule advanced")), pending: false }
+    /// The glue: trusted to compute `spec_external`, as it was before the
+    /// twins were written down.
+    #[verifier::external_body]
+    fn external(&self, op: &Request, s: &Server, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
+        crate::model::external_glue(self, op, s, now)
+    }
+
+    #[verifier::external_body]
+    fn internal(&self, step: &Internal, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
+        crate::model::internal_glue(self, step, s, now)
     }
 }
 

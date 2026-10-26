@@ -329,7 +329,7 @@ concatenation; 6 items, no `assume` or `admit`. It is the frame for
 `concrete_refines_abstract`: a store machine (the bucket as state, verified
 document handlers after a sweep as `external`) against the Resonate model.
 
-Resonate's twins are written down (`examples/resonate/src/twins.rs`): the
+Resonate's twins are written down (`examples/resonate/src/spec.rs`): the
 whole protocol as spec functions over the state's view (ids as `Seq<char>`,
 the persistent maps as `Map`, the sets as `Set`), one per handler and one
 per internal step, `ext` and `int` at the top, lifted to the model's own
@@ -666,7 +666,7 @@ refusals are made on the ids alone, so their footprint stays in one origin and
 doesn't merge anything. A schedule's occurrences land in the origin its
 template names; `CreateSchedule` touches that origin, so the partitions merge.
 
-The model is the `resonate` crate (`examples/resonate/src/spec.rs`, written in
+The model is the `resonate` crate (`examples/resonate/src/exec.rs`, written in
 Verus; traces in `examples/resonate/tests/traces.rs`, from `ExampleTraces.cs`
 and `LeaseAndTimeoutTests.cs` and for what the Lean specification adds).
 
@@ -778,7 +778,7 @@ Porting also found three checker bugs, all fixed:
 - `examples/bank/`: the large-bank benchmark (`cargo run --release --example bank -- [accounts] [rounds] [concurrency]`).
 - `tests/bank.rs`: overlapping calls, double-spend, real-time order, unanswered requests, pruning measurement.
 - `tests/jobs.rs`: background completion, run deadlines, timeout timers, deferred independent jobs.
-- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/spec.rs` is the server (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`, and its frame), `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
+- `examples/resonate/`: the Resonate spec as its own crate, written in Verus. `src/exec.rs` is the server as it runs (verified: no panics or overflow anywhere, and safety properties as `ensures`; so far `created_at <= settled_at <= timeout_at` for `promise_create`, and its frame), `src/spec.rs` the same handlers as `spec fn` twins over the state's view, which the trace semantics and refinement proofs are stated over, `src/collections.rs` what it trusts, `src/model.rs` the glue to the checker, `src/explore.rs` its marks and suggestions. `cargo build` compiles it as ordinary Rust; `cargo verus verify -p resonate` verifies it. Its traces are in its `tests/`, its benchmark and fuzz driver in its `examples/`.
 - `examples/tigerbeetle/`: TigerBeetle's state machine. `lean/` has it as a Lean `Model`, with a proof that debits never exceed credits (built by `lean/lakefile.toml`); `src/` has its data model in Rust, not yet a `Model`.
 - `examples/porcupine/`: Porcupine's etcd and key-value histories, checked against its Go checker's verdicts (`cargo run --release --example porcupine -- all [--dfs] [--certify]`; `fetch.sh` gets the histories).
 - `tests/certificate.rs`, `tests/time.rs`: `certify` on its own; deadlines on the clock, never early, in deadline order after a jump.

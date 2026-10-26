@@ -1,7 +1,10 @@
 //! The Resonate server protocol as an accordant model, written in Verus.
 //!
-//! * `spec`: the server, verified: what each request and each piece of internal
-//!   work does, and the safety properties proved about it.
+//! * `exec`: the server as it runs, verified: what each request and each piece
+//!   of internal work does, and the safety properties proved about it.
+//! * `spec`: the server as mathematics: the `spec fn` twins of `exec`'s
+//!   handlers over the state's view, which the trace semantics and the
+//!   refinement proofs are stated over.
 //! * `collections`: what the spec trusts (persistent maps and sets, string
 //!   helpers).
 //! * `model`: plain-Rust glue to the checker's `Model`, `Footprint` and
@@ -27,10 +30,10 @@
 pub mod collections;
 mod explore;
 mod model;
+pub mod exec;
 pub mod spec;
-pub mod twins;
 
 pub use collections::{PMap, PSet};
 pub use explore::{IDS, MARKS, PLAIN, SCHEDULES};
 pub use model::{on, Key};
-pub use spec::*;
+pub use exec::*;
