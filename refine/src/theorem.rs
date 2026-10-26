@@ -1,21 +1,19 @@
-//! `concrete_refines_abstract`: every trace of the store machine is a trace of
-//! the Resonate model.
+//! `concrete_refines_abstract`: every bounded trace of the store machine is
+//! a trace of the Resonate model.
 //!
 //! The relation: the abstract state is the sweep of the concrete one at the
 //! clock, translated; the calls in flight are the same; the abstract has sent
 //! what the concrete has, plus what that sweep sends; the abstract's pending
 //! work is timers, none due, one for every deadline the abstract state owes;
-//! the clocks agree.
+//! the clocks agree; and the concrete side keeps the kernel's invariant, its
+//! leases from their ttl, no scoped tag, every version within the wire's.
 //!
-//! What is proved here: the theorem from the relation and the simulation, by
-//! `accordant::refinement::refines`; the initial configurations are related.
-//! What is not: `simulation_holds`, that every concrete step from related
-//! configurations is matched. It is stated with `admit()`, so this crate
-//! verifies with one hole, named. Filling it is the per-step work: invoke,
-//! return and receive are bookkeeping on `rel`; a tick is the lemma that the
-//! sweep at the new clock is what the abstract timers due by then compute; a
-//! request is one commutation lemma per handler, the kernel's `spec_handle`
-//! after a sweep against the model's twin on the translated state.
+//! The theorem is `refines_under` from the relation, the initial case and
+//! `simulation_holds`: invoke, return and receive are bookkeeping on `rel`; a
+//! sweep is a stutter; a tick is `tick::tick_matched`, the model's timers due
+//! by the new clock draining to the kernel's sweep there; a request is
+//! `effect::effect_matched`, one commutation lemma per handler
+//! (`handlers`) and the same drain.
 
 use vstd::prelude::*;
 
@@ -34,6 +32,8 @@ use resonate::{Dispatch, Internal, Request, Resonate, Response, Server};
 use crate::machine::*;
 use crate::sweep::{mdeadline_at, next_deadline, sweep_fn, sweep_sends};
 use crate::sweep_proof::{callbacks_spent, lemma_inv_empty, lemma_inv_fresh, lemma_sends_idem, lemma_sweep_idem, lemma_sweep_inv, lemma_sweep_swept, lemma_swept_ahead, listeners_spent, swept};
+use crate::frame::{lemma_sweep_shell, no_scope, shell_kept, versions_bounded};
+use crate::trans::leases_from_ttl;
 use crate::translate::*;
 
 verus! {
@@ -147,6 +147,9 @@ pub open spec fn rel(cfg: Concrete, c: Cfg<Concrete>, s: Cfg<Resonate>) -> bool 
     &&& raw.objects.dom().finite()
     &&& raw.schedules == Map::<Seq<char>, ASchedule>::empty()
     &&& inv(c.now as nat, raw)
+    &&& leases_from_ttl(raw)
+    &&& no_scope(raw)
+    &&& versions_bounded(raw)
     &&& callbacks_spent(raw)
     &&& listeners_spent(raw)
     &&& sweep_armed(c)
@@ -176,7 +179,7 @@ pub open spec fn dial_ok(cfg: Concrete) -> bool {
 /// `MAX_TIME`, so that no sum the kernel takes wraps where the model's
 /// saturates.
 pub open spec fn request_bounded(req: RequestV) -> bool {
-    match req {
+    well_formed(req) && match req {
         RequestV::CreatePromise(c) => c.timeout_at <= MAX_TIME && (c.tags.delay is Some ==> c.tags.delay.unwrap() <= MAX_TIME),
         RequestV::CreateTask { ttl, action, .. } => ttl <= MAX_TIME && action.timeout_at <= MAX_TIME && (action.tags.delay is Some ==> action.tags.delay.unwrap() <= MAX_TIME),
         RequestV::AcquireTask { ttl, .. } => ttl <= MAX_TIME,
@@ -413,8 +416,8 @@ pub proof fn matched_receive(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, 
     }
 }
 
-/// ADMITTED. The clock moves: the abstract timers due by the new instant run,
-/// in deadline order, and compute the sweep at that instant.
+/// The clock moves: the model ticks and drains to the sweep at the new
+/// instant (`tick::tick_matched`).
 pub proof fn matched_tick(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
         dial_ok(cfg),
@@ -424,11 +427,12 @@ pub proof fn matched_tick(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: 
     ensures
         exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
 {
-    admit();
+    crate::tick::tick_matched(cfg, x, l, y, s);
 }
 
-/// ADMITTED. A request takes effect: the kernel's handler after a sweep
-/// against the model's twin on the translated state, one lemma per handler.
+/// A request takes effect: the kernel's handler after a sweep against the
+/// model's twin on the translated state (`effect::effect_matched`), one
+/// lemma per handler (`handlers`).
 pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: Cfg<Concrete>, s: Cfg<Resonate>)
     requires
         dial_ok(cfg),
@@ -438,7 +442,7 @@ pub proof fn matched_effect(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y
     ensures
         exists|t: Cfg<Resonate>| #[trigger] matches(abstract_of(cfg), s, l, t) && rel(cfg, y, t),
 {
-    admit();
+    crate::effect::effect_matched(cfg, x, l, y, s);
 }
 
 /// A concrete sweep runs: a stutter. The relation reads the concrete state
@@ -494,6 +498,12 @@ pub proof fn matched_run(cfg: Concrete, x: Cfg<Concrete>, l: Lab<Concrete>, y: C
     lemma_sweep_inv(raw, now, t);
     lemma_inv_fresh(now, sw);
     assert(inv(now, raw2));
+    crate::tick::lemma_sweep_leases(raw, now, t);
+    assert(leases_from_ttl(raw2));
+    lemma_sweep_shell(raw, now, t);
+    assert(shell_kept(raw, raw2));
+    crate::frame::lemma_shell_keeps(raw, raw2);
+    assert(no_scope(raw2) && versions_bounded(raw2));
     assert(raw2.objects.dom() =~= raw.objects.dom());
     assert(sweep_armed(y)) by {
         match next_deadline(raw2) {

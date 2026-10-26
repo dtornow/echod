@@ -100,31 +100,40 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **`concrete_refines_abstract`.** Every trace of the store machine (the
-  bucket as state, the verified document handlers after a sweep as the
-  request step, sweeps as internal work) is a trace of the Resonate model.
-  What exists: accordant's `refines` (`src/refinement.rs`), trace
-  inclusion from a forward simulation, proved; the model's functional
-  specification (`examples/resonate/src/twins.rs`), so the abstract side
-  of the statement is definite; the store machine as a second `Model`
-  (`refine/`, verified with `cargo verus`, which verifies the kernel too),
-  with the wire rules of `dispatch.rs` as `translate.rs` and a functional
-  sweep over the kernel's step functions (`sweep.rs`: three of the six are
-  the kernel's own functions, `callback` and `listener` written out from
-  the shapes the kernel states, the phases in the model's order); the
-  relation `rel` (the abstract state is the sweep of the concrete one,
-  translated; the calls the same; the abstract has sent what the concrete
-  has plus what the sweep sends; a timer for every deadline, none due);
-  the theorem from `refines`, with the initial case proved. What remains
-  is `simulation_holds`, admitted: invoke, return and receive as
-  bookkeeping on `rel`; the tick as the lemma that the sweep at the new
-  clock is what the abstract timers due by then compute; the request as
-  one commutation lemma per handler, `spec_handle` after a sweep against
-  the twin on the translated state. Known not to go through as things
-  stand: a targeted timer (the wire strips the target, the model answers
-  400), which the simulator does not send. Schedules out until the fire's
-  shape is settled. Then echod's own system model against the store
-  machine, where the clocks and the stamps live.
+- **`concrete_refines_abstract`, proved.** Every bounded trace of the store
+  machine (the bucket as state, the verified document handlers after a
+  sweep as the request step, sweeps as internal work) is a trace of the
+  Resonate model: `refine/`, `cargo verus verify -p echod-refine`, no
+  admits. The relation (`theorem.rs`): the abstract state is the sweep of
+  the concrete one at the clock, translated; the calls the same; the
+  abstract has sent what the concrete has plus what the sweep sends; a
+  timer on `id` at `t` for every deadline `t` the swept state owes, none
+  due; the kernel's invariant, every lease at least its ttl ahead of its
+  start, no `resonate:scope` tag, every version within the wire's `u32`.
+  The steps: invoke, return, receive as bookkeeping; a sweep as a stutter
+  (the swept state sweeps to itself); the tick as the lemma that the
+  model's timers due by the new clock drain to the kernel's sweep there
+  (`tick.rs`, `drain.rs`: any ready item runs in an order the sweep
+  absorbs, `absorb.rs`, `onstep.rs`, `trans.rs`, `canon.rs`); a request as
+  one commutation lemma per handler (`handlers.rs`, `hcommon.rs`,
+  `hmany.rs`: the kernel's `spec_handle` on the swept bucket against the
+  twin on the translated state, then the same drain, `effect.rs`).
+  Bounded means (`request_bounded`): the clock and every instant and
+  duration a request carries at most `MAX_TIME`, so no kernel sum wraps
+  where the model saturates; the request passes the wire's validators
+  where the model has no door (ids, process ids and addresses non-empty,
+  ttl positive, a heartbeat naming some task, a fenced settle's state one
+  that parses); no targeted timer (the wire drops the target, the SDKs'
+  sleep; the protocol refuses it); no schedule. Two trusted statements
+  beyond the kernel's and the model's own: the model's `origin` is the
+  kernel's (both read before the first `:`), and the simulator's worker
+  address is a URL. What the proof moved: the kernel refuses an acquire
+  at `u32::MAX` (`MAX_VERSION`), as the servers do, where it refused at
+  `MAX_TIME`; a task record's resume count saturates as the wire's does;
+  the store machine's plan mirrors the validators' doors on a delay, a
+  task's target and a heartbeat's origins. Next: echod's own system model
+  against the store machine, where the clocks and the stamps live, and
+  schedules once the fire's shape is settled.
 
 ## Smaller items
 

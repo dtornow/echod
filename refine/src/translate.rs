@@ -111,6 +111,67 @@ pub open spec fn settle_in(st: SettleV) -> Option<APromiseSettleReq> {
     }
 }
 
+/// The validator's rules on a delay (`validate_promise_create_data`): it is
+/// below the deadline, and the promise has a target.
+pub open spec fn delay_ok(c: CreateV) -> bool {
+    match c.tags.delay {
+        Some(d) => d < c.timeout_at && c.tags.target,
+        None => true,
+    }
+}
+
+/// A request the wire's validators pass that the model has no door for: ids,
+/// process ids and addresses non-empty, durations positive, a heartbeat
+/// naming some task, a fenced settle's state one that parses. And the one
+/// concession the wire makes to the SDKs, a sleep created as a targeted
+/// timer, left out: the protocol refuses it where the wire drops the target.
+pub open spec fn well_formed(req: RequestV) -> bool {
+    match req {
+        RequestV::CreatePromise(c) => create_wf(c),
+        RequestV::GetPromise(id) => id.len() > 0,
+        RequestV::SettlePromise(st) => st.id.len() > 0,
+        RequestV::RegisterCallback { awaited, awaiter } => awaited.len() > 0 && awaiter.len() > 0,
+        RequestV::RegisterListener { awaited, address } => awaited.len() > 0 && address.len() > 0,
+        RequestV::GetTask(id) => id.len() > 0,
+        RequestV::CreateTask { pid, ttl, action } => pid.len() > 0 && ttl >= 1 && create_wf(action),
+        RequestV::AcquireTask { id, pid, ttl, .. } => id.len() > 0 && pid.len() > 0 && ttl >= 1,
+        RequestV::ReleaseTask { id, .. } => id.len() > 0,
+        RequestV::FulfillTask { id, .. } => id.len() > 0,
+        RequestV::HeartbeatTask { pid, tasks } => pid.len() > 0 && tasks.len() > 0 && forall|i: int| 0 <= i < tasks.len() ==> (#[trigger] tasks[i]).id.len() > 0,
+        RequestV::SuspendTask { id, awaited, .. } => id.len() > 0 && forall|i: int| 0 <= i < awaited.len() ==> (#[trigger] awaited[i]).len() > 0,
+        RequestV::FenceTask { id, action, .. } => id.len() > 0 && match action {
+            FencedV::Create(c) => create_wf(c),
+            FencedV::Settle(st) => st.id.len() > 0 && spec_settable(st.state) is Some,
+        },
+        RequestV::HaltTask(id) => id.len() > 0,
+        RequestV::ContinueTask(id) => id.len() > 0,
+        RequestV::CreateSchedule(_) | RequestV::GetSchedule(_) | RequestV::DeleteSchedule(_) => false,
+    }
+}
+
+pub open spec fn create_wf(c: CreateV) -> bool {
+    c.id.len() > 0 && !(c.tags.timer && c.tags.target)
+}
+
+/// The model's `origin` and the kernel's agree: both read everything before
+/// the first `:`. Trusted: the model's is uninterpreted, computed by
+/// `resonate::model::origin`, and the kernel's is `origin_of`.
+#[verifier::external_body]
+pub proof fn axiom_origin(id: Chars)
+    ensures
+        resonate::collections::origin(id) == echod_kernel::types::origin(id),
+{
+}
+
+/// The simulator's worker is an absolute URL. Trusted: `address_valid`
+/// decides `spec_address_valid`.
+#[verifier::external_body]
+pub proof fn axiom_worker_valid()
+    ensures
+        spec_address_valid(worker()),
+{
+}
+
 /// What a request becomes in front of the kernel.
 pub enum Plan {
     /// Refused by the wire rules.
@@ -127,7 +188,9 @@ pub enum Plan {
 pub open spec fn plan(req: RequestV) -> Plan {
     match req {
         RequestV::CreatePromise(c) => {
-            if c.tags.target && !c.tags.timer && !spec_address_valid(worker()) {
+            if !delay_ok(c) {
+                Plan::Refuse(400)
+            } else if c.tags.target && !c.tags.timer && !spec_address_valid(worker()) {
                 Plan::Refuse(400)
             } else {
                 Plan::One(ARequest::PromiseCreate(create_in(c)))
@@ -147,17 +210,29 @@ pub open spec fn plan(req: RequestV) -> Plan {
             }
         },
         RequestV::GetTask(id) => Plan::One(ARequest::TaskGet(ATaskGetReq { id })),
-        RequestV::CreateTask { pid, ttl, action } => Plan::One(ARequest::TaskCreate(ATaskCreateReq { pid, ttl, action: create_in(action) })),
+        RequestV::CreateTask { pid, ttl, action } => {
+            if !action.tags.target || action.tags.delay is Some {
+                Plan::Refuse(400)
+            } else {
+                Plan::One(ARequest::TaskCreate(ATaskCreateReq { pid, ttl, action: create_in(action) }))
+            }
+        },
         RequestV::AcquireTask { id, version, pid, ttl } => Plan::One(ARequest::TaskAcquire(ATaskAcquireReq { id, version: version as u64, pid, ttl })),
         RequestV::ReleaseTask { id, version } => Plan::One(ARequest::TaskRelease(ATaskReleaseReq { id, version: version as u64 })),
         RequestV::FulfillTask { id, version, state, data } => match settle_in(SettleV { id, state, data }) {
             Some(q) => Plan::One(ARequest::TaskFulfill(ATaskFulfillReq { id, version: version as u64, action: q })),
             None => Plan::Refuse(400),
         },
-        RequestV::HeartbeatTask { pid, tasks } => Plan::One(ARequest::TaskHeartbeat(ATaskHeartbeatReq {
-            pid,
-            tasks: tasks.map_values(|r: TaskRefV| ATaskRef { id: r.id, version: r.version as u64 }),
-        })),
+        RequestV::HeartbeatTask { pid, tasks } => {
+            if !one_origin(tasks) {
+                Plan::Refuse(400)
+            } else {
+                Plan::One(ARequest::TaskHeartbeat(ATaskHeartbeatReq {
+                    pid,
+                    tasks: tasks.map_values(|r: TaskRefV| ATaskRef { id: r.id, version: r.version as u64 }),
+                }))
+            }
+        },
         RequestV::SuspendTask { id, version, awaited } => Plan::One(ARequest::TaskSuspend(ATaskSuspendReq {
             id,
             version: version as u64,
@@ -165,7 +240,9 @@ pub open spec fn plan(req: RequestV) -> Plan {
         })),
         RequestV::FenceTask { id, version, action } => match action {
             FencedV::Create(c) => {
-                if c.tags.target && !c.tags.timer && !spec_address_valid(worker()) {
+                if !delay_ok(c) {
+                    Plan::Refuse(400)
+                } else if c.tags.target && !c.tags.timer && !spec_address_valid(worker()) {
                     Plan::Refuse(400)
                 } else if origin(c.id) != origin(id) {
                     Plan::Detached(create_in(c), ATaskFenceCheckReq { id, version: version as u64 })
@@ -214,6 +291,8 @@ pub open spec fn prec_out(r: APromiseRecord) -> PromiseRecV {
     }
 }
 
+/// A task record as the wire carries it and the model types it: the resume
+/// count saturates at `u32::MAX`, as the model's does.
 pub open spec fn trec_out(r: ATaskRecord) -> TaskRecV {
     TaskRecV {
         id: r.id,
@@ -221,7 +300,7 @@ pub open spec fn trec_out(r: ATaskRecord) -> TaskRecV {
         version: r.version as u32,
         pid: r.pid,
         ttl: r.ttl,
-        resumes: r.resumes as u32,
+        resumes: if r.resumes > u32::MAX { u32::MAX } else { r.resumes as u32 },
     }
 }
 

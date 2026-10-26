@@ -7,6 +7,7 @@
 //! whose promise is the first of the awaiter's settled awaiteds.
 
 use vstd::prelude::*;
+use vstd::multiset::Multiset;
 
 use accordant::refinement::{end, lemma_end_add, lemma_legal_add, lemma_project_add, shows};
 use accordant::semantics::{
@@ -279,6 +280,7 @@ pub proof fn lemma_first_index(p: spec_fn(int) -> bool, k: int)
 }
 
 /// Among the indices below `k` satisfying `p`, one has the least key.
+#[verifier::rlimit(200)]
 pub proof fn lemma_argmin(p: spec_fn(int) -> bool, d: spec_fn(int) -> int, k: int)
     requires
         0 <= k,
@@ -982,6 +984,611 @@ pub proof fn lemma_run_inv(cfg: Concrete, b: AState, s: Cfg<Resonate>, i: int)
             assert(k != i);
             assert(timer_at(s.internals[k], id, t));
         }
+    }
+}
+
+
+// ------------------------------------------------------- the step to take
+
+/// A ready item exists when the count says so.
+pub proof fn lemma_count_ready_pos(s: Seq<Sched<Internal>>, now: u64)
+    requires
+        count_ready(s, now) > 0,
+    ensures
+        exists|i: int| 0 <= i < s.len() && ready_item(#[trigger] s[i], now),
+{
+    if !(exists|i: int| 0 <= i < s.len() && ready_item(#[trigger] s[i], now)) {
+        lemma_count_ready_none(s, now);
+    }
+}
+
+/// On one id, the resumes are vacuous: no promise awaits itself.
+pub proof fn lemma_resume_ok_single(b: AState, x: Seq<char>, now: nat)
+    requires
+        inv(now, b),
+    ensures
+        resume_ok(phase_deadlines(b, seq![x], now), seq![x], now),
+{
+    let ids = seq![x];
+    let b1 = phase_deadlines(b, ids, now);
+    lemma_deadlines_exact(b, ids, now);
+    lemma_inv_pointwise(now, b);
+    assert forall|i: int, j: int| #![trigger ids[i], ids[j]] 0 <= i < ids.len() && 0 <= j < ids.len() && awaits(b1, ids[i], ids[j], now)
+        implies first_awaited(b1, ids[i], ids[j], ids_of(b1), now) || done(b1, ids[j], now) by {
+        assert(ids[i] == x && ids[j] == x);
+        if b.objects.contains_key(x) {
+            assert(inv_obj(now, b, x));
+            assert(b1.objects[x].callbacks == b.objects[x].callbacks);
+            assert(!b.objects[x].callbacks.contains(x));
+            assert(!awaits(b1, x, x, now));
+        }
+    }
+}
+
+/// On a settled `x` and an awaiter `w`: the resumes go in order when `w` is
+/// done after the projection, or `x` is the first of `w`'s settled awaiteds.
+pub proof fn lemma_resume_ok_pair(b: AState, x: Seq<char>, w: Seq<char>, now: nat)
+    requires
+        inv(now, b),
+        b.objects.contains_key(x),
+        b.objects[x].state != PromiseState::Pending,
+        x != w,
+        done(phase_deadlines(b, seq![x, w], now), w, now) || (first_awaited(b, x, w, ids_of(b), now) && !pending_due(b, w, now as u64) && now <= u64::MAX),
+    ensures
+        resume_ok(phase_deadlines(b, seq![x, w], now), seq![x, w], now),
+{
+    let ids = seq![x, w];
+    let b1 = phase_deadlines(b, ids, now);
+    lemma_deadlines_exact(b, ids, now);
+    lemma_deadlines_inv(b, ids, now);
+    lemma_inv_pointwise(now, b);
+    lemma_inv_pointwise(now, b1);
+    assert(inv_obj(now, b, x));
+    assert(ids.contains(x) && ids.contains(w)) by {
+        assert(ids[0] == x && ids[1] == w);
+    }
+    assert(b1.objects[x] == b.objects[x].project(now));
+    assert(b1.objects[x].callbacks == b.objects[x].callbacks);
+    assert(b1.objects[x].state != PromiseState::Pending);
+    assert(inv_obj(now, b1, x));
+    assert(done(b1, x, now)) by {
+        match b1.objects[x].task {
+            None => {},
+            Some(t) => {
+                assert(t.state == TaskState::Fulfilled);
+                lemma_projected_obj(b1.objects[x], now);
+            },
+        }
+    }
+    assert(!awaits(b1, x, x, now));
+    if b.objects.contains_key(w) {
+        assert(inv_obj(now, b, w));
+        assert(b1.objects[w].callbacks == b.objects[w].callbacks);
+        assert(!b.objects[w].callbacks.contains(w));
+        assert(!awaits(b1, w, w, now));
+    }
+    assert forall|i: int, j: int| #![trigger ids[i], ids[j]] 0 <= i < ids.len() && 0 <= j < ids.len() && awaits(b1, ids[i], ids[j], now)
+        implies first_awaited(b1, ids[i], ids[j], ids_of(b1), now) || done(b1, ids[j], now) by {
+        if ids[i] == x && ids[j] == w {
+            if !done(b1, w, now) {
+                assert(first_awaited(b, x, w, ids_of(b), now));
+                assert(!pending_due(b, w, now as u64));
+                assert(b.objects.contains_key(w));
+                assert(b1.objects[w] == b.objects[w].project(now));
+                // w stays as it was: not due, it is read unchanged
+                if b.objects[w].state == PromiseState::Pending {
+                    assert(b.objects[w].timeout_at > now);
+                }
+                assert(b1.objects[w].callbacks == b.objects[w].callbacks);
+                assert(ids_of(b1) == ids_of(b));
+                assert forall|k: int, l: int| #![trigger ids_of(b1)[k], ids_of(b1)[l]] 0 <= k < l < ids_of(b1).len() && ids_of(b1)[l] == x implies !awaits(b1, ids_of(b1)[k], w, now) by {
+                    let y = ids_of(b)[k];
+                    assert(!awaits(b, y, w, now));
+                    if y == w {
+                        assert(!awaits(b1, w, w, now));
+                    } else if y == x {
+                        assert(false);
+                    } else {
+                        assert(!b.objects.contains_key(y) || b1.objects[y] == b.objects[y]);
+                    }
+                }
+            }
+        } else if ids[i] == w && ids[j] == x {
+            assert(done(b1, x, now));
+        } else {
+            assert(ids[i] == ids[j]);
+            assert(false);
+        }
+    }
+}
+
+/// What a pick establishes of item `i`.
+pub open spec fn picked(cfg: Concrete, b: AState, s: Cfg<Resonate>, i: int) -> bool {
+    &&& 0 <= i < s.internals.len()
+    &&& ready_item(s.internals[i], s.now)
+    &&& (overdue(abstract_of(cfg), s) ==> is_first(abstract_of(cfg), s, i))
+    &&& resume_ok(phase_deadlines(b, item_ids(s.internals[i]), s.now as nat), item_ids(s.internals[i]), s.now as nat)
+}
+
+/// Something is overdue: the first overdue timer is on one id.
+#[verifier::rlimit(60)]
+pub proof fn lemma_pick_overdue(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+        overdue(abstract_of(cfg), s),
+    ensures
+        exists|i: int| #[trigger] picked(cfg, b, s, i),
+{
+    let a = abstract_of(cfg);
+    let now = s.now;
+    let n = now as nat;
+    lemma_work_wf_items(b, s.internals);
+    lemma_first_overdue(a, s);
+    let i = choose|i: int| 0 <= i < s.internals.len() && #[trigger] is_first(a, s, i);
+    assert(is_overdue(a, s, i));
+    assert(ready_item(s.internals[i], now));
+    let ids = item_ids(s.internals[i]);
+    assert(item_wf(b, s.internals[i]));
+    assert(ids.len() == 1);
+    assert(ids =~= seq![ids[0]]);
+    lemma_resume_ok_single(b, ids[0], n);
+    assert(picked(cfg, b, s, i));
+}
+
+/// Nothing overdue: every ready item is a later.
+pub proof fn lemma_ready_laters(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+        !overdue(abstract_of(cfg), s),
+    ensures
+        forall|k: int| 0 <= k < s.internals.len() && ready_item(#[trigger] s.internals[k], s.now) ==> s.internals[k] is Later,
+{
+    let a = abstract_of(cfg);
+    let now = s.now;
+    lemma_work_wf_items(b, s.internals);
+    assert forall|k: int| 0 <= k < s.internals.len() && ready_item(#[trigger] s.internals[k], now) implies s.internals[k] is Later by {
+        if s.internals[k] is Timer {
+            assert(item_wf(b, s.internals[k]));
+            lemma_resonate_internal(a, req_of(s.internals[k]), s.state, now);
+            assert(is_overdue(a, s, k));
+        }
+    }
+}
+
+/// Nothing overdue and a promise past its deadline: the later that resumes
+/// it is a pair whose second is that promise, done once read.
+#[verifier::rlimit(60)]
+pub proof fn lemma_pick_due(cfg: Concrete, b: AState, s: Cfg<Resonate>, id: Seq<char>)
+    requires
+        drain_inv(cfg, b, s),
+        !overdue(abstract_of(cfg), s),
+        pending_due(b, id, s.now),
+    ensures
+        exists|i: int| #[trigger] picked(cfg, b, s, i),
+{
+    let now = s.now;
+    let n = now as nat;
+    lemma_work_wf_items(b, s.internals);
+    lemma_ready_laters(cfg, b, s);
+    assert(covered(s.internals, now, id));
+    let k = choose|k: int| 0 <= k < s.internals.len() && ready_item(#[trigger] s.internals[k], now) && item_ids(s.internals[k]).contains(id);
+    let ids = item_ids(s.internals[k]);
+    assert(item_wf(b, s.internals[k]));
+    let x = ids[0];
+    assert(b.objects[x].state != PromiseState::Pending);
+    assert(id != x);
+    assert(ids.len() == 2);
+    assert(ids[1] == id) by {
+        let j = choose|j: int| 0 <= j < ids.len() && ids[j] == id;
+        assert(j == 1);
+    }
+    assert(ids =~= seq![x, id]);
+    let b1 = phase_deadlines(b, ids, n);
+    lemma_deadlines_exact(b, ids, n);
+    assert(b1.objects[id] == b.objects[id].project(n));
+    assert(b1.objects[id].state != PromiseState::Pending);
+    lemma_projected_obj(b1.objects[id], n);
+    assert(done(b1, id, n));
+    lemma_resume_ok_pair(b, x, id, n);
+    assert(picked(cfg, b, s, k));
+}
+
+/// A pair `[x, w]` whose `w` is not done once read, with nothing past its
+/// deadline: `w` holds a pending promise.
+#[verifier::rlimit(60)]
+pub proof fn lemma_pair_second_pending(b: AState, s: Cfg<Resonate>, x: Seq<char>, w: Seq<char>)
+    requires
+        inv(s.now as nat, b),
+        forall|id: Seq<char>| !pending_due(b, id, s.now),
+        b.objects.contains_key(w),
+        x != w,
+        !done(phase_deadlines(b, seq![x, w], s.now as nat), w, s.now as nat),
+    ensures
+        b.objects[w].state == PromiseState::Pending,
+{
+    let now = s.now;
+    let n = now as nat;
+    let ids = seq![x, w];
+    assert(ids.no_duplicates());
+    let b1 = phase_deadlines(b, ids, n);
+    lemma_deadlines_exact(b, ids, n);
+    assert(b1.objects[w] == b.objects[w].project(n));
+    lemma_inv_pointwise(n, b);
+    assert(inv_obj(n, b, w));
+    assert(!pending_due(b, w, now));
+    lemma_projected_obj(b1.objects[w], n);
+    if b.objects[w].state != PromiseState::Pending {
+        match b.objects[w].task {
+            None => { assert(b1.objects[w].task is None); },
+            Some(t) => {
+                assert(t.state == TaskState::Fulfilled);
+                assert(b1.objects[w].task.unwrap().state == TaskState::Fulfilled);
+            },
+        }
+        assert(false);
+    }
+}
+
+/// `w` holds a pending promise and some settled `x0` awaits it, the first in
+/// the sweep's order: the pair `[x0, w]` is ready, and runs first.
+#[verifier::rlimit(80)]
+pub proof fn lemma_pick_awaited(cfg: Concrete, b: AState, s: Cfg<Resonate>, w: Seq<char>, k0: int)
+    requires
+        drain_inv(cfg, b, s),
+        !overdue(abstract_of(cfg), s),
+        forall|id: Seq<char>| !pending_due(b, id, s.now),
+        b.objects.contains_key(w),
+        b.objects[w].state == PromiseState::Pending,
+        0 <= k0 < ids_of(b).len(),
+        awaits(b, ids_of(b)[k0], w, s.now as nat),
+        forall|j: int| 0 <= j < k0 ==> !#[trigger] awaits(b, ids_of(b)[j], w, s.now as nat),
+    ensures
+        exists|j: int| #[trigger] picked(cfg, b, s, j),
+{
+    let now = s.now;
+    let n = now as nat;
+    lemma_work_wf_items(b, s.internals);
+    lemma_ready_laters(cfg, b, s);
+    let x0 = ids_of(b)[k0];
+    assert(b.objects.contains_key(x0));
+    // x0 is settled as stored: nothing is past its deadline
+    assert(b.objects[x0].state != PromiseState::Pending) by {
+        if b.objects[x0].state == PromiseState::Pending {
+            assert(!pending_due(b, x0, now));
+            assert(b.objects[x0].project(n).state == PromiseState::Pending);
+        }
+    }
+    assert(b.objects[x0].callbacks.contains(w));
+    assert(covered2(s.internals, now, x0, w));
+    let m = choose|m: int| 0 <= m < s.internals.len() && ready_item(#[trigger] s.internals[m], now) && item_ids(s.internals[m]).contains(x0) && item_ids(s.internals[m]).contains(w);
+    let mids = item_ids(s.internals[m]);
+    assert(item_wf(b, s.internals[m]));
+    assert(s.internals[m] is Later);
+    assert(x0 != w);
+    assert(mids.len() == 2) by {
+        if mids.len() == 1 {
+            assert(mids[0] == x0 && mids[0] == w);
+        }
+    }
+    assert(mids[0] == x0) by {
+        if mids[0] != x0 {
+            assert(mids[0] == w);
+            assert(b.objects[w].state != PromiseState::Pending);
+        }
+    }
+    assert(mids[1] == w) by {
+        let j = choose|j: int| 0 <= j < mids.len() && mids[j] == w;
+        assert(j == 1);
+    }
+    assert(mids =~= seq![x0, w]);
+    assert(first_awaited(b, x0, w, ids_of(b), n)) by {
+        b.objects.dom().lemma_to_seq_no_duplicates();
+        assert forall|k: int, l: int| #![trigger ids_of(b)[k], ids_of(b)[l]] 0 <= k < l < ids_of(b).len() && ids_of(b)[l] == x0 implies !awaits(b, ids_of(b)[k], w, n) by {
+            assert(l == k0);
+        }
+    }
+    lemma_resume_ok_pair(b, x0, w, n);
+    assert(picked(cfg, b, s, m));
+}
+
+/// Nothing overdue, nothing past its deadline, and a pair `[x, w]` whose `w`
+/// is not done once read: `w` holds a pending promise, and the pair that
+/// resumes it first is ready.
+#[verifier::rlimit(60)]
+pub proof fn lemma_pick_pair(cfg: Concrete, b: AState, s: Cfg<Resonate>, i: int)
+    requires
+        drain_inv(cfg, b, s),
+        !overdue(abstract_of(cfg), s),
+        forall|id: Seq<char>| !pending_due(b, id, s.now),
+        0 <= i < s.internals.len(),
+        ready_item(s.internals[i], s.now),
+        item_ids(s.internals[i]).len() == 2,
+        !done(phase_deadlines(b, item_ids(s.internals[i]), s.now as nat), item_ids(s.internals[i])[1], s.now as nat),
+    ensures
+        exists|j: int| #[trigger] picked(cfg, b, s, j),
+{
+    let now = s.now;
+    let n = now as nat;
+    lemma_work_wf_items(b, s.internals);
+    let ids = item_ids(s.internals[i]);
+    assert(item_wf(b, s.internals[i]));
+    let x = ids[0];
+    let w = ids[1];
+    assert(ids =~= seq![x, w]);
+    assert(w != x);
+    let b1 = phase_deadlines(b, ids, n);
+    lemma_deadlines_exact(b, ids, n);
+    assert(!done(b1, w, n));
+    assert(b1.objects.contains_key(w));
+    assert(b.objects.contains_key(w));
+    lemma_pair_second_pending(b, s, x, w);
+    if exists|y: Seq<char>| #[trigger] awaits(b, y, w, n) {
+        lemma_min_awaited(b, w, n);
+        let k0 = choose|k0: int| 0 <= k0 < ids_of(b).len() && #[trigger] awaits(b, ids_of(b)[k0], w, n) && forall|j: int| 0 <= j < k0 ==> !#[trigger] awaits(b, ids_of(b)[j], w, n);
+        lemma_pick_awaited(cfg, b, s, w, k0);
+    } else {
+        assert(first_awaited(b, x, w, ids_of(b), n)) by {
+            assert forall|k: int, l: int| #![trigger ids_of(b)[k], ids_of(b)[l]] 0 <= k < l < ids_of(b).len() && ids_of(b)[l] == x implies !awaits(b, ids_of(b)[k], w, n) by {}
+        }
+        lemma_resume_ok_pair(b, x, w, n);
+        assert(picked(cfg, b, s, i));
+    }
+}
+
+/// Some ready item can be run in an order the sweep absorbs.
+#[verifier::rlimit(60)]
+pub proof fn lemma_pick(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+        count_ready(s.internals, s.now) > 0,
+    ensures
+        exists|i: int| 0 <= i < s.internals.len() && ready_item(#[trigger] s.internals[i], s.now)
+            && (overdue(abstract_of(cfg), s) ==> is_first(abstract_of(cfg), s, i))
+            && resume_ok(phase_deadlines(b, item_ids(s.internals[i]), s.now as nat), item_ids(s.internals[i]), s.now as nat),
+{
+    let a = abstract_of(cfg);
+    let now = s.now;
+    let n = now as nat;
+    lemma_work_wf_items(b, s.internals);
+    if overdue(a, s) {
+        lemma_pick_overdue(cfg, b, s);
+    } else if exists|id: Seq<char>| pending_due(b, id, now) {
+        let id = choose|id: Seq<char>| pending_due(b, id, now);
+        lemma_pick_due(cfg, b, s, id);
+    } else {
+        lemma_count_ready_pos(s.internals, now);
+        let i = choose|i: int| 0 <= i < s.internals.len() && ready_item(#[trigger] s.internals[i], now);
+        let ids = item_ids(s.internals[i]);
+        assert(item_wf(b, s.internals[i]));
+        let x = ids[0];
+        if ids.len() == 1 {
+            assert(ids =~= seq![x]);
+            lemma_resume_ok_single(b, x, n);
+            assert(picked(cfg, b, s, i));
+        } else {
+            let w = ids[1];
+            assert(ids =~= seq![x, w]);
+            let b1 = phase_deadlines(b, ids, n);
+            lemma_deadlines_exact(b, ids, n);
+            if done(b1, w, n) {
+                lemma_resume_ok_pair(b, x, w, n);
+                assert(picked(cfg, b, s, i));
+            } else {
+                lemma_pick_pair(cfg, b, s, i);
+            }
+        }
+    }
+    let j = choose|j: int| #[trigger] picked(cfg, b, s, j);
+    assert(0 <= j < s.internals.len() && ready_item(s.internals[j], s.now));
+}
+
+// ------------------------------------------------------------- the drain
+
+/// Nothing ready: the state is swept and every deadline ahead has its timer.
+pub proof fn lemma_no_ready_swept(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+        count_ready(s.internals, s.now) == 0,
+    ensures
+        swept(b, s.now as nat),
+        timers_cover(s.internals, b, s.now),
+{
+    let now = s.now;
+    let n = now as nat;
+    assert forall|i: int| 0 <= i < s.internals.len() implies !ready_item(#[trigger] s.internals[i], now) by {
+        if ready_item(s.internals[i], now) {
+            lemma_count_ready_some(s.internals, now, i);
+        }
+    }
+    lemma_inv_pointwise(n, b);
+    assert forall|id: Seq<char>| #[trigger] b.objects.contains_key(id) implies swept_obj(b.objects[id], n) by {
+        let p = b.objects[id];
+        assert(inv_obj(n, b, id));
+        assert(!pending_due(b, id, now));
+        if p.state == PromiseState::Pending {
+            assert(p.timeout_at > now);
+            assert(p.project(n) == p);
+        } else {
+            match p.task {
+                None => {},
+                Some(t) => {
+                    assert(t.state == TaskState::Fulfilled);
+                },
+            }
+            assert(p.project(n) == p);
+            if p.callbacks.len() > 0 {
+                assert(p.callbacks.contains(p.callbacks[0]));
+                assert(covered2(s.internals, now, id, p.callbacks[0]));
+                assert(false);
+            }
+            if p.listeners.len() > 0 {
+                assert(covered(s.internals, now, id));
+                assert(false);
+            }
+        }
+        if lease_due(p, n) {
+            assert(covered(s.internals, now, id));
+            assert(false);
+        }
+        if retry_due(p, n) {
+            assert(covered(s.internals, now, id));
+            assert(false);
+        }
+    }
+    lemma_swept_ahead(b, n);
+    lemma_work_wf_items(b, s.internals);
+    assert forall|i: int| 0 <= i < s.internals.len() implies match #[trigger] s.internals[i] {
+        Sched::Timer(t, step) => t > now && (step@ matches InternalV::On(ids) && ids.no_duplicates() && ids.len() == 1),
+        Sched::Later(_) => false,
+    } by {
+        assert(item_wf(b, s.internals[i]));
+        match s.internals[i] {
+            Sched::Timer(t, step) => {
+                assert(t > now);
+                assert(item_ids(s.internals[i]) == on_ids(step));
+            },
+            Sched::Later(_) => {
+                assert(ready_item(s.internals[i], now));
+            },
+        }
+    }
+}
+
+/// What a drain reaches.
+pub open spec fn drained(cfg: Concrete, b: AState, s: Cfg<Resonate>, mid: Execution<Resonate>, t: Cfg<Resonate>, bn: AState) -> bool {
+    let a = abstract_of(cfg);
+    let n = s.now as nat;
+    let rt = cfg.retry_timeout as nat;
+    &&& legal(a, s, mid)
+    &&& project::<Resonate>(mid) == Seq::<accordant::Event<resonate::Request, resonate::Response, Dispatch>>::empty()
+    &&& end::<Resonate>(s, mid) == t
+    &&& t.now == s.now
+    &&& t.externals == s.externals
+    &&& t.state@ == translate(bn)
+    &&& swept(bn, n)
+    &&& inv(n, bn)
+    &&& leases_from_ttl(bn)
+    &&& bn.objects.dom() == b.objects.dom()
+    &&& bn.schedules == b.schedules
+    &&& bn.objects == sweep_fn(b, n, rt).objects
+    &&& t.sent.to_multiset() == s.sent.to_multiset().add(lift_dispatches(sweep_sends(b, n, rt)).to_multiset())
+    &&& timers_cover(t.internals, bn, s.now)
+}
+
+/// Nothing ready: the drain is over where it stands.
+#[verifier::rlimit(60)]
+pub proof fn lemma_drain_base(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+        count_ready(s.internals, s.now) == 0,
+    ensures
+        drained(cfg, b, s, Seq::empty(), s, b),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let a = abstract_of(cfg);
+    let n = s.now as nat;
+    let rt = cfg.retry_timeout as nat;
+    lemma_no_ready_swept(cfg, b, s);
+    lemma_sweep_idem(b, n, rt);
+    lemma_sends_idem(b, n, rt);
+    let mid: Execution<Resonate> = Seq::empty();
+    assert(legal(a, s, mid));
+    assert(project::<Resonate>(mid) =~= Seq::<accordant::Event<resonate::Request, resonate::Response, Dispatch>>::empty());
+    assert(end::<Resonate>(s, mid) == s);
+    assert(lift_dispatches(sweep_sends(b, n, rt)) =~= Seq::<Dispatch>::empty());
+    assert(Seq::<Dispatch>::empty().to_multiset() =~= Multiset::<Dispatch>::empty()) by {
+        broadcast use vstd::seq_lib::group_to_multiset_ensures;
+    }
+    assert(s.sent.to_multiset() =~= s.sent.to_multiset().add(Multiset::<Dispatch>::empty()));
+}
+
+/// One step, then a drain of what it leaves, is a drain.
+#[verifier::rlimit(60)]
+pub proof fn lemma_drain_compose(cfg: Concrete, b: AState, s: Cfg<Resonate>, i: int, mid2: Execution<Resonate>, t: Cfg<Resonate>, bn: AState)
+    requires
+        drain_inv(cfg, b, s),
+        0 <= i < s.internals.len(),
+        ready_item(s.internals[i], s.now),
+        overdue(abstract_of(cfg), s) ==> is_first(abstract_of(cfg), s, i),
+        resume_ok(phase_deadlines(b, item_ids(s.internals[i]), s.now as nat), item_ids(s.internals[i]), s.now as nat),
+        drained(cfg, next_state(cfg, b, s, i), next_cfg(cfg, b, s, i), mid2, t, bn),
+    ensures
+        drained(cfg, b, s, seq![(Label::Silent, next_cfg(cfg, b, s, i))] + mid2, t, bn),
+{
+    broadcast use vstd::seq_lib::lemma_multiset_commutative;
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let a = abstract_of(cfg);
+    let now = s.now;
+    let n = now as nat;
+    let rt = cfg.retry_timeout as nat;
+    let ids = item_ids(s.internals[i]);
+    let b2 = next_state(cfg, b, s, i);
+    let s2 = next_cfg(cfg, b, s, i);
+    lemma_run_is_step(cfg, b, s, i);
+    lemma_run_state(cfg, b, s, i);
+    assert(s2.now == now);
+    // one step, then the rest
+    let first: Execution<Resonate> = seq![(Label::Silent, s2)];
+    assert(legal(a, s, first)) by {
+        assert forall|k: int| 0 <= k < first.len() implies #[trigger] step(a, before::<Resonate>(s, first, k), first[k].0, first[k].1) by {
+            assert(k == 0);
+            assert(before::<Resonate>(s, first, 0) == s);
+            assert(run(a, s, Label::Silent, s2));
+        }
+    }
+    assert(end::<Resonate>(s, first) == s2);
+    assert(project::<Resonate>(first) =~= Seq::<accordant::Event<resonate::Request, resonate::Response, Dispatch>>::empty()) by {
+        assert(first.len() == 1);
+        assert(first.last() == (Label::<resonate::Request, resonate::Response, Dispatch>::Silent, s2));
+        assert(first.drop_last() =~= Seq::<(Lab<Resonate>, Cfg<Resonate>)>::empty());
+        assert(project::<Resonate>(first.drop_last()) =~= Seq::<accordant::Event<resonate::Request, resonate::Response, Dispatch>>::empty());
+    }
+    let mid = first + mid2;
+    lemma_legal_add(a, s, first, mid2);
+    lemma_project_add::<Resonate>(first, mid2);
+    lemma_end_add::<Resonate>(s, first, mid2);
+    assert(project::<Resonate>(mid) =~= Seq::<accordant::Event<resonate::Request, resonate::Response, Dispatch>>::empty());
+    // the sends: this step's, then the rest's, is the sweep's
+    let k = k_on_sends(b, ids, n, rt);
+    let rest = sweep_sends(b2, n, rt);
+    lemma_lift_dispatch_injective();
+    lemma_map_multiset_injective(sweep_sends(b, n, rt), k + rest, |d: DispatchV| lift_dispatch(d));
+    assert(lift_dispatches(k + rest) =~= lift_dispatches(k) + lift_dispatches(rest));
+    assert(t.sent.to_multiset() =~= s.sent.to_multiset().add(lift_dispatches(sweep_sends(b, n, rt)).to_multiset()));
+}
+
+/// The model drains: silent steps from `s` reach the translation of the sweep
+/// of `b`, having sent what the sweep sends.
+#[verifier::rlimit(60)]
+pub proof fn lemma_drain(cfg: Concrete, b: AState, s: Cfg<Resonate>)
+    requires
+        drain_inv(cfg, b, s),
+    ensures
+        exists|mid: Execution<Resonate>, t: Cfg<Resonate>, bn: AState| #[trigger] drained(cfg, b, s, mid, t, bn),
+    decreases due_set(b, s.now).len(), count_ready(s.internals, s.now),
+{
+    let a = abstract_of(cfg);
+    let now = s.now;
+    let n = now as nat;
+    if count_ready(s.internals, now) == 0 {
+        lemma_drain_base(cfg, b, s);
+        let mid: Execution<Resonate> = Seq::empty();
+        assert(drained(cfg, b, s, mid, s, b));
+    } else {
+        lemma_pick(cfg, b, s);
+        let i = choose|i: int| 0 <= i < s.internals.len() && ready_item(#[trigger] s.internals[i], now)
+            && (overdue(a, s) ==> is_first(a, s, i))
+            && resume_ok(phase_deadlines(b, item_ids(s.internals[i]), n), item_ids(s.internals[i]), n);
+        let b2 = next_state(cfg, b, s, i);
+        let s2 = next_cfg(cfg, b, s, i);
+        lemma_run_inv(cfg, b, s, i);
+        lemma_run_measure(cfg, b, s, i);
+        assert(s2.now == now);
+        lemma_drain(cfg, b2, s2);
+        let (mid2, t, bn) = choose|mid2: Execution<Resonate>, t: Cfg<Resonate>, bn: AState| #[trigger] drained(cfg, b2, s2, mid2, t, bn);
+        lemma_drain_compose(cfg, b, s, i, mid2, t, bn);
+        let mid = seq![(Label::Silent, s2)] + mid2;
+        assert(drained(cfg, b, s, mid, t, bn));
     }
 }
 
