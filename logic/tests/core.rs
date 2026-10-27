@@ -274,7 +274,7 @@ fn the_same_events_give_the_same_effects() {
 #[test]
 fn the_debug_operations_own_the_clock() {
     let mut h = Harness::new("n1");
-    h.state = State::new({
+    h.state = Concrete::new({
         let mut cfg = Config::memory("n1");
         cfg.debug = true;
         cfg
