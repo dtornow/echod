@@ -44,10 +44,10 @@ def seqOuts (cfg : Config) (ins : List (Time × Input Msg)) : List (List (Out Ms
 -- The default timeout is configuration.
 #guard (seqOuts { defaultTimeout := 5 } [(0, req "c" 1 (.create "p" none))]).map sends ==
   [[("c", .res 1 ⟨200, some (pending 5)⟩)]]
--- Load shedding is a choice: every request may be answered 503. Three
--- requests, eight runs; in one of them all three are shed and `p` was never made.
-#guard (seqOuts { mayShed := true } (scenario.take 3)).length == 8
-#guard (seqOuts { mayShed := true } (scenario.take 3)).any fun o =>
+-- Failure is a choice: every request may be answered 503, done or not.
+-- Three requests, 27 runs; in one of them all three are shed and `p` was never made.
+#guard (seqOuts { unreliable := true } (scenario.take 3)).length == 27
+#guard (seqOuts { unreliable := true } (scenario.take 3)).any fun o =>
   sends o == [("c", .res 1 ⟨503, none⟩), ("w", .res 2 ⟨503, none⟩), ("c", .res 3 ⟨503, none⟩)]
 
 /-! ## Concurrent
@@ -78,7 +78,7 @@ def raceRun : Execution promises := (schedule promises {} {} race).getD []
 
 /-! ## Fuzzing
 
-Two hundred random runs of twelve steps, with load shedding on. No
+Two hundred random runs of twelve steps, with failures on. No
 `always` fails, every `sometimes` is hit, and in every run the sequential
 shell explains the server. -/
 
@@ -88,12 +88,12 @@ def inputs : List (Addr × Msg) :=
    ("b", .req 5 (.settle "p" .pending ""))]
 
 def fuzzRuns : List (Execution promises) :=
-  (List.range 200).map fun seed => fuzz promises { mayShed := true } {} inputs seed 12
+  (List.range 200).map fun seed => fuzz promises { unreliable := true } {} inputs seed 12
 
 #guard fuzzRuns.all fun x => failed (outs x) == []
 #guard ["create finds the promise settled", "settle arrives after the timeout"].all fun n =>
   fuzzRuns.any fun x => (hit (outs x)).contains n
 #guard fuzzRuns.all fun x =>
-  (runs promises { mayShed := true } {} (serverInputs x)).any fun r => sends r.2 == serverSends x
+  (runs promises { unreliable := true } {} (serverInputs x)).any fun r => sends r.2 == serverSends x
 
 end Experiment

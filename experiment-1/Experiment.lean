@@ -3,5 +3,9 @@ import Experiment.Service
 import Experiment.Sequential
 import Experiment.Concurrent
 import Experiment.Fuzz
+import Experiment.Network
+import Experiment.Check
 import Experiment.Promise
 import Experiment.Examples
+import Experiment.Storage
+import Experiment.StorageExamples

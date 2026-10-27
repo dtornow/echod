@@ -14,7 +14,9 @@ requester; a notification is a message to a listener. Both go out through
 the same `send`.
 
 **Where the specification allows a choice, the handler chooses**: with
-`mayShed`, any request may be answered 503 and do nothing.
+`unreliable`, any request may be answered 503: having done nothing, or
+having done it. A client that gets a 503 cannot tell which; neither can
+the specification, so it allows both.
 
 **The top level is Kleppmann's step function**: the server receives a
 message from a sender at `now` and sends messages. A request is dispatched,
@@ -63,9 +65,9 @@ def Promise.record (p : Promise) : Record := ⟨p.id, p.state, p.value, p.timeou
 structure Config where
   /-- The timeout of a promise created without one, from its creation. -/
   defaultTimeout : Time := 1000
-  /-- Whether the server may shed load: answer 503 to any request, and do
-      nothing. A choice the specification allows, not a fault. -/
-  mayShed : Bool := false
+  /-- Whether a request may fail: answered 503, having done nothing or
+      having done it. A choice the specification allows, not a fault. -/
+  unreliable : Bool := false
   deriving Repr
 
 structure State where
@@ -131,6 +133,10 @@ def promiseGet (id : Ident) (now : Time) : Handler Response := do
   | none => return { status := 404 }
   | some p => return ok p
 
+/-- The one promise a request is about: its footprint. -/
+def Request.key : Request → Ident
+  | .get id | .create id _ | .settle id _ _ | .listen id _ => id
+
 def promiseCreate (id : Ident) (timeoutAt : Option Time) (now : Time) : Handler Response := do
   match ← load id now with
   | some p =>
@@ -168,15 +174,32 @@ def promiseListen (id : Ident) (address : Addr) (now : Time) : Handler Response 
 
 /-! ## The top level -/
 
-/-- A request, dispatched to its handler; unless the server sheds it. -/
-def request (r : Request) (now : Time) : Handler Response := do
-  if (← read).mayShed then
-    if ← choose ⟨[false, true], by simp⟩ then return { status := 503 }
+/-- A request, dispatched to its handler. -/
+def dispatch (r : Request) (now : Time) : Handler Response :=
   match r with
   | .get id            => promiseGet id now
   | .create id t       => promiseCreate id t now
   | .settle id st v    => promiseSettle id st v now
   | .listen id address => promiseListen id address now
+
+/-- How a request fares when the server is unreliable. -/
+inductive Fate where
+  | serve
+  /-- Answered 503, nothing done. -/
+  | shed
+  /-- Answered 503, done anyway. -/
+  | lose
+
+/-- A request: served, or, when the server is unreliable, maybe failed.
+    The outcomes come in this order: served, shed, lost. -/
+def request (r : Request) (now : Time) : Handler Response := do
+  if (← read).unreliable then
+    match ← choose ⟨[Fate.serve, .shed, .lose], by simp⟩ with
+    | .serve => dispatch r now
+    | .shed  => return { status := 503 }
+    | .lose  => do let _ ← dispatch r now; return { status := 503 }
+  else
+    dispatch r now
 
 /-- The server's step on a message: a request is answered with a message
     back to its sender. The server receives nothing else. -/

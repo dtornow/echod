@@ -26,10 +26,27 @@
 - `Experiment/Promise.lean`: a slice of Resonate's promise protocol
   written as handlers. A response and a notification are both messages,
   sent the same way; the top level dispatches a request by `match`; with
-  `mayShed`, any request may be answered 503 (a `choose`).
+  `unreliable`, any request may be answered 503, done or not (a `choose`).
 - `Experiment/Examples.lean`: the promise service in all three shells:
   a sequential scenario, a concurrent race in which a read overtakes a
   create, and 200 fuzzed runs in each of which the sequential shell
   explains the server.
+
+- `Experiment/Network.lean`: shell 4, many processes, one service, each
+  with its own state. Executable only.
+- `Experiment/Check.lean`: a search: could this trace of the concurrent
+  shell have happened? Executable, unproved.
+- `Experiment/Storage.lean`: a simplified echod. Nodes keep nothing; every
+  promise is a document in a store process, under a version. A node loads,
+  runs the abstract handler, writes conditionally, retries on a lost race,
+  answers after the write lands, 503 when the store cannot say. Refinement
+  is checked per run: the clients' trace against the abstract service.
+- `Experiment/StorageExamples.lean`: two nodes and a store. Two settles
+  racing: with conditional writes the second sees the first (refines);
+  without, both win (does not refine). A write that fails having landed
+  (refines: the abstract 503 may have been done).
+
+Proved: the theorems in `Concurrent.lean`. Everything about storage is
+checked by running it, not proved.
 
 `lake build` checks everything. No dependencies, no `sorry`.
