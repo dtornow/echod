@@ -1,4 +1,4 @@
-import Experiment.Handler
+import Experiment.Service
 
 /-!
 # Promises, written as handlers
@@ -13,6 +13,9 @@ than by a later internal step.
 requester; a notification is a message to a listener. Both go out through
 the same `send`.
 
+**Where the specification allows a choice, the handler chooses**: with
+`mayShed`, any request may be answered 503 and do nothing.
+
 **The top level is Kleppmann's step function**: the server receives a
 message from a sender at `now` and sends messages. A request is dispatched,
 by a `match`, to its handler; the handler's response is sent back to the
@@ -21,8 +24,6 @@ sender.
 
 namespace Experiment
 
-abbrev Time := Nat
-abbrev Addr := String
 abbrev Ident := String
 abbrev CallId := Nat
 
@@ -62,6 +63,9 @@ def Promise.record (p : Promise) : Record := ⟨p.id, p.state, p.value, p.timeou
 structure Config where
   /-- The timeout of a promise created without one, from its creation. -/
   defaultTimeout : Time := 1000
+  /-- Whether the server may shed load: answer 503 to any request, and do
+      nothing. A choice the specification allows, not a fault. -/
+  mayShed : Bool := false
   deriving Repr
 
 structure State where
@@ -86,16 +90,7 @@ inductive Msg where
   | notify (p : Record)
   deriving DecidableEq, Repr
 
-/-- What a handler emits: a message to send, or an assertion. -/
-inductive Out where
-  | send      (to : Addr) (m : Msg)
-  /-- Must hold every time it is emitted. -/
-  | always    (name : String) (ok : Bool)
-  /-- Should hold at least once, over a fuzzing run. -/
-  | sometimes (name : String) (hit : Bool)
-  deriving DecidableEq, Repr
-
-abbrev Handler := H Config State Out
+abbrev Handler := H Config State (Out Msg)
 
 def send (to : Addr) (m : Msg) : Handler Unit := emit (.send to m)
 def always (name : String) (ok : Bool) : Handler Unit := emit (.always name ok)
@@ -173,8 +168,10 @@ def promiseListen (id : Ident) (address : Addr) (now : Time) : Handler Response 
 
 /-! ## The top level -/
 
-/-- A request, dispatched to its handler. -/
-def request (r : Request) (now : Time) : Handler Response :=
+/-- A request, dispatched to its handler; unless the server sheds it. -/
+def request (r : Request) (now : Time) : Handler Response := do
+  if (← read).mayShed then
+    if ← choose ⟨[false, true], by simp⟩ then return { status := 503 }
   match r with
   | .get id            => promiseGet id now
   | .create id t       => promiseCreate id t now
@@ -193,83 +190,12 @@ def timeout (now : Time) : Handler Unit := do
   for p in (← get).promises do
     let _ ← load p.id now
 
-/-! ## Running it -/
-
-/-- What the server sent, and what it asserted. -/
-def sent (outs : List Out) : List (Addr × Msg) :=
-  outs.filterMap fun | .send a m => some (a, m) | _ => none
-
-def failed (outs : List Out) : List String :=
-  outs.filterMap fun | .always n false => some n | _ => none
-
-def hit (outs : List Out) : List String :=
-  outs.filterMap fun | .sometimes n true => some n | _ => none
-
-/-- One input to the server: a request from a client, or a tick. -/
-inductive Input where
-  | call (from_ : Addr) (id : CallId) (r : Request)
-  | tick
-
-/-- Run inputs at their instants; everything the server emitted, in order. -/
-def simulate (cfg : Config) (inputs : List (Time × Input)) : State × List Out :=
-  inputs.foldl (fun (s, outs) (now, i) =>
-    let step := match i with
-      | .call a id r => receive a (.req id r) now
-      | .tick => timeout now
-    let ((), s', outs') := step.run cfg s
-    (s', outs ++ outs')) ({}, [])
-
-/-! ## A scenario
-
-`c` creates `p` with a timeout at 10; `w` listens; `c` reads at 5 and at
-20; `c` tries to settle at 21. -/
-
-def scenario : List (Time × Input) :=
-  [ (0,  .call "c" 1 (.create "p" (some 10))),
-    (1,  .call "w" 2 (.listen "p" "w")),
-    (5,  .call "c" 3 (.get "p")),
-    (20, .call "c" 4 (.get "p")),
-    (21, .call "c" 5 (.settle "p" .resolved "v")) ]
-
-def timedOut : Record := ⟨"p", .rejectedTimedout, "", 10⟩
-
-#guard (sent (simulate {} scenario).2).map (·.1) == ["c", "w", "c", "w", "c", "c"]
--- The read at 20 times the promise out: `w` is told, then `c` answered.
-#guard (sent (simulate {} scenario).2)[3]? == some ("w", .notify timedOut)
-#guard (sent (simulate {} scenario).2)[4]? == some ("c", .res 4 ⟨200, some timedOut⟩)
--- The late settle sees the timeout, and the assertion that wants that is hit.
-#guard (sent (simulate {} scenario).2)[5]? == some ("c", .res 5 ⟨200, some timedOut⟩)
-#guard hit (simulate {} scenario).2 == ["settle arrives after the timeout"]
-#guard failed (simulate {} scenario).2 == []
-
--- Without a read, a tick at 20 does it: `w` is told once, at the tick.
-#guard sent (simulate {} [(0, .call "c" 1 (.create "p" (some 10))), (1, .call "w" 2 (.listen "p" "w")),
-    (20, .tick), (30, .tick)]).2 ==
-  [("c", .res 1 ⟨200, some ⟨"p", .pending, "", 10⟩⟩), ("w", .res 2 ⟨200, some ⟨"p", .pending, "", 10⟩⟩),
-   ("w", .notify timedOut)]
-
--- The default timeout comes from the configuration.
-#guard (sent (simulate {} [(0, .call "c" 1 (.create "p" none))]).2) ==
-  [("c", .res 1 ⟨200, some ⟨"p", .pending, "", 1000⟩⟩)]
-#guard (sent (simulate { defaultTimeout := 5 } [(0, .call "c" 1 (.create "p" none))]).2) ==
-  [("c", .res 1 ⟨200, some ⟨"p", .pending, "", 5⟩⟩)]
-
-/-! ## A small fuzzer
-
-Every sequence of three requests from a handful, at instants 0, 5 and 20:
-no `always` fails, and every `sometimes` is hit somewhere. -/
-
-def alphabet : List Request :=
-  [.create "p" (some 10), .create "p" none, .get "p", .settle "p" .resolved "v",
-   .settle "p" .pending "", .listen "p" "w"]
-
-def runs : List (List Out) :=
-  alphabet.flatMap fun a => alphabet.flatMap fun b => alphabet.map fun c =>
-    (simulate {} [(0, .call "c" 1 a), (5, .call "c" 2 b), (20, .call "c" 3 c)]).2
-
-#guard runs.length == 216
-#guard runs.all (failed · == [])
-#guard ["create finds the promise settled", "settle arrives after the timeout"].all
-  fun n => runs.any fun o => (hit o).contains n
+/-- The promise service: what every shell runs. -/
+abbrev promises : Service where
+  Config  := Config
+  State   := State
+  Msg     := Msg
+  receive := receive
+  tick    := timeout
 
 end Experiment
