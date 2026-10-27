@@ -103,7 +103,7 @@ impl Node {
         self.me.upgrade().expect("the node outlives its tasks")
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Concrete> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
