@@ -20,4 +20,24 @@ reordering, duplication and loss are what is left unsaid.
   execution, that every response a client can receive answers a request it
   sent.
 
+## Checking traces in the same shape
+
+- `Kleppmann/World.lean`: the same shape set up for trace checking. Three
+  kinds of process: `sys` (the model: `external` for requests, `tick` for
+  what it does on its own, `due` for what must have happened by), clients,
+  and the clock. One rule, Kleppmann's, with four marked changes: a clock
+  only the clock process moves; nothing but a tick while something is due;
+  a step has a list of outcomes; a received message is gone. A trace is
+  every step but the system's; `Valid` says some execution shows exactly it.
+- `Kleppmann/Check.lean`: a certificate is the system's steps between
+  observed events; `certify` replays it, `accepted_valid` proves what it
+  accepts is valid, `search` finds one (`search_sound`). A counter with a
+  timer exercises `due` and concurrency.
+- `Kleppmann/ResonateCheck.lean`: Resonate as such a model, from the
+  specification's handlers. `tick` runs every internal step the state makes
+  a candidate and keeps those that change something; `due` reads leases,
+  retries and schedules off the state. Scenarios: a promise read across its
+  timeout, two clients whose window is message causality, a lease that runs
+  out and must be released and re-offered before anything else is observed.
+
 `lake build` fetches the specification and checks everything.
