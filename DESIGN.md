@@ -7,7 +7,7 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the sweep and drain, each proved to compute its specification function |
+| `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `refine/` | `echod-refine`: the store machine (the bucket as state, the wire rules, a sweep, the kernel handler, a drain as the request step; a sweep as internal work) as an `accordant::Model`, and `concrete_refines_abstract`: every bounded trace of it is a trace of the Resonate model, by accordant's forward-simulation theorem; the model's handlers are themselves verified to compute the twins the theorem is stated over. Proof only, `cargo verus verify -p echod-refine`; 290 items, no admits. Bounded: the clock and every instant and duration a request carries at most `MAX_TIME`, requests the wire's validators pass, no targeted timer, no schedule (`request_bounded`) |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
@@ -153,13 +153,11 @@ events. Echod's concrete model follows that boundary; its protocol state and
 commit algorithm are different.
 
 The kernel operation inside a document is deterministic at the representation
-level too. Its executable sweep visits document rows in stored order and, for
-each row, processes promise timeout, lease timeout and retry timeout. `drain`
-then snapshots settled rows' callbacks and listeners in their stored order,
-processes those snapshots, snapshots due retries, and repeats until one round
-does no work or 65 rounds have run. The concrete specification records this
-bounded algorithm exactly. The phase-ordered `refine::sweep_fn` is an abstract
-proof normal form, not the definition of Concrete.
+level too. Its executable normalization makes one global ordered pass:
+promise deadlines over document rows in stored order, leases over those rows,
+all callback vectors in stored row and vector order, all listener vectors in
+the same order, then due retries over stored rows. The concrete specification
+records this single-pass algorithm exactly; it does not iterate or use fuel.
 
 `State` is everything a node holds: the verified `NodeCore` with its view
 of the membership, its cache's versions and its armed keys; the cache;
@@ -572,10 +570,12 @@ its deadline keys (the key kept for each origin, with the version written
 with it). `Commit` (`commit.rs`) is one commit's decisions: the previous
 key, whether to arm, what to delete, what to keep. Each function `ensures`
 it equals the specification function of the same name on the state's
-view. `steps.rs` verifies the loops the node runs around the kernel:
-`sweep` leaves nothing due at its instant and leaves the document as it
-was if nothing fired; `drain` is kernel steps; `next_deadline` is the
-least deadline; `clamp_now` the later of clock and stamp. One primitive
+view. `steps.rs` verifies the node's single normalization pass: `sweep`
+projects every deadline, reclaims every lease, spends every callback,
+spends every listener, then dispatches every retry; it leaves nothing due
+at its instant and leaves the document as it was if nothing fired.
+`next_deadline` is the least deadline; `clamp_now` the later of clock and
+stamp. One primitive
 is trusted with its meaning stated: FNV-1a is a function of the string,
 as `str == str` and `String::clone` are.
 
@@ -595,9 +595,10 @@ The actions: a clock advances; a node joins or crashes; a node drops a
 cache entry; and the commit, five actions, one store round trip each.
 `Prepare` loads the bucket's document and decides a step on it, and
 touches nothing: for a request, the document after is the kernel's
-`spec_handle` of the one loaded followed by any sequence of internal
-steps at the same instant, what `drain` ensures; for a sweep, what `sweep`
-then `drain` ensure. `AddTimer`
+`spec_handle` of the normalized document followed by the same single
+normalization pass. The system proof consumes the pass through its weaker
+`drained` relation (a sequence of legal internal steps with stable keys).
+For timer work, `Prepare` consumes one `sweep`. `AddTimer`
 puts the key for the document's nearest deadline. `Process` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
@@ -650,10 +651,10 @@ a schedule created on one node and owned by another, never fired. The
 Occurrences theorem is why a fire commits the origin before the schedule.
 
 What the model asks of a node's step is exactly what the node's verified
-functions ensure, and nothing else. A request's document is the handler's
-function then `drain`; a sweep's is `sweep` then `drain`; a fire's two are
-`spec_fire` then `drain`, and a schedule's key with nothing due is what
-`schedule_due` answers. `drain` and `sweep` are proved to keep every
+functions ensure, and nothing else. A request normalizes, runs the handler,
+then normalizes its result once; timer work is one normalization; a fire is
+`spec_fire` followed by one normalization, and a schedule's key with nothing
+due is what `schedule_due` answers. The normalization is proved to keep every
 object's key and the schedules; every handler is proved to drop no object
 and to keep the other kind's rows (`lemma_spec_handle_keeps`). From these
 the proof derives what it needs of a step — that a document keeps its

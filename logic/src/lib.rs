@@ -25,7 +25,7 @@
 //! ```
 //!
 //! The verified kernel beneath supplies `handle`, `NodeCore`, `Commit`, and
-//! the exact ordered, bounded sweep/drain transition. This crate adds the
+//! the exact ordered, single-pass sweep/drain transition. This crate adds the
 //! deterministic orchestration around them. Proving [`on_event`] computes
 //! its specification is the implementation-to-Concrete obligation; it is not
 //! hidden inside an alternative model.

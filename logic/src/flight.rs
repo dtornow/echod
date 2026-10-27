@@ -531,6 +531,10 @@ impl State {
                 let r = state.handle(req, now, &self.kcfg);
                 let status = crate::wire::status_of(&r);
                 let why = (status >= 400).then(|| crate::wire::reason_for(kind, req, status, &state));
+                // The handler may settle a promise or release/wake a task.
+                // Normalize that result once: callbacks precede listeners,
+                // and both precede retries.
+                let _ = steps::sweep(&mut state, now, &self.kcfg);
                 (Some(r), why, false)
             }
             Work::Sweep { .. } => {
@@ -539,7 +543,6 @@ impl State {
             }
             Work::Fire { .. } => (None, None, false),
         };
-        steps::drain(&mut state, now, &self.kcfg);
         let rows = R::rows_of(&state);
         let fired = match work {
             Work::Sweep { fired, .. } => fired.clone(),
@@ -721,7 +724,7 @@ impl State {
         let req = ScheduleTimeoutReq { schedule: id, occurrences: vec![Occurrence { at: ctx.at, promise_id: ctx.promise_id.clone() }], next_run_at: ctx.next };
         let mut state = KState { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
         state.process_schedule(&req, t, &self.kcfg);
-        steps::drain(&mut state, t, &self.kcfg);
+        let _ = steps::sweep(&mut state, t, &self.kcfg);
         self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         let mut commit = self.commit_new(wo, state.objects, t, false, None);
         match self.commit_advance(f.id, &mut commit, None) {
