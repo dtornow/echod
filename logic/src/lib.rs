@@ -1,7 +1,8 @@
 //! echod-logic: the decision core of a node, with no I/O in it.
 //!
-//! The core is a state machine: `State`, `Event` in, `Effect`s out,
-//! `on_event` the only step. Every call on the store leaves as an
+//! The core is the deterministic concrete model: `State`, `Event` in,
+//! ordered `Effect`s out, with [`on_event`] as its only behavioral step.
+//! Every call on the store leaves as an
 //! `Effect::Store` under an op id and comes back as `Event::Completed`
 //! under the same id; every answer to a client leaves as `Effect::Reply`;
 //! the clock is read by whoever drives the core and handed in on every
@@ -23,11 +24,11 @@
 //! debug.rs      debug.reset, debug.snap, debug.tick: what a test that owns the clock asks for
 //! ```
 //!
-//! What stays verified beneath, all of it the kernel's: `handle` runs every
-//! request, `NodeCore` and `Commit` take every decision about membership,
-//! cache and deadline keys, and `steps` runs the sweep and the drain.
-//! The core is the shim the proof stops at, now with nothing in it but
-//! the order of calls.
+//! The verified kernel beneath supplies `handle`, `NodeCore`, `Commit`, and
+//! the exact ordered, bounded sweep/drain transition. This crate adds the
+//! deterministic orchestration around them. Proving [`on_event`] computes
+//! its specification is the implementation-to-Concrete obligation; it is not
+//! hidden inside an alternative model.
 
 use std::collections::HashMap;
 
@@ -97,6 +98,23 @@ pub struct State {
     last_wake: Option<u64>,
 }
 
+/// The deterministic concrete model executed by both the production shell
+/// and deterministic simulation. This is an alias, not a second
+/// implementation: the executable logic is the concrete model.
+pub type Concrete = State;
+
+/// Effects are ordered. The shell submits them in this order; asynchronous
+/// completions may return in any order and re-enter as distinct [`Event`]s.
+pub type Effects = Vec<Effect>;
+
+/// Advance the concrete model by exactly one event.
+///
+/// Adapters do not mutate [`State`] and do not make decisions while
+/// interpreting effects.
+pub fn on_event(state: &mut Concrete, event: Event) -> Effects {
+    state.transition(event)
+}
+
 /// What an observer reads of the node at a glance.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -142,8 +160,8 @@ impl State {
         }
     }
 
-    /// The one step: an event in, the effects it calls for out.
-    pub fn on_event(&mut self, event: Event) -> Vec<Effect> {
+    /// The implementation of the one public [`on_event`] step.
+    fn transition(&mut self, event: Event) -> Effects {
         match event {
             Event::Start { clock, loops } => {
                 self.clock = clock;

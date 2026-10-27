@@ -43,6 +43,34 @@ pub open spec fn distinct_by<T, K>(s: Seq<T>, key: spec_fn(T) -> K) -> bool {
         0 <= i < s.len() && 0 <= j < s.len() && #[trigger] key(s[i]) == #[trigger] key(s[j]) ==> i == j
 }
 
+/// The executable order of the object rows.  Unlike `AState::objects`, this
+/// is not recoverable from the folded map: callback delivery observes it.
+pub open spec fn object_ids(s: State) -> Seq<Seq<char>> {
+    s.objects@.map_values(|p: Promise| p.id@)
+}
+
+/// `ids` is exactly one row for every object in `a`, in an explicit order.
+/// This is the order witness used by specifications of the executable
+/// sweeper; no ordering is chosen from a map.
+pub open spec fn object_order(a: AState, ids: Seq<Seq<char>>) -> bool {
+    &&& ids.no_duplicates()
+    &&& forall|i: int| 0 <= i < ids.len() ==> a.objects.contains_key(#[trigger] ids[i])
+    &&& forall|id: Seq<char>| #[trigger] a.objects.contains_key(id) ==> ids.contains(id)
+}
+
+/// The executable order of outbox rows. Replacing an existing keyed entry
+/// keeps its position; inserting a fresh key appends it.
+pub open spec fn outbox_keys(s: State) -> Seq<OutboxKey> {
+    s.outbox@.map_values(|e: OutboxEntry| e@.key())
+}
+
+pub open spec fn upsert_outbox_order(
+    keys: Seq<OutboxKey>,
+    key: OutboxKey,
+) -> Seq<OutboxKey> {
+    if keys.contains(key) { keys } else { keys.push(key) }
+}
+
 // ---------------------------------------------------------------------------
 // The state
 // ---------------------------------------------------------------------------
@@ -335,19 +363,44 @@ impl State {
             final(self)@.objects == old(self)@.objects,
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox =~= old(self)@.outbox.insert(e@.key(), e@),
+            outbox_keys(*final(self))
+                == upsert_outbox_order(outbox_keys(*old(self)), e@.key()),
     {
+        let ghost keys = outbox_keys(*self);
+        let ghost key = e@.key();
         match self.find_outbox(&e) {
             Some(i) => {
                 proof {
+                    crate::store_proof::lemma_outbox_keys_update(
+                        self.outbox@,
+                        i as int,
+                        e,
+                    );
                     lemma_fold_update(self.outbox@, out_key(), out_val(), i as int, e);
                 }
                 self.outbox[i] = e;
+                proof {
+                    assert(keys[i as int] == key);
+                    assert(keys.contains(key));
+                    assert(outbox_keys(*self) == keys);
+                    assert(upsert_outbox_order(keys, key) == keys);
+                }
             }
             None => {
                 proof {
                     let s = self.outbox@;
                     lemma_fold_dom(s, out_key(), out_val());
                     lemma_fold_push(s, out_key(), out_val(), e);
+                    assert(!outbox_keys(*self).contains(e@.key())) by {
+                        if outbox_keys(*self).contains(e@.key()) {
+                            let i = choose|i: int|
+                                0 <= i < outbox_keys(*self).len()
+                                && outbox_keys(*self)[i] == e@.key();
+                            assert(out_key()(self.outbox@[i]) == e@.key());
+                            assert(mentions(s, out_key(), e@.key()));
+                            assert(self@.outbox.contains_key(e@.key()));
+                        }
+                    }
                     let t = s.push(e);
                     assert forall|a: int, b: int|
                         0 <= a < t.len() && 0 <= b < t.len() && #[trigger] out_key()(t[a]) == #[trigger] out_key()(t[b])
@@ -363,6 +416,10 @@ impl State {
                     }
                 }
                 self.outbox.push(e);
+                proof {
+                    assert(outbox_keys(*self) == keys.push(key));
+                    assert(upsert_outbox_order(keys, key) == keys.push(key));
+                }
             }
         }
     }

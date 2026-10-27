@@ -125,6 +125,12 @@ pub enum StoreOutcome {
 // ---------------------------------------------------------------------------
 
 /// What the core asks the executor to do.
+///
+/// The surrounding `Vec<Effect>` is ordered: the shell submits effects from
+/// first to last. Submission does not serialize asynchronous work; operations
+/// carrying an [`OpId`] may complete in any order, each through its own
+/// [`Event::Completed`]. Effects without a completion event are deliberately
+/// one-way.
 pub enum Effect {
     /// Make this call on the store and answer with `Event::Completed { op }`.
     Store { op: OpId, call: StoreCall },

@@ -9,6 +9,7 @@
 //! (`no_due`), a sweep that fired nothing left the document as it was, and
 //! `next_deadline` is the least deadline of the document (`is_next`).
 
+use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
 use crate::commit::*;
@@ -193,6 +194,41 @@ pub proof fn lemma_reach_step(now: nat, a: AState, b: AState, c: AState)
     assert(chain(now, w) && w[0] == a && w.last() == c);
 }
 
+pub proof fn lemma_reach_trans(now: nat, a: AState, b: AState, c: AState)
+    requires
+        reach(now, a, b),
+        reach(now, b, c),
+    ensures
+        reach(now, a, c),
+{
+    let x = choose |x: Seq<AState>| #[trigger] chain(now, x)
+        && x[0] == a && x.last() == b;
+    let y = choose |y: Seq<AState>| #[trigger] chain(now, y)
+        && y[0] == b && y.last() == c;
+    let z = x + y.drop_first();
+    assert(z.len() >= 1);
+    assert forall |i: int| 0 <= i < z.len() - 1
+        implies #[trigger] kstep(now, z[i], z[i + 1]) by {
+        if i < x.len() - 1 {
+            assert(z[i] == x[i]);
+            assert(z[i + 1] == x[i + 1]);
+        } else {
+            let j = i - (x.len() - 1);
+            assert(0 <= j < y.len() - 1);
+            if j == 0 {
+                assert(z[i] == x.last());
+                assert(x.last() == y[0]);
+            } else {
+                assert(z[i] == y[j]);
+            }
+            assert(z[i + 1] == y[j + 1]);
+        }
+    }
+    assert(z[0] == a);
+    assert(z.last() == c);
+    assert(chain(now, z));
+}
+
 pub proof fn lemma_reach_inv(now: nat, a: AState, b: AState)
     requires reach(now, a, b), inv(now, a),
     ensures inv(now, b),
@@ -204,6 +240,501 @@ pub proof fn lemma_reach_inv(now: nat, a: AState, b: AState)
         let i: int = s.len() - 2;
         assert(kstep(now, s[i], s[i + 1]));
         assert(s[i + 1] == b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The executable row-order specification
+// ---------------------------------------------------------------------------
+
+/// One iteration of `sweep`'s object loop: projection, lease reclamation,
+/// then retry dispatch.  The outbox update is included.
+pub open spec fn executable_sweep_one(
+    a: AState,
+    id: Seq<char>,
+    now: nat,
+    retry_timeout: nat,
+) -> AState {
+    let a1 = with_objects(a, promise_timeout_objects(a, id, now));
+    let a2 = with_objects(a1, lease_timeout_objects(a1, id, now));
+    retry_timeout_state(a2, id, now, retry_timeout)
+}
+
+/// The exact phase and row order of `sweep`: all three operations on a row
+/// before moving to the next row.
+pub open spec fn executable_sweep_rows(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+) -> AState
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        a
+    } else {
+        executable_sweep_one(
+            executable_sweep_rows(a, ids.drop_last(), now, retry_timeout),
+            ids.last(),
+            now,
+            retry_timeout,
+        )
+    }
+}
+
+/// Apply the callback snapshot of one owed row, in stored callback order.
+pub open spec fn executable_callbacks(
+    a: AState,
+    x: Seq<char>,
+    callbacks: Seq<Seq<char>>,
+    now: nat,
+) -> AState
+    decreases callbacks.len(),
+{
+    if callbacks.len() == 0 {
+        a
+    } else {
+        callback_state(
+            executable_callbacks(a, x, callbacks.drop_last(), now),
+            x,
+            callbacks.last(),
+            now,
+        )
+    }
+}
+
+/// Apply the listener snapshot of one owed row, in stored listener order.
+pub open spec fn executable_listeners(
+    a: AState,
+    x: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    now: nat,
+) -> AState
+    decreases listeners.len(),
+{
+    if listeners.len() == 0 {
+        a
+    } else {
+        listener_state(
+            executable_listeners(a, x, listeners.drop_last(), now),
+            x,
+            listeners.last(),
+            now,
+        )
+    }
+}
+
+/// The settled rows and their callback/listener lists, snapshotted at the
+/// start of one drain round in stored row order.
+pub open spec fn executable_owed_snapshot(
+    a: AState,
+    ids: Seq<Seq<char>>,
+) -> Seq<AOwed>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        Seq::empty()
+    } else {
+        let prior = executable_owed_snapshot(a, ids.drop_last());
+        let x = ids.last();
+        if a.objects.contains_key(x)
+            && a.objects[x].state != PromiseState::Pending
+            && (a.objects[x].callbacks.len() > 0 || a.objects[x].listeners.len() > 0)
+        {
+            prior.push(AOwed {
+                awaited: x,
+                callbacks: a.objects[x].callbacks,
+                listeners: a.objects[x].listeners,
+            })
+        } else {
+            prior
+        }
+    }
+}
+
+/// Process an owed snapshot in order. Each row's callback list is processed
+/// before its listener list, exactly as the executable loop does.
+pub open spec fn executable_owed(
+    a: AState,
+    owed: Seq<AOwed>,
+    now: nat,
+) -> AState
+    decreases owed.len(),
+{
+    if owed.len() == 0 {
+        a
+    } else {
+        let a1 = executable_owed(a, owed.drop_last(), now);
+        let item = owed.last();
+        let a2 = executable_callbacks(a1, item.awaited, item.callbacks, now);
+        executable_listeners(a2, item.awaited, item.listeners, now)
+    }
+}
+
+/// Retry ids snapshotted after owed callbacks and listeners have run.
+pub open spec fn executable_retry_selected(p: APromise, now: nat) -> bool {
+    &&& p.state == PromiseState::Pending
+    &&& p.task is Some
+    &&& p.task.unwrap().state == TaskState::Pending
+    &&& p.task.unwrap().retry_timeout_at is Some
+    &&& p.task.unwrap().retry_timeout_at.unwrap() <= now
+}
+
+pub open spec fn executable_due_snapshot(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+) -> Seq<Seq<char>>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        Seq::empty()
+    } else {
+        let prior = executable_due_snapshot(a, ids.drop_last(), now);
+        let x = ids.last();
+        if a.objects.contains_key(x)
+            && executable_retry_selected(a.objects[x], now)
+        {
+            prior.push(x)
+        } else {
+            prior
+        }
+    }
+}
+
+pub open spec fn executable_due(
+    a: AState,
+    due: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+) -> AState
+    decreases due.len(),
+{
+    if due.len() == 0 {
+        a
+    } else {
+        retry_timeout_state(
+            executable_due(a, due.drop_last(), now, retry_timeout),
+            due.last(),
+            now,
+            retry_timeout,
+        )
+    }
+}
+
+pub open spec fn executable_drain_round(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+) -> AState {
+    let owed = executable_owed_snapshot(a, ids);
+    let after_owed = executable_owed(a, owed, now);
+    let due = executable_due_snapshot(after_owed, ids, now);
+    executable_due(after_owed, due, now, retry_timeout)
+}
+
+pub open spec fn executable_round_has_work(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+) -> bool {
+    let owed = executable_owed_snapshot(a, ids);
+    let after_owed = executable_owed(a, owed, now);
+    owed.len() > 0 || executable_due_snapshot(after_owed, ids, now).len() > 0
+}
+
+/// The executable drain's bounded loop, including its early return.  The
+/// production loop executes at most 65 rounds.
+pub open spec fn executable_drain_rows(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+    fuel: nat,
+) -> AState
+    decreases fuel,
+{
+    if fuel == 0 || !executable_round_has_work(a, ids, now) {
+        a
+    } else {
+        executable_drain_rows(
+            executable_drain_round(a, ids, now, retry_timeout),
+            ids,
+            now,
+            retry_timeout,
+            (fuel - 1) as nat,
+        )
+    }
+}
+
+/// What `logic::flight::decide` does for an internal sweep, at map level.
+/// The order argument comes from `State::objects`, not from the map.
+pub open spec fn executable_sweep_and_drain(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+) -> AState {
+    let swept = executable_sweep_rows(a, ids, now, retry_timeout);
+    executable_drain_rows(swept, ids, now, retry_timeout, 65)
+}
+
+proof fn lemma_executable_sweep_rows_push(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    id: Seq<char>,
+    now: nat,
+    retry_timeout: nat,
+)
+    ensures
+        executable_sweep_rows(a, ids.push(id), now, retry_timeout)
+            == executable_sweep_one(
+                executable_sweep_rows(a, ids, now, retry_timeout),
+                id,
+                now,
+                retry_timeout,
+            ),
+{
+    assert(ids.push(id).drop_last() == ids);
+    assert(ids.push(id).last() == id);
+}
+
+proof fn lemma_executable_owed_snapshot_push(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    id: Seq<char>,
+)
+    ensures
+        executable_owed_snapshot(a, ids.push(id))
+            == if a.objects.contains_key(id)
+                && a.objects[id].state != PromiseState::Pending
+                && (a.objects[id].callbacks.len() > 0
+                    || a.objects[id].listeners.len() > 0)
+            {
+                executable_owed_snapshot(a, ids).push(AOwed {
+                    awaited: id,
+                    callbacks: a.objects[id].callbacks,
+                    listeners: a.objects[id].listeners,
+                })
+            } else {
+                executable_owed_snapshot(a, ids)
+            },
+{
+    assert(ids.push(id).drop_last() == ids);
+    assert(ids.push(id).last() == id);
+}
+
+proof fn lemma_executable_callbacks_push(
+    a: AState,
+    x: Seq<char>,
+    callbacks: Seq<Seq<char>>,
+    callback: Seq<char>,
+    now: nat,
+)
+    ensures
+        executable_callbacks(a, x, callbacks.push(callback), now)
+            == callback_state(
+                executable_callbacks(a, x, callbacks, now),
+                x,
+                callback,
+                now,
+            ),
+{
+    assert(callbacks.push(callback).drop_last() == callbacks);
+    assert(callbacks.push(callback).last() == callback);
+}
+
+proof fn lemma_executable_listeners_push(
+    a: AState,
+    x: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    listener: Seq<char>,
+    now: nat,
+)
+    ensures
+        executable_listeners(a, x, listeners.push(listener), now)
+            == listener_state(
+                executable_listeners(a, x, listeners, now),
+                x,
+                listener,
+                now,
+            ),
+{
+    assert(listeners.push(listener).drop_last() == listeners);
+    assert(listeners.push(listener).last() == listener);
+}
+
+proof fn lemma_executable_owed_push(
+    a: AState,
+    owed: Seq<AOwed>,
+    item: AOwed,
+    now: nat,
+)
+    ensures
+        executable_owed(a, owed.push(item), now)
+            == executable_listeners(
+                executable_callbacks(
+                    executable_owed(a, owed, now),
+                    item.awaited,
+                    item.callbacks,
+                    now,
+                ),
+                item.awaited,
+                item.listeners,
+                now,
+            ),
+{
+    assert(owed.push(item).drop_last() == owed);
+    assert(owed.push(item).last() == item);
+}
+
+proof fn lemma_executable_due_snapshot_push(
+    a: AState,
+    ids: Seq<Seq<char>>,
+    id: Seq<char>,
+    now: nat,
+)
+    ensures
+        executable_due_snapshot(a, ids.push(id), now)
+            == if a.objects.contains_key(id)
+                && executable_retry_selected(a.objects[id], now)
+            {
+                executable_due_snapshot(a, ids, now).push(id)
+            } else {
+                executable_due_snapshot(a, ids, now)
+            },
+{
+    assert(ids.push(id).drop_last() == ids);
+    assert(ids.push(id).last() == id);
+}
+
+proof fn lemma_executable_due_push(
+    a: AState,
+    due: Seq<Seq<char>>,
+    id: Seq<char>,
+    now: nat,
+    retry_timeout: nat,
+)
+    ensures
+        executable_due(a, due.push(id), now, retry_timeout)
+            == retry_timeout_state(
+                executable_due(a, due, now, retry_timeout),
+                id,
+                now,
+                retry_timeout,
+            ),
+{
+    assert(due.push(id).drop_last() == due);
+    assert(due.push(id).last() == id);
+}
+
+proof fn lemma_executable_callbacks_frame(
+    a: AState,
+    x: Seq<char>,
+    callbacks: Seq<Seq<char>>,
+    now: nat,
+)
+    ensures
+        executable_callbacks(a, x, callbacks, now).schedules == a.schedules,
+        executable_callbacks(a, x, callbacks, now).objects.dom() == a.objects.dom(),
+    decreases callbacks.len(),
+{
+    if callbacks.len() > 0 {
+        lemma_executable_callbacks_frame(a, x, callbacks.drop_last(), now);
+        let b = executable_callbacks(a, x, callbacks.drop_last(), now);
+        assert(callback_state(b, x, callbacks.last(), now).schedules == b.schedules);
+        assert(callback_state(b, x, callbacks.last(), now).objects.dom()
+            =~= b.objects.dom());
+    }
+}
+
+proof fn lemma_executable_listeners_frame(
+    a: AState,
+    x: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    now: nat,
+)
+    ensures
+        executable_listeners(a, x, listeners, now).schedules == a.schedules,
+        executable_listeners(a, x, listeners, now).objects.dom() == a.objects.dom(),
+    decreases listeners.len(),
+{
+    if listeners.len() > 0 {
+        lemma_executable_listeners_frame(a, x, listeners.drop_last(), now);
+        let b = executable_listeners(a, x, listeners.drop_last(), now);
+        assert(listener_state(b, x, listeners.last(), now).schedules == b.schedules);
+        assert(listener_state(b, x, listeners.last(), now).objects.dom()
+            =~= b.objects.dom());
+    }
+}
+
+proof fn lemma_executable_owed_frame(
+    a: AState,
+    owed: Seq<AOwed>,
+    now: nat,
+)
+    ensures
+        executable_owed(a, owed, now).schedules == a.schedules,
+        executable_owed(a, owed, now).objects.dom() == a.objects.dom(),
+    decreases owed.len(),
+{
+    if owed.len() > 0 {
+        lemma_executable_owed_frame(a, owed.drop_last(), now);
+        let b = executable_owed(a, owed.drop_last(), now);
+        let item = owed.last();
+        lemma_executable_callbacks_frame(
+            b,
+            item.awaited,
+            item.callbacks,
+            now,
+        );
+        let c = executable_callbacks(
+            b,
+            item.awaited,
+            item.callbacks,
+            now,
+        );
+        lemma_executable_listeners_frame(
+            c,
+            item.awaited,
+            item.listeners,
+            now,
+        );
+    }
+}
+
+proof fn lemma_executable_due_frame(
+    a: AState,
+    due: Seq<Seq<char>>,
+    now: nat,
+    retry_timeout: nat,
+)
+    ensures
+        executable_due(a, due, now, retry_timeout).schedules == a.schedules,
+        executable_due(a, due, now, retry_timeout).objects.dom() == a.objects.dom(),
+    decreases due.len(),
+{
+    if due.len() > 0 {
+        lemma_executable_due_frame(
+            a,
+            due.drop_last(),
+            now,
+            retry_timeout,
+        );
+        let b = executable_due(a, due.drop_last(), now, retry_timeout);
+        assert(retry_timeout_state(
+            b,
+            due.last(),
+            now,
+            retry_timeout,
+        ).schedules == b.schedules);
+        assert(retry_timeout_state(
+            b,
+            due.last(),
+            now,
+            retry_timeout,
+        ).objects.dom() =~= b.objects.dom());
     }
 }
 
@@ -615,8 +1146,16 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
         final(s).wf(),
         inv(now as nat, final(s)@),
         swept_by(now as nat, old(s)@, final(s)@, did),
+        object_ids(*final(s)) == object_ids(*old(s)),
+        final(s)@ == executable_sweep_rows(
+            old(s)@,
+            object_ids(*old(s)),
+            now as nat,
+            cfg.retry_timeout as nat,
+        ),
 {
     let ghost a = s@;
+    let ghost row_order = object_ids(*s);
     proof { lemma_reach_refl(now as nat, a); }
     let mut ids: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -632,6 +1171,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
     }
     proof {
         lemma_fold_dom(s.objects@, obj_key(), obj_val());
+        assert(ids.deep_view() =~= row_order);
         assert forall |id: Seq<char>| #[trigger] a.objects.contains_key(id) implies exists |j: int| 0 <= j < ids@.len() && #[trigger] ids@[j]@ == id by {
             assert(mentions(s.objects@, obj_key(), id));
             let j = choose |j: int| 0 <= j < s.objects@.len() && #[trigger] obj_key()(s.objects@[j]) == id;
@@ -652,6 +1192,14 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             cfg.wf(),
             forall |j: int| 0 <= j < k && s@.objects.contains_key(#[trigger] ids@[j]@) ==> cleared(s@.objects[ids@[j]@], now as nat),
             !did ==> s@ == a,
+            ids.deep_view() == row_order,
+            object_ids(*s) == row_order,
+            s@ == executable_sweep_rows(
+                a,
+                ids.deep_view().take(k as int),
+                now as nat,
+                cfg.retry_timeout as nat,
+            ),
             forall |id: Seq<char>| #[trigger] a.objects.contains_key(id) ==> exists |j: int| 0 <= j < ids@.len() && #[trigger] ids@[j]@ == id,
         decreases ids@.len() - k,
     {
@@ -715,6 +1263,38 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
         }
         proof {
             let x = id@;
+            assert(s1 == with_objects(s0, promise_timeout_objects(s0, x, now as nat)));
+            assert(s2 == with_objects(s1, lease_timeout_objects(s1, x, now as nat)));
+            assert(s3 == retry_timeout_state(s2, x, now as nat, cfg.retry_timeout as nat));
+            assert(ids.deep_view().take(k as int + 1)
+                =~= ids.deep_view().take(k as int).push(x));
+            let prefix = ids.deep_view().take(k as int);
+            assert(ids.deep_view().take(k as int + 1) == prefix.push(x));
+            assert(s0 == executable_sweep_rows(
+                a,
+                prefix,
+                now as nat,
+                cfg.retry_timeout as nat,
+            ));
+            assert(executable_sweep_one(
+                s0,
+                x,
+                now as nat,
+                cfg.retry_timeout as nat,
+            ) == s3);
+            lemma_executable_sweep_rows_push(
+                a,
+                prefix,
+                x,
+                now as nat,
+                cfg.retry_timeout as nat,
+            );
+            assert(executable_sweep_rows(
+                a,
+                ids.deep_view().take(k as int + 1),
+                now as nat,
+                cfg.retry_timeout as nat,
+            ) == s3);
             lemma_swept_object(now as nat, s0, s1, s2, s3, x, cfg.retry_timeout as nat);
             assert(s3.objects.dom() =~= a.objects.dom());
             if !(due_p || due_l || due_r) {
@@ -737,6 +1317,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
         k += 1;
     }
     proof {
+        assert(ids.deep_view().take(ids.len() as int) =~= row_order);
         assert forall |id: Seq<char>| #[trigger] s@.objects.contains_key(id) implies cleared(s@.objects[id], now as nat) by {
             let j = choose |j: int| 0 <= j < ids@.len() && #[trigger] ids@[j]@ == id;
         }
@@ -749,11 +1330,15 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
 // ---------------------------------------------------------------------------
 
 /// What a settled promise still owes: its callbacks and listeners.
-struct Owed {
-    awaited: String,
-    callbacks: Vec<String>,
-    listeners: Vec<String>,
+#[make_spec_type]
+pub struct Owed {
+    pub awaited: String,
+    pub callbacks: Vec<String>,
+    pub listeners: Vec<String>,
 }
+
+#[cfg(verus_keep_ghost)]
+pub type AOwed = OwedSpec;
 
 fn clone_strings(v: &Vec<String>) -> (r: Vec<String>)
     ensures r.deep_view() == v.deep_view(),
@@ -771,128 +1356,425 @@ fn clone_strings(v: &Vec<String>) -> (r: Vec<String>)
     r
 }
 
+/// Snapshot the settled rows still carrying callbacks or listeners, in
+/// executable row order.
+fn snapshot_owed(s: &State) -> (r: Vec<Owed>)
+    requires s.wf(),
+    ensures
+        r.deep_view() == executable_owed_snapshot(s@, object_ids(*s)),
+{
+    let mut r: Vec<Owed> = Vec::new();
+    let mut i: usize = 0;
+    while i < s.objects.len()
+        invariant
+            i <= s.objects@.len(),
+            s.wf(),
+            r.deep_view() == executable_owed_snapshot(
+                s@,
+                object_ids(*s).take(i as int),
+            ),
+        decreases s.objects@.len() - i,
+    {
+        proof { s.lemma_object_at(i as int); }
+        let p = &s.objects[i];
+        let pending = match p.state { PromiseState::Pending => true, _ => false };
+        if !pending && (p.callbacks.len() > 0 || p.listeners.len() > 0) {
+            r.push(Owed {
+                awaited: clone_string(&p.id),
+                callbacks: clone_strings(&p.callbacks),
+                listeners: clone_strings(&p.listeners),
+            });
+        }
+        proof {
+            let prefix = object_ids(*s).take(i as int);
+            assert(object_ids(*s).take(i as int + 1)
+                =~= prefix.push(s.objects@[i as int].id@));
+            assert(object_ids(*s).take(i as int + 1)
+                == prefix.push(s.objects@[i as int].id@));
+            lemma_executable_owed_snapshot_push(
+                s@,
+                prefix,
+                s.objects@[i as int].id@,
+            );
+        }
+        i += 1;
+    }
+    assert(object_ids(*s).take(s.objects@.len() as int) =~= object_ids(*s));
+    r
+}
+
+/// Apply an owed snapshot exactly as the executable nested loops do.
+fn apply_owed(s: &mut State, owed: &Vec<Owed>, now: u64, cfg: &Config)
+    requires pre(*old(s), now, *cfg),
+    ensures
+        final(s).wf(),
+        inv(now as nat, final(s)@),
+        reach(now as nat, old(s)@, final(s)@),
+        final(s)@ == executable_owed(old(s)@, owed.deep_view(), now as nat),
+        final(s)@.schedules == old(s)@.schedules,
+        final(s)@.objects.dom() == old(s)@.objects.dom(),
+        object_ids(*final(s)) == object_ids(*old(s)),
+{
+    let ghost a = s@;
+    let ghost row_order = object_ids(*s);
+    proof { lemma_reach_refl(now as nat, a); }
+    let mut o: usize = 0;
+    while o < owed.len()
+        invariant
+            o <= owed@.len(),
+            s.wf(),
+            inv(now as nat, s@),
+            reach(now as nat, a, s@),
+            object_ids(*s) == row_order,
+            now <= MAX_TIME,
+            cfg.wf(),
+            s@ == executable_owed(
+                a,
+                owed.deep_view().take(o as int),
+                now as nat,
+            ),
+        decreases owed@.len() - o,
+    {
+        let ghost b = s@;
+        let mut c: usize = 0;
+        while c < owed[o].callbacks.len()
+            invariant
+                o < owed@.len(),
+                c <= owed@[o as int].callbacks@.len(),
+                s.wf(),
+                inv(now as nat, s@),
+                reach(now as nat, a, s@),
+                object_ids(*s) == row_order,
+                now <= MAX_TIME,
+                cfg.wf(),
+                s@ == executable_callbacks(
+                    b,
+                    owed@[o as int]@.awaited,
+                    owed@[o as int]@.callbacks.take(c as int),
+                    now as nat,
+                ),
+            decreases owed@[o as int].callbacks@.len() - c,
+        {
+            let ghost before = s@;
+            let req = PromiseRegisterCallbackReq {
+                awaited: clone_string(&owed[o].awaited),
+                awaiter: clone_string(&owed[o].callbacks[c]),
+            };
+            s.process_callback(&req, now, cfg);
+            proof {
+                lemma_reach_step(now as nat, a, before, s@);
+                let prefix = owed@[o as int]@.callbacks.take(c as int);
+                assert(owed@[o as int]@.callbacks.take(c as int + 1)
+                    =~= prefix.push(owed@[o as int]@.callbacks[c as int]));
+                lemma_executable_callbacks_push(
+                    b,
+                    owed@[o as int]@.awaited,
+                    prefix,
+                    owed@[o as int]@.callbacks[c as int],
+                    now as nat,
+                );
+            }
+            c += 1;
+        }
+        proof {
+            assert(owed@[o as int]@.callbacks.take(
+                owed@[o as int]@.callbacks.len() as int,
+            ) =~= owed@[o as int]@.callbacks);
+        }
+        let ghost after_callbacks = s@;
+        let mut l: usize = 0;
+        while l < owed[o].listeners.len()
+            invariant
+                o < owed@.len(),
+                l <= owed@[o as int].listeners@.len(),
+                s.wf(),
+                inv(now as nat, s@),
+                reach(now as nat, a, s@),
+                object_ids(*s) == row_order,
+                now <= MAX_TIME,
+                cfg.wf(),
+                s@ == executable_listeners(
+                    after_callbacks,
+                    owed@[o as int]@.awaited,
+                    owed@[o as int]@.listeners.take(l as int),
+                    now as nat,
+                ),
+            decreases owed@[o as int].listeners@.len() - l,
+        {
+            let ghost before = s@;
+            let req = PromiseRegisterListenerReq {
+                awaited: clone_string(&owed[o].awaited),
+                address: clone_string(&owed[o].listeners[l]),
+            };
+            s.process_listener(&req, now, cfg);
+            proof {
+                lemma_reach_step(now as nat, a, before, s@);
+                let prefix = owed@[o as int]@.listeners.take(l as int);
+                assert(owed@[o as int]@.listeners.take(l as int + 1)
+                    =~= prefix.push(owed@[o as int]@.listeners[l as int]));
+                lemma_executable_listeners_push(
+                    after_callbacks,
+                    owed@[o as int]@.awaited,
+                    prefix,
+                    owed@[o as int]@.listeners[l as int],
+                    now as nat,
+                );
+            }
+            l += 1;
+        }
+        proof {
+            assert(owed@[o as int]@.listeners.take(
+                owed@[o as int]@.listeners.len() as int,
+            ) =~= owed@[o as int]@.listeners);
+            let prefix = owed.deep_view().take(o as int);
+            assert(owed.deep_view().take(o as int + 1)
+                =~= prefix.push(owed@[o as int]@));
+            lemma_executable_owed_push(
+                a,
+                prefix,
+                owed@[o as int]@,
+                now as nat,
+            );
+        }
+        o += 1;
+    }
+    assert(owed.deep_view().take(owed@.len() as int) =~= owed.deep_view());
+    proof {
+        lemma_executable_owed_frame(a, owed.deep_view(), now as nat);
+    }
+}
+
+/// Snapshot retry ids after the owed pass, in executable row order.
+fn snapshot_due(s: &State, now: u64) -> (r: Vec<String>)
+    requires s.wf(),
+    ensures
+        r.deep_view() == executable_due_snapshot(
+            s@,
+            object_ids(*s),
+            now as nat,
+        ),
+{
+    let mut r: Vec<String> = Vec::new();
+    let mut i: usize = 0;
+    while i < s.objects.len()
+        invariant
+            i <= s.objects@.len(),
+            s.wf(),
+            r.deep_view() == executable_due_snapshot(
+                s@,
+                object_ids(*s).take(i as int),
+                now as nat,
+            ),
+        decreases s.objects@.len() - i,
+    {
+        proof { s.lemma_object_at(i as int); }
+        let p = &s.objects[i];
+        let pending = match p.state { PromiseState::Pending => true, _ => false };
+        let task_due = match &p.task {
+            Some(t) => match t.retry_timeout_at {
+                Some(d) => {
+                    let task_pending = match t.state { TaskState::Pending => true, _ => false };
+                    task_pending && d <= now
+                }
+                None => false,
+            },
+            None => false,
+        };
+        if pending && task_due {
+            r.push(clone_string(&p.id));
+        }
+        proof {
+            let prefix = object_ids(*s).take(i as int);
+            assert(object_ids(*s).take(i as int + 1)
+                =~= prefix.push(s.objects@[i as int].id@));
+            assert(object_ids(*s).take(i as int + 1)
+                == prefix.push(s.objects@[i as int].id@));
+            lemma_executable_due_snapshot_push(
+                s@,
+                prefix,
+                s.objects@[i as int].id@,
+                now as nat,
+            );
+            reveal(executable_retry_selected);
+        }
+        i += 1;
+    }
+    assert(object_ids(*s).take(s.objects@.len() as int) =~= object_ids(*s));
+    r
+}
+
+/// Apply a snapshotted retry list exactly.
+fn apply_due(s: &mut State, due: &Vec<String>, now: u64, cfg: &Config)
+    requires pre(*old(s), now, *cfg),
+    ensures
+        final(s).wf(),
+        inv(now as nat, final(s)@),
+        reach(now as nat, old(s)@, final(s)@),
+        final(s)@ == executable_due(
+            old(s)@,
+            due.deep_view(),
+            now as nat,
+            cfg.retry_timeout as nat,
+        ),
+        final(s)@.schedules == old(s)@.schedules,
+        final(s)@.objects.dom() == old(s)@.objects.dom(),
+        object_ids(*final(s)) == object_ids(*old(s)),
+{
+    let ghost a = s@;
+    let ghost row_order = object_ids(*s);
+    proof { lemma_reach_refl(now as nat, a); }
+    let mut d: usize = 0;
+    while d < due.len()
+        invariant
+            d <= due@.len(),
+            s.wf(),
+            inv(now as nat, s@),
+            reach(now as nat, a, s@),
+            object_ids(*s) == row_order,
+            now <= MAX_TIME,
+            cfg.wf(),
+            s@ == executable_due(
+                a,
+                due.deep_view().take(d as int),
+                now as nat,
+                cfg.retry_timeout as nat,
+            ),
+        decreases due@.len() - d,
+    {
+        let ghost before = s@;
+        s.process_retry_timeout(
+            &TaskRetryTimeoutReq { id: clone_string(&due[d]) },
+            now,
+            cfg,
+        );
+        proof {
+            lemma_reach_step(now as nat, a, before, s@);
+            let prefix = due.deep_view().take(d as int);
+            assert(due.deep_view().take(d as int + 1)
+                =~= prefix.push(due@[d as int]@));
+            lemma_executable_due_push(
+                a,
+                prefix,
+                due@[d as int]@,
+                now as nat,
+                cfg.retry_timeout as nat,
+            );
+        }
+        d += 1;
+    }
+    assert(due.deep_view().take(due@.len() as int) =~= due.deep_view());
+    proof {
+        lemma_executable_due_frame(
+            a,
+            due.deep_view(),
+            now as nat,
+            cfg.retry_timeout as nat,
+        );
+    }
+}
+
+/// One exact drain round, including both snapshots.
+fn drain_round(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
+    requires pre(*old(s), now, *cfg),
+    ensures
+        final(s).wf(),
+        inv(now as nat, final(s)@),
+        reach(now as nat, old(s)@, final(s)@),
+        final(s)@ == executable_drain_round(
+            old(s)@,
+            object_ids(*old(s)),
+            now as nat,
+            cfg.retry_timeout as nat,
+        ),
+        did == executable_round_has_work(
+            old(s)@,
+            object_ids(*old(s)),
+            now as nat,
+        ),
+        final(s)@.schedules == old(s)@.schedules,
+        final(s)@.objects.dom() == old(s)@.objects.dom(),
+        object_ids(*final(s)) == object_ids(*old(s)),
+{
+    let ghost a = s@;
+    let ghost ids = object_ids(*s);
+    let owed = snapshot_owed(s);
+    apply_owed(s, &owed, now, cfg);
+    let ghost after_owed = s@;
+    let due = snapshot_due(s, now);
+    apply_due(s, &due, now, cfg);
+    proof {
+        lemma_reach_trans(now as nat, a, after_owed, s@);
+        assert(owed.deep_view() == executable_owed_snapshot(a, ids));
+        assert(object_ids(*s) == ids);
+    }
+    !owed.is_empty() || !due.is_empty()
+}
+
+fn drain_fuel(s: &mut State, now: u64, cfg: &Config, fuel: u64)
+    requires pre(*old(s), now, *cfg),
+    ensures
+        final(s).wf(),
+        inv(now as nat, final(s)@),
+        drained(now as nat, old(s)@, final(s)@),
+        final(s)@ == executable_drain_rows(
+            old(s)@,
+            object_ids(*old(s)),
+            now as nat,
+            cfg.retry_timeout as nat,
+            fuel as nat,
+        ),
+        final(s)@.schedules == old(s)@.schedules,
+        final(s)@.objects.dom() == old(s)@.objects.dom(),
+        object_ids(*final(s)) == object_ids(*old(s)),
+    decreases fuel,
+{
+    let ghost a = s@;
+    let ghost ids = object_ids(*s);
+    if fuel == 0 {
+        proof { lemma_reach_refl(now as nat, a); }
+        return;
+    }
+    let did = drain_round(s, now, cfg);
+    let ghost b = s@;
+    if !did {
+        proof {
+            assert(!executable_round_has_work(a, ids, now as nat));
+            assert(b == executable_drain_round(
+                a,
+                ids,
+                now as nat,
+                cfg.retry_timeout as nat,
+            ));
+            assert(b == a);
+        }
+        return;
+    }
+    drain_fuel(s, now, cfg, fuel - 1);
+    proof {
+        lemma_reach_trans(now as nat, a, b, s@);
+        assert(object_ids(*s) == ids);
+    }
+}
+
 /// Discharge every settled promise's callbacks and listeners, then fire
-/// every retry that is due, until nothing is owed or the round limit is
-/// reached. Every step is a kernel step at `now`.
+/// every retry that is due, until nothing is owed or 65 rounds have run.
+/// The exact bounded transition is `executable_drain_rows`.
 pub fn drain(s: &mut State, now: u64, cfg: &Config)
     requires pre(*old(s), now, *cfg),
     ensures
         final(s).wf(),
         inv(now as nat, final(s)@),
         drained(now as nat, old(s)@, final(s)@),
+        final(s)@ == executable_drain_rows(
+            old(s)@,
+            object_ids(*old(s)),
+            now as nat,
+            cfg.retry_timeout as nat,
+            65,
+        ),
+        object_ids(*final(s)) == object_ids(*old(s)),
 {
-    proof { lemma_reach_refl(now as nat, old(s)@); }
-    let mut rounds: u64 = 0;
-    while rounds <= 64
-        invariant
-            s.wf(),
-            inv(now as nat, s@),
-            reach(now as nat, old(s)@, s@),
-            s@.schedules == old(s)@.schedules,
-            s@.objects.dom() == old(s)@.objects.dom(),
-            now <= MAX_TIME,
-            cfg.wf(),
-        decreases 65 - rounds,
-    {
-        rounds += 1;
-        let mut did = false;
-        let mut owed: Vec<Owed> = Vec::new();
-        let mut i: usize = 0;
-        while i < s.objects.len()
-            invariant i <= s.objects@.len(),
-            decreases s.objects@.len() - i,
-        {
-            let p = &s.objects[i];
-            let pending = match p.state { PromiseState::Pending => true, _ => false };
-            if !pending && (p.callbacks.len() > 0 || p.listeners.len() > 0) {
-                owed.push(Owed { awaited: clone_string(&p.id), callbacks: clone_strings(&p.callbacks), listeners: clone_strings(&p.listeners) });
-            }
-            i += 1;
-        }
-        let mut o: usize = 0;
-        while o < owed.len()
-            invariant
-                o <= owed@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
-            decreases owed@.len() - o,
-        {
-            let mut c: usize = 0;
-            while c < owed[o].callbacks.len()
-                invariant
-                    o < owed@.len(),
-                    c <= owed@[o as int].callbacks@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
-                decreases owed@[o as int].callbacks@.len() - c,
-            {
-                let ghost b = s@;
-                let req = PromiseRegisterCallbackReq { awaited: clone_string(&owed[o].awaited), awaiter: clone_string(&owed[o].callbacks[c]) };
-                s.process_callback(&req, now, cfg);
-                proof {
-                    assert(inv(now as nat, s@));
-                    assert(legal(now as nat, b, s@));
-                    assert(kstep(now as nat, b, s@));
-                    lemma_reach_step(now as nat, old(s)@, b, s@);
-                }
-                did = true;
-                c += 1;
-            }
-            let mut l: usize = 0;
-            while l < owed[o].listeners.len()
-                invariant
-                    o < owed@.len(),
-                    l <= owed@[o as int].listeners@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
-                decreases owed@[o as int].listeners@.len() - l,
-            {
-                let ghost b = s@;
-                let req = PromiseRegisterListenerReq { awaited: clone_string(&owed[o].awaited), address: clone_string(&owed[o].listeners[l]) };
-                s.process_listener(&req, now, cfg);
-                proof { lemma_reach_step(now as nat, old(s)@, b, s@); }
-                did = true;
-                l += 1;
-            }
-            o += 1;
-        }
-        let mut due: Vec<String> = Vec::new();
-        let mut i: usize = 0;
-        while i < s.objects.len()
-            invariant i <= s.objects@.len(),
-            decreases s.objects@.len() - i,
-        {
-            let p = &s.objects[i];
-            let pending = match p.state { PromiseState::Pending => true, _ => false };
-            let task_due = match &p.task {
-                Some(t) => match t.retry_timeout_at {
-                    Some(d) => { let tp = match t.state { TaskState::Pending => true, _ => false }; tp && d <= now }
-                    None => false,
-                },
-                None => false,
-            };
-            if pending && task_due {
-                due.push(clone_string(&p.id));
-            }
-            i += 1;
-        }
-        let mut d: usize = 0;
-        while d < due.len()
-            invariant
-                d <= due@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
-            decreases due@.len() - d,
-        {
-            let ghost b = s@;
-            s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(&due[d]) }, now, cfg);
-            proof {
-                lemma_reach_step(now as nat, old(s)@, b, s@);
-                assert(s@.objects.dom() =~= b.objects.dom());
-            }
-            did = true;
-            d += 1;
-        }
-        if !did {
-            return;
-        }
-    }
+    drain_fuel(s, now, cfg, 65);
 }
 
 } // verus!

@@ -128,6 +128,39 @@ echod/
 
 ### The core
 
+`Concrete` is the executable logic state machine itself, not a second
+implementation beside it:
+
+```text
+on_event : Concrete × Event → Concrete × Vec<Effect>
+```
+
+`Concrete` is an alias for `logic::State`; the free `logic::on_event` is its
+only behavioral entry point. The vector is semantic order: the shell submits
+effects from first to last. A submission does not serialize asynchronous
+work. Store effects carry an operation id, and their completions may return in
+any order as separate events under those ids. Queues retain their `VecDeque`
+order; timer keys use ordered maps and sets; document rows, callbacks,
+listeners and outbox entries retain vector order. Hash maps are used only for
+keyed lookup or for sets whose completion order is supplied explicitly by
+events, never to choose effect order.
+
+This is the same core/executor vocabulary used by `denoland/celld`: it calls
+the outputs `Effect`s, makes a free `on_event(&mut State, Event) ->
+Vec<Effect>` the only way behavioral state advances, and has production and
+simulation shells perform those effects and return versioned completion
+events. Echod's concrete model follows that boundary; its protocol state and
+commit algorithm are different.
+
+The kernel operation inside a document is deterministic at the representation
+level too. Its executable sweep visits document rows in stored order and, for
+each row, processes promise timeout, lease timeout and retry timeout. `drain`
+then snapshots settled rows' callbacks and listeners in their stored order,
+processes those snapshots, snapshots due retries, and repeats until one round
+does no work or 65 rounds have run. The concrete specification records this
+bounded algorithm exactly. The phase-ordered `refine::sweep_fn` is an abstract
+proof normal form, not the definition of Concrete.
+
 `State` is everything a node holds: the verified `NodeCore` with its view
 of the membership, its cache's versions and its armed keys; the cache;
 the flights in progress on documents; the membership refresh; the timer

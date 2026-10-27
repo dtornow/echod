@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use echod_logic::types::{Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
-use echod_logic::{Config, State};
+use echod_logic::{on_event, Concrete, Config};
 use resonate_core::types::{RequestEnvelope, RequestHead, ResponseEnvelope, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 
@@ -75,7 +75,7 @@ impl Bucket {
 /// A node and its world: the state, the bucket, the clock, and what came
 /// out that was not a store call.
 struct Harness {
-    state: State,
+    state: Concrete,
     bucket: Bucket,
     clock: u64,
     replies: Vec<(u64, Result<ResponseEnvelope, resonate_core::Unavailable>)>,
@@ -91,20 +91,20 @@ impl Harness {
         cfg.timer_bucket_ms = 1_000;
         cfg.heartbeat_ms = 100;
         cfg.node_ttl_ms = 1_000;
-        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, next_request: 1 }
+        Self { state: Concrete::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, next_request: 1 }
     }
 
     /// One event in, and every store call it leads to answered, until the
     /// core asks for nothing more of the store.
     fn apply(&mut self, event: Event) {
-        let mut pending = self.state.on_event(event);
+        let mut pending = on_event(&mut self.state, event);
         while !pending.is_empty() {
             let mut next = Vec::new();
             for e in pending {
                 match e {
                     Effect::Store { op, call } => {
                         let outcome = self.bucket.call(call);
-                        next.extend(self.state.on_event(Event::Completed { op, outcome, clock: self.clock }));
+                        next.extend(on_event(&mut self.state, Event::Completed { op, outcome, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => self.sent.push(format!("{address} {}", serde_json::to_string(&message).unwrap())),

@@ -657,6 +657,7 @@ impl State {
             final(self).outbox == old(self).outbox,
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
             match r {
                 None => {
                     &&& !old(self)@.objects.contains_key(id@)
@@ -683,6 +684,7 @@ impl State {
                 }
                 self.objects[i].project(now);
                 proof {
+                    lemma_object_ids_update(before, i as int, self.objects@[i as int]);
                     crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)
@@ -1021,6 +1023,7 @@ impl State {
             final(self).outbox == old(self).outbox,
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
             match r {
                 None => {
                     &&& *final(self) == *old(self)
@@ -1049,6 +1052,7 @@ impl State {
                 let ghost before = self.objects@;
                 self.objects[i].project(now);
                 proof {
+                    lemma_object_ids_update(before, i as int, self.objects@[i as int]);
                     crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)

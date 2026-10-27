@@ -169,8 +169,90 @@ pub proof fn lemma_fold_update<T, K, V>(s: Seq<T>, key: spec_fn(T) -> K, val: sp
     }
 }
 
+/// Replacing an object row by another carrying the same id preserves the
+/// executable object order.
+pub proof fn lemma_object_ids_update(s: Seq<Promise>, i: int, p: Promise)
+    requires
+        0 <= i < s.len(),
+        s[i].id@ == p.id@,
+    ensures
+        s.update(i, p).map_values(|q: Promise| q.id@)
+            == s.map_values(|q: Promise| q.id@),
+{
+    let t = s.update(i, p);
+    assert(t.len() == s.len());
+    assert forall|j: int| 0 <= j < t.len()
+        implies #[trigger] t[j].id@ == s[j].id@ by {
+        if j != i {
+            assert(t[j] == s[j]);
+        }
+    }
+    assert(t.map_values(|q: Promise| q.id@)
+        =~= s.map_values(|q: Promise| q.id@));
+}
+
+/// Replacing an outbox row by another carrying the same key preserves its
+/// executable position.
+pub proof fn lemma_outbox_keys_update(
+    s: Seq<OutboxEntry>,
+    i: int,
+    e: OutboxEntry,
+)
+    requires
+        0 <= i < s.len(),
+        s[i]@.key() == e@.key(),
+    ensures
+        s.update(i, e).map_values(|q: OutboxEntry| q@.key())
+            == s.map_values(|q: OutboxEntry| q@.key()),
+{
+    let t = s.update(i, e);
+    assert(t.len() == s.len());
+    assert forall|j: int| 0 <= j < t.len()
+        implies #[trigger] t[j]@.key() == s[j]@.key() by {
+        if j != i {
+            assert(t[j] == s[j]);
+        }
+    }
+    assert(t.map_values(|q: OutboxEntry| q@.key())
+        =~= s.map_values(|q: OutboxEntry| q@.key()));
+}
+
 impl State {
     // --- objects ---
+
+    /// The row vector itself supplies a sound order witness for its folded
+    /// object map.  In particular, this does not identify that order with
+    /// `Map::dom().to_seq()`, whose order is unspecified.
+    pub proof fn lemma_object_order(self)
+        requires
+            self.wf(),
+        ensures
+            object_order(self@, object_ids(self)),
+    {
+        lemma_fold_dom(self.objects@, obj_key(), obj_val());
+        assert(object_ids(self).no_duplicates()) by {
+            assert forall|i: int, j: int|
+                0 <= i < object_ids(self).len()
+                && 0 <= j < object_ids(self).len()
+                && object_ids(self)[i] == object_ids(self)[j]
+                implies i == j by {
+                assert(object_ids(self)[i] == obj_key()(self.objects@[i]));
+                assert(object_ids(self)[j] == obj_key()(self.objects@[j]));
+            }
+        }
+        assert forall|i: int| 0 <= i < object_ids(self).len()
+            implies self@.objects.contains_key(#[trigger] object_ids(self)[i]) by {
+            assert(mentions(self.objects@, obj_key(), object_ids(self)[i])) by {
+                assert(obj_key()(self.objects@[i]) == object_ids(self)[i]);
+            }
+        }
+        assert forall|id: Seq<char>| #[trigger] self@.objects.contains_key(id)
+            implies object_ids(self).contains(id) by {
+            let i = choose|i: int| 0 <= i < self.objects@.len()
+                && #[trigger] obj_key()(self.objects@[i]) == id;
+            assert(object_ids(self)[i] == id);
+        }
+    }
 
     /// The row at `i` is the entry at its id.
     pub proof fn lemma_object_at(self, i: int)

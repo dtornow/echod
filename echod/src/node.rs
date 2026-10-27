@@ -1,12 +1,13 @@
 //! The executor: the core's effects, performed.
 //!
 //! One `State` behind one lock. Every event goes through `apply`, which
-//! takes the lock, runs the core's one step, drops the lock, and performs
-//! what came out: a store call is spawned and its answer comes back as
-//! `Completed`; a reply wakes the request waiting for it; a message is
-//! pushed; a wake resets the one timer; a note goes to the metrics, the
-//! log, and whoever listens. The core never waits, so the lock is held
-//! for a step and no longer, and nothing here decides anything.
+//! takes the lock, runs the core's one step, drops the lock, and submits
+//! the ordered effects that came out: a store call is spawned and its answer
+//! comes back as `Completed`; a reply wakes the request waiting for it; a
+//! message is pushed; a wake resets the one timer; a note goes to the metrics,
+//! log, and whoever listens. The core never waits, so the lock is held for a
+//! step and no longer. Asynchronous completions may return in any order, as
+//! separate events; nothing here decides anything.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use echod_logic::members::Membership;
 use echod_logic::types::{Effect, Event, Note, RequestId};
-use echod_logic::State;
+use echod_logic::{on_event, Concrete};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
 use tokio::sync::{oneshot, watch};
@@ -36,7 +37,7 @@ pub struct Node {
     me: Weak<Node>,
     cfg: Config,
     id: String,
-    state: Mutex<State>,
+    state: Mutex<Concrete>,
     store: Arc<dyn Store>,
     router: Arc<dyn ResonateRouter>,
     clock: Arc<dyn Clock>,
@@ -71,7 +72,7 @@ impl Node {
         let appendable = store.supports_append();
         let store: Arc<dyn Store> = Arc::new(metrics::MeteredStore::new(store, keys, Arc::clone(&metrics)));
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", echod_logic::keys::fnv1a(&format!("{}/{}", cfg.node_url(), clock.now()))));
-        let state = State::new(cfg.logic(id.clone(), appendable));
+        let state = Concrete::new(cfg.logic(id.clone(), appendable));
         let (wake, _) = watch::channel(None);
         let (stopped, _) = watch::channel(false);
         let (crashed, _) = watch::channel(false);
@@ -170,7 +171,7 @@ impl Node {
         }
         let (effects, stopped) = {
             let mut s = self.lock();
-            let effects = s.on_event(event);
+            let effects = on_event(&mut s, event);
             (effects, s.stopped())
         };
         for e in effects {
