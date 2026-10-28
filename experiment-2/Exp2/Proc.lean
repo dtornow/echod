@@ -83,6 +83,11 @@ def oneOf {α : Type} : Some α → Proc E S M α
   | ⟨x :: rest, _⟩ => .choose rest.length fun i => .pure ((x :: rest)[i.val]'(by simp))
   | ⟨[], h⟩ => absurd rfl h
 
+/-- Emit each output in order. -/
+def emitAll : List (Out M) → Proc E S M Unit
+  | [] => .pure ()
+  | o :: rest => .emit o (emitAll rest)
+
 end Proc
 
 open Proc in
@@ -91,7 +96,7 @@ open Proc in
 def Proc.lift {α : Type} (h : H E S (Out M) α) : Proc E S M α := do
   let (a, s, outs) ← oneOf (h (← read) (← get))
   set s
-  for o in outs do .emit o (.pure ())
+  emitAll outs
   return a
 
 

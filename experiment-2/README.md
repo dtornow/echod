@@ -16,6 +16,10 @@ scheduler. This experiment takes that shape and plugs it into experiment
   runs from where it was blocked until it blocks again, and starts over
   when it ends, as an Erlang server loop. A process's state is its data,
   its mailbox, and its continuation.
+- `Exp2/Refinement.lean`: the proof that the common fragment refines
+  experiment 1. A terminating evaluation relation for processes records
+  results, state, and outputs. `eval_lift_iff` proves that `Proc.lift`
+  introduces no handler outcome and loses none.
 - `Exp2/Node.lean`: experiment 1's storage node rewritten as code: take a
   request, ask the store, wait, decide with the abstract handler, write
   conditionally, wait, answer; retry on a lost race. The flight table and
@@ -25,6 +29,8 @@ scheduler. This experiment takes that shape and plugs it into experiment
   refines with conditional writes and not without, a request queued
   behind another is served after it, 30 fuzzed runs refine.
 
-No spawn, so a node serves one request at a time. Nothing is proved.
+No spawn, so a node serves one request at a time. The handler embedding is
+proved. The storage node's end-to-end refinement of the abstract promise
+service is still checked per run, not proved.
 
 `lake build` builds experiment 1 too (a path dependency).
