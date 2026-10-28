@@ -10,8 +10,10 @@
 pub mod external;
 pub mod internal;
 pub mod promise_spec;
+pub mod schedule_spec;
 pub mod state;
 pub mod system;
+pub mod task_spec;
 pub mod types;
 
 pub use state::{apply_all, Config, Effect, State, Transition};

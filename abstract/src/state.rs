@@ -563,7 +563,9 @@ impl TaskObject {
         }
     }
 
-    pub fn to_record(&self, id: &Ident) -> TaskRecord {
+    pub fn to_record(&self, id: &Ident) -> (r: TaskRecord)
+        ensures r@ == crate::task_spec::spec_task_record(self@, id@),
+    {
         TaskRecord {
             id: id.dup(), state: self.state, version: self.version,
             resumes: self.resumes.len() as u64, ttl: self.ttl,

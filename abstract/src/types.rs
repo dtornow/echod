@@ -277,27 +277,65 @@ pub type APromiseRegisterListenerReq = PromiseRegisterListenerReqSpec;
 #[cfg(verus_keep_ghost)]
 pub type APromiseSearchReq = PromiseSearchReqSpec;
 #[make_spec_type] pub struct ScheduleGetReq { pub id: Ident }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleGetReq = ScheduleGetReqSpec;
 #[make_spec_type] pub struct ScheduleCreateReq {
     pub id: Ident, pub cron: Text, pub promise_id: Ident,
     pub promise_timeout: u64, pub promise_param: Value, pub promise_tags: Tags,
     /// Executable witness for Lean's opaque `nextCron cron now`.
     pub next_run_at: u64,
 }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleCreateReq = ScheduleCreateReqSpec;
 #[make_spec_type] pub struct ScheduleDeleteReq { pub id: Ident }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleDeleteReq = ScheduleDeleteReqSpec;
 #[make_spec_type] pub struct ScheduleSearchReq {
     pub limit: Option<u64>, pub cursor: Option<Text>,
 }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleSearchReq = ScheduleSearchReqSpec;
 #[make_spec_type] pub struct TaskGetReq { pub id: Ident }
+#[cfg(verus_keep_ghost)]
+pub type ATaskGetReq = TaskGetReqSpec;
 #[make_spec_type] pub struct TaskCreateReq {
     pub pid: Text, pub ttl: u64, pub action: PromiseCreateReq,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskCreateReq = TaskCreateReqSpec;
 #[make_spec_type] pub struct TaskAcquireReq {
     pub id: Ident, pub version: u64, pub pid: Text, pub ttl: u64,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskAcquireReq = TaskAcquireReqSpec;
 
 pub enum TaskFenceAction {
     Create(PromiseCreateReq),
     Settle(PromiseSettleReq),
+}
+
+#[cfg(verus_keep_ghost)]
+pub enum ATaskFenceAction {
+    Create(APromiseCreateReq),
+    Settle(APromiseSettleReq),
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceAction {
+    type V = ATaskFenceAction;
+
+    open spec fn deep_view(&self) -> ATaskFenceAction {
+        match self {
+            TaskFenceAction::Create(req) => ATaskFenceAction::Create(req.deep_view()),
+            TaskFenceAction::Settle(req) => ATaskFenceAction::Settle(req.deep_view()),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceAction {
+    type V = ATaskFenceAction;
+    open spec fn view(&self) -> ATaskFenceAction { self.deep_view() }
 }
 
 pub struct TaskFenceReq {
@@ -306,20 +344,62 @@ pub struct TaskFenceReq {
     pub action: TaskFenceAction,
 }
 
+#[cfg(verus_keep_ghost)]
+pub struct ATaskFenceReq {
+    pub id: AIdent,
+    pub version: u64,
+    pub action: ATaskFenceAction,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceReq {
+    type V = ATaskFenceReq;
+
+    open spec fn deep_view(&self) -> ATaskFenceReq {
+        ATaskFenceReq {
+            id: self.id.deep_view(),
+            version: self.version,
+            action: self.action.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceReq {
+    type V = ATaskFenceReq;
+    open spec fn view(&self) -> ATaskFenceReq { self.deep_view() }
+}
+
 #[make_spec_type] pub struct TaskRef { pub id: Ident, pub version: u64 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskRef = TaskRefSpec;
 #[make_spec_type] pub struct TaskHeartbeatReq { pub pid: Text, pub tasks: Vec<TaskRef> }
+#[cfg(verus_keep_ghost)]
+pub type ATaskHeartbeatReq = TaskHeartbeatReqSpec;
 #[make_spec_type] pub struct TaskSuspendReq {
     pub id: Ident, pub version: u64, pub actions: Vec<PromiseRegisterCallbackReq>,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskSuspendReq = TaskSuspendReqSpec;
 #[make_spec_type] pub struct TaskFulfillReq {
     pub id: Ident, pub version: u64, pub action: PromiseSettleReq,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskFulfillReq = TaskFulfillReqSpec;
 #[make_spec_type] pub struct TaskReleaseReq { pub id: Ident, pub version: u64 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskReleaseReq = TaskReleaseReqSpec;
 #[make_spec_type] pub struct TaskHaltReq { pub id: Ident }
+#[cfg(verus_keep_ghost)]
+pub type ATaskHaltReq = TaskHaltReqSpec;
 #[make_spec_type] pub struct TaskContinueReq { pub id: Ident }
+#[cfg(verus_keep_ghost)]
+pub type ATaskContinueReq = TaskContinueReqSpec;
 #[make_spec_type] pub struct TaskSearchReq {
     pub state: Option<TaskState>, pub limit: Option<u64>, pub cursor: Option<Text>,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskSearchReq = TaskSearchReqSpec;
 
 #[make_spec_type] pub struct PromiseTimeoutReq { pub id: Ident }
 #[make_spec_type] pub struct TaskLeaseTimeoutReq { pub id: Ident }
@@ -396,25 +476,35 @@ pub type APromiseSearchRes = PromiseSearchResSpec;
 
 #[make_spec_type]
 pub struct ScheduleRes { pub status: u16, pub schedule: Option<Schedule> }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleRes = ScheduleResSpec;
 pub type ScheduleGetRes = ScheduleRes;
 pub type ScheduleCreateRes = ScheduleRes;
 
 #[make_spec_type]
 pub struct ScheduleDeleteRes { pub status: u16 }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleDeleteRes = ScheduleDeleteResSpec;
 
 #[make_spec_type]
 pub struct ScheduleSearchRes {
     pub status: u16, pub schedules: Vec<Schedule>, pub cursor: Option<Text>,
 }
+#[cfg(verus_keep_ghost)]
+pub type AScheduleSearchRes = ScheduleSearchResSpec;
 
 #[make_spec_type]
 pub struct TaskGetRes { pub status: u16, pub task: Option<TaskRecord> }
+#[cfg(verus_keep_ghost)]
+pub type ATaskGetRes = TaskGetResSpec;
 
 #[make_spec_type]
 pub struct TaskClaimRes {
     pub status: u16, pub task: Option<TaskRecord>,
     pub promise: Option<PromiseRecord>, pub preload: Vec<PromiseRecord>,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskClaimRes = TaskClaimResSpec;
 pub type TaskCreateRes = TaskClaimRes;
 pub type TaskAcquireRes = TaskClaimRes;
 
@@ -422,14 +512,67 @@ pub enum TaskFenceInnerRes {
     Create(PromiseCreateRes),
     Settle(PromiseSettleRes),
 }
+
+#[cfg(verus_keep_ghost)]
+pub enum ATaskFenceInnerRes {
+    Create(APromiseRes),
+    Settle(APromiseRes),
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceInnerRes {
+    type V = ATaskFenceInnerRes;
+
+    open spec fn deep_view(&self) -> ATaskFenceInnerRes {
+        match self {
+            TaskFenceInnerRes::Create(res) => ATaskFenceInnerRes::Create(res.deep_view()),
+            TaskFenceInnerRes::Settle(res) => ATaskFenceInnerRes::Settle(res.deep_view()),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceInnerRes {
+    type V = ATaskFenceInnerRes;
+    open spec fn view(&self) -> ATaskFenceInnerRes { self.deep_view() }
+}
+
 pub struct TaskFenceRes {
     pub status: u16,
     pub action: Option<TaskFenceInnerRes>,
     pub preload: Vec<PromiseRecord>,
 }
 
+#[cfg(verus_keep_ghost)]
+pub struct ATaskFenceRes {
+    pub status: u16,
+    pub action: Option<ATaskFenceInnerRes>,
+    pub preload: Seq<APromiseRecord>,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TaskFenceRes {
+    type V = ATaskFenceRes;
+
+    open spec fn deep_view(&self) -> ATaskFenceRes {
+        ATaskFenceRes {
+            status: self.status,
+            action: self.action.deep_view(),
+            preload: self.preload.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TaskFenceRes {
+    type V = ATaskFenceRes;
+    open spec fn view(&self) -> ATaskFenceRes { self.deep_view() }
+}
+
 #[make_spec_type]
 pub struct StatusRes { pub status: u16 }
+#[cfg(verus_keep_ghost)]
+pub type AStatusRes = StatusResSpec;
 pub type TaskHeartbeatRes = StatusRes;
 pub type TaskReleaseRes = StatusRes;
 pub type TaskHaltRes = StatusRes;
@@ -439,14 +582,20 @@ pub type TaskContinueRes = StatusRes;
 pub struct TaskSuspendRes {
     pub status: u16, pub preload: Vec<PromiseRecord>,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskSuspendRes = TaskSuspendResSpec;
 
 #[make_spec_type]
 pub struct TaskFulfillRes { pub status: u16, pub promise: Option<PromiseRecord> }
+#[cfg(verus_keep_ghost)]
+pub type ATaskFulfillRes = TaskFulfillResSpec;
 
 #[make_spec_type]
 pub struct TaskSearchRes {
     pub status: u16, pub tasks: Vec<TaskRecord>, pub cursor: Option<Text>,
 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskSearchRes = TaskSearchResSpec;
 
 // Ordered-list helpers ------------------------------------------------------
 

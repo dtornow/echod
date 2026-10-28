@@ -21,6 +21,11 @@ this crate does not depend on `echod-kernel`, `echod-concrete`, `logic`,
   executable commit, and a pure `spec_apply_all` twin.
 - `promise_spec.rs`: independent `AState`/`AEffect` reader-writer semantics
   for all six Promise external actions, including their committed next states.
+- `task_spec.rs`: independent ghost reader-writer semantics for every Task
+  external variant, including both `TaskFenceAction` alternatives.
+- `schedule_spec.rs`: independent reader-writer semantics for all four
+  Schedule external actions, with the opaque `nextCron` result supplied as a
+  separate witness.
 - `external.rs`: one named semantic action for every external handler.
 - `internal.rs`: one named semantic action for every internal handler.
 - `system.rs`: the 21/6 dispatch sums and semantic runners. Observation
@@ -39,7 +44,7 @@ All 21 external names are present and dispatched:
 |---|---|---|
 | Promise | get, create, settle, register callback, register listener | executable |
 | Promise | search | exact Lean result: 501, no effects |
-| Task | get, create, acquire, fence, heartbeat, suspend, fulfill, release, halt, continue | executable |
+| Task | get, create, acquire, fence, heartbeat, suspend, fulfill, release, halt, continue | executable and proved |
 | Task | search | exact Lean result: 501, no effects |
 | Schedule | get, create, delete | executable |
 | Schedule | search | exact Lean result: 501, no effects |
@@ -60,6 +65,16 @@ the three searches, and they are unsupported in the Lean source itself.
 Each executable Promise handler has a Verus contract proving that its response
 and ordered effect sequence equal the independent ghost semantics, and that
 committing those effects with `spec_apply_all` yields the specified next state.
+The four executable Schedule handlers have the same three-part contract.
+Schedule get/search produce no effects; create/delete prove their exact
+singleton writer effects on the writing branches.
+
+The dispatcher contains exactly 11 `ExternalAction::Task*` variants: get,
+create, acquire, fence, heartbeat, suspend, fulfill, release, halt, continue,
+and search. All 11 have the same three-part correctness contract; fence covers
+both of its inner variants, create and settle. The Task specs read only the
+transition pre-state and concatenate repeated heartbeat/suspend effects in
+request order.
 
 ## Explicit semantic boundaries
 
