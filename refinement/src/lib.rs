@@ -1,0 +1,218 @@
+//! Local Concrete-to-Abstract refinement.
+//!
+//! This crate depends on the two model levels, not on a checker framework.
+//! Concrete owns persisted row order; Abstract owns independent protocol
+//! objects and actions. Translation is the refinement boundary.
+
+#![cfg(verus_keep_ghost)]
+#![allow(unused_imports)]
+
+use vstd::prelude::*;
+
+use echod_abstract::state as abs_state;
+use echod_abstract::types as abs;
+use echod_concrete::{
+    kernel_view, row_ids, rows_wf, AStore,
+};
+use echod_kernel::types as kernel;
+use echod_kernel::types::{
+    APromise, ATask, AValue,
+};
+
+verus! {
+
+pub type Chars = Seq<char>;
+
+/// Everything after the first `:`, or empty for a root id.
+pub open spec fn suffix(id: Chars) -> Chars
+    decreases id.len(),
+{
+    if id.len() == 0 {
+        Seq::empty()
+    } else if id[0] == ':' {
+        id.drop_first()
+    } else {
+        suffix(id.drop_first())
+    }
+}
+
+pub open spec fn text(chars: Chars) -> abs::AText {
+    abs::AText { chars }
+}
+
+pub open spec fn ident(id: Chars) -> abs::AIdent {
+    abs::AIdent {
+        origin: text(kernel::origin(id)),
+        suffix: text(suffix(id)),
+    }
+}
+
+pub open spec fn tag(pair: (Chars, Chars)) -> abs::ATag {
+    abs::ATag {
+        key: text(pair.0),
+        value: text(pair.1),
+    }
+}
+
+pub open spec fn tags(xs: Seq<(Chars, Chars)>) -> Seq<abs::ATag>
+    decreases xs.len(),
+{
+    if xs.len() == 0 {
+        Seq::empty()
+    } else {
+        tags(xs.drop_last()).push(tag(xs.last()))
+    }
+}
+
+pub open spec fn value(v: AValue) -> abs::AValue {
+    abs::AValue {
+        headers: tags(v.headers),
+        data: match v.data {
+            Some(x) => Some(text(x)),
+            None => None,
+        },
+    }
+}
+
+pub open spec fn promise_state(
+    state: kernel::PromiseState,
+) -> abs::PromiseState {
+    match state {
+        kernel::PromiseState::Pending => abs::PromiseState::Pending,
+        kernel::PromiseState::Resolved => abs::PromiseState::Resolved,
+        kernel::PromiseState::Rejected => abs::PromiseState::Rejected,
+        kernel::PromiseState::RejectedCanceled =>
+            abs::PromiseState::RejectedCanceled,
+        kernel::PromiseState::RejectedTimedout =>
+            abs::PromiseState::RejectedTimedout,
+    }
+}
+
+pub open spec fn task_state(state: kernel::TaskState) -> abs::TaskState {
+    match state {
+        kernel::TaskState::Pending => abs::TaskState::Pending,
+        kernel::TaskState::Acquired => abs::TaskState::Acquired,
+        kernel::TaskState::Suspended => abs::TaskState::Suspended,
+        kernel::TaskState::Halted => abs::TaskState::Halted,
+        kernel::TaskState::Fulfilled => abs::TaskState::Fulfilled,
+    }
+}
+
+pub open spec fn id_list(ids: Seq<Chars>) -> Seq<abs::AIdent>
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        Seq::empty()
+    } else {
+        id_list(ids.drop_last()).push(ident(ids.last()))
+    }
+}
+
+pub open spec fn text_list(xs: Seq<Chars>) -> Seq<abs::AText>
+    decreases xs.len(),
+{
+    if xs.len() == 0 {
+        Seq::empty()
+    } else {
+        text_list(xs.drop_last()).push(text(xs.last()))
+    }
+}
+
+pub open spec fn task(t: ATask) -> abs_state::ATaskObject {
+    abs_state::ATaskObject {
+        state: task_state(t.state),
+        version: t.version,
+        ttl: t.ttl,
+        pid: match t.pid {
+            Some(x) => Some(text(x)),
+            None => None,
+        },
+        lease_timeout_at: t.lease_timeout_at,
+        retry_timeout_at: t.retry_timeout_at,
+        resumes: id_list(t.resumes),
+    }
+}
+
+pub open spec fn promise(p: APromise) -> abs_state::APromiseObject {
+    abs_state::APromiseObject {
+        state: promise_state(p.state),
+        param: value(p.param),
+        value: value(p.value),
+        tags: tags(p.tags),
+        timeout_at: p.timeout_at,
+        created_at: p.created_at,
+        settled_at: p.settled_at,
+        callbacks: id_list(p.callbacks),
+        listeners: text_list(p.listeners),
+    }
+}
+
+pub open spec fn object(p: APromise) -> abs_state::AObject {
+    abs_state::AObject {
+        id: ident(p.id),
+        promise: promise(p),
+        task: match p.task {
+            Some(t) => Some(task(t)),
+            None => None,
+        },
+    }
+}
+
+pub open spec fn objects(rows: Seq<APromise>) -> Seq<abs_state::AObject>
+    decreases rows.len(),
+{
+    if rows.len() == 0 {
+        Seq::empty()
+    } else {
+        objects(rows.drop_last()).push(object(rows.last()))
+    }
+}
+
+pub open spec fn abstract_of(store: AStore) -> abs_state::AState {
+    abs_state::AState {
+        objects: objects(store.rows),
+        schedules: Seq::empty(),
+        outbox: Seq::empty(),
+    }
+}
+
+/// The first refinement relation: the Abstract state is exactly the
+/// protocol interpretation of Concrete's persisted rows.
+pub open spec fn related(
+    concrete: AStore,
+    abstract_state: abs_state::AState,
+) -> bool {
+    &&& rows_wf(concrete.rows)
+    &&& abstract_state == abstract_of(concrete)
+}
+
+pub open spec fn concrete_init() -> AStore {
+    AStore { rows: Seq::empty() }
+}
+
+pub open spec fn abstract_init() -> abs_state::AState {
+    abs_state::AState {
+        objects: Seq::empty(),
+        schedules: Seq::empty(),
+        outbox: Seq::empty(),
+    }
+}
+
+pub proof fn lemma_objects_len(rows: Seq<APromise>)
+    ensures
+        objects(rows).len() == rows.len(),
+    decreases rows.len(),
+{
+    if rows.len() > 0 {
+        lemma_objects_len(rows.drop_last());
+    }
+}
+
+pub proof fn lemma_init_related()
+    ensures
+        related(concrete_init(), abstract_init()),
+{
+    assert(rows_wf(Seq::<APromise>::empty()));
+}
+
+} // verus!
