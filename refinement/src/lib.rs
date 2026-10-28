@@ -168,6 +168,28 @@ pub open spec fn objects(rows: Seq<APromise>) -> Seq<abs_state::AObject>
     }
 }
 
+/// Abstract object-list order is not semantic. Handlers address objects by
+/// id and searches are explicitly unsupported, so refinement compares the
+/// keyed contents while Concrete retains its own persisted row order.
+pub open spec fn abstract_object_map(
+    rows: Seq<abs_state::AObject>,
+) -> Map<abs::AIdent, abs_state::AObject>
+    decreases rows.len(),
+{
+    if rows.len() == 0 {
+        Map::empty()
+    } else {
+        let object = rows.last();
+        abstract_object_map(rows.drop_last()).insert(object.id, object)
+    }
+}
+
+pub open spec fn abstract_ids(
+    rows: Seq<abs_state::AObject>,
+) -> Seq<abs::AIdent> {
+    rows.map_values(|object: abs_state::AObject| object.id)
+}
+
 pub open spec fn abstract_of(store: AStore) -> abs_state::AState {
     abs_state::AState {
         objects: objects(store.rows),
@@ -183,7 +205,11 @@ pub open spec fn related(
     abstract_state: abs_state::AState,
 ) -> bool {
     &&& rows_wf(concrete.rows)
-    &&& abstract_state == abstract_of(concrete)
+    &&& abstract_ids(abstract_state.objects).no_duplicates()
+    &&& abstract_object_map(abstract_state.objects)
+        == abstract_object_map(objects(concrete.rows))
+    &&& abstract_state.schedules == Seq::<abs::ASchedule>::empty()
+    &&& abstract_state.outbox == Seq::<abs_state::AOutboxEntry>::empty()
 }
 
 pub open spec fn concrete_init() -> AStore {
@@ -213,6 +239,7 @@ pub proof fn lemma_init_related()
         related(concrete_init(), abstract_init()),
 {
     assert(rows_wf(Seq::<APromise>::empty()));
+    assert(abstract_ids(Seq::<abs_state::AObject>::empty()).no_duplicates());
 }
 
 } // verus!
