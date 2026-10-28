@@ -1,0 +1,10 @@
+name = "experiment-3"
+defaultTargets = ["Exp3"]
+
+# The shells, the checker, the abstract promise handlers, and the store, from experiment 1.
+[[require]]
+name = "experiment-1"
+path = "../experiment-1"
+
+[[lean_lib]]
+name = "Exp3"
