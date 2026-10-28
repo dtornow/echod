@@ -1,9 +1,7 @@
 //! Protocol vocabulary from `01-protocol/types.lean`.
 //!
-//! `Text` is UTF-8 bytes. The Lean model treats strings opaquely except for
-//! equality, origin equality, and five ASCII tag names, so bytes retain all
-//! semantically relevant information without requiring an unverified string
-//! primitive.
+//! `Text` is a vector of Unicode scalar values. This matches the kernel's
+//! `Seq<char>` view directly; encoding belongs to the wire boundary.
 
 use vstd::contrib::{make_spec_type, self_view};
 use vstd::prelude::*;
@@ -15,7 +13,7 @@ pub const MAX_TIME: u64 = 0x3fff_ffff_ffff_ffff;
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, Default, PartialEq, Eq))]
 pub struct Text {
-    pub bytes: Vec<u8>,
+    pub chars: Vec<char>,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -23,25 +21,25 @@ pub type AText = TextSpec;
 
 impl Text {
     pub fn empty() -> Text {
-        Text { bytes: Vec::new() }
+        Text { chars: Vec::new() }
     }
 
     pub fn dup(&self) -> (r: Text)
         ensures r@ == self@,
     {
-        let mut bytes = Vec::new();
+        let mut chars = Vec::new();
         let mut i: usize = 0;
-        while i < self.bytes.len()
+        while i < self.chars.len()
             invariant
-                i <= self.bytes@.len(),
-                bytes@ == self.bytes@.take(i as int),
-            decreases self.bytes@.len() - i,
+                i <= self.chars@.len(),
+                chars@ == self.chars@.take(i as int),
+            decreases self.chars@.len() - i,
         {
-            bytes.push(self.bytes[i]);
+            chars.push(self.chars[i]);
             i += 1;
         }
-        assert(self.bytes@.take(self.bytes@.len() as int) =~= self.bytes@);
-        Text { bytes }
+        assert(self.chars@.take(self.chars@.len() as int) =~= self.chars@);
+        Text { chars }
     }
 }
 
@@ -63,7 +61,7 @@ impl Ident {
     }
 
     pub fn same_origin(&self, other: &Ident) -> bool {
-        self.origin.bytes == other.origin.bytes
+        self.origin.chars == other.origin.chars
     }
 }
 
@@ -407,60 +405,60 @@ pub fn dup_tags(tags: &Tags) -> Tags {
 }
 
 pub fn ident_eq(a: &Ident, b: &Ident) -> bool {
-    a.origin.bytes == b.origin.bytes && a.suffix.bytes == b.suffix.bytes
+    a.origin.chars == b.origin.chars && a.suffix.chars == b.suffix.chars
 }
 
 pub fn text_eq(a: &Text, b: &Text) -> bool {
-    a.bytes == b.bytes
+    a.chars == b.chars
 }
 
 fn ascii_true(x: &Text) -> bool {
-    x.bytes.len() == 4 && x.bytes[0] == 116 && x.bytes[1] == 114
-        && x.bytes[2] == 117 && x.bytes[3] == 101
+    x.chars.len() == 4 && x.chars[0] == 't' && x.chars[1] == 'r'
+        && x.chars[2] == 'u' && x.chars[3] == 'e'
 }
 
 fn ascii_global(x: &Text) -> bool {
-    x.bytes.len() == 6 && x.bytes[0] == 103 && x.bytes[1] == 108
-        && x.bytes[2] == 111 && x.bytes[3] == 98 && x.bytes[4] == 97
-        && x.bytes[5] == 108
+    x.chars.len() == 6 && x.chars[0] == 'g' && x.chars[1] == 'l'
+        && x.chars[2] == 'o' && x.chars[3] == 'b' && x.chars[4] == 'a'
+        && x.chars[5] == 'l'
 }
 
 fn key_prefix(x: &Text) -> bool {
-    x.bytes.len() >= 9 && x.bytes[0] == 114 && x.bytes[1] == 101
-        && x.bytes[2] == 115 && x.bytes[3] == 111 && x.bytes[4] == 110
-        && x.bytes[5] == 97 && x.bytes[6] == 116 && x.bytes[7] == 101
-        && x.bytes[8] == 58
+    x.chars.len() >= 9 && x.chars[0] == 'r' && x.chars[1] == 'e'
+        && x.chars[2] == 's' && x.chars[3] == 'o' && x.chars[4] == 'n'
+        && x.chars[5] == 'a' && x.chars[6] == 't' && x.chars[7] == 'e'
+        && x.chars[8] == ':'
 }
 
 fn key_target(x: &Text) -> bool {
-    key_prefix(x) && x.bytes.len() == 15 && x.bytes[9] == 116
-        && x.bytes[10] == 97 && x.bytes[11] == 114 && x.bytes[12] == 103
-        && x.bytes[13] == 101 && x.bytes[14] == 116
+    key_prefix(x) && x.chars.len() == 15 && x.chars[9] == 't'
+        && x.chars[10] == 'a' && x.chars[11] == 'r' && x.chars[12] == 'g'
+        && x.chars[13] == 'e' && x.chars[14] == 't'
 }
 
 fn key_scope(x: &Text) -> bool {
-    key_prefix(x) && x.bytes.len() == 14 && x.bytes[9] == 115
-        && x.bytes[10] == 99 && x.bytes[11] == 111 && x.bytes[12] == 112
-        && x.bytes[13] == 101
+    key_prefix(x) && x.chars.len() == 14 && x.chars[9] == 's'
+        && x.chars[10] == 'c' && x.chars[11] == 'o' && x.chars[12] == 'p'
+        && x.chars[13] == 'e'
 }
 
 fn key_external(x: &Text) -> bool {
-    key_prefix(x) && x.bytes.len() == 17 && x.bytes[9] == 101
-        && x.bytes[10] == 120 && x.bytes[11] == 116 && x.bytes[12] == 101
-        && x.bytes[13] == 114 && x.bytes[14] == 110 && x.bytes[15] == 97
-        && x.bytes[16] == 108
+    key_prefix(x) && x.chars.len() == 17 && x.chars[9] == 'e'
+        && x.chars[10] == 'x' && x.chars[11] == 't' && x.chars[12] == 'e'
+        && x.chars[13] == 'r' && x.chars[14] == 'n' && x.chars[15] == 'a'
+        && x.chars[16] == 'l'
 }
 
 fn key_timer(x: &Text) -> bool {
-    key_prefix(x) && x.bytes.len() == 14 && x.bytes[9] == 116
-        && x.bytes[10] == 105 && x.bytes[11] == 109 && x.bytes[12] == 101
-        && x.bytes[13] == 114
+    key_prefix(x) && x.chars.len() == 14 && x.chars[9] == 't'
+        && x.chars[10] == 'i' && x.chars[11] == 'm' && x.chars[12] == 'e'
+        && x.chars[13] == 'r'
 }
 
 fn key_delay(x: &Text) -> bool {
-    key_prefix(x) && x.bytes.len() == 14 && x.bytes[9] == 100
-        && x.bytes[10] == 101 && x.bytes[11] == 108 && x.bytes[12] == 97
-        && x.bytes[13] == 121
+    key_prefix(x) && x.chars.len() == 14 && x.chars[9] == 'd'
+        && x.chars[10] == 'e' && x.chars[11] == 'l' && x.chars[12] == 'a'
+        && x.chars[13] == 'y'
 }
 
 /// First matching tag, exactly Lean's `List.find?`.
@@ -511,11 +509,22 @@ pub fn tags_otype(tags: &Tags) -> OType {
 pub fn parse_nat_bounded(x: &Text) -> u64 {
     let mut acc: u64 = 0;
     let mut i: usize = 0;
-    while i < x.bytes.len()
-        decreases x.bytes@.len() - i,
+    while i < x.chars.len()
+        decreases x.chars@.len() - i,
     {
-        let b = x.bytes[i];
-        let d = if b >= 48 { (b - 48) as u64 } else { 0 };
+        let d = match x.chars[i] {
+            '0' => 0,
+            '1' => 1,
+            '2' => 2,
+            '3' => 3,
+            '4' => 4,
+            '5' => 5,
+            '6' => 6,
+            '7' => 7,
+            '8' => 8,
+            '9' => 9,
+            _ => 0,
+        };
         if acc > MAX_TIME / 10 {
             return MAX_TIME;
         }

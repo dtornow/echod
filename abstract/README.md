@@ -68,8 +68,9 @@ theorems restrict inputs to the no-overflow domain, where these operations
 equal Lean arithmetic exactly. Values outside that domain are unsupported by
 the executable twin, not protocol-level 400 responses.
 
-`Text` stores UTF-8 bytes. Equality and ASCII protocol tags are exact; the
-delay parser is intended for the protocol's decimal ASCII delay values.
+`Text` stores Unicode scalar values, matching the kernel's `Seq<char>` view;
+wire encoding remains outside this model. Equality and ASCII protocol tags
+are exact, and the delay parser accepts decimal ASCII characters.
 
 ## Verification
 

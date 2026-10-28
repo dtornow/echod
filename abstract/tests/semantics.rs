@@ -4,7 +4,7 @@ use echod_abstract::state::{
 };
 
 fn text(s: &str) -> Text {
-    Text { bytes: s.as_bytes().to_vec() }
+    Text { chars: s.chars().collect() }
 }
 
 fn id(origin: &str, suffix: &str) -> Ident {

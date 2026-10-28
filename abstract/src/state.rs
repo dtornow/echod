@@ -378,12 +378,12 @@ impl APromiseObject {
 }
 
 /// Ghost twin of first-match timer classification.
-pub open spec fn spec_tag_key_timer(k: Seq<u8>) -> bool {
-    k =~= seq![114u8,101u8,115u8,111u8,110u8,97u8,116u8,101u8,58u8,116u8,105u8,109u8,101u8,114u8]
+pub open spec fn spec_tag_key_timer(k: Seq<char>) -> bool {
+    k =~= seq!['r','e','s','o','n','a','t','e',':','t','i','m','e','r']
 }
 
 pub open spec fn spec_text_true(x: AText) -> bool {
-    x.bytes =~= seq![116u8,114u8,117u8,101u8]
+    x.chars =~= seq!['t','r','u','e']
 }
 
 pub open spec fn spec_timer_value(tags: ATags) -> Option<AText>
@@ -391,7 +391,7 @@ pub open spec fn spec_timer_value(tags: ATags) -> Option<AText>
 {
     if tags.len() == 0 {
         None
-    } else if spec_tag_key_timer(tags[0].key.bytes) {
+    } else if spec_tag_key_timer(tags[0].key.chars) {
         Some(tags[0].value)
     } else {
         spec_timer_value(tags.drop_first())
