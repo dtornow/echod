@@ -61,13 +61,12 @@ The action preserves the supplied occurrence list order and applies the same
 stable `≤ now` filter as Lean. A future checker must obtain these witnesses
 from its cron/expansion implementation and validate that boundary.
 
-Lean uses unbounded `Nat`; this executable uses the protocol-friendly `u64`
-domain and `MAX_TIME = 2^62 - 1`. Create/acquire actions reject values outside
-that sound arithmetic door with 400, and bounded delay parsing saturates at
-the door. Inside the door, additions cannot overflow and the results match
-the Lean arithmetic. Internal callers must likewise supply `now ≤ MAX_TIME`
-and `Config::bounded()`. This is an explicit input-domain restriction, not a
-successful result for an unimplemented case.
+Lean uses unbounded `Nat`; the executable carrier is `u64`. Handlers do not
+invent rejection responses at the carrier boundary: arithmetic saturates
+only to keep the executable total. Refinement and checker-completeness
+theorems restrict inputs to the no-overflow domain, where these operations
+equal Lean arithmetic exactly. Values outside that domain are unsupported by
+the executable twin, not protocol-level 400 responses.
 
 `Text` stores UTF-8 bytes. Equality and ASCII protocol tags are exact; the
 delay parser is intended for the protocol's decimal ASCII delay values.

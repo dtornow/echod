@@ -44,7 +44,7 @@ pub fn promise_get_action(
 pub fn promise_create_action(
     state: &State, req: PromiseCreateReq, now: u64, materialize: bool,
 ) -> Transition<PromiseCreateRes> {
-    if tags_timer_targeted(&req.tags) || req.timeout_at > MAX_TIME || now > MAX_TIME {
+    if tags_timer_targeted(&req.tags) {
         return Transition { response: promise_error(400), effects: Vec::new() };
     }
     let read = read_object(state, &req.id, now, materialize);
@@ -191,7 +191,6 @@ pub fn task_create_action(
 ) -> Transition<TaskCreateRes> {
     let a = req.action;
     if tags_otype(&a.tags) != OType::Runnable || tags_timer_targeted(&a.tags)
-        || a.timeout_at > MAX_TIME || req.ttl > MAX_TIME || now > MAX_TIME
     {
         return Transition { response: claim_error(400), effects: Vec::new() };
     }
@@ -242,11 +241,10 @@ pub fn task_create_action(
             if t0.state == TaskState::Fulfilled {
                 return Transition { response: claim_ok(&o, t0), effects: read.effects };
             }
-            if t0.state != TaskState::Pending || t0.version == u64::MAX {
+            if t0.state != TaskState::Pending {
                 return Transition { response: claim_error(409), effects: read.effects };
             }
-            assert(t0.version < u64::MAX);
-            let next_version = t0.version + 1;
+            let next_version = t0.version.saturating_add(1);
             let mut t = t0.dup();
             t.state = TaskState::Acquired;
             t.version = next_version;
@@ -265,9 +263,6 @@ pub fn task_create_action(
 pub fn task_acquire_action(
     state: &State, req: TaskAcquireReq, now: u64, materialize: bool,
 ) -> Transition<TaskAcquireRes> {
-    if req.ttl > MAX_TIME || now > MAX_TIME {
-        return Transition { response: claim_error(400), effects: Vec::new() };
-    }
     let read = read_task_object(state, &req.id, now, materialize);
     let o = match read.object {
         None => return Transition { response: claim_error(404), effects: read.effects },
@@ -278,12 +273,11 @@ pub fn task_acquire_action(
         Some(t) => t,
     };
     if t0.state != TaskState::Pending || o.promise.state != PromiseState::Pending
-        || t0.version != req.version || t0.version == u64::MAX
+        || t0.version != req.version
     {
         return Transition { response: claim_error(409), effects: read.effects };
     }
-    assert(t0.version < u64::MAX);
-    let next_version = t0.version + 1;
+    let next_version = t0.version.saturating_add(1);
     let mut t = t0.dup();
     t.state = TaskState::Acquired;
     t.version = next_version;
@@ -666,9 +660,7 @@ pub fn schedule_get_action(
 pub fn schedule_create_action(
     state: &State, req: ScheduleCreateReq, now: u64, _materialize: bool,
 ) -> Transition<ScheduleCreateRes> {
-    if tags_timer_targeted(&req.promise_tags) || req.promise_timeout > MAX_TIME
-        || now > MAX_TIME
-    {
+    if tags_timer_targeted(&req.promise_tags) {
         return Transition {
             response: ScheduleRes { status: 400, schedule: None }, effects: Vec::new(),
         };
