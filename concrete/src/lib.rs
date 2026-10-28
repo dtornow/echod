@@ -9,9 +9,14 @@
 
 use vstd::prelude::*;
 
+use echod_kernel::types::Promise;
+
+#[cfg(verus_keep_ghost)]
 use echod_kernel::steps::executable_single_pass;
+#[cfg(verus_keep_ghost)]
 use echod_kernel::store::{object_order, AState};
-use echod_kernel::types::{APromise, Promise};
+#[cfg(verus_keep_ghost)]
+use echod_kernel::types::APromise;
 
 verus! {
 
