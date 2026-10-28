@@ -1,0 +1,22 @@
+[package]
+name = "echod-concrete"
+description = "The deterministic Concrete document model: persisted rows, with maps only as derived views."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_concrete"
+path = "src/lib.rs"
+
+[dependencies]
+echod-kernel = { path = "../kernel" }
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

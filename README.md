@@ -21,6 +21,7 @@ crashes, outages and lost acks.
 | | |
 |---|---|
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
+| [`concrete/`](concrete) | the deterministic document model at its own level: persisted promise rows in order, with kernel maps only as derived views; normalization uses that row order directly |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
@@ -42,6 +43,7 @@ a map of its files.
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
 (cd kernel && ./verify.sh)              # the kernel under Verus
+(cd concrete && ./verify.sh)            # the row-native Concrete document model
 (cd system && ./verify.sh)              # the system model under Verus, importing the kernel
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001
