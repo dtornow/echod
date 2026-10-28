@@ -4,12 +4,15 @@
 //! Lean semantics. No action records Invoke/Return observations.
 
 use vstd::prelude::*;
+use crate::promise_spec::*;
 use crate::state::*;
 use crate::types::*;
 
 verus! {
 
-fn promise_error(status: u16) -> PromiseRes {
+fn promise_error(status: u16) -> (r: PromiseRes)
+    ensures r@ == spec_promise_error(status),
+{
     PromiseRes { status, promise: None }
 }
 
@@ -30,7 +33,15 @@ fn claim_ok(o: &Object, t: &TaskObject) -> TaskClaimRes {
 
 pub fn promise_get_action(
     state: &State, req: &PromiseGetReq, now: u64, materialize: bool,
-) -> Transition<PromiseGetRes> {
+) -> (result: Transition<PromiseGetRes>)
+    ensures
+        result.response@ ==
+            spec_promise_get_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_get_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_get_action(state@, req@, now, materialize).next_state,
+{
     let read = read_object(state, &req.id, now, materialize);
     match read.object {
         None => Transition { response: promise_error(404), effects: read.effects },
@@ -43,7 +54,15 @@ pub fn promise_get_action(
 
 pub fn promise_create_action(
     state: &State, req: PromiseCreateReq, now: u64, materialize: bool,
-) -> Transition<PromiseCreateRes> {
+) -> (result: Transition<PromiseCreateRes>)
+    ensures
+        result.response@ ==
+            spec_promise_create_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_create_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_create_action(state@, req@, now, materialize).next_state,
+{
     if tags_timer_targeted(&req.tags) {
         return Transition { response: promise_error(400), effects: Vec::new() };
     }
@@ -68,7 +87,15 @@ pub fn promise_create_action(
 
 pub fn promise_settle_action(
     state: &State, req: PromiseSettleReq, now: u64, materialize: bool,
-) -> Transition<PromiseSettleRes> {
+) -> (result: Transition<PromiseSettleRes>)
+    ensures
+        result.response@ ==
+            spec_promise_settle_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_settle_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_settle_action(state@, req@, now, materialize).next_state,
+{
     if !req.state.settable() {
         return Transition { response: promise_error(400), effects: Vec::new() };
     }
@@ -100,7 +127,15 @@ pub fn promise_settle_action(
 
 pub fn promise_register_callback_action(
     state: &State, req: &PromiseRegisterCallbackReq, now: u64, materialize: bool,
-) -> Transition<PromiseRegisterCallbackRes> {
+) -> (result: Transition<PromiseRegisterCallbackRes>)
+    ensures
+        result.response@ ==
+            spec_promise_register_callback_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_register_callback_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_register_callback_action(state@, req@, now, materialize).next_state,
+{
     if ident_eq(&req.awaited, &req.awaiter) || !req.awaited.same_origin(&req.awaiter) {
         return Transition { response: promise_error(400), effects: Vec::new() };
     }
@@ -119,7 +154,7 @@ pub fn promise_register_callback_action(
         return Transition { response: promise_error(422), effects };
     }
     if oa.promise.state == PromiseState::Pending && ow.promise.state == PromiseState::Pending {
-        effects.push(Effect::SetPromise(
+        push_effect(&mut effects, Effect::SetPromise(
             oa.id.dup(), oa.promise.dup().add_callback(&req.awaiter),
         ));
     }
@@ -133,7 +168,15 @@ pub fn promise_register_callback_action(
 
 pub fn promise_register_listener_action(
     state: &State, req: &PromiseRegisterListenerReq, now: u64, materialize: bool,
-) -> Transition<PromiseRegisterListenerRes> {
+) -> (result: Transition<PromiseRegisterListenerRes>)
+    ensures
+        result.response@ ==
+            spec_promise_register_listener_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_register_listener_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_register_listener_action(state@, req@, now, materialize).next_state,
+{
     let read = read_object(state, &req.awaited, now, materialize);
     match read.object {
         None => Transition { response: promise_error(404), effects: read.effects },
@@ -143,7 +186,7 @@ pub fn promise_register_listener_action(
             }
             let mut effects = read.effects;
             if o.promise.state == PromiseState::Pending {
-                effects.push(Effect::SetPromise(
+                push_effect(&mut effects, Effect::SetPromise(
                     o.id.dup(), o.promise.dup().add_listener(&req.address),
                 ));
             }
@@ -158,11 +201,25 @@ pub fn promise_register_listener_action(
 }
 
 pub fn promise_search_action(
-    _state: &State, _req: &PromiseSearchReq, _now: u64, _materialize: bool,
-) -> Transition<PromiseSearchRes> {
+    state: &State, req: &PromiseSearchReq, now: u64, materialize: bool,
+) -> (result: Transition<PromiseSearchRes>)
+    ensures
+        result.response@ ==
+            spec_promise_search_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_promise_search_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_promise_search_action(state@, req@, now, materialize).next_state,
+{
+    let promises = Vec::new();
+    let effects = Vec::new();
+    proof {
+        assert(promises.deep_view() =~= Seq::<APromiseRecord>::empty());
+        assert(effects.deep_view() =~= Seq::<AEffect>::empty());
+    }
     Transition {
-        response: PromiseSearchRes { status: 501, promises: Vec::new(), cursor: None },
-        effects: Vec::new(),
+        response: PromiseSearchRes { status: 501, promises, cursor: None },
+        effects,
     }
 }
 

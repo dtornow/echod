@@ -158,58 +158,151 @@ pub struct ReadResult {
     pub effects: Vec<Effect>,
 }
 
+pub open spec fn spec_add_callback(
+    promise: APromiseObject, id: AIdent,
+) -> APromiseObject {
+    if promise.callbacks.contains(id) {
+        promise
+    } else {
+        APromiseObject { callbacks: promise.callbacks.push(id), ..promise }
+    }
+}
+
+pub open spec fn spec_add_listener(
+    promise: APromiseObject, address: AText,
+) -> APromiseObject {
+    if promise.listeners.contains(address) {
+        promise
+    } else {
+        APromiseObject {
+            listeners: promise.listeners.push(address),
+            ..promise
+        }
+    }
+}
+
 impl State {
     pub fn new() -> State {
         State { objects: Vec::new(), schedules: Vec::new(), outbox: Vec::new() }
     }
 
     pub fn find_object(&self, id: &Ident) -> (r: Option<usize>)
-        ensures match r { Some(i) => i < self.objects@.len(), None => true },
+        ensures match r {
+            Some(i) => i < self.objects@.len()
+                && spec_find_object(self.objects.deep_view(), id@)
+                    == Some(self.objects[i as int]@),
+            None => spec_find_object(self.objects.deep_view(), id@) is None,
+        },
     {
         let mut i: usize = 0;
         while i < self.objects.len()
-            invariant i <= self.objects@.len(),
+            invariant
+                i <= self.objects@.len(),
+                spec_find_object(self.objects.deep_view(), id@)
+                    == spec_find_object_at(self.objects.deep_view(), id@, i as nat),
             decreases self.objects@.len() - i,
         {
-            if ident_eq(&self.objects[i].id, id) { return Some(i); }
+            if ident_eq(&self.objects[i].id, id) {
+                assert(spec_find_object_at(
+                    self.objects.deep_view(), id@, i as nat,
+                ) == Some(self.objects[i as int]@));
+                return Some(i);
+            }
+            assert(spec_find_object_at(
+                self.objects.deep_view(), id@, i as nat,
+            ) == spec_find_object_at(
+                self.objects.deep_view(), id@, i as nat + 1,
+            ));
             i += 1;
         }
+        assert(spec_find_object_at(
+            self.objects.deep_view(), id@, i as nat,
+        ) is None);
         None
     }
 
     pub fn find_schedule(&self, id: &Ident) -> (r: Option<usize>)
-        ensures match r { Some(i) => i < self.schedules@.len(), None => true },
+        ensures match r {
+            Some(i) => i < self.schedules@.len()
+                && spec_find_schedule(self.schedules.deep_view(), id@)
+                    == Some(self.schedules[i as int]@),
+            None => spec_find_schedule(self.schedules.deep_view(), id@) is None,
+        },
     {
         let mut i: usize = 0;
         while i < self.schedules.len()
-            invariant i <= self.schedules@.len(),
+            invariant
+                i <= self.schedules@.len(),
+                spec_find_schedule(self.schedules.deep_view(), id@)
+                    == spec_find_schedule_at(
+                        self.schedules.deep_view(), id@, i as nat,
+                    ),
             decreases self.schedules@.len() - i,
         {
-            if ident_eq(&self.schedules[i].id, id) { return Some(i); }
+            if ident_eq(&self.schedules[i].id, id) {
+                assert(spec_find_schedule_at(
+                    self.schedules.deep_view(), id@, i as nat,
+                ) == Some(self.schedules[i as int]@));
+                return Some(i);
+            }
+            assert(spec_find_schedule_at(
+                self.schedules.deep_view(), id@, i as nat,
+            ) == spec_find_schedule_at(
+                self.schedules.deep_view(), id@, i as nat + 1,
+            ));
             i += 1;
         }
+        assert(spec_find_schedule_at(
+            self.schedules.deep_view(), id@, i as nat,
+        ) is None);
         None
     }
 }
 
 impl PromiseObject {
-    pub fn dup(&self) -> PromiseObject {
+    pub fn dup(&self) -> (r: PromiseObject)
+        ensures r@ == self@,
+    {
         let mut callbacks = Vec::new();
         let mut i: usize = 0;
         while i < self.callbacks.len()
+            invariant
+                i <= self.callbacks@.len(),
+                callbacks.deep_view() == self.callbacks.deep_view().take(i as int),
             decreases self.callbacks@.len() - i,
         {
-            callbacks.push(self.callbacks[i].dup());
+            let ghost before = callbacks.deep_view();
+            let next = self.callbacks[i].dup();
+            callbacks.push(next);
+            assert(callbacks.deep_view()
+                =~= before.push(self.callbacks.deep_view()[i as int]));
+            assert(self.callbacks.deep_view().take(i as int + 1)
+                =~= self.callbacks.deep_view().take(i as int)
+                    .push(self.callbacks.deep_view()[i as int]));
             i += 1;
         }
+        assert(self.callbacks.deep_view().take(self.callbacks@.len() as int)
+            =~= self.callbacks.deep_view());
         let mut listeners = Vec::new();
         i = 0;
         while i < self.listeners.len()
+            invariant
+                i <= self.listeners@.len(),
+                listeners.deep_view() == self.listeners.deep_view().take(i as int),
             decreases self.listeners@.len() - i,
         {
-            listeners.push(self.listeners[i].dup());
+            let ghost before = listeners.deep_view();
+            let next = self.listeners[i].dup();
+            listeners.push(next);
+            assert(listeners.deep_view()
+                =~= before.push(self.listeners.deep_view()[i as int]));
+            assert(self.listeners.deep_view().take(i as int + 1)
+                =~= self.listeners.deep_view().take(i as int)
+                    .push(self.listeners.deep_view()[i as int]));
             i += 1;
         }
+        assert(self.listeners.deep_view().take(self.listeners@.len() as int)
+            =~= self.listeners.deep_view());
         PromiseObject {
             state: self.state, param: self.param.dup(), value: self.value.dup(),
             tags: dup_tags(&self.tags), timeout_at: self.timeout_at,
@@ -218,7 +311,18 @@ impl PromiseObject {
         }
     }
 
-    pub fn to_record(&self, id: &Ident) -> PromiseRecord {
+    pub fn to_record(&self, id: &Ident) -> (r: PromiseRecord)
+        ensures r@ == (APromiseRecord {
+            id: id@,
+            state: self@.state,
+            param: self@.param,
+            value: self@.value,
+            tags: self@.tags,
+            timeout_at: self@.timeout_at,
+            created_at: self@.created_at,
+            settled_at: self@.settled_at,
+        }),
+    {
         PromiseRecord {
             id: id.dup(), state: self.state, param: self.param.dup(),
             value: self.value.dup(), tags: dup_tags(&self.tags),
@@ -227,10 +331,21 @@ impl PromiseObject {
         }
     }
 
-    pub fn is_timer(&self) -> bool { tags_is_timer(&self.tags) }
-    pub fn otype(&self) -> OType { tags_otype(&self.tags) }
+    pub fn is_timer(&self) -> (r: bool)
+        ensures r == spec_tags_is_timer(self@.tags),
+    {
+        tags_is_timer(&self.tags)
+    }
+    pub fn otype(&self) -> (r: OType)
+        ensures r == spec_otype(self@.tags),
+    {
+        tags_otype(&self.tags)
+    }
 
-    pub fn project(mut self, now: u64) -> PromiseObject {
+    pub fn project(mut self, now: u64) -> (r: PromiseObject)
+        ensures r@ == spec_project_promise(self@, now),
+    {
+        let ghost original = self@;
         if self.state == PromiseState::Pending && self.timeout_at <= now {
             self.state = if self.is_timer() {
                 PromiseState::Resolved
@@ -239,74 +354,207 @@ impl PromiseObject {
             };
             self.settled_at = Some(self.timeout_at);
         }
+        assert(self@.param == original.param);
+        assert(self@.value == original.value);
+        assert(self@.tags == original.tags);
+        assert(self@.callbacks == original.callbacks);
+        assert(self@.listeners == original.listeners);
+        assert(self@.state == spec_project_promise(original, now).state);
+        assert(self@.timeout_at == spec_project_promise(original, now).timeout_at);
+        assert(self@.created_at == spec_project_promise(original, now).created_at);
+        assert(self@.settled_at == spec_project_promise(original, now).settled_at);
+        assert(self@.param == spec_project_promise(original, now).param);
+        assert(self@.value == spec_project_promise(original, now).value);
+        assert(self@.tags == spec_project_promise(original, now).tags);
+        assert(self@.callbacks == spec_project_promise(original, now).callbacks);
+        assert(self@.listeners == spec_project_promise(original, now).listeners);
+        assert(self@ == spec_project_promise(original, now));
         self
     }
 
-    pub fn add_callback(mut self, id: &Ident) -> PromiseObject {
+    pub fn add_callback(mut self, id: &Ident) -> (r: PromiseObject)
+        ensures r@ == spec_add_callback(self@, id@),
+    {
+        let ghost original = self@;
         let mut found = false;
         let mut i: usize = 0;
         while i < self.callbacks.len()
+            invariant
+                self@ == original,
+                i <= self.callbacks@.len(),
+                found == original.callbacks.take(i as int).contains(id@),
             decreases self.callbacks@.len() - i,
         {
             if ident_eq(&self.callbacks[i], id) { found = true; }
+            proof {
+                vstd::seq_lib::lemma_seq_contains_after_push(
+                    original.callbacks.take(i as int),
+                    original.callbacks[i as int],
+                    id@,
+                );
+            }
+            assert(original.callbacks.take(i as int + 1)
+                =~= original.callbacks.take(i as int)
+                    .push(original.callbacks[i as int]));
             i += 1;
         }
-        if !found { self.callbacks.push(id.dup()); }
+        assert(original.callbacks.take(original.callbacks.len() as int)
+            =~= original.callbacks);
+        if !found {
+            let next = id.dup();
+            self.callbacks.push(next);
+            assert(self@.callbacks =~= original.callbacks.push(id@));
+        }
+        assert(self@ == spec_add_callback(original, id@));
         self
     }
 
-    pub fn add_listener(mut self, address: &Text) -> PromiseObject {
+    pub fn add_listener(mut self, address: &Text) -> (r: PromiseObject)
+        ensures r@ == spec_add_listener(self@, address@),
+    {
+        let ghost original = self@;
         let mut found = false;
         let mut i: usize = 0;
         while i < self.listeners.len()
+            invariant
+                self@ == original,
+                i <= self.listeners@.len(),
+                found == original.listeners.take(i as int).contains(address@),
             decreases self.listeners@.len() - i,
         {
             if text_eq(&self.listeners[i], address) { found = true; }
+            proof {
+                vstd::seq_lib::lemma_seq_contains_after_push(
+                    original.listeners.take(i as int),
+                    original.listeners[i as int],
+                    address@,
+                );
+            }
+            assert(original.listeners.take(i as int + 1)
+                =~= original.listeners.take(i as int)
+                    .push(original.listeners[i as int]));
             i += 1;
         }
-        if !found { self.listeners.push(address.dup()); }
+        assert(original.listeners.take(original.listeners.len() as int)
+            =~= original.listeners);
+        if !found {
+            let next = address.dup();
+            self.listeners.push(next);
+            assert(self@.listeners =~= original.listeners.push(address@));
+        }
+        assert(self@ == spec_add_listener(original, address@));
         self
     }
 
-    pub fn remove_callback(mut self, id: &Ident) -> PromiseObject {
+    pub fn remove_callback(mut self, id: &Ident) -> (r: PromiseObject)
+        ensures r@ == (APromiseObject {
+            callbacks: spec_without_ident(self@.callbacks, id@),
+            ..self@
+        }),
+    {
+        let ghost original = self@;
+        let mut callbacks = Vec::new();
         let mut i: usize = 0;
         while i < self.callbacks.len()
+            invariant
+                self@ == original,
+                i <= self.callbacks@.len(),
+                callbacks.deep_view()
+                    == spec_without_ident(original.callbacks.take(i as int), id@),
             decreases self.callbacks@.len() - i,
         {
-            if ident_eq(&self.callbacks[i], id) {
-                self.callbacks.remove(i);
-            } else {
-                i += 1;
+            if !ident_eq(&self.callbacks[i], id) {
+                callbacks.push(self.callbacks[i].dup());
             }
+            proof {
+                lemma_without_ident_push(
+                    original.callbacks.take(i as int), original.callbacks[i as int], id@,
+                );
+            }
+            assert(original.callbacks.take(i as int + 1)
+                =~= original.callbacks.take(i as int).push(original.callbacks[i as int]));
+            assert(spec_without_ident(original.callbacks.take(i as int + 1), id@)
+                =~= if original.callbacks[i as int] == id@ {
+                    spec_without_ident(original.callbacks.take(i as int), id@)
+                } else {
+                    spec_without_ident(original.callbacks.take(i as int), id@)
+                        .push(original.callbacks[i as int])
+                });
+            i += 1;
         }
+        assert(original.callbacks.take(original.callbacks.len() as int)
+            =~= original.callbacks);
+        self.callbacks = callbacks;
         self
     }
 
-    pub fn remove_listener(mut self, address: &Text) -> PromiseObject {
+    pub fn remove_listener(mut self, address: &Text) -> (r: PromiseObject)
+        ensures r@ == (APromiseObject {
+            listeners: spec_without_text(self@.listeners, address@),
+            ..self@
+        }),
+    {
+        let ghost original = self@;
+        let mut listeners = Vec::new();
         let mut i: usize = 0;
         while i < self.listeners.len()
+            invariant
+                self@ == original,
+                i <= self.listeners@.len(),
+                listeners.deep_view()
+                    == spec_without_text(original.listeners.take(i as int), address@),
             decreases self.listeners@.len() - i,
         {
-            if text_eq(&self.listeners[i], address) {
-                self.listeners.remove(i);
-            } else {
-                i += 1;
+            if !text_eq(&self.listeners[i], address) {
+                listeners.push(self.listeners[i].dup());
             }
+            proof {
+                lemma_without_text_push(
+                    original.listeners.take(i as int), original.listeners[i as int], address@,
+                );
+            }
+            assert(original.listeners.take(i as int + 1)
+                =~= original.listeners.take(i as int).push(original.listeners[i as int]));
+            assert(spec_without_text(original.listeners.take(i as int + 1), address@)
+                =~= if original.listeners[i as int] == address@ {
+                    spec_without_text(original.listeners.take(i as int), address@)
+                } else {
+                    spec_without_text(original.listeners.take(i as int), address@)
+                        .push(original.listeners[i as int])
+                });
+            i += 1;
         }
+        assert(original.listeners.take(original.listeners.len() as int)
+            =~= original.listeners);
+        self.listeners = listeners;
         self
     }
 }
 
 impl TaskObject {
-    pub fn dup(&self) -> TaskObject {
+    pub fn dup(&self) -> (r: TaskObject)
+        ensures r.deep_view() == self.deep_view(),
+    {
         let mut resumes = Vec::new();
         let mut i: usize = 0;
         while i < self.resumes.len()
+            invariant
+                i <= self.resumes@.len(),
+                resumes.deep_view() == self.resumes.deep_view().take(i as int),
             decreases self.resumes@.len() - i,
         {
-            resumes.push(self.resumes[i].dup());
+            let ghost before = resumes.deep_view();
+            let next = self.resumes[i].dup();
+            resumes.push(next);
+            assert(resumes.deep_view()
+                =~= before.push(self.resumes.deep_view()[i as int]));
+            assert(self.resumes.deep_view().take(i as int + 1)
+                =~= self.resumes.deep_view().take(i as int)
+                    .push(self.resumes.deep_view()[i as int]));
             i += 1;
         }
+        assert(self.resumes.deep_view().take(self.resumes@.len() as int)
+            =~= self.resumes.deep_view());
         TaskObject {
             state: self.state, version: self.version, ttl: self.ttl,
             pid: match &self.pid { Some(x) => Some(x.dup()), None => None },
@@ -323,17 +571,37 @@ impl TaskObject {
         }
     }
 
-    pub fn fulfill(mut self) -> TaskObject {
+    pub fn fulfill(mut self) -> (r: TaskObject)
+        ensures r.deep_view() == spec_fulfill_task(self.deep_view()),
+    {
+        let ghost original = self.deep_view();
         self.state = TaskState::Fulfilled;
         self.pid = None;
         self.ttl = None;
         self.lease_timeout_at = None;
         self.retry_timeout_at = None;
         self.resumes = Vec::new();
+        assert(self.deep_view().state == spec_fulfill_task(original).state);
+        assert(self.deep_view().version == spec_fulfill_task(original).version);
+        assert(self.deep_view().ttl == spec_fulfill_task(original).ttl);
+        assert(self.deep_view().pid == spec_fulfill_task(original).pid);
+        assert(self.deep_view().lease_timeout_at
+            == spec_fulfill_task(original).lease_timeout_at);
+        assert(self.deep_view().retry_timeout_at
+            == spec_fulfill_task(original).retry_timeout_at);
+        assert(self.deep_view().resumes == spec_fulfill_task(original).resumes);
+        assert(self.deep_view() == spec_fulfill_task(original));
         self
     }
 
-    pub fn view(self, promise: &PromiseObject) -> TaskObject {
+    pub fn view(self, promise: &PromiseObject) -> (r: TaskObject)
+        ensures r.deep_view() == if promise@.state != PromiseState::Pending
+            && self.deep_view().state != TaskState::Fulfilled {
+            spec_fulfill_task(self.deep_view())
+        } else {
+            self.deep_view()
+        },
+    {
         if promise.state != PromiseState::Pending && self.state != TaskState::Fulfilled {
             self.fulfill()
         } else {
@@ -343,14 +611,18 @@ impl TaskObject {
 }
 
 impl Object {
-    pub fn dup(&self) -> Object {
+    pub fn dup(&self) -> (r: Object)
+        ensures r@ == self@,
+    {
         Object {
             id: self.id.dup(), promise: self.promise.dup(),
             task: match &self.task { Some(t) => Some(t.dup()), None => None },
         }
     }
 
-    pub fn project(mut self, now: u64) -> Object {
+    pub fn project(mut self, now: u64) -> (r: Object)
+        ensures r@ == spec_project_object(self@, now),
+    {
         self.promise = self.promise.project(now);
         self.task = match self.task {
             Some(t) => Some(t.view(&self.promise)),
@@ -399,25 +671,201 @@ pub open spec fn spec_timer_value(tags: ATags) -> Option<AText>
 }
 
 pub open spec fn spec_tags_is_timer(tags: ATags) -> bool {
-    match spec_timer_value(tags) {
-        Some(value) => spec_text_true(value),
-        None => false,
+    spec_is_timer(tags)
+}
+
+/// Pure Abstract projection used by executable correctness contracts.
+pub open spec fn spec_project_promise(p: APromiseObject, now: u64) -> APromiseObject {
+    if p.state == PromiseState::Pending && p.timeout_at <= now {
+        APromiseObject {
+            state: if spec_tags_is_timer(p.tags) {
+                PromiseState::Resolved
+            } else {
+                PromiseState::RejectedTimedout
+            },
+            settled_at: Some(p.timeout_at),
+            ..p
+        }
+    } else {
+        p
     }
+}
+
+pub open spec fn spec_fulfill_task(t: ATaskObject) -> ATaskObject {
+    ATaskObject {
+        state: TaskState::Fulfilled,
+        ttl: None,
+        pid: None,
+        lease_timeout_at: None,
+        retry_timeout_at: None,
+        resumes: Seq::empty(),
+        ..t
+    }
+}
+
+pub open spec fn spec_project_object(o: AObject, now: u64) -> AObject {
+    let promise = spec_project_promise(o.promise, now);
+    let task = match o.task {
+        Some(t) => Some(if promise.state != PromiseState::Pending
+            && t.state != TaskState::Fulfilled {
+            spec_fulfill_task(t)
+        } else {
+            t
+        }),
+        None => None,
+    };
+    AObject { promise, task, ..o }
+}
+
+pub open spec fn spec_without_ident(xs: Seq<AIdent>, id: AIdent) -> Seq<AIdent>
+    decreases xs.len(),
+{
+    if xs.len() == 0 {
+        Seq::empty()
+    } else if xs.last() == id {
+        spec_without_ident(xs.drop_last(), id)
+    } else {
+        spec_without_ident(xs.drop_last(), id).push(xs.last())
+    }
+}
+
+pub open spec fn spec_without_text(xs: Seq<AText>, x: AText) -> Seq<AText>
+    decreases xs.len(),
+{
+    if xs.len() == 0 {
+        Seq::empty()
+    } else if xs.last() == x {
+        spec_without_text(xs.drop_last(), x)
+    } else {
+        spec_without_text(xs.drop_last(), x).push(xs.last())
+    }
+}
+
+pub proof fn lemma_without_ident_push(xs: Seq<AIdent>, x: AIdent, id: AIdent)
+    ensures spec_without_ident(xs.push(x), id)
+        == if x == id {
+            spec_without_ident(xs, id)
+        } else {
+            spec_without_ident(xs, id).push(x)
+        },
+    decreases xs.len(),
+{
+    assert(xs.push(x).drop_last() =~= xs);
+    assert(xs.push(x).last() == x);
+}
+
+pub proof fn lemma_without_text_push(xs: Seq<AText>, x: AText, removed: AText)
+    ensures spec_without_text(xs.push(x), removed)
+        == if x == removed {
+            spec_without_text(xs, removed)
+        } else {
+            spec_without_text(xs, removed).push(x)
+        },
+    decreases xs.len(),
+{
+    assert(xs.push(x).drop_last() =~= xs);
+    assert(xs.push(x).last() == x);
 }
 
 // Pure ghost commit twin. These list functions deliberately use head/tail
 // recursion, so proofs see the same stable filters and prepend order as Lean.
 
 #[cfg(verus_keep_ghost)]
-pub open spec fn spec_find_object(rows: Seq<AObject>, id: AIdent) -> Option<AObject>
-    decreases rows.len(),
+pub open spec fn spec_find_object_at(
+    rows: Seq<AObject>, id: AIdent, start: nat,
+) -> Option<AObject>
+    decreases rows.len() - start,
 {
-    if rows.len() == 0 {
+    if start >= rows.len() {
         None
-    } else if rows[0].id == id {
-        Some(rows[0])
+    } else if rows[start as int].id == id {
+        Some(rows[start as int])
     } else {
-        spec_find_object(rows.drop_first(), id)
+        spec_find_object_at(rows, id, start + 1)
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_find_object(rows: Seq<AObject>, id: AIdent) -> Option<AObject> {
+    spec_find_object_at(rows, id, 0)
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_find_schedule_at(
+    rows: Seq<ASchedule>, id: AIdent, start: nat,
+) -> Option<ASchedule>
+    decreases rows.len() - start,
+{
+    if start >= rows.len() {
+        None
+    } else if rows[start as int].id == id {
+        Some(rows[start as int])
+    } else {
+        spec_find_schedule_at(rows, id, start + 1)
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_find_schedule(
+    rows: Seq<ASchedule>, id: AIdent,
+) -> Option<ASchedule> {
+    spec_find_schedule_at(rows, id, 0)
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_read_object(
+    state: AState, id: AIdent, now: u64,
+) -> Option<AObject> {
+    match spec_find_object(state.objects, id) {
+        Some(o) => Some(spec_project_object(o, now)),
+        None => None,
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_read_effects(
+    state: AState, id: AIdent, now: u64, materialize: bool,
+) -> Seq<AEffect> {
+    match spec_find_object(state.objects, id) {
+        None => Seq::empty(),
+        Some(old) => {
+            let projected = spec_project_object(old, now);
+            let promise = if materialize && projected.promise.state != old.promise.state {
+                seq![AEffect::SetPromise(id, projected.promise)]
+            } else {
+                Seq::empty()
+            };
+            let task = if materialize {
+                match (old.task, projected.task) {
+                    (Some(a), Some(b)) if a.state != b.state =>
+                        seq![AEffect::SetTask(id, b)],
+                    _ => Seq::empty(),
+                }
+            } else {
+                Seq::empty()
+            };
+            promise + task
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_read_task_object(
+    state: AState, id: AIdent, now: u64,
+) -> Option<AObject> {
+    match spec_find_object(state.objects, id) {
+        Some(o) if o.task is Some => spec_read_object(state, id, now),
+        _ => None,
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_read_task_effects(
+    state: AState, id: AIdent, now: u64, materialize: bool,
+) -> Seq<AEffect> {
+    match spec_find_object(state.objects, id) {
+        Some(o) if o.task is Some => spec_read_effects(state, id, now, materialize),
+        _ => Seq::empty(),
     }
 }
 
@@ -546,40 +994,74 @@ pub open spec fn spec_apply_all(state: AState, effects: Seq<AEffect>) -> AState
 }
 
 /// Append all effects in `tail` after `head`, retaining Lean list order.
-pub fn append_effects(mut head: Vec<Effect>, mut tail: Vec<Effect>) -> Vec<Effect> {
+pub fn append_effects(
+    mut head: Vec<Effect>, mut tail: Vec<Effect>,
+) -> (r: Vec<Effect>)
+    ensures r.deep_view() == head.deep_view() + tail.deep_view(),
+{
+    let ghost original_head = head.deep_view();
+    let ghost original_tail = tail.deep_view();
     while tail.len() > 0
+        invariant
+            head.deep_view() + tail.deep_view() == original_head + original_tail,
         decreases tail@.len(),
     {
         let e = tail.remove(0);
         head.push(e);
     }
+    assert(tail.deep_view() =~= Seq::<AEffect>::empty());
     head
 }
 
-pub fn read_object(state: &State, id: &Ident, now: u64, materialize: bool) -> ReadResult {
+pub fn push_effect(out: &mut Vec<Effect>, effect: Effect)
+    ensures
+        final(out).deep_view()
+            == old(out).deep_view().push(effect.deep_view()),
+{
+    let ghost before = out.deep_view();
+    let ghost added = effect.deep_view();
+    out.push(effect);
+    assert(final(out).deep_view() =~= before.push(added));
+}
+
+pub fn read_object(
+    state: &State, id: &Ident, now: u64, materialize: bool,
+) -> (r: ReadResult)
+    ensures
+        r.object.deep_view() == spec_read_object(state@, id@, now),
+        r.effects.deep_view() == spec_read_effects(state@, id@, now, materialize),
+{
     match state.find_object(id) {
         None => ReadResult { object: None, effects: Vec::new() },
         Some(i) => {
             let old = &state.objects[i];
             let projected = old.dup().project(now);
             let mut effects = Vec::new();
-            if materialize && projected.promise.state != old.promise.state {
-                effects.push(Effect::SetPromise(id.dup(), projected.promise.dup()));
-            }
-            match (&old.task, &projected.task) {
-                (Some(a), Some(b)) => {
-                    if a.state != b.state {
-                        effects.push(Effect::SetTask(id.dup(), b.dup()));
-                    }
+            if materialize {
+                if projected.promise.state != old.promise.state {
+                    effects.push(Effect::SetPromise(id.dup(), projected.promise.dup()));
                 }
-                _ => {}
+                match (&old.task, &projected.task) {
+                    (Some(a), Some(b)) => {
+                        if a.state != b.state {
+                            effects.push(Effect::SetTask(id.dup(), b.dup()));
+                        }
+                    }
+                    _ => {}
+                }
             }
             ReadResult { object: Some(projected), effects }
         }
     }
 }
 
-pub fn read_task_object(state: &State, id: &Ident, now: u64, materialize: bool) -> ReadResult {
+pub fn read_task_object(
+    state: &State, id: &Ident, now: u64, materialize: bool,
+) -> (r: ReadResult)
+    ensures
+        r.object.deep_view() == spec_read_task_object(state@, id@, now),
+        r.effects.deep_view() == spec_read_task_effects(state@, id@, now, materialize),
+{
     match state.find_object(id) {
         None => ReadResult { object: None, effects: Vec::new() },
         Some(i) => match &state.objects[i].task {
@@ -589,7 +1071,29 @@ pub fn read_task_object(state: &State, id: &Ident, now: u64, materialize: bool) 
     }
 }
 
-pub fn set_settled_effects(o: &Object, p: &PromiseObject) -> Vec<Effect> {
+pub open spec fn spec_set_settled_effects(
+    object: AObject, promise: APromiseObject,
+) -> Seq<AEffect> {
+    let first = seq![AEffect::SetPromise(object.id, promise)];
+    if promise.state != PromiseState::Pending {
+        match object.task {
+            Some(task) if task.state != TaskState::Fulfilled =>
+                first.push(AEffect::SetTask(
+                    object.id,
+                    spec_fulfill_task(task),
+                )),
+            _ => first,
+        }
+    } else {
+        first
+    }
+}
+
+pub fn set_settled_effects(
+    o: &Object, p: &PromiseObject,
+) -> (r: Vec<Effect>)
+    ensures r.deep_view() == spec_set_settled_effects(o@, p@),
+{
     let mut out = Vec::new();
     out.push(Effect::SetPromise(o.id.dup(), p.dup()));
     if p.state != PromiseState::Pending {
@@ -605,7 +1109,9 @@ pub fn set_settled_effects(o: &Object, p: &PromiseObject) -> Vec<Effect> {
     out
 }
 
-pub fn checked_add(a: u64, b: u64) -> u64 {
+pub fn checked_add(a: u64, b: u64) -> (r: u64)
+    ensures r == if b <= u64::MAX - a { (a + b) as u64 } else { u64::MAX },
+{
     if b <= u64::MAX - a { a + b } else { u64::MAX }
 }
 
@@ -614,7 +1120,96 @@ pub struct Created {
     pub effects: Vec<Effect>,
 }
 
-pub fn create_promise(req: PromiseCreateReq, now: u64) -> Created {
+pub open spec fn spec_created_promise(
+    req: APromiseCreateReq, now: u64,
+) -> APromiseObject {
+    if req.timeout_at > now {
+        APromiseObject {
+            state: PromiseState::Pending,
+            param: req.param,
+            value: AValue { headers: Seq::empty(), data: None },
+            tags: req.tags,
+            timeout_at: req.timeout_at,
+            created_at: now,
+            settled_at: None,
+            callbacks: Seq::empty(),
+            listeners: Seq::empty(),
+        }
+    } else {
+        APromiseObject {
+            state: if spec_is_timer(req.tags) {
+                PromiseState::Resolved
+            } else {
+                PromiseState::RejectedTimedout
+            },
+            param: req.param,
+            value: AValue { headers: Seq::empty(), data: None },
+            tags: req.tags,
+            timeout_at: req.timeout_at,
+            created_at: req.timeout_at,
+            settled_at: Some(req.timeout_at),
+            callbacks: Seq::empty(),
+            listeners: Seq::empty(),
+        }
+    }
+}
+
+pub open spec fn spec_created_task(
+    promise: APromiseObject, now: u64,
+) -> Option<ATaskObject> {
+    if spec_otype(promise.tags) != OType::Runnable {
+        None
+    } else if promise.state == PromiseState::Pending {
+        let due = match spec_tag_value(promise.tags, 4) {
+            Some(d) => {
+                let parsed = spec_parse_nat_bounded(d);
+                if parsed > now { parsed } else { now }
+            }
+            None => now,
+        };
+        Some(ATaskObject {
+            state: TaskState::Pending,
+            version: 0,
+            ttl: None,
+            pid: None,
+            lease_timeout_at: None,
+            retry_timeout_at: Some(due),
+            resumes: Seq::empty(),
+        })
+    } else {
+        Some(ATaskObject {
+            state: TaskState::Fulfilled,
+            version: 0,
+            ttl: None,
+            pid: None,
+            lease_timeout_at: None,
+            retry_timeout_at: None,
+            resumes: Seq::empty(),
+        })
+    }
+}
+
+pub open spec fn spec_create_promise_effects(
+    req: APromiseCreateReq, now: u64,
+) -> Seq<AEffect> {
+    let promise = spec_created_promise(req, now);
+    let base = seq![AEffect::SetPromise(req.id, promise)];
+    match spec_created_task(promise, now) {
+        Some(task) => base.push(AEffect::SetTask(req.id, task)),
+        None => base,
+    }
+}
+
+pub fn create_promise(req: PromiseCreateReq, now: u64) -> (r: Created)
+    ensures
+        r.object@ == (AObject {
+            id: req@.id,
+            promise: spec_created_promise(req@, now),
+            task: spec_created_task(spec_created_promise(req@, now), now),
+        }),
+        r.effects.deep_view() == spec_create_promise_effects(req@, now),
+{
+    let ghost request = req@;
     let id = req.id;
     let promise = if req.timeout_at > now {
         PromiseObject {
@@ -631,6 +1226,16 @@ pub fn create_promise(req: PromiseCreateReq, now: u64) -> Created {
             settled_at: Some(req.timeout_at), callbacks: Vec::new(), listeners: Vec::new(),
         }
     };
+    assert(promise@.state == spec_created_promise(request, now).state);
+    assert(promise@.param == spec_created_promise(request, now).param);
+    assert(promise@.value == spec_created_promise(request, now).value);
+    assert(promise@.tags == spec_created_promise(request, now).tags);
+    assert(promise@.timeout_at == spec_created_promise(request, now).timeout_at);
+    assert(promise@.created_at == spec_created_promise(request, now).created_at);
+    assert(promise@.settled_at == spec_created_promise(request, now).settled_at);
+    assert(promise@.callbacks == spec_created_promise(request, now).callbacks);
+    assert(promise@.listeners == spec_created_promise(request, now).listeners);
+    assert(promise@ == spec_created_promise(request, now));
     let mut effects = Vec::new();
     effects.push(Effect::SetPromise(id.dup(), promise.dup()));
     let task = if promise.otype() == OType::Runnable {
@@ -657,7 +1262,18 @@ pub fn create_promise(req: PromiseCreateReq, now: u64) -> Created {
     } else {
         None
     };
-    Created { object: Object { id, promise, task }, effects }
+    assert(task.deep_view() == spec_created_task(promise@, now));
+    assert(effects.deep_view() == spec_create_promise_effects(request, now));
+    let r = Created { object: Object { id, promise, task }, effects };
+    assert(r.object@.id == request.id);
+    assert(r.object@.promise == spec_created_promise(request, now));
+    assert(r.object@.task == spec_created_task(spec_created_promise(request, now), now));
+    assert(r.object@ == (AObject {
+        id: request.id,
+        promise: spec_created_promise(request, now),
+        task: spec_created_task(spec_created_promise(request, now), now),
+    }));
+    r
 }
 
 fn message_same_key(a: &OutboxEntry, address: &Text, msg: &Message) -> bool {

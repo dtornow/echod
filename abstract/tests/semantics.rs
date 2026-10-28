@@ -89,6 +89,70 @@ fn view_projects_without_emitting_materialization() {
 }
 
 #[test]
+fn task_view_projects_both_faces_without_writing_either() {
+    let x = id("o", "task");
+    let task = TaskObject {
+        state: TaskState::Acquired,
+        version: 1,
+        ttl: Some(10),
+        pid: Some(text("worker")),
+        lease_timeout_at: Some(20),
+        retry_timeout_at: None,
+        resumes: vec![],
+    };
+    let state = State {
+        objects: vec![Object {
+            id: x.clone(),
+            promise: promise(PromiseState::Pending, 5),
+            task: Some(task),
+        }],
+        schedules: vec![],
+        outbox: vec![],
+    };
+
+    let view = echod_abstract::state::read_task_object(&state, &x, 6, false);
+    let projected = view.object.unwrap();
+    assert_eq!(projected.promise.state, PromiseState::RejectedTimedout);
+    assert_eq!(projected.task.unwrap().state, TaskState::Fulfilled);
+    assert!(view.effects.is_empty());
+
+    let touch = echod_abstract::state::read_task_object(&state, &x, 6, true);
+    assert_eq!(touch.effects.len(), 2);
+}
+
+#[test]
+fn object_view_projects_task_without_emitting_materialization() {
+    let x = id("o", "object-task");
+    let task = TaskObject {
+        state: TaskState::Pending,
+        version: 0,
+        ttl: None,
+        pid: None,
+        lease_timeout_at: None,
+        retry_timeout_at: Some(0),
+        resumes: vec![],
+    };
+    let state = State {
+        objects: vec![Object {
+            id: x.clone(),
+            promise: promise(PromiseState::Pending, 5),
+            task: Some(task),
+        }],
+        schedules: vec![],
+        outbox: vec![],
+    };
+
+    let view = read_object(&state, &x, 6, false);
+    let projected = view.object.unwrap();
+    assert_eq!(projected.promise.state, PromiseState::RejectedTimedout);
+    assert_eq!(projected.task.unwrap().state, TaskState::Fulfilled);
+    assert!(view.effects.is_empty());
+
+    let touch = read_object(&state, &x, 6, true);
+    assert_eq!(touch.effects.len(), 2);
+}
+
+#[test]
 fn set_task_for_absent_object_is_a_noop() {
     let state = State::new();
     let task = TaskObject {

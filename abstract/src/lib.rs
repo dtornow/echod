@@ -9,6 +9,7 @@
 
 pub mod external;
 pub mod internal;
+pub mod promise_spec;
 pub mod state;
 pub mod system;
 pub mod types;

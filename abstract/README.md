@@ -19,6 +19,8 @@ this crate does not depend on `echod-kernel`, `echod-concrete`, `logic`,
   first-match tag lookup, and generated ghost/spec twins.
 - `state.rs`: fused promise/task objects, state, ordered writer effects,
   executable commit, and a pure `spec_apply_all` twin.
+- `promise_spec.rs`: independent `AState`/`AEffect` reader-writer semantics
+  for all six Promise external actions, including their committed next states.
 - `external.rs`: one named semantic action for every external handler.
 - `internal.rs`: one named semantic action for every internal handler.
 - `system.rs`: the 21/6 dispatch sums and semantic runners. Observation
@@ -45,8 +47,19 @@ All 21 external names are present and dispatched:
 All six internal names are executable: promise timeout, callback, listener,
 task lease timeout, task retry timeout, and schedule timeout.
 
+Each internal handler has an independently stated ghost semantics and an
+executable postcondition proving its exact ordered `Seq<AEffect>` result.
+The callback/resume and schedule folds always read the transition pre-state;
+their effect sequences are concatenated in Lean writer order. Forced touches
+materialize both projected faces, while lease/retry views project without
+emitting either write.
+
 There are no remaining handler bodies. The only unsupported operations are
 the three searches, and they are unsupported in the Lean source itself.
+
+Each executable Promise handler has a Verus contract proving that its response
+and ordered effect sequence equal the independent ghost semantics, and that
+committing those effects with `spec_apply_all` yields the specified next state.
 
 ## Explicit semantic boundaries
 
