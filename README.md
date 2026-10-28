@@ -20,6 +20,7 @@ crashes, outages and lost acks.
 
 | | |
 |---|---|
+| [`abstract/`](abstract) | the independent executable Abstract Resonate machine: all 21 protocol handlers and all 6 autonomous actions, with observation bookkeeping separate from semantics; Verus-only dependencies, no kernel, Concrete, Accordant or checker dependency |
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
 | [`concrete/`](concrete) | the deterministic document model at its own level: persisted promise rows in order, with kernel maps only as derived views; normalization uses that row order directly |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
@@ -30,10 +31,11 @@ crashes, outages and lost acks.
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |
 
-`kernel/` and `system/` are proved. `logic/` is the shim the proof stops at,
-with nothing in it but the order of calls, and it runs with no runtime:
-its tests feed it events by hand. `echod/` performs what it asks. `sim/` is
-the evidence for both. [DESIGN.md](DESIGN.md) is the design;
+`abstract/`, `kernel/`, `concrete/` and `system/` verify independently.
+The refinement links between those levels and the full `logic/` orchestration
+remain to be proved. `logic/` runs with no runtime: its tests feed it events
+by hand. `echod/` performs what it asks. `sim/` is the executable evidence.
+[DESIGN.md](DESIGN.md) is the design;
 [BACKLOG.md](BACKLOG.md) is what is next. Each crate's `lib.rs` opens with
 a map of its files.
 
@@ -42,6 +44,7 @@ a map of its files.
 ```
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
+(cd abstract && ./verify.sh)            # the independent Abstract protocol machine
 (cd kernel && ./verify.sh)              # the kernel under Verus
 (cd concrete && ./verify.sh)            # the row-native Concrete document model
 (cd system && ./verify.sh)              # the system model under Verus, importing the kernel
