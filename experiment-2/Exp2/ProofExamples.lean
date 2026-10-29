@@ -16,11 +16,11 @@ namespace Exp2
 open Experiment
 
 def safeAbstractSchedule : List (Time × Act Msg) :=
-  [(0, .request "c" (.req 1 (.create "p" (some 100)))),
+  [(0, .request "c" (.req 1 0 (.create "p" (some 100)))),
    (0, .deliver 0 0),
    (0, .deliver 0),
-   (1, .request "a" (.req 2 (.settle "p" .resolved "x"))),
-   (1, .request "b" (.req 3 (.settle "p" .rejected "y"))),
+   (1, .request "a" (.req 2 1 (.settle "p" .resolved "x"))),
+   (1, .request "b" (.req 3 1 (.settle "p" .rejected "y"))),
    (1, .deliver 0 0),
    (1, .deliver 0 0),
    (2, .deliver 0),
@@ -41,8 +41,8 @@ theorem safe_valid :
   native_decide
 
 def queuedAbstractSchedule : List (Time × Act Msg) :=
-  [(0, .request "a" (.req 1 (.create "p" (some 100)))),
-   (0, .request "b" (.req 2 (.get "p"))),
+  [(0, .request "a" (.req 1 0 (.create "p" (some 100)))),
+   (0, .request "b" (.req 2 0 (.get "p"))),
    (0, .deliver 0 0),
    (0, .deliver 0 0),
    (0, .deliver 0),
@@ -67,17 +67,17 @@ node answers 503; the abstract unreliable service explains the same trace with
 its `lose` outcome. -/
 
 def ghost := (drive { flaky := true }
-  ([(0, .send "a" "n1" (.req 1 (.create "p" (some 100)))), (0, .move "a" "n1"),
+  ([(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"),
     (0, .move "n1" "s3"), (0, .move "s3" "n1"), (0, .move "n1" "s3" 1),
     (0, .move "s3" "n1"), (0, .move "n1" "a")] ++
-   [(1, .send "b" "n2" (.req 2 (.get "p"))), (1, .move "b" "n2"),
+   [(1, .send "b" "n2" (.req 2 1 (.get "p"))), (1, .move "b" "n2"),
     (1, .move "n2" "s3"), (1, .move "s3" "n2"), (1, .move "n2" "b")])).getD []
 
 def ghostAbstractSchedule : List (Time × Act Msg) :=
-  [(0, .request "a" (.req 1 (.create "p" (some 100)))),
+  [(0, .request "a" (.req 1 0 (.create "p" (some 100)))),
    (0, .deliver 0 2),
    (0, .deliver 0),
-   (1, .request "b" (.req 2 (.get "p"))),
+   (1, .request "b" (.req 2 1 (.get "p"))),
    (1, .deliver 0 0),
    (1, .deliver 0)]
 
@@ -91,6 +91,30 @@ theorem ghostAbstract_runs :
 theorem ghost_valid :
     Valid promises { unreliable := true } {} (clientTrace ghost) := by
   apply valid_of_schedule ghostAbstract_runs
+  native_decide
+
+/-! The request-time regression: `b` reads before `a`'s delayed CAS, while
+`a` still uses the time carried by its original request. -/
+
+def delayedCasAbstractSchedule : List (Time × Act Msg) :=
+  [(0, .request "a" (.req 1 0 (.create "p" (some 5)))),
+   (10, .request "b" (.req 2 10 (.get "p"))),
+   (10, .deliver 1 0),
+   (10, .deliver 1),
+   (10, .deliver 0 0),
+   (10, .deliver 0)]
+
+def delayedCasAbstract : Execution promises :=
+  (schedule promises { unreliable := true } {} delayedCasAbstractSchedule).getD []
+
+theorem delayedCasAbstract_runs :
+    schedule promises { unreliable := true } {} delayedCasAbstractSchedule =
+      some delayedCasAbstract := by
+  rfl
+
+theorem delayedCas_valid :
+    Valid promises { unreliable := true } {} (clientTrace delayedCas) := by
+  apply valid_of_schedule delayedCasAbstract_runs
   native_decide
 
 end Exp2

@@ -45,7 +45,7 @@ def answered (x : Experiment.Network.Execution system) : List Addr :=
     | _, _ => none
 
 def through (a n : Addr) (id : Nat) (r : Request) (t : Time) : List (Time × Script) :=
-  [(t, .send a n (.req id r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
+  [(t, .send a n (.req id t r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
    (t, .move n "s3"), (t, .move "s3" n), (t, .move n a)]
 
 def settled (v : String) (st : Experiment.PromiseState) : Response := ⟨200, some ⟨"p", st, v, 100⟩⟩
@@ -54,8 +54,8 @@ def settled (v : String) (st : Experiment.PromiseState) : Response := ⟨200, so
 
 def race : List (Time × Script) :=
   through "c" "n1" 1 (.create "p" (some 100)) 0 ++
-  [(1, .send "a" "n1" (.req 2 (.settle "p" .resolved "x"))),
-   (1, .send "b" "n2" (.req 3 (.settle "p" .rejected "y"))),
+  [(1, .send "a" "n1" (.req 2 1 (.settle "p" .resolved "x"))),
+   (1, .send "b" "n2" (.req 3 1 (.settle "p" .rejected "y"))),
    (1, .move "a" "n1"), (1, .move "b" "n2"),
    (1, .move "n1" "s3"), (1, .move "n2" "s3"),
    (1, .move "s3" "n1"), (1, .move "s3" "n2"),
@@ -81,8 +81,8 @@ def lost := (drive { conditional := false } (race ++ [(2, .move "n1" "a"), (2, .
 once; `b`'s read is answered while `a`'s write is still on its way. -/
 
 def both := (drive {}
-  [(0, .send "a" "n1" (.req 1 (.create "p" (some 100)))), (0, .move "a" "n1"),
-   (0, .send "b" "n1" (.req 2 (.get "q"))), (0, .move "b" "n1"),
+  [(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"),
+   (0, .send "b" "n1" (.req 2 0 (.get "q"))), (0, .move "b" "n1"),
    (0, .move "n1" "s3"), (0, .move "n1" "s3"),       -- both loads at the store
    (0, .move "s3" "n1"), (0, .move "s3" "n1"),       -- p loaded: write; q loaded: answer
    (0, .move "n1" "b"),
@@ -97,9 +97,10 @@ def both := (drive {}
 /-! ## Fuzzing, a little -/
 
 def inputs : List (Addr × CMsg) :=
-  [("a", .app (.req 1 (.create "p" (some 10)))), ("a", .app (.req 2 (.get "p"))),
-   ("b", .app (.req 3 (.settle "p" .resolved "x"))), ("c", .app (.req 4 (.settle "p" .rejected "y"))),
-   ("w", .app (.req 5 (.listen "p" "w"))), ("b", .app (.req 6 (.get "p")))]
+  [("a", .app (.req 1 0 (.create "p" (some 10)))), ("a", .app (.req 2 0 (.get "p"))),
+   ("b", .app (.req 3 0 (.settle "p" .resolved "x"))),
+   ("c", .app (.req 4 0 (.settle "p" .rejected "y"))),
+   ("w", .app (.req 5 0 (.listen "p" "w"))), ("b", .app (.req 6 0 (.get "p")))]
 
 def fuzzRuns (cfg : Config) : List (Experiment.Network.Execution system) :=
   (List.range 30).map fun seed => Experiment.Network.fuzz system cfg world inputs ["n1", "n2"] seed 16

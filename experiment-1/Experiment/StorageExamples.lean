@@ -36,7 +36,7 @@ def drive (cfg : Config) (script : List (Time × Script)) : Option (Network.Exec
 /-- A client's request, all the way through one node: in, load, decide,
     write, answer. -/
 def through (a n : Addr) (id : Nat) (r : Request) (t : Time) : List (Time × Script) :=
-  [(t, .send a n (.req id r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
+  [(t, .send a n (.req id t r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
    (t, .move n "s3"), (t, .move "s3" n), (t, .move n a)]
 
 /-! ## A race: two settles on two nodes
@@ -49,8 +49,8 @@ sees. Without, `n2` overwrites: both clients are told their own value. -/
 
 def race : List (Time × Script) :=
   through "c" "n1" 1 (.create "p" (some 100)) 0 ++
-  [(1, .send "a" "n1" (.req 2 (.settle "p" .resolved "x"))),
-   (1, .send "b" "n2" (.req 3 (.settle "p" .rejected "y"))),
+  [(1, .send "a" "n1" (.req 2 1 (.settle "p" .resolved "x"))),
+   (1, .send "b" "n2" (.req 3 1 (.settle "p" .rejected "y"))),
    (1, .move "a" "n1"), (1, .move "b" "n2"),       -- both ask for the document
    (1, .move "n1" "s3"), (1, .move "n2" "s3"),
    (1, .move "s3" "n1"), (1, .move "s3" "n2"),     -- both get version 1
@@ -91,9 +91,9 @@ A later read sees the promise. The abstract service explains it: a 503
 may have been done. -/
 
 def ghost := (drive { flaky := true }
-  ([(0, .send "a" "n1" (.req 1 (.create "p" (some 100)))), (0, .move "a" "n1"), (0, .move "n1" "s3"),
+  ([(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"), (0, .move "n1" "s3"),
     (0, .move "s3" "n1"), (0, .move "n1" "s3" 1), (0, .move "s3" "n1"), (0, .move "n1" "a")] ++
-   [(1, .send "b" "n2" (.req 2 (.get "p"))), (1, .move "b" "n2"), (1, .move "n2" "s3"),
+   [(1, .send "b" "n2" (.req 2 1 (.get "p"))), (1, .move "b" "n2"), (1, .move "n2" "s3"),
     (1, .move "s3" "n2"), (1, .move "n2" "b")])).getD []
 
 #guard answerTo "a" ghost == [.res 1 ⟨503, none⟩]
@@ -107,9 +107,10 @@ creates, reads, settles both ways, a listener, and a timeout at 10 the
 runs pass through. Every run refines the abstract service. -/
 
 def inputs : List (Addr × CMsg) :=
-  [("a", .app (.req 1 (.create "p" (some 10)))), ("a", .app (.req 2 (.get "p"))),
-   ("b", .app (.req 3 (.settle "p" .resolved "x"))), ("c", .app (.req 4 (.settle "p" .rejected "y"))),
-   ("w", .app (.req 5 (.listen "p" "w"))), ("b", .app (.req 6 (.get "p")))]
+  [("a", .app (.req 1 0 (.create "p" (some 10)))), ("a", .app (.req 2 0 (.get "p"))),
+   ("b", .app (.req 3 0 (.settle "p" .resolved "x"))),
+   ("c", .app (.req 4 0 (.settle "p" .rejected "y"))),
+   ("w", .app (.req 5 0 (.listen "p" "w"))), ("b", .app (.req 6 0 (.get "p")))]
 
 def fuzzRuns (cfg : Config) : List (Network.Execution system) :=
   (List.range 300).map fun seed => Network.fuzz system cfg world inputs ["n1", "n2"] seed 40

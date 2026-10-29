@@ -34,7 +34,7 @@ def fresh : NodeP Nat := do
   return n
 
 def isRequest : Addr → CMsg → Bool
-  | _, .app (.req _ _) => true
+  | _, .app (.req _ _ _) => true
   | _, _ => false
 
 def answers (op : Nat) : Addr → CMsg → Bool
@@ -45,11 +45,11 @@ def answer (c : Addr) (id : CallId) (res : Response) : NodeP Unit := send c (.ap
 
 /-- One request, through: load, decide with the abstract handler, write
     conditionally, answer. `tries` more after a lost race. -/
-def serve (c : Addr) (id : CallId) (r : Request) (tries : Nat) : NodeP Unit := do
+def serve (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) : NodeP Unit := do
     let cfg ← read
     let op ← fresh
     send cfg.store (.get op r.key)
-    let (_, reply, now) ← recv (answers op)
+    let (_, reply, _) ← recv (answers op)
     let .got _ doc := reply | answer c id ⟨503, none⟩
     let before : Experiment.State := { promises := doc.toList.map (·.1) }
     let (res, after, outs) := pick ((Experiment.request r now).run cfg.app before) 0
@@ -74,7 +74,7 @@ def serve (c : Addr) (id : CallId) (r : Request) (tries : Nat) : NodeP Unit := d
           for (a, m) in sends outs do send a (.app m)
         | .conflict _ =>
           match _h : tries with
-          | k + 1 => serve c id r k
+          | k + 1 => serve c id r now k
           | 0 => answer c id ⟨503, none⟩
         | _ => answer c id ⟨503, none⟩
 termination_by tries
@@ -84,7 +84,7 @@ decreasing_by omega
 def node : NodeP Unit := do
   let (c, m, _) ← recv isRequest
   match m with
-  | .app (.req id r) => serve c id r (← read).retries
+  | .app (.req id now r) => serve c id r now (← read).retries
   | _ => return
 
 /-! ## The system -/
@@ -178,7 +178,7 @@ def answerTo (a : Addr) (x : Experiment.Network.Execution system) : List Msg :=
     | _, _ => none
 
 def through (a n : Addr) (id : Nat) (r : Request) (t : Time) : List (Time × Script) :=
-  [(t, .send a n (.req id r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
+  [(t, .send a n (.req id t r)), (t, .move a n), (t, .move n "s3"), (t, .move "s3" n),
    (t, .move n "s3"), (t, .move "s3" n), (t, .move n a)]
 
 def settled (v : String) (st : Experiment.PromiseState) : Response := ⟨200, some ⟨"p", st, v, 100⟩⟩
@@ -187,8 +187,8 @@ def settled (v : String) (st : Experiment.PromiseState) : Response := ⟨200, so
 
 def race : List (Time × Script) :=
   through "c" "n1" 1 (.create "p" (some 100)) 0 ++
-  [(1, .send "a" "n1" (.req 2 (.settle "p" .resolved "x"))),
-   (1, .send "b" "n2" (.req 3 (.settle "p" .rejected "y"))),
+  [(1, .send "a" "n1" (.req 2 1 (.settle "p" .resolved "x"))),
+   (1, .send "b" "n2" (.req 3 1 (.settle "p" .rejected "y"))),
    (1, .move "a" "n1"), (1, .move "b" "n2"),
    (1, .move "n1" "s3"), (1, .move "n2" "s3"),
    (1, .move "s3" "n1"), (1, .move "s3" "n2"),
@@ -214,8 +214,8 @@ def lost := (drive { conditional := false } (race ++ [(2, .move "n1" "a"), (2, .
 It stays in the mailbox; `n1` serves it once the create is answered. -/
 
 def queued := (drive {}
-  [(0, .send "a" "n1" (.req 1 (.create "p" (some 100)))), (0, .move "a" "n1"),
-   (0, .send "b" "n1" (.req 2 (.get "p"))), (0, .move "b" "n1"),      -- n1 is busy: queued
+  [(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"),
+   (0, .send "b" "n1" (.req 2 0 (.get "p"))), (0, .move "b" "n1"),      -- n1 is busy: queued
    (0, .move "n1" "s3"), (0, .move "s3" "n1"), (0, .move "n1" "s3"), (0, .move "s3" "n1"),
    (0, .move "n1" "s3"), (0, .move "s3" "n1"),                         -- now b's read
    (0, .move "n1" "a"), (0, .move "n1" "b")]).getD []
@@ -224,51 +224,48 @@ def queued := (drive {}
 #guard answerTo "b" queued == [.res 2 ⟨200, some ⟨"p", .pending, "", 100⟩⟩]
 #guard refines {} queued
 
-/-! ### Conditional writes are not enough when handlers read time
+/-! ### Request time survives a delayed CAS
 
-`a` reads an absent document at time 0 and computes a create with the default
-timeout, 1000. Its conditional write is delayed. At time 10, `b` still reads
-the document as absent and receives 404. Then `a`'s write lands and `a`
-receives the record computed at time 0.
+`a`'s request carries time 0 and creates a promise with absolute timeout 5.
+Its conditional write is delayed. At time 10, `b` still reads the document as
+absent and receives 404. Then `a`'s write lands and returns the pending promise
+computed from its request time.
 
-The abstract service cannot produce this trace. To explain the 404 it must
-place `b`'s get before `a`'s create. The create must then run at time 10 or
-later, so its default timeout is 1010 or later, not the observed 1000.
+The abstract execution orders `b` before `a` while retaining time 0 as part of
+`a`'s request. The later CAS instant does not change the handler input.
 -/
 
-def lateCasScript : List (Time × Script) :=
-  [(0, .send "a" "n1" (.req 1 (.create "p" none))),
+def delayedCasScript : List (Time × Script) :=
+  [(0, .send "a" "n1" (.req 1 0 (.create "p" (some 5)))),
    (0, .move "a" "n1"), (0, .move "n1" "s3"), (0, .move "s3" "n1"),
-   (10, .send "b" "n2" (.req 2 (.get "p"))),
+   (10, .send "b" "n2" (.req 2 10 (.get "p"))),
    (10, .move "b" "n2"), (10, .move "n2" "s3"), (10, .move "s3" "n2"),
    (10, .move "n2" "b"),
    (10, .move "n1" "s3"), (10, .move "s3" "n1"), (10, .move "n1" "a")]
 
-def lateCas := (drive {} lateCasScript).getD []
+def delayedCas := (drive {} delayedCasScript).getD []
 
-theorem lateCas_runs : drive {} lateCasScript = some lateCas := by
-  have hs : (drive {} lateCasScript).isSome = true := by native_decide
-  cases h : drive {} lateCasScript with
+theorem delayedCas_runs : drive {} delayedCasScript = some delayedCas := by
+  have hs : (drive {} delayedCasScript).isSome = true := by native_decide
+  cases h : drive {} delayedCasScript with
   | none => simp [h] at hs
   | some x =>
-    have hx : lateCas = x := by simp [lateCas, h]
+    have hx : delayedCas = x := by simp [delayedCas, h]
     rw [hx]
 
-theorem lateCas_rejected : refines {} lateCas = false := by
-  native_decide
-
-#guard lateCas.length == 12
-#guard answerTo "b" lateCas == [.res 2 ⟨404, none⟩]
-#guard answerTo "a" lateCas ==
-  [.res 1 ⟨200, some ⟨"p", .pending, "", 1000⟩⟩]
-#guard !refines {} lateCas
+#guard delayedCas.length == 12
+#guard answerTo "b" delayedCas == [.res 2 ⟨404, none⟩]
+#guard answerTo "a" delayedCas ==
+  [.res 1 ⟨200, some ⟨"p", .pending, "", 5⟩⟩]
+#guard refines {} delayedCas
 
 /-! ### Fuzzing, a little -/
 
 def inputs : List (Addr × CMsg) :=
-  [("a", .app (.req 1 (.create "p" (some 10)))), ("a", .app (.req 2 (.get "p"))),
-   ("b", .app (.req 3 (.settle "p" .resolved "x"))), ("c", .app (.req 4 (.settle "p" .rejected "y"))),
-   ("w", .app (.req 5 (.listen "p" "w"))), ("b", .app (.req 6 (.get "p")))]
+  [("a", .app (.req 1 0 (.create "p" (some 10)))), ("a", .app (.req 2 0 (.get "p"))),
+   ("b", .app (.req 3 0 (.settle "p" .resolved "x"))),
+   ("c", .app (.req 4 0 (.settle "p" .rejected "y"))),
+   ("w", .app (.req 5 0 (.listen "p" "w"))), ("b", .app (.req 6 0 (.get "p")))]
 
 def fuzzRuns (cfg : Config) : List (Experiment.Network.Execution system) :=
   (List.range 30).map fun seed => Experiment.Network.fuzz system cfg world inputs ["n1", "n2"] seed 16

@@ -87,7 +87,9 @@ structure Response where
   deriving DecidableEq, Repr
 
 inductive Msg where
-  | req    (id : CallId) (r : Request)
+  /-- `now` is captured when the request enters the protocol. It is request
+      data, not the later instant at which an implementation linearizes it. -/
+  | req    (id : CallId) (now : Time) (r : Request)
   | res    (id : CallId) (r : Response)
   | notify (p : Record)
   deriving DecidableEq, Repr
@@ -212,9 +214,9 @@ def request (r : Request) (now : Time) : Handler Response := do
 
 /-- The server's step on a message: a request is answered with a message
     back to its sender. The server receives nothing else. -/
-def receive (sender : Addr) (m : Msg) (now : Time) : Handler Unit :=
+def receive (sender : Addr) (m : Msg) (_stepNow : Time) : Handler Unit :=
   match m with
-  | .req id r => do send sender (.res id (← request r now))
+  | .req id now r => do send sender (.res id (← request r now))
   | _ => pure ()
 
 /-- The server's step on a tick: every promise past its timeout times out. -/

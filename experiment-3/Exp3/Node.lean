@@ -29,9 +29,9 @@ open Experiment.Storage (CMsg Config Store storeReceive)
 
 /-- Where a request waits. -/
 inductive Wait where
-  | loading (c : Addr) (id : CallId) (r : Request) (tries : Nat)
-  | writing (c : Addr) (id : CallId) (r : Request) (res : Response) (notify : List (Addr × Msg))
-      (tries : Nat)
+  | loading (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat)
+  | writing (c : Addr) (id : CallId) (r : Request) (now : Time)
+      (res : Response) (notify : List (Addr × Msg)) (tries : Nat)
 
 def Wait.client : Wait → Addr
   | .loading c .. | .writing c .. => c
@@ -54,8 +54,8 @@ def note : List (Out Msg) → N Unit
   | .sometimes n hit :: rest => do C.emit (.sometimes n hit); note rest
   | .send _ _ :: rest => note rest
 
-def load (c : Addr) (id : CallId) (r : Request) (tries : Nat) : N Unit := do
-  C.call (← read).store (fun op => .get op r.key) (.loading c id r tries)
+def load (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) : N Unit := do
+  C.call (← read).store (fun op => .get op r.key) (.loading c id r now tries)
 
 def replyTo : CMsg → Option Nat
   | .got op _ | .written op | .conflict op | .failed op => some op
@@ -63,11 +63,11 @@ def replyTo : CMsg → Option Nat
 
 def receive (sender : Addr) (m : CMsg) (_ : Time) : N Unit :=
   match m with
-  | .app (.req id r) => do load sender id r (← read).retries
+  | .app (.req id now r) => do load sender id r now (← read).retries
   | _ => pure ()
 
 /-- The abstract handler has run on the loaded document: answer, or write. -/
-def decided (c : Addr) (id : CallId) (r : Request) (tries : Nat) (cfg : Config)
+def decided (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) (cfg : Config)
     (doc : Option (Experiment.Promise × Experiment.Storage.Version)) (before : Experiment.State) :
     Response × Experiment.State × List (Out Msg) → N Unit
   | (res, after, outs) => do
@@ -80,18 +80,18 @@ def decided (c : Addr) (id : CallId) (r : Request) (tries : Nat) (cfg : Config)
       | none => answer c id ⟨503, none⟩
       | some p =>
         C.call cfg.store (fun op => .put op r.key p (doc.map (·.2)))
-          (.writing c id r res (sends outs) tries)
+          (.writing c id r now res (sends outs) tries)
 
-def resume (w : Wait) (_ : Addr) (m : CMsg) (now : Time) : N Unit :=
+def resume (w : Wait) (_ : Addr) (m : CMsg) (_stepNow : Time) : N Unit :=
   match w, m with
-  | .loading c id r tries, .got _ doc => do
+  | .loading c id r now tries, .got _ doc => do
     let cfg ← read
     let before : Experiment.State := { promises := doc.toList.map (·.1) }
-    decided c id r tries cfg doc before (pick ((Experiment.request r now).run cfg.app before) 0)
-  | .writing c id _ res notify _, .written _ => do
+    decided c id r now tries cfg doc before (pick ((Experiment.request r now).run cfg.app before) 0)
+  | .writing c id _ _ res notify _, .written _ => do
     answer c id res
     sendAll notify
-  | .writing c id r _ _ (k + 1), .conflict _ => load c id r k
+  | .writing c id r now _ _ (k + 1), .conflict _ => load c id r now k
   | w, _ => answer w.client w.id ⟨503, none⟩
 
 def node : Caller where
@@ -120,12 +120,14 @@ theorem note_keeps (xs : List (Out Msg)) : Keeps (note xs) := by
     | always _ _ => exact Keeps.bind (Keeps.emit _) fun _ => ih
     | sometimes _ _ => exact Keeps.bind (Keeps.emit _) fun _ => ih
 
-theorem load_keeps (c : Addr) (id : CallId) (r : Request) (k : Nat) : Keeps (load c id r k) :=
+theorem load_keeps (c : Addr) (id : CallId) (r : Request) (now : Time) (k : Nat) :
+    Keeps (load c id r now k) :=
   Keeps.bind Keeps.read fun _ => Keeps.call _ _ _
 
-theorem decided_keeps (c : Addr) (id : CallId) (r : Request) (tries : Nat) (cfg : Config)
+theorem decided_keeps (c : Addr) (id : CallId) (r : Request) (now : Time)
+    (tries : Nat) (cfg : Config)
     (doc : Option (Experiment.Promise × Experiment.Storage.Version)) (before : Experiment.State) :
-    ∀ x, Keeps (decided c id r tries cfg doc before x) := by
+    ∀ x, Keeps (decided c id r now tries cfg doc before x) := by
   rintro ⟨res, after, outs⟩
   unfold decided
   refine Keeps.bind (note_keeps _) fun _ => ?_
@@ -141,15 +143,15 @@ theorem node_keeps : node.Keeps := by
     show Keeps (receive sender m now)
     unfold receive
     split
-    · exact Keeps.bind Keeps.read fun _ => load_keeps _ _ _ _
+    · exact Keeps.bind Keeps.read fun _ => load_keeps _ _ _ _ _
     · exact Keeps.pure _
   · intro w sender m now
     show Keeps (resume w sender m now)
     unfold resume
     split
-    · exact Keeps.bind Keeps.read fun _ => decided_keeps _ _ _ _ _ _ _ _
+    · exact Keeps.bind Keeps.read fun _ => decided_keeps _ _ _ _ _ _ _ _ _
     · exact Keeps.bind (Keeps.send _ _) fun _ => sendAll_keeps _
-    · exact load_keeps _ _ _ _
+    · exact load_keeps _ _ _ _ _
     · exact Keeps.send _ _
 
 /-- No call of a node is resumed twice. -/

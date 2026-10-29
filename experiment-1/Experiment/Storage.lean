@@ -98,6 +98,8 @@ structure Flight where
   client  : Addr
   id      : CallId
   req     : Request
+  /-- The instant carried by the client request, kept through retries. -/
+  now     : Time
   attempt : Nat
   phase   : Phase
 
@@ -130,9 +132,9 @@ def answer (f : Flight) (res : Response) : NodeH Unit := send f.client (.app (.r
 
 /-- The document is loaded: run the abstract handler on it. Nothing
     changed: answer now. Something did: write it, conditionally. -/
-def decideStep (f : Flight) (doc : Option (Promise × Version)) (now : Time) : NodeH Unit := do
+def decideStep (f : Flight) (doc : Option (Promise × Version)) : NodeH Unit := do
   let before : Experiment.State := { promises := doc.toList.map (·.1) }
-  let (res, after, outs) := pick ((Experiment.request f.req now).run (← read).app before) 0
+  let (res, after, outs) := pick ((Experiment.request f.req f.now).run (← read).app before) 0
   for o in outs do
     match o with
     | .always n ok => emit (.always n ok)
@@ -148,13 +150,13 @@ def decideStep (f : Flight) (doc : Option (Promise × Version)) (now : Time) : N
       await { f with phase := .writing res (sends outs) } fun op =>
         .put op f.req.key p (doc.map (·.2))
 
-def nodeReceive (sender : Addr) (m : CMsg) (now : Time) : NodeH Unit := do
+def nodeReceive (sender : Addr) (m : CMsg) (_stepNow : Time) : NodeH Unit := do
   match m with
-  | .app (.req id r) =>
-    await ⟨sender, id, r, 0, .loading⟩ fun op => .get op r.key
+  | .app (.req id now r) =>
+    await ⟨sender, id, r, now, 0, .loading⟩ fun op => .get op r.key
   | .got op doc =>
     match ← takeFlight op with
-    | some f => decideStep f doc now
+    | some f => decideStep f doc
     | none => pure ()
   | .written op =>
     match ← takeFlight op with

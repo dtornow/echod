@@ -7,15 +7,13 @@ import Experiment.NetworkRefinement
 Unlike `eval_lift_iff`, this file speaks about complete executions.  The
 concrete side is the node/store network and the abstract side is the promise
 service. Conditional writes are necessary: the `lost` counterexample shows
-the statement is false without them. They are not sufficient: `lateCas` shows
-that deciding at one instant and committing after a later observation can
-violate the time-sensitive abstract handler.
+the statement is false without them. Request time is carried in `Msg.req` and
+is kept through retries, independently of the later CAS instant.
 
 `drive_refines_of_simulation` closes all generic semantic plumbing.  What
-remains for a restricted or repaired protocol is the system-specific
-simulation invariant: mailboxes and in-flight store operations must be
-related to pending abstract requests, including writes that fail after
-landing.
+remains for the general theorem is the system-specific simulation invariant:
+mailboxes and in-flight store operations must be related to pending abstract
+requests, including writes that fail after landing.
 -/
 
 namespace Exp2
@@ -42,8 +40,7 @@ theorem project_clientView (x : Network.Execution system) :
       | request to m => cases m <;> simp [Network.project, clientView, clientTrace, ih]
       | receive sender m => cases m <;> simp [Network.project, clientView, clientTrace, ih]
 
-/-- The trace-inclusion property originally sought for experiment 2.
-`lateCas` demonstrates that it is false for the current protocol. -/
+/-- The trace-inclusion property sought for experiment 2. -/
 def Refines (cfg : Experiment.Storage.Config) : Prop :=
   cfg.conditional = true →
   ∀ script x, drive cfg script = some x →
