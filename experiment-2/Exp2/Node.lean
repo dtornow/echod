@@ -253,7 +253,6 @@ theorem lateCas_runs : drive {} lateCasScript = some lateCas := by
   | some x =>
     have hx : lateCas = x := by simp [lateCas, h]
     rw [hx]
-    exact h
 
 theorem lateCas_rejected : refines {} lateCas = false := by
   native_decide
