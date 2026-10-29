@@ -13,7 +13,8 @@ use vstd::prelude::*;
 use echod_abstract::state as abs_state;
 use echod_abstract::types as abs;
 use echod_concrete::{
-    bucket_wf, AOriginDocument, AScheduleDocument, AScheduleRow, AStore,
+    bucket_wf, AOriginDocument, AScheduleDocument, AScheduleRow,
+    ASemanticBucket,
 };
 use echod_kernel::types as kernel;
 use echod_kernel::types::{
@@ -264,7 +265,7 @@ pub open spec fn abstract_schedule_ids(
     rows.map_values(|schedule: abs::ASchedule| schedule.id)
 }
 
-pub open spec fn abstract_of(store: AStore) -> abs_state::AState {
+pub open spec fn abstract_of(store: ASemanticBucket) -> abs_state::AState {
     abs_state::AState {
         objects: document_objects(store.origins),
         schedules: document_schedules(store.schedules),
@@ -276,7 +277,7 @@ pub open spec fn abstract_of(store: AStore) -> abs_state::AState {
 /// keyed protocol interpretation of every Concrete document. The order of
 /// origins and schedules in either bucket/list representation is immaterial.
 pub open spec fn related(
-    concrete: AStore,
+    concrete: ASemanticBucket,
     abstract_state: abs_state::AState,
 ) -> bool {
     &&& bucket_wf(concrete)
@@ -289,8 +290,8 @@ pub open spec fn related(
     &&& abstract_state.outbox == Seq::<abs_state::AOutboxEntry>::empty()
 }
 
-pub open spec fn concrete_init() -> AStore {
-    AStore {
+pub open spec fn concrete_init() -> ASemanticBucket {
+    ASemanticBucket {
         origins: Seq::empty(),
         schedules: Seq::empty(),
         timers: Seq::empty(),

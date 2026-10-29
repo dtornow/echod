@@ -1,12 +1,9 @@
 [package]
 name = "echod-codec"
 description = "Executable, versioned canonical byte codecs with Verus round-trip proofs."
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
-
-[workspace]
-resolver = "2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [lib]
 name = "echod_codec"

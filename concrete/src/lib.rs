@@ -89,8 +89,8 @@ pub struct Bucket {
 /// from raw bytes, but the object-store automaton never stores it.
 pub type SemanticBucket = Bucket;
 
-/// Compatibility alias for the former semantic store.
-pub type Store = Bucket;
+/// The actual Concrete store is the raw object-store automaton.
+pub type Store = raw::RawStore;
 
 #[cfg(verus_keep_ghost)]
 pub struct AScheduleRow {
@@ -149,7 +149,10 @@ pub struct ABucket {
 }
 
 #[cfg(verus_keep_ghost)]
-pub type AStore = ABucket;
+pub type ASemanticBucket = ABucket;
+
+#[cfg(verus_keep_ghost)]
+pub type AStore = raw::ARawStore;
 
 #[cfg(verus_keep_ghost)]
 impl View for ScheduleRow {
