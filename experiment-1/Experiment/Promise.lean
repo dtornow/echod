@@ -103,20 +103,29 @@ def sometimes (name : String) (hit : Bool) : Handler Unit := emit (.sometimes na
 def save (p : Promise) : Handler Unit :=
   modify fun s => { s with promises := p :: s.promises.filter (·.id != p.id) }
 
+def notifyAll (p : Record) : List Addr → Handler Unit
+  | [] => pure ()
+  | a :: rest => do
+    send a (.notify p)
+    notifyAll p rest
+
 /-- Settle a pending promise, and tell everyone listening. -/
 def settle (p : Promise) (state : PromiseState) (value : String) : Handler Promise := do
   always "only a pending promise settles" (p.state == .pending)
   always "a promise settles to a final state" (state != .pending)
   let p' := { p with state, value, listeners := [] }
   save p'
-  for a in p.listeners do
-    send a (.notify p'.record)
+  notifyAll p'.record p.listeners
   return p'
+
+/-- Find one promise without exposing the whole state to the continuation. -/
+def lookup (id : Ident) : Handler (Option Promise) :=
+  fun _ s => .one (s.promises.find? (·.id == id), s, [])
 
 /-- Read a promise at `now`. A promise past its timeout times out here, so
     every read sees it timed out, and its listeners hear of it once. -/
 def load (id : Ident) (now : Time) : Handler (Option Promise) := do
-  match (← get).promises.find? (·.id == id) with
+  match ← lookup id with
   | none => return none
   | some p =>
     if p.state == .pending && p.timeoutAt ≤ now then

@@ -39,6 +39,9 @@
   shell to the single-service shell implies trace inclusion.
 - `Experiment/Check.lean`: a search: could this trace of the concurrent
   shell have happened? Executable, unproved.
+- `Experiment/PromiseFrame.lean`: a handler-frame calculus proving that a
+  request on one promise preserves every promise at another key. This is the
+  local transaction lemma needed by storage refinement.
 - `Experiment/Storage.lean`: a simplified echod. Nodes keep nothing; every
   promise is a document in a store process, under a version. A node loads,
   runs the abstract handler, writes conditionally, retries on a lost race,

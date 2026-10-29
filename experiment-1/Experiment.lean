@@ -7,6 +7,7 @@ import Experiment.Network
 import Experiment.NetworkRefinement
 import Experiment.Check
 import Experiment.Promise
+import Experiment.PromiseFrame
 import Experiment.Examples
 import Experiment.Storage
 import Experiment.StorageExamples
