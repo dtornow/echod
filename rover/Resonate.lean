@@ -73,6 +73,18 @@ def outputs (outs : List (Experiment.Out Experiment.Msg)) : List Output :=
     | .send client (.notify record) => some (.notification client record)
     | _ => none
 
+/-- The normal (non-unreliable-wrapper) handler transition used by storage
+nodes. Store failures are mapped separately to the abstract unreliable
+serve/lose/shed outcomes. -/
+def dispatch (config : Config) (call : Call) (state : State) :
+    Outcomes (State × List Output) :=
+  let results :=
+    Experiment.dispatch call.request call.requestedAt config state
+  ⟨results.val.map fun (response, next, outs) =>
+      (next, outputs
+        (outs ++ [.send call.client (.res call.id response)])),
+    by simpa using results.property⟩
+
 /-- Every abstract result of applying one request to the global promise state.
 This is the common linearization operation used by both models. -/
 def run (config : Config) (call : Call) (state : State) :

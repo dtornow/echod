@@ -5,8 +5,9 @@ import Resonate.Refinement
 
 These checks exercise the shared transition and the concrete conditional-write
 boundary. They are intentionally data-oriented: a later trace checker can
-decode boundary events, replay the same `Resonate.run` transitions, and use
-`Refinement.boundary_refinement` as its semantic justification.
+decode boundary events and replay the same `Resonate.run` transitions.  The
+raw PUT example also illustrates that semantic provenance is a ghost invariant,
+not protocol data.
 -/
 
 namespace Resonate.Examples
@@ -21,10 +22,10 @@ def createCall : Call := {
 }
 
 def createOutcome : State × List Output :=
-  (Resonate.run {} createCall {}).val.headD ({}, [])
+  (Resonate.dispatch {} createCall {}).val.headD ({}, [])
 
 theorem createOutcome_valid :
-    createOutcome ∈ (Resonate.run {} createCall {}).val := by
+    createOutcome ∈ (Resonate.dispatch {} createCall {}).val := by
   native_decide
 
 #guard createOutcome.1.promises.length == 1
@@ -41,49 +42,73 @@ theorem createOutcome_valid :
     }
   }]
 
-def candidate : Concrete.Candidate ({} : Resonate.Config) := {
-  call := createCall
-  before := {}
-  version := 0
-  after := createOutcome.1
-  outputs := createOutcome.2
-  valid := createOutcome_valid
-}
+def createdDocument : Promise :=
+  createOutcome.1.promises.headD {
+    id := "missing"
+    timeoutAt := 0
+  }
+
+/-- The store sees only protocol data. No call, response, notification, prior
+state, operation id, or proof witness is present in this raw PUT payload. -/
+def rawPut : Concrete.StoreRequest :=
+  .put "promise-a" createdDocument none
+
+/-- Correlation belongs to the RPC envelope around the raw payload. -/
+def rawPutCall : Concrete.Msg ({} : Resonate.Config) :=
+  .call 0 rawPut
 
 def commitResult : Result Concrete.Pid Concrete.Local
     (Concrete.Msg ({} : Resonate.Config)) :=
-  (Concrete.step {} {} .store (.store {} 0) 0
-    (.receive (.server "node-a") (.cas candidate))).val.headD {
+  (Concrete.step {} {} .store (.store {}) 0
+    (.receive (.server "node-a") rawPutCall)).val.headD {
       state := .outside
       send := []
     }
 
 #guard match commitResult.state with
-  | .store state version =>
-      version == 1 && state.promises.length == 1
+  | .store store =>
+      store.docs == [("promise-a", createdDocument, 1)]
   | _ => false
 
-#guard commitResult.send.length == 1
+#guard commitResult.send == [(.server "node-a", .reply 0 .written)]
 
-/-- Receiving the same append-only CAS message again cannot publish twice:
-its old version conflicts and the store requests a fresh snapshot. -/
+/-- Receiving the same append-only raw PUT again cannot publish twice: its
+stale `none` expected version conflicts with the document's current version. -/
 def duplicateResult : Result Concrete.Pid Concrete.Local
     (Concrete.Msg ({} : Resonate.Config)) :=
-  (Concrete.step {} {} .store (.store createOutcome.1 1) 1
-    (.receive (.server "node-a") (.cas candidate))).val.headD {
+  (Concrete.step {} {} .store
+    (.store { docs := [("promise-a", createdDocument, 1)] }) 1
+    (.receive (.server "node-a") rawPutCall)).val.headD {
       state := .outside
       send := []
     }
 
 #guard match duplicateResult.send with
-  | [(.server "node-a", .retry call)] => call == createCall
+  | [(.server "node-a", .reply 0 .conflict)] => true
   | _ => false
 
-/-- The theorem is available for deployments of any finite size. -/
-example : ∀ events,
-    Concrete.ValidBoundaryTrace ["node-a", "node-b", "node-c"] {} {} events →
-    Abstract.ValidBoundaryTrace {} events :=
-  Refinement.boundary_refinement
-    ["node-a", "node-b", "node-c"] {} {} rfl
+/-- A flaky matching PUT has all three faithful outcomes: acknowledged land,
+failed-after-land, and failed-without-landing. -/
+def flakyPutResults : List (Result Concrete.Pid Concrete.Local
+    (Concrete.Msg ({} : Resonate.Config))) :=
+  (Concrete.storePutResults { flaky := true } "node-a" {}
+    0 "promise-a" createdDocument none).val
+
+#guard flakyPutResults.length == 3
+#guard match flakyPutResults[1]? with
+  | some result => match result.state with
+    | .store store => store.docs == [("promise-a", createdDocument, 1)]
+    | _ => false
+  | _ => false
+#guard match flakyPutResults[1]? with
+  | some result => match result.send with
+    | [(.server "node-a", .reply 0 .failed)] => true
+    | _ => false
+  | _ => false
+#guard match flakyPutResults[2]? with
+  | some result => match result.state with
+    | .store store => store.docs.isEmpty
+    | _ => false
+  | _ => false
 
 end Resonate.Examples

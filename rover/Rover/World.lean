@@ -6,9 +6,11 @@ messages that were sent. A process may receive any message addressed to it
 that occurs in that history, any number of times and in any order. Delaying a
 message means receiving it later; losing it means never receiving it.
 
-One distinguished endpoint, `outside`, has no process state and never steps.
-The environment may inject an allowed request from `outside` into the network.
-Messages sent by processes to `outside` are the system's observable outputs.
+One distinguished endpoint, `outside`, has no process state. The environment
+may inject an allowed request from `outside` into the network, and may
+separately observe any message addressed to `outside`. Observation does not
+remove a message, so output delivery has the same delay, loss, reordering, and
+duplication semantics as process delivery.
 -/
 
 namespace Rover
@@ -90,28 +92,30 @@ def World.land (world : World model) (process : model.Pid) (now : Time)
       result.send.map fun (recipient, message) => (process, recipient, message)
     now }
 
+/-- Observe one outside-addressed message without consuming it. -/
+def World.observeOutside (world : World model) (now : Time) : World model :=
+  { world with now }
+
 /-- Labels retain exactly what happened in one world step. -/
 inductive Label (model : Model) where
   | input (recipient : model.Pid) (now : Time) (message : model.Msg)
   | process (process : model.Pid) (now : Time)
       (event : Event model.Pid model.Msg)
       (send : List (model.Pid × model.Msg))
+  | outside (sender : model.Pid) (now : Time) (message : model.Msg)
 
 /-- The observable system boundary. -/
 inductive BoundaryEvent (model : Model) where
   | input  (recipient : model.Pid) (now : Time) (message : model.Msg)
   | output (sender : model.Pid) (now : Time) (message : model.Msg)
 
-/-- Keep requests injected from `outside` and messages sent to `outside`.
-Everything else is hidden. -/
+/-- Inputs and explicit outside observations are visible. Process sends,
+including sends addressed to outside, are hidden until separately observed. -/
 def Label.observe (label : Label model) : List (BoundaryEvent model) :=
-  letI := model.decEqPid
   match label with
   | .input recipient now message => [.input recipient now message]
-  | .process sender now _ sends =>
-      sends.filterMap fun (recipient, message) =>
-        if recipient = model.outside then some (.output sender now message)
-        else none
+  | .process _ _ _ _ => []
+  | .outside sender now message => [.output sender now message]
 
 /-- One atomic world transition. The network itself does not step:
 injection appends one outside message; a process step validates one event,
@@ -134,6 +138,13 @@ inductive Step (model : Model) (config : model.Config) :
       Step model config world
         (.process process now event result.send)
         (world.land process now result)
+
+  | outside {world sender now message} :
+      world.now ≤ now →
+      (sender, model.outside, message) ∈ world.network →
+      Step model config world
+        (.outside sender now message)
+        (world.observeOutside now)
 
 abbrev Execution (model : Model) := List (Label model × World model)
 

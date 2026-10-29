@@ -11,33 +11,48 @@ refinement.
   boundary events, and the promise transition reused from experiment 1.
 - `Resonate/Abstract.lean` — exactly one real process containing the global
   promise state.
-- `Resonate/Concrete.lean` — any duplicate-free list of stateless server
-  addresses plus one versioned object store. Servers load, evaluate, and
-  submit conditional-write candidates.
-- `Resonate/Refinement.lean` — the forward simulation and end-to-end
-  `boundary_refinement` theorem.
+- `Resonate/Concrete.lean` — any duplicate-free list of server addresses plus
+  a per-document versioned object store. Node-local flights retain calls and
+  handler outcomes; raw PUTs carry only protocol data.
+- `Resonate/Refinement.lean` — ghost PUT provenance and its reachable-network
+  invariant.
 - `Resonate/TraceChecker.lean` — executable certificate search, verified
   replay into an abstract Rover execution, and checker soundness.
 - `Resonate/Examples.lean` — executable checks for create, successful commit,
-  duplicate stale commit, and a three-node theorem instantiation.
+  duplicate stale commit, and all three flaky-write outcomes.
 
 The network records every message ever sent. Receiving checks membership and
 does not remove anything, so loss, delay, reordering, and arbitrary duplicate
 delivery are all represented without extra rules. `outside` is not a process:
-the environment appends injectable requests, while sends addressed to
-`outside` are observations.
+the environment appends injectable requests, and a separate outside-observe
+step observes messages addressed to it without consuming them. Process sends
+are hidden until that explicit observation.
 
 ## Refinement
 
-The concrete store is the linearization point. A server computes a candidate
-from a versioned snapshot. Only a candidate whose version and prior state both
-match may update the store and publish its response/notifications. Replaying a
-successful CAS message therefore conflicts and requests a new snapshot.
+The store payload protocol is `get/got/put/written/conflict/failed`. A PUT is
+exactly a key, document, and optional expected per-document version. Operation
+ids live only in the surrounding RPC call/reply envelope used for correlation.
+Replaying a successful enveloped PUT therefore conflicts against its stale version.
+Flaky writes have the three storage outcomes: landed/written, landed/failed,
+and not-landed/failed.
 
-`Resonate.Refinement.boundary_refinement` proves, without project-specific axioms
-or admitted obligations, that every legal concrete boundary trace is a valid
-trace of the single-process abstract model for arbitrary duplicate-free server
-lists under conditional writes.
+`Resonate.Refinement.reachable_raw_put_valid` proves, without proof-carrying
+messages, that every raw PUT in a reachable append-only network is a legitimate
+selected handler outcome.
+
+Explicit outside observation lets the abstract service linearize writes in
+store order while client outputs are observed later in any delivery order.
+For flaky storage, the intended refinement target is
+`{ appConfig with unreliable := true }`: written maps to serve,
+landed/failed to lose, and not-landed/failed to shed. Unobserved abstract
+notifications may remain in the append-only network.
+
+`Resonate.Refinement.boundary_refinement` proves end-to-end trace inclusion
+for every duplicate-free node list when conditional writes are enabled. Its
+reachable invariant connects op-only replies to node history, reconstructs
+raw-PUT provenance, preserves the per-document store representation, and
+tracks abstract output coverage until explicit outside observation.
 
 ## Trace checker
 
