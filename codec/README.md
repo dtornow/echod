@@ -1,7 +1,7 @@
 # echod-codec
 
-`echod-codec` is an independent executable persistence codec. Nothing in
-`echod-logic` or the runtime uses it yet.
+`echod-codec` is the executable persistence codec used by `echod-logic` for
+documents, textual store keys, node announcements, and membership bodies.
 
 ## Format
 

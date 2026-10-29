@@ -1136,6 +1136,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-codec"
+version = "0.1.0"
+dependencies = [
+ "echod-kernel",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-diff"
 version = "0.1.0"
 dependencies = [
@@ -1163,6 +1173,7 @@ dependencies = [
 name = "echod-logic"
 version = "0.1.0"
 dependencies = [
+ "echod-codec",
  "echod-kernel",
  "resonate-core",
  "serde",
