@@ -213,3 +213,151 @@ fn verified_string_and_kernel_bridges_round_trip() {
     let schedule_after = echod_codec::bridge::round_trip_kernel_schedule(schedule);
     assert_eq!(schedule_model(&schedule_after), schedule_before);
 }
+
+#[test]
+fn appendable_promise_document_is_segmented_and_last_row_wins() {
+    use echod_codec::document::*;
+
+    let header1 = Header {
+        stamp: 10,
+        nonce: 1,
+    };
+    let header2 = Header {
+        stamp: 20,
+        nonce: 2,
+    };
+    let mut first = kernel_promise();
+    first.id = "first".into();
+    first.state = PromiseState::Pending;
+    let mut changed = first.clone();
+    changed.state = PromiseState::Resolved;
+    changed.settled_at = Some(20);
+    let mut second = kernel_promise();
+    second.id = "second".into();
+
+    let segment1 = encode_promise_segment(&header1, &vec![first]).unwrap();
+    let segment2 =
+        encode_promise_segment(&header2, &vec![changed.clone(), second.clone()]).unwrap();
+
+    let (split1, rest) = split_frame(&[segment1.clone(), segment2.clone()].concat()).unwrap();
+    assert_eq!(split1, segment1);
+    assert_eq!(rest, segment2);
+
+    let mut document = split1;
+    document.extend_from_slice(&rest);
+    let (last_header, rows) = decode_promise_document(&document).unwrap();
+    assert_eq!(last_header, Some(header2.clone()));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(promise_model(&rows[0]), promise_model(&changed));
+    assert_eq!(promise_model(&rows[1]), promise_model(&second));
+
+    let (segment_header, segment_rows) = decode_promise_segment(&rest).unwrap();
+    assert_eq!(segment_header, header2);
+    assert_eq!(segment_rows.len(), 2);
+}
+
+#[test]
+fn promise_and_schedule_compaction_preserve_folded_documents() {
+    use echod_codec::document::*;
+
+    let h1 = Header {
+        stamp: 1,
+        nonce: 11,
+    };
+    let h2 = Header {
+        stamp: 2,
+        nonce: 22,
+    };
+    let h3 = Header {
+        stamp: 3,
+        nonce: 33,
+    };
+
+    let mut old = kernel_promise();
+    old.id = "same".into();
+    old.state = PromiseState::Pending;
+    let mut newest = old.clone();
+    newest.state = PromiseState::Rejected;
+    newest.settled_at = Some(2);
+    let mut promise_doc = encode_promise_segment(&h1, &vec![old]).unwrap();
+    promise_doc.extend_from_slice(&encode_promise_segment(&h2, &vec![newest]).unwrap());
+    let (_, before_promises) = decode_promise_document(&promise_doc).unwrap();
+    let compacted = compact_promise_document(&promise_doc, &h3).unwrap();
+    let (compact_header, after_promises) = decode_promise_document(&compacted).unwrap();
+    assert_eq!(compact_header, Some(h3.clone()));
+    assert_eq!(
+        after_promises.iter().map(promise_model).collect::<Vec<_>>(),
+        before_promises
+            .iter()
+            .map(promise_model)
+            .collect::<Vec<_>>()
+    );
+    assert!(split_frame(&compacted).unwrap().1.is_empty());
+
+    let schedule = echod_kernel::Schedule {
+        id: "daily".into(),
+        cron: "0 0 * * *".into(),
+        promise_id: "promise".into(),
+        promise_timeout: 10,
+        promise_param: echod_kernel::Value {
+            headers: vec![],
+            data: None,
+        },
+        promise_tags: vec![],
+        next_run_at: 100,
+        last_run_at: None,
+        created_at: 1,
+    };
+    let mut changed = schedule.clone();
+    changed.next_run_at = 200;
+    changed.last_run_at = Some(100);
+    let mut schedule_doc = encode_schedule_segment(&h1, &vec![schedule]).unwrap();
+    schedule_doc.extend_from_slice(&encode_schedule_segment(&h2, &vec![changed]).unwrap());
+    let (_, before_schedules) = decode_schedule_document(&schedule_doc).unwrap();
+    let compacted = compact_schedule_document(&schedule_doc, &h3).unwrap();
+    let (compact_header, after_schedules) = decode_schedule_document(&compacted).unwrap();
+    assert_eq!(compact_header, Some(h3));
+    assert_eq!(
+        after_schedules
+            .iter()
+            .map(schedule_model)
+            .collect::<Vec<_>>(),
+        before_schedules
+            .iter()
+            .map(schedule_model)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn document_decoder_rejects_truncated_and_malformed_segments() {
+    use echod_codec::document::*;
+
+    let header = Header { stamp: 1, nonce: 1 };
+    let segment = encode_promise_segment(&header, &vec![kernel_promise()]).unwrap();
+    for end in 1..segment.len() {
+        assert!(decode_promise_document(&segment[..end].to_vec()).is_err());
+    }
+
+    let mut trailing = segment.clone();
+    trailing.extend_from_slice(&[0x45, 0x43, 0x48]);
+    assert!(decode_promise_document(&trailing).is_err());
+
+    let schedule = echod_kernel::Schedule {
+        id: "schedule".into(),
+        cron: "* * * * *".into(),
+        promise_id: "promise".into(),
+        promise_timeout: 10,
+        promise_param: echod_kernel::Value {
+            headers: vec![],
+            data: None,
+        },
+        promise_tags: vec![],
+        next_run_at: 1,
+        last_run_at: None,
+        created_at: 1,
+    };
+    let wrong_kind = encode_schedule_segment(&header, &vec![schedule]).unwrap();
+    assert!(decode_promise_document(&wrong_kind).is_err());
+    assert!(decode_schedule_document(&segment).is_err());
+}

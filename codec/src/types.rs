@@ -166,6 +166,8 @@ pub struct Promise {
 
 #[cfg(verus_keep_ghost)]
 pub type APromise = PromiseSpec;
+#[cfg(not(verus_keep_ghost))]
+pub type APromise = Promise;
 
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, PartialEq, Eq))]
@@ -183,5 +185,7 @@ pub struct Schedule {
 
 #[cfg(verus_keep_ghost)]
 pub type ASchedule = ScheduleSpec;
+#[cfg(not(verus_keep_ghost))]
+pub type ASchedule = Schedule;
 
 } // verus!

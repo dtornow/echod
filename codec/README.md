@@ -22,9 +22,18 @@ Kinds are assigned for Header, Promise, Schedule, node Announcement,
 Membership, and StoreKey. Store keys have variants for document, schedule,
 origin timer, schedule timer, node, and membership objects.
 
+Promise and Schedule documents use appendable segment kinds 7 and 8. Each
+write is one complete envelope whose record contains a Header followed by the
+ordered changed rows. A stored document is the direct concatenation of these
+self-framed segments; no outer length is rewritten when another write is
+appended. Reading rejects an invalid or truncated segment, takes the last
+Header, and folds rows by ID in commit order with the last row winning while
+retaining each ID's first-seen position. Compaction writes one segment
+containing a new Header and the folded rows.
+
 ## Verification
 
-`./verify.sh` verifies the byte/model implementation and 183 obligations without
+`./verify.sh` verifies the byte/model implementation and 283 obligations without
 trusted stubs or proof escape hatches. It proves executable/spec agreement for
 primitive decoders, UTF-8 validation, blobs, options, sequences, envelopes, and
 records; their canonical round trips; kind separation; and model-level typed
@@ -46,6 +55,13 @@ format model rejects the input. These contracts cover Header, Announcement,
 Membership, Promise, Schedule, every StoreKey variant, and the kernel
 Promise/Schedule APIs. The kernel decoder contracts additionally prove that the
 decoded model is the verified UTF-8 bridge image of the returned kernel row.
+
+`document.rs` additionally verifies frame splitting, Promise and Schedule
+segment refinement, whole-document decoding, literal-concatenation append
+laws, last-row-wins folding, fold idempotence, and compaction/rewrite
+preservation. Its public segment and document APIs use kernel Promise/Schedule
+rows and the typed Header; malformed and truncated non-empty documents are
+rejected. The empty byte string represents an empty document.
 
 Run:
 

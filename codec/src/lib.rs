@@ -9,6 +9,7 @@
 )]
 
 pub mod bridge;
+pub mod document;
 pub mod frame;
 pub mod laws;
 pub mod primitives;
