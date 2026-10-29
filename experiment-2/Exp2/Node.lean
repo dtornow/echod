@@ -150,18 +150,12 @@ abbrev system : Service where
   receive := receive
   tick    := fun _ => pure ()
 
-/-- The two-node deployment used by the original examples. -/
-def defaultNodes : List Addr := ["n1", "n2"]
-
 /-- A deployment with one fresh Resonate process at every supplied address
 and the physical object store at `s3`.  Refinement requires the addresses to
 be distinct and not to contain `s3`. -/
-def worldFor (nodes : List Addr) : List (Addr × Local) :=
+def world (nodes : List Addr) : List (Addr × Local) :=
   nodes.map (fun address => (address, .node ⟨0, [], node⟩)) ++
     [("s3", .store {})]
-
-/-- Backwards-compatible name for the original two-node deployment. -/
-def world : List (Addr × Local) := worldFor defaultNodes
 
 /-- What the clients saw, as the abstract world's trace. -/
 def clientTrace (x : Experiment.Network.Execution system) : List (Experiment.Label Msg) :=
@@ -196,17 +190,12 @@ def driveFrom (cfg : Config) (c : Experiment.Network.Conf system) :
     let x ← driveFrom cfg c' rest
     return (l, o, c') :: x
 
-def driveFor (nodes : List Addr) (cfg : Config)
+def drive (nodes : List Addr) (cfg : Config)
     (script : List (Time × Script)) :
     Option (Experiment.Network.Execution system) :=
-  driveFrom cfg (Experiment.Network.initial (worldFor nodes)) script
+  driveFrom cfg (Experiment.Network.initial (world nodes)) script
 
-/-- Backwards-compatible driver for `defaultNodes`. -/
-def drive (cfg : Config) (script : List (Time × Script)) :
-    Option (Experiment.Network.Execution system) :=
-  driveFor defaultNodes cfg script
-
-/-- Every execution returned by `drive` follows the network shell's rule. -/
+/-- Every execution returned by `driveFrom` follows the network shell's rule. -/
 theorem driveFrom_legal {c : Experiment.Network.Conf system}
     {script : List (Time × Script)} {x : Experiment.Network.Execution system}
     (h : driveFrom cfg c script = some x) :
@@ -227,19 +216,12 @@ theorem driveFrom_legal {c : Experiment.Network.Conf system}
     subst x
     exact ⟨⟨t, act, ht⟩, ih hxs⟩
 
-theorem driveFor_legal {nodes : List Addr} {script : List (Time × Script)}
+theorem drive_legal {nodes : List Addr} {script : List (Time × Script)}
     {x : Experiment.Network.Execution system}
-    (h : driveFor nodes cfg script = some x) :
+    (h : drive nodes cfg script = some x) :
     Experiment.Network.Legal system cfg
-      (Experiment.Network.initial (worldFor nodes)) x :=
+      (Experiment.Network.initial (world nodes)) x :=
   driveFrom_legal h
-
-theorem drive_legal {script : List (Time × Script)}
-    {x : Experiment.Network.Execution system}
-    (h : drive cfg script = some x) :
-    Experiment.Network.Legal system cfg (Experiment.Network.initial world) x := by
-  simpa [drive, world] using
-    (driveFor_legal (nodes := defaultNodes) h)
 
 def answerTo (a : Addr) (x : Experiment.Network.Execution system) : List Msg :=
   x.filterMap fun ((w, _, ev), _, _) =>
@@ -255,6 +237,8 @@ def settled (v : String) (st : Experiment.PromiseState) : Response := ⟨200, so
 
 /-! ### Two settles racing on two nodes (experiment 1's race, same script) -/
 
+def nodes : List Addr := ["n1", "n2"]
+
 def race : List (Time × Script) :=
   through "c" "n1" 1 (.create "p" (some 100)) 0 ++
   [(1, .send "a" "n1" (.req 2 1 (.settle "p" .resolved "x"))),
@@ -265,7 +249,7 @@ def race : List (Time × Script) :=
    (1, .move "n1" "s3"), (1, .move "s3" "n1"),
    (1, .move "n2" "s3"), (1, .move "s3" "n2")]
 
-def safe := (drive {} (race ++ [(1, .move "n2" "s3"), (1, .move "s3" "n2"),
+def safe := (drive nodes {} (race ++ [(1, .move "n2" "s3"), (1, .move "s3" "n2"),
   (2, .move "n1" "a"), (2, .move "n2" "b")])).getD []
 
 #guard safe.length == 23
@@ -273,7 +257,8 @@ def safe := (drive {} (race ++ [(1, .move "n2" "s3"), (1, .move "s3" "n2"),
 #guard answerTo "b" safe == [.res 3 (settled "x" .resolved)]
 #guard refines {} safe
 
-def lost := (drive { conditional := false } (race ++ [(2, .move "n1" "a"), (2, .move "n2" "b")])).getD []
+def lost := (drive nodes { conditional := false }
+  (race ++ [(2, .move "n1" "a"), (2, .move "n2" "b")])).getD []
 
 #guard answerTo "b" lost == [.res 3 (settled "y" .rejected)]
 #guard !refines { conditional := false } lost
@@ -283,7 +268,7 @@ def lost := (drive { conditional := false } (race ++ [(2, .move "n1" "a"), (2, .
 `b`'s read reaches `n1` while `n1` waits for the store on `a`'s create.
 It stays in the mailbox; `n1` serves it once the create is answered. -/
 
-def queued := (drive {}
+def queued := (drive nodes {}
   [(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"),
    (0, .send "b" "n1" (.req 2 0 (.get "p"))), (0, .move "b" "n1"),      -- n1 is busy: queued
    (0, .move "n1" "s3"), (0, .move "s3" "n1"), (0, .move "n1" "s3"), (0, .move "s3" "n1"),
@@ -313,11 +298,11 @@ def delayedCasScript : List (Time × Script) :=
    (10, .move "n2" "b"),
    (10, .move "n1" "s3"), (10, .move "s3" "n1"), (10, .move "n1" "a")]
 
-def delayedCas := (drive {} delayedCasScript).getD []
+def delayedCas := (drive nodes {} delayedCasScript).getD []
 
-theorem delayedCas_runs : drive {} delayedCasScript = some delayedCas := by
-  have hs : (drive {} delayedCasScript).isSome = true := by native_decide
-  cases h : drive {} delayedCasScript with
+theorem delayedCas_runs : drive nodes {} delayedCasScript = some delayedCas := by
+  have hs : (drive nodes {} delayedCasScript).isSome = true := by native_decide
+  cases h : drive nodes {} delayedCasScript with
   | none => simp [h] at hs
   | some x =>
     have hx : delayedCas = x := by simp [delayedCas, h]
@@ -338,7 +323,8 @@ def inputs : List (Addr × CMsg) :=
    ("w", .app (.req 5 0 (.listen "p" "w"))), ("b", .app (.req 6 0 (.get "p")))]
 
 def fuzzRuns (cfg : Config) : List (Experiment.Network.Execution system) :=
-  (List.range 30).map fun seed => Experiment.Network.fuzz system cfg world inputs ["n1", "n2"] seed 16
+  (List.range 30).map fun seed =>
+    Experiment.Network.fuzz system cfg (world nodes) inputs nodes seed 16
 
 #guard (fuzzRuns { flaky := true }).all (refines { flaky := true })
 

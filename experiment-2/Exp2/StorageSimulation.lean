@@ -2260,19 +2260,6 @@ theorem store_service_step_pick {cfg : Storage.Config}
     (Local.store store', outs)
   rw [pick_map, pick_map, h]
 
-def NormalRel (cfg : Storage.Config)
-    (concrete : Network.Conf system) (abstract : Experiment.Conf promises) : Prop :=
-  ∃ node1 node2 store wire1 wire2 nodeTokens1 nodeTokens2,
-    concrete.states =
-      [("n1", .node node1), ("n2", .node node2), ("s3", .store store)] ∧
-    NodeRep cfg store "n1" node1 wire1 nodeTokens1 ∧
-    NodeRep cfg store "n2" node2 wire2 nodeTokens2 ∧
-    (protocolMessages concrete.net).Perm
-      (optionList wire1 ++ optionList wire2) ∧
-    Covers (appTokens concrete.net ++ nodeTokens1 ++ nodeTokens2) abstract.net ∧
-    StoreRep store abstract.state ∧
-    abstract.now ≤ concrete.now
-
 /-- `NodeRep` witnesses aligned with an arbitrary list of server addresses.
 The last two indices are the flattened concrete protocol wires and abstract
 tokens contributed by the represented nodes. -/
@@ -2425,10 +2412,9 @@ theorem NodesRep.Focus.replaceRestart
       (focus.beforeTokens ++ nodeTokens ++ focus.afterTokens) :=
   focus.replace restart.nodeRep
 
-/-- The storage simulation invariant for an arbitrary deployment.  In
-contrast with `NormalRel`, node states and their wire/token contributions are
-represented recursively and flattened in address order. -/
-def NormalRelFor (nodes : List Addr) (cfg : Storage.Config)
+/-- The storage simulation invariant. Node states and their wire/token
+contributions are represented recursively and flattened in address order. -/
+def NormalRel (nodes : List Addr) (cfg : Storage.Config)
     (concrete : Network.Conf system) (abstract : Experiment.Conf promises) : Prop :=
   ∃ nodeStates store wires tokens,
     concrete.states = nodeStates ++ [("s3", .store store)] ∧
@@ -2438,9 +2424,9 @@ def NormalRelFor (nodes : List Addr) (cfg : Storage.Config)
     StoreRep store abstract.state ∧
     abstract.now ≤ concrete.now
 
-theorem NormalRelFor.time {nodes : List Addr} {cfg : Storage.Config}
+theorem NormalRel.time {nodes : List Addr} {cfg : Storage.Config}
     {concrete : Network.Conf system} {abstract : Experiment.Conf promises}
-    (h : NormalRelFor nodes cfg concrete abstract) :
+    (h : NormalRel nodes cfg concrete abstract) :
     abstract.now ≤ concrete.now := by
   obtain ⟨_, _, _, _, _, _, _, _, _, htime⟩ := h
   exact htime
@@ -3088,28 +3074,6 @@ theorem NodesRep.Focus.map_update
     focus.after.map_update_miss hsplit.2]
   simp [beq_eq_false_iff_ne.mpr hneStore]
 
-theorem protocol_message_is_between_procs {cfg : Storage.Config} {store : Store}
-    {node1 node2 : Running Storage.Config Nat CMsg}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage} {net : List ConcreteMessage}
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hp : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    {message : ConcreteMessage} (hm : message ∈ protocolMessages net) :
-    ∃ source dest m, message = (.proc source, .proc dest, m) := by
-  have hout := (hp.mem_iff).1 hm
-  simp only [List.mem_append] at hout
-  rcases hout with hout | hout
-  · have hw : wire1 = some message := by
-      cases wire1 <;> simp [optionList] at hout ⊢
-      exact hout.symm
-    exact hn1.wire_is_protocol hw
-  · have hw : wire2 = some message := by
-      cases wire2 <;> simp [optionList] at hout ⊢
-      exact hout.symm
-    exact hn2.wire_is_protocol hw
-
 theorem initial_store_rep :
     StoreRep ({} : Store) ({} : Experiment.State) := by
   intro key
@@ -3126,1030 +3090,15 @@ theorem initial_nodesRep (cfg : Storage.Config) (nodes : List Addr) :
       exact NodeRep.idle (by simp [AppOnly]) rfl
     exact NodesRep.cons hidle ih
 
-theorem initial_normalRelFor (nodes : List Addr) (cfg : Storage.Config) :
-    NormalRelFor nodes cfg
-      (Network.initial (worldFor nodes)) (Experiment.initial {}) := by
+theorem initial_normalRel (nodes : List Addr) (cfg : Storage.Config) :
+    NormalRel nodes cfg
+      (Network.initial (world nodes)) (Experiment.initial {}) := by
   refine ⟨nodes.map (fun address => (address, .node ⟨0, [], node⟩)),
     {}, [], [], ?_, initial_nodesRep cfg nodes, ?_, ?_,
     initial_store_rep, Nat.le_refl 0⟩
   · rfl
   · exact .nil
   · exact ⟨[], .nil⟩
-
-theorem initial_normalRel (cfg : Storage.Config) :
-    NormalRel cfg (Network.initial world) (Experiment.initial {}) := by
-  refine ⟨⟨0, [], node⟩, ⟨0, [], node⟩, {}, none, none, [], [],
-    rfl, ?_, ?_, ?_, ?_, initial_store_rep, Nat.le_refl 0⟩
-  · exact .idle (by simp [AppOnly]) rfl
-  · exact .idle (by simp [AppOnly]) rfl
-  · change [].Perm []
-    exact .nil
-  · change Covers [] []
-    exact ⟨[], List.Perm.refl []⟩
-
-theorem normalRel_node1_conflict_retry {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next k : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (htries : candidate.tries = k + 1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .conflict op) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .conflict op) : ConcreteMessage) :: post) :
-    let running : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        loadK k (candidate.call.retry k)
-          candidate.client candidate.id candidate.req candidate.now next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3", .get next candidate.req.key)
-    (toStep node 64 source.addr (.conflict op) t cfg
-      (⟨next, mailbox,
-        writeK candidate.tries (candidate.call.retry candidate.tries)
-          candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-      [((), running, [.send "s3" (.get next candidate.req.key)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (writing_conflict_retry_run (cfg := cfg) (cand := candidate)
-        (next := next) happ hnone htries source.addr t)
-  · let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3", .get next candidate.req.key)
-    refine ⟨_, node2, store, some wire, wire2,
-      mailboxTokens mailbox ++ [candidate.call.token], tokens2,
-      rfl, ?_, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [wire, hstoreAddr, Candidate.call] using
-        (NodeRep.loadingGet
-          (cfg := cfg) (store := store) (address := "n1")
-          (call := candidate.call) (tries := k)
-          happ rfl (answers_none_of_appOnly mailbox next happ))
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [wire]
-      have hswap :
-          (optionList wire2 ++ [wire]).Perm
-            ([wire] ++ optionList wire2) := List.perm_append_comm
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · rw [hnet] at hcover
-      simpa [wire, appTokens, appToken, Candidate.stageTokens,
-        List.append_assoc] using hcover
-
-theorem normalRel_node2_conflict_retry {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next k : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (htries : candidate.tries = k + 1)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .conflict op) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .conflict op) : ConcreteMessage) :: post) :
-    let running : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        loadK k (candidate.call.retry k)
-          candidate.client candidate.id candidate.req candidate.now next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3", .get next candidate.req.key)
-    (toStep node 64 source.addr (.conflict op) t cfg
-      (⟨next, mailbox,
-        writeK candidate.tries (candidate.call.retry candidate.tries)
-          candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-      [((), running, [.send "s3" (.get next candidate.req.key)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (writing_conflict_retry_run (cfg := cfg) (cand := candidate)
-        (next := next) happ hnone htries source.addr t)
-  · let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3", .get next candidate.req.key)
-    refine ⟨node1, _, store, wire1, some wire,
-      tokens1, mailboxTokens mailbox ++ [candidate.call.token],
-      rfl, hn1, ?_, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [wire, hstoreAddr, Candidate.call] using
-        (NodeRep.loadingGet
-          (cfg := cfg) (store := store) (address := "n2")
-          (call := candidate.call) (tries := k)
-          happ rfl (answers_none_of_appOnly mailbox next happ))
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [wire]
-    · rw [hnet] at hcover
-      simpa [wire, appTokens, appToken, Candidate.stageTokens,
-        List.append_assoc] using hcover
-
-set_option maxHeartbeats 1000000 in
-theorem normalRel_node1_got_changed {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)}
-    {res : Response} {after : Experiment.State} {outs : List (Out Msg)}
-    {promise : Promise}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hchanged : (after == { promises := doc.toList.map (·.1) }) = false)
-    (hpromise :
-      after.promises.find? (·.id == call.req.key) = some promise)
-    (hsnapshot : Snapshot store call.req.key doc)
-    (hdoc : DocAtKey call.req.key doc)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .got op doc) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++ (mailboxTokens mailbox ++ [call.token]) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .got op doc) : ConcreteMessage) :: post) :
-    let candidate : Candidate :=
-      ⟨call.client, call.id, call.req, call.now, tries, doc,
-        res, after, outs, promise⟩
-    let running : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        writeK tries (call.retry tries) candidate next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3",
-        .put next call.req.key promise (doc.map (·.2)))
-    (toStep node 64 source.addr (.got op doc) t cfg
-      (⟨next, mailbox,
-        loadK tries (call.retry tries)
-          call.client call.id call.req call.now op⟩ :
-        Running Storage.Config Nat CMsg)).val =
-      [((), running, notes outs ++
-        [.send "s3" (.put next call.req.key promise (doc.map (·.2)))])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (loading_got_changed_run (cfg := cfg) (call := call)
-        (tries := tries) (next := next) happ hnone hpick hchanged hpromise
-        source.addr t)
-  · let candidate : Candidate :=
-      ⟨call.client, call.id, call.req, call.now, tries, doc,
-        res, after, outs, promise⟩
-    let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3",
-        .put next call.req.key promise (doc.map (·.2)))
-    have hvalid : candidate.Valid cfg := by
-      simpa [candidate] using changed_candidate_valid hpick hdoc hpromise
-    refine ⟨_, node2, store, some wire, wire2,
-      mailboxTokens mailbox ++ candidate.stageTokens .pending, tokens2,
-      rfl, ?_, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [candidate, wire, hstoreAddr, Candidate.call, Call.retry] using
-        (NodeRep.writingPut
-          (cfg := cfg) (store := store) (address := "n1")
-          (candidate := candidate) happ rfl
-          (answers_none_of_appOnly mailbox next happ) hvalid hsnapshot)
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [wire]
-      have hswap :
-          (optionList wire2 ++ [wire]).Perm
-            ([wire] ++ optionList wire2) := List.perm_append_comm
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · rw [hnet] at hcover
-      simpa [candidate, wire, appTokens, appToken, Candidate.stageTokens,
-        Candidate.call, Call.token, List.append_assoc] using hcover
-
-set_option maxHeartbeats 1000000 in
-theorem normalRel_node2_got_changed {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)}
-    {res : Response} {after : Experiment.State} {outs : List (Out Msg)}
-    {promise : Promise}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hchanged : (after == { promises := doc.toList.map (·.1) }) = false)
-    (hpromise :
-      after.promises.find? (·.id == call.req.key) = some promise)
-    (hsnapshot : Snapshot store call.req.key doc)
-    (hdoc : DocAtKey call.req.key doc)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .got op doc) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ [call.token])) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .got op doc) : ConcreteMessage) :: post) :
-    let candidate : Candidate :=
-      ⟨call.client, call.id, call.req, call.now, tries, doc,
-        res, after, outs, promise⟩
-    let running : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        writeK tries (call.retry tries) candidate next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3",
-        .put next call.req.key promise (doc.map (·.2)))
-    (toStep node 64 source.addr (.got op doc) t cfg
-      (⟨next, mailbox,
-        loadK tries (call.retry tries)
-          call.client call.id call.req call.now op⟩ :
-        Running Storage.Config Nat CMsg)).val =
-      [((), running, notes outs ++
-        [.send "s3" (.put next call.req.key promise (doc.map (·.2)))])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (loading_got_changed_run (cfg := cfg) (call := call)
-        (tries := tries) (next := next) happ hnone hpick hchanged hpromise
-        source.addr t)
-  · let candidate : Candidate :=
-      ⟨call.client, call.id, call.req, call.now, tries, doc,
-        res, after, outs, promise⟩
-    let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3",
-        .put next call.req.key promise (doc.map (·.2)))
-    have hvalid : candidate.Valid cfg := by
-      simpa [candidate] using changed_candidate_valid hpick hdoc hpromise
-    refine ⟨node1, _, store, wire1, some wire,
-      tokens1, mailboxTokens mailbox ++ candidate.stageTokens .pending,
-      rfl, hn1, ?_, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [candidate, wire, hstoreAddr, Candidate.call, Call.retry] using
-        (NodeRep.writingPut
-          (cfg := cfg) (store := store) (address := "n2")
-          (candidate := candidate) happ rfl
-          (answers_none_of_appOnly mailbox next happ) hvalid hsnapshot)
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [wire]
-    · rw [hnet] at hcover
-      simpa [candidate, wire, appTokens, appToken, Candidate.stageTokens,
-        Candidate.call, Call.token, List.append_assoc] using hcover
-
-theorem normalRel_node1_written {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .written op) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .served) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .written op) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id candidate.res)) ::
-          (sends candidate.outs).map
-            (fun (address, message) => .send address (.app message)) ++ rest
-      (toStep node 64 source.addr (.written op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n1" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n1" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_written_restart (cfg := cfg) (store := store) (address := "n1")
-      happ hnone source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-  let emittedPrefix : List (Out CMsg) :=
-    [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-      (sends candidate.outs).map
-        (fun (address, message) => .send address (.app message))
-  let emitted : List (Out CMsg) := emittedPrefix ++ rest
-  have hprefixProtocol :
-      protocolMessages (routedOuts states "n1" emittedPrefix) = [] := by
-    rw [show emittedPrefix =
-      [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-        (sends candidate.outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, protocolMessages_append,
-      protocolMessages_routedResponse,
-      protocolMessages_routedOutputs]
-    rfl
-  have hprefixApp :
-      appTokens (routedOuts states "n1" emittedPrefix) =
-        [responseToken candidate.client candidate.id candidate.res] ++
-          outputTokens candidate.outs := by
-    rw [show emittedPrefix =
-      [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-        (sends candidate.outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, appTokens_append,
-      appTokens_routedResponse,
-      appTokens_routedOutputs states "n1" candidate.outs
-        (Candidate.onlyNotifies (candidate := candidate) hvalid)]
-  have hrouteProtocol :
-      protocolMessages (routedOuts states "n1" emitted) =
-        optionList wire := by
-    rw [show emitted = emittedPrefix ++ rest from rfl, routedOuts_append,
-      protocolMessages_append, hprefixProtocol, List.nil_append]
-    cases hrestart with
-    | idle happ' hnone' => rfl
-    | @loading call nextOp next' mailbox' happ' hnext' hnone' =>
-      simp [routedOuts, routedMessages, sends, protocolMessages,
-        optionList, states, hstoreAddr, Network.Conf.route,
-        Network.Conf.isProc]
-  have hrouteApp :
-      appTokens (routedOuts states "n1" emitted) =
-        [responseToken candidate.client candidate.id candidate.res] ++
-          outputTokens candidate.outs := by
-    rw [show emitted = emittedPrefix ++ rest from rfl, routedOuts_append,
-      appTokens_append, hprefixApp]
-    cases hrestart <;>
-      simp [routedOuts, routedMessages, sends, appTokens, appToken,
-        states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted, emittedPrefix, List.append_assoc] using hrun
-  · rw [hnet] at hprotocol hcover
-    have hbase :
-        (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire2) := by
-      apply Perm.cancel_exposed
-      simpa [protocolMessages, List.append_assoc] using hprotocol
-    have hprotocolFinal :
-        (protocolMessages
-          (pre ++ post ++ routedOuts states "n1" emitted)).Perm
-          (optionList wire ++ optionList wire2) := by
-      rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-      have hp := hbase.append_right (optionList wire)
-      have hswap :
-          (optionList wire2 ++ optionList wire).Perm
-            (optionList wire ++ optionList wire2) :=
-        List.perm_append_comm
-      simpa [List.append_assoc] using hp.trans hswap
-    have hcoverFinal : Covers
-        (appTokens (pre ++ post ++ routedOuts states "n1" emitted) ++
-          tokens ++ tokens2) a.net := by
-      have hlocal :
-          (mailboxTokens mailbox ++ candidate.stageTokens .served).Perm
-            ([responseToken candidate.client candidate.id candidate.res] ++
-              outputTokens candidate.outs ++ tokens) := by
-        have hfirst :
-            (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id candidate.res]).Perm
-              ([responseToken candidate.client candidate.id candidate.res] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.perm_append_comm :
-              (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id candidate.res]).Perm
-              ([responseToken candidate.client candidate.id candidate.res] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs))
-        have hmiddle :
-            ([responseToken candidate.client candidate.id candidate.res] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs).Perm
-              ([responseToken candidate.client candidate.id candidate.res] ++
-                tokens ++ outputTokens candidate.outs) :=
-          by
-            simpa [List.append_assoc] using
-              (List.Perm.append_left
-                [responseToken candidate.client candidate.id candidate.res]
-                (htokens.symm.append_right (outputTokens candidate.outs)))
-        have hlast :
-            ([responseToken candidate.client candidate.id candidate.res] ++
-                tokens ++ outputTokens candidate.outs).Perm
-              ([responseToken candidate.client candidate.id candidate.res] ++
-                outputTokens candidate.outs ++ tokens) := by
-          simpa [List.append_assoc] using
-            (List.Perm.append_left
-              [responseToken candidate.client candidate.id candidate.res]
-              (List.perm_append_comm :
-                (tokens ++ outputTokens candidate.outs).Perm
-                  (outputTokens candidate.outs ++ tokens)))
-        simpa [Candidate.stageTokens, List.append_assoc] using
-          hfirst.trans (hmiddle.trans hlast)
-      have hold : Covers
-          (appTokens pre ++ appTokens post ++
-            (mailboxTokens mailbox ++ candidate.stageTokens .served) ++
-            tokens2) a.net := by
-        simpa [appTokens, appToken, List.append_assoc] using hcover
-      rw [appTokens_append, appTokens_append, hrouteApp]
-      apply Covers.of_perm _ hold
-      simpa [List.append_assoc] using
-        (List.Perm.append_right tokens2
-          (List.Perm.append_left (appTokens pre ++ appTokens post) hlocal))
-    refine ⟨running, node2, store, wire, wire2, tokens, tokens2,
-      rfl, hrestart.nodeRep, hn2, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hprotocolFinal
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hcoverFinal
-
-theorem normalRel_node2_written {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .written op) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .served)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .written op) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id candidate.res)) ::
-          (sends candidate.outs).map
-            (fun (address, message) => .send address (.app message)) ++ rest
-      (toStep node 64 source.addr (.written op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n2" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n2" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_written_restart (cfg := cfg) (store := store) (address := "n2")
-      happ hnone source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-  let emittedPrefix : List (Out CMsg) :=
-    [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-      (sends candidate.outs).map
-        (fun (address, message) => .send address (.app message))
-  let emitted : List (Out CMsg) := emittedPrefix ++ rest
-  have hprefixProtocol :
-      protocolMessages (routedOuts states "n2" emittedPrefix) = [] := by
-    rw [show emittedPrefix =
-      [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-        (sends candidate.outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, protocolMessages_append,
-      protocolMessages_routedResponse, protocolMessages_routedOutputs]
-    rfl
-  have hprefixApp :
-      appTokens (routedOuts states "n2" emittedPrefix) =
-        [responseToken candidate.client candidate.id candidate.res] ++
-          outputTokens candidate.outs := by
-    rw [show emittedPrefix =
-      [.send candidate.client (.app (.res candidate.id candidate.res))] ++
-        (sends candidate.outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, appTokens_append, appTokens_routedResponse,
-      appTokens_routedOutputs states "n2" candidate.outs
-        (Candidate.onlyNotifies (candidate := candidate) hvalid)]
-  have hrouteProtocol :
-      protocolMessages (routedOuts states "n2" emitted) =
-        optionList wire := by
-    rw [show emitted = emittedPrefix ++ rest from rfl, routedOuts_append,
-      protocolMessages_append, hprefixProtocol, List.nil_append]
-    cases hrestart with
-    | idle happ' hnone' => rfl
-    | @loading call nextOp next' mailbox' happ' hnext' hnone' =>
-      simp [routedOuts, routedMessages, sends, protocolMessages,
-        optionList, states, hstoreAddr, Network.Conf.route,
-        Network.Conf.isProc]
-  have hrouteApp :
-      appTokens (routedOuts states "n2" emitted) =
-        [responseToken candidate.client candidate.id candidate.res] ++
-          outputTokens candidate.outs := by
-    rw [show emitted = emittedPrefix ++ rest from rfl, routedOuts_append,
-      appTokens_append, hprefixApp]
-    cases hrestart <;>
-      simp [routedOuts, routedMessages, sends, appTokens, appToken,
-        states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  rw [hnet] at hprotocol hcover
-  have hbaseProtocol :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire1) := by
-    have hp := hprotocol.trans List.perm_append_comm
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hp
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n2" emitted)).Perm
-        (optionList wire1 ++ optionList wire) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    simpa [List.append_assoc] using hbaseProtocol.append_right (optionList wire)
-  have hlocal :
-      (mailboxTokens mailbox ++ candidate.stageTokens .served).Perm
-        ([responseToken candidate.client candidate.id candidate.res] ++
-          outputTokens candidate.outs ++ tokens) := by
-    have hfirst :
-        (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-            [responseToken candidate.client candidate.id candidate.res]).Perm
-          ([responseToken candidate.client candidate.id candidate.res] ++
-            mailboxTokens mailbox ++ outputTokens candidate.outs) := by
-      simpa [List.append_assoc] using
-        (List.perm_append_comm :
-          (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-            [responseToken candidate.client candidate.id candidate.res]).Perm
-          ([responseToken candidate.client candidate.id candidate.res] ++
-            mailboxTokens mailbox ++ outputTokens candidate.outs))
-    have hmiddle :
-        ([responseToken candidate.client candidate.id candidate.res] ++
-            mailboxTokens mailbox ++ outputTokens candidate.outs).Perm
-          ([responseToken candidate.client candidate.id candidate.res] ++
-            tokens ++ outputTokens candidate.outs) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left
-          [responseToken candidate.client candidate.id candidate.res]
-          (htokens.symm.append_right (outputTokens candidate.outs)))
-    have hlast :
-        ([responseToken candidate.client candidate.id candidate.res] ++
-            tokens ++ outputTokens candidate.outs).Perm
-          ([responseToken candidate.client candidate.id candidate.res] ++
-            outputTokens candidate.outs ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left
-          [responseToken candidate.client candidate.id candidate.res]
-          (List.perm_append_comm :
-            (tokens ++ outputTokens candidate.outs).Perm
-              (outputTokens candidate.outs ++ tokens)))
-    simpa [Candidate.stageTokens, List.append_assoc] using
-      hfirst.trans (hmiddle.trans hlast)
-  have hold : Covers
-      (appTokens pre ++ appTokens post ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .served)) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n2" emitted) ++
-        tokens1 ++ tokens) a.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    apply Covers.of_perm _ hold
-    have hwith :
-        (tokens1 ++
-            (mailboxTokens mailbox ++ candidate.stageTokens .served)).Perm
-          (tokens1 ++
-            ([responseToken candidate.client candidate.id candidate.res] ++
-              outputTokens candidate.outs ++ tokens)) :=
-      List.Perm.append_left tokens1 hlocal
-    have hmove :
-        (tokens1 ++
-            ([responseToken candidate.client candidate.id candidate.res] ++
-              outputTokens candidate.outs ++ tokens)).Perm
-          ([responseToken candidate.client candidate.id candidate.res] ++
-            outputTokens candidate.outs ++ tokens1 ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_right tokens
-          (List.perm_append_comm :
-            (tokens1 ++
-              ([responseToken candidate.client candidate.id candidate.res] ++
-                outputTokens candidate.outs)).Perm
-              (([responseToken candidate.client candidate.id candidate.res] ++
-                outputTokens candidate.outs) ++ tokens1)))
-    simpa [List.append_assoc] using
-      (List.Perm.append_left (appTokens pre ++ appTokens post)
-        (hwith.trans hmove))
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted, emittedPrefix, List.append_assoc] using hrun
-  · refine ⟨node1, running, store, wire1, wire, tokens1, tokens,
-      rfl, hn1, hrestart.nodeRep, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hprotocolFinal
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hcoverFinal
-
-theorem normalRel_node1_failed {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)} {stage : WriteStage}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hstage : stage = .shed ∨ stage = .lost)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .failed op) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens stage) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .failed op) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-      (toStep node 64 source.addr (.failed op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n1" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n1" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_failed_restart (cfg := cfg) (store := store) (address := "n1")
-      happ hnone source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-  let emitted : List (Out CMsg) :=
-    .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-  have hrouteStore :
-      (⟨[], states, 0⟩ : Network.Conf system).route cfg.store =
-        .proc cfg.store := by
-    simp [states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  obtain ⟨hrouteProtocol, hrouteApp⟩ :=
-    hrestart.routedResponse hrouteStore
-      (client := candidate.client) (id := candidate.id)
-      (response := ⟨503, none⟩)
-  rw [hnet] at hprotocol hcover
-  have hbase :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire2) := by
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n1" emitted)).Perm
-        (optionList wire ++ optionList wire2) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    have hp := hbase.append_right (optionList wire)
-    have hswap :
-        (optionList wire2 ++ optionList wire).Perm
-          (optionList wire ++ optionList wire2) :=
-      List.perm_append_comm
-    simpa [List.append_assoc] using hp.trans hswap
-  have hold : Covers
-      (appTokens pre ++ appTokens post ++
-        (mailboxTokens mailbox ++ candidate.stageTokens stage) ++
-        tokens2) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n1" emitted) ++
-        tokens ++ tokens2) a.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    rcases hstage with rfl | rfl
-    · have hlocal :
-          (mailboxTokens mailbox ++
-              [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens) := by
-        exact (List.perm_append_comm.trans
-          (List.Perm.append_left
-            [responseToken candidate.client candidate.id ⟨503, none⟩]
-            htokens.symm))
-      apply Covers.of_perm _ hold
-      simpa [Candidate.stageTokens, List.append_assoc] using
-        (List.Perm.append_right tokens2
-          (List.Perm.append_left (appTokens pre ++ appTokens post) hlocal))
-    · have hlocal :
-          (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-              [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens ++ outputTokens candidate.outs) := by
-        have hfirst :
-            (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.perm_append_comm :
-              (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs))
-        have hsecond :
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.Perm.append_left
-              [responseToken candidate.client candidate.id ⟨503, none⟩]
-              (htokens.symm.append_right (outputTokens candidate.outs)))
-        exact hfirst.trans hsecond
-      have hglobal :
-          (appTokens pre ++ appTokens post ++
-              (mailboxTokens mailbox ++ candidate.stageTokens .lost) ++
-              tokens2).Perm
-            ((appTokens pre ++ appTokens post ++
-              [responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens ++ tokens2) ++ outputTokens candidate.outs) := by
-        have hwith :=
-          List.Perm.append_right tokens2
-            (List.Perm.append_left (appTokens pre ++ appTokens post) hlocal)
-        have hmove :
-            (appTokens pre ++ appTokens post ++
-                ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                  tokens ++ outputTokens candidate.outs) ++ tokens2).Perm
-              ((appTokens pre ++ appTokens post ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens ++ tokens2) ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.Perm.append_left
-              (appTokens pre ++ appTokens post ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens)
-              (List.perm_append_comm :
-                (outputTokens candidate.outs ++ tokens2).Perm
-                  (tokens2 ++ outputTokens candidate.outs)))
-        simpa [Candidate.stageTokens, List.append_assoc] using
-          hwith.trans hmove
-      apply Covers.weaken (extra := outputTokens candidate.outs)
-      exact Covers.of_perm hglobal hold
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted] using hrun
-  · refine ⟨running, node2, store, wire, wire2, tokens, tokens2,
-      rfl, hrestart.nodeRep, hn2, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, List.append_assoc] using hprotocolFinal
-    · simpa [states, emitted, List.append_assoc] using hcoverFinal
-
-theorem normalRel_node2_failed {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)} {stage : WriteStage}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hstage : stage = .shed ∨ stage = .lost)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .failed op) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens stage)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .failed op) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-      (toStep node 64 source.addr (.failed op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n2" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n2" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_failed_restart (cfg := cfg) (store := store) (address := "n2")
-      happ hnone source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-  let emitted : List (Out CMsg) :=
-    .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-  have hrouteStore :
-      (⟨[], states, 0⟩ : Network.Conf system).route cfg.store =
-        .proc cfg.store := by
-    simp [states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  obtain ⟨hrouteProtocol, hrouteApp⟩ :=
-    hrestart.routedResponse hrouteStore
-      (client := candidate.client) (id := candidate.id)
-      (response := ⟨503, none⟩)
-  rw [hnet] at hprotocol hcover
-  have hbaseProtocol :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire1) := by
-    have hp := hprotocol.trans List.perm_append_comm
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hp
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n2" emitted)).Perm
-        (optionList wire1 ++ optionList wire) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    simpa [List.append_assoc] using
-      hbaseProtocol.append_right (optionList wire)
-  have hold : Covers
-      (appTokens pre ++ appTokens post ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens stage)) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n2" emitted) ++
-        tokens1 ++ tokens) a.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    rcases hstage with rfl | rfl
-    · have hlocal :
-          (mailboxTokens mailbox ++
-              [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens) :=
-        List.perm_append_comm.trans
-          (List.Perm.append_left
-            [responseToken candidate.client candidate.id ⟨503, none⟩]
-            htokens.symm)
-      have hwith :
-          (tokens1 ++
-              (mailboxTokens mailbox ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩])).Perm
-            (tokens1 ++
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens)) :=
-        List.Perm.append_left tokens1 hlocal
-      have hmove :
-          (tokens1 ++
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens)).Perm
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens1 ++ tokens) := by
-        simpa [List.append_assoc] using
-          (List.Perm.append_right tokens
-            (List.perm_append_comm :
-              (tokens1 ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens1)))
-      apply Covers.of_perm _ hold
-      simpa [Candidate.stageTokens, List.append_assoc] using
-        (List.Perm.append_left (appTokens pre ++ appTokens post)
-          (hwith.trans hmove))
-    · have hlocal :
-          (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-              [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens ++ outputTokens candidate.outs) := by
-        have hfirst :
-            (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.perm_append_comm :
-              (mailboxTokens mailbox ++ outputTokens candidate.outs ++
-                [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs))
-        have hsecond :
-            ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                mailboxTokens mailbox ++ outputTokens candidate.outs).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens ++ outputTokens candidate.outs) := by
-          simpa [List.append_assoc] using
-            (List.Perm.append_left
-              [responseToken candidate.client candidate.id ⟨503, none⟩]
-              (htokens.symm.append_right (outputTokens candidate.outs)))
-        exact hfirst.trans hsecond
-      have hwith :
-          (tokens1 ++
-              (mailboxTokens mailbox ++ candidate.stageTokens .lost)).Perm
-            (tokens1 ++
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens ++ outputTokens candidate.outs)) := by
-        simpa [Candidate.stageTokens, List.append_assoc] using
-          List.Perm.append_left tokens1 hlocal
-      have hmove :
-          (tokens1 ++
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens ++ outputTokens candidate.outs)).Perm
-            (([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-              tokens1 ++ tokens) ++ outputTokens candidate.outs) := by
-        have hfront :
-            (tokens1 ++
-                ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                  tokens)).Perm
-              ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                tokens1 ++ tokens) := by
-          simpa [List.append_assoc] using
-            (List.Perm.append_right tokens
-              (List.perm_append_comm :
-                (tokens1 ++
-                  [responseToken candidate.client candidate.id ⟨503, none⟩]).Perm
-                ([responseToken candidate.client candidate.id ⟨503, none⟩] ++
-                  tokens1)))
-        simpa [List.append_assoc] using
-          hfront.append_right (outputTokens candidate.outs)
-      apply Covers.weaken (extra := outputTokens candidate.outs)
-      apply Covers.of_perm _ hold
-      simpa [List.append_assoc] using
-        (List.Perm.append_left (appTokens pre ++ appTokens post)
-          (hwith.trans hmove))
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted] using hrun
-  · refine ⟨node1, running, store, wire1, wire, tokens1, tokens,
-      rfl, hn1, hrestart.nodeRep, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, List.append_assoc] using hprotocolFinal
-    · simpa [states, emitted, List.append_assoc] using hcoverFinal
 
 theorem linearize_candidate_shed_early {cfg : Storage.Config}
     {candidate : Candidate} {store : Store}
@@ -4182,154 +3131,12 @@ theorem linearize_candidate_shed_early {cfg : Storage.Config}
   exact request_step_mem
     (request_shed_mem cfg.app a.state candidate.req candidate.now)
 
-theorem normalRel_node1_conflict_exhausted {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (htries : candidate.tries = 0)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .conflict op) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .conflict op) : ConcreteMessage) :: post) :
-    ∃ a' running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "n1", t, .receive source (CMsg.conflict op)) a' ∧
-      (toStep node 64 source.addr (.conflict op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n1" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n1" emitted, states, t⟩ a' := by
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        candidate.call.token :: tokens2) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hc
-  have hlin := linearize_candidate_shed_early
-    (cfg := cfg) (candidate := candidate) hstore hanet
-  dsimp at hlin
-  obtain ⟨hlegal, hobs, hstore'⟩ := hlin
-  let response : AbstractMessage :=
-    responseToken candidate.client candidate.id ⟨503, none⟩
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ [response], a.state, a.now⟩
-  have haeq : a' =
-      ⟨apre ++ apost ++ Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)],
-        a.state, a.now⟩ := by
-    simp [a', response, responseToken, Experiment.emits, sends]
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_conflict_exhausted_restart
-      (cfg := cfg) (store := store) (address := "n1")
-      happ hnone htries source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-  let emitted : List (Out CMsg) :=
-    .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-  have hrouteStore :
-      (⟨[], states, 0⟩ : Network.Conf system).route cfg.store =
-        .proc cfg.store := by
-    simp [states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  obtain ⟨hrouteProtocol, hrouteApp⟩ :=
-    hrestart.routedResponse hrouteStore
-      (client := candidate.client) (id := candidate.id)
-      (response := ⟨503, none⟩)
-  rw [hnet] at hprotocol
-  have hbase :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire2) := by
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n1" emitted)).Perm
-        (optionList wire ++ optionList wire2) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    have hp := hbase.append_right (optionList wire)
-    exact (by
-      simpa [List.append_assoc] using hp.trans
-        (List.perm_append_comm :
-          (optionList wire2 ++ optionList wire).Perm
-            (optionList wire ++ optionList wire2)))
-  have hcAdded := Covers.insert_both
-    (left := appTokens pre ++ appTokens post ++ mailboxTokens mailbox)
-    (right := tokens2) (added := [response]) hcRest
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n1" emitted) ++
-        tokens ++ tokens2) a'.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    apply Covers.of_perm _ hcAdded
-    have hlocal :
-        (mailboxTokens mailbox ++ [response]).Perm
-          ([response] ++ tokens) :=
-      List.perm_append_comm.trans
-        (List.Perm.append_left [response] htokens.symm)
-    simpa [a', List.append_assoc] using
-      (List.Perm.append_right tokens2
-        (List.Perm.append_left (appTokens pre ++ appTokens post) hlocal))
-  refine ⟨a', running, rest, wire, tokens, ?_, ?_, hrestart, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)], a')],
-      ?_, hobs, rfl⟩
-    simpa [haeq] using hlegal
-  · simpa [emitted] using hrun
-  · refine ⟨running, node2, store, wire, wire2, tokens, tokens2,
-      rfl, hrestart.nodeRep, hn2, ?_, ?_, ?_,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, List.append_assoc] using hprotocolFinal
-    · simpa [states, emitted, List.append_assoc] using hcoverFinal
-    · simpa [a', haeq] using hstore'
-
-theorem NormalRel.clientRequest {cfg : Storage.Config}
-    {c : Network.Conf system} {a : Experiment.Conf promises}
-    (hrel : NormalRel cfg c a) (client to : Addr) (t : Time) (m : Msg) :
-    NormalRel cfg
-      ⟨c.net ++ [(.client client, .proc to, .app m)], c.states, t⟩
-      ⟨a.net ++ [(.client client, .server, m)], a.state, t⟩ := by
-  obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-    hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-  refine ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-    hstates, hn1, hn2, ?_, ?_, hstore, Nat.le_refl t⟩
-  · simpa [protocolMessages] using hprotocol
-  · simpa [appTokens, appToken, List.append_assoc] using
-      (Covers.insert_both
-        (left := appTokens c.net) (right := tokens1 ++ tokens2)
-        (added := [((.client client, .server, m) : AbstractMessage)])
-        (by simpa [List.append_assoc] using hcover))
-
-theorem NormalRelFor.clientRequest {nodes : List Addr}
+theorem NormalRel.clientRequest {nodes : List Addr}
     {cfg : Storage.Config}
     {c : Network.Conf system} {a : Experiment.Conf promises}
-    (hrel : NormalRelFor nodes cfg c a)
+    (hrel : NormalRel nodes cfg c a)
     (client to : Addr) (t : Time) (m : Msg) :
-    NormalRelFor nodes cfg
+    NormalRel nodes cfg
       ⟨c.net ++ [(.client client, .proc to, .app m)], c.states, t⟩
       ⟨a.net ++ [(.client client, .server, m)], a.state, t⟩ := by
   obtain ⟨states, store, wires, tokens, hstates, hnodes,
@@ -4343,42 +3150,16 @@ theorem NormalRelFor.clientRequest {nodes : List Addr}
         (added := [((.client client, .server, m) : AbstractMessage)])
         hcover)
 
-theorem NormalRel.clientReceive {cfg : Storage.Config}
-    {c : Network.Conf system} {a : Experiment.Conf promises}
-    (hrel : NormalRel cfg c a) (sender : Network.Who) (client : Addr)
-    (t : Time) (m : Msg)
-    (pre post : List ConcreteMessage)
-    (hnet : c.net = pre ++
-      (sender, .client client, .app m) :: post) :
-    ∃ apre apost,
-      a.net = apre ++ (.server, .client client, m) :: apost ∧
-      NormalRel cfg
-        ⟨pre ++ post, c.states, t⟩
-        ⟨apre ++ apost, a.state, t⟩ := by
-  obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-    hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-  rw [hnet] at hprotocol hcover
-  have hc : Covers
-      (appTokens pre ++
-        (.server, .client client, m) ::
-          (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  obtain ⟨apre, apost, hanet, hc'⟩ := Covers.consume hc
-  refine ⟨apre, apost, hanet, node1, node2, store, wire1, wire2,
-    tokens1, tokens2, hstates, hn1, hn2, ?_, ?_, hstore, Nat.le_refl t⟩
-  · simpa [protocolMessages, List.append_assoc] using hprotocol
-  · simpa [appTokens, List.append_assoc] using hc'
-
-theorem NormalRelFor.clientReceive {nodes : List Addr}
+theorem NormalRel.clientReceive {nodes : List Addr}
     {cfg : Storage.Config}
     {c : Network.Conf system} {a : Experiment.Conf promises}
-    (hrel : NormalRelFor nodes cfg c a)
+    (hrel : NormalRel nodes cfg c a)
     (sender : Network.Who) (client : Addr) (t : Time) (m : Msg)
     (pre post : List ConcreteMessage)
     (hnet : c.net = pre ++ (sender, .client client, .app m) :: post) :
     ∃ apre apost,
       a.net = apre ++ (.server, .client client, m) :: apost ∧
-      NormalRelFor nodes cfg
+      NormalRel nodes cfg
         ⟨pre ++ post, c.states, t⟩
         ⟨apre ++ apost, a.state, t⟩ := by
   obtain ⟨states, store, wires, tokens, hstates, hnodes,
@@ -4394,71 +3175,15 @@ theorem NormalRelFor.clientReceive {nodes : List Addr}
   · simpa [protocolMessages, List.append_assoc] using hprotocol
   · simpa [appTokens, List.append_assoc] using hc'
 
-theorem NormalRel.storeApp {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {a : Experiment.Conf promises}
-    (hrel : NormalRel cfg
-      ⟨net, [("n1", .node node1), ("n2", .node node2), ("s3", .store store)],
-        now⟩ a)
-    (source : Network.Who) (message : Msg) (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++ (source, .proc "s3", .app message) :: post) :
-    NormalRel cfg
-      ⟨pre ++ post,
-        [("n1", .node node1), ("n2", .node node2), ("s3", .store store)], t⟩ a := by
-  obtain ⟨represented1, represented2, representedStore,
-    wire1, wire2, tokens1, tokens2,
-    hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-  simp only [List.cons.injEq, Prod.mk.injEq, true_and, and_true,
-    Local.node.injEq, Local.store.injEq] at hstates
-  obtain ⟨rfl, rfl, rfl⟩ := hstates
-  refine ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-    rfl, hn1, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-  · rw [hnet] at hprotocol
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  · rw [hnet] at hcover
-    cases source with
-    | client client =>
-      have hc : Covers
-          (appTokens pre ++
-            (.client client, .server, message) ::
-              (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-        simpa [appTokens, appToken, List.append_assoc] using hcover
-      simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-    | proc sender =>
-      cases message with
-      | req id requestNow request =>
-        have hc : Covers
-            (appTokens pre ++
-              (.client sender, .server, .req id requestNow request) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-      | res id response =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "s3", .res id response) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-      | notify promise =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "s3", .notify promise) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-
-theorem NormalRelFor.storeApp {nodes : List Addr}
+theorem NormalRel.storeApp {nodes : List Addr}
     {cfg : Storage.Config}
     {c : Network.Conf system} {t : Time}
     {a : Experiment.Conf promises}
-    (hrel : NormalRelFor nodes cfg c a)
+    (hrel : NormalRel nodes cfg c a)
     (source : Network.Who) (message : Msg) (hstepTime : c.now ≤ t)
     (pre post : List ConcreteMessage)
     (hnet : c.net = pre ++ (source, .proc "s3", .app message) :: post) :
-    NormalRelFor nodes cfg
+    NormalRel nodes cfg
       ⟨pre ++ post, c.states, t⟩ a := by
   obtain ⟨nodeStates, store, wires, tokens,
     hstates, hnodes, hprotocol, hcover, hstore, htime⟩ := hrel
@@ -4499,413 +3224,7 @@ theorem NormalRelFor.storeApp {nodes : List Addr}
           simpa [appTokens, appToken, List.append_assoc] using hcover
         simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
 
-theorem NormalRel.node1AppNonrequest {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {a : Experiment.Conf promises}
-    (hrel : NormalRel cfg
-      ⟨net, [("n1", .node node1), ("n2", .node node2), ("s3", .store store)],
-        now⟩ a)
-    (source : Network.Who) (message : Msg) (t : Time)
-    (hstepTime : now ≤ t)
-    (hm : isRequest source.addr (.app message) = false)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++ (source, .proc "n1", .app message) :: post) :
-    ∃ node1',
-      (toStep node 64 source.addr (.app message) t cfg node1).val =
-        [((), node1', [])] ∧
-      NormalRel cfg
-        ⟨pre ++ post,
-          [("n1", .node node1'), ("n2", .node node2), ("s3", .store store)],
-          t⟩ a := by
-  obtain ⟨represented1, represented2, representedStore,
-    wire1, wire2, tokens1, tokens2,
-    hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-  simp only [List.cons.injEq, Prod.mk.injEq, true_and, and_true,
-    Local.node.injEq, Local.store.injEq] at hstates
-  obtain ⟨rfl, rfl, rfl⟩ := hstates
-  obtain ⟨nextNode1, hrun, hn1'⟩ :=
-    hn1.receive_app_nonrequest message t hm
-  refine ⟨nextNode1, hrun, nextNode1, node2, store, wire1, wire2,
-    tokens1, tokens2, rfl, hn1', hn2, ?_, ?_, hstore,
-    Nat.le_trans htime hstepTime⟩
-  · rw [hnet] at hprotocol
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  · rw [hnet] at hcover
-    cases source with
-    | client client =>
-      have hc : Covers
-          (appTokens pre ++
-            (.client client, .server, message) ::
-              (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-        simpa [appTokens, appToken, List.append_assoc] using hcover
-      simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-    | proc sender =>
-      cases message with
-      | req id now request => simp [isRequest] at hm
-      | res id response =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "n1", .res id response) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-      | notify promise =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "n1", .notify promise) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-
-theorem normalRel_node1_nonrequest {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    (hcover : Covers (appTokens net ++ tokens1 ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (message : Msg) (t : Time)
-    (hstepTime : now ≤ t)
-    (hm : isRequest source.addr (.app message) = false)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++ (source, .proc "n1", .app message) :: post) :
-    ∃ node1',
-      (toStep node 64 source.addr (.app message) t cfg node1).val =
-        [((), node1', [])] ∧
-      NormalRel cfg
-        ⟨pre ++ post,
-          [("n1", .node node1'), ("n2", .node node2), ("s3", .store store)],
-          t⟩ a :=
-  NormalRel.node1AppNonrequest
-    ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-      rfl, hn1, hn2, hprotocol, hcover, hstore, htime⟩
-    source message t hstepTime hm pre post hnet
-
-theorem normalRel_node1_request_idle {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hn : take? isRequest mailbox = none)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm (optionList wire2))
-    (hcover : Covers
-      (appTokens net ++ mailboxTokens mailbox ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (id : CallId) (requestNow t : Time)
-    (request : Request) (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net =
-      pre ++ (source, .proc "n1", .app (.req id requestNow request)) :: post) :
-    let nextNode : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        loadK cfg.retries
-          (Call.retry ⟨source.addr, id, request, requestNow⟩ cfg.retries)
-          source.addr id request requestNow next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3", .get next request.key)
-    (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
-      ⟨next, mailbox, node⟩).val =
-        [((), nextNode, [.send "s3" (.get next request.key)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node nextNode), ("n2", .node node2), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (idle_request_run (cfg := cfg) happ hn next source.addr id
-        requestNow t request)
-  · let call : Call := ⟨source.addr, id, request, requestNow⟩
-    let wire : ConcreteMessage :=
-      (.proc "n1", .proc "s3", .get next request.key)
-    refine ⟨_, node2, store, some wire, wire2,
-      mailboxTokens mailbox ++ [call.token], tokens2,
-      rfl, ?_, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [wire, call, hstoreAddr] using
-        (NodeRep.loadingGet
-          (cfg := cfg) (store := store) (address := "n1")
-          (call := call) (tries := cfg.retries) happ rfl
-          (answers_none_of_appOnly mailbox next happ))
-    · rw [hnet] at hprotocol
-      have hp := hprotocol.append_right [wire]
-      have hswap :
-          (optionList wire2 ++ [wire]).Perm
-            ([wire] ++ optionList wire2) := List.perm_append_comm
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · rw [hnet] at hcover
-      have hat : appToken
-          (source, .proc "n1", .app (.req id requestNow request)) =
-          some call.token := by
-        cases source <;> rfl
-      have hwire' : appToken
-          ((.proc "n1", .proc "s3", .get next request.key) :
-            ConcreteMessage) = none := rfl
-      apply Covers.of_perm _ hcover
-      simp only [appTokens, List.filterMap_append, List.filterMap_cons,
-        hat, hwire', List.filterMap_nil, List.append_nil]
-      simpa only [List.append_assoc, List.cons_append, List.nil_append,
-        List.append_nil, appTokens] using
-        (List.Perm.append_left (appTokens pre)
-          (perm_append_cons_head
-            (appTokens post ++ mailboxTokens mailbox)
-            tokens2 call.token).symm)
-
-theorem normalRel_node1_request_busy {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hbusy : wire1 ≠ none)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    (hcover : Covers (appTokens net ++ tokens1 ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (id : CallId) (requestNow t : Time)
-    (request : Request) (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net =
-      pre ++ (source, .proc "n1", .app (.req id requestNow request)) :: post) :
-    ∃ node1',
-      (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
-        node1).val = [((), node1', [])] ∧
-      NormalRel cfg
-        ⟨pre ++ post,
-          [("n1", .node node1'), ("n2", .node node2), ("s3", .store store)],
-          t⟩ a := by
-  obtain ⟨nextNode1, nextTokens1, hrun, hn1', htokens⟩ :=
-    hn1.receive_app_request_busy id requestNow t request hbusy
-  refine ⟨nextNode1, hrun, nextNode1, node2, store, wire1, wire2,
-    nextTokens1, tokens2, rfl, hn1', hn2, ?_, ?_, hstore,
-    Nat.le_trans htime hstepTime⟩
-  · rw [hnet] at hprotocol
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  · rw [hnet] at hcover
-    let token : AbstractMessage :=
-      Call.token ⟨source.addr, id, request, requestNow⟩
-    have happ : appToken
-        (source, .proc "n1", .app (.req id requestNow request)) =
-        some token := by
-      cases source <;> rfl
-    have hc : Covers
-        (appTokens pre ++ token ::
-          (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-      simpa [appTokens, happ, List.append_assoc] using hcover
-    apply Covers.of_perm _ hc
-    have hmove :
-        (appTokens pre ++ token ::
-          (appTokens post ++ tokens1 ++ tokens2)).Perm
-        (appTokens pre ++ appTokens post ++
-          (tokens1 ++ [token]) ++ tokens2) := by
-      simpa [List.append_assoc, List.cons_append] using
-        (List.Perm.append_left (appTokens pre)
-          (perm_append_cons_head
-            (appTokens post ++ tokens1) tokens2 token).symm)
-    exact hmove.trans (by
-      simpa [appTokens, List.append_assoc] using
-        (List.Perm.append
-          (List.Perm.refl (appTokens pre ++ appTokens post))
-          (htokens.symm.append_right tokens2)))
-
-theorem normalRel_node2_nonrequest {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    (hcover : Covers (appTokens net ++ tokens1 ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (message : Msg) (t : Time)
-    (hstepTime : now ≤ t)
-    (hm : isRequest source.addr (.app message) = false)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++ (source, .proc "n2", .app message) :: post) :
-    ∃ node2',
-      (toStep node 64 source.addr (.app message) t cfg node2).val =
-        [((), node2', [])] ∧
-      NormalRel cfg
-        ⟨pre ++ post,
-          [("n1", .node node1), ("n2", .node node2'), ("s3", .store store)],
-          t⟩ a := by
-  obtain ⟨nextNode2, hrun, hn2'⟩ :=
-    hn2.receive_app_nonrequest message t hm
-  refine ⟨nextNode2, hrun, node1, nextNode2, store, wire1, wire2,
-    tokens1, tokens2, rfl, hn1, hn2', ?_, ?_, hstore,
-    Nat.le_trans htime hstepTime⟩
-  · rw [hnet] at hprotocol
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  · rw [hnet] at hcover
-    cases source with
-    | client client =>
-      have hc : Covers
-          (appTokens pre ++
-            (.client client, .server, message) ::
-              (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-        simpa [appTokens, appToken, List.append_assoc] using hcover
-      simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-    | proc sender =>
-      cases message with
-      | req id now request => simp [isRequest] at hm
-      | res id response =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "n2", .res id response) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-      | notify promise =>
-        have hc : Covers
-            (appTokens pre ++
-              (.server, .client "n2", .notify promise) ::
-                (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-          simpa [appTokens, appToken, List.append_assoc] using hcover
-        simpa [appTokens, List.append_assoc] using Covers.drop_middle hc
-
-theorem normalRel_node2_request_idle {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hn : take? isRequest mailbox = none)
-    (hprotocol : (protocolMessages net).Perm (optionList wire1))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++ mailboxTokens mailbox) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (id : CallId) (requestNow t : Time)
-    (request : Request) (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net =
-      pre ++ (source, .proc "n2", .app (.req id requestNow request)) :: post) :
-    let nextNode : Running Storage.Config Nat CMsg :=
-      ⟨next + 1, mailbox,
-        loadK cfg.retries
-          (Call.retry ⟨source.addr, id, request, requestNow⟩ cfg.retries)
-          source.addr id request requestNow next⟩
-    let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3", .get next request.key)
-    (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
-      ⟨next, mailbox, node⟩).val =
-        [((), nextNode, [.send "s3" (.get next request.key)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [wire],
-        [("n1", .node node1), ("n2", .node nextNode), ("s3", .store store)],
-        t⟩ a := by
-  dsimp
-  constructor
-  · simpa [hstoreAddr] using
-      (idle_request_run (cfg := cfg) happ hn next source.addr id
-        requestNow t request)
-  · let call : Call := ⟨source.addr, id, request, requestNow⟩
-    let wire : ConcreteMessage :=
-      (.proc "n2", .proc "s3", .get next request.key)
-    refine ⟨node1, _, store, wire1, some wire,
-      tokens1, mailboxTokens mailbox ++ [call.token],
-      rfl, hn1, ?_, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [wire, call, hstoreAddr] using
-        (NodeRep.loadingGet
-          (cfg := cfg) (store := store) (address := "n2")
-          (call := call) (tries := cfg.retries) happ rfl
-          (answers_none_of_appOnly mailbox next happ))
-    · rw [hnet] at hprotocol
-      simpa [wire, protocolMessages, optionList, List.append_assoc] using
-        hprotocol.append_right [wire]
-    · rw [hnet] at hcover
-      have hat : appToken
-          (source, .proc "n2", .app (.req id requestNow request)) =
-          some call.token := by
-        cases source <;> rfl
-      have hwire : appToken
-          ((.proc "n2", .proc "s3", .get next request.key) :
-            ConcreteMessage) = none := rfl
-      apply Covers.of_perm _ hcover
-      simp only [appTokens, List.filterMap_append, List.filterMap_cons,
-        hat, hwire, List.filterMap_nil, List.append_nil]
-      simpa only [List.append_assoc, List.cons_append, List.nil_append,
-        List.append_nil, appTokens] using
-        (List.Perm.append_left (appTokens pre)
-          (perm_append_cons_head
-            (appTokens post ++ tokens1 ++ mailboxTokens mailbox)
-            [] call.token).symm)
-
-theorem normalRel_node2_request_busy {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now : Time}
-    {node1 node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hbusy : wire2 ≠ none)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    (hcover : Covers (appTokens net ++ tokens1 ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (source : Network.Who) (id : CallId) (requestNow t : Time)
-    (request : Request) (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net =
-      pre ++ (source, .proc "n2", .app (.req id requestNow request)) :: post) :
-    ∃ node2',
-      (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
-        node2).val = [((), node2', [])] ∧
-      NormalRel cfg
-        ⟨pre ++ post,
-          [("n1", .node node1), ("n2", .node node2'), ("s3", .store store)],
-          t⟩ a := by
-  obtain ⟨nextNode2, nextTokens2, hrun, hn2', htokens⟩ :=
-    hn2.receive_app_request_busy id requestNow t request hbusy
-  refine ⟨nextNode2, hrun, node1, nextNode2, store, wire1, wire2,
-    tokens1, nextTokens2, rfl, hn1, hn2', ?_, ?_, hstore,
-    Nat.le_trans htime hstepTime⟩
-  · rw [hnet] at hprotocol
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  · rw [hnet] at hcover
-    let token : AbstractMessage :=
-      Call.token ⟨source.addr, id, request, requestNow⟩
-    have happ : appToken
-        (source, .proc "n2", .app (.req id requestNow request)) =
-        some token := by
-      cases source <;> rfl
-    have hc : Covers
-        (appTokens pre ++ token ::
-          (appTokens post ++ tokens1 ++ tokens2)) a.net := by
-      simpa [appTokens, happ, List.append_assoc] using hcover
-    apply Covers.of_perm _ hc
-    have hmove :
-        (appTokens pre ++ token ::
-          (appTokens post ++ tokens1 ++ tokens2)).Perm
-        (appTokens pre ++ appTokens post ++ tokens1 ++
-          (tokens2 ++ [token])) := by
-      simpa [List.append_assoc, List.cons_append] using
-        (List.Perm.append_left (appTokens pre)
-          (perm_append_cons_head
-            (appTokens post ++ tokens1 ++ tokens2) [] token).symm)
-    exact hmove.trans (by
-      simpa [appTokens, List.append_assoc] using
-        (List.Perm.append
-          (List.Perm.refl (appTokens pre ++ appTokens post ++ tokens1))
-          htokens.symm))
-
-theorem normalRelFor_nonrequest {nodes : List Addr}
+theorem normalRel_nonrequest {nodes : List Addr}
     {cfg : Storage.Config} {store : Store}
     {nodeStates : List (Addr × Local)}
     {wires : List ConcreteMessage} {tokens : List AbstractMessage}
@@ -4924,7 +3243,7 @@ theorem normalRelFor_nonrequest {nodes : List Addr}
     ∃ running',
       (toStep node 64 source.addr (.app message) t cfg focus.running).val =
         [((), running', [])] ∧
-      NormalRelFor nodes cfg
+      NormalRel nodes cfg
         ⟨pre ++ post,
           (focus.beforeStates ++
             (address, .node running') :: focus.afterStates) ++
@@ -4969,7 +3288,7 @@ theorem normalRelFor_nonrequest {nodes : List Addr}
         simpa [focus.tokens_eq, appTokens, List.append_assoc] using
           Covers.drop_middle hc
 
-theorem normalRelFor_request_busy {nodes : List Addr}
+theorem normalRel_request_busy {nodes : List Addr}
     {cfg : Storage.Config} {store : Store}
     {nodeStates : List (Addr × Local)}
     {wires : List ConcreteMessage} {tokens : List AbstractMessage}
@@ -4989,7 +3308,7 @@ theorem normalRelFor_request_busy {nodes : List Addr}
     ∃ running',
       (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
         focus.running).val = [((), running', [])] ∧
-      NormalRelFor nodes cfg
+      NormalRel nodes cfg
         ⟨pre ++ post,
           (focus.beforeStates ++
             (address, .node running') :: focus.afterStates) ++
@@ -5041,7 +3360,7 @@ theorem normalRelFor_request_busy {nodes : List Addr}
             htokens.symm))
     simpa [appTokens, List.append_assoc] using hmove.trans hreplace
 
-theorem normalRelFor_request_idle
+theorem normalRel_request_idle
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -5077,7 +3396,7 @@ theorem normalRelFor_request_idle
     (toStep node 64 source.addr (.app (.req id requestNow request)) t cfg
       ⟨next, mailbox, node⟩).val =
         [((), nextNode, [.send "s3" (.get next request.key)])] ∧
-    NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+    NormalRel (beforeNodes ++ address :: afterNodes) cfg
       ⟨pre ++ post ++ [wire],
         (beforeStates ++ (address, .node nextNode) :: afterStates) ++
           [("s3", .store store)],
@@ -5146,7 +3465,7 @@ theorem normalRelFor_request_idle
               mailboxTokens mailbox)
             afterTokens call.token).symm)
 
-theorem normalRelFor_conflict_retry
+theorem normalRel_conflict_retry
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -5189,7 +3508,7 @@ theorem normalRelFor_conflict_retry
         writeK candidate.tries (candidate.call.retry candidate.tries)
           candidate op⟩ : Running Storage.Config Nat CMsg)).val =
       [((), running, [.send "s3" (.get next candidate.req.key)])] ∧
-    NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+    NormalRel (beforeNodes ++ address :: afterNodes) cfg
       ⟨pre ++ post ++ [wire],
         (beforeStates ++ (address, .node running) :: afterStates) ++
           [("s3", .store store)],
@@ -5239,7 +3558,7 @@ theorem normalRelFor_conflict_retry
       simpa [wire, appTokens, appToken, Candidate.stageTokens,
         List.append_assoc] using hcover
 
-theorem normalRelFor_got_changed
+theorem normalRel_got_changed
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -5292,7 +3611,7 @@ theorem normalRelFor_got_changed
         Running Storage.Config Nat CMsg)).val =
       [((), running, notes outs ++
         [.send "s3" (.put next call.req.key promise (doc.map (·.2)))])] ∧
-    NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+    NormalRel (beforeNodes ++ address :: afterNodes) cfg
       ⟨pre ++ post ++ [wire],
         (beforeStates ++ (address, .node running) :: afterStates) ++
           [("s3", .store store)],
@@ -5370,7 +3689,7 @@ theorem store_get_run (cfg : Storage.Config) (store : Store)
       [((), store, [.send sender (.got op (storeLookup store key))])] := by
   rfl
 
-theorem normalRelFor_store_get_changed
+theorem normalRel_store_get_changed
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -5411,7 +3730,7 @@ theorem normalRelFor_store_get_changed
     let reply : ConcreteMessage := (.proc "s3", .proc address, .got op doc)
     ((storeReceive address (.get op call.req.key)).run cfg store).val =
       [((), store, [.send address (.got op doc)])] ∧
-    NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+    NormalRel (beforeNodes ++ address :: afterNodes) cfg
       ⟨pre ++ post ++ [reply],
         (beforeStates ++
           (address, .node ⟨next, mailbox,
@@ -5458,143 +3777,6 @@ theorem normalRelFor_store_get_changed
             (List.perm_append_comm :
               (afterWires ++ [reply]).Perm ([reply] ++ afterWires)))
       simpa [reply, protocolMessages, List.append_assoc] using hp.trans hinsert
-    · rw [hnet] at hcover
-      simpa [reply, appTokens, appToken, List.append_assoc] using hcover
-
-theorem normalRel_store_get_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    {res : Response} {after : Experiment.State} {outs : List (Out Msg)}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := (storeLookup store call.req.key).toList.map (·.1) }) 0 =
-          (res, after, outs))
-    (hchanged :
-      after ≠ { promises :=
-        (storeLookup store call.req.key).toList.map (·.1) })
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3", .get op call.req.key) :
-        ConcreteMessage)] ++ optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ [call.token]) ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3", .get op call.req.key) :
-        ConcreteMessage) :: post) :
-    let doc := storeLookup store call.req.key
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .got op doc)
-    ((storeReceive "n1" (.get op call.req.key)).run cfg store).val =
-      [((), store, [.send "n1" (.got op doc)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [reply],
-        [("n1", .node ⟨next, mailbox,
-          loadK tries (call.retry tries) call.client call.id call.req call.now op⟩),
-         ("n2", .node node2), ("s3", .store store)], t⟩ a := by
-  dsimp
-  constructor
-  · exact store_get_run cfg store "n1" op call.req.key
-  · let reply : ConcreteMessage :=
-      (.proc "s3", .proc "n1", .got op (storeLookup store call.req.key))
-    refine ⟨_, node2, store, some reply, wire2,
-      mailboxTokens mailbox ++ [call.token], tokens2,
-      rfl, ?_, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.loadingGot
-          (cfg := cfg) (store := store) (address := "n1")
-          (call := call) (tries := tries)
-          happ hnext hnone ⟨res, after, outs, hpick, hchanged⟩
-          (Snapshot.of_lookup rfl)
-          (docAtKey_of_rep_lookup hstore rfl))
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [reply]
-      have hswap :
-          (optionList wire2 ++ [reply]).Perm
-            ([reply] ++ optionList wire2) := List.perm_append_comm
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · rw [hnet] at hcover
-      simpa [reply, appTokens, appToken, List.append_assoc] using hcover
-
-theorem normalRel_store_get_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    {res : Response} {after : Experiment.State} {outs : List (Out Msg)}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := (storeLookup store call.req.key).toList.map (·.1) }) 0 =
-          (res, after, outs))
-    (hchanged :
-      after ≠ { promises :=
-        (storeLookup store call.req.key).toList.map (·.1) })
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "n2", .proc "s3", .get op call.req.key) :
-          ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ [call.token])) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3", .get op call.req.key) :
-        ConcreteMessage) :: post) :
-    let doc := storeLookup store call.req.key
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .got op doc)
-    ((storeReceive "n2" (.get op call.req.key)).run cfg store).val =
-      [((), store, [.send "n2" (.got op doc)])] ∧
-    NormalRel cfg
-      ⟨pre ++ post ++ [reply],
-        [("n1", .node node1),
-         ("n2", .node ⟨next, mailbox,
-          loadK tries (call.retry tries) call.client call.id call.req call.now op⟩),
-         ("s3", .store store)], t⟩ a := by
-  dsimp
-  constructor
-  · exact store_get_run cfg store "n2" op call.req.key
-  · let reply : ConcreteMessage :=
-      (.proc "s3", .proc "n2", .got op (storeLookup store call.req.key))
-    refine ⟨node1, _, store, wire1, some reply,
-      tokens1, mailboxTokens mailbox ++ [call.token],
-      rfl, hn1, ?_, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.loadingGot
-          (cfg := cfg) (store := store) (address := "n2")
-          (call := call) (tries := tries)
-          happ hnext hnone ⟨res, after, outs, hpick, hchanged⟩
-          (Snapshot.of_lookup rfl)
-          (docAtKey_of_rep_lookup hstore rfl))
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [reply]
     · rw [hnet] at hcover
       simpa [reply, appTokens, appToken, List.append_assoc] using hcover
 
@@ -5715,7 +3897,7 @@ theorem store_put_classify {cfg : Storage.Config} {store after : Store}
     obtain ⟨rfl, rfl⟩ := hout
     exact .conflict
 
-theorem normalRelFor_store_conflict
+theorem normalRel_store_conflict
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -5750,7 +3932,7 @@ theorem normalRelFor_store_conflict
         .put op candidate.req.key candidate.promise
           (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
     let reply : ConcreteMessage := (.proc "s3", .proc address, .conflict op)
-    NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+    NormalRel (beforeNodes ++ address :: afterNodes) cfg
       ⟨pre ++ post ++ [reply],
         (beforeStates ++
           (address, .node ⟨next, mailbox,
@@ -5795,117 +3977,6 @@ theorem normalRelFor_store_conflict
           (List.perm_append_comm :
             (afterWires ++ [reply]).Perm ([reply] ++ afterWires)))
     simpa [reply, protocolMessages, List.append_assoc] using hp.trans hinsert
-  · rw [hnet] at hcover
-    simpa [reply, appTokens, appToken, List.append_assoc] using hcover
-
-theorem normalRel_store_conflict_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .conflict op)
-    NormalRel cfg
-      ⟨pre ++ post ++ [reply],
-        [("n1", .node ⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩),
-         ("n2", .node node2), ("s3", .store store)], t⟩ a := by
-  dsimp
-  let reply : ConcreteMessage := (.proc "s3", .proc "n1", .conflict op)
-  refine ⟨_, node2, store, some reply, wire2,
-    mailboxTokens mailbox ++ candidate.stageTokens .pending, tokens2,
-    rfl, ?_, hn2, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-  · simpa [reply, hstoreAddr] using
-      (NodeRep.writingConflict
-        (cfg := cfg) (store := store) (address := "n1")
-        (candidate := candidate) happ hnext hnone hvalid hsnapshot)
-  · rw [hnet] at hprotocol
-    have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire2) := by
-      apply Perm.cancel_exposed
-      simpa [protocolMessages, List.append_assoc] using hprotocol
-    have hp := hbase.append_right [reply]
-    have hswap :
-        (optionList wire2 ++ [reply]).Perm
-          ([reply] ++ optionList wire2) := List.perm_append_comm
-    simpa [reply, protocolMessages, optionList, List.append_assoc] using
-      hp.trans hswap
-  · rw [hnet] at hcover
-    simpa [reply, appTokens, appToken, List.append_assoc] using hcover
-
-theorem normalRel_store_conflict_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "n2", .proc "s3",
-          .put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2))) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .conflict op)
-    NormalRel cfg
-      ⟨pre ++ post ++ [reply],
-        [("n1", .node node1),
-         ("n2", .node ⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩),
-         ("s3", .store store)], t⟩ a := by
-  dsimp
-  let reply : ConcreteMessage := (.proc "s3", .proc "n2", .conflict op)
-  refine ⟨node1, _, store, wire1, some reply,
-    tokens1, mailboxTokens mailbox ++ candidate.stageTokens .pending,
-    rfl, hn1, ?_, ?_, ?_, hstore, Nat.le_trans htime hstepTime⟩
-  · simpa [reply, hstoreAddr] using
-      (NodeRep.writingConflict
-        (cfg := cfg) (store := store) (address := "n2")
-        (candidate := candidate) happ hnext hnone hvalid hsnapshot)
-  · rw [hnet] at hprotocol
-    have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire1) := by
-      have hp := hprotocol.trans List.perm_append_comm
-      apply Perm.cancel_exposed
-      simpa [protocolMessages, List.append_assoc] using hp
-    simpa [reply, protocolMessages, optionList, List.append_assoc] using
-      hbase.append_right [reply]
   · rw [hnet] at hcover
     simpa [reply, appTokens, appToken, List.append_assoc] using hcover
 
@@ -6099,610 +4170,6 @@ theorem linearize_candidate_shed {cfg : Storage.Config} {cand : Candidate}
   exact request_step_mem
     (request_shed_mem cfg.app a.state cand.req cand.now)
 
-theorem normalRel_store_failed_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .failed op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n1")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩),
-           ("n2", .node node2), ("s3", .store store)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        candidate.stageTokens .pending ++ tokens2) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  change Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        [candidate.call.token] ++ tokens2) a.net at hc
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        candidate.call.token :: tokens2) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hlin := linearize_candidate_shed
-    (cfg := cfg) (cand := candidate) hstore hanet
-  dsimp at hlin
-  obtain ⟨hlegal, hobs, hstore'⟩ := hlin
-  let response : AbstractMessage :=
-    responseToken candidate.client candidate.id ⟨503, none⟩
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ [response], a.state, a.now⟩
-  have haeq : a' =
-      ⟨apre ++ apost ++ Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        [.send candidate.client
-          (Msg.res candidate.id ⟨503, none⟩)], a.state, a.now⟩ := by
-    simp [a', response, responseToken, Experiment.emits, sends]
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)], a')],
-      ?_, hobs, rfl⟩
-    simpa [haeq] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n1", .failed op)
-    refine ⟨_, node2, store, some reply, wire2,
-      mailboxTokens mailbox ++ candidate.stageTokens .shed, tokens2,
-      rfl, ?_, hn2, ?_, ?_, ?_, Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingShed
-          (cfg := cfg) (store := store) (address := "n1")
-          (candidate := candidate) happ hnext hnone hvalid hsnapshot)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [reply]
-      have hswap :
-          (optionList wire2 ++ [reply]).Perm
-            ([reply] ++ optionList wire2) := List.perm_append_comm
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ mailboxTokens mailbox)
-        (right := tokens2) (added := [response]) hcRest
-      simpa [a', response, responseToken, Candidate.stageTokens,
-        appTokens, appToken, List.append_assoc] using hcAdded
-    · simpa [a', haeq] using hstore'
-
-
-theorem normalRel_store_failed_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ [((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .failed op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n2")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node node1),
-           ("n2", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩), ("s3", .store store)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        candidate.stageTokens .pending) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  change Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        [candidate.call.token]) a.net at hc
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        candidate.call.token :: []) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hlin := linearize_candidate_shed
-    (cfg := cfg) (cand := candidate) hstore hanet
-  dsimp at hlin
-  obtain ⟨hlegal, hobs, hstore'⟩ := hlin
-  let response : AbstractMessage :=
-    responseToken candidate.client candidate.id ⟨503, none⟩
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ [response], a.state, a.now⟩
-  have haeq : a' =
-      ⟨apre ++ apost ++ Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        [.send candidate.client
-          (Msg.res candidate.id ⟨503, none⟩)], a.state, a.now⟩ := by
-    simp [a', response, responseToken, Experiment.emits, sends]
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)], a')],
-      ?_, hobs, rfl⟩
-    simpa [haeq] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n2", .failed op)
-    refine ⟨node1, _, store, wire1, some reply,
-      tokens1, mailboxTokens mailbox ++ candidate.stageTokens .shed,
-      rfl, hn1, ?_, ?_, ?_, ?_, Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingShed
-          (cfg := cfg) (store := store) (address := "n2")
-          (candidate := candidate) happ hnext hnone hvalid hsnapshot)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [reply]
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ tokens1 ++
-          mailboxTokens mailbox)
-        (right := []) (added := [response]) hcRest
-      simpa [a', response, responseToken, Candidate.stageTokens,
-        appTokens, appToken, List.append_assoc] using hcAdded
-    · simpa [a', haeq] using hstore'
-
-theorem normalRel_store_written_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hmatch : candidate.doc.map (·.2) =
-      (storeLookup store candidate.req.key).map (·.2))
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)] ++ optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let committed := storeCommit store candidate.req.key candidate.promise
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .written op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n1")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩),
-           ("n2", .node node2), ("s3", .store committed)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        [candidate.call.token] ++ tokens2) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        candidate.call.token :: tokens2) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdoc := Snapshot.eq_of_versions hsnapshot hmatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-    hlegal, hobs, hstore', haeq⟩ :=
-    linearize_candidate hvalid hstore hdoc hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted := candidate.stageTokens .served
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        (candidate.outs ++ [.send candidate.client
-          (Msg.res candidate.id candidate.res)]) = emitted := by
-    simp [emitted, Candidate.stageTokens, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      candidate.outs ++ [.send candidate.client
-        (Msg.res candidate.id candidate.res)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n1", .written op)
-    refine ⟨_, node2, storeCommit store candidate.req.key candidate.promise,
-      some reply, wire2,
-      mailboxTokens mailbox ++ candidate.stageTokens .served, tokens2,
-      rfl, ?_, hn2.commit, ?_, ?_, hstore', Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingServed
-          (cfg := cfg) (store := storeCommit store candidate.req.key candidate.promise)
-          (address := "n1") (candidate := candidate)
-          happ hnext hnone hvalid)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [reply]
-      have hswap : (optionList wire2 ++ [reply]).Perm
-          ([reply] ++ optionList wire2) := List.perm_append_comm
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ mailboxTokens mailbox)
-        (right := tokens2) (added := emitted) hcRest
-      simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
-
-
-
-theorem normalRel_store_written_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hmatch : candidate.doc.map (·.2) =
-      (storeLookup store candidate.req.key).map (·.2))
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ [((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let committed := storeCommit store candidate.req.key candidate.promise
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .written op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n2")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node node1),
-           ("n2", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩), ("s3", .store committed)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        [candidate.call.token]) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        candidate.call.token :: []) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdoc := Snapshot.eq_of_versions hsnapshot hmatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-    hlegal, hobs, hstore', haeq⟩ :=
-    linearize_candidate hvalid hstore hdoc hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted := candidate.stageTokens .served
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        (candidate.outs ++ [.send candidate.client
-          (Msg.res candidate.id candidate.res)]) = emitted := by
-    simp [emitted, Candidate.stageTokens, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      candidate.outs ++ [.send candidate.client
-        (Msg.res candidate.id candidate.res)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n2", .written op)
-    refine ⟨node1, _, storeCommit store candidate.req.key candidate.promise,
-      wire1, some reply,
-      tokens1, mailboxTokens mailbox ++ candidate.stageTokens .served,
-      rfl, hn1.commit, ?_, ?_, ?_, hstore', Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingServed
-          (cfg := cfg) (store := storeCommit store candidate.req.key candidate.promise)
-          (address := "n2") (candidate := candidate)
-          happ hnext hnone hvalid)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [reply]
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox)
-        (right := []) (added := emitted) hcRest
-      simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
-
-
-theorem normalRel_store_landedFailed_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hmatch : candidate.doc.map (·.2) =
-      (storeLookup store candidate.req.key).map (·.2))
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)] ++ optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending) ++
-        tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let committed := storeCommit store candidate.req.key candidate.promise
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .failed op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n1")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩),
-           ("n2", .node node2), ("s3", .store committed)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        [candidate.call.token] ++ tokens2) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        candidate.call.token :: tokens2) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdoc := Snapshot.eq_of_versions hsnapshot hmatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-    hlegal, hobs, hstore', haeq⟩ :=
-    linearize_candidate_lost hvalid hstore hdoc hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted := candidate.stageTokens .lost
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        (candidate.outs ++ [.send candidate.client
-          (Msg.res candidate.id ⟨503, none⟩)]) = emitted := by
-    simp [emitted, Candidate.stageTokens, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      candidate.outs ++ [.send candidate.client
-        (Msg.res candidate.id ⟨503, none⟩)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n1", .failed op)
-    refine ⟨_, node2, storeCommit store candidate.req.key candidate.promise,
-      some reply, wire2,
-      mailboxTokens mailbox ++ candidate.stageTokens .lost, tokens2,
-      rfl, ?_, hn2.commit, ?_, ?_, hstore', Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingLost
-          (cfg := cfg) (store := storeCommit store candidate.req.key candidate.promise)
-          (address := "n1") (candidate := candidate)
-          happ hnext hnone hvalid)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [reply]
-      have hswap : (optionList wire2 ++ [reply]).Perm
-          ([reply] ++ optionList wire2) := List.perm_append_comm
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ mailboxTokens mailbox)
-        (right := tokens2) (added := emitted) hcRest
-      simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
-
-
-theorem normalRel_store_landedFailed_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat} {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hvalid : candidate.Valid cfg)
-    (hsnapshot : Snapshot store candidate.req.key candidate.doc)
-    (hmatch : candidate.doc.map (·.2) =
-      (storeLookup store candidate.req.key).map (·.2))
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++ [((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3",
-        .put op candidate.req.key candidate.promise
-          (candidate.doc.map (·.2))) : ConcreteMessage) :: post) :
-    let committed := storeCommit store candidate.req.key candidate.promise
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .failed op)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n2")
-          (CMsg.put op candidate.req.key candidate.promise
-            (candidate.doc.map (·.2)))) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node node1),
-           ("n2", .node ⟨next, mailbox,
-            writeK candidate.tries (candidate.call.retry candidate.tries)
-              candidate op⟩), ("s3", .store committed)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        [candidate.call.token]) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        candidate.call.token :: []) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdoc := Snapshot.eq_of_versions hsnapshot hmatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-    hlegal, hobs, hstore', haeq⟩ :=
-    linearize_candidate_lost hvalid hstore hdoc hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted := candidate.stageTokens .lost
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        (candidate.outs ++ [.send candidate.client
-          (Msg.res candidate.id ⟨503, none⟩)]) = emitted := by
-    simp [emitted, Candidate.stageTokens, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      candidate.outs ++ [.send candidate.client
-        (Msg.res candidate.id ⟨503, none⟩)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n2", .failed op)
-    refine ⟨node1, _, storeCommit store candidate.req.key candidate.promise,
-      wire1, some reply,
-      tokens1, mailboxTokens mailbox ++ candidate.stageTokens .lost,
-      rfl, hn1.commit, ?_, ?_, ?_, hstore', Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.writingLost
-          (cfg := cfg) (store := storeCommit store candidate.req.key candidate.promise)
-          (address := "n2") (candidate := candidate)
-          happ hnext hnone hvalid)
-    · rw [hnet] at hprotocol
-      have hbase : (protocolMessages pre ++ protocolMessages post).Perm
-          (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [reply]
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox)
-        (right := []) (added := emitted) hcRest
-      simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
-
-set_option maxHeartbeats 1000000 in
-/-- A handler outcome that leaves its loaded document unchanged linearizes
-at the store read. The concrete store and abstract state remain related. -/
 theorem linearize_unchanged {cfg : Storage.Config} {store : Store}
     {a : Experiment.Conf promises} {client : Addr} {id : CallId}
     {req : Request} {now : Time} {doc : Option (Promise × Version)}
@@ -6774,141 +4241,6 @@ theorem linearize_unchanged {cfg : Storage.Config} {store : Store}
   dsimp [next]
   refine ⟨.receive (r := (globalAfter, serviceOut)) (Nat.le_refl _) hnet ?_, trivial⟩
   exact request_step_mem hglobal
-
-theorem normalRel_node2_conflict_exhausted {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {candidate : Candidate} {op next : Nat}
-    {mailbox : List (Addr × CMsg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (htries : candidate.tries = 0)
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .conflict op) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ candidate.stageTokens .pending)) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .conflict op) : ConcreteMessage) :: post) :
-    ∃ a' running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "n2", t, .receive source (CMsg.conflict op)) a' ∧
-      (toStep node 64 source.addr (.conflict op) t cfg
-        (⟨next, mailbox,
-          writeK candidate.tries (candidate.call.retry candidate.tries)
-            candidate op⟩ : Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n2" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n2" emitted, states, t⟩ a' := by
-  rw [hnet] at hcover
-  have hc : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        [candidate.call.token]) a.net := by
-    simpa [appTokens, appToken, Candidate.stageTokens,
-      List.append_assoc] using hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        candidate.call.token :: []) a.net := by
-    simpa [List.append_assoc] using hc
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hlin := linearize_candidate_shed
-    (cfg := cfg) (cand := candidate) hstore hanet
-  dsimp at hlin
-  obtain ⟨hlegal, hobs, hstore'⟩ := hlin
-  let response : AbstractMessage :=
-    responseToken candidate.client candidate.id ⟨503, none⟩
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ [response], a.state, a.now⟩
-  have haeq : a' =
-      ⟨apre ++ apost ++ Experiment.emits .server
-        (.receive (.client candidate.client)
-          (Msg.req candidate.id candidate.now candidate.req))
-        [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)],
-        a.state, a.now⟩ := by
-    simp [a', response, responseToken, Experiment.emits, sends]
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    writing_conflict_exhausted_restart
-      (cfg := cfg) (store := store) (address := "n2")
-      happ hnone htries source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-  let emitted : List (Out CMsg) :=
-    .send candidate.client (.app (.res candidate.id ⟨503, none⟩)) :: rest
-  have hrouteStore :
-      (⟨[], states, 0⟩ : Network.Conf system).route cfg.store =
-        .proc cfg.store := by
-    simp [states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  obtain ⟨hrouteProtocol, hrouteApp⟩ :=
-    hrestart.routedResponse hrouteStore
-      (client := candidate.client) (id := candidate.id)
-      (response := ⟨503, none⟩)
-  rw [hnet] at hprotocol
-  have hbase :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire1) := by
-    have hp := hprotocol.trans List.perm_append_comm
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hp
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n2" emitted)).Perm
-        (optionList wire1 ++ optionList wire) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    simpa [List.append_assoc] using hbase.append_right (optionList wire)
-  have hcAdded := Covers.insert_both
-    (left := appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox)
-    (right := []) (added := [response]) hcRest
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n2" emitted) ++
-        tokens1 ++ tokens) a'.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    apply Covers.of_perm _ hcAdded
-    have hlocal :
-        (mailboxTokens mailbox ++ [response]).Perm
-          ([response] ++ tokens) :=
-      List.perm_append_comm.trans
-        (List.Perm.append_left [response] htokens.symm)
-    have hwith :
-        (tokens1 ++ mailboxTokens mailbox ++ [response]).Perm
-          (tokens1 ++ [response] ++ tokens) := by
-      simpa [List.append_assoc] using List.Perm.append_left tokens1 hlocal
-    have hmove :
-        (tokens1 ++ [response] ++ tokens).Perm
-          ([response] ++ tokens1 ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_right tokens
-          (List.perm_append_comm :
-            (tokens1 ++ [response]).Perm ([response] ++ tokens1)))
-    simpa [a', List.append_assoc] using
-      (List.Perm.append_left (appTokens pre ++ appTokens post)
-        (hwith.trans hmove))
-  refine ⟨a', running, rest, wire, tokens, ?_, ?_, hrestart, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client candidate.client)
-        (Msg.req candidate.id candidate.now candidate.req)),
-      [.send candidate.client (Msg.res candidate.id ⟨503, none⟩)], a')],
-      ?_, hobs, rfl⟩
-    simpa [haeq] using hlegal
-  · simpa [emitted] using hrun
-  · refine ⟨node1, running, store, wire1, wire, tokens1, tokens,
-      rfl, hn1, hrestart.nodeRep, ?_, ?_, ?_,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, List.append_assoc] using hprotocolFinal
-    · simpa [states, emitted, List.append_assoc] using hcoverFinal
-    · simpa [a', haeq] using hstore'
 
 theorem dispatch_onlyNotifies {cfg : Storage.Config} {call : Call}
     {doc : Option (Promise × Version)} {res : Response}
@@ -7187,670 +4519,6 @@ theorem split_of_get?_eq_some {xs : List α} {index : Nat} {value : α}
       · simp [htail]
       · simp [herase]
 
-theorem normalRel_store_get_done_node1 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)} {res : Response}
-    {after : Experiment.State} {outs : List (Out Msg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hunchanged : after = { promises := doc.toList.map (·.1) })
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "n1", .proc "s3", .get op call.req.key) :
-        ConcreteMessage)] ++ optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ [call.token]) ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n1", .proc "s3", .get op call.req.key) :
-        ConcreteMessage) :: post)
-    (hdocValue : doc = storeLookup store call.req.key) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n1", .got op doc)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n1")
-          (CMsg.get op call.req.key)) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node ⟨next, mailbox,
-            loadK tries (call.retry tries)
-              call.client call.id call.req call.now op⟩),
-           ("n2", .node node2), ("s3", .store store)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ mailboxTokens mailbox) ++
-        call.token :: tokens2) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdispatch :
-      (res, after, outs) ∈
-        ((Experiment.dispatch call.req call.now).run
-          { cfg.app with unreliable := true }
-          { promises := doc.toList.map (·.1) }).val := by
-    rw [← hpick]
-    exact pick_mem _ _
-  have hrequest :
-      (res, after, outs) ∈
-        ((Experiment.request call.req call.now).run
-          { cfg.app with unreliable := true }
-          { promises := doc.toList.map (·.1) }).val :=
-    dispatch_as_serve hdispatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-      hlegal, hobs, hstore', haeq⟩ :=
-    linearize_unchanged (cfg := cfg) hstore hdocValue.symm
-      hrequest hunchanged hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted : List AbstractMessage :=
-    outputTokens outs ++ [responseToken call.client call.id res]
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client call.client)
-          (Msg.req call.id call.now call.req))
-        (outs ++ [.send call.client (Msg.res call.id res)]) = emitted := by
-    simp [emitted, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client call.client)
-        (Msg.req call.id call.now call.req)),
-      outs ++ [.send call.client (Msg.res call.id res)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n1", .got op doc)
-    refine ⟨_, node2, store, some reply, wire2,
-      mailboxTokens mailbox ++ outputTokens outs ++
-        [responseToken call.client call.id res],
-      tokens2, rfl, ?_, hn2, ?_, ?_, hstore',
-      Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.loadingDone
-          (cfg := cfg) (store := store) (address := "n1")
-          (call := call) (tries := tries) (doc := doc)
-          happ hnext hnone hpick hunchanged
-          (Snapshot.of_lookup hdocValue.symm)
-          (docAtKey_of_rep_lookup hstore hdocValue.symm))
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire2) := by
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hprotocol
-      have hp := hbase.append_right [reply]
-      have hswap :
-          (optionList wire2 ++ [reply]).Perm
-            ([reply] ++ optionList wire2) := List.perm_append_comm
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hp.trans hswap
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ mailboxTokens mailbox)
-        (right := tokens2) (added := emitted) hcRest
-      simpa [a', emitted, reply, appTokens, appToken,
-        List.append_assoc] using hcAdded
-
-theorem normalRel_store_get_done_node2 {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)} {res : Response}
-    {after : Experiment.State} {outs : List (Out Msg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hunchanged : after = { promises := doc.toList.map (·.1) })
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "n2", .proc "s3", .get op call.req.key) :
-          ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ [call.token])) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "n2", .proc "s3", .get op call.req.key) :
-        ConcreteMessage) :: post)
-    (hdocValue : doc = storeLookup store call.req.key) :
-    let reply : ConcreteMessage := (.proc "s3", .proc "n2", .got op doc)
-    ∃ a',
-      Network.Matches { cfg.app with unreliable := true } clientView a
-        (.proc "s3", t, .receive (.proc "n2")
-          (CMsg.get op call.req.key)) a' ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ [reply],
-          [("n1", .node node1),
-           ("n2", .node ⟨next, mailbox,
-            loadK tries (call.retry tries)
-              call.client call.id call.req call.now op⟩),
-           ("s3", .store store)], t⟩ a' := by
-  dsimp
-  rw [hnet] at hcover
-  have hcCall : Covers
-      ((appTokens pre ++ appTokens post ++ tokens1 ++ mailboxTokens mailbox) ++
-        call.token :: []) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  obtain ⟨apre, apost, hanet, hcRest⟩ := Covers.consume hcCall
-  have hdispatch :
-      (res, after, outs) ∈
-        ((Experiment.dispatch call.req call.now).run
-          { cfg.app with unreliable := true }
-          { promises := doc.toList.map (·.1) }).val := by
-    rw [← hpick]
-    exact pick_mem _ _
-  have hrequest :
-      (res, after, outs) ∈
-        ((Experiment.request call.req call.now).run
-          { cfg.app with unreliable := true }
-          { promises := doc.toList.map (·.1) }).val :=
-    dispatch_as_serve hdispatch
-  obtain ⟨globalAfter, serviceOut, abstractNext, hservice,
-      hlegal, hobs, hstore', haeq⟩ :=
-    linearize_unchanged (cfg := cfg) hstore hdocValue.symm
-      hrequest hunchanged hanet
-  subst serviceOut
-  subst abstractNext
-  let emitted : List AbstractMessage :=
-    outputTokens outs ++ [responseToken call.client call.id res]
-  have hemitted :
-      Experiment.emits .server
-        (.receive (.client call.client)
-          (Msg.req call.id call.now call.req))
-        (outs ++ [.send call.client (Msg.res call.id res)]) = emitted := by
-    simp [emitted, emits_outputs_response]
-  let a' : Experiment.Conf promises :=
-    ⟨apre ++ apost ++ emitted, globalAfter, a.now⟩
-  refine ⟨a', ?_, ?_⟩
-  · refine ⟨[((.server, a.now,
-      .receive (.client call.client)
-        (Msg.req call.id call.now call.req)),
-      outs ++ [.send call.client (Msg.res call.id res)], a')], ?_, hobs, rfl⟩
-    simpa [a', hemitted] using hlegal
-  · let reply : ConcreteMessage := (.proc "s3", .proc "n2", .got op doc)
-    refine ⟨node1, _, store, wire1, some reply, tokens1,
-      mailboxTokens mailbox ++ outputTokens outs ++
-        [responseToken call.client call.id res],
-      rfl, hn1, ?_, ?_, ?_, hstore',
-      Nat.le_trans htime hstepTime⟩
-    · simpa [reply, hstoreAddr] using
-        (NodeRep.loadingDone
-          (cfg := cfg) (store := store) (address := "n2")
-          (call := call) (tries := tries) (doc := doc)
-          happ hnext hnone hpick hunchanged
-          (Snapshot.of_lookup hdocValue.symm)
-          (docAtKey_of_rep_lookup hstore hdocValue.symm))
-    · rw [hnet] at hprotocol
-      have hbase :
-          (protocolMessages pre ++ protocolMessages post).Perm
-            (optionList wire1) := by
-        have hp := hprotocol.trans List.perm_append_comm
-        apply Perm.cancel_exposed
-        simpa [protocolMessages, List.append_assoc] using hp
-      simpa [reply, protocolMessages, optionList, List.append_assoc] using
-        hbase.append_right [reply]
-    · have hcAdded := Covers.insert_both
-        (left := appTokens pre ++ appTokens post ++ tokens1 ++
-          mailboxTokens mailbox)
-        (right := []) (added := emitted) hcRest
-      simpa [a', emitted, reply, appTokens, appToken,
-        List.append_assoc] using hcAdded
-
-theorem normalRel_node1_got_done {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)} {res : Response}
-    {after : Experiment.State} {outs : List (Out Msg)}
-    {node2 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire2 : Option ConcreteMessage} {tokens2 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hunchanged : after = { promises := doc.toList.map (·.1) })
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hprotocol : (protocolMessages net).Perm
-      ([((.proc "s3", .proc "n1", .got op doc) : ConcreteMessage)] ++
-        optionList wire2))
-    (hcover : Covers
-      (appTokens net ++
-        (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res]) ++ tokens2) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n1", .got op doc) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        notes outs ++
-          .send call.client (.app (.res call.id res)) ::
-            (sends outs).map (fun (address, message) =>
-              .send address (.app message)) ++ rest
-      (toStep node 64 source.addr (.got op doc) t cfg
-        (⟨next, mailbox,
-          loadK tries (call.retry tries)
-            call.client call.id call.req call.now op⟩ :
-          Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n1" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n1" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    loading_got_unchanged_restart
-      (cfg := cfg) (store := store) (address := "n1")
-      happ hnone hpick hunchanged source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node running), ("n2", .node node2), ("s3", .store store)]
-  let emittedPrefix : List (Out CMsg) :=
-    [.send call.client (.app (.res call.id res))] ++
-      (sends outs).map
-        (fun (address, message) => .send address (.app message))
-  let emitted : List (Out CMsg) := notes outs ++ emittedPrefix ++ rest
-  have hprefixProtocol :
-      protocolMessages (routedOuts states "n1" emittedPrefix) = [] := by
-    rw [show emittedPrefix =
-      [.send call.client (.app (.res call.id res))] ++
-        (sends outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, protocolMessages_append,
-      protocolMessages_routedResponse, protocolMessages_routedOutputs]
-    rfl
-  have hprefixApp :
-      appTokens (routedOuts states "n1" emittedPrefix) =
-        [responseToken call.client call.id res] ++ outputTokens outs := by
-    rw [show emittedPrefix =
-      [.send call.client (.app (.res call.id res))] ++
-        (sends outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, appTokens_append, appTokens_routedResponse,
-      appTokens_routedOutputs states "n1" outs
-        (dispatch_onlyNotifies (cfg := cfg) hpick)]
-  have hrouteProtocol :
-      protocolMessages (routedOuts states "n1" emitted) =
-        optionList wire := by
-    rw [show emitted = notes outs ++ (emittedPrefix ++ rest) by
-          simp [emitted, List.append_assoc],
-      routedOuts_append, routedOuts_notes, List.nil_append,
-      routedOuts_append, protocolMessages_append, hprefixProtocol,
-      List.nil_append]
-    cases hrestart with
-    | idle happ' hnone' => rfl
-    | @loading nextCall nextOp next' mailbox' happ' hnext' hnone' =>
-      simp [routedOuts, routedMessages, sends, protocolMessages,
-        optionList, states, hstoreAddr, Network.Conf.route,
-        Network.Conf.isProc]
-  have hrouteApp :
-      appTokens (routedOuts states "n1" emitted) =
-        [responseToken call.client call.id res] ++ outputTokens outs := by
-    rw [show emitted = notes outs ++ (emittedPrefix ++ rest) by
-          simp [emitted, List.append_assoc],
-      routedOuts_append, routedOuts_notes, List.nil_append,
-      routedOuts_append, appTokens_append, hprefixApp]
-    cases hrestart <;>
-      simp [routedOuts, routedMessages, sends, appTokens, appToken,
-        states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  rw [hnet] at hprotocol hcover
-  have hbase :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire2) := by
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hprotocol
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n1" emitted)).Perm
-        (optionList wire ++ optionList wire2) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    have hp := hbase.append_right (optionList wire)
-    simpa [List.append_assoc] using hp.trans
-      (List.perm_append_comm :
-        (optionList wire2 ++ optionList wire).Perm
-          (optionList wire ++ optionList wire2))
-  have hlocal :
-      (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res]).Perm
-        ([responseToken call.client call.id res] ++
-          outputTokens outs ++ tokens) := by
-    have hfirst :
-        (mailboxTokens mailbox ++ outputTokens outs ++
-            [responseToken call.client call.id res]).Perm
-          ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs) := by
-      simpa [List.append_assoc] using
-        (List.perm_append_comm :
-          (mailboxTokens mailbox ++ outputTokens outs ++
-            [responseToken call.client call.id res]).Perm
-          ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs))
-    have hmiddle :
-        ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs).Perm
-          ([responseToken call.client call.id res] ++
-            tokens ++ outputTokens outs) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left [responseToken call.client call.id res]
-          (htokens.symm.append_right (outputTokens outs)))
-    have hlast :
-        ([responseToken call.client call.id res] ++
-            tokens ++ outputTokens outs).Perm
-          ([responseToken call.client call.id res] ++
-            outputTokens outs ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left [responseToken call.client call.id res]
-          (List.perm_append_comm :
-            (tokens ++ outputTokens outs).Perm
-              (outputTokens outs ++ tokens)))
-    exact hfirst.trans (hmiddle.trans hlast)
-  have hold : Covers
-      (appTokens pre ++ appTokens post ++
-        (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res]) ++ tokens2) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n1" emitted) ++
-        tokens ++ tokens2) a.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    apply Covers.of_perm _ hold
-    simpa [List.append_assoc] using
-      (List.Perm.append_right tokens2
-        (List.Perm.append_left (appTokens pre ++ appTokens post) hlocal))
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted, emittedPrefix, List.append_assoc] using hrun
-  · refine ⟨running, node2, store, wire, wire2, tokens, tokens2,
-      rfl, hrestart.nodeRep, hn2, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hprotocolFinal
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hcoverFinal
-
-theorem normalRel_node2_got_done {cfg : Storage.Config}
-    {net : List ConcreteMessage} {now t : Time}
-    {call : Call} {tries op next : Nat} {mailbox : List (Addr × CMsg)}
-    {doc : Option (Promise × Version)} {res : Response}
-    {after : Experiment.State} {outs : List (Out Msg)}
-    {node1 : Running Storage.Config Nat CMsg} {store : Store}
-    {wire1 : Option ConcreteMessage} {tokens1 : List AbstractMessage}
-    {a : Experiment.Conf promises}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (happ : AppOnly mailbox) (hnext : next = op + 1)
-    (hnone : take? (answers op) mailbox = none)
-    (hpick :
-      pick ((Experiment.dispatch call.req call.now).run
-        { cfg.app with unreliable := true }
-        { promises := doc.toList.map (·.1) }) 0 = (res, after, outs))
-    (hunchanged : after = { promises := doc.toList.map (·.1) })
-    (hprotocol : (protocolMessages net).Perm
-      (optionList wire1 ++
-        [((.proc "s3", .proc "n2", .got op doc) : ConcreteMessage)]))
-    (hcover : Covers
-      (appTokens net ++ tokens1 ++
-        (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res])) a.net)
-    (hstore : StoreRep store a.state) (htime : a.now ≤ now)
-    (hstepTime : now ≤ t) (source : Network.Who)
-    (pre post : List ConcreteMessage)
-    (hnet : net = pre ++
-      ((.proc "s3", .proc "n2", .got op doc) : ConcreteMessage) :: post) :
-    ∃ running rest wire tokens,
-      let states : List (Addr × Local) :=
-        [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-      let emitted : List (Out CMsg) :=
-        notes outs ++
-          .send call.client (.app (.res call.id res)) ::
-            (sends outs).map (fun (address, message) =>
-              .send address (.app message)) ++ rest
-      (toStep node 64 source.addr (.got op doc) t cfg
-        (⟨next, mailbox,
-          loadK tries (call.retry tries)
-            call.client call.id call.req call.now op⟩ :
-          Running Storage.Config Nat CMsg)).val =
-          [((), running, emitted)] ∧
-      RestartRep cfg store "n2" running rest wire tokens ∧
-      NormalRel cfg
-        ⟨pre ++ post ++ routedOuts states "n2" emitted, states, t⟩ a := by
-  obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
-    loading_got_unchanged_restart
-      (cfg := cfg) (store := store) (address := "n2")
-      happ hnone hpick hunchanged source.addr t
-  let states : List (Addr × Local) :=
-    [("n1", .node node1), ("n2", .node running), ("s3", .store store)]
-  let emittedPrefix : List (Out CMsg) :=
-    [.send call.client (.app (.res call.id res))] ++
-      (sends outs).map
-        (fun (address, message) => .send address (.app message))
-  let emitted : List (Out CMsg) := notes outs ++ emittedPrefix ++ rest
-  have hprefixProtocol :
-      protocolMessages (routedOuts states "n2" emittedPrefix) = [] := by
-    rw [show emittedPrefix =
-      [.send call.client (.app (.res call.id res))] ++
-        (sends outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, protocolMessages_append,
-      protocolMessages_routedResponse, protocolMessages_routedOutputs]
-    rfl
-  have hprefixApp :
-      appTokens (routedOuts states "n2" emittedPrefix) =
-        [responseToken call.client call.id res] ++ outputTokens outs := by
-    rw [show emittedPrefix =
-      [.send call.client (.app (.res call.id res))] ++
-        (sends outs).map
-          (fun (address, message) => .send address (.app message)) from rfl]
-    rw [routedOuts_append, appTokens_append, appTokens_routedResponse,
-      appTokens_routedOutputs states "n2" outs
-        (dispatch_onlyNotifies (cfg := cfg) hpick)]
-  have hrouteProtocol :
-      protocolMessages (routedOuts states "n2" emitted) =
-        optionList wire := by
-    rw [show emitted = notes outs ++ (emittedPrefix ++ rest) by
-          simp [emitted, List.append_assoc],
-      routedOuts_append, routedOuts_notes, List.nil_append,
-      routedOuts_append, protocolMessages_append, hprefixProtocol,
-      List.nil_append]
-    cases hrestart with
-    | idle happ' hnone' => rfl
-    | @loading nextCall nextOp next' mailbox' happ' hnext' hnone' =>
-      simp [routedOuts, routedMessages, sends, protocolMessages,
-        optionList, states, hstoreAddr, Network.Conf.route,
-        Network.Conf.isProc]
-  have hrouteApp :
-      appTokens (routedOuts states "n2" emitted) =
-        [responseToken call.client call.id res] ++ outputTokens outs := by
-    rw [show emitted = notes outs ++ (emittedPrefix ++ rest) by
-          simp [emitted, List.append_assoc],
-      routedOuts_append, routedOuts_notes, List.nil_append,
-      routedOuts_append, appTokens_append, hprefixApp]
-    cases hrestart <;>
-      simp [routedOuts, routedMessages, sends, appTokens, appToken,
-        states, hstoreAddr, Network.Conf.route, Network.Conf.isProc]
-  rw [hnet] at hprotocol hcover
-  have hbase :
-      (protocolMessages pre ++ protocolMessages post).Perm
-        (optionList wire1) := by
-    have hp := hprotocol.trans List.perm_append_comm
-    apply Perm.cancel_exposed
-    simpa [protocolMessages, List.append_assoc] using hp
-  have hprotocolFinal :
-      (protocolMessages
-        (pre ++ post ++ routedOuts states "n2" emitted)).Perm
-        (optionList wire1 ++ optionList wire) := by
-    rw [protocolMessages_append, protocolMessages_append, hrouteProtocol]
-    simpa [List.append_assoc] using hbase.append_right (optionList wire)
-  have hlocal :
-      (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res]).Perm
-        ([responseToken call.client call.id res] ++
-          outputTokens outs ++ tokens) := by
-    have hfirst :
-        (mailboxTokens mailbox ++ outputTokens outs ++
-            [responseToken call.client call.id res]).Perm
-          ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs) := by
-      simpa [List.append_assoc] using
-        (List.perm_append_comm :
-          (mailboxTokens mailbox ++ outputTokens outs ++
-            [responseToken call.client call.id res]).Perm
-          ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs))
-    have hmiddle :
-        ([responseToken call.client call.id res] ++
-            mailboxTokens mailbox ++ outputTokens outs).Perm
-          ([responseToken call.client call.id res] ++
-            tokens ++ outputTokens outs) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left [responseToken call.client call.id res]
-          (htokens.symm.append_right (outputTokens outs)))
-    have hlast :
-        ([responseToken call.client call.id res] ++
-            tokens ++ outputTokens outs).Perm
-          ([responseToken call.client call.id res] ++
-            outputTokens outs ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_left [responseToken call.client call.id res]
-          (List.perm_append_comm :
-            (tokens ++ outputTokens outs).Perm
-              (outputTokens outs ++ tokens)))
-    exact hfirst.trans (hmiddle.trans hlast)
-  have hold : Covers
-      (appTokens pre ++ appTokens post ++ tokens1 ++
-        (mailboxTokens mailbox ++ outputTokens outs ++
-          [responseToken call.client call.id res])) a.net := by
-    simpa [appTokens, appToken, List.append_assoc] using hcover
-  have hcoverFinal : Covers
-      (appTokens (pre ++ post ++ routedOuts states "n2" emitted) ++
-        tokens1 ++ tokens) a.net := by
-    rw [appTokens_append, appTokens_append, hrouteApp]
-    apply Covers.of_perm _ hold
-    have hwith := List.Perm.append_left tokens1 hlocal
-    have hmove :
-        (tokens1 ++
-          ([responseToken call.client call.id res] ++
-            outputTokens outs ++ tokens)).Perm
-        ([responseToken call.client call.id res] ++
-          outputTokens outs ++ tokens1 ++ tokens) := by
-      simpa [List.append_assoc] using
-        (List.Perm.append_right tokens
-          (List.perm_append_comm :
-            (tokens1 ++
-              ([responseToken call.client call.id res] ++
-                outputTokens outs)).Perm
-            (([responseToken call.client call.id res] ++
-              outputTokens outs) ++ tokens1)))
-    simpa [List.append_assoc] using
-      (List.Perm.append_left (appTokens pre ++ appTokens post)
-        (hwith.trans hmove))
-  refine ⟨running, rest, wire, tokens, ?_, hrestart, ?_⟩
-  · simpa [emitted, emittedPrefix, List.append_assoc] using hrun
-  · refine ⟨node1, running, store, wire1, wire, tokens1, tokens,
-      rfl, hn1, hrestart.nodeRep, ?_, ?_, hstore,
-      Nat.le_trans htime hstepTime⟩
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hprotocolFinal
-    · simpa [states, emitted, emittedPrefix, List.append_assoc] using
-        hcoverFinal
-
-theorem protocol_to_node1_is_wire {cfg : Storage.Config} {store : Store}
-    {node1 node2 : Running Storage.Config Nat CMsg}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage} {net : List ConcreteMessage}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hp : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    {source : Network.Who} {message : CMsg}
-    (hm : (source, .proc "n1", message) ∈ protocolMessages net) :
-    wire1 = some (source, .proc "n1", message) := by
-  have hout := (hp.mem_iff).1 hm
-  simp only [List.mem_append] at hout
-  rcases hout with hout | hout
-  · cases wire1 <;> simp [optionList] at hout ⊢
-    exact hout.symm
-  · cases hn2 <;> simp [optionList, hstoreAddr] at hout
-
-theorem protocol_to_node2_is_wire {cfg : Storage.Config} {store : Store}
-    {node1 node2 : Running Storage.Config Nat CMsg}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage} {net : List ConcreteMessage}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hp : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    {source : Network.Who} {message : CMsg}
-    (hm : (source, .proc "n2", message) ∈ protocolMessages net) :
-    wire2 = some (source, .proc "n2", message) := by
-  have hout := (hp.mem_iff).1 hm
-  simp only [List.mem_append] at hout
-  rcases hout with hout | hout
-  · cases hn1 <;> simp [optionList, hstoreAddr] at hout
-  · cases wire2 <;> simp [optionList] at hout ⊢
-    exact hout.symm
-
-theorem protocol_from_node1_to_store_is_wire {cfg : Storage.Config}
-    {store : Store} {node1 node2 : Running Storage.Config Nat CMsg}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage} {net : List ConcreteMessage}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hp : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    {message : CMsg}
-    (hm : (.proc "n1", .proc "s3", message) ∈ protocolMessages net) :
-    wire1 = some (.proc "n1", .proc "s3", message) := by
-  have hout := (hp.mem_iff).1 hm
-  simp only [List.mem_append] at hout
-  rcases hout with hout | hout
-  · cases wire1 <;> simp [optionList] at hout ⊢
-    exact hout.symm
-  · cases hn2 <;> simp [optionList, hstoreAddr] at hout
-
-theorem protocol_from_node2_to_store_is_wire {cfg : Storage.Config}
-    {store : Store} {node1 node2 : Running Storage.Config Nat CMsg}
-    {wire1 wire2 : Option ConcreteMessage}
-    {tokens1 tokens2 : List AbstractMessage} {net : List ConcreteMessage}
-    (hstoreAddr : cfg.store = "s3")
-    (hn1 : NodeRep cfg store "n1" node1 wire1 tokens1)
-    (hn2 : NodeRep cfg store "n2" node2 wire2 tokens2)
-    (hp : (protocolMessages net).Perm
-      (optionList wire1 ++ optionList wire2))
-    {message : CMsg}
-    (hm : (.proc "n2", .proc "s3", message) ∈ protocolMessages net) :
-    wire2 = some (.proc "n2", .proc "s3", message) := by
-  have hout := (hp.mem_iff).1 hm
-  simp only [List.mem_append] at hout
-  rcases hout with hout | hout
-  · cases hn1 <;> simp [optionList, hstoreAddr] at hout
-  · cases wire2 <;> simp [optionList] at hout ⊢
-    exact hout.symm
-
 theorem source_eq_s3_of_inbound_wire {cfg : Storage.Config}
     (hstoreAddr : cfg.store = "s3") {source destination : Network.Who}
     {message message' : CMsg}
@@ -7885,7 +4553,7 @@ theorem route_store_for_split_states
         .proc cfg.store := by
   simp [Network.Conf.route, Network.Conf.isProc, hstoreAddr]
 
-theorem normalRelFor_store_get_done
+theorem normalRel_store_get_done
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -7926,7 +4594,7 @@ theorem normalRelFor_store_get_done
       Network.Matches { cfg.app with unreliable := true } clientView a
         (.proc "s3", t, .receive (.proc address)
           (CMsg.get op call.req.key)) a' ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ [reply],
           (beforeStates ++
             (address, .node ⟨next, mailbox,
@@ -8014,7 +4682,7 @@ theorem normalRelFor_store_get_done
       simpa [a', emitted, reply, appTokens, appToken,
         List.append_assoc] using hcAdded
 
-theorem normalRelFor_store_written
+theorem normalRel_store_written
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8057,7 +4725,7 @@ theorem normalRelFor_store_written
         (.proc "s3", t, .receive (.proc address)
           (CMsg.put op candidate.req.key candidate.promise
             (candidate.doc.map (·.2)))) a' ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ [reply],
           (beforeStates ++
             (address, .node ⟨next, mailbox,
@@ -8132,7 +4800,7 @@ theorem normalRelFor_store_written
         (right := afterTokens) (added := emitted) hcRest
       simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
 
-theorem normalRelFor_store_landedFailed
+theorem normalRel_store_landedFailed
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8175,7 +4843,7 @@ theorem normalRelFor_store_landedFailed
         (.proc "s3", t, .receive (.proc address)
           (CMsg.put op candidate.req.key candidate.promise
             (candidate.doc.map (·.2)))) a' ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ [reply],
           (beforeStates ++
             (address, .node ⟨next, mailbox,
@@ -8249,7 +4917,7 @@ theorem normalRelFor_store_landedFailed
         (right := afterTokens) (added := emitted) hcRest
       simpa [a', emitted, appTokens, appToken, List.append_assoc] using hcAdded
 
-theorem normalRelFor_store_failed
+theorem normalRel_store_failed
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8289,7 +4957,7 @@ theorem normalRelFor_store_failed
         (.proc "s3", t, .receive (.proc address)
           (CMsg.put op candidate.req.key candidate.promise
             (candidate.doc.map (·.2)))) a' ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ [reply],
           (beforeStates ++
             (address, .node ⟨next, mailbox,
@@ -8362,7 +5030,7 @@ theorem normalRelFor_store_failed
         appTokens, appToken, List.append_assoc] using hcAdded
     · simpa [a', haeq] using hstore'
 
-theorem normalRelFor_written
+theorem normalRel_written
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8408,7 +5076,7 @@ theorem normalRelFor_written
             candidate op⟩ : Running Storage.Config Nat CMsg)).val =
           [((), running, emitted)] ∧
       RestartRep cfg store address running rest wire tokens ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ routedOuts states address emitted, states, t⟩ a := by
   obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
     writing_written_restart (cfg := cfg) (store := store) (address := address)
@@ -8540,7 +5208,7 @@ theorem normalRelFor_written
     · simpa [states, emitted, emittedPrefix, List.append_assoc] using
         hcoverFinal
 
-theorem normalRelFor_failed
+theorem normalRel_failed
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8583,7 +5251,7 @@ theorem normalRelFor_failed
             candidate op⟩ : Running Storage.Config Nat CMsg)).val =
           [((), running, emitted)] ∧
       RestartRep cfg store address running rest wire tokens ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ routedOuts states address emitted, states, t⟩ a := by
   obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
     writing_failed_restart (cfg := cfg) (store := store) (address := address)
@@ -8723,7 +5391,7 @@ theorem normalRelFor_failed
     · simpa [states, emitted, List.append_assoc] using hprotocolFinal
     · simpa [states, emitted, List.append_assoc] using hcoverFinal
 
-theorem normalRelFor_conflict_exhausted
+theorem normalRel_conflict_exhausted
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8768,7 +5436,7 @@ theorem normalRelFor_conflict_exhausted
             candidate op⟩ : Running Storage.Config Nat CMsg)).val =
           [((), running, emitted)] ∧
       RestartRep cfg store address running rest wire tokens ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ routedOuts states address emitted, states, t⟩ a' := by
   rw [hnet] at hcover
   have hcCall : Covers
@@ -8863,7 +5531,7 @@ theorem normalRelFor_conflict_exhausted
     · simpa [states, emitted, List.append_assoc] using hcoverFinal
     · simpa [a', haeq] using hstore'
 
-theorem normalRelFor_got_done
+theorem normalRel_got_done
     {cfg : Storage.Config} {store : Store} {address : Addr}
     {beforeNodes afterNodes : List Addr}
     {beforeStates afterStates : List (Addr × Local)}
@@ -8915,7 +5583,7 @@ theorem normalRelFor_got_done
           Running Storage.Config Nat CMsg)).val =
           [((), running, emitted)] ∧
       RestartRep cfg store address running rest wire tokens ∧
-      NormalRelFor (beforeNodes ++ address :: afterNodes) cfg
+      NormalRel (beforeNodes ++ address :: afterNodes) cfg
         ⟨pre ++ post ++ routedOuts states address emitted, states, t⟩ a := by
   obtain ⟨running, rest, wire, tokens, hrun, hrestart, htokens⟩ :=
     loading_got_unchanged_restart
@@ -9059,11 +5727,11 @@ theorem normalRelFor_got_done
 attribute [local simp] Network.Conf.route Network.Conf.isProc
 
 set_option maxHeartbeats 3000000 in
-theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
+theorem storage_simulationOn {nodes : List Addr} {cfg : Storage.Config}
     (hnodup : nodes.Nodup) (hphysical : "s3" ∉ nodes)
     (hconditional : cfg.conditional = true) (hstoreAddr : cfg.store = "s3") :
     Network.SimulationOn cfg { cfg.app with unreliable := true }
-      clientView DriveSafe (NormalRelFor nodes cfg) := by
+      clientView DriveSafe (NormalRel nodes cfg) := by
   intro c l stepOut c' a hrel hstep hok
   obtain ⟨t, act, htake⟩ := hstep
   cases act with
@@ -9248,7 +5916,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
             cases message with
             | res id response =>
               obtain ⟨running, hrun, hrel'⟩ :=
-                normalRelFor_nonrequest focus hprotocol hcover hstore htime
+                normalRel_nonrequest focus hprotocol hcover hstore htime
                   from_ (.res id response) hstepTime rfl pre post hnet
               have hservice := node_service_step_singleton hrun
               have hservice' :
@@ -9263,7 +5931,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                 sends_notes] using hrel'
             | notify promise =>
               obtain ⟨running, hrun, hrel'⟩ :=
-                normalRelFor_nonrequest focus hprotocol hcover hstore htime
+                normalRel_nonrequest focus hprotocol hcover hstore htime
                   from_ (.notify promise) hstepTime rfl pre post hnet
               have hservice := node_service_step_singleton hrun
               have hservice' :
@@ -9279,7 +5947,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
             | req id requestNow request =>
               by_cases hbusy : focus.wire ≠ none
               · obtain ⟨running, hrun, hrel'⟩ :=
-                  normalRelFor_request_busy focus hbusy hprotocol hcover
+                  normalRel_request_busy focus hbusy hprotocol hcover
                     hstore htime from_ id requestNow request hstepTime
                     pre post hnet
                 have hservice := node_service_step_singleton hrun
@@ -9297,7 +5965,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                 cases selected with
                 | @idle next mailbox happ hn =>
                   obtain ⟨hrun, hrel'⟩ :=
-                    normalRelFor_request_idle focus.before focus.after
+                    normalRel_request_idle focus.before focus.after
                       (next := next) happ hn hstoreAddr
                       (by simpa [focus.wires_eq, hw, hwire, optionList,
                         List.append_assoc] using hprotocol)
@@ -9371,7 +6039,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               obtain ⟨promise, hpromise⟩ :=
                 dispatch_changed_has_promise hd hpick hchanged
               obtain ⟨hrun, hrel'⟩ :=
-                normalRelFor_got_changed focus.before focus.after happ hn
+                normalRel_got_changed focus.before focus.after happ hn
                   hpick (beq_eq_false_iff_ne.mpr hchanged) hpromise hs hd
                   hstoreAddr
                   (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
@@ -9399,7 +6067,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               subst op
               subst doc
               obtain ⟨running, rest, wire, nodeTokens, hrun, hrestart, hrel'⟩ :=
-                normalRelFor_got_done focus.before focus.after happ hnext hn
+                normalRel_got_done focus.before focus.after happ hnext hn
                   hpick hunchanged hstoreAddr
                   (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                     List.append_assoc] using hprotocol)
@@ -9435,7 +6103,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               injection hmsg with hop
               subst op
               obtain ⟨running, rest, wire, nodeTokens, hrun, hrestart, hrel'⟩ :=
-                normalRelFor_written focus.before focus.after happ hnext hn
+                normalRel_written focus.before focus.after happ hnext hn
                   hvalid hstoreAddr
                   (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                     List.append_assoc] using hprotocol)
@@ -9477,7 +6145,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               | zero =>
                 obtain ⟨a', running, rest, wire, nodeTokens,
                     hmatch, hrun, hrestart, hrel'⟩ :=
-                  normalRelFor_conflict_exhausted focus.before focus.after
+                  normalRel_conflict_exhausted focus.before focus.after
                     happ hnext hn htries hstoreAddr
                     (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                       List.append_assoc] using hprotocol)
@@ -9494,7 +6162,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                 simpa [focus.nodes_eq, List.append_assoc] using hrel'
               | succ k =>
                 obtain ⟨hrun, hrel'⟩ :=
-                  normalRelFor_conflict_retry focus.before focus.after
+                  normalRel_conflict_retry focus.before focus.after
                     happ hn hvalid hs htries hstoreAddr
                     (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                       List.append_assoc] using hprotocol)
@@ -9534,7 +6202,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               injection hmsg with hop
               subst op
               obtain ⟨running, rest, wire, nodeTokens, hrun, hrestart, hrel'⟩ :=
-                normalRelFor_failed focus.before focus.after happ hnext hn
+                normalRel_failed focus.before focus.after happ hnext hn
                   (Or.inr rfl) hstoreAddr
                   (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                     List.append_assoc] using hprotocol)
@@ -9559,7 +6227,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               injection hmsg with hop
               subst op
               obtain ⟨running, rest, wire, nodeTokens, hrun, hrestart, hrel'⟩ :=
-                normalRelFor_failed focus.before focus.after happ hnext hn
+                normalRel_failed focus.before focus.after happ hnext hn
                   (Or.inl rfl) hstoreAddr
                   (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                     List.append_assoc] using hprotocol)
@@ -9589,7 +6257,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
               simp
             cases message with
             | app message =>
-              have hrel' := NormalRelFor.storeApp
+              have hrel' := NormalRel.storeApp
                 ⟨nodeStates, store, wires, tokens, hstates, hnodes,
                   hprotocol, hcover, hstore, htime⟩
                 from_ message hstepTime pre post hnet
@@ -9658,7 +6326,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                     { promises :=
                       (storeLookup store call.req.key).toList.map (·.1) }
                 · obtain ⟨a', hmatch, hrel'⟩ :=
-                    normalRelFor_store_get_done focus.before focus.after
+                    normalRel_store_get_done focus.before focus.after
                       happ hnext hn hpick hunchanged hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9696,7 +6364,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                     routedMessages, sends, Network.Conf.route,
                     Network.Conf.isProc, List.append_assoc] using hrel'
                 · obtain ⟨hrun, hrel'⟩ :=
-                    normalRelFor_store_get_changed focus.before focus.after
+                    normalRel_store_get_changed focus.before focus.after
                       happ hnext hn hpick hunchanged hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9837,7 +6505,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                 cases store_put_classify hconditional hout with
                 | conflict =>
                   have hrel' :=
-                    normalRelFor_store_conflict focus.before focus.after
+                    normalRel_store_conflict focus.before focus.after
                       happ hnext hn hvalid hs hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9854,7 +6522,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                     Network.Conf.isProc, List.append_assoc] using hrel'
                 | written hmatch =>
                   obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                    normalRelFor_store_written focus.before focus.after
+                    normalRel_store_written focus.before focus.after
                       happ hnext hn hvalid hs hmatch hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9871,7 +6539,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                     Network.Conf.isProc, List.append_assoc] using hrel'
                 | landedFailed hmatch =>
                   obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                    normalRelFor_store_landedFailed focus.before focus.after
+                    normalRel_store_landedFailed focus.before focus.after
                       happ hnext hn hvalid hs hmatch hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9888,7 +6556,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
                     Network.Conf.isProc, List.append_assoc] using hrel'
                 | failed =>
                   obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                    normalRelFor_store_failed focus.before focus.after
+                    normalRel_store_failed focus.before focus.after
                       happ hnext hn hvalid hs hstoreAddr
                       (by simpa [focus.wires_eq, hwire, hstoreAddr, optionList,
                         List.append_assoc] using hprotocol)
@@ -9948,7 +6616,7 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
     next hstepTime =>
       obtain ⟨nodeStates, store, wires, tokens, hstates, hnodes,
         hprotocol, hcover, hstore, htime⟩ := hrel
-      have hrelTime : NormalRelFor nodes cfg
+      have hrelTime : NormalRel nodes cfg
           ⟨c.net, nodeStates ++ [("s3", .store store)], t⟩ a :=
         ⟨nodeStates, store, wires, tokens, rfl, hnodes, hprotocol, hcover,
           hstore, Nat.le_trans htime hstepTime⟩
@@ -10004,1344 +6672,6 @@ theorem storage_simulationOnFor {nodes : List Addr} {cfg : Storage.Config}
     next => contradiction
 
 set_option maxHeartbeats 2000000 in
-theorem storage_simulationOn {cfg : Storage.Config}
-    (hconditional : cfg.conditional = true) (hstoreAddr : cfg.store = "s3") :
-    Network.SimulationOn cfg { cfg.app with unreliable := true }
-      clientView DriveSafe (NormalRel cfg) := by
-  intro c l stepOut c' a hrel hstep hok
-  obtain ⟨t, act, htake⟩ := hstep
-  cases act with
-  | request client to message =>
-    simp only [Network.Conf.take] at htake
-    split at htake
-    next hguard =>
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hguard
-      have hstepTime : c.now ≤ t := by
-        exact hguard.1
-      simp only [Option.some.injEq, Prod.mk.injEq] at htake
-      obtain ⟨rfl, rfl, rfl⟩ := htake
-      cases message with
-      | app message =>
-        obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-          hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-        let a' : Experiment.Conf promises :=
-          ⟨a.net ++ [(.client client, .server, message)], a.state, t⟩
-        refine ⟨a', matches_client_request
-          (Nat.le_trans htime hstepTime), ?_⟩
-        exact NormalRel.clientRequest
-          ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩
-          client to t message
-      | get op key => simp [DriveSafe] at hok
-      | put op key promise ifMatch => simp [DriveSafe] at hok
-      | got op doc => simp [DriveSafe] at hok
-      | written op => simp [DriveSafe] at hok
-      | conflict op => simp [DriveSafe] at hok
-      | failed op => simp [DriveSafe] at hok
-    next => contradiction
-  | deliver index choice =>
-    simp only [Network.Conf.take] at htake
-    split at htake <;> try contradiction
-    next hstepTime =>
-      split at htake <;> try contradiction
-      next from_ client message hmessage =>
-        simp only [Option.some.injEq, Prod.mk.injEq] at htake
-        obtain ⟨rfl, rfl, rfl⟩ := htake
-        obtain ⟨pre, post, hnet, herase⟩ :=
-          split_of_get?_eq_some hmessage
-        cases message with
-        | app message =>
-          obtain ⟨apre, apost, hanet, hrel'⟩ :=
-            hrel.clientReceive from_ client t message pre post hnet
-          let a' : Experiment.Conf promises :=
-            ⟨apre ++ apost, a.state, t⟩
-          refine ⟨a', matches_client_receive
-            (Nat.le_trans (by
-              obtain ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, htime⟩ := hrel
-              exact htime) hstepTime) hanet, ?_⟩
-          simpa [a', herase] using hrel'
-        | get op key =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.get op key) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-        | put op key promise ifMatch =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.put op key promise ifMatch) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-        | got op doc =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.got op doc) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-        | written op =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.written op) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-        | conflict op =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.conflict op) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-        | failed op =>
-          obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-            _, hn1, hn2, hprotocol, _, _, _⟩ := hrel
-          have hm : (from_, .client client, CMsg.failed op) ∈
-              protocolMessages c.net := by
-            rw [hnet]
-            simp [protocolMessages]
-          obtain ⟨source, dest, m, heq⟩ :=
-            protocol_message_is_between_procs hn1 hn2 hprotocol hm
-          cases heq
-      next from_ proc message hmessage =>
-        obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-          hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-        obtain ⟨pre, post, hnet, herase⟩ :=
-          split_of_get?_eq_some hmessage
-        by_cases hp1 : proc = "n1"
-        · subst proc
-          cases message with
-          | app message =>
-            cases message with
-            | res id response =>
-              obtain ⟨node1', hrun, hrel'⟩ :=
-                normalRel_node1_nonrequest hn1 hn2 hprotocol hcover hstore htime
-                  from_ (.res id response) t hstepTime rfl pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node node1) t
-                    (.msg from_.addr (.app (.res id response))) =
-                    Some.one (.node node1', []) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-            | req id requestNow request =>
-              by_cases hbusy : wire1 ≠ none
-              · obtain ⟨node1', hrun, hrel'⟩ :=
-                  normalRel_node1_request_busy hn1 hn2 hbusy hprotocol hcover
-                    hstore htime from_ id requestNow t request hstepTime
-                    pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node node1) t
-                      (.msg from_.addr (.app (.req id requestNow request))) =
-                      Some.one (.node node1', []) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              · have hw : wire1 = none := Classical.not_not.mp hbusy
-                subst wire1
-                cases hn1 with
-                | @idle next mailbox happ hn =>
-                  obtain ⟨hrun, hrel'⟩ :=
-                    normalRel_node1_request_idle hstoreAddr happ hn hn2
-                      (by simpa [optionList] using hprotocol)
-                      (by simpa [List.append_assoc] using hcover)
-                      hstore htime from_ id requestNow t request hstepTime
-                      pre post hnet
-                  have hservice := node_service_step_singleton hrun
-                  have hservice' :
-                      system.step cfg (.node ⟨next, mailbox, node⟩) t
-                        (.msg from_.addr (.app (.req id requestNow request))) =
-                        Some.one (.node
-                          ⟨next + 1, mailbox,
-                            loadK cfg.retries
-                              (Call.retry
-                                ⟨from_.addr, id, request, requestNow⟩
-                                cfg.retries)
-                              from_.addr id request requestNow next⟩,
-                          [.send "s3" (.get next request.key)]) :=
-                    Subtype.ext hservice
-                  rw [herase] at htake
-                  simp [Network.Conf.run, Network.Conf.state?, hstates,
-                    hservice', Experiment.pick, Some.one] at htake
-                  obtain ⟨rfl, rfl, rfl⟩ := htake
-                  refine ⟨a, matches_hidden rfl, ?_⟩
-                  simpa [List.append_assoc] using hrel'
-            | notify promise =>
-              obtain ⟨node1', hrun, hrel'⟩ :=
-                normalRel_node1_nonrequest hn1 hn2 hprotocol hcover hstore htime
-                  from_ (.notify promise) t hstepTime rfl pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node node1) t
-                    (.msg from_.addr (.app (.notify promise))) =
-                    Some.one (.node node1', []) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-          | get op key =>
-            have hm : (from_, .proc "n1", CMsg.get op key) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 <;> simp [hstoreAddr] at hw
-          | put op key promise ifMatch =>
-            have hm : (from_, .proc "n1", CMsg.put op key promise ifMatch) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 <;> simp [hstoreAddr] at hw
-          | got op doc =>
-            have hm : (from_, .proc "n1", CMsg.got op doc) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 with
-            | idle happ hn => simp [optionList] at hw
-            | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-            | @loadingGot call tries loadedOp next mailbox loadedDoc
-                happ hnext hn hchanged hs hd =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop hdoc
-              subst op
-              subst doc
-              obtain ⟨res, after, outs, hpick, hchanged⟩ := hchanged
-              obtain ⟨promise, hpromise⟩ :=
-                dispatch_changed_has_promise hd hpick hchanged
-              obtain ⟨hrun, hrel'⟩ :=
-                normalRel_node1_got_changed hstoreAddr happ hnext hn hpick
-                  (beq_eq_false_iff_ne.mpr hchanged) hpromise hs hd hn2
-                  hprotocol hcover hstore htime hstepTime (.proc "s3") pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node ⟨next, mailbox,
-                    loadK tries (call.retry tries)
-                      call.client call.id call.req call.now loadedOp⟩) t
-                    (.msg (Network.Who.proc "s3").addr (.got loadedOp loadedDoc)) =
-                    Some.one (.node _, _) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-            | @loadingDone call tries loadedOp next mailbox loadedDoc
-                res after outs happ hnext hn hpick hunchanged hs hd =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop hdoc
-              subst op
-              subst doc
-              obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                normalRel_node1_got_done hstoreAddr happ hnext hn hpick
-                  hunchanged hn2 hprotocol hcover hstore htime hstepTime
-                  (.proc "s3") pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node ⟨next, mailbox,
-                    loadK tries (call.retry tries)
-                      call.client call.id call.req call.now loadedOp⟩) t
-                    (.msg (Network.Who.proc "s3").addr (.got loadedOp loadedDoc)) =
-                    Some.one (.node running, _) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-            | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-            | writingConflict happ hnext hn hv hs => simp at hw
-            | writingServed happ hnext hn hv => simp at hw
-            | writingLost happ hnext hn hv => simp at hw
-            | writingShed happ hnext hn hv hs => simp at hw
-          | written op =>
-            have hm : (from_, .proc "n1", CMsg.written op) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 with
-            | idle happ hn => simp at hw
-            | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-            | loadingGot happ hnext hn hc hs hd => simp at hw
-            | loadingDone happ hnext hn hp hu hs hd => simp at hw
-            | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-            | writingConflict happ hnext hn hv hs => simp at hw
-            | @writingServed candidate loadedOp next mailbox
-                happ hnext hn hvalid =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop
-              subst op
-              obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                normalRel_node1_written hstoreAddr happ hnext hn hvalid hn2
-                  hprotocol hcover hstore htime hstepTime (.proc "s3") pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node ⟨next, mailbox,
-                    writeK candidate.tries
-                      (candidate.call.retry candidate.tries)
-                      candidate loadedOp⟩) t
-                    (.msg (Network.Who.proc "s3").addr (.written loadedOp)) =
-                    Some.one (.node running, _) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-            | writingLost happ hnext hn hv => simp at hw
-            | writingShed happ hnext hn hv hs => simp at hw
-          | conflict op =>
-            have hm : (from_, .proc "n1", CMsg.conflict op) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 with
-            | idle happ hn => simp at hw
-            | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-            | loadingGot happ hnext hn hc hs hd => simp at hw
-            | loadingDone happ hnext hn hp hu hs hd => simp at hw
-            | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-            | @writingConflict candidate loadedOp next mailbox
-                happ hnext hn hvalid hs =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop
-              subst op
-              cases htries : candidate.tries with
-              | zero =>
-                obtain ⟨a', running, rest, wire, tokens,
-                    hmatch, hrun, hrestart, hrel'⟩ :=
-                  normalRel_node1_conflict_exhausted hstoreAddr happ hnext hn
-                    htries hn2 hprotocol hcover hstore htime hstepTime (.proc "s3")
-                    pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      writeK candidate.tries
-                        (candidate.call.retry candidate.tries)
-                        candidate loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.conflict loadedOp)) =
-                      Some.one (.node running, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a', hmatch, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | succ k =>
-                obtain ⟨hrun, hrel'⟩ :=
-                  normalRel_node1_conflict_retry hstoreAddr happ hnext hn
-                    hvalid hs htries hn2 hprotocol hcover hstore htime
-                    hstepTime (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      writeK candidate.tries
-                        (candidate.call.retry candidate.tries)
-                        candidate loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.conflict loadedOp)) =
-                      Some.one (.node _, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-            | writingServed happ hnext hn hv => simp at hw
-            | writingLost happ hnext hn hv => simp at hw
-            | writingShed happ hnext hn hv hs => simp at hw
-          | failed op =>
-            have hm : (from_, .proc "n1", CMsg.failed op) ∈
-                protocolMessages c.net := by
-              rw [hnet]
-              simp [protocolMessages]
-            have hw := protocol_to_node1_is_wire hstoreAddr hn1 hn2
-              hprotocol hm
-            cases hn1 with
-            | idle happ hn => simp at hw
-            | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-            | loadingGot happ hnext hn hc hs hd => simp at hw
-            | loadingDone happ hnext hn hp hu hs hd => simp at hw
-            | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-            | writingConflict happ hnext hn hv hs => simp at hw
-            | writingServed happ hnext hn hv => simp at hw
-            | @writingLost candidate loadedOp next mailbox
-                happ hnext hn hvalid =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop
-              subst op
-              obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                normalRel_node1_failed hstoreAddr happ hnext hn (Or.inr rfl)
-                  hn2 hprotocol hcover hstore htime hstepTime (.proc "s3")
-                  pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node ⟨next, mailbox,
-                    writeK candidate.tries
-                      (candidate.call.retry candidate.tries)
-                      candidate loadedOp⟩) t
-                    (.msg (Network.Who.proc "s3").addr (.failed loadedOp)) =
-                    Some.one (.node running, _) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-            | @writingShed candidate loadedOp next mailbox
-                happ hnext hn hvalid hs =>
-              have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-              subst from_
-              simp only [hstoreAddr] at hprotocol
-              have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                (Option.some.inj hw)
-              injection hmsg with hop
-              subst op
-              obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                normalRel_node1_failed hstoreAddr happ hnext hn (Or.inl rfl)
-                  hn2 hprotocol hcover hstore htime hstepTime (.proc "s3")
-                  pre post hnet
-              have hservice := node_service_step_singleton hrun
-              have hservice' :
-                  system.step cfg (.node ⟨next, mailbox,
-                    writeK candidate.tries
-                      (candidate.call.retry candidate.tries)
-                      candidate loadedOp⟩) t
-                    (.msg (Network.Who.proc "s3").addr (.failed loadedOp)) =
-                    Some.one (.node running, _) :=
-                Subtype.ext hservice
-              rw [herase] at htake
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, ?_⟩
-              simpa [routedOuts, routedMessages, List.append_assoc,
-                sends_notes] using hrel'
-        · by_cases hp2 : proc = "n2"
-          · subst proc
-            cases message with
-            | app message =>
-              cases message with
-              | res id response =>
-                obtain ⟨node2', hrun, hrel'⟩ :=
-                  normalRel_node2_nonrequest hn1 hn2 hprotocol hcover hstore htime
-                    from_ (.res id response) t hstepTime rfl pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node node2) t
-                      (.msg from_.addr (.app (.res id response))) =
-                      Some.one (.node node2', []) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | req id requestNow request =>
-                by_cases hbusy : wire2 ≠ none
-                · obtain ⟨node2', hrun, hrel'⟩ :=
-                    normalRel_node2_request_busy hn1 hn2 hbusy hprotocol hcover
-                      hstore htime from_ id requestNow t request hstepTime
-                      pre post hnet
-                  have hservice := node_service_step_singleton hrun
-                  have hservice' :
-                      system.step cfg (.node node2) t
-                        (.msg from_.addr (.app (.req id requestNow request))) =
-                        Some.one (.node node2', []) :=
-                    Subtype.ext hservice
-                  rw [herase] at htake
-                  simp [Network.Conf.run, Network.Conf.state?, hstates,
-                    hservice', Experiment.pick, Some.one] at htake
-                  obtain ⟨rfl, rfl, rfl⟩ := htake
-                  refine ⟨a, matches_hidden rfl, ?_⟩
-                  simpa [routedOuts, routedMessages, List.append_assoc,
-                    sends_notes] using hrel'
-                · have hw : wire2 = none := Classical.not_not.mp hbusy
-                  subst wire2
-                  cases hn2 with
-                  | @idle next mailbox happ hn =>
-                    obtain ⟨hrun, hrel'⟩ :=
-                      normalRel_node2_request_idle hstoreAddr hn1 happ hn
-                        (by simpa [optionList] using hprotocol)
-                        (by simpa [List.append_assoc] using hcover)
-                        hstore htime from_ id requestNow t request hstepTime
-                        pre post hnet
-                    have hservice := node_service_step_singleton hrun
-                    have hservice' :
-                        system.step cfg (.node ⟨next, mailbox, node⟩) t
-                          (.msg from_.addr (.app (.req id requestNow request))) =
-                          Some.one (.node
-                            ⟨next + 1, mailbox,
-                              loadK cfg.retries
-                                (Call.retry
-                                  ⟨from_.addr, id, request, requestNow⟩
-                                  cfg.retries)
-                                from_.addr id request requestNow next⟩,
-                            [.send "s3" (.get next request.key)]) :=
-                      Subtype.ext hservice
-                    rw [herase] at htake
-                    simp [Network.Conf.run, Network.Conf.state?, hstates,
-                      hservice', Experiment.pick, Some.one] at htake
-                    obtain ⟨rfl, rfl, rfl⟩ := htake
-                    refine ⟨a, matches_hidden rfl, ?_⟩
-                    simpa [List.append_assoc] using hrel'
-              | notify promise =>
-                obtain ⟨node2', hrun, hrel'⟩ :=
-                  normalRel_node2_nonrequest hn1 hn2 hprotocol hcover hstore htime
-                    from_ (.notify promise) t hstepTime rfl pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node node2) t
-                      (.msg from_.addr (.app (.notify promise))) =
-                      Some.one (.node node2', []) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-            | get op key =>
-              have hm : (from_, .proc "n2", CMsg.get op key) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 <;> simp [hstoreAddr] at hw
-            | put op key promise ifMatch =>
-              have hm : (from_, .proc "n2", CMsg.put op key promise ifMatch) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 <;> simp [hstoreAddr] at hw
-            | got op doc =>
-              have hm : (from_, .proc "n2", CMsg.got op doc) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 with
-              | idle happ hn => simp [optionList] at hw
-              | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-              | @loadingGot call tries loadedOp next mailbox loadedDoc
-                  happ hnext hn hchanged hs hd =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop hdoc
-                subst op
-                subst doc
-                obtain ⟨res, after, outs, hpick, hchanged⟩ := hchanged
-                obtain ⟨promise, hpromise⟩ :=
-                  dispatch_changed_has_promise hd hpick hchanged
-                obtain ⟨hrun, hrel'⟩ :=
-                  normalRel_node2_got_changed hstoreAddr hn1 happ hnext hn hpick
-                    (beq_eq_false_iff_ne.mpr hchanged) hpromise hs hd
-                    hprotocol hcover hstore htime hstepTime (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      loadK tries (call.retry tries)
-                        call.client call.id call.req call.now loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.got loadedOp loadedDoc)) =
-                      Some.one (.node _, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | @loadingDone call tries loadedOp next mailbox loadedDoc
-                  res after outs happ hnext hn hpick hunchanged hs hd =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop hdoc
-                subst op
-                subst doc
-                obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                  normalRel_node2_got_done hstoreAddr hn1 happ hnext hn hpick
-                    hunchanged hprotocol hcover hstore htime hstepTime
-                    (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      loadK tries (call.retry tries)
-                        call.client call.id call.req call.now loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.got loadedOp loadedDoc)) =
-                      Some.one (.node running, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-              | writingConflict happ hnext hn hv hs => simp at hw
-              | writingServed happ hnext hn hv => simp at hw
-              | writingLost happ hnext hn hv => simp at hw
-              | writingShed happ hnext hn hv hs => simp at hw
-            | written op =>
-              have hm : (from_, .proc "n2", CMsg.written op) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 with
-              | idle happ hn => simp at hw
-              | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-              | loadingGot happ hnext hn hc hs hd => simp at hw
-              | loadingDone happ hnext hn hp hu hs hd => simp at hw
-              | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-              | writingConflict happ hnext hn hv hs => simp at hw
-              | @writingServed candidate loadedOp next mailbox
-                  happ hnext hn hvalid =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop
-                subst op
-                obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                  normalRel_node2_written hstoreAddr hn1 happ hnext hn hvalid
-                    hprotocol hcover hstore htime hstepTime (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      writeK candidate.tries
-                        (candidate.call.retry candidate.tries)
-                        candidate loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.written loadedOp)) =
-                      Some.one (.node running, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | writingLost happ hnext hn hv => simp at hw
-              | writingShed happ hnext hn hv hs => simp at hw
-            | conflict op =>
-              have hm : (from_, .proc "n2", CMsg.conflict op) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 with
-              | idle happ hn => simp at hw
-              | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-              | loadingGot happ hnext hn hc hs hd => simp at hw
-              | loadingDone happ hnext hn hp hu hs hd => simp at hw
-              | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-              | @writingConflict candidate loadedOp next mailbox
-                  happ hnext hn hvalid hs =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop
-                subst op
-                cases htries : candidate.tries with
-                | zero =>
-                  obtain ⟨a', running, rest, wire, tokens,
-                      hmatch, hrun, hrestart, hrel'⟩ :=
-                    normalRel_node2_conflict_exhausted hstoreAddr hn1 happ hnext
-                      hn htries hprotocol hcover hstore htime hstepTime (.proc "s3")
-                      pre post hnet
-                  have hservice := node_service_step_singleton hrun
-                  have hservice' :
-                      system.step cfg (.node ⟨next, mailbox,
-                        writeK candidate.tries
-                          (candidate.call.retry candidate.tries)
-                          candidate loadedOp⟩) t
-                        (.msg (Network.Who.proc "s3").addr (.conflict loadedOp)) =
-                        Some.one (.node running, _) :=
-                    Subtype.ext hservice
-                  rw [herase] at htake
-                  simp [Network.Conf.run, Network.Conf.state?, hstates,
-                    hservice', Experiment.pick, Some.one] at htake
-                  obtain ⟨rfl, rfl, rfl⟩ := htake
-                  refine ⟨a', hmatch, ?_⟩
-                  simpa [routedOuts, routedMessages, List.append_assoc,
-                    sends_notes] using hrel'
-                | succ k =>
-                  obtain ⟨hrun, hrel'⟩ :=
-                    normalRel_node2_conflict_retry hstoreAddr hn1 happ hnext hn
-                      hvalid hs htries hprotocol hcover hstore htime
-                      hstepTime (.proc "s3") pre post hnet
-                  have hservice := node_service_step_singleton hrun
-                  have hservice' :
-                      system.step cfg (.node ⟨next, mailbox,
-                        writeK candidate.tries
-                          (candidate.call.retry candidate.tries)
-                          candidate loadedOp⟩) t
-                        (.msg (Network.Who.proc "s3").addr (.conflict loadedOp)) =
-                        Some.one (.node _, _) :=
-                    Subtype.ext hservice
-                  rw [herase] at htake
-                  simp [Network.Conf.run, Network.Conf.state?, hstates,
-                    hservice', Experiment.pick, Some.one] at htake
-                  obtain ⟨rfl, rfl, rfl⟩ := htake
-                  refine ⟨a, matches_hidden rfl, ?_⟩
-                  simpa [routedOuts, routedMessages, List.append_assoc,
-                    sends_notes] using hrel'
-              | writingServed happ hnext hn hv => simp at hw
-              | writingLost happ hnext hn hv => simp at hw
-              | writingShed happ hnext hn hv hs => simp at hw
-            | failed op =>
-              have hm : (from_, .proc "n2", CMsg.failed op) ∈
-                  protocolMessages c.net := by
-                rw [hnet]
-                simp [protocolMessages]
-              have hw := protocol_to_node2_is_wire hstoreAddr hn1 hn2
-                hprotocol hm
-              cases hn2 with
-              | idle happ hn => simp at hw
-              | loadingGet happ hnext hn => simp [hstoreAddr] at hw
-              | loadingGot happ hnext hn hc hs hd => simp at hw
-              | loadingDone happ hnext hn hp hu hs hd => simp at hw
-              | writingPut happ hnext hn hv hs => simp [hstoreAddr] at hw
-              | writingConflict happ hnext hn hv hs => simp at hw
-              | writingServed happ hnext hn hv => simp at hw
-              | @writingLost candidate loadedOp next mailbox
-                  happ hnext hn hvalid =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop
-                subst op
-                obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                  normalRel_node2_failed hstoreAddr hn1 happ hnext hn
-                    (Or.inr rfl) hprotocol hcover hstore htime hstepTime
-                    (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      writeK candidate.tries
-                        (candidate.call.retry candidate.tries)
-                        candidate loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.failed loadedOp)) =
-                      Some.one (.node running, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | @writingShed candidate loadedOp next mailbox
-                  happ hnext hn hvalid hs =>
-                have hfrom := source_eq_s3_of_inbound_wire hstoreAddr hw
-                subst from_
-                simp only [hstoreAddr] at hprotocol
-                have hmsg := congrArg (fun x : ConcreteMessage => x.2.2)
-                  (Option.some.inj hw)
-                injection hmsg with hop
-                subst op
-                obtain ⟨running, rest, wire, tokens, hrun, hrestart, hrel'⟩ :=
-                  normalRel_node2_failed hstoreAddr hn1 happ hnext hn
-                    (Or.inl rfl) hprotocol hcover hstore htime hstepTime
-                    (.proc "s3") pre post hnet
-                have hservice := node_service_step_singleton hrun
-                have hservice' :
-                    system.step cfg (.node ⟨next, mailbox,
-                      writeK candidate.tries
-                        (candidate.call.retry candidate.tries)
-                        candidate loadedOp⟩) t
-                      (.msg (Network.Who.proc "s3").addr (.failed loadedOp)) =
-                      Some.one (.node running, _) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-          · by_cases hp3 : proc = "s3"
-            · subst proc
-              cases message with
-              | app message =>
-                have hrel0 : NormalRel cfg
-                    ⟨c.net,
-                      [("n1", .node node1), ("n2", .node node2),
-                        ("s3", .store store)], c.now⟩ a :=
-                  ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-                    rfl, hn1, hn2, hprotocol, hcover, hstore, htime⟩
-                have hrel' :=
-                  hrel0.storeApp from_ message hstepTime pre post hnet
-                have hraw :
-                    ((storeReceive from_.addr (.app message)).run cfg store).val =
-                      [((), store, [])] := by
-                  cases message <;> rfl
-                have hservice := store_service_step_singleton
-                  (now := t) hraw
-                have hservice' :
-                    system.step cfg (.store store) t
-                      (.msg from_.addr (.app message)) =
-                      Some.one (.store store, []) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                refine ⟨a, matches_hidden rfl, ?_⟩
-                simpa [routedOuts, routedMessages, List.append_assoc,
-                  sends_notes] using hrel'
-              | get op key =>
-                have hm : (from_, .proc "s3", CMsg.get op key) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                obtain ⟨source, dest, protocol, hproc⟩ :=
-                  protocol_message_is_between_procs hn1 hn2 hprotocol hm
-                cases hproc
-                by_cases hs1 : source = "n1"
-                · subst source
-                  have hw := protocol_from_node1_to_store_is_wire
-                    hstoreAddr hn1 hn2 hprotocol hm
-                  cases hn1 with
-                  | idle happ hn => simp at hw
-                  | @loadingGet call tries loadedOp next mailbox
-                      happ hnext hn =>
-                    rw [hstoreAddr] at hw
-                    simp only [hstoreAddr] at hprotocol
-                    simp only [Option.some.injEq, Prod.mk.injEq,
-                      Network.Who.proc.injEq, CMsg.get.injEq, true_and] at hw
-                    obtain ⟨rfl, rfl⟩ := hw
-                    let picked := pick
-                      ((Experiment.dispatch call.req call.now).run
-                        { cfg.app with unreliable := true }
-                        { promises :=
-                          (storeLookup store call.req.key).toList.map (·.1) }) 0
-                    have hpick :
-                        pick ((Experiment.dispatch call.req call.now).run
-                          { cfg.app with unreliable := true }
-                          { promises :=
-                            (storeLookup store call.req.key).toList.map (·.1) }) 0 =
-                          picked := rfl
-                    obtain ⟨res, after, outs⟩ := picked
-                    by_cases hunchanged : after =
-                        { promises :=
-                          (storeLookup store call.req.key).toList.map (·.1) }
-                    · obtain ⟨a', hmatch, hrel'⟩ :=
-                        normalRel_store_get_done_node1 hstoreAddr happ hnext hn
-                          hpick hunchanged hn2 hprotocol hcover hstore htime
-                          hstepTime pre post hnet rfl
-                      have hraw := store_get_run cfg store "n1" loadedOp
-                        call.req.key
-                      have hservice := store_service_step_singleton
-                        (now := t) hraw
-                      have hservice' :
-                          system.step cfg (.store store) t
-                            (.msg (Network.Who.proc "n1").addr
-                              (.get loadedOp call.req.key)) =
-                            Some.one (.store store,
-                              [.send "n1"
-                                (.got loadedOp
-                                  (storeLookup store call.req.key))]) :=
-                        Subtype.ext hservice
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservice', Experiment.pick, Some.one] at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a', hmatch, ?_⟩
-                      simpa [routedOuts, routedMessages, List.append_assoc,
-                        sends_notes] using hrel'
-                    · obtain ⟨hrun, hrel'⟩ :=
-                        normalRel_store_get_node1 hstoreAddr happ hnext hn hpick
-                          hunchanged hn2 hprotocol hcover hstore htime hstepTime
-                          pre post hnet
-                      have hservice := store_service_step_singleton
-                        (now := t) hrun
-                      have hservice' :
-                          system.step cfg (.store store) t
-                            (.msg (Network.Who.proc "n1").addr
-                              (.get loadedOp call.req.key)) =
-                            Some.one (.store store,
-                              [.send "n1"
-                                (.got loadedOp
-                                  (storeLookup store call.req.key))]) :=
-                        Subtype.ext hservice
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservice', Experiment.pick, Some.one] at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a, matches_hidden rfl, ?_⟩
-                      simpa [routedOuts, routedMessages, List.append_assoc,
-                        sends_notes] using hrel'
-                  | loadingGot happ hnext hn hc hs hd => simp at hw
-                  | loadingDone happ hnext hn hp hu hs hd => simp at hw
-                  | writingPut happ hnext hn hv hs => simp at hw
-                  | writingConflict happ hnext hn hv hs => simp at hw
-                  | writingServed happ hnext hn hv => simp at hw
-                  | writingLost happ hnext hn hv => simp at hw
-                  | writingShed happ hnext hn hv hs => simp at hw
-                · by_cases hs2 : source = "n2"
-                  · subst source
-                    have hw := protocol_from_node2_to_store_is_wire
-                      hstoreAddr hn1 hn2 hprotocol hm
-                    cases hn2 with
-                    | idle happ hn => simp at hw
-                    | @loadingGet call tries loadedOp next mailbox
-                        happ hnext hn =>
-                      rw [hstoreAddr] at hw
-                      simp only [hstoreAddr] at hprotocol
-                      simp only [Option.some.injEq, Prod.mk.injEq,
-                        Network.Who.proc.injEq, CMsg.get.injEq, true_and] at hw
-                      obtain ⟨rfl, rfl⟩ := hw
-                      let picked := pick
-                        ((Experiment.dispatch call.req call.now).run
-                          { cfg.app with unreliable := true }
-                          { promises :=
-                            (storeLookup store call.req.key).toList.map (·.1) }) 0
-                      have hpick :
-                          pick ((Experiment.dispatch call.req call.now).run
-                            { cfg.app with unreliable := true }
-                            { promises :=
-                              (storeLookup store call.req.key).toList.map (·.1) }) 0 =
-                            picked := rfl
-                      obtain ⟨res, after, outs⟩ := picked
-                      by_cases hunchanged : after =
-                          { promises :=
-                            (storeLookup store call.req.key).toList.map (·.1) }
-                      · obtain ⟨a', hmatch, hrel'⟩ :=
-                          normalRel_store_get_done_node2 hstoreAddr hn1 happ hnext
-                            hn hpick hunchanged hprotocol hcover hstore htime
-                            hstepTime pre post hnet rfl
-                        have hraw := store_get_run cfg store "n2" loadedOp
-                          call.req.key
-                        have hservice := store_service_step_singleton
-                          (now := t) hraw
-                        have hservice' :
-                            system.step cfg (.store store) t
-                              (.msg (Network.Who.proc "n2").addr
-                                (.get loadedOp call.req.key)) =
-                              Some.one (.store store,
-                                [.send "n2"
-                                  (.got loadedOp
-                                    (storeLookup store call.req.key))]) :=
-                          Subtype.ext hservice
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservice', Experiment.pick, Some.one] at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a', hmatch, ?_⟩
-                        simpa [routedOuts, routedMessages, List.append_assoc,
-                          sends_notes] using hrel'
-                      · obtain ⟨hrun, hrel'⟩ :=
-                          normalRel_store_get_node2 hstoreAddr hn1 happ hnext hn
-                            hpick hunchanged hprotocol hcover hstore htime
-                            hstepTime pre post hnet
-                        have hservice := store_service_step_singleton
-                          (now := t) hrun
-                        have hservice' :
-                            system.step cfg (.store store) t
-                              (.msg (Network.Who.proc "n2").addr
-                                (.get loadedOp call.req.key)) =
-                              Some.one (.store store,
-                                [.send "n2"
-                                  (.got loadedOp
-                                    (storeLookup store call.req.key))]) :=
-                          Subtype.ext hservice
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservice', Experiment.pick, Some.one] at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a, matches_hidden rfl, ?_⟩
-                        simpa [routedOuts, routedMessages, List.append_assoc,
-                          sends_notes] using hrel'
-                    | loadingGot happ hnext hn hc hs hd => simp at hw
-                    | loadingDone happ hnext hn hp hu hs hd => simp at hw
-                    | writingPut happ hnext hn hv hs => simp at hw
-                    | writingConflict happ hnext hn hv hs => simp at hw
-                    | writingServed happ hnext hn hv => simp at hw
-                    | writingLost happ hnext hn hv => simp at hw
-                    | writingShed happ hnext hn hv hs => simp at hw
-                  · have hout := (hprotocol.mem_iff).1 hm
-                    cases hn1 <;> cases hn2 <;>
-                      simp [optionList, hstoreAddr, hs1, hs2] at hout
-              | put op key promise ifMatch =>
-                have hm : (from_, .proc "s3",
-                    CMsg.put op key promise ifMatch) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                obtain ⟨source, dest, protocol, hproc⟩ :=
-                  protocol_message_is_between_procs hn1 hn2 hprotocol hm
-                cases hproc
-                by_cases hs1 : source = "n1"
-                · subst source
-                  have hw := protocol_from_node1_to_store_is_wire
-                    hstoreAddr hn1 hn2 hprotocol hm
-                  cases hn1 with
-                  | idle happ hn => simp at hw
-                  | loadingGet happ hnext hn => simp at hw
-                  | loadingGot happ hnext hn hc hs hd => simp at hw
-                  | loadingDone happ hnext hn hp hu hs hd => simp at hw
-                  | @writingPut candidate loadedOp next mailbox
-                      happ hnext hn hvalid hs =>
-                    rw [hstoreAddr] at hw
-                    simp only [hstoreAddr] at hprotocol
-                    simp only [Option.some.injEq, Prod.mk.injEq,
-                      Network.Who.proc.injEq, CMsg.put.injEq, true_and] at hw
-                    obtain ⟨rfl, rfl, rfl, rfl⟩ := hw
-                    let chosen := pick
-                      ((storeReceive "n1"
-                        (.put loadedOp candidate.req.key candidate.promise
-                          (candidate.doc.map (·.2)))).run cfg store) choice
-                    have hchosen :
-                        pick ((storeReceive "n1"
-                          (.put loadedOp candidate.req.key candidate.promise
-                            (candidate.doc.map (·.2)))).run cfg store) choice =
-                          chosen := rfl
-                    obtain ⟨unit, afterStore, emitted⟩ := chosen
-                    cases unit
-                    have hout :
-                        ((), afterStore, emitted) ∈
-                          ((storeReceive "n1"
-                            (.put loadedOp candidate.req.key candidate.promise
-                              (candidate.doc.map (·.2)))).run cfg store).val := by
-                      rw [← hchosen]
-                      exact pick_mem _ _
-                    have hservicePick :
-                        pick (system.step cfg (.store store) t
-                          (.msg (Network.Who.proc "n1").addr
-                            (.put loadedOp candidate.req.key candidate.promise
-                              (candidate.doc.map (·.2))))) choice =
-                          (Local.store afterStore, emitted) := by
-                      exact store_service_step_pick (now := t) hchosen
-                    cases store_put_classify hconditional hout with
-                    | conflict =>
-                      have hrel' :=
-                        normalRel_store_conflict_node1 hstoreAddr happ hnext hn
-                          hvalid hs hn2 hprotocol hcover hstore htime hstepTime
-                          pre post hnet
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservicePick, Network.Conf.route, Network.Conf.isProc]
-                        at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a, matches_hidden rfl, ?_⟩
-                      simpa [List.append_assoc] using hrel'
-                    | written hmatch =>
-                      obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                        normalRel_store_written_node1 hstoreAddr happ hnext hn
-                          hvalid hs hmatch hn2 hprotocol hcover hstore htime
-                          hstepTime pre post hnet
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservicePick, Network.Conf.route, Network.Conf.isProc]
-                        at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a', hmatchAbstract, ?_⟩
-                      simpa [List.append_assoc] using hrel'
-                    | landedFailed hmatch =>
-                      obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                        normalRel_store_landedFailed_node1 hstoreAddr happ hnext
-                          hn hvalid hs hmatch hn2 hprotocol hcover hstore htime
-                          hstepTime pre post hnet
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservicePick, Network.Conf.route, Network.Conf.isProc]
-                        at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a', hmatchAbstract, ?_⟩
-                      simpa [List.append_assoc] using hrel'
-                    | failed =>
-                      obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                        normalRel_store_failed_node1 hstoreAddr happ hnext hn
-                          hvalid hs hn2 hprotocol hcover hstore htime hstepTime
-                          pre post hnet
-                      rw [herase] at htake
-                      simp [Network.Conf.run, Network.Conf.state?, hstates,
-                        hservicePick, Network.Conf.route, Network.Conf.isProc]
-                        at htake
-                      obtain ⟨rfl, rfl, rfl⟩ := htake
-                      refine ⟨a', hmatchAbstract, ?_⟩
-                      simpa [List.append_assoc] using hrel'
-                  | writingConflict happ hnext hn hv hs => simp at hw
-                  | writingServed happ hnext hn hv => simp at hw
-                  | writingLost happ hnext hn hv => simp at hw
-                  | writingShed happ hnext hn hv hs => simp at hw
-                · by_cases hs2 : source = "n2"
-                  · subst source
-                    have hw := protocol_from_node2_to_store_is_wire
-                      hstoreAddr hn1 hn2 hprotocol hm
-                    cases hn2 with
-                    | idle happ hn => simp at hw
-                    | loadingGet happ hnext hn => simp at hw
-                    | loadingGot happ hnext hn hc hs hd => simp at hw
-                    | loadingDone happ hnext hn hp hu hs hd => simp at hw
-                    | @writingPut candidate loadedOp next mailbox
-                        happ hnext hn hvalid hs =>
-                      rw [hstoreAddr] at hw
-                      simp only [hstoreAddr] at hprotocol
-                      simp only [Option.some.injEq, Prod.mk.injEq,
-                        Network.Who.proc.injEq, CMsg.put.injEq, true_and] at hw
-                      obtain ⟨rfl, rfl, rfl, rfl⟩ := hw
-                      let chosen := pick
-                        ((storeReceive "n2"
-                          (.put loadedOp candidate.req.key candidate.promise
-                            (candidate.doc.map (·.2)))).run cfg store) choice
-                      have hchosen :
-                          pick ((storeReceive "n2"
-                            (.put loadedOp candidate.req.key candidate.promise
-                              (candidate.doc.map (·.2)))).run cfg store) choice =
-                            chosen := rfl
-                      obtain ⟨unit, afterStore, emitted⟩ := chosen
-                      cases unit
-                      have hout :
-                          ((), afterStore, emitted) ∈
-                            ((storeReceive "n2"
-                              (.put loadedOp candidate.req.key candidate.promise
-                                (candidate.doc.map (·.2)))).run cfg store).val := by
-                        rw [← hchosen]
-                        exact pick_mem _ _
-                      have hservicePick :
-                          pick (system.step cfg (.store store) t
-                            (.msg (Network.Who.proc "n2").addr
-                              (.put loadedOp candidate.req.key candidate.promise
-                                (candidate.doc.map (·.2))))) choice =
-                            (Local.store afterStore, emitted) := by
-                        exact store_service_step_pick (now := t) hchosen
-                      cases store_put_classify hconditional hout with
-                      | conflict =>
-                        have hrel' :=
-                          normalRel_store_conflict_node2 hstoreAddr hn1 happ
-                            hnext hn hvalid hs hprotocol hcover hstore htime
-                            hstepTime pre post hnet
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservicePick, Network.Conf.route, Network.Conf.isProc]
-                          at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a, matches_hidden rfl, ?_⟩
-                        simpa [List.append_assoc] using hrel'
-                      | written hmatch =>
-                        obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                          normalRel_store_written_node2 hstoreAddr happ
-                            hnext hn hvalid hs hmatch hn1 hprotocol hcover hstore
-                            htime hstepTime pre post hnet
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservicePick, Network.Conf.route, Network.Conf.isProc]
-                          at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a', hmatchAbstract, ?_⟩
-                        simpa [List.append_assoc] using hrel'
-                      | landedFailed hmatch =>
-                        obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                          normalRel_store_landedFailed_node2 hstoreAddr happ
-                            hnext hn hvalid hs hmatch hn1 hprotocol hcover hstore
-                            htime hstepTime pre post hnet
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservicePick, Network.Conf.route, Network.Conf.isProc]
-                          at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a', hmatchAbstract, ?_⟩
-                        simpa [List.append_assoc] using hrel'
-                      | failed =>
-                        obtain ⟨a', hmatchAbstract, hrel'⟩ :=
-                          normalRel_store_failed_node2 hstoreAddr happ hnext
-                            hn hvalid hs hn1 hprotocol hcover hstore htime hstepTime
-                            pre post hnet
-                        rw [herase] at htake
-                        simp [Network.Conf.run, Network.Conf.state?, hstates,
-                          hservicePick, Network.Conf.route, Network.Conf.isProc]
-                          at htake
-                        obtain ⟨rfl, rfl, rfl⟩ := htake
-                        refine ⟨a', hmatchAbstract, ?_⟩
-                        simpa [List.append_assoc] using hrel'
-                    | writingConflict happ hnext hn hv hs => simp at hw
-                    | writingServed happ hnext hn hv => simp at hw
-                    | writingLost happ hnext hn hv => simp at hw
-                    | writingShed happ hnext hn hv hs => simp at hw
-                  · have hout := (hprotocol.mem_iff).1 hm
-                    cases hn1 <;> cases hn2 <;>
-                      simp [optionList, hstoreAddr, hs1, hs2] at hout
-              | got op doc =>
-                have hm : (from_, .proc "s3", CMsg.got op doc) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                have hout := (hprotocol.mem_iff).1 hm
-                cases hn1 <;> cases hn2 <;>
-                  simp [optionList, hstoreAddr] at hout
-              | written op =>
-                have hm : (from_, .proc "s3", CMsg.written op) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                have hout := (hprotocol.mem_iff).1 hm
-                cases hn1 <;> cases hn2 <;>
-                  simp [optionList, hstoreAddr] at hout
-              | conflict op =>
-                have hm : (from_, .proc "s3", CMsg.conflict op) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                have hout := (hprotocol.mem_iff).1 hm
-                cases hn1 <;> cases hn2 <;>
-                  simp [optionList, hstoreAddr] at hout
-              | failed op =>
-                have hm : (from_, .proc "s3", CMsg.failed op) ∈
-                    protocolMessages c.net := by
-                  rw [hnet]
-                  simp [protocolMessages]
-                have hout := (hprotocol.mem_iff).1 hm
-                cases hn1 <;> cases hn2 <;>
-                  simp [optionList, hstoreAddr] at hout
-            · have hp1' : "n1" ≠ proc := fun h => hp1 h.symm
-              have hp2' : "n2" ≠ proc := fun h => hp2 h.symm
-              have hp3' : "s3" ≠ proc := fun h => hp3 h.symm
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hp1', hp2', hp3'] at htake
-  | tick address choice =>
-    simp only [Network.Conf.take] at htake
-    split at htake
-    next hstepTime =>
-      obtain ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-        hstates, hn1, hn2, hprotocol, hcover, hstore, htime⟩ := hrel
-      have hrel' : NormalRel cfg
-          ⟨c.net,
-            [("n1", .node node1), ("n2", .node node2), ("s3", .store store)],
-            t⟩ a :=
-        ⟨node1, node2, store, wire1, wire2, tokens1, tokens2,
-          rfl, hn1, hn2, hprotocol, hcover, hstore,
-          Nat.le_trans htime hstepTime⟩
-      by_cases hp1 : address = "n1"
-      · subst address
-        have hservice :
-            system.step cfg (.node node1) t .tick =
-              Some.one (.node node1, []) := by rfl
-        simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-          Experiment.pick, Some.one] at htake
-        obtain ⟨rfl, rfl, rfl⟩ := htake
-        exact ⟨a, matches_hidden rfl, hrel'⟩
-      · by_cases hp2 : address = "n2"
-        · subst address
-          have hservice :
-              system.step cfg (.node node2) t .tick =
-                Some.one (.node node2, []) := by rfl
-          simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-            Experiment.pick, Some.one] at htake
-          obtain ⟨rfl, rfl, rfl⟩ := htake
-          exact ⟨a, matches_hidden rfl, hrel'⟩
-        · by_cases hp3 : address = "s3"
-          · subst address
-            have hservice :
-                system.step cfg (.store store) t .tick =
-                  Some.one (.store store, []) := by rfl
-            simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-              Experiment.pick, Some.one] at htake
-            obtain ⟨rfl, rfl, rfl⟩ := htake
-            exact ⟨a, matches_hidden rfl, hrel'⟩
-          · have hp1' : "n1" ≠ address := fun h => hp1 h.symm
-            have hp2' : "n2" ≠ address := fun h => hp2 h.symm
-            have hp3' : "s3" ≠ address := fun h => hp3 h.symm
-            simp [Network.Conf.run, Network.Conf.state?, hstates,
-              hp1', hp2', hp3'] at htake
-    next => contradiction
-
 def RequestOnlyMsg : CMsg → Prop
   | .app _ | .get _ _ => True
   | _ => False
@@ -11730,9 +7060,9 @@ theorem RequestNodes.map_update_store
   rw [h.map_update_miss hphysical (Local.store nextStore)]
   simp
 
-def requestRouteFor (nodes : List Addr) (cfg : Storage.Config) :
+def requestRoute (nodes : List Addr) (cfg : Storage.Config) :
     Network.Who :=
-  (⟨[], worldFor nodes, 0⟩ : Network.Conf system).route cfg.store
+  (⟨[], world nodes, 0⟩ : Network.Conf system).route cfg.store
 
 theorem RequestNodes.any_addresses {cfg : Storage.Config}
     {nodes : List Addr} {states : List (Addr × Local)}
@@ -11753,27 +7083,27 @@ theorem RequestNodes.route_eq {cfg : Storage.Config}
     (destination : Addr) :
     (⟨[], states ++ [("s3", Local.store store)], 0⟩ :
       Network.Conf system).route destination =
-      (⟨[], worldFor nodes, 0⟩ :
+      (⟨[], world nodes, 0⟩ :
         Network.Conf system).route destination := by
-  unfold worldFor
+  unfold world
   simp only [Network.Conf.route, Network.Conf.isProc, List.any_append]
   rw [h.any_addresses destination]
   simp
 
-def RequestNetFor (nodes : List Addr) (cfg : Storage.Config)
+def RequestNet (nodes : List Addr) (cfg : Storage.Config)
     (net : List ConcreteMessage) : Prop :=
   ∀ source destination message, (source, destination, message) ∈ net →
     match message with
     | .app _ => ∃ address, destination = .proc address
     | .get _ _ =>
         ∃ address, address ∈ nodes ∧ source = .proc address ∧
-          destination = requestRouteFor nodes cfg
+          destination = requestRoute nodes cfg
     | _ => False
 
-theorem RequestNetFor.request {nodes : List Addr} {cfg : Storage.Config}
-    {net : List ConcreteMessage} (h : RequestNetFor nodes cfg net)
+theorem RequestNet.request {nodes : List Addr} {cfg : Storage.Config}
+    {net : List ConcreteMessage} (h : RequestNet nodes cfg net)
     (client to : Addr) (message : Msg) :
-    RequestNetFor nodes cfg
+    RequestNet nodes cfg
       (net ++ [(.client client, .proc to, .app message)]) := by
   intro source destination concrete hm
   rw [List.mem_append] at hm
@@ -11783,11 +7113,11 @@ theorem RequestNetFor.request {nodes : List Addr} {cfg : Storage.Config}
     obtain ⟨rfl, rfl, rfl⟩ := hm
     exact ⟨to, rfl⟩
 
-theorem RequestNetFor.remove {nodes : List Addr} {cfg : Storage.Config}
-    {net : List ConcreteMessage} (h : RequestNetFor nodes cfg net)
+theorem RequestNet.remove {nodes : List Addr} {cfg : Storage.Config}
+    {net : List ConcreteMessage} (h : RequestNet nodes cfg net)
     {message : ConcreteMessage} (pre post : List ConcreteMessage)
     (hnet : net = pre ++ message :: post) :
-    RequestNetFor nodes cfg (pre ++ post) := by
+    RequestNet nodes cfg (pre ++ post) := by
   intro source destination concrete hm
   apply h source destination concrete
   rw [hnet]
@@ -11796,12 +7126,12 @@ theorem RequestNetFor.remove {nodes : List Addr} {cfg : Storage.Config}
   · exact Or.inl hm
   · exact Or.inr (Or.inr hm)
 
-theorem RequestNetFor.emitGet {nodes : List Addr}
+theorem RequestNet.emitGet {nodes : List Addr}
     {cfg : Storage.Config} {net : List ConcreteMessage}
-    (h : RequestNetFor nodes cfg net) (source : Addr)
+    (h : RequestNet nodes cfg net) (source : Addr)
     (hsource : source ∈ nodes) (op : Nat) (key : Ident) :
-    RequestNetFor nodes cfg
-      (net ++ [(.proc source, requestRouteFor nodes cfg, .get op key)]) := by
+    RequestNet nodes cfg
+      (net ++ [(.proc source, requestRoute nodes cfg, .get op key)]) := by
   intro from_ destination message hm
   rw [List.mem_append] at hm
   rcases hm with hm | hm
@@ -11810,32 +7140,32 @@ theorem RequestNetFor.emitGet {nodes : List Addr}
     obtain ⟨rfl, rfl, rfl⟩ := hm
     exact ⟨source, hsource, rfl, rfl⟩
 
-theorem requestRouteFor_ne_s3 {nodes : List Addr} {cfg : Storage.Config}
+theorem requestRoute_ne_s3 {nodes : List Addr} {cfg : Storage.Config}
     (hstore : cfg.store ≠ "s3") :
-    requestRouteFor nodes cfg ≠ .proc "s3" := by
+    requestRoute nodes cfg ≠ .proc "s3" := by
   intro heq
-  unfold requestRouteFor Network.Conf.route at heq
+  unfold requestRoute Network.Conf.route at heq
   by_cases hp :
-      (⟨[], worldFor nodes, 0⟩ :
+      (⟨[], world nodes, 0⟩ :
         Network.Conf system).isProc cfg.store = true
   · rw [if_pos hp] at heq
     exact hstore (Network.Who.proc.inj heq)
   · rw [if_neg hp] at heq
     cases heq
 
-def RequestOnlyRelFor (nodes : List Addr) (cfg : Storage.Config)
+def RequestOnlyRel (nodes : List Addr) (cfg : Storage.Config)
     (concrete : Network.Conf system)
     (abstract : Experiment.Conf promises) : Prop :=
   ∃ states store,
     concrete.states = states ++ [("s3", .store store)] ∧
     RequestNodes cfg nodes states ∧
-    RequestNetFor nodes cfg concrete.net ∧
+    RequestNet nodes cfg concrete.net ∧
     abstract.state = {} ∧
     abstract.now ≤ concrete.now
 
-theorem initial_requestOnlyRelFor (nodes : List Addr)
+theorem initial_requestOnlyRel (nodes : List Addr)
     (cfg : Storage.Config) :
-    RequestOnlyRelFor nodes cfg (Network.initial (worldFor nodes))
+    RequestOnlyRel nodes cfg (Network.initial (world nodes))
       (Experiment.initial {}) := by
   refine ⟨nodes.map (fun address =>
       (address, .node ⟨0, [], node⟩)), {}, rfl, ?_, ?_, rfl,
@@ -11847,311 +7177,11 @@ theorem initial_requestOnlyRelFor (nodes : List Addr)
   · intro source destination message hm
     simp [Network.initial] at hm
 
-def requestRoute (cfg : Storage.Config) : Network.Who :=
-  (⟨[], world, 0⟩ : Network.Conf system).route cfg.store
-
-def RequestNet (cfg : Storage.Config) (net : List ConcreteMessage) : Prop :=
-  ∀ source destination message, (source, destination, message) ∈ net →
-    match message with
-    | .app _ => ∃ address, destination = .proc address
-    | .get _ _ =>
-        (source = .proc "n1" ∨ source = .proc "n2") ∧
-          destination = requestRoute cfg
-    | _ => False
-
-theorem request_route_eq {cfg : Storage.Config}
-    (node1 node2 : Running Storage.Config Nat CMsg) (store : Store) :
-    (⟨[], [("n1", .node node1), ("n2", .node node2), ("s3", .store store)], 0⟩ :
-      Network.Conf system).route cfg.store = requestRoute cfg := by
-  simp [requestRoute, world, worldFor, defaultNodes, Network.initial, Network.Conf.route,
-    Network.Conf.isProc]
-
-theorem request_route_ne_s3 {cfg : Storage.Config} (hstore : cfg.store ≠ "s3") :
-    requestRoute cfg ≠ .proc "s3" := by
-  intro heq
-  by_cases hproc :
-      "n1" = cfg.store ∨ "n2" = cfg.store ∨ "s3" = cfg.store
-  · simp [requestRoute, world, worldFor, defaultNodes,
-      Network.Conf.route, Network.Conf.isProc,
-      hproc] at heq
-    exact hstore heq
-  · simp [requestRoute, world, worldFor, defaultNodes,
-      Network.Conf.route, Network.Conf.isProc,
-      hproc] at heq
-
-theorem RequestNet.request {cfg : Storage.Config} {net : List ConcreteMessage}
-    (h : RequestNet cfg net) (client : Addr) (to : Addr) (message : Msg) :
-    RequestNet cfg
-      (net ++ [(.client client, .proc to, CMsg.app message)]) := by
-  intro source destination concreteMessage hm
-  rw [List.mem_append] at hm
-  rcases hm with hm | hm
-  · exact h source destination concreteMessage hm
-  · simp only [List.mem_singleton, Prod.mk.injEq] at hm
-    obtain ⟨rfl, rfl, rfl⟩ := hm
-    exact ⟨to, rfl⟩
-
-theorem RequestNet.remove {cfg : Storage.Config} {net : List ConcreteMessage}
-    (h : RequestNet cfg net) {message : ConcreteMessage}
-    (pre post : List ConcreteMessage) (hnet : net = pre ++ message :: post) :
-    RequestNet cfg (pre ++ post) := by
-  intro source destination concreteMessage hm
-  apply h source destination concreteMessage
-  rw [hnet]
-  simp only [List.mem_append, List.mem_cons]
-  rcases List.mem_append.mp hm with hm | hm
-  · exact Or.inl hm
-  · exact Or.inr (Or.inr hm)
-
-theorem RequestNet.emitGet {cfg : Storage.Config}
-    {net : List ConcreteMessage} (h : RequestNet cfg net)
-    (node1 node2 : Running Storage.Config Nat CMsg) (store : Store)
-    (source : Addr) (hsource : source = "n1" ∨ source = "n2")
-    (op : Nat) (key : Ident) :
-    RequestNet cfg
-      (net ++
-        [(.proc source,
-          (⟨[], [("n1", .node node1), ("n2", .node node2),
-            ("s3", .store store)], 0⟩ : Network.Conf system).route cfg.store,
-          .get op key)]) := by
-  intro from_ destination message hm
-  rw [List.mem_append] at hm
-  rcases hm with hm | hm
-  · exact h from_ destination message hm
-  · simp only [List.mem_singleton, Prod.mk.injEq] at hm
-    obtain ⟨rfl, rfl, rfl⟩ := hm
-    exact ⟨by
-      rcases hsource with rfl | rfl
-      · exact Or.inl rfl
-      · exact Or.inr rfl,
-      request_route_eq node1 node2 store⟩
-
-def RequestOnlyRel (cfg : Storage.Config)
-    (concrete : Network.Conf system) (abstract : Experiment.Conf promises) : Prop :=
-  ∃ node1 node2 store,
-    concrete.states =
-      [("n1", .node node1), ("n2", .node node2), ("s3", .store store)] ∧
-    RequestNode cfg node1 ∧
-    RequestNode cfg node2 ∧
-    RequestNet cfg concrete.net ∧
-    abstract.state = {} ∧
-    abstract.now ≤ concrete.now
-
-theorem initial_requestOnlyRel (cfg : Storage.Config) :
-    RequestOnlyRel cfg (Network.initial world) (Experiment.initial {}) := by
-  refine ⟨⟨0, [], node⟩, ⟨0, [], node⟩, {}, rfl, ?_, ?_, ?_, rfl,
-    Nat.le_refl 0⟩
-  · exact .idle (by simp [RequestOnlyMailbox]) rfl
-  · exact .idle (by simp [RequestOnlyMailbox]) rfl
-  · intro source destination message hm
-    simp [Network.initial] at hm
-
-set_option maxHeartbeats 1000000 in
-theorem storage_simulationOn_not_s3 {cfg : Storage.Config}
-    (hstoreAddr : cfg.store ≠ "s3") :
-    Network.SimulationOn cfg { cfg.app with unreliable := true }
-      clientView DriveSafe (RequestOnlyRel cfg) := by
-  intro c l stepOut c' a hrel hstep hok
-  obtain ⟨t, act, htake⟩ := hstep
-  cases act with
-  | request client to message =>
-    simp only [Network.Conf.take] at htake
-    split at htake
-    next hguard =>
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hguard
-      have hstepTime : c.now ≤ t := hguard.1
-      simp only [Option.some.injEq, Prod.mk.injEq] at htake
-      obtain ⟨rfl, rfl, rfl⟩ := htake
-      cases message with
-      | app message =>
-        obtain ⟨node1, node2, store, hstates, hn1, hn2,
-          hnet, hstate, htime⟩ := hrel
-        let a' : Experiment.Conf promises :=
-          ⟨a.net ++ [(.client client, .server, message)], a.state, t⟩
-        refine ⟨a', matches_client_request
-          (Nat.le_trans htime hstepTime), ?_⟩
-        exact ⟨node1, node2, store, hstates, hn1, hn2,
-          hnet.request client to message, hstate, Nat.le_refl t⟩
-      | get op key => simp [DriveSafe] at hok
-      | put op key promise ifMatch => simp [DriveSafe] at hok
-      | got op doc => simp [DriveSafe] at hok
-      | written op => simp [DriveSafe] at hok
-      | conflict op => simp [DriveSafe] at hok
-      | failed op => simp [DriveSafe] at hok
-    next => contradiction
-  | deliver index choice =>
-    simp only [Network.Conf.take] at htake
-    split at htake <;> try contradiction
-    next hstepTime =>
-      split at htake <;> try contradiction
-      next from_ client message hmessage =>
-        simp only [Option.some.injEq, Prod.mk.injEq] at htake
-        obtain ⟨rfl, rfl, rfl⟩ := htake
-        obtain ⟨node1, node2, store, hstates, hn1, hn2,
-          hsafe, hstate, htime⟩ := hrel
-        obtain ⟨pre, post, hnet, herase⟩ :=
-          split_of_get?_eq_some hmessage
-        have hm : (from_, .client client, message) ∈ c.net := by
-          rw [hnet]
-          simp
-        have hs := hsafe from_ (.client client) message hm
-        cases message with
-        | app message =>
-          obtain ⟨address, hbad⟩ := hs
-          cases hbad
-        | get op key =>
-          refine ⟨a, matches_hidden rfl, node1, node2, store, ?_,
-            hn1, hn2, ?_, hstate,
-            Nat.le_trans htime hstepTime⟩
-          · simpa [herase] using hstates
-          · simpa [herase] using hsafe.remove pre post hnet
-        | put op key promise ifMatch => contradiction
-        | got op doc => contradiction
-        | written op => contradiction
-        | conflict op => contradiction
-        | failed op => contradiction
-      next from_ proc message hmessage =>
-        obtain ⟨node1, node2, store, hstates, hn1, hn2,
-          hsafe, hstate, htime⟩ := hrel
-        obtain ⟨pre, post, hnet, herase⟩ :=
-          split_of_get?_eq_some hmessage
-        have hm : (from_, .proc proc, message) ∈ c.net := by
-          rw [hnet]
-          simp
-        have hs := hsafe from_ (.proc proc) message hm
-        have hbase := hsafe.remove pre post hnet
-        by_cases hp1 : proc = "n1"
-        · subst proc
-          have hmessageSafe : RequestOnlyMsg message := by
-            cases message <;> simp_all [RequestOnlyMsg]
-          obtain ⟨node1', outs, hrun, hn1', hout⟩ :=
-            hn1.receive from_.addr message t hmessageSafe
-          have hservice := node_service_step_singleton hrun
-          have hservice' :
-              system.step cfg (.node node1) t (.msg from_.addr message) =
-                Some.one (.node node1', outs) :=
-            Subtype.ext hservice
-          rw [herase] at htake
-          rcases hout with rfl | ⟨op, key, rfl⟩
-          · simp [Network.Conf.run, Network.Conf.state?, hstates,
-              hservice', Experiment.pick, Some.one] at htake
-            obtain ⟨rfl, rfl, rfl⟩ := htake
-            exact ⟨a, matches_hidden rfl, node1', node2, store, rfl,
-              hn1', hn2, hbase, hstate, Nat.le_trans htime hstepTime⟩
-          · simp [Network.Conf.run, Network.Conf.state?, hstates,
-              hservice', Experiment.pick, Some.one] at htake
-            obtain ⟨rfl, rfl, rfl⟩ := htake
-            refine ⟨a, matches_hidden rfl, node1', node2, store, rfl,
-              hn1', hn2, ?_, hstate, Nat.le_trans htime hstepTime⟩
-            simpa [Network.Conf.route, Network.Conf.isProc] using
-              hbase.emitGet node1' node2 store "n1" (Or.inl rfl) op key
-        · by_cases hp2 : proc = "n2"
-          · subst proc
-            have hmessageSafe : RequestOnlyMsg message := by
-              cases message <;> simp_all [RequestOnlyMsg]
-            obtain ⟨node2', outs, hrun, hn2', hout⟩ :=
-              hn2.receive from_.addr message t hmessageSafe
-            have hservice := node_service_step_singleton hrun
-            have hservice' :
-                system.step cfg (.node node2) t (.msg from_.addr message) =
-                  Some.one (.node node2', outs) :=
-              Subtype.ext hservice
-            rw [herase] at htake
-            rcases hout with rfl | ⟨op, key, rfl⟩
-            · simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              exact ⟨a, matches_hidden rfl, node1, node2', store, rfl,
-                hn1, hn2', hbase, hstate, Nat.le_trans htime hstepTime⟩
-            · simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hservice', Experiment.pick, Some.one] at htake
-              obtain ⟨rfl, rfl, rfl⟩ := htake
-              refine ⟨a, matches_hidden rfl, node1, node2', store, rfl,
-                hn1, hn2', ?_, hstate, Nat.le_trans htime hstepTime⟩
-              simpa [Network.Conf.route, Network.Conf.isProc] using
-                hbase.emitGet node1 node2' store "n2" (Or.inr rfl) op key
-          · by_cases hp3 : proc = "s3"
-            · subst proc
-              cases message with
-              | app message =>
-                have hraw :
-                    ((storeReceive from_.addr (.app message)).run cfg store).val =
-                      [((), store, [])] := by
-                  cases message <;> rfl
-                have hservice := store_service_step_singleton
-                  (now := t) hraw
-                have hservice' :
-                    system.step cfg (.store store) t
-                      (.msg from_.addr (.app message)) =
-                      Some.one (.store store, []) :=
-                  Subtype.ext hservice
-                rw [herase] at htake
-                simp [Network.Conf.run, Network.Conf.state?, hstates,
-                  hservice', Experiment.pick, Some.one] at htake
-                obtain ⟨rfl, rfl, rfl⟩ := htake
-                exact ⟨a, matches_hidden rfl, node1, node2, store, rfl,
-                  hn1, hn2, hbase, hstate, Nat.le_trans htime hstepTime⟩
-              | get op key =>
-                exact (request_route_ne_s3 hstoreAddr hs.2.symm).elim
-              | put op key promise ifMatch => contradiction
-              | got op doc => contradiction
-              | written op => contradiction
-              | conflict op => contradiction
-              | failed op => contradiction
-            · have hp1' : "n1" ≠ proc := fun h => hp1 h.symm
-              have hp2' : "n2" ≠ proc := fun h => hp2 h.symm
-              have hp3' : "s3" ≠ proc := fun h => hp3 h.symm
-              simp [Network.Conf.run, Network.Conf.state?, hstates,
-                hp1', hp2', hp3'] at htake
-  | tick address choice =>
-    simp only [Network.Conf.take] at htake
-    split at htake
-    next hstepTime =>
-      obtain ⟨node1, node2, store, hstates, hn1, hn2,
-        hsafe, hstate, htime⟩ := hrel
-      by_cases hp1 : address = "n1"
-      · subst address
-        have hservice :
-            system.step cfg (.node node1) t .tick =
-              Some.one (.node node1, []) := by rfl
-        simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-          Experiment.pick, Some.one] at htake
-        obtain ⟨rfl, rfl, rfl⟩ := htake
-        exact ⟨a, matches_hidden rfl, node1, node2, store, rfl,
-          hn1, hn2, hsafe, hstate, Nat.le_trans htime hstepTime⟩
-      · by_cases hp2 : address = "n2"
-        · subst address
-          have hservice :
-              system.step cfg (.node node2) t .tick =
-                Some.one (.node node2, []) := by rfl
-          simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-            Experiment.pick, Some.one] at htake
-          obtain ⟨rfl, rfl, rfl⟩ := htake
-          exact ⟨a, matches_hidden rfl, node1, node2, store, rfl,
-            hn1, hn2, hsafe, hstate, Nat.le_trans htime hstepTime⟩
-        · by_cases hp3 : address = "s3"
-          · subst address
-            have hservice :
-                system.step cfg (.store store) t .tick =
-                  Some.one (.store store, []) := by rfl
-            simp [Network.Conf.run, Network.Conf.state?, hstates, hservice,
-              Experiment.pick, Some.one] at htake
-            obtain ⟨rfl, rfl, rfl⟩ := htake
-            exact ⟨a, matches_hidden rfl, node1, node2, store, rfl,
-              hn1, hn2, hsafe, hstate, Nat.le_trans htime hstepTime⟩
-          · have hp1' : "n1" ≠ address := fun h => hp1 h.symm
-            have hp2' : "n2" ≠ address := fun h => hp2 h.symm
-            have hp3' : "s3" ≠ address := fun h => hp3 h.symm
-            simp [Network.Conf.run, Network.Conf.state?, hstates,
-              hp1', hp2', hp3'] at htake
-    next => contradiction
-
-set_option maxHeartbeats 2000000 in
-theorem storage_simulationOnFor_not_s3 {nodes : List Addr}
+theorem storage_simulationOn_not_s3 {nodes : List Addr}
     {cfg : Storage.Config} (hnodup : nodes.Nodup)
     (hphysical : "s3" ∉ nodes) (hstoreAddr : cfg.store ≠ "s3") :
     Network.SimulationOn cfg { cfg.app with unreliable := true }
-      clientView DriveSafe (RequestOnlyRelFor nodes cfg) := by
+      clientView DriveSafe (RequestOnlyRel nodes cfg) := by
   intro c l stepOut c' a hrel hstep hok
   obtain ⟨t, act, htake⟩ := hstep
   cases act with
@@ -12295,9 +7325,9 @@ theorem storage_simulationOnFor_not_s3 {nodes : List Addr}
                     (proc, .node running) :: focus.afterStates) ++
                     [("s3", .store store)], 0⟩ :
                   Network.Conf system).route cfg.store =
-                  requestRouteFor nodes cfg := by
+                  requestRoute nodes cfg := by
               exact hnodes'.route_eq store cfg.store
-            change RequestNetFor nodes cfg
+            change RequestNet nodes cfg
               (pre ++ post ++
                 [(.proc proc,
                   (⟨[],
@@ -12345,7 +7375,7 @@ theorem storage_simulationOnFor_not_s3 {nodes : List Addr}
                 hstate, Nat.le_trans htime hstepTime⟩
             | get op key =>
               obtain ⟨address, haddress, hsource, hdest⟩ := hs
-              exact (requestRouteFor_ne_s3 hstoreAddr hdest.symm).elim
+              exact (requestRoute_ne_s3 hstoreAddr hdest.symm).elim
             | put op key promise ifMatch => contradiction
             | got op doc => contradiction
             | written op => contradiction
@@ -12418,27 +7448,17 @@ theorem storage_simulationOnFor_not_s3 {nodes : List Addr}
           simp [Network.Conf.run, hcstate] at htake
     next => contradiction
 
-theorem system_refines (cfg : Storage.Config) : Refines cfg := by
-  intro hconditional script execution hdrive
-  by_cases hstoreAddr : cfg.store = "s3"
-  · exact drive_refines_of_simulationOn
-      (storage_simulationOn hconditional hstoreAddr)
-      (initial_normalRel cfg) hdrive
-  · exact drive_refines_of_simulationOn
-      (storage_simulationOn_not_s3 hstoreAddr)
-      (initial_requestOnlyRel cfg) hdrive
-
-theorem system_refines_for (nodes : List Addr) (hnodup : nodes.Nodup)
+theorem system_refines (nodes : List Addr) (hnodup : nodes.Nodup)
     (hphysical : "s3" ∉ nodes) (cfg : Storage.Config) :
-    RefinesFor nodes cfg := by
+    Refines nodes cfg := by
   intro hconditional script execution hdrive
   by_cases hstoreAddr : cfg.store = "s3"
-  · exact driveFor_refines_of_simulationOn
-      (storage_simulationOnFor hnodup hphysical hconditional hstoreAddr)
-      (initial_normalRelFor nodes cfg) hdrive
-  · exact driveFor_refines_of_simulationOn
-      (storage_simulationOnFor_not_s3
+  · exact drive_refines_of_simulationOn
+      (storage_simulationOn hnodup hphysical hconditional hstoreAddr)
+      (initial_normalRel nodes cfg) hdrive
+  · exact drive_refines_of_simulationOn
+      (storage_simulationOn_not_s3
         hnodup hphysical hstoreAddr)
-      (initial_requestOnlyRelFor nodes cfg) hdrive
+      (initial_requestOnlyRel nodes cfg) hdrive
 
 end Exp2

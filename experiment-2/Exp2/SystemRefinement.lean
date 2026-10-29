@@ -79,15 +79,10 @@ theorem driveFrom_admitted {cfg : Experiment.Storage.Config} {c : Network.Conf s
     subst x
     exact ⟨script_take_safe ha ht, ih hxs⟩
 
-theorem drive_admitted {cfg : Experiment.Storage.Config}
-    {script : List (Time × Script)} {x : Network.Execution system}
-    (h : drive cfg script = some x) : Network.Admitted DriveSafe x :=
-  driveFrom_admitted h
-
-theorem driveFor_admitted {nodes : List Addr}
+theorem drive_admitted {nodes : List Addr}
     {cfg : Experiment.Storage.Config}
     {script : List (Time × Script)} {x : Network.Execution system}
-    (h : driveFor nodes cfg script = some x) : Network.Admitted DriveSafe x :=
+    (h : drive nodes cfg script = some x) : Network.Admitted DriveSafe x :=
   driveFrom_admitted h
 
 theorem project_clientView (x : Network.Execution system) :
@@ -105,65 +100,38 @@ theorem project_clientView (x : Network.Execution system) :
       | receive sender m => cases m <;> simp [Network.project, clientView, clientTrace, ih]
 
 /-- Trace inclusion for a deployment with the supplied Resonate addresses. -/
-def RefinesFor (nodes : List Addr) (cfg : Experiment.Storage.Config) : Prop :=
+def Refines (nodes : List Addr) (cfg : Experiment.Storage.Config) : Prop :=
   cfg.conditional = true →
-  ∀ script x, driveFor nodes cfg script = some x →
+  ∀ script x, drive nodes cfg script = some x →
     Valid promises { cfg.app with unreliable := true } {} (clientTrace x)
-
-/-- The trace-inclusion property sought by the original two-node experiment. -/
-def Refines (cfg : Experiment.Storage.Config) : Prop :=
-  RefinesFor defaultNodes cfg
 
 /-- Once the node/store simulation is supplied, every successful drive has a
 legal abstract execution with exactly the same client trace. -/
-theorem driveFor_refines_of_simulation
+theorem drive_refines_of_simulation
     {nodes : List Addr}
     {cfg : Experiment.Storage.Config}
     {rel : Network.Conf system → Experiment.Conf promises → Prop}
     (hsim : Network.Simulation cfg { cfg.app with unreliable := true } clientView rel)
-    (hinit : rel (Network.initial (worldFor nodes)) (Experiment.initial {}))
+    (hinit : rel (Network.initial (world nodes)) (Experiment.initial {}))
     {script : List (Time × Script)} {x : Network.Execution system}
-    (hdrive : driveFor nodes cfg script = some x) :
+    (hdrive : drive nodes cfg script = some x) :
     Valid promises { cfg.app with unreliable := true } {} (clientTrace x) := by
   rw [← project_clientView x]
-  exact Network.refines hsim hinit (driveFor_legal hdrive)
-
-theorem drive_refines_of_simulation
-    {cfg : Experiment.Storage.Config}
-    {rel : Network.Conf system → Experiment.Conf promises → Prop}
-    (hsim : Network.Simulation cfg { cfg.app with unreliable := true } clientView rel)
-    (hinit : rel (Network.initial world) (Experiment.initial {}))
-    {script : List (Time × Script)} {x : Network.Execution system}
-    (hdrive : drive cfg script = some x) :
-    Valid promises { cfg.app with unreliable := true } {} (clientTrace x) := by
-  simpa [drive, world] using
-    driveFor_refines_of_simulation (nodes := defaultNodes) hsim hinit hdrive
+  exact Network.refines hsim hinit (drive_legal hdrive)
 
 /-- The useful form for `drive`: only application requests need simulation. -/
-theorem driveFor_refines_of_simulationOn
+theorem drive_refines_of_simulationOn
     {nodes : List Addr}
     {cfg : Experiment.Storage.Config}
     {rel : Network.Conf system → Experiment.Conf promises → Prop}
     (hsim : Network.SimulationOn cfg { cfg.app with unreliable := true }
       clientView DriveSafe rel)
-    (hinit : rel (Network.initial (worldFor nodes)) (Experiment.initial {}))
+    (hinit : rel (Network.initial (world nodes)) (Experiment.initial {}))
     {script : List (Time × Script)} {x : Network.Execution system}
-    (hdrive : driveFor nodes cfg script = some x) :
+    (hdrive : drive nodes cfg script = some x) :
     Valid promises { cfg.app with unreliable := true } {} (clientTrace x) := by
   rw [← project_clientView x]
   exact Network.refinesOn hsim hinit
-    (driveFor_legal hdrive) (driveFor_admitted hdrive)
-
-theorem drive_refines_of_simulationOn
-    {cfg : Experiment.Storage.Config}
-    {rel : Network.Conf system → Experiment.Conf promises → Prop}
-    (hsim : Network.SimulationOn cfg { cfg.app with unreliable := true }
-      clientView DriveSafe rel)
-    (hinit : rel (Network.initial world) (Experiment.initial {}))
-    {script : List (Time × Script)} {x : Network.Execution system}
-    (hdrive : drive cfg script = some x) :
-    Valid promises { cfg.app with unreliable := true } {} (clientTrace x) := by
-  simpa [drive, world] using
-    driveFor_refines_of_simulationOn (nodes := defaultNodes) hsim hinit hdrive
+    (drive_legal hdrive) (drive_admitted hdrive)
 
 end Exp2

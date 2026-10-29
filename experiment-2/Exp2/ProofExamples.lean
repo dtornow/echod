@@ -66,7 +66,7 @@ theorem queued_valid :
 node answers 503; the abstract unreliable service explains the same trace with
 its `lose` outcome. -/
 
-def ghost := (drive { flaky := true }
+def ghost := (drive nodes { flaky := true }
   ([(0, .send "a" "n1" (.req 1 0 (.create "p" (some 100)))), (0, .move "a" "n1"),
     (0, .move "n1" "s3"), (0, .move "s3" "n1"), (0, .move "n1" "s3" 1),
     (0, .move "s3" "n1"), (0, .move "n1" "a")] ++
@@ -118,7 +118,7 @@ theorem delayedCas_valid :
   native_decide
 
 /-- The general theorem is not tied to the original two-node deployment. -/
-theorem three_node_refines : RefinesFor ["n1", "n2", "n3"] {} :=
-  system_refines_for ["n1", "n2", "n3"] (by decide) (by decide) {}
+theorem three_node_refines : Refines ["n1", "n2", "n3"] {} :=
+  system_refines ["n1", "n2", "n3"] (by decide) (by decide) {}
 
 end Exp2
