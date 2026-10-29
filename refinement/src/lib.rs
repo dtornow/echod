@@ -1,8 +1,9 @@
 //! Local Concrete-to-Abstract refinement.
 //!
 //! This crate depends on the two model levels, not on a checker framework.
-//! Concrete owns persisted row order; Abstract owns independent protocol
-//! objects and actions. Translation is the refinement boundary.
+//! Concrete owns document-local persisted row order; Abstract owns independent
+//! protocol objects and actions. Bucket listing order is erased at this
+//! refinement boundary by comparing derived keyed meanings.
 
 #![cfg(verus_keep_ghost)]
 #![allow(unused_imports)]
@@ -12,11 +13,11 @@ use vstd::prelude::*;
 use echod_abstract::state as abs_state;
 use echod_abstract::types as abs;
 use echod_concrete::{
-    kernel_view, row_ids, rows_wf, AStore,
+    bucket_wf, AOriginDocument, AScheduleDocument, AScheduleRow, AStore,
 };
 use echod_kernel::types as kernel;
 use echod_kernel::types::{
-    APromise, ATask, AValue,
+    APromise, ASchedule, ATask, AValue,
 };
 
 verus! {
@@ -158,6 +159,20 @@ pub open spec fn object(p: APromise) -> abs_state::AObject {
     }
 }
 
+pub open spec fn schedule(row: ASchedule) -> abs::ASchedule {
+    abs::ASchedule {
+        id: ident(row.id),
+        cron: text(row.cron),
+        promise_id: ident(row.promise_id),
+        promise_timeout: row.promise_timeout,
+        promise_param: value(row.promise_param),
+        promise_tags: tags(row.promise_tags),
+        next_run_at: row.next_run_at,
+        last_run_at: row.last_run_at,
+        created_at: row.created_at,
+    }
+}
+
 pub open spec fn objects(rows: Seq<APromise>) -> Seq<abs_state::AObject>
     decreases rows.len(),
 {
@@ -165,6 +180,46 @@ pub open spec fn objects(rows: Seq<APromise>) -> Seq<abs_state::AObject>
         Seq::empty()
     } else {
         objects(rows.drop_last()).push(object(rows.last()))
+    }
+}
+
+pub open spec fn schedule_rows(
+    rows: Seq<AScheduleRow>,
+) -> Seq<abs::ASchedule>
+    decreases rows.len(),
+{
+    if rows.len() == 0 {
+        Seq::empty()
+    } else {
+        schedule_rows(rows.drop_last()).push(schedule(rows.last().schedule))
+    }
+}
+
+/// Fold every origin document. This sequence is only a rendering for the
+/// independent Abstract state; its cross-document order is not compared.
+pub open spec fn document_objects(
+    documents: Seq<AOriginDocument>,
+) -> Seq<abs_state::AObject>
+    decreases documents.len(),
+{
+    if documents.len() == 0 {
+        Seq::empty()
+    } else {
+        document_objects(documents.drop_last()) + objects(documents.last().rows)
+    }
+}
+
+/// Fold every schedule document and every explicit schedule row.
+pub open spec fn document_schedules(
+    documents: Seq<AScheduleDocument>,
+) -> Seq<abs::ASchedule>
+    decreases documents.len(),
+{
+    if documents.len() == 0 {
+        Seq::empty()
+    } else {
+        document_schedules(documents.drop_last())
+            + schedule_rows(documents.last().rows)
     }
 }
 
@@ -190,30 +245,58 @@ pub open spec fn abstract_ids(
     rows.map_values(|object: abs_state::AObject| object.id)
 }
 
+pub open spec fn abstract_schedule_map(
+    rows: Seq<abs::ASchedule>,
+) -> Map<abs::AIdent, abs::ASchedule>
+    decreases rows.len(),
+{
+    if rows.len() == 0 {
+        Map::empty()
+    } else {
+        let schedule = rows.last();
+        abstract_schedule_map(rows.drop_last()).insert(schedule.id, schedule)
+    }
+}
+
+pub open spec fn abstract_schedule_ids(
+    rows: Seq<abs::ASchedule>,
+) -> Seq<abs::AIdent> {
+    rows.map_values(|schedule: abs::ASchedule| schedule.id)
+}
+
 pub open spec fn abstract_of(store: AStore) -> abs_state::AState {
     abs_state::AState {
-        objects: objects(store.rows),
-        schedules: Seq::empty(),
+        objects: document_objects(store.origins),
+        schedules: document_schedules(store.schedules),
         outbox: Seq::empty(),
     }
 }
 
 /// The first refinement relation: the Abstract state is exactly the
-/// protocol interpretation of Concrete's persisted rows.
+/// keyed protocol interpretation of every Concrete document. The order of
+/// origins and schedules in either bucket/list representation is immaterial.
 pub open spec fn related(
     concrete: AStore,
     abstract_state: abs_state::AState,
 ) -> bool {
-    &&& rows_wf(concrete.rows)
+    &&& bucket_wf(concrete)
     &&& abstract_ids(abstract_state.objects).no_duplicates()
+    &&& abstract_schedule_ids(abstract_state.schedules).no_duplicates()
     &&& abstract_object_map(abstract_state.objects)
-        == abstract_object_map(objects(concrete.rows))
-    &&& abstract_state.schedules == Seq::<abs::ASchedule>::empty()
+        == abstract_object_map(document_objects(concrete.origins))
+    &&& abstract_schedule_map(abstract_state.schedules)
+        == abstract_schedule_map(document_schedules(concrete.schedules))
     &&& abstract_state.outbox == Seq::<abs_state::AOutboxEntry>::empty()
 }
 
 pub open spec fn concrete_init() -> AStore {
-    AStore { rows: Seq::empty() }
+    AStore {
+        origins: Seq::empty(),
+        schedules: Seq::empty(),
+        timers: Seq::empty(),
+        announcements: Seq::empty(),
+        membership: None,
+    }
 }
 
 pub open spec fn abstract_init() -> abs_state::AState {
@@ -234,12 +317,23 @@ pub proof fn lemma_objects_len(rows: Seq<APromise>)
     }
 }
 
+pub proof fn lemma_schedule_rows_len(rows: Seq<AScheduleRow>)
+    ensures
+        schedule_rows(rows).len() == rows.len(),
+    decreases rows.len(),
+{
+    if rows.len() > 0 {
+        lemma_schedule_rows_len(rows.drop_last());
+    }
+}
+
 pub proof fn lemma_init_related()
     ensures
         related(concrete_init(), abstract_init()),
 {
-    assert(rows_wf(Seq::<APromise>::empty()));
+    assert(bucket_wf(concrete_init()));
     assert(abstract_ids(Seq::<abs_state::AObject>::empty()).no_duplicates());
+    assert(abstract_schedule_ids(Seq::<abs::ASchedule>::empty()).no_duplicates());
 }
 
 } // verus!

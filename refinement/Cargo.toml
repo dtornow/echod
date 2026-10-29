@@ -1,6 +1,6 @@
 [package]
 name = "echod-refinement"
-description = "Local forward refinement from the row-native Concrete model to the independent Abstract Resonate model."
+description = "Local forward refinement from the document-bucket Concrete model to the independent Abstract Resonate model."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

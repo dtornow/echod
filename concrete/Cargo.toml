@@ -1,6 +1,6 @@
 [package]
 name = "echod-concrete"
-description = "The deterministic Concrete document model: persisted rows, with maps only as derived views."
+description = "The deterministic Concrete bucket model: keyed documents with document-local persisted row order."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
