@@ -10,15 +10,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use echod_kernel::PromiseState;
 use echod::env::Clock;
 use echod::store::{MemoryStore, Store};
+use echod_abstract::state::{Message as AbstractMessage, MessageKind, OutboxEntry};
+use echod_kernel::PromiseState;
 use echod_logic::keys::{origin_of, KeySpace};
-use resonate::Dispatch;
 use resonate_core::types::Message;
 use resonate_core::{ResonateRouter, Unavailable};
 
-use crate::wire::prec;
+use crate::wire::{ident, promise_record_from_json, text};
 
 #[derive(Debug, Clone)]
 pub struct Sent {
@@ -26,8 +26,8 @@ pub struct Sent {
     pub address: String,
     pub kind: String,
     pub id: String,
-    /// The message as the model types it.
-    pub msg: Dispatch,
+    /// The addressed message as the Abstract model types it.
+    pub msg: OutboxEntry,
 }
 
 #[derive(Default)]
@@ -47,12 +47,20 @@ pub struct RecordingBus {
 
 impl RecordingBus {
     pub fn new(store: Arc<MemoryStore>, keys: KeySpace, clock: Arc<dyn Clock>) -> Self {
-        Self { store, keys, clock, sent: Mutex::new(Vec::new()), tally: Mutex::new(Tally::default()) }
+        Self {
+            store,
+            keys,
+            clock,
+            sent: Mutex::new(Vec::new()),
+            tally: Mutex::new(Tally::default()),
+        }
     }
 
     async fn rows(&self, origin: &str) -> Vec<echod_kernel::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_logic::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
+            Ok(Some((bytes, _))) => echod_logic::doc::decode(&bytes)
+                .map(|l| l.rows)
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -63,10 +71,37 @@ impl ResonateRouter for RecordingBus {
     async fn route(&self, address: &str, msg: &Message) -> Result<(), Unavailable> {
         let now = self.clock.now();
         let (kind, id, dispatch) = match msg {
-            Message::Execute(m) => ("execute", m.data.task.id.clone(), Dispatch::Execute { id: m.data.task.id.clone(), version: m.data.task.version as u32 }),
+            Message::Execute(m) => (
+                "execute",
+                m.data.task.id.clone(),
+                OutboxEntry {
+                    address: text(address),
+                    message: AbstractMessage {
+                        kind: MessageKind::Execute,
+                        task_id: Some(ident(&m.data.task.id)),
+                        version: m.data.task.version as u64,
+                        promise: None,
+                    },
+                },
+            ),
             Message::Unblock(m) => {
-                let promise = serde_json::to_value(&m.data.promise).ok().and_then(|v| prec(&v)).unwrap_or_else(|| panic!("an unblock with a promise record: {msg:?}"));
-                ("unblock", m.data.promise.id.clone(), Dispatch::Unblock { address: address.to_string(), promise })
+                let promise = serde_json::to_value(&m.data.promise)
+                    .ok()
+                    .and_then(|v| promise_record_from_json(&v))
+                    .unwrap_or_else(|| panic!("an unblock with a promise record: {msg:?}"));
+                (
+                    "unblock",
+                    m.data.promise.id.clone(),
+                    OutboxEntry {
+                        address: text(address),
+                        message: AbstractMessage {
+                            kind: MessageKind::Unblock,
+                            task_id: None,
+                            version: 0,
+                            promise: Some(promise),
+                        },
+                    },
+                )
             }
         };
         let rows = self.rows(origin_of(&id)).await;
@@ -77,22 +112,36 @@ impl ResonateRouter for RecordingBus {
                 tally.executes += 1;
                 match found {
                     Some(p) if p.task.is_some() => {}
-                    _ => tally.violations.push(format!("execute for {id} at {now}: no such task in the bucket")),
+                    _ => tally.violations.push(format!(
+                        "execute for {id} at {now}: no such task in the bucket"
+                    )),
                 }
             }
             Message::Unblock(m) => {
                 tally.unblocks += 1;
-                let settled = found.map(|p| p.state != PromiseState::Pending || p.timeout_at <= now).unwrap_or(false);
+                let settled = found
+                    .map(|p| p.state != PromiseState::Pending || p.timeout_at <= now)
+                    .unwrap_or(false);
                 if !settled {
-                    tally.violations.push(format!("unblock for {id} at {now}: the promise is not settled in the bucket"));
+                    tally.violations.push(format!(
+                        "unblock for {id} at {now}: the promise is not settled in the bucket"
+                    ));
                 }
                 if m.data.promise.state == resonate_core::types::PromiseState::Pending {
-                    tally.violations.push(format!("unblock for {id} at {now}: carries a pending promise"));
+                    tally.violations.push(format!(
+                        "unblock for {id} at {now}: carries a pending promise"
+                    ));
                 }
             }
         }
         drop(tally);
-        self.sent.lock().unwrap().push(Sent { at: now, address: address.to_string(), kind: kind.to_string(), id, msg: dispatch });
+        self.sent.lock().unwrap().push(Sent {
+            at: now,
+            address: address.to_string(),
+            kind: kind.to_string(),
+            id,
+            msg: dispatch,
+        });
         Ok(())
     }
 }

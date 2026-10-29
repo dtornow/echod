@@ -6,16 +6,16 @@
 //! which every operation admits, so the span is the only window in which the
 //! operation can have taken effect.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use resonate::Request;
+use echod_abstract::ExternalAction;
 use serde_json::Value;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Entry {
     pub id: u64,
     pub client: String,
-    pub req: Request,
+    pub req: Arc<ExternalAction>,
     /// The instant the client sent this attempt at on the injected clock.
     /// A retry carries its own.
     pub now: u64,
@@ -43,9 +43,21 @@ impl History {
     }
 
     /// Open an entry; it is recorded when closed.
-    pub fn begin(&self, client: &str, req: Request, now: u64, invoke: u64) -> u64 {
+    pub fn begin(&self, client: &str, req: Arc<ExternalAction>, now: u64, invoke: u64) -> u64 {
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.open.lock().unwrap().insert(id, Entry { id, client: client.to_string(), req, now, invoke, ret: 0, outcome: None, attempts: 0 });
+        self.open.lock().unwrap().insert(
+            id,
+            Entry {
+                id,
+                client: client.to_string(),
+                req,
+                now,
+                invoke,
+                ret: 0,
+                outcome: None,
+                attempts: 0,
+            },
+        );
         id
     }
 
