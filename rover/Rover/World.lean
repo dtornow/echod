@@ -173,13 +173,18 @@ def trace : Execution model → List (BoundaryEvent model)
   | [] => []
   | (label, _) :: rest => label.observe ++ trace rest
 
+/-- A complete finite behavior starts in an allowed process state and follows
+only legal world transitions. -/
+def Behavior (model : Model) (config : model.Config)
+    (execution : Execution model) : Prop :=
+  ∃ process,
+    model.init config process ∧
+    Legal model config (World.initial process) execution
+
 /-- Trace checking asks whether some legal execution from an allowed initial
 state shows exactly the supplied boundary trace. -/
 def ValidTrace (model : Model) (config : model.Config)
     (events : List (BoundaryEvent model)) : Prop :=
-  ∃ process execution,
-    model.init config process ∧
-    Legal model config (World.initial process) execution ∧
-    trace execution = events
+  ∃ execution, Behavior model config execution ∧ trace execution = events
 
 end Rover

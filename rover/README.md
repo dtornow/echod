@@ -1,42 +1,52 @@
 # Rover
 
-Rover is a minimal Lean model of a message-passing world.
+Rover is an append-only, Kleppmann-style model and a proved promise-service
+refinement.
 
-Its local protocol signature is:
+## Layout
 
-```text
-Config →
-Pid →
-State →
-Time →
-Event Pid Msg →
-Nonempty (State × List (Pid × Msg))
-```
+- `Rover/World.lean` — generic worlds, injection, process steps, append-only
+  message history, legal executions, `Behavior`, and raw boundary traces.
+- `Rover/Protocol.lean` — shared calls, responses, notifications, clean
+  boundary events, and the promise transition reused from experiment 1.
+- `Rover/Abstract/Model.lean` — exactly one real process containing the global
+  promise state.
+- `Rover/Concrete/Model.lean` — any duplicate-free list of stateless server
+  addresses plus one versioned object store. Servers load, evaluate, and
+  submit conditional-write candidates.
+- `Rover/Refinement.lean` — the forward simulation and end-to-end
+  `boundary_refinement` theorem.
+- `Rover/Examples.lean` — executable checks for create, successful commit,
+  duplicate stale commit, and a three-node theorem instantiation.
 
-The world contains:
+The network records every message ever sent. Receiving checks membership and
+does not remove anything, so loss, delay, reordering, and arbitrary duplicate
+delivery are all represented without extra rules. `outside` is not a process:
+the environment appends injectable requests, while sends addressed to
+`outside` are observations.
 
-```lean
-structure World where
-  process : Pid → State
-  network : List (Pid × Pid × Msg)
-  now     : Time
-```
+## Refinement
 
-The network follows Kleppmann's semantics: it records every message that was
-sent. Receiving a message checks membership but does not remove it, so messages
-may be delayed, lost, reordered, or duplicated.
+The concrete store is the linearization point. A server computes a candidate
+from a versioned snapshot. Only a candidate whose version and prior state both
+match may update the store and publish its response/notifications. Replaying a
+successful CAS message therefore conflicts and requests a new snapshot.
 
-`model.outside` is a distinguished stateless endpoint:
+`Rover.Refinement.boundary_refinement` proves, without project-specific axioms
+or admitted obligations, that every legal concrete boundary trace is a valid
+trace of the single-process abstract model for arbitrary duplicate-free server
+lists under conditional writes.
 
-- an `inject` step appends an allowed request from `outside` to any process;
-- messages sent by a process to `outside` are outputs;
-- process 0/outside never has a transition of its own.
+## Later trace checker
 
-`trace` keeps only those boundary inputs and outputs. `ValidTrace` means that
-some legal execution from an allowed initial state shows exactly that trace.
+`Protocol.BoundaryEvent` is the stable checker-facing format. A checker can:
 
-Build with:
+1. decode input/output records into `BoundaryEvent`;
+2. replay candidate abstract states with `Protocol.run`;
+3. report an executable witness or mismatch;
+4. rely on `boundary_refinement` for concrete-to-abstract soundness.
 
-```text
-lake build
-```
+The current `#guard` examples already exercise the pure transition data that
+such a checker will consume; no unproved checker is trusted by the theorem.
+
+Build with `lake build`.

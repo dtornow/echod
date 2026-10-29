@@ -1,6 +1,13 @@
 {"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [],
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "«experiment-1»",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../experiment-1",
+   "configFile": "lakefile.toml"}],
  "name": "rover",
  "lakeDir": ".lake",
  "fixedToolchain": false}

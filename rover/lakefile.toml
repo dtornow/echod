@@ -1,5 +1,9 @@
 name = "rover"
 defaultTargets = ["Rover"]
 
+[[require]]
+name = "experiment-1"
+path = "../experiment-1"
+
 [[lean_lib]]
 name = "Rover"
