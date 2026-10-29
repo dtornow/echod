@@ -344,7 +344,7 @@ fn option_string_to_text(value: &Option<String>) -> (text: Option<Text>)
     }
 }
 
-fn texts_to_strings(values: Vec<Text>) -> (strings: Vec<String>)
+pub fn texts_to_strings(values: Vec<Text>) -> (strings: Vec<String>)
     requires
         forall|i: int| 0 <= i < values.len()
             ==> valid_utf8(#[trigger] values[i]@),

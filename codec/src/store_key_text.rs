@@ -2138,9 +2138,12 @@ pub fn decode_store_key_bytes(
 ) -> (result: KeyResult<model::StoreKey>)
     ensures
         match result {
-            Ok(value) => decode_store_key_spec(
-                prefix@, bucket_ms, key@,
-            ) == Some(value.deep_view()),
+            Ok(value) => {
+                &&& decode_store_key_spec(
+                    prefix@, bucket_ms, key@,
+                ) == Some(value.deep_view())
+                &&& key_text_wf(value.deep_view())
+            }
             Err(_) => decode_store_key_spec(
                 prefix@, bucket_ms, key@,
             ) is None,
@@ -2377,7 +2380,7 @@ proof fn lemma_hex16_excludes_tilde(value: u64)
     }
 }
 
-#[verifier::rlimit(100)]
+#[verifier::rlimit(200)]
 proof fn lemma_timer_round_trip(
     key: model::AStoreKey,
     bucket_ms: u64,
@@ -3498,7 +3501,7 @@ fn string_key_model(
     }
 }
 
-fn model_key_string(
+pub fn model_key_string(
     key: model::StoreKey,
 ) -> (result: StringStoreKey)
     requires key_text_wf(key.deep_view()),

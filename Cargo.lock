@@ -1113,6 +1113,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-abstract"
+version = "0.1.0"
+dependencies = [
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-accordant"
 version = "0.1.0"
 dependencies = [
@@ -1127,18 +1136,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-abstract"
+name = "echod-codec"
 version = "0.1.0"
 dependencies = [
+ "echod-kernel",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
 ]
 
 [[package]]
-name = "echod-codec"
+name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
+ "echod-codec",
  "echod-kernel",
  "verus_builtin",
  "verus_builtin_macros",
@@ -1188,6 +1199,18 @@ dependencies = [
  "accordant",
  "echod-kernel",
  "resonate",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
+name = "echod-refinement"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract",
+ "echod-concrete",
+ "echod-kernel",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",

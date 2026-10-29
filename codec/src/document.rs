@@ -2473,6 +2473,32 @@ pub proof fn lemma_schedules_model_kernel_round_trip(
     }
 }
 
+pub proof fn lemma_promises_kernel_model_round_trip(
+    rows: Seq<echod_kernel::APromise>,
+)
+    ensures
+        promises_to_kernel(promises_from_kernel(rows)) == rows,
+{
+    assert forall|i: int| 0 <= i < rows.len()
+        implies promises_to_kernel(promises_from_kernel(rows))[i]
+            == rows[i] by {
+        crate::bridge::lemma_promise_kernel_round_trip(rows[i]);
+    }
+}
+
+pub proof fn lemma_schedules_kernel_model_round_trip(
+    rows: Seq<echod_kernel::ASchedule>,
+)
+    ensures
+        schedules_to_kernel(schedules_from_kernel(rows)) == rows,
+{
+    assert forall|i: int| 0 <= i < rows.len()
+        implies schedules_to_kernel(schedules_from_kernel(rows))[i]
+            == rows[i] by {
+        crate::bridge::lemma_schedule_kernel_round_trip(rows[i]);
+    }
+}
+
 fn model_promises(
     rows: &Vec<echod_kernel::Promise>,
 ) -> (result: Vec<model::Promise>)

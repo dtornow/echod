@@ -163,6 +163,8 @@ pub struct RawStore {
 #[cfg(verus_keep_ghost)]
 pub struct ARawStore {
     pub bucket: Seq<char>,
+    /// The exact executable representation, exposed to the derived decoder.
+    pub entries: Seq<AEntry>,
     pub objects: Map<Seq<u8>, ARawObject>,
     /// Executable representation order. It is not listing order.
     pub keys: Seq<Seq<u8>>,
@@ -175,6 +177,7 @@ impl View for RawStore {
     open spec fn view(&self) -> ARawStore {
         ARawStore {
             bucket: self.bucket@,
+            entries: self.entries.deep_view(),
             objects: fold_by(self.entries@, entry_key(), entry_value()),
             keys: entry_keys(self.entries@),
             next_version: self.next_version,
@@ -774,6 +777,7 @@ impl RawStore {
 #[cfg(verus_keep_ghost)]
 pub open spec fn same_raw_state(a: ARawStore, b: ARawStore) -> bool {
     &&& a.bucket == b.bucket
+    &&& a.entries == b.entries
     &&& a.objects == b.objects
     &&& a.keys == b.keys
     &&& a.next_version == b.next_version

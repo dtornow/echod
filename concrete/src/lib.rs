@@ -14,6 +14,7 @@ use vstd::prelude::*;
 use echod_kernel::types::{Promise, Schedule};
 
 pub mod raw;
+pub mod derived;
 
 #[cfg(verus_keep_ghost)]
 use echod_kernel::steps::executable_single_pass;

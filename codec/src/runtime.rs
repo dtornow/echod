@@ -929,7 +929,11 @@ pub fn decode_announcement(
 ) -> (result: CodecResult<model::Announcement>)
     ensures
         match result {
-            Ok(value) => decode_announcement_spec(bytes@) == Some(value@),
+            Ok(value) => {
+                &&& decode_announcement_spec(bytes@) == Some(value@)
+                &&& value.id.wf()
+                &&& value.url.wf()
+            }
             Err(_) => decode_announcement_spec(bytes@) is None,
         },
 {
@@ -989,7 +993,11 @@ pub fn decode_membership(
 ) -> (result: CodecResult<model::Membership>)
     ensures
         match result {
-            Ok(value) => decode_membership_spec(bytes@) == Some(value@),
+            Ok(value) => {
+                &&& decode_membership_spec(bytes@) == Some(value@)
+                &&& forall|i: int| 0 <= i < value.members.len()
+                    ==> value.members[i].wf()
+            }
             Err(_) => decode_membership_spec(bytes@) is None,
         },
 {

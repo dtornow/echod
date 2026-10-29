@@ -13,8 +13,8 @@ use vstd::prelude::*;
 use echod_abstract::state as abs_state;
 use echod_abstract::types as abs;
 use echod_concrete::{
-    bucket_wf, AOriginDocument, AScheduleDocument, AScheduleRow,
-    ASemanticBucket,
+    bucket_wf, derived::decode_bucket_spec, raw::{ARawObject, ARawStore},
+    AOriginDocument, AScheduleDocument, AScheduleRow, ASemanticBucket,
 };
 use echod_kernel::types as kernel;
 use echod_kernel::types::{
@@ -273,10 +273,10 @@ pub open spec fn abstract_of(store: ASemanticBucket) -> abs_state::AState {
     }
 }
 
-/// The first refinement relation: the Abstract state is exactly the
-/// keyed protocol interpretation of every Concrete document. The order of
-/// origins and schedules in either bucket/list representation is immaterial.
-pub open spec fn related(
+/// The semantic half of refinement, after raw bytes have been decoded.
+/// The order of origins and schedules in either bucket/list representation
+/// is immaterial.
+pub open spec fn semantic_related(
     concrete: ASemanticBucket,
     abstract_state: abs_state::AState,
 ) -> bool {
@@ -290,13 +290,60 @@ pub open spec fn related(
     &&& abstract_state.outbox == Seq::<abs_state::AOutboxEntry>::empty()
 }
 
-pub open spec fn concrete_init() -> ASemanticBucket {
+/// A raw store is a well-formed Concrete state only when every key and body
+/// decodes and the resulting semantic bucket satisfies its local invariants.
+/// Thus malformed and noncanonical bytes are outside the Concrete state
+/// space, rather than being related to an arbitrary Abstract state.
+pub open spec fn concrete_wf(
+    concrete: ARawStore,
+    prefix: Seq<u8>,
+    bucket_ms: u64,
+) -> bool {
+    &&& concrete.keys == concrete.entries.map_values(
+        |entry: echod_concrete::raw::AEntry| entry.key,
+    )
+    &&& concrete.keys.no_duplicates()
+    &&& concrete.next_version > 0
+    &&& forall|i: int| 0 <= i < concrete.entries.len()
+        ==> concrete.entries[i].object.version < concrete.next_version
+    &&& match decode_bucket_spec(concrete, prefix, bucket_ms) {
+        Some(decoded) => bucket_wf(decoded),
+        None => false,
+    }
+}
+
+/// The primary refinement relation is explicitly RawStore -> decoded
+/// SemanticBucket -> Abstract.
+pub open spec fn related(
+    concrete: ARawStore,
+    prefix: Seq<u8>,
+    bucket_ms: u64,
+    abstract_state: abs_state::AState,
+) -> bool {
+    &&& concrete_wf(concrete, prefix, bucket_ms)
+    &&& match decode_bucket_spec(concrete, prefix, bucket_ms) {
+        Some(decoded) => semantic_related(decoded, abstract_state),
+        None => false,
+    }
+}
+
+pub open spec fn semantic_init() -> ASemanticBucket {
     ASemanticBucket {
         origins: Seq::empty(),
         schedules: Seq::empty(),
         timers: Seq::empty(),
         announcements: Seq::empty(),
         membership: None,
+    }
+}
+
+pub open spec fn concrete_init(bucket: Chars) -> ARawStore {
+    ARawStore {
+        bucket,
+        entries: Seq::empty(),
+        objects: Map::<Seq<u8>, ARawObject>::empty(),
+        keys: Seq::empty(),
+        next_version: 1,
     }
 }
 
@@ -328,13 +375,36 @@ pub proof fn lemma_schedule_rows_len(rows: Seq<AScheduleRow>)
     }
 }
 
-pub proof fn lemma_init_related()
+pub proof fn lemma_init_related(
+    bucket: Chars,
+    prefix: Seq<u8>,
+    bucket_ms: u64,
+)
     ensures
-        related(concrete_init(), abstract_init()),
+        concrete_wf(concrete_init(bucket), prefix, bucket_ms),
+        related(
+            concrete_init(bucket), prefix, bucket_ms, abstract_init(),
+        ),
 {
-    assert(bucket_wf(concrete_init()));
+    assert(concrete_init(bucket).keys
+        == concrete_init(bucket).entries.map_values(
+            |entry: echod_concrete::raw::AEntry| entry.key,
+        ));
+    assert(concrete_init(bucket).keys.no_duplicates());
+    assert forall|i: int| 0 <= i < concrete_init(bucket).entries.len()
+        implies concrete_init(bucket).entries[i].object.version
+            < concrete_init(bucket).next_version by {}
+    assert(decode_bucket_spec(
+        concrete_init(bucket), prefix, bucket_ms,
+    ) == Some(semantic_init()));
+    assert(bucket_wf(semantic_init()));
+    assert(concrete_wf(concrete_init(bucket), prefix, bucket_ms));
     assert(abstract_ids(Seq::<abs_state::AObject>::empty()).no_duplicates());
     assert(abstract_schedule_ids(Seq::<abs::ASchedule>::empty()).no_duplicates());
+    assert(semantic_related(semantic_init(), abstract_init()));
+    assert(related(
+        concrete_init(bucket), prefix, bucket_ms, abstract_init(),
+    ));
 }
 
 } // verus!

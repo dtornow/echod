@@ -11,14 +11,25 @@ else
   export VERUS_Z3_PATH="${VERUS_Z3_PATH:-$VERUS_DIR/z3}"
 fi
 KERNEL=../kernel
-OUT="$KERNEL/target-verus"
-VIR="$OUT/echod_kernel.vir"
-RLIB="$OUT/libechod_kernel.rlib"
-if [ ! -f "$VIR" ] || [ ! -f "$RLIB" ] || [ -n "$(find "$KERNEL/src" -newer "$VIR" -name '*.rs')" ]; then
+KERNEL_OUT="$KERNEL/target-verus"
+KERNEL_VIR="$KERNEL_OUT/echod_kernel.vir"
+KERNEL_RLIB="$KERNEL_OUT/libechod_kernel.rlib"
+if [ ! -f "$KERNEL_VIR" ] || [ ! -f "$KERNEL_RLIB" ] || [ -n "$(find "$KERNEL/src" -newer "$KERNEL_VIR" -name '*.rs')" ]; then
   echo "exporting the kernel" >&2
-  mkdir -p "$OUT"
+  mkdir -p "$KERNEL_OUT"
   (cd "$KERNEL" && ./verify.sh --export "$PWD/target-verus/echod_kernel.vir" --compile --out-dir "$PWD/target-verus" --crate-name echod_kernel)
 fi
+CODEC=../codec
+CODEC_OUT="$CODEC/target-verus"
+CODEC_VIR="$CODEC_OUT/echod_codec.vir"
+CODEC_RLIB="$CODEC_OUT/libechod_codec.rlib"
+if [ ! -f "$CODEC_VIR" ] || [ ! -f "$CODEC_RLIB" ] || [ -n "$(find "$CODEC/src" -newer "$CODEC_VIR" -name '*.rs')" ]; then
+  echo "exporting the codec" >&2
+  mkdir -p "$CODEC_OUT"
+  (cd "$CODEC" && ./verify.sh --export "$PWD/target-verus/echod_codec.vir" --compile --out-dir "$PWD/target-verus" --crate-name echod_codec)
+fi
 exec "$VERUS" --crate-type=lib src/lib.rs \
-  --import "echod_kernel=$VIR" --extern "echod_kernel=$RLIB" -L "$OUT" \
+  --import "echod_kernel=$KERNEL_VIR" --extern "echod_kernel=$KERNEL_RLIB" \
+  --import "echod_codec=$CODEC_VIR" --extern "echod_codec=$CODEC_RLIB" \
+  -L "$KERNEL_OUT" -L "$CODEC_OUT" \
   --triggers-mode silent --multiple-errors 12 --no-auto-recommends-check "$@"

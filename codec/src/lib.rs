@@ -19,3 +19,11 @@ pub mod text;
 pub mod types;
 
 mod runtime;
+
+pub use runtime::{
+    decode_announcement, decode_header, decode_membership, decode_promise,
+    decode_promise_model, decode_schedule, decode_schedule_model,
+    decode_store_key, encode_announcement, encode_header, encode_membership,
+    encode_promise, encode_promise_model, encode_schedule,
+    encode_schedule_model, encode_store_key, CodecResult,
+};
