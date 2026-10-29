@@ -224,6 +224,46 @@ def queued := (drive {}
 #guard answerTo "b" queued == [.res 2 ⟨200, some ⟨"p", .pending, "", 100⟩⟩]
 #guard refines {} queued
 
+/-! ### Conditional writes are not enough when handlers read time
+
+`a` reads an absent document at time 0 and computes a create with the default
+timeout, 1000. Its conditional write is delayed. At time 10, `b` still reads
+the document as absent and receives 404. Then `a`'s write lands and `a`
+receives the record computed at time 0.
+
+The abstract service cannot produce this trace. To explain the 404 it must
+place `b`'s get before `a`'s create. The create must then run at time 10 or
+later, so its default timeout is 1010 or later, not the observed 1000.
+-/
+
+def lateCasScript : List (Time × Script) :=
+  [(0, .send "a" "n1" (.req 1 (.create "p" none))),
+   (0, .move "a" "n1"), (0, .move "n1" "s3"), (0, .move "s3" "n1"),
+   (10, .send "b" "n2" (.req 2 (.get "p"))),
+   (10, .move "b" "n2"), (10, .move "n2" "s3"), (10, .move "s3" "n2"),
+   (10, .move "n2" "b"),
+   (10, .move "n1" "s3"), (10, .move "s3" "n1"), (10, .move "n1" "a")]
+
+def lateCas := (drive {} lateCasScript).getD []
+
+theorem lateCas_runs : drive {} lateCasScript = some lateCas := by
+  have hs : (drive {} lateCasScript).isSome = true := by native_decide
+  cases h : drive {} lateCasScript with
+  | none => simp [h] at hs
+  | some x =>
+    have hx : lateCas = x := by simp [lateCas, h]
+    rw [hx]
+    exact h
+
+theorem lateCas_rejected : refines {} lateCas = false := by
+  native_decide
+
+#guard lateCas.length == 12
+#guard answerTo "b" lateCas == [.res 2 ⟨404, none⟩]
+#guard answerTo "a" lateCas ==
+  [.res 1 ⟨200, some ⟨"p", .pending, "", 1000⟩⟩]
+#guard !refines {} lateCas
+
 /-! ### Fuzzing, a little -/
 
 def inputs : List (Addr × CMsg) :=

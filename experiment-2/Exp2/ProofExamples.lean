@@ -7,8 +7,8 @@ These are semantic proofs, not calls to the unproved trace checker.  Each
 concrete client trace is paired with an explicit schedule of the abstract
 promise service; `schedule_legal` proves the schedule is a legal execution.
 
-They exercise the two characteristic examples while the general simulation
-relation from `Experiment.NetworkRefinement` is instantiated for this system.
+They exercise characteristic successful executions. They do not imply the
+general property, which `lateCas` refutes.
 -/
 
 namespace Exp2

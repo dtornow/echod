@@ -35,12 +35,15 @@ scheduler. This experiment takes that shape and plugs it into experiment
   arrive meanwhile wait in the mailbox. The store, messages and abstract
   handlers are experiment 1's. Checked as there: the race on two nodes
   refines with conditional writes and not without, a request queued
-  behind another is served after it, 30 fuzzed runs refine.
+  behind another is served after it, and 30 fuzzed runs refine.
+  `lateCas` is a counterexample even with conditional writes: a create
+  computes its default timeout before a later read, but commits after it.
 
 No spawn, so a node serves one request at a time. The handler embedding is
-proved, as are three end-to-end examples. The general storage-node theorem
-is `Refines cfg`; it necessarily assumes conditional writes, because `lost`
-is a counterexample without them. Its system-specific simulation invariant
-is still open.
+proved, as are three end-to-end examples. The general storage-node property
+`Refines cfg` is false for the current protocol: conditional writes serialize
+document changes, but they do not serialize the instant read by a handler.
+A general proof needs either a protocol fix or a restriction to operations
+whose outcome is stable from document read through commit.
 
 `lake build` builds experiment 1 too (a path dependency).
