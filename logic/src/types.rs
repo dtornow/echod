@@ -46,7 +46,7 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 /// What a conditional read answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Body(Vec<u8>, Etag),
     NotModified,
@@ -105,7 +105,7 @@ impl StoreCall {
 }
 
 /// What a store call answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreOutcome {
     /// `Get`: the object and its version, or nothing.
     Got(Option<(Vec<u8>, Etag)>),

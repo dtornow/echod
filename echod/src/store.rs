@@ -5,13 +5,13 @@
 //! directory bucket also appends; a general-purpose bucket rewrites. Timer and
 //! node objects carry their meaning in the key and are written blind.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use echod_concrete::raw::{ConditionalRead as RawRead, Failure, Key, Operation, RawStore, Response};
 
-pub use echod_logic::types::{Etag, Read, StoreError};
-use echod_logic::types::{StoreCall, StoreOutcome};
+pub use echod_concrete::raw::Environment;
+pub use echod_logic::types::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 #[async_trait]
 pub trait Store: Send + Sync {
@@ -100,21 +100,26 @@ pub async fn call(store: &dyn Store, c: StoreCall) -> StoreOutcome {
 
 /// An in-process store with the same conditional semantics. Tests, and a
 /// server with no bucket named.
-#[derive(Default)]
 pub struct MemoryStore {
-    objects: Mutex<BTreeMap<String, (Vec<u8>, u64)>>,
+    raw: Mutex<RawStore>,
     appendable: bool,
     listings: std::sync::atomic::AtomicUsize,
 }
 
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryStore {
     pub fn new() -> Self {
-        Self::default()
+        Self { raw: Mutex::new(RawStore::new("memory".into())), appendable: false, listings: Default::default() }
     }
 
     /// A store that appends, the way a directory bucket does.
     pub fn appendable() -> Self {
-        Self { objects: Mutex::new(BTreeMap::new()), appendable: true, listings: Default::default() }
+        Self { raw: Mutex::new(RawStore::new("memory".into())), appendable: true, listings: Default::default() }
     }
 
     /// How many listings have been asked of this store, for tests.
@@ -122,72 +127,141 @@ impl MemoryStore {
         self.listings.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, (Vec<u8>, u64)>> {
-        self.objects.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, RawStore> {
+        self.raw.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The version is the content, as an S3 ETag is: writing the same bytes
-    /// again yields the same version. A writer that must move the version
-    /// changes the bytes.
-    fn etag(body: &[u8]) -> Etag {
-        Etag(format!("{:016x}", echod_logic::keys::fnv1a(&String::from_utf8_lossy(body))))
+    fn operation(call: StoreCall) -> Operation {
+        fn key(value: String) -> Key {
+            Key::new(value.into_bytes())
+        }
+        fn version(etag: Etag) -> u64 {
+            // Raw versions start at one, so zero is stale for every malformed
+            // or foreign ETag.
+            etag.0.parse().unwrap_or(0)
+        }
+        match call {
+            StoreCall::Get { key: value } => Operation::Get { key: key(value) },
+            StoreCall::GetIfNoneMatch { key: value, etag } => Operation::GetIfNoneMatch { key: key(value), version: version(etag) },
+            StoreCall::PutIfMatch { key: value, body, etag } => Operation::Update { key: key(value), version: version(etag), bytes: body },
+            StoreCall::PutIfNoneMatch { key: value, body } => Operation::Create { key: key(value), bytes: body },
+            StoreCall::AppendIfMatch { key: value, offset, body, etag } => Operation::Append { key: key(value), version: version(etag), offset, bytes: body },
+            StoreCall::Put { key: value, body } => Operation::Put { key: key(value), bytes: body },
+            StoreCall::Delete { key: value } => Operation::Delete { key: key(value) },
+            StoreCall::List { prefix, max_keys } => Operation::List { prefix: key(prefix), max_keys },
+            StoreCall::ListPrefixes { prefix } => Operation::ListPrefixes { prefix: key(prefix) },
+        }
+    }
+
+    fn outcome(response: Response, environment: Environment) -> StoreOutcome {
+        fn etag(version: u64) -> Etag {
+            Etag(version.to_string())
+        }
+        fn key(value: Key) -> String {
+            String::from_utf8(value.bytes).expect("runtime-created raw keys remain UTF-8")
+        }
+        match response {
+            Response::Got(object) => StoreOutcome::Got(object.map(|object| (object.bytes, etag(object.version)))),
+            Response::Read(RawRead::Body(object)) => StoreOutcome::Read(Read::Body(object.bytes, etag(object.version))),
+            Response::Read(RawRead::NotModified) => StoreOutcome::Read(Read::NotModified),
+            Response::Read(RawRead::Absent) => StoreOutcome::Read(Read::Absent),
+            Response::Written(version) => StoreOutcome::Written(etag(version)),
+            Response::Done => StoreOutcome::Done,
+            Response::Listed(keys) => StoreOutcome::Listed(keys.into_iter().map(key).collect()),
+            Response::Failed(Failure::Refused) => StoreOutcome::Failed(StoreError::PreconditionFailed),
+            Response::Failed(Failure::Unavailable) => {
+                let message = match environment {
+                    Environment::ApplyButLostAck => "raw store applied the operation but lost its acknowledgement",
+                    _ => "raw store unavailable before applying the operation",
+                };
+                StoreOutcome::Failed(StoreError::Unavailable(message.into()))
+            }
+            Response::InvalidChoice => StoreOutcome::Failed(StoreError::Unavailable("invalid environment choice for raw store operation".into())),
+        }
+    }
+
+    /// Execute exactly one verified raw-store step with an explicit
+    /// environmental disposition.
+    pub fn execute_with_environment(&self, call: StoreCall, environment: Environment) -> StoreOutcome {
+        self.execute_selecting_environment(call, |_, _| environment).1
+    }
+
+    /// Select an environment while the raw state is locked, then execute one
+    /// step. The booleans say whether `Refused` and `ApplyButLostAck` are
+    /// valid, respectively, for the operation and current state.
+    pub fn execute_selecting_environment<F>(&self, call: StoreCall, select: F) -> (Environment, StoreOutcome)
+    where
+        F: FnOnce(bool, bool) -> Environment,
+    {
+        let listing = matches!(&call, StoreCall::List { .. } | StoreCall::ListPrefixes { .. });
+        let operation = Self::operation(call);
+        let mut raw = self.lock();
+        let can_refuse = raw.accepts_environment(&operation, Environment::Refused);
+        let can_lose_ack = raw.accepts_environment(&operation, Environment::ApplyButLostAck);
+        let environment = select(can_refuse, can_lose_ack);
+        if listing && environment != Environment::FailBeforeApply {
+            self.listings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let response = raw.execute(operation, environment);
+        (environment, Self::outcome(response, environment))
+    }
+
+    fn unexpected(expected: &str) -> StoreError {
+        StoreError::Unavailable(format!("raw store returned an outcome other than {expected}"))
     }
 
     /// Every key, for tests.
     pub fn keys(&self) -> Vec<String> {
-        self.lock().keys().cloned().collect()
+        let mut keys: Vec<String> = self.lock().entries.iter().map(|entry| {
+            String::from_utf8(entry.key.bytes.clone()).expect("runtime-created raw keys remain UTF-8")
+        }).collect();
+        keys.sort();
+        keys
     }
 }
 
 #[async_trait]
 impl Store for MemoryStore {
     async fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
-        Ok(self.lock().get(key).map(|(b, _)| (b.clone(), Self::etag(b))))
+        match self.execute_with_environment(StoreCall::Get { key: key.into() }, Environment::Normal) {
+            StoreOutcome::Got(value) => Ok(value),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Get")),
+        }
     }
 
     async fn get_if_none_match(&self, key: &str, etag: &Etag) -> Result<Read, StoreError> {
-        Ok(match self.lock().get(key) {
-            None => Read::Absent,
-            Some((b, _)) if Self::etag(b) == *etag => Read::NotModified,
-            Some((b, _)) => Read::Body(b.clone(), Self::etag(b)),
-        })
+        match self.execute_with_environment(StoreCall::GetIfNoneMatch { key: key.into(), etag: etag.clone() }, Environment::Normal) {
+            StoreOutcome::Read(value) => Ok(value),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("GetIfNoneMatch")),
+        }
     }
 
     async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
-        let mut m = self.lock();
-        match m.get(key) {
-            Some((b, v)) if Self::etag(b) == *etag => {
-                let nv = v + 1;
-                let e = Self::etag(&body);
-                m.insert(key.to_string(), (body, nv));
-                Ok(e)
-            }
-            _ => Err(StoreError::PreconditionFailed),
+        match self.execute_with_environment(StoreCall::PutIfMatch { key: key.into(), body, etag: etag.clone() }, Environment::Normal) {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("PutIfMatch")),
         }
     }
 
     async fn put_if_none_match(&self, key: &str, body: Vec<u8>) -> Result<Etag, StoreError> {
-        let mut m = self.lock();
-        if m.contains_key(key) {
-            return Err(StoreError::PreconditionFailed);
+        match self.execute_with_environment(StoreCall::PutIfNoneMatch { key: key.into(), body }, Environment::Normal) {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("PutIfNoneMatch")),
         }
-        let e = Self::etag(&body);
-        m.insert(key.to_string(), (body, 1));
-        Ok(e)
     }
 
     async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
         if !self.appendable {
             return Err(StoreError::Unavailable("this store does not append".into()));
         }
-        let mut m = self.lock();
-        match m.get_mut(key) {
-            Some((b, v)) if Self::etag(b) == *etag && b.len() as u64 == offset => {
-                b.extend_from_slice(&body);
-                *v += 1;
-                Ok(Self::etag(b))
-            }
-            _ => Err(StoreError::PreconditionFailed),
+        match self.execute_with_environment(StoreCall::AppendIfMatch { key: key.into(), offset, body, etag: etag.clone() }, Environment::Normal) {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("AppendIfMatch")),
         }
     }
 
@@ -196,34 +270,35 @@ impl Store for MemoryStore {
     }
 
     async fn put(&self, key: &str, body: Vec<u8>) -> Result<(), StoreError> {
-        let mut m = self.lock();
-        let v = m.get(key).map(|(_, v)| v + 1).unwrap_or(1);
-        m.insert(key.to_string(), (body, v));
-        Ok(())
+        match self.execute_with_environment(StoreCall::Put { key: key.into(), body }, Environment::Normal) {
+            StoreOutcome::Done => Ok(()),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Put")),
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
-        self.lock().remove(key);
-        Ok(())
+        match self.execute_with_environment(StoreCall::Delete { key: key.into() }, Environment::Normal) {
+            StoreOutcome::Done => Ok(()),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Delete")),
+        }
     }
 
     async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError> {
-        self.listings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(self.lock().range(prefix.to_string()..).take_while(|(k, _)| k.starts_with(prefix)).take(max_keys).map(|(k, _)| k.clone()).collect())
+        match self.execute_with_environment(StoreCall::List { prefix: prefix.into(), max_keys }, Environment::Normal) {
+            StoreOutcome::Listed(keys) => Ok(keys),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("List")),
+        }
     }
 
     async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
-        self.listings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut out: Vec<String> = Vec::new();
-        for (k, _) in self.lock().range(prefix.to_string()..).take_while(|(k, _)| k.starts_with(prefix)) {
-            if let Some(i) = k[prefix.len()..].find('/') {
-                let p = k[..prefix.len() + i + 1].to_string();
-                if out.last() != Some(&p) {
-                    out.push(p);
-                }
-            }
+        match self.execute_with_environment(StoreCall::ListPrefixes { prefix: prefix.into() }, Environment::Normal) {
+            StoreOutcome::Listed(prefixes) => Ok(prefixes),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("ListPrefixes")),
         }
-        Ok(out)
     }
 
     async fn ready(&self) -> bool {

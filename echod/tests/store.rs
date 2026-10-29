@@ -28,7 +28,7 @@ struct Backend {
 async fn backends() -> Vec<Backend> {
     let nonce = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let mut out = vec![
-        Backend { name: "memory", store: Arc::new(MemoryStore::new()), content_addressed: true },
+        Backend { name: "memory", store: Arc::new(MemoryStore::new()), content_addressed: false },
         Backend { name: "object_store memory", store: Arc::new(ObjectStoreStore::new(Arc::new(object_store::memory::InMemory::new()), object_store::path::Path::default())), content_addressed: false },
     ];
     // Not `object_store::local::LocalFileSystem`: it does not implement

@@ -1235,6 +1235,39 @@ impl RawStore {
         }
     }
 
+    fn can_apply_mutation(&self, operation: &Operation) -> bool
+        requires self.wf(),
+    {
+        match operation {
+            Operation::Create { .. }
+            | Operation::Update { .. }
+            | Operation::Append { .. } => !self.can_refuse(operation),
+            Operation::Put { .. } | Operation::Delete { .. } => true,
+            Operation::Get { .. }
+            | Operation::GetIfNoneMatch { .. }
+            | Operation::List { .. }
+            | Operation::ListPrefixes { .. } => false,
+        }
+    }
+
+    /// Whether this environmental choice describes this operation in the
+    /// current state.  Callers that inject faults use this before selecting
+    /// one environmental input, then execute exactly one automaton step.
+    pub fn accepts_environment(
+        &self,
+        operation: &Operation,
+        environment: Environment,
+    ) -> (accepted: bool)
+        requires self.wf(),
+    {
+        match environment {
+            Environment::Normal | Environment::FailBeforeApply => true,
+            Environment::Refused => self.can_refuse(operation),
+            Environment::ApplyButLostAck =>
+                self.can_apply_mutation(operation),
+        }
+    }
+
     /// Execute an operation under ordinary store behavior.
     pub fn execute_normal(&mut self, operation: Operation) -> (response: Response)
         requires old(self).wf(),
