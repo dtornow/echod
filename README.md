@@ -13,8 +13,7 @@ deadline keys is the kernel too, each decision proved to compute its
 specification. What several nodes do to one bucket is the system model,
 proved safe whatever the clocks do. What the proof stops at, the shim between
 the verified core and S3, a deterministic simulator holds to the Resonate
-model of [dtornow/accordant](https://github.com/dtornow/accordant) under
-crashes, outages and lost acks.
+model in [`abstract/`](abstract) under crashes, outages and lost acks.
 
 ## Layout
 
@@ -28,8 +27,8 @@ crashes, outages and lost acks.
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, every run checked against the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant) |
-| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; public responses and messages compared. `diff/accordant/`: isolated echod processes driven by the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant), every public-observation trace checked against it |
+| [`sim/`](sim) | `echod-sim`: deterministic multi-node chaos whose finite public trace is searched against the local executable Abstract model; `Ok` requires a witness, exhausted search is `Ko`, bounded search is `Unknown` |
+| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; public responses and messages compared |
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |
 
@@ -61,9 +60,7 @@ The differential wants the reference server built from `resonatehq/resonate`
 (`impl/server/core`, `cargo build --release --bin resonate`); it starts it
 and echod as isolated processes and drives both over public HTTP. The
 external reference process requires its development-mode flag; echod runs
-with its production clock and timers. `diff/accordant` is a workspace of
-its own (`cd diff/accordant && cargo run --release`): it builds against
-accordant's pin of Verus's `vstd`, which is not the kernel's.
+with its production clock and timers.
 
 `verify.sh` wants a Verus source tree with a release build in `VERUS_DIR`
 (default `~/verus-lang/verus/source`) and z3 beside it. `cargo build` is

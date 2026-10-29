@@ -13,10 +13,9 @@ durable executions in V8. Built inside out, from the stored data up.
 | `concrete/` | `echod-concrete`: the deterministic raw object-store automaton: one configured bucket of keyed bytes and opaque versions, conditional writes/appends/listings, and explicit fail-before-apply/apply-with-lost-ack/refusal choices. Decoded documents and auxiliary objects are verified derived views |
 | `refinement/` | `echod-refinement`: the local proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency |
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
-| `refine/` | `echod-refine`: the store machine (the bucket as state, the wire rules, a sweep, the kernel handler, a drain as the request step; a sweep as internal work) as an `accordant::Model`, and `concrete_refines_abstract`: every bounded trace of it is a trace of the Resonate model, by accordant's forward-simulation theorem; the model's handlers are themselves verified to compute the twins the theorem is stated over. Proof only, `cargo verus verify -p echod-refine`; 290 items, no admits. Bounded: the clock and every instant and duration a request carries at most `MAX_TIME`, requests the wire's validators pass, no targeted timer, no schedule (`request_bounded`) |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; every run checked against the Resonate model of `dtornow/accordant` |
+| `sim/` | `echod-sim`: deterministic multi-node chaos, one seed and no sockets; finite public traces are searched directly against `echod-abstract`, with witness/exhausted/bounded outcomes |
 
 The Abstract, kernel, Concrete-bucket and system layers verify
 independently. The remaining work is the refinement chain between them and
@@ -437,32 +436,22 @@ into the origins the clients work on, so fires collide with requests. The
 run ends with a read of every id, so what the bucket holds is what the
 model holds.
 
-The check is the Resonate model of `dtornow/accordant`, the whole protocol
-as the Lean specification has it, with its checker (`checker.rs`): some
-execution of the model must show exactly what the clients saw and the bus
-carried, the model's internal work (a deadline, a lease's end, a resume, a
-retry, an occurrence) placed where the checker likes. The trace is what a
-client could record: every request as an invoke at the instant it was sent
-(from the simulator's injected clock) and a return where its answer came,
-every message the bus carried as a receive, and the clock moving to the
-instants the nodes stamp at, the requests'
-and, through the notes port, the nodes' own sweeps and fires; a return or
-a receive moves the clock nowhere, since every instant the clock visits
-while a call is open is one more place the model may land its effect.
-Nothing else of the nodes' account enters. What makes the check hold is
-the protocol: a lease past its end reads as lost and a task's offers are
-on a grid (above), so the model's exact timers and the node's sweeps agree
-on every state a client can see. The one step that is not a projection, a
-schedule's occurrence, the model fires anywhere from its instant to
-`fire_within` later, two timer buckets here (`Options::fire_within`), the
-bound within which a node gets to a key. Clients are routed to an origin's
-owner, as a load balancer over the members would route them, which
-serialises an origin's requests behind one flight; `--misroute` sends a
-share elsewhere, where a read may miss a write the owner decided and has
-not landed, whose stamp precedes the read, which one clock cannot show.
-Besides that: every deadline a document owes has a key, every `execute`
-names a task that exists and every `unblock` a settled promise, every kind
-answered 200 at least once, and the history overlapped.
+The check executes the independent model in `abstract/`. A bounded
+existential search places overlapping calls and internal work—deadlines,
+leases, callbacks, listeners, retries and schedule occurrences—between the
+public invoke/return/receive/clock observations. `Ok` carries a replayable
+Abstract witness; an exhausted complete frontier is `Ko`; a width or node
+budget limit is `Unknown`. Independent origin components are searched
+separately and merged when an action spans them; schedules use global search.
+The default budget is two million semantic successors and width 512.
+
+The trace contains only what a client and worker could record. Node notes
+provide clock marks and validated schedule-occurrence witnesses, but do not
+decide which Abstract internal action ran. The checker derives enabled work
+from candidate Abstract state. Clients are routed to an origin's owner by
+default; `--misroute` exercises other nodes. Besides model acceptance, the run
+checks timer-key coverage, message referents, request-kind coverage and
+overlap.
 
 ### Differential
 
@@ -493,29 +482,6 @@ stream: echod does not serve them. Nor is a fence creating a promise in
 another origin, where the two part by design ("The detached create"
 below); the simulator's workload has none either, its model being one
 origin at a time.
-
-### The accordant model
-
-`diff/accordant` drives echod with the Resonate model of
-`dtornow/accordant`, an executable specification in Verus of the whole
-protocol as the Lean specification has it (promises, callbacks, listeners,
-tasks with leases, resumes and redispatch, halt and continue, schedules),
-and checks every recorded trace against it: an execution of the model must
-produce exactly the observations, with the model's internal work (a
-deadline, a lease, a resume, a retry, an occurrence) placed where the
-checker likes. A run resets echod and takes the model's own actions, the
-ones it suggests from an initially empty model or random ones. Every run
-starts an isolated echod process. Requests, responses, and every `execute`
-and `unblock` the sink receives form the trace; production maintenance
-timers run normally. Short model clock moves wait for wall time and long
-synthetic jumps are skipped. The marks of the execution that explains an
-accepted trace are the coverage. echod runs with the model's retry timeout.
-
-Nothing is translated: a detached create is sent as any other fence, and
-`task.create` in every state. One request is not sent: a timer created with
-a target, which echod accepts with the target dropped (a concession to the
-SDKs' sleep, `wire::create_tags`) and the model refuses, as the Lean
-specification does.
 
 ### The detached create
 
