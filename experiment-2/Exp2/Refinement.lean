@@ -29,6 +29,9 @@ inductive Eval (e : E) : {α : Type} → S → Proc E S M α → α → S → Li
   | emit {s : S} {o : Out M} {k : Proc E S M α} {a : α} {s' : S}
       {outs : List (Out M)} (h : Eval e s k a s' outs) :
       Eval e s (.emit o k) a s' (o :: outs)
+  | emitMany {s : S} {batch : List (Out M)} {k : Proc E S M α} {a : α} {s' : S}
+      {outs : List (Out M)} (h : Eval e s k a s' outs) :
+      Eval e s (.emitMany batch k) a s' (batch ++ outs)
   | choose {s : S} {n : Nat} {k : Fin (n + 1) → Proc E S M α} {i : Fin (n + 1)}
       {a : α} {s' : S} {outs : List (Out M)} (h : Eval e s (k i) a s' outs) :
       Eval e s (.choose n k) a s' outs
@@ -46,6 +49,9 @@ theorem bind {x : Proc E S M α} {f : α → Proc E S M β}
   | load _ ih => exact .load (ih hf)
   | store _ ih => exact .store (ih hf)
   | emit _ ih => exact .emit (ih hf)
+  | emitMany _ ih =>
+    change Eval e _ (.emitMany _ (_ >>= f)) _ _ _
+    simpa [List.append_assoc] using Eval.emitMany (ih hf)
   | choose _ ih => exact .choose (ih hf)
 
 theorem bind_inv {x : Proc E S M α} {f : α → Proc E S M β}
@@ -74,6 +80,11 @@ theorem bind_inv {x : Proc E S M α} {f : α → Proc E S M β}
     | emit h =>
       obtain ⟨a, s₁, w₁, w₂, hx, hf, rfl⟩ := ih h
       exact ⟨a, s₁, o :: w₁, w₂, .emit hx, hf, rfl⟩
+  | emitMany batch k ih =>
+    cases h with
+    | emitMany h =>
+      obtain ⟨a, s₁, w₁, w₂, hx, hf, rfl⟩ := ih h
+      exact ⟨a, s₁, batch ++ w₁, w₂, .emitMany hx, hf, by simp⟩
   | choose n k ih =>
     cases h with
     | choose h =>

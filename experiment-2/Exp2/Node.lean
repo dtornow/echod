@@ -43,15 +43,17 @@ def answers (op : Nat) : Addr → CMsg → Bool
 
 def answer (c : Addr) (id : CallId) (res : Response) : NodeP Unit := send c (.app (.res id res))
 
-def note : List (Out Msg) → NodeP Unit
-  | [] => pure ()
-  | .always n ok :: rest => do Proc.emit (.always n ok) (Proc.pure ()); note rest
-  | .sometimes n hit :: rest => do Proc.emit (.sometimes n hit) (Proc.pure ()); note rest
-  | .send _ _ :: rest => note rest
+def notes (outs : List (Out Msg)) : List (Out CMsg) :=
+  outs.filterMap fun
+    | .always n ok => some (.always n ok)
+    | .sometimes n hit => some (.sometimes n hit)
+    | .send _ _ => none
 
-def sendAll : List (Addr × Msg) → NodeP Unit
-  | [] => pure ()
-  | (a, m) :: rest => do send a (.app m); sendAll rest
+def note (outs : List (Out Msg)) : NodeP Unit :=
+  Proc.emitAllNow (notes outs)
+
+def sendAll (messages : List (Addr × Msg)) : NodeP Unit :=
+  Proc.emitAllNow (messages.map fun (a, m) => .send a (.app m))
 
 structure Candidate where
   client : Addr
@@ -109,7 +111,8 @@ def loadK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
 
 /-- One request, through: load, decide with the abstract handler, write
     conditionally, answer. `tries` more after a lost race. -/
-def serve (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) : NodeP Unit := do
+@[irreducible] def serve (c : Addr) (id : CallId) (r : Request) (now : Time)
+    (tries : Nat) : NodeP Unit := do
   let cfg ← read
   let op ← fresh
   send cfg.store (.get op r.key)
@@ -133,7 +136,7 @@ inductive Local where
 def receive (sender : Addr) (m : CMsg) (now : Time) : H Config Local (Out CMsg) Unit :=
   fun e s =>
     match s with
-    | .node r => ((toStep node 1000 sender m now) e r).map fun (a, r', w) => (a, .node r', w)
+    | .node r => ((toStep node 64 sender m now) e r).map fun (a, r', w) => (a, .node r', w)
     | .store st => ((storeReceive sender m) e st).map fun (a, st', w) => (a, .store st', w)
 
 abbrev system : Service where

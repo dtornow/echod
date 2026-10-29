@@ -40,6 +40,7 @@ inductive Proc (E S M : Type) (α : Type) where
   | load (k : S → Proc E S M α)
   | store (s : S) (k : Proc E S M α)
   | emit (o : Out M) (k : Proc E S M α)
+  | emitMany (outs : List (Out M)) (k : Proc E S M α)
   /-- One of `n + 1` ways: never none. -/
   | choose (n : Nat) (k : Fin (n + 1) → Proc E S M α)
   /-- Block until a message `accept` takes is in the mailbox. -/
@@ -55,6 +56,7 @@ def bind {α β : Type} : Proc E S M α → (α → Proc E S M β) → Proc E S 
   | .load k, f => .load fun s => (k s).bind f
   | .store s k, f => .store s (k.bind f)
   | .emit o k, f => .emit o (k.bind f)
+  | .emitMany outs k, f => .emitMany outs (k.bind f)
   | .choose n k, f => .choose n fun i => (k i).bind f
   | .receive acc k, f => .receive acc fun a m t => (k a m t).bind f
 
@@ -73,6 +75,8 @@ instance : MonadStateOf S (Proc E S M) where
 def send (to : Addr) (m : M) : Proc E S M Unit := .emit (.send to m) (.pure ())
 
 def always (name : String) (ok : Bool) : Proc E S M Unit := .emit (.always name ok) (.pure ())
+
+def emitAllNow (outs : List (Out M)) : Proc E S M Unit := .emitMany outs (.pure ())
 
 /-- The oldest message `accept` takes: who sent it, what, and when it is taken. -/
 def recv (accept : Addr → M → Bool) : Proc E S M (Addr × M × Time) :=
@@ -115,6 +119,53 @@ def take? {M : Type} (accept : Addr → M → Bool) : List (Addr × M) → Optio
     if accept a m then some (a, m, rest)
     else (take? accept rest).map fun (a', m', rest') => (a', m', (a, m) :: rest')
 
+theorem take?_append_match {M : Type} {accept : Addr → M → Bool}
+    {mb : List (Addr × M)} {a : Addr} {m : M}
+    (hn : take? accept mb = none) (ha : accept a m = true) :
+    take? accept (mb ++ [(a, m)]) = some (a, m, mb) := by
+  induction mb with
+  | nil => simp [take?, ha]
+  | cons x rest ih =>
+    obtain ⟨b, n⟩ := x
+    simp only [take?] at hn ⊢
+    split at hn
+    · simp at hn
+    · rename_i hx
+      cases hr : take? accept rest with
+      | none =>
+        simp only [hr, Option.map_none] at hn
+        change take? accept ((b, n) :: (rest ++ [(a, m)])) =
+          some (a, m, (b, n) :: rest)
+        rw [take?.eq_def]
+        simp only [hx]
+        rw [ih hr]
+        rfl
+      | some result =>
+        simp [hr] at hn
+
+theorem take?_append_miss {M : Type} {accept : Addr → M → Bool}
+    {mb : List (Addr × M)} {a : Addr} {m : M}
+    (hn : take? accept mb = none) (ha : accept a m = false) :
+    take? accept (mb ++ [(a, m)]) = none := by
+  induction mb with
+  | nil => simp [take?, ha]
+  | cons x rest ih =>
+    obtain ⟨b, n⟩ := x
+    simp only [take?] at hn ⊢
+    split at hn
+    · simp at hn
+    · rename_i hx
+      cases hr : take? accept rest with
+      | none =>
+        simp only [hr, Option.map_none] at hn
+        change take? accept ((b, n) :: (rest ++ [(a, m)])) = none
+        rw [take?.eq_def]
+        simp only [hx]
+        rw [ih hr]
+        rfl
+      | some result =>
+        simp [hr] at hn
+
 variable {E S M : Type}
 
 /-- Run from `k` until blocked, at `now`: every outcome, with what was
@@ -130,6 +181,7 @@ def advance (main : Proc E S M Unit) (e : E) (now : Time) :
     | .load k => advance main e now fuel s mb (k s)
     | .store s' k => advance main e now fuel s' mb k
     | .emit o k => (advance main e now fuel s mb k).map fun (r, os) => (r, o :: os)
+    | .emitMany outs k => (advance main e now fuel s mb k).map fun (r, os) => (r, outs ++ os)
     | .choose n k => (List.finRange (n + 1)).flatMap fun i => advance main e now fuel s mb (k i)
     | .receive acc k =>
       match take? acc mb with
