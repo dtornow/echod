@@ -38,6 +38,10 @@ theorem SameState.refl (s : State) : SameState s s := fun _ => rfl
 theorem SameState.symm {a b : State} (h : SameState a b) : SameState b a :=
   fun key => (h key).symm
 
+theorem SameState.trans {a b c : State} (h₁ : SameState a b) (h₂ : SameState b c) :
+    SameState a c :=
+  fun key => (h₁ key).trans (h₂ key)
+
 theorem RespectsState.pure (a : α) : RespectsState (Pure.pure a : Handler α) := by
   intro cfg s t hst x hx
   change x ∈ [(a, s, [])] at hx
@@ -83,6 +87,16 @@ theorem RespectsState.readDefaultTimeout :
   subst x
   refine ⟨(cfg.defaultTimeout, t, []), ?_, rfl, hst, rfl⟩
   change (cfg.defaultTimeout, t, []) ∈ [(cfg.defaultTimeout, t, [])]
+  simp
+
+theorem RespectsState.readUnreliable :
+    RespectsState Experiment.readUnreliable := by
+  intro cfg s t hst x hx
+  change x ∈ [(cfg.unreliable, s, [])] at hx
+  simp only [List.mem_singleton] at hx
+  subst x
+  refine ⟨(cfg.unreliable, t, []), ?_, rfl, hst, rfl⟩
+  change (cfg.unreliable, t, []) ∈ [(cfg.unreliable, t, [])]
   simp
 
 theorem RespectsState.emit (o : Out Msg) : RespectsState (emit o : Handler Unit) := by
@@ -269,6 +283,11 @@ theorem Frames.read (frame : List Promise) : Frames frame (read : Handler Config
 
 theorem Frames.readDefaultTimeout (frame : List Promise) :
     Frames frame Experiment.readDefaultTimeout := by
+  intro cfg s
+  rfl
+
+theorem Frames.readUnreliable (frame : List Promise) :
+    Frames frame Experiment.readUnreliable := by
   intro cfg s
   rfl
 
@@ -502,7 +521,7 @@ theorem Frames.dispatch (r : Request) {frame : List Promise} (hf : AwayFrom r.ke
 theorem Frames.request (r : Request) {frame : List Promise} (hf : AwayFrom r.key frame)
     (now : Time) : Frames frame (Experiment.request r now) := by
   unfold Experiment.request
-  refine Frames.bind (Frames.read frame) fun cfg => ?_
+  refine Frames.bind (Frames.readUnreliable frame) fun unreliable => ?_
   split
   · refine Frames.bind (Frames.choose frame ⟨[Fate.serve, .shed, .lose], by simp⟩) ?_
     intro fate
@@ -640,7 +659,7 @@ theorem RespectsState.dispatch (r : Request) (now : Time) :
 theorem RespectsState.request (r : Request) (now : Time) :
     RespectsState (Experiment.request r now) := by
   unfold Experiment.request
-  refine RespectsState.bind RespectsState.read fun cfg => ?_
+  refine RespectsState.bind RespectsState.readUnreliable fun unreliable => ?_
   split
   · refine RespectsState.bind
       (RespectsState.choose ⟨[Fate.serve, .shed, .lose], by simp⟩) ?_
@@ -724,5 +743,81 @@ theorem request_transport (r : Request) (now : Time) (cfg : Config)
   subst res'
   subst outs'
   exact ⟨globalAfter, hglobal, hstate⟩
+
+/-- The corresponding transport theorem for the reliable dispatch body. -/
+theorem dispatch_transport (r : Request) (now : Time) (cfg : Config)
+    (global localAfter : State) (doc : Option Promise)
+    (res : Response) (outs : List (Out Msg))
+    (hdoc : promiseAt global r.key = doc)
+    (hout : (res, localAfter, outs) ∈
+      (Experiment.dispatch r now cfg { promises := doc.toList }).val) :
+    ∃ globalAfter,
+      (res, globalAfter, outs) ∈ (Experiment.dispatch r now cfg global).val ∧
+      SameState
+        (localAfter.withFrame (global.promises.filter (·.id != r.key)))
+        globalAfter := by
+  let frame := global.promises.filter (·.id != r.key)
+  have haway : AwayFrom r.key frame := by
+    intro p hp
+    exact bne_iff_ne.mp (List.mem_filter.mp hp).2
+  have hframed : (res, localAfter.withFrame frame, outs) ∈
+      (Experiment.dispatch r now cfg
+        (({ promises := doc.toList } : State).withFrame frame)).val := by
+    have heq := Frames.dispatch r haway now cfg { promises := doc.toList }
+    rw [heq]
+    exact List.mem_map.mpr ⟨(res, localAfter, outs), hout, rfl⟩
+  have hsame := footprint_frame_same global r.key doc hdoc
+  obtain ⟨⟨res', globalAfter, outs'⟩, hglobal, hres, hstate, houts⟩ :=
+    RespectsState.dispatch r now cfg _ _ hsame _ hframed
+  change res = res' at hres
+  change outs = outs' at houts
+  subst res'
+  subst outs'
+  exact ⟨globalAfter, hglobal, hstate⟩
+
+/-- Package a request-handler outcome as the promise service's receive step.
+The handler's notifications precede the final response send. -/
+theorem request_step_mem {cfg : Config} {state state' : State}
+    {client : Addr} {id : CallId} {now stepNow : Time} {r : Request}
+    {res : Response} {outs : List (Out Msg)}
+    (h : (res, state', outs) ∈ (Experiment.request r now cfg state).val) :
+    (state', outs ++ [.send client (.res id res)]) ∈
+      (promises.step cfg state stepNow (.msg client (.req id now r))).val := by
+  simp only [Service.step, promises, receive, H.run, Some.map, List.mem_map]
+  refine ⟨((), state', outs ++ [.send client (.res id res)]), ?_, rfl⟩
+  simp only [Bind.bind, Some.bind, Some.map, List.mem_flatMap, List.mem_map]
+  refine ⟨(res, state', outs), h, ((), state', [.send client (.res id res)]), ?_, rfl⟩
+  simp [Experiment.send, emit, Some.one]
+
+theorem dispatch_as_serve {cfg : Config} {state state' : State}
+    {r : Request} {now : Time} {res : Response} {outs : List (Out Msg)}
+    (h : (res, state', outs) ∈
+      (Experiment.dispatch r now { cfg with unreliable := true } state).val) :
+    (res, state', outs) ∈
+      (Experiment.request r now { cfg with unreliable := true } state).val := by
+  simp [Experiment.request, readUnreliable, Bind.bind, Some.one, Some.bind, Some.map, choose] at h ⊢
+  exact .inl h
+
+theorem dispatch_as_lose {cfg : Config} {state state' : State}
+    {r : Request} {now : Time} {res : Response} {outs : List (Out Msg)}
+    (h : (res, state', outs) ∈
+      (Experiment.dispatch r now { cfg with unreliable := true } state).val) :
+    (Response.mk 503 none, state', outs) ∈
+      (Experiment.request r now { cfg with unreliable := true } state).val := by
+  simp [Experiment.request, readUnreliable, Bind.bind, Some.one, Some.bind, Some.map, choose] at h ⊢
+  right
+  right
+  refine ⟨res, state', outs, h, Response.mk 503 none, state', [], ?_, rfl, rfl, by simp⟩
+  change (Response.mk 503 none, state', []) ∈ [(Response.mk 503 none, state', [])]
+  simp
+
+theorem request_shed_mem (cfg : Config) (state : State) (r : Request) (now : Time) :
+    (Response.mk 503 none, state, []) ∈
+      (Experiment.request r now { cfg with unreliable := true } state).val := by
+  simp [Experiment.request, readUnreliable, Bind.bind, Some.one, Some.bind, Some.map, choose]
+  right
+  left
+  change (Response.mk 503 none, state, []) ∈ [(Response.mk 503 none, state, [])]
+  simp
 
 end Experiment

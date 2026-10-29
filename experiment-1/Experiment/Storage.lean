@@ -136,7 +136,7 @@ def decideStep (f : Flight) (doc : Option (Promise × Version)) : NodeH Unit := 
   let before : Experiment.State := { promises := doc.toList.map (·.1) }
   let cfg ← read
   let (res, after, outs) :=
-    pick ((Experiment.request f.req f.now).run { cfg.app with unreliable := true } before) 0
+    pick ((Experiment.dispatch f.req f.now).run { cfg.app with unreliable := true } before) 0
   for o in outs do
     match o with
     | .always n ok => emit (.always n ok)

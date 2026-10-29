@@ -24,6 +24,10 @@ scheduler. This experiment takes that shape and plugs it into experiment
   trace-inclusion theorem specialized to this system. `clientView` is the
   client projection, and `drive_refines_of_simulation` proves a driven run
   valid once the node/store simulation relation is supplied.
+- `Exp2/StorageSimulation.lean`: the system-specific core: canonical node
+  control states, key-extensional store representation, local-to-global
+  handler transport, and proved abstract linearization steps for unchanged
+  reads, successful CAS writes, and writes that land but report failure.
 - `Exp2/ProofExamples.lean`: semantic witnesses for `safe`, `queued`,
   `ghost` (a failed write that landed), and `delayedCas`.
   These do not trust the executable checker: each gives an explicit abstract

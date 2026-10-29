@@ -105,6 +105,9 @@ def sometimes (name : String) (hit : Bool) : Handler Unit := emit (.sometimes na
 def readDefaultTimeout : Handler Time :=
   fun cfg s => .one (cfg.defaultTimeout, s, [])
 
+def readUnreliable : Handler Bool :=
+  fun cfg s => .one (cfg.unreliable, s, [])
+
 /-! ## Helpers -/
 
 def save (p : Promise) : Handler Unit :=
@@ -209,7 +212,7 @@ inductive Fate where
 /-- A request: served, or, when the server is unreliable, maybe failed.
     The outcomes come in this order: served, shed, lost. -/
 def request (r : Request) (now : Time) : Handler Response := do
-  if (← read).unreliable then
+  if ← readUnreliable then
     match ← choose ⟨[Fate.serve, .shed, .lose], by simp⟩ with
     | .serve => dispatch r now
     | .shed  => return { status := 503 }

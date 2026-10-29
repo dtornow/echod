@@ -98,7 +98,7 @@ theorem storePromiseAt_commit (store : Store) (key : Ident) (p : Promise) (other
 def Candidate.Valid (cfg : Storage.Config) (cand : Candidate) : Prop :=
   let before : Experiment.State := { promises := cand.doc.toList.map (·.1) }
   (cand.res, cand.after, cand.outs) =
-      pick ((Experiment.request cand.req cand.now).run
+      pick ((Experiment.dispatch cand.req cand.now).run
         { cfg.app with unreliable := true } before) 0 ∧
   cand.after.promises.find? (·.id == cand.req.key) = some cand.promise ∧
   cand.after.promises = [cand.promise]
@@ -106,7 +106,7 @@ def Candidate.Valid (cfg : Storage.Config) (cand : Candidate) : Prop :=
 theorem Candidate.local_member {cfg : Storage.Config} {cand : Candidate}
     (h : cand.Valid cfg) :
     (cand.res, cand.after, cand.outs) ∈
-      ((Experiment.request cand.req cand.now).run
+      ((Experiment.dispatch cand.req cand.now).run
         { cfg.app with unreliable := true }
         { promises := cand.doc.toList.map (·.1) }).val := by
   rw [h.1]
@@ -131,7 +131,7 @@ theorem candidate_transport {cfg : Storage.Config} {cand : Candidate}
     (hcand : cand.Valid cfg) :
     ∃ globalAfter,
       (cand.res, globalAfter, cand.outs) ∈
-        ((Experiment.request cand.req cand.now).run
+        ((Experiment.dispatch cand.req cand.now).run
           { cfg.app with unreliable := true } global).val ∧
       SameState
         (cand.after.withFrame (global.promises.filter (·.id != cand.req.key)))
@@ -140,7 +140,7 @@ theorem candidate_transport {cfg : Storage.Config} {cand : Candidate}
       cand.doc.map (·.1) := by
     rw [← hrep cand.req.key]
     exact storeAt_of_lookup hdoc
-  exact request_transport cand.req cand.now
+  exact dispatch_transport cand.req cand.now
     { cfg.app with unreliable := true } global cand.after
     (cand.doc.map (·.1)) cand.res cand.outs hglobalDoc
     (by
@@ -149,13 +149,13 @@ theorem candidate_transport {cfg : Storage.Config} {cand : Candidate}
       | none =>
         simp only [h, Option.toList, List.map_nil, Option.map] at hm ⊢
         change (cand.res, cand.after, cand.outs) ∈
-          (Experiment.request cand.req cand.now
+          (Experiment.dispatch cand.req cand.now
             { cfg.app with unreliable := true } {}).val at hm
         exact hm
       | some value =>
         simp only [h, Option.toList, List.map_cons, List.map_nil, Option.map] at hm ⊢
         change (cand.res, cand.after, cand.outs) ∈
-          (Experiment.request cand.req cand.now
+          (Experiment.dispatch cand.req cand.now
             { cfg.app with unreliable := true } { promises := [value.1] }).val at hm
         exact hm)
 
@@ -186,5 +186,140 @@ theorem commit_rep {cfg : Storage.Config} {cand : Candidate}
     rw [show (cand.promise.id == key) = false from beq_eq_false_iff_ne.mpr hpk]
     rw [Experiment.find?_filter_other _ hk]
     exact hrep key
+
+/-- A successful conditional commit is one hidden abstract server step. -/
+theorem linearize_candidate {cfg : Storage.Config} {cand : Candidate}
+    {store : Store} {a : Experiment.Conf promises}
+    {pre post : List (Experiment.Proc × Experiment.Proc × Msg)}
+    (hcand : cand.Valid cfg)
+    (hrep : StoreRep store a.state)
+    (hdoc : storeLookup store cand.req.key = cand.doc)
+    (hnet : a.net =
+      pre ++ (.client cand.client, .server, Msg.req cand.id cand.now cand.req) :: post) :
+    ∃ globalAfter serviceOut next,
+      serviceOut = cand.outs ++ [.send cand.client (Msg.res cand.id cand.res)] ∧
+      Experiment.Legal promises { cfg.app with unreliable := true } a
+        [((.server, a.now,
+          .receive (.client cand.client) (Msg.req cand.id cand.now cand.req)),
+          serviceOut, next)] ∧
+      Experiment.observe
+        [((.server, a.now,
+          .receive (.client cand.client) (Msg.req cand.id cand.now cand.req)),
+          serviceOut, next)] = [] ∧
+      StoreRep (storeCommit store cand.req.key cand.promise) globalAfter := by
+  obtain ⟨globalAfter, hout, hstate⟩ := candidate_transport hrep hdoc hcand
+  let serviceOut := cand.outs ++ [.send cand.client (Msg.res cand.id cand.res)]
+  let next : Experiment.Conf promises :=
+    ⟨pre ++ post ++ Experiment.emits .server
+      (.receive (.client cand.client) (Msg.req cand.id cand.now cand.req)) serviceOut,
+      globalAfter, a.now⟩
+  refine ⟨globalAfter, serviceOut, next, rfl, ?_, rfl, commit_rep hcand hrep hstate⟩
+  dsimp [next]
+  refine ⟨.receive (r := (globalAfter, serviceOut)) (Nat.le_refl _) hnet ?_, trivial⟩
+  exact request_step_mem (dispatch_as_serve hout)
+
+/-- A write that lands but reports failure is the abstract `lose` outcome:
+state and notifications happen, while the client receives 503. -/
+theorem linearize_candidate_lost {cfg : Storage.Config} {cand : Candidate}
+    {store : Store} {a : Experiment.Conf promises}
+    {pre post : List (Experiment.Proc × Experiment.Proc × Msg)}
+    (hcand : cand.Valid cfg)
+    (hrep : StoreRep store a.state)
+    (hdoc : storeLookup store cand.req.key = cand.doc)
+    (hnet : a.net =
+      pre ++ (.client cand.client, .server, Msg.req cand.id cand.now cand.req) :: post) :
+    ∃ globalAfter serviceOut next,
+      serviceOut = cand.outs ++ [.send cand.client (Msg.res cand.id ⟨503, none⟩)] ∧
+      Experiment.Legal promises { cfg.app with unreliable := true } a
+        [((.server, a.now,
+          .receive (.client cand.client) (Msg.req cand.id cand.now cand.req)),
+          serviceOut, next)] ∧
+      Experiment.observe
+        [((.server, a.now,
+          .receive (.client cand.client) (Msg.req cand.id cand.now cand.req)),
+          serviceOut, next)] = [] ∧
+      StoreRep (storeCommit store cand.req.key cand.promise) globalAfter := by
+  obtain ⟨globalAfter, hout, hstate⟩ := candidate_transport hrep hdoc hcand
+  let failed : Response := ⟨503, none⟩
+  let serviceOut := cand.outs ++ [.send cand.client (Msg.res cand.id failed)]
+  let next : Experiment.Conf promises :=
+    ⟨pre ++ post ++ Experiment.emits .server
+      (.receive (.client cand.client) (Msg.req cand.id cand.now cand.req)) serviceOut,
+      globalAfter, a.now⟩
+  refine ⟨globalAfter, serviceOut, next, rfl, ?_, rfl, commit_rep hcand hrep hstate⟩
+  dsimp [next]
+  refine ⟨.receive (r := (globalAfter, serviceOut)) (Nat.le_refl _) hnet ?_, trivial⟩
+  exact request_step_mem (dispatch_as_lose hout)
+
+set_option maxHeartbeats 1000000 in
+/-- A handler outcome that leaves its loaded document unchanged linearizes
+at the store read. The concrete store and abstract state remain related. -/
+theorem linearize_unchanged {cfg : Storage.Config} {store : Store}
+    {a : Experiment.Conf promises} {client : Addr} {id : CallId}
+    {req : Request} {now : Time} {doc : Option (Promise × Version)}
+    {res : Response} {after : Experiment.State} {outs : List (Out Msg)}
+    {pre post : List (Experiment.Proc × Experiment.Proc × Msg)}
+    (hrep : StoreRep store a.state)
+    (hdoc : storeLookup store req.key = doc)
+    (hout : (res, after, outs) ∈
+      ((Experiment.request req now).run { cfg.app with unreliable := true }
+        { promises := doc.toList.map (·.1) }).val)
+    (hunchanged : after = { promises := doc.toList.map (·.1) })
+    (hnet : a.net = pre ++ (.client client, .server, Msg.req id now req) :: post) :
+    ∃ globalAfter serviceOut next,
+      serviceOut = outs ++ [.send client (Msg.res id res)] ∧
+      Experiment.Legal promises { cfg.app with unreliable := true } a
+        [((.server, a.now, .receive (.client client) (Msg.req id now req)),
+          serviceOut, next)] ∧
+      Experiment.observe
+        [((.server, a.now, .receive (.client client) (Msg.req id now req)),
+          serviceOut, next)] = [] ∧
+      StoreRep store globalAfter := by
+  have hglobalDoc : Experiment.promiseAt a.state req.key = doc.map (·.1) := by
+    rw [← hrep req.key]
+    exact storeAt_of_lookup hdoc
+  have hlocal : (res, after, outs) ∈
+      ((Experiment.request req now).run { cfg.app with unreliable := true }
+        { promises := (doc.map (·.1)).toList }).val := by
+    cases hd : doc with
+    | none =>
+      simp only [hd, Option.toList, List.map_nil, Option.map] at hout ⊢
+      change (res, after, outs) ∈
+        (Experiment.request req now { cfg.app with unreliable := true } {}).val at hout
+      exact hout
+    | some value =>
+      simp only [hd, Option.toList, List.map_cons, List.map_nil, Option.map] at hout ⊢
+      change (res, after, outs) ∈
+        (Experiment.request req now { cfg.app with unreliable := true }
+          { promises := [value.1] }).val at hout
+      exact hout
+  have hlocal' : (res, after, outs) ∈
+      (Experiment.request req now { cfg.app with unreliable := true }
+        { promises := (doc.map (fun x : Promise × Version => x.1)).toList }).val := by
+    change (res, after, outs) ∈
+      ((Experiment.request req now).run { cfg.app with unreliable := true }
+        { promises := (doc.map (fun x : Promise × Version => x.1)).toList }).val
+    exact hlocal
+  obtain ⟨globalAfter, hglobal, hstate⟩ :=
+    request_transport req now { cfg.app with unreliable := true } a.state after
+      (doc.map (fun x : Promise × Version => x.1)) res outs hglobalDoc hlocal'
+  have hframe := footprint_frame_same a.state req.key (doc.map (·.1)) hglobalDoc
+  have hsame : SameState a.state globalAfter := by
+    apply hframe.symm.trans
+    rw [hunchanged] at hstate
+    cases hd : doc with
+    | none => simpa [hd] using hstate
+    | some value => simpa [hd] using hstate
+  have hrep' : StoreRep store globalAfter :=
+    fun key => (hrep key).trans (hsame key)
+  let serviceOut := outs ++ [.send client (Msg.res id res)]
+  let next : Experiment.Conf promises :=
+    ⟨pre ++ post ++ Experiment.emits .server
+      (.receive (.client client) (Msg.req id now req)) serviceOut,
+      globalAfter, a.now⟩
+  refine ⟨globalAfter, serviceOut, next, rfl, ?_, rfl, hrep'⟩
+  dsimp [next]
+  refine ⟨.receive (r := (globalAfter, serviceOut)) (Nat.le_refl _) hnet ?_, trivial⟩
+  exact request_step_mem hglobal
 
 end Exp2
