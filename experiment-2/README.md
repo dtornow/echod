@@ -24,7 +24,8 @@ scheduler. This experiment takes that shape and plugs it into experiment
   trace-inclusion theorem specialized to this system. `clientView` is the
   client projection, and `drive_refines_of_simulation` proves a driven run
   valid once the node/store simulation relation is supplied.
-- `Exp2/ProofExamples.lean`: semantic witnesses for `safe` and `queued`.
+- `Exp2/ProofExamples.lean`: semantic witnesses for `safe`, `queued`, and
+  `ghost` (a failed write that landed).
   These do not trust the executable checker: each gives an explicit abstract
   schedule and proves it legal with exactly the concrete client trace.
 - `Exp2/Node.lean`: experiment 1's storage node rewritten as code: take a
@@ -37,7 +38,7 @@ scheduler. This experiment takes that shape and plugs it into experiment
   behind another is served after it, 30 fuzzed runs refine.
 
 No spawn, so a node serves one request at a time. The handler embedding is
-proved, as are the two end-to-end examples. The general storage-node theorem
+proved, as are three end-to-end examples. The general storage-node theorem
 is `Refines cfg`; it necessarily assumes conditional writes, because `lost`
 is a counterexample without them. Its system-specific simulation invariant
 is still open.
