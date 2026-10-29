@@ -264,6 +264,9 @@ inductive Act (M : Type) where
 def pick {α : Type} (xs : Some α) (j : Nat) : α :=
   xs.val[j % xs.val.length]'(Nat.mod_lt _ (List.length_pos_iff.mpr xs.property))
 
+theorem pick_mem {α : Type} (xs : Some α) (j : Nat) : pick xs j ∈ xs.val :=
+  List.getElem_mem ..
+
 /-- One step at `t`, if the environment can make it. -/
 def Conf.take (c : Conf svc) (cfg : svc.Config) (t : Time) :
     Act svc.Msg → Option (Label svc.Msg × List (Out svc.Msg) × Conf svc)
@@ -287,15 +290,83 @@ def Conf.take (c : Conf svc) (cfg : svc.Config) (t : Time) :
         some ((.server, t, .timeout), r.2, ⟨c.net ++ emits .server .timeout r.2, r.1, t⟩)
       else none
 
+theorem split_at {α : Type} {l : List α} {i : Nat} {a : α} (h : l[i]? = some a) :
+    l = l.take i ++ a :: l.drop (i + 1) := by
+  obtain ⟨hi, rfl⟩ := List.getElem?_eq_some_iff.mp h
+  rw [← List.drop_eq_getElem_cons hi, List.take_append_drop]
+
+/-- The executable scheduler takes only steps admitted by the rule. -/
+theorem take_step {c c' : Conf svc} {cfg : svc.Config} {t : Time}
+    {act : Act svc.Msg} {l : Label svc.Msg} {outs : List (Out svc.Msg)}
+    (h : c.take cfg t act = some (l, outs, c')) :
+    Step svc cfg c l outs c' := by
+  cases act with
+  | request a m =>
+    simp only [Conf.take] at h
+    split at h <;> try simp at h
+    rename_i ht
+    obtain ⟨rfl, rfl, rfl⟩ := h
+    exact .request ht
+  | deliver i j =>
+    simp only [Conf.take] at h
+    split at h <;> try simp at h
+    rename_i ht
+    split at h <;> try simp at h
+    · rename_i a m hi
+      obtain ⟨rfl, rfl, rfl⟩ := h
+      rw [List.eraseIdx_eq_take_drop_succ]
+      exact .deliver ht (split_at hi)
+    · rename_i a m hi
+      obtain ⟨rfl, rfl, rfl⟩ := h
+      rw [List.eraseIdx_eq_take_drop_succ]
+      exact .receive ht (split_at hi) (pick_mem _ _)
+  | tick j =>
+    simp only [Conf.take] at h
+    split at h <;> try simp at h
+    rename_i ht
+    obtain ⟨rfl, rfl, rfl⟩ := h
+    exact .tick ht (pick_mem _ _)
+
+def runSchedule (cfg : svc.Config) (c : Conf svc) :
+    List (Time × Act svc.Msg) → Option (Execution svc)
+  | [] => some []
+  | (t, a) :: rest => do
+      let (l, o, c') ← c.take cfg t a
+      let x ← runSchedule cfg c' rest
+      return (l, o, c') :: x
+
+theorem runSchedule_legal {c : Conf svc} {cfg : svc.Config}
+    {acts : List (Time × Act svc.Msg)} {x : Execution svc}
+    (h : runSchedule cfg c acts = some x) : Legal svc cfg c x := by
+  induction acts generalizing c x with
+  | nil =>
+    simp [runSchedule] at h
+    subst h
+    trivial
+  | cons ta rest ih =>
+    obtain ⟨t, act⟩ := ta
+    simp only [runSchedule] at h
+    obtain ⟨⟨l, outs, c'⟩, ht, h⟩ := Option.bind_eq_some_iff.mp h
+    obtain ⟨xs, hxs, h⟩ := Option.bind_eq_some_iff.mp h
+    change some ((l, outs, c') :: xs) = some x at h
+    simp only [Option.some.injEq] at h
+    subst x
+    exact ⟨take_step ht, ih hxs⟩
+
 /-- Run a schedule from the start; `none` if a step cannot be made. -/
 def schedule (svc : Service) (cfg : svc.Config) (s : svc.State) (acts : List (Time × Act svc.Msg)) :
     Option (Execution svc) :=
-  let rec go (c : Conf svc) : List (Time × Act svc.Msg) → Option (Execution svc)
-    | [] => some []
-    | (t, a) :: rest => do
-        let (l, o, c') ← c.take cfg t a
-        let x ← go c' rest
-        return (l, o, c') :: x
-  go (initial s) acts
+  runSchedule cfg (initial s) acts
+
+theorem schedule_legal {cfg : svc.Config} {s : svc.State}
+    {acts : List (Time × Act svc.Msg)} {x : Execution svc}
+    (h : schedule svc cfg s acts = some x) : Legal svc cfg (initial s) x :=
+  runSchedule_legal h
+
+theorem valid_of_schedule {cfg : svc.Config} {s : svc.State}
+    {acts : List (Time × Act svc.Msg)} {x : Execution svc} {trace : List (Label svc.Msg)}
+    (hs : schedule svc cfg s acts = some x) (ho : observe x = trace) :
+    Valid svc cfg s trace :=
+  ⟨x, schedule_legal hs, ho⟩
 
 end Experiment

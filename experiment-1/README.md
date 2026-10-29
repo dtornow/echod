@@ -33,7 +33,10 @@
   explains the server.
 
 - `Experiment/Network.lean`: shell 4, many processes, one service, each
-  with its own state. Executable only.
+  with its own state. Its executable step relation and legal executions are
+  defined, and every returned schedule is proved legal.
+- `Experiment/NetworkRefinement.lean`: forward simulation from that network
+  shell to the single-service shell implies trace inclusion.
 - `Experiment/Check.lean`: a search: could this trace of the concurrent
   shell have happened? Executable, unproved.
 - `Experiment/Storage.lean`: a simplified echod. Nodes keep nothing; every

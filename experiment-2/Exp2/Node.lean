@@ -126,20 +126,50 @@ inductive Script where
   | send (a to : Addr) (m : Msg)
   | move (from_ to : Addr) (j : Nat := 0)
 
+def Script.act? (c : Experiment.Network.Conf system) :
+    Script → Option (Experiment.Network.Act system.Msg)
+  | .send a to m => some (Experiment.Network.Act.request a to (.app m))
+  | .move f to j =>
+    (c.net.findIdx? fun (w, w', _) => w.addr == f && w'.addr == to).map
+      (fun i => Experiment.Network.Act.deliver i j)
+
+def driveFrom (cfg : Config) (c : Experiment.Network.Conf system) :
+    List (Time × Script) → Option (Experiment.Network.Execution system)
+  | [] => some []
+  | (t, s) :: rest => do
+    let act ← s.act? c
+    let (l, o, c') ← c.take cfg t act
+    let x ← driveFrom cfg c' rest
+    return (l, o, c') :: x
+
 def drive (cfg : Config) (script : List (Time × Script)) : Option (Experiment.Network.Execution system) :=
-  let rec go (c : Experiment.Network.Conf system) :
-      List (Time × Script) → Option (Experiment.Network.Execution system)
-    | [] => some []
-    | (t, s) :: rest => do
-      let act ← match s with
-        | .send a to m => some (Experiment.Network.Act.request a to (.app m))
-        | .move f to j =>
-          (c.net.findIdx? fun (w, w', _) => w.addr == f && w'.addr == to).map
-            (fun i => Experiment.Network.Act.deliver i j)
-      let (l, o, c') ← c.take cfg t act
-      let x ← go c' rest
-      return (l, o, c') :: x
-  go (Experiment.Network.initial world) script
+  driveFrom cfg (Experiment.Network.initial world) script
+
+/-- Every execution returned by `drive` follows the network shell's rule. -/
+theorem driveFrom_legal {c : Experiment.Network.Conf system}
+    {script : List (Time × Script)} {x : Experiment.Network.Execution system}
+    (h : driveFrom cfg c script = some x) :
+    Experiment.Network.Legal system cfg c x := by
+  induction script generalizing c x with
+  | nil =>
+    simp [driveFrom] at h
+    subst h
+    trivial
+  | cons ts rest ih =>
+    obtain ⟨t, s⟩ := ts
+    simp only [driveFrom] at h
+    obtain ⟨act, _, h⟩ := Option.bind_eq_some_iff.mp h
+    obtain ⟨⟨l, outs, c'⟩, ht, h⟩ := Option.bind_eq_some_iff.mp h
+    obtain ⟨xs, hxs, h⟩ := Option.bind_eq_some_iff.mp h
+    change some ((l, outs, c') :: xs) = some x at h
+    simp only [Option.some.injEq] at h
+    subst x
+    exact ⟨⟨t, act, ht⟩, ih hxs⟩
+
+theorem drive_legal {script : List (Time × Script)} {x : Experiment.Network.Execution system}
+    (h : drive cfg script = some x) :
+    Experiment.Network.Legal system cfg (Experiment.Network.initial world) x :=
+  driveFrom_legal h
 
 def answerTo (a : Addr) (x : Experiment.Network.Execution system) : List Msg :=
   x.filterMap fun ((w, _, ev), _, _) =>

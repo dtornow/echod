@@ -87,17 +87,55 @@ def Conf.take (c : Conf svc) (cfg : svc.Config) (t : Time) :
         (c.run cfg p t .tick j c.net).map fun (o, c') => ((.proc p, t, .timeout), o, c')
       else none
 
+/-- One executable network step.  `take` is the rule for this shell; retaining
+    it as a proposition lets later proofs quantify over executions produced by
+    any driver, rather than over one particular schedule. -/
+def Step (svc : Service) (cfg : svc.Config) (c : Conf svc)
+    (l : Label svc.Msg) (outs : List (Out svc.Msg)) (c' : Conf svc) : Prop :=
+  ∃ t act, c.take cfg t act = some (l, outs, c')
+
+/-- Every entry is a step from the configuration before it. -/
+def Legal (svc : Service) (cfg : svc.Config) : Conf svc → Execution svc → Prop
+  | _, [] => True
+  | c, (l, outs, c') :: rest => Step svc cfg c l outs c' ∧ Legal svc cfg c' rest
+
 def initial (states : List (Addr × svc.State)) : Conf svc := ⟨[], states, 0⟩
+
+def run (cfg : svc.Config) (c : Conf svc) :
+    List (Time × Act svc.Msg) → Option (Execution svc)
+  | [] => some []
+  | (t, a) :: rest => do
+      let (l, o, c') ← c.take cfg t a
+      let x ← run cfg c' rest
+      return (l, o, c') :: x
 
 def schedule (svc : Service) (cfg : svc.Config) (states : List (Addr × svc.State))
     (acts : List (Time × Act svc.Msg)) : Option (Execution svc) :=
-  let rec go (c : Conf svc) : List (Time × Act svc.Msg) → Option (Execution svc)
-    | [] => some []
-    | (t, a) :: rest => do
-        let (l, o, c') ← c.take cfg t a
-        let x ← go c' rest
-        return (l, o, c') :: x
-  go (initial states) acts
+  run cfg (initial states) acts
+
+theorem run_legal {c : Conf svc} {acts : List (Time × Act svc.Msg)} {x : Execution svc}
+    (h : run cfg c acts = some x) : Legal svc cfg c x := by
+  induction acts generalizing c x with
+  | nil =>
+    simp [run] at h
+    subst h
+    trivial
+  | cons ta rest ih =>
+    obtain ⟨t, act⟩ := ta
+    simp only [run] at h
+    obtain ⟨⟨l, outs, c'⟩, ht, h⟩ := Option.bind_eq_some_iff.mp h
+    obtain ⟨xs, hxs, h⟩ := Option.bind_eq_some_iff.mp h
+    change some ((l, outs, c') :: xs) = some x at h
+    simp only [Option.some.injEq] at h
+    subst x
+    exact ⟨⟨t, act, ht⟩, ih hxs⟩
+
+/-- Every execution returned by `schedule` is legal. -/
+theorem schedule_legal {states : List (Addr × svc.State)}
+    {acts : List (Time × Act svc.Msg)} {x : Execution svc}
+    (h : schedule svc cfg states acts = some x) :
+    Legal svc cfg (initial states) x :=
+  run_legal h
 
 /-- A random execution: at each step a client sends one of `inputs` to a
     random one of `to`, or a message on the network is delivered; time

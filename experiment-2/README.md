@@ -20,6 +20,13 @@ scheduler. This experiment takes that shape and plugs it into experiment
   experiment 1. A terminating evaluation relation for processes records
   results, state, and outputs. `eval_lift_iff` proves that `Proc.lift`
   introduces no handler outcome and loses none.
+- `Exp2/SystemRefinement.lean`: the end-to-end statement and the generic
+  trace-inclusion theorem specialized to this system. `clientView` is the
+  client projection, and `drive_refines_of_simulation` proves a driven run
+  valid once the node/store simulation relation is supplied.
+- `Exp2/ProofExamples.lean`: semantic witnesses for `safe` and `queued`.
+  These do not trust the executable checker: each gives an explicit abstract
+  schedule and proves it legal with exactly the concrete client trace.
 - `Exp2/Node.lean`: experiment 1's storage node rewritten as code: take a
   request, ask the store, wait, decide with the abstract handler, write
   conditionally, wait, answer; retry on a lost race. The flight table and
@@ -30,7 +37,9 @@ scheduler. This experiment takes that shape and plugs it into experiment
   behind another is served after it, 30 fuzzed runs refine.
 
 No spawn, so a node serves one request at a time. The handler embedding is
-proved. The storage node's end-to-end refinement of the abstract promise
-service is still checked per run, not proved.
+proved, as are the two end-to-end examples. The general storage-node theorem
+is `Refines cfg`; it necessarily assumes conditional writes, because `lost`
+is a counterexample without them. Its system-specific simulation invariant
+is still open.
 
 `lake build` builds experiment 1 too (a path dependency).

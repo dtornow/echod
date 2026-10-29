@@ -4,6 +4,7 @@ import Experiment.Sequential
 import Experiment.Concurrent
 import Experiment.Fuzz
 import Experiment.Network
+import Experiment.NetworkRefinement
 import Experiment.Check
 import Experiment.Promise
 import Experiment.Examples
