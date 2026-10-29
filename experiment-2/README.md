@@ -23,13 +23,16 @@ scheduler. This experiment takes that shape and plugs it into experiment
 - `Exp2/SystemRefinement.lean`: the end-to-end statement and the generic
   trace-inclusion theorem specialized to this system. `clientView` is the
   client projection, and `drive_refines_of_simulation` proves a driven run
-  valid once the node/store simulation relation is supplied.
+  valid once the node/store simulation relation is supplied. `RefinesFor`
+  states the property for an arbitrary list of server addresses.
 - `Exp2/StorageSimulation.lean`: the system-specific core: canonical node
   control states, key-extensional store representation, local-to-global
   handler transport, and proved abstract linearization steps for unchanged
   reads, successful CAS writes, and writes that land but report failure.
   `storage_simulationOn` proves every driven transition is simulated;
-  `system_refines` proves `Refines cfg` for every configuration.
+  `system_refines_for` proves `RefinesFor nodes cfg` for every duplicate-free
+  node list not containing the physical store address. `system_refines` is
+  its backwards-compatible two-node instance.
 - `Exp2/ProofExamples.lean`: semantic witnesses for `safe`, `queued`,
   `ghost` (a failed write that landed), and `delayedCas`.
   These do not trust the executable checker: each gives an explicit abstract
@@ -45,9 +48,10 @@ scheduler. This experiment takes that shape and plugs it into experiment
   `delayedCas` checks that request time survives an intervening read and a
   later CAS.
 
-No spawn, so a node serves one request at a time. The handler embedding is
-proved, as are four end-to-end examples. The general storage-node property
-is `Refines cfg`; `system_refines` proves it. The property necessarily assumes
+No spawn, so each node serves one request at a time. `worldFor nodes` creates
+any finite number of such nodes. The handler embedding is proved, as are four
+end-to-end examples. The general storage-node property is `RefinesFor nodes
+cfg`; `system_refines_for` proves it. The property necessarily assumes
 conditional writes, because `lost` is a counterexample without them.
 
 `lake build` builds experiment 1 too (a path dependency).

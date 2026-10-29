@@ -34,7 +34,8 @@
 
 - `Experiment/Network.lean`: shell 4, many processes, one service, each
   with its own state. Its executable step relation and legal executions are
-  defined, and every returned schedule is proved legal.
+  defined, every returned schedule is proved legal, and `Reachable` provides
+  reusable induction over attainable configurations.
 - `Experiment/NetworkRefinement.lean`: forward simulation from that network
   shell to the single-service shell implies trace inclusion.
 - `Experiment/Check.lean`: a search: could this trace of the concurrent

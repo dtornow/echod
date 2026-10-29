@@ -150,8 +150,18 @@ abbrev system : Service where
   receive := receive
   tick    := fun _ => pure ()
 
-def world : List (Addr × Local) :=
-  [("n1", .node ⟨0, [], node⟩), ("n2", .node ⟨0, [], node⟩), ("s3", .store {})]
+/-- The two-node deployment used by the original examples. -/
+def defaultNodes : List Addr := ["n1", "n2"]
+
+/-- A deployment with one fresh Resonate process at every supplied address
+and the physical object store at `s3`.  Refinement requires the addresses to
+be distinct and not to contain `s3`. -/
+def worldFor (nodes : List Addr) : List (Addr × Local) :=
+  nodes.map (fun address => (address, .node ⟨0, [], node⟩)) ++
+    [("s3", .store {})]
+
+/-- Backwards-compatible name for the original two-node deployment. -/
+def world : List (Addr × Local) := worldFor defaultNodes
 
 /-- What the clients saw, as the abstract world's trace. -/
 def clientTrace (x : Experiment.Network.Execution system) : List (Experiment.Label Msg) :=
@@ -186,8 +196,15 @@ def driveFrom (cfg : Config) (c : Experiment.Network.Conf system) :
     let x ← driveFrom cfg c' rest
     return (l, o, c') :: x
 
-def drive (cfg : Config) (script : List (Time × Script)) : Option (Experiment.Network.Execution system) :=
-  driveFrom cfg (Experiment.Network.initial world) script
+def driveFor (nodes : List Addr) (cfg : Config)
+    (script : List (Time × Script)) :
+    Option (Experiment.Network.Execution system) :=
+  driveFrom cfg (Experiment.Network.initial (worldFor nodes)) script
+
+/-- Backwards-compatible driver for `defaultNodes`. -/
+def drive (cfg : Config) (script : List (Time × Script)) :
+    Option (Experiment.Network.Execution system) :=
+  driveFor defaultNodes cfg script
 
 /-- Every execution returned by `drive` follows the network shell's rule. -/
 theorem driveFrom_legal {c : Experiment.Network.Conf system}
@@ -210,10 +227,19 @@ theorem driveFrom_legal {c : Experiment.Network.Conf system}
     subst x
     exact ⟨⟨t, act, ht⟩, ih hxs⟩
 
-theorem drive_legal {script : List (Time × Script)} {x : Experiment.Network.Execution system}
-    (h : drive cfg script = some x) :
-    Experiment.Network.Legal system cfg (Experiment.Network.initial world) x :=
+theorem driveFor_legal {nodes : List Addr} {script : List (Time × Script)}
+    {x : Experiment.Network.Execution system}
+    (h : driveFor nodes cfg script = some x) :
+    Experiment.Network.Legal system cfg
+      (Experiment.Network.initial (worldFor nodes)) x :=
   driveFrom_legal h
+
+theorem drive_legal {script : List (Time × Script)}
+    {x : Experiment.Network.Execution system}
+    (h : drive cfg script = some x) :
+    Experiment.Network.Legal system cfg (Experiment.Network.initial world) x := by
+  simpa [drive, world] using
+    (driveFor_legal (nodes := defaultNodes) h)
 
 def answerTo (a : Addr) (x : Experiment.Network.Execution system) : List Msg :=
   x.filterMap fun ((w, _, ev), _, _) =>

@@ -1,4 +1,4 @@
-import Exp2.Node
+import Exp2.StorageSimulation
 
 /-!
 # End-to-end refinement witnesses
@@ -116,5 +116,9 @@ theorem delayedCas_valid :
     Valid promises { unreliable := true } {} (clientTrace delayedCas) := by
   apply valid_of_schedule delayedCasAbstract_runs
   native_decide
+
+/-- The general theorem is not tied to the original two-node deployment. -/
+theorem three_node_refines : RefinesFor ["n1", "n2", "n3"] {} :=
+  system_refines_for ["n1", "n2", "n3"] (by decide) (by decide) {}
 
 end Exp2
