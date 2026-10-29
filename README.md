@@ -22,7 +22,7 @@ crashes, outages and lost acks.
 |---|---|
 | [`abstract/`](abstract) | the independent executable Abstract Resonate machine: all 21 protocol handlers and all 6 autonomous actions, with observation bookkeeping separate from semantics; Verus-only dependencies, no kernel, Concrete, Accordant or checker dependency |
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
-| [`concrete/`](concrete) | the deterministic document model at its own level: persisted promise rows in order, with kernel maps only as derived views; normalization uses that row order directly |
+| [`concrete/`](concrete) | the deterministic bucket model: keyed origin and schedule documents with document-local row order, versions and headers, plus timer keys, node announcements and membership; maps are derived views |
 | [`refinement/`](refinement) | the local Concrete-to-Abstract proof boundary: independent type/state translation and refinement relation, with no checker-framework dependency |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |

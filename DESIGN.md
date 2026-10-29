@@ -9,7 +9,7 @@ durable executions in V8. Built inside out, from the stored data up.
 |---|---|
 | `abstract/` | `echod-abstract`: an independent executable Verus port of the Resonate abstract machine. Its own protocol state and ordered writer effects; one named semantic action for each of 21 external handlers and 6 internal actions. Invoke/return/receive/clock bookkeeping is separate. It depends only on Verus, not on the kernel, Concrete, Accordant or checker |
 | `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
-| `concrete/` | `echod-concrete`: the deterministic document model at the Concrete level. Its state is the persisted sequence of promise rows; object maps are derived views only. Existing rows update in place, births append, and the single-pass normalization consumes the persisted row order directly. Verified independently of the Abstract model |
+| `concrete/` | `echod-concrete`: the deterministic bucket model. It contains keyed origin and schedule documents with document-local ordered rows, stamps, nonces and versions, plus timer keys, node announcements and membership. Bucket collection order is erased by derived map views; row order remains local to each document |
 | `refinement/` | `echod-refinement`: the local proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency |
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `refine/` | `echod-refine`: the store machine (the bucket as state, the wire rules, a sweep, the kernel handler, a drain as the request step; a sweep as internal work) as an `accordant::Model`, and `concrete_refines_abstract`: every bounded trace of it is a trace of the Resonate model, by accordant's forward-simulation theorem; the model's handlers are themselves verified to compute the twins the theorem is stated over. Proof only, `cargo verus verify -p echod-refine`; 290 items, no admits. Bounded: the clock and every instant and duration a request carries at most `MAX_TIME`, requests the wire's validators pass, no targeted timer, no schedule (`request_bounded`) |
@@ -17,7 +17,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
 | `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; every run checked against the Resonate model of `dtornow/accordant` |
 
-The Abstract, kernel, Concrete-document and system layers verify
+The Abstract, kernel, Concrete-bucket and system layers verify
 independently. The remaining work is the refinement chain between them and
 the complete `logic::on_event` orchestration. `echod` performs the logic's
 effects; simulation is executable evidence at the same boundary. The core
