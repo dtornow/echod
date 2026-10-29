@@ -23,11 +23,6 @@ def project (view : Label concrete.Msg → Option (Experiment.Label abstract.Msg
   | [] => []
   | (l, _, _) :: rest => (view l).toList ++ project view rest
 
-/-- The configuration after a concrete network execution. -/
-def endOf (c : Conf concrete) : Execution concrete → Conf concrete
-  | [] => c
-  | (_, _, c') :: rest => endOf c' rest
-
 /-- The configuration after an abstract execution. -/
 def abstractEnd (c : Experiment.Conf abstract) :
     Experiment.Execution abstract → Experiment.Conf abstract

@@ -99,6 +99,45 @@ def Legal (svc : Service) (cfg : svc.Config) : Conf svc → Execution svc → Pr
   | _, [] => True
   | c, (l, outs, c') :: rest => Step svc cfg c l outs c' ∧ Legal svc cfg c' rest
 
+/-- The configuration after an execution. -/
+def endOf (c : Conf svc) : Execution svc → Conf svc
+  | [] => c
+  | (_, _, c') :: rest => endOf c' rest
+
+/-- Inductive closure of `Step`: configurations obtainable from `first`. -/
+inductive Reachable (svc : Service) (cfg : svc.Config) (first : Conf svc) :
+    Conf svc → Prop where
+  | init : Reachable svc cfg first first
+  | step {c l outs c'} :
+      Reachable svc cfg first c →
+      Step svc cfg c l outs c' →
+      Reachable svc cfg first c'
+
+theorem Reachable.trans {a b c : Conf svc}
+    (hab : Reachable svc cfg a b) (hbc : Reachable svc cfg b c) :
+    Reachable svc cfg a c := by
+  induction hbc with
+  | init => exact hab
+  | step _ hs ih => exact Reachable.step ih hs
+
+theorem legal_reachable {first : Conf svc} {x : Execution svc}
+    (h : Legal svc cfg first x) :
+    Reachable svc cfg first (endOf first x) := by
+  induction x generalizing first with
+  | nil => exact .init
+  | cons entry rest ih =>
+    obtain ⟨l, outs, c'⟩ := entry
+    exact (Reachable.step Reachable.init h.1).trans (ih h.2)
+
+/-- The standard invariant rule for reachable network configurations. -/
+theorem Reachable.invariant {first : Conf svc} {P : Conf svc → Prop}
+    (hinit : P first)
+    (hstep : ∀ {c l outs c'}, P c → Step svc cfg c l outs c' → P c')
+    {c : Conf svc} (h : Reachable svc cfg first c) : P c := by
+  induction h with
+  | init => exact hinit
+  | step hr hs ih => exact hstep ih hs
+
 def initial (states : List (Addr × svc.State)) : Conf svc := ⟨[], states, 0⟩
 
 def run (cfg : svc.Config) (c : Conf svc) :
