@@ -1,6 +1,6 @@
 [package]
 name = "echod-concrete"
-description = "The deterministic Concrete bucket model: keyed documents with document-local persisted row order."
+description = "The deterministic verified raw object-store automaton."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

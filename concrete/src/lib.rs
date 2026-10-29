@@ -1,15 +1,19 @@
-//! The deterministic Concrete bucket model.
+//! The deterministic Concrete object-store model.
 //!
-//! Persisted row order belongs to one document. A bucket is only a collection
-//! of keyed documents and auxiliary objects; the order of those collections
-//! is not semantic. Map views below are therefore derived from keys, while
-//! each origin document retains the row order consumed by the kernel.
+//! [`raw::RawStore`] is durable state: opaque key, bytes, and version only.
+//! The semantic `Bucket` below remains temporarily as the decoded target used
+//! by refinement; it is not stored by the raw automaton.
 
-#![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
+#![cfg_attr(
+    not(verus_keep_ghost),
+    allow(unused_imports, dead_code, unused_variables)
+)]
 
 use vstd::prelude::*;
 
 use echod_kernel::types::{Promise, Schedule};
+
+pub mod raw;
 
 #[cfg(verus_keep_ghost)]
 use echod_kernel::steps::executable_single_pass;
@@ -70,8 +74,8 @@ pub struct MembershipConfiguration {
     pub members: Vec<String>,
 }
 
-/// Everything persisted in the Concrete store. Vector order here is merely a
-/// representation of a bucket listing and is never used as state meaning.
+/// Decoded semantic target. Vector order here is merely a representation of a
+/// bucket listing and is never used as state meaning.
 pub struct Bucket {
     pub origins: Vec<OriginDocument>,
     pub schedules: Vec<ScheduleDocument>,
@@ -80,7 +84,12 @@ pub struct Bucket {
     pub membership: Option<MembershipConfiguration>,
 }
 
-/// Store and bucket are the same persistence boundary.
+/// Temporary decoded target for refinement. Durable state lives in
+/// [`raw::RawStore`]; a codec/refinement layer may derive this semantic shape
+/// from raw bytes, but the object-store automaton never stores it.
+pub type SemanticBucket = Bucket;
+
+/// Compatibility alias for the former semantic store.
 pub type Store = Bucket;
 
 #[cfg(verus_keep_ghost)]
