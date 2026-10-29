@@ -18,7 +18,7 @@ if [ -z "${ECHOD_STORE:-}" ]; then
     pid=$!
     export AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s ECHOD_ENDPOINT=http://127.0.0.1:9000
     for _ in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:9000/ && break; sleep 1; done
-    cargo run -q -p echod-server --example mkbucket -- echod "$ECHOD_ENDPOINT"
+    cargo run -q -p echod --example mkbucket -- echod "$ECHOD_ENDPOINT"
   else
     mkdir -p "$root/echod"
     s3s-fs --host 127.0.0.1 --port 8014 --access-key k --secret-key s "$root" >"$root/s3s.log" 2>&1 &
