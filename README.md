@@ -22,7 +22,8 @@ crashes, outages and lost acks.
 |---|---|
 | [`abstract/`](abstract) | the independent executable Abstract Resonate machine: all 21 protocol handlers and all 6 autonomous actions, with observation bookkeeping separate from semantics; Verus-only dependencies, no kernel, Concrete, Accordant or checker dependency |
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
-| [`concrete/`](concrete) | the deterministic bucket model: keyed origin and schedule documents with document-local row order, versions and headers, plus timer keys, node announcements and membership; maps are derived views |
+| [`codec/`](codec) | the executable verified persistence format: canonical UTF-8, typed object/key codecs, appendable document segments, compaction and malformed-input rejection |
+| [`concrete/`](concrete) | the deterministic raw object-store automaton: keyed bytes and opaque versions with explicit failure choices; decoded documents, timers, announcements and membership are verified derived views |
 | [`refinement/`](refinement) | the local Concrete-to-Abstract proof boundary: independent type/state translation and refinement relation, with no checker-framework dependency |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
@@ -47,7 +48,8 @@ cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
 (cd abstract && ./verify.sh)            # the independent Abstract protocol machine
 (cd kernel && ./verify.sh)              # the kernel under Verus
-(cd concrete && ./verify.sh)            # the row-native Concrete document model
+(cd codec && ./verify.sh)               # byte/object/document/key codec laws
+(cd concrete && ./verify.sh)            # raw-byte Concrete store and decoded view
 (cd refinement && ./verify.sh)          # local Concrete-to-Abstract relation
 (cd system && ./verify.sh)              # the system model under Verus, importing the kernel
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
