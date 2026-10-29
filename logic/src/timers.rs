@@ -195,7 +195,7 @@ impl State {
     /// Load what is owed, else fire what is due. Called whenever time
     /// passed or a listing ended.
     pub(crate) fn timers_run(&mut self, now: u64) {
-        if !self.timers.started || self.timers.listing.is_some() {
+        if !self.running() || !self.timers.started || self.timers.listing.is_some() {
             return;
         }
         if let Some(b) = self.timers.backoff_until {
@@ -248,6 +248,10 @@ impl State {
     }
 
     pub(crate) fn timers_completed(&mut self, op: OpId, outcome: StoreOutcome) {
+        if !self.running() {
+            self.timers.listing = None;
+            return;
+        }
         let Some(listing) = self.timers.listing.take() else { return };
         if !listing.expects(op) {
             self.timers.listing = Some(listing);
@@ -339,6 +343,9 @@ impl State {
     }
 
     fn dispatch_due(&mut self, now: u64) {
+        if !self.running() {
+            return;
+        }
         while self.timers.inflight < CONCURRENCY {
             let Some((at, key)) = self.timers.backlog.pop_front() else { break };
             self.timer_fire(key, at, now);

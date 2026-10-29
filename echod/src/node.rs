@@ -4,9 +4,9 @@
 //! takes the lock, runs the core's one step, drops the lock, and submits
 //! the ordered effects that came out: a store call is spawned and its answer
 //! comes back as `Completed`; a reply wakes the request waiting for it; a
-//! message is pushed; a wake resets the one timer; a note goes to the metrics,
-//! log, and whoever listens. The core never waits, so the lock is held for a
-//! step and no longer. Asynchronous completions may return in any order, as
+//! message is pushed; a versioned timer intent replaces the prior one; a note
+//! goes to the metrics, log, and whoever listens. The core never waits, so
+//! the lock is held for a step and no longer. Asynchronous completions may return in any order, as
 //! separate events; nothing here decides anything.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use echod_logic::members::Membership;
-use echod_logic::types::{Effect, Event, Note, RequestId};
+use echod_logic::types::{Effect, Event, Note, RequestId, Timer};
 use echod_logic::{on_event, Concrete};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
@@ -33,6 +33,12 @@ pub const NODE: &str = "x-echod-node";
 
 type Reply = Result<ResponseEnvelope, Unavailable>;
 
+#[derive(Clone, Copy)]
+struct ScheduledTimer {
+    timer: Timer,
+    at: tokio::time::Instant,
+}
+
 pub struct Node {
     me: Weak<Node>,
     cfg: Config,
@@ -45,8 +51,8 @@ pub struct Node {
     metrics: Arc<Metrics>,
     replies: Mutex<HashMap<RequestId, oneshot::Sender<Reply>>>,
     next_request: AtomicU64,
-    /// When the core next wants a tick, as the wake task reads it.
-    wake: watch::Sender<Option<tokio::time::Instant>>,
+    /// The core's latest versioned timer intent.
+    timer: watch::Sender<Option<ScheduledTimer>>,
     stopped: watch::Sender<bool>,
     crashed: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -73,7 +79,7 @@ impl Node {
         let store: Arc<dyn Store> = Arc::new(metrics::MeteredStore::new(store, keys, Arc::clone(&metrics)));
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", echod_logic::keys::fnv1a(&format!("{}/{}", cfg.node_url(), clock.now()))));
         let state = Concrete::new(cfg.logic(id.clone(), appendable));
-        let (wake, _) = watch::channel(None);
+        let (timer, _) = watch::channel(None);
         let (stopped, _) = watch::channel(false);
         let (crashed, _) = watch::channel(false);
         let node = Arc::new_cyclic(|me| Node {
@@ -88,7 +94,7 @@ impl Node {
             metrics,
             replies: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
-            wake,
+            timer,
             stopped,
             crashed,
             tasks: Mutex::new(Vec::new()),
@@ -208,8 +214,8 @@ impl Node {
                 let node = self.me();
                 tokio::spawn(async move { node.send(address, message).await });
             }
-            Effect::Wake { after_ms } => {
-                let _ = self.wake.send(Some(tokio::time::Instant::now() + Duration::from_millis(after_ms)));
+            Effect::ScheduleTimer { timer, after_ms } => {
+                self.timer.send_replace(Some(ScheduledTimer { timer, at: tokio::time::Instant::now() + Duration::from_millis(after_ms) }));
             }
             Effect::Note(n) => {
                 self.metrics.note(&n);
@@ -238,21 +244,20 @@ impl Node {
         self.metrics.message(kind, outcome, started);
     }
 
-    /// The one timer: sleeps until the instant the core last asked for,
-    /// then ticks; a new ask resets it.
-    fn spawn_wake(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// Deliver the latest intent, returning its identity and generation.
+    fn spawn_timer(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let node = Arc::clone(self);
-        let mut rx = self.wake.subscribe();
+        let mut rx = self.timer.subscribe();
         tokio::spawn(async move {
             loop {
-                let at = *rx.borrow_and_update();
-                match at {
+                let scheduled = *rx.borrow_and_update();
+                match scheduled {
                     None => {
                         if rx.changed().await.is_err() {
                             return;
                         }
                     }
-                    Some(at) => {
+                    Some(scheduled) => {
                         tokio::select! {
                             biased;
                             r = rx.changed() => {
@@ -260,10 +265,14 @@ impl Node {
                                     return;
                                 }
                             }
-                            _ = tokio::time::sleep_until(at) => {
-                                let _ = node.wake.send_replace(None);
+                            _ = tokio::time::sleep_until(scheduled.at) => {
                                 let clock = node.clock.now();
-                                node.apply(Event::Tick { clock });
+                                node.apply(Event::TimerFired { timer: scheduled.timer, clock });
+                                // Do not redeliver an expired generation when
+                                // its completion produced no replacement.
+                                if !rx.has_changed().unwrap_or(false) && rx.changed().await.is_err() {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -293,15 +302,15 @@ fn log(n: &Note) {
 
 #[async_trait]
 impl ResonateServer for Node {
-    /// Start: announce, list, read the configuration; then, unless the
-    /// clock belongs to the caller, keep going on the one timer.
+    /// Start the core unconditionally. Debug controls timer delivery in this
+    /// shell, not maintenance behavior in the core.
     async fn init(&self, debug: bool) -> Result<(), Unavailable> {
         let clock = self.clock.now();
         if !debug {
-            let handle = self.me().spawn_wake();
+            let handle = self.me().spawn_timer();
             self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         }
-        self.apply(Event::Start { clock, loops: !debug });
+        self.apply(Event::Start { clock });
         Ok(())
     }
 

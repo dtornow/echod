@@ -76,8 +76,8 @@ pub struct Config {
     #[arg(long, env = "ECHOD_CACHE_BYTES", default_value_t = 256 * 1024 * 1024)]
     pub cache_bytes: u64,
 
-    /// Debug mode: the clock is the request's `resonate:debug_time`, and no
-    /// loop runs on wall time.
+    /// Debug mode: the clock is the request's `resonate:debug_time`, and the
+    /// shell retains timer intents without delivering their events.
     #[arg(long, env = "ECHOD_DEBUG", default_value_t = false)]
     pub debug: bool,
 }

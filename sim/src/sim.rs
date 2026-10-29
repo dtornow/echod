@@ -235,7 +235,8 @@ impl World {
         cfg.debug = true; // the clock is the request's
         let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
         let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>);
-        // A node that cannot reach the store keeps trying on its own.
+        // Deliver core timer intents on paused Tokio time; the simulation
+        // controls when virtual time reaches each versioned completion.
         server.init(false).await.expect("a node starts");
         tracing::info!(node = %id, skew, drift, at = self.clock.now(), "started");
         self.fleet.lock().unwrap().live.insert(id, Node { server: Arc::clone(&server), clock, store: node_store });

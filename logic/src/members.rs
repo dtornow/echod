@@ -426,7 +426,9 @@ impl State {
             Ok(()) => {
                 if !self.members.read_once {
                     self.members.read_once = true;
-                    self.timers_start(now);
+                    if self.running() {
+                        self.timers_start(now);
+                    }
                 }
             }
             Err(e) => self.note(Note::RefreshFailed {
@@ -437,7 +439,7 @@ impl State {
         if self.members.leave_pending {
             self.members.leave_pending = false;
             self.leave();
-        } else if self.loops {
+        } else if self.running() {
             self.timers_run(now);
         }
     }

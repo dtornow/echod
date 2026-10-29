@@ -169,10 +169,11 @@ of the membership, its cache's versions and its armed keys; the cache;
 the flights in progress on documents; the membership refresh; the timer
 wheel and the listings. `on_event` is the only step. It is told one thing
 at a time, `Event`: the node starts; a request came in; a store call it
-issued has its answer; time passed; the node stops. It answers with
+issued has its answer; a particular timer generation fired; the node
+stops. It answers with
 `Effect`s: make this call on the store and tell me under this op id;
-answer this request; push this message; wake me after this long; note
-this. Every event carries the node's clock as the executor read it; the
+answer this request; push this message; schedule this timer generation
+after this long; note this. Every event carries the node's clock as the executor read it; the
 core never reads one. Nothing in it waits, sleeps, locks or spawns, so
 the same events in the same order give the same effects, which is what
 `logic/tests/core.rs` checks with a bucket that is a map and a clock that
@@ -194,10 +195,14 @@ waits for a schedule's slot, none of this waits in a circle.
 The executor (`node.rs`) is one `State` behind one lock. `apply` takes
 the lock, runs the step, drops the lock, and performs what came out: a
 store call is spawned and its answer applied as a completion; a reply
-wakes the request waiting on it; a message is pushed; a wake resets the
-one timer; a note goes to the metrics, the log, and whoever listens. The
-simulation supplies the clock and the listener; everything else it
-supplies is the store.
+wakes the request waiting on it; a message is pushed; a versioned timer
+intent replaces the executor's prior intent; a note goes to the metrics,
+the log, and whoever listens. The completion returns the timer identity
+and generation unchanged. The core ignores replaced generations and
+invalidates the current one while stopping. A running core always emits
+maintenance intent; debug withholds completion while simulation delivers
+it on virtual time. The simulation supplies the clock and the listener;
+everything else it supplies is the store.
 
 ### The bucket
 

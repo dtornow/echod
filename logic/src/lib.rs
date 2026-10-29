@@ -54,7 +54,7 @@ pub mod wire;
 
 pub use config::Config;
 pub use dispatch::Target;
-pub use types::{Effect, Event, Note};
+pub use types::{Effect, Event, Note, Timer, TimerIdentity};
 
 /// Who waits for a store call's answer.
 pub(crate) enum Owner {
@@ -66,6 +66,20 @@ pub(crate) enum Owner {
     Leaving,
     /// Nobody: a best-effort call whose answer changes nothing.
     Ignored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifecycle {
+    Created,
+    Running,
+    Stopping,
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+struct TimerIntent {
+    timer: Timer,
+    at: u64,
 }
 
 /// What a node holds and decides with: the verified core, the cache, the
@@ -90,12 +104,10 @@ pub struct State {
     pub(crate) members: members::Members,
     pub(crate) timers: timers::Timers,
     pub(crate) debug: debug::Debug,
-    /// Whether the node keeps itself going: heartbeats and timers.
-    pub(crate) loops: bool,
-    pub(crate) stopping: bool,
-    stopped: bool,
+    lifecycle: Lifecycle,
     out: Vec<Effect>,
-    last_wake: Option<u64>,
+    next_timer_generation: u64,
+    timer_intent: Option<TimerIntent>,
 }
 
 /// The deterministic concrete model executed by both the production shell
@@ -151,21 +163,28 @@ impl State {
             members,
             timers: timers::Timers::new(),
             debug: debug::Debug::default(),
-            loops: false,
-            stopping: false,
-            stopped: false,
+            lifecycle: Lifecycle::Created,
             out: Vec::new(),
-            last_wake: None,
+            next_timer_generation: 0,
+            timer_intent: None,
             cfg,
         }
     }
 
     /// The implementation of the one public [`on_event`] step.
     fn transition(&mut self, event: Event) -> Effects {
+        if let Event::TimerFired { timer, .. } = &event {
+            if self.timer_intent.map(|intent| intent.timer) != Some(*timer) {
+                return Vec::new();
+            }
+        }
         match event {
-            Event::Start { clock, loops } => {
+            Event::Start { clock } => {
+                if self.lifecycle != Lifecycle::Created {
+                    return Vec::new();
+                }
                 self.clock = clock;
-                self.loops = loops;
+                self.lifecycle = Lifecycle::Running;
                 let now = self.now();
                 self.members_refresh(now);
             }
@@ -180,15 +199,14 @@ impl State {
                     Some(Owner::Members) => self.members_completed(op, outcome),
                     Some(Owner::Timers) => self.timers_completed(op, outcome),
                     Some(Owner::Debug) => self.debug_completed(op, outcome),
-                    Some(Owner::Leaving) => self.stopped = true,
+                    Some(Owner::Leaving) => self.lifecycle = Lifecycle::Stopped,
                     Some(Owner::Ignored) | None => {}
                 }
             }
-            Event::Tick { clock } => {
+            Event::TimerFired { clock, .. } => {
                 self.clock = clock;
-                // A wake that came early asks again below.
-                self.last_wake = None;
-                if self.loops && !self.stopping {
+                self.timer_intent = None;
+                if self.running() {
                     let now = self.now();
                     self.members_tick(now);
                     self.timers_run(now);
@@ -199,7 +217,7 @@ impl State {
                 self.stop();
             }
         }
-        self.schedule_wake();
+        self.schedule_timer();
         std::mem::take(&mut self.out)
     }
 
@@ -247,7 +265,7 @@ impl State {
 
     /// The node has withdrawn its announcement: nothing more to do.
     pub fn stopped(&self) -> bool {
-        self.stopped
+        self.lifecycle == Lifecycle::Stopped
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -294,8 +312,11 @@ impl State {
     }
 
     fn stop(&mut self) {
-        self.stopping = true;
-        self.loops = false;
+        if matches!(self.lifecycle, Lifecycle::Stopping | Lifecycle::Stopped) {
+            return;
+        }
+        self.lifecycle = Lifecycle::Stopping;
+        self.timer_intent = None;
         // A refresh in flight finishes first, so the announcement it
         // writes does not outlive the withdrawal.
         if self.members.refreshing() {
@@ -362,19 +383,28 @@ impl State {
         self.core.forget(origin);
     }
 
-    /// Ask for a tick at the earliest instant anything is due, when that
-    /// moved.
-    fn schedule_wake(&mut self) {
-        if !self.loops || self.stopping {
+    pub(crate) fn running(&self) -> bool {
+        self.lifecycle == Lifecycle::Running
+    }
+
+    /// State the current versioned timer intent when the earliest due
+    /// instant changes.
+    fn schedule_timer(&mut self) {
+        if !self.running() {
+            self.timer_intent = None;
             return;
         }
         let now = self.now();
         let at = [self.members.wake_at(), self.timers.wake_at(now)].into_iter().flatten().min();
-        if at != self.last_wake {
-            if let Some(at) = at {
-                self.emit(Effect::Wake { after_ms: at.saturating_sub(now).max(1) });
-            }
-            self.last_wake = at;
+        if at == self.timer_intent.map(|intent| intent.at) {
+            return;
+        }
+        self.timer_intent = None;
+        if let Some(at) = at {
+            self.next_timer_generation = self.next_timer_generation.checked_add(1).expect("timer generation exhausted");
+            let timer = Timer { identity: TimerIdentity::Maintenance, generation: self.next_timer_generation };
+            self.timer_intent = Some(TimerIntent { timer, at });
+            self.emit(Effect::ScheduleTimer { timer, after_ms: at.saturating_sub(now).max(1) });
         }
     }
 }
