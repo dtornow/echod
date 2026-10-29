@@ -297,7 +297,9 @@ impl Text {
         }
     }
 
-    pub fn as_bytes(&self) -> &Vec<u8> {
+    pub fn as_bytes(&self) -> (bytes: &Vec<u8>)
+        ensures bytes@ == self@,
+    {
         &self.bytes
     }
 

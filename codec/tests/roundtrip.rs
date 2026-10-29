@@ -4,6 +4,10 @@ use echod_codec::primitives::{decode_bool, decode_option_blob, encode_u64};
 use echod_codec::types::*;
 use echod_kernel::{PromiseState, TaskState};
 
+#[path = "../../logic/src/keys.rs"]
+#[allow(dead_code)]
+mod existing_keys;
+
 fn text(value: &str) -> echod_codec::text::Text {
     string_to_text(&value.to_string())
 }
@@ -360,4 +364,184 @@ fn document_decoder_rejects_truncated_and_malformed_segments() {
     let wrong_kind = encode_schedule_segment(&header, &vec![schedule]).unwrap();
     assert!(decode_promise_document(&wrong_kind).is_err());
     assert!(decode_schedule_document(&segment).is_err());
+}
+
+#[test]
+fn textual_store_keys_match_existing_keyspace() {
+    use echod_codec::store_key_text::{
+        class_of_text_key, decode_runtime_store_key, encode_runtime_store_key, KeyClass,
+        StringStoreKey,
+    };
+    use existing_keys::KeySpace;
+
+    for prefix in ["", "tenant", "tenant/", "租户/"] {
+        let keyspace = KeySpace::new(prefix, 1_000);
+        let cases = vec![
+            (
+                StringStoreKey::Document("订单:α/a_b@c~d%".into()),
+                keyspace.doc_key("订单:α/a_b@c~d%"),
+                KeyClass::Document,
+            ),
+            (
+                StringStoreKey::Schedule("计划/東京:_@~%".into()),
+                keyspace.sched_key("计划/東京:_@~%"),
+                KeyClass::Schedule,
+            ),
+            (
+                StringStoreKey::Node("节点/東京 %".into()),
+                keyspace.node_key("节点/東京 %"),
+                KeyClass::Node,
+            ),
+            (
+                StringStoreKey::Membership,
+                keyspace.members_key(),
+                KeyClass::Membership,
+            ),
+        ];
+        for (key, expected, class) in cases {
+            let encoded = encode_runtime_store_key(&prefix.to_string(), 1_000, &key).unwrap();
+            assert_eq!(encoded, expected);
+            assert_eq!(
+                class_of_text_key(&prefix.to_string(), &encoded),
+                Some(class)
+            );
+            assert_eq!(
+                keyspace.class_of(&encoded),
+                Some(match class {
+                    KeyClass::Document => "wf",
+                    KeyClass::Schedule => "sched",
+                    KeyClass::Timer => "t",
+                    KeyClass::Node => "nodes",
+                    KeyClass::Membership => "members",
+                })
+            );
+            assert_eq!(
+                decode_runtime_store_key(&prefix.to_string(), 1_000, &encoded).unwrap(),
+                key
+            );
+        }
+
+        let deadline = 12_345;
+        let bucket = keyspace.bucket_of(deadline);
+        let origin = "来源/α:_@~%";
+        let by = "节点/東京 @~%";
+        let token = 0x00ab_cdef_1234_5678;
+        let origin_key = StringStoreKey::TimerOrigin {
+            bucket,
+            deadline,
+            origin: origin.into(),
+            token,
+            by: by.into(),
+        };
+        let encoded = encode_runtime_store_key(&prefix.to_string(), 1_000, &origin_key).unwrap();
+        assert_eq!(encoded, keyspace.timer_key(origin, deadline, token, by));
+        assert_eq!(
+            class_of_text_key(&prefix.to_string(), &encoded),
+            Some(KeyClass::Timer)
+        );
+        assert_eq!(
+            decode_runtime_store_key(&prefix.to_string(), 1_000, &encoded).unwrap(),
+            origin_key
+        );
+
+        let id = "计划/β:_@~%";
+        let schedule_key = StringStoreKey::TimerSchedule {
+            bucket,
+            deadline,
+            id: id.into(),
+            token,
+            by: by.into(),
+        };
+        let encoded = encode_runtime_store_key(&prefix.to_string(), 1_000, &schedule_key).unwrap();
+        assert_eq!(encoded, keyspace.sched_timer_key(id, deadline, token, by));
+        assert_eq!(
+            decode_runtime_store_key(&prefix.to_string(), 1_000, &encoded).unwrap(),
+            schedule_key
+        );
+    }
+}
+
+#[test]
+fn textual_store_key_bucket_width_and_zero_config_match_keyspace() {
+    use echod_codec::store_key_text::{
+        decode_runtime_store_key, encode_runtime_store_key, StringStoreKey,
+    };
+    use existing_keys::KeySpace;
+
+    for bucket_ms in [0, 1, 10, 1_000, u64::MAX] {
+        let keyspace = KeySpace::new("p", bucket_ms);
+        for deadline in [0, 1, 999, 1_000, u64::MAX] {
+            let key = StringStoreKey::TimerOrigin {
+                bucket: keyspace.bucket_of(deadline),
+                deadline,
+                origin: "o".into(),
+                token: u64::MAX,
+                by: "n".into(),
+            };
+            let encoded = encode_runtime_store_key(&"p".to_string(), bucket_ms, &key).unwrap();
+            assert_eq!(encoded, keyspace.timer_key("o", deadline, u64::MAX, "n"));
+            let rest = encoded.strip_prefix("p/t/").unwrap();
+            assert_eq!(&rest[..20], format!("{:020}", keyspace.bucket_of(deadline)));
+            assert_eq!(&rest[21..41], format!("{deadline:020}"));
+            assert_eq!(
+                decode_runtime_store_key(&"p".to_string(), bucket_ms, &encoded).unwrap(),
+                key
+            );
+        }
+    }
+}
+
+#[test]
+fn textual_store_key_decoder_rejects_noncanonical_and_malformed_keys() {
+    use echod_codec::store_key_text::{
+        decode_runtime_store_key, encode_runtime_store_key, StringStoreKey,
+    };
+
+    let prefix = "p".to_string();
+    for malformed in [
+        "p/wf/%e6%9d%b1", // lowercase escapes
+        "p/wf/%41",       // redundant escape
+        "p/wf/%",         // truncated escape
+        "p/wf/%GG",       // invalid escape
+        "p/t/0000000000000000000/00000000000000000001_o@0000000000000000~n",
+        "p/t/00000000000000000000/0000000000000000001_o@0000000000000000~n",
+        "p/t/00000000000000000000/00000000000000000001_o@000000000000000~n",
+        "p/t/00000000000000000000/00000000000000000001_o@000000000000000A~n",
+        "p/t/00000000000000000001/00000000000000000002_o@0000000000000000~n",
+        "wrong/wf/o",
+        "p/unknown/o",
+    ] {
+        assert!(
+            decode_runtime_store_key(&prefix, 1_000, &malformed.to_string()).is_err(),
+            "accepted malformed key: {malformed}"
+        );
+    }
+
+    let noncanonical_bucket = StringStoreKey::TimerOrigin {
+        bucket: 1,
+        deadline: 2,
+        origin: "o".into(),
+        token: 0,
+        by: "n".into(),
+    };
+    assert!(encode_runtime_store_key(&prefix, 1_000, &noncanonical_bucket).is_err());
+    assert!(
+        echod_codec::store_key_text::decode_store_key_bytes(
+            &b"p".to_vec(),
+            1_000,
+            &b"p/wf/%FF".to_vec(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn fixed_width_bucket_text_sorts_in_numeric_order() {
+    let values = [0, 1, 9, 10, 999, 1_000, u64::MAX - 1, u64::MAX];
+    let formatted: Vec<String> = values.iter().map(|value| format!("{value:020}")).collect();
+    for i in 0..values.len() {
+        for j in 0..values.len() {
+            assert_eq!(formatted[i] < formatted[j], values[i] < values[j]);
+        }
+    }
 }

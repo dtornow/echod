@@ -14,6 +14,7 @@ pub mod frame;
 pub mod laws;
 pub mod primitives;
 pub mod record;
+pub mod store_key_text;
 pub mod text;
 pub mod types;
 

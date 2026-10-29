@@ -31,9 +31,26 @@ Header, and folds rows by ID in commit order with the last row winning while
 retaining each ID's first-seen position. Compaction writes one segment
 containing a new Header and the folded rows.
 
+Textual object-store keys are independently available through
+`store_key_text.rs` and match `logic::keys::KeySpace` output:
+
+```text
+<prefix>wf/<percent-encoded origin>
+<prefix>sched/<percent-encoded id>
+<prefix>nodes/<percent-encoded id>
+<prefix>members
+<prefix>t/<bucket:020>/<deadline:020>_<target>@<token:016x>~<percent-encoded by>
+```
+
+The optional prefix is normalized with one trailing slash and a zero timer
+bucket width behaves as one millisecond. Timer targets are either a
+percent-encoded origin or `sched:<percent-encoded id>`. The canonical parser
+requires uppercase percent escapes, exact decimal/token widths, lowercase
+token hex, valid decoded UTF-8, and the configured deadline-derived bucket.
+
 ## Verification
 
-`./verify.sh` verifies the byte/model implementation and 283 obligations without
+`./verify.sh` verifies 391 obligations across the byte/model implementation without
 trusted stubs or proof escape hatches. It proves executable/spec agreement for
 primitive decoders, UTF-8 validation, blobs, options, sequences, envelopes, and
 records; their canonical round trips; kind separation; and model-level typed
@@ -62,6 +79,12 @@ laws, last-row-wins folding, fold idempotence, and compaction/rewrite
 preservation. Its public segment and document APIs use kernel Promise/Schedule
 rows and the typed Header; malformed and truncated non-empty documents are
 rejected. The empty byte string represents an empty document.
+
+`store_key_text.rs` verifies percent framing, fixed-width decimal and hex
+formatting/parsing, numeric/lexicographic bucket ordering, prefix and class
+parsing, every textual StoreKey variant, canonical malformed-input rejection,
+UTF-8 validity of emitted S3 keys, byte-model round trips, and the executable
+`StringStoreKey`/`String` bridge.
 
 Run:
 
