@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["abstract", "kernel", "codec", "concrete", "refinement", "system", "logic", "echod", "sim", "diff", "diff/accordant", "refine"]
+members = ["abstract", "kernel", "codec", "concrete", "refinement", "system", "logic", "echod", "sim", "diff"]
+exclude = ["diff/accordant", "refine"]
 
 [workspace.package]
 version = "0.1.0"

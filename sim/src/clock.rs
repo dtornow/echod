@@ -19,7 +19,10 @@ pub struct SimClock {
 impl SimClock {
     /// A clock reading `base_ms` now, in virtual time.
     pub fn new(base_ms: u64) -> Self {
-        Self { base_ms, start: tokio::time::Instant::now() }
+        Self {
+            base_ms,
+            start: tokio::time::Instant::now(),
+        }
     }
 }
 
@@ -40,8 +43,19 @@ pub struct NodeClock {
 }
 
 impl NodeClock {
-    pub fn new(reference: std::sync::Arc<SimClock>, skew_ms: i64, drift_ppm: i64, band_ms: i64) -> Self {
-        Self { reference, skew_ms, drift_ppm, band_ms, offset: std::sync::Mutex::new(0) }
+    pub fn new(
+        reference: std::sync::Arc<SimClock>,
+        skew_ms: i64,
+        drift_ppm: i64,
+        band_ms: i64,
+    ) -> Self {
+        Self {
+            reference,
+            skew_ms,
+            drift_ppm,
+            band_ms,
+            offset: std::sync::Mutex::new(0),
+        }
     }
 
     /// Step the clock by `delta_ms`, negative for a step back, within the band.

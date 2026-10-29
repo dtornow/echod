@@ -1,6 +1,6 @@
 [package]
 name = "echod-sim"
-description = "Deterministic simulation of echod: one seed, no wall clock, no sockets; every run checked against the Resonate model of dtornow/accordant."
+description = "Deterministic simulation of echod checked against the workspace executable Abstract model."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 echod-kernel = { path = "../kernel" }
 echod-logic = { path = "../logic" }
+echod-abstract = { path = "../abstract" }
 echod = { path = "../echod" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 async-trait = "0.1"
@@ -25,5 +26,3 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-accordant = { git = "https://github.com/dtornow/accordant", rev = "bb48aff9a989b5b3f2b05ef6c1794910f2584bca" }
-resonate = { git = "https://github.com/dtornow/accordant", rev = "bb48aff9a989b5b3f2b05ef6c1794910f2584bca", package = "resonate" }

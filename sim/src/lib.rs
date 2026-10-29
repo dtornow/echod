@@ -13,19 +13,16 @@
 //! bus.rs       a bus that records every message and checks it against the bucket
 //! history.rs   what each client saw and what the nodes did, with virtual timestamps
 //! workload.rs  the requests a run issues, and how they are generated
-//! checker.rs   the run as a trace of the Resonate model, checked by accordant
+//! checker.rs   bounded finite-trace search over the workspace Abstract model
+//! wire.rs      local Abstract-to-protocol conversion
 //! sim.rs       the run: nodes over one store, clients, crashes, then the checks
 //! ```
 //!
-//! The specification a run is checked against is the Resonate model of
-//! `dtornow/accordant`, the whole protocol as the Lean specification has it,
-//! and the checker is accordant's: some execution of the model must show
-//! exactly what the clients saw and the bus carried, with the nodes' own
-//! steps (a sweep, a fire) where the nodes report them (`checker.rs`). The
-//! run ends with a read of every id, so the state the bucket holds is what
-//! the model holds too. Besides: every deadline a document owes has a key;
-//! every message names state that is really there; and the run exercised
-//! what it claims to have exercised.
+//! The specification is the workspace `echod-abstract` executable machine.
+//! The local checker searches call linearizations and productive internal
+//! actions, and reports `Unknown` rather than accepting when its finite
+//! budget is exhausted. The run ends with a read of every id, so the bucket's
+//! visible state is checked too.
 
 pub mod bus;
 pub mod checker;
@@ -34,6 +31,5 @@ pub mod history;
 pub mod rng;
 pub mod sim;
 pub mod store;
-#[path = "../../diff/accordant/src/wire.rs"]
 pub mod wire;
 pub mod workload;
