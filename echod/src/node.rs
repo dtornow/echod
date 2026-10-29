@@ -302,14 +302,12 @@ fn log(n: &Note) {
 
 #[async_trait]
 impl ResonateServer for Node {
-    /// Start the core unconditionally. Debug controls timer delivery in this
-    /// shell, not maintenance behavior in the core.
-    async fn init(&self, debug: bool) -> Result<(), Unavailable> {
+    /// Start the core and production timer delivery. The trait's boolean is
+    /// retained for compatibility with `ResonateServer` and has no effect.
+    async fn init(&self, _: bool) -> Result<(), Unavailable> {
         let clock = self.clock.now();
-        if !debug {
-            let handle = self.me().spawn_timer();
-            self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
-        }
+        let handle = self.me().spawn_timer();
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         self.apply(Event::Start { clock });
         Ok(())
     }

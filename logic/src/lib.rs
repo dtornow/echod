@@ -21,7 +21,6 @@
 //! flight.rs     one step on one document, from load to commit: the verified protocol, one store call at a time; the fire across two
 //! members.rs    the nodes: announce, list, read the configuration, write the next epoch
 //! timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
-//! debug.rs      debug.reset, debug.snap, debug.tick: what a test that owns the clock asks for
 //! ```
 //!
 //! The verified kernel beneath supplies `handle`, `NodeCore`, `Commit`, and
@@ -42,7 +41,6 @@ use crate::types::*;
 
 pub mod cache;
 pub mod config;
-pub mod debug;
 pub mod dispatch;
 pub mod doc;
 pub mod flight;
@@ -61,7 +59,6 @@ pub(crate) enum Owner {
     Flight(FlightId),
     Members,
     Timers,
-    Debug,
     /// The node's announcement being withdrawn: its answer ends the node.
     Leaving,
     /// Nobody: a best-effort call whose answer changes nothing.
@@ -103,7 +100,6 @@ pub struct State {
     pub(crate) flights: flight::Flights,
     pub(crate) members: members::Members,
     pub(crate) timers: timers::Timers,
-    pub(crate) debug: debug::Debug,
     lifecycle: Lifecycle,
     out: Vec<Effect>,
     next_timer_generation: u64,
@@ -162,7 +158,6 @@ impl State {
             flights: flight::Flights::new(),
             members,
             timers: timers::Timers::new(),
-            debug: debug::Debug::default(),
             lifecycle: Lifecycle::Created,
             out: Vec::new(),
             next_timer_generation: 0,
@@ -198,7 +193,6 @@ impl State {
                     Some(Owner::Flight(f)) => self.flight_completed(f, op, outcome),
                     Some(Owner::Members) => self.members_completed(op, outcome),
                     Some(Owner::Timers) => self.timers_completed(op, outcome),
-                    Some(Owner::Debug) => self.debug_completed(op, outcome),
                     Some(Owner::Leaving) => self.lifecycle = Lifecycle::Stopped,
                     Some(Owner::Ignored) | None => {}
                 }
@@ -291,13 +285,7 @@ impl State {
     // -----------------------------------------------------------------------
 
     fn request(&mut self, id: RequestId, envelope: RequestEnvelope) {
-        if self.cfg.debug && envelope.kind.starts_with("debug.") {
-            return self.debug_request(id, envelope);
-        }
-        let now = match (self.cfg.debug, envelope.head.debug_time) {
-            (true, Some(t)) => t.max(0) as u64,
-            _ => self.now(),
-        };
+        let now = self.now();
         match dispatch::decode(&envelope, now) {
             Err(resp) => self.emit(Effect::Reply { id, response: Ok(resp) }),
             Ok(d) => {
@@ -306,7 +294,7 @@ impl State {
                     None => flight::Stage::Whole,
                 };
                 let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now, stage };
-                self.submit(d.target, work, None, false);
+                self.submit(d.target, work, None);
             }
         }
     }

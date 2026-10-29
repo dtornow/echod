@@ -47,10 +47,9 @@ use crate::{unavailable, Owner, State};
 /// What a flight does.
 pub(crate) enum Work {
     Request { id: RequestId, kind: String, corr: String, req: k::Request, action_kind: Option<String>, now: u64, stage: Stage },
-    /// `fired` is the key whose firing this is; none for a sweep or a fire
-    /// a test asked for.
-    Sweep { fired: Option<FiredKey>, now: u64 },
-    Fire { schedule: String, fired: Option<FiredKey>, now: u64 },
+    /// `fired` is the key whose firing this is.
+    Sweep { fired: FiredKey, now: u64 },
+    Fire { schedule: String, fired: FiredKey, now: u64 },
 }
 
 /// Where a request stands when it spans two documents: a fence whose create
@@ -185,14 +184,10 @@ struct Flight {
     attempt: u32,
     phase: Phase,
     firing: Option<Firing>,
-    /// Started by `debug.tick`, which hears how it ended.
-    debug: bool,
-    /// A sweep that fired nothing, or a fire that found nothing due.
-    idle: bool,
 }
 
 enum Queued {
-    Work(Box<(Target, Work, Option<Firing>, bool)>),
+    Work(Box<(Target, Work, Option<Firing>)>),
     Waiter(FlightId),
 }
 
@@ -225,7 +220,7 @@ impl State {
     // -----------------------------------------------------------------------
 
     /// Run `work` on `target`, after whatever is on it already.
-    pub(crate) fn submit(&mut self, target: Target, work: Work, firing: Option<Firing>, debug: bool) {
+    pub(crate) fn submit(&mut self, target: Target, work: Work, firing: Option<Firing>) {
         let name = target.name();
         if let Work::Sweep { now, .. } = &work {
             let flight = self.next_flight;
@@ -233,17 +228,17 @@ impl State {
         }
         let slot = self.flights.slots.entry(name).or_default();
         if slot.busy.is_some() {
-            slot.queue.push_back(Queued::Work(Box::new((target, work, firing, debug))));
+            slot.queue.push_back(Queued::Work(Box::new((target, work, firing))));
             return;
         }
-        self.start(target, work, firing, debug);
+        self.start(target, work, firing);
     }
 
-    fn start(&mut self, target: Target, work: Work, firing: Option<Firing>, debug: bool) {
+    fn start(&mut self, target: Target, work: Work, firing: Option<Firing>) {
         let id = self.next_flight;
         self.next_flight += 1;
         self.flights.slots.entry(target.name()).or_default().busy = Some(id);
-        let f = Flight { id, target, work, attempt: 0, phase: Phase::Idle, firing, debug, idle: false };
+        let f = Flight { id, target, work, attempt: 0, phase: Phase::Idle, firing };
         self.begin(f);
     }
 
@@ -256,8 +251,8 @@ impl State {
                 self.flights.slots.remove(name);
             }
             Some(Queued::Work(q)) => {
-                let (target, work, firing, debug) = *q;
-                self.start(target, work, firing, debug);
+                let (target, work, firing) = *q;
+                self.start(target, work, firing);
             }
             Some(Queued::Waiter(fid)) => {
                 slot.busy = Some(fid);
@@ -545,7 +540,7 @@ impl State {
         };
         let rows = R::rows_of(&state);
         let fired = match work {
-            Work::Sweep { fired, .. } => fired.clone(),
+            Work::Sweep { fired, .. } => Some(fired.clone()),
             _ => None,
         };
         let commit = self.commit_new(w, rows, now, did, fired);
@@ -566,7 +561,7 @@ impl State {
                     (Some(k::Response::Promise(inner)), Some(check)) => {
                         let work = Work::Request { id: *id, kind: kind.clone(), corr: corr.clone(), req: *check, action_kind: action_kind.clone(), now: *now, stage: Stage::Check { inner: Some(inner) } };
                         let then = then.clone();
-                        self.submit(then, work, None, f.debug);
+                        self.submit(then, work, None);
                     }
                     _ => self.emit(Effect::Reply { id: *id, response: Err(Unavailable::new("no answer")) }),
                 }
@@ -594,7 +589,6 @@ impl State {
             }
             Work::Fire { .. } => {}
         }
-        f.idle = !done.did;
         self.finish(f, Ok(fired));
     }
 
@@ -640,9 +634,6 @@ impl State {
             let now = self.now();
             self.timer_fired(firing, now, r);
         }
-        if f.debug {
-            self.debug_flight_done(&f.work, f.idle);
-        }
     }
 
     pub(crate) fn send(&mut self, e: &OutboxEntry) {
@@ -665,13 +656,12 @@ impl State {
     /// unchanged so the key can be collected behind the write.
     fn fire_decide(&mut self, mut f: Flight, ws: Working<Schedule>) {
         let Work::Fire { schedule, fired, now } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
-        let (id, fired, now) = (schedule.clone(), fired.clone(), *now);
+        let (id, fired, now) = (schedule.clone(), Some(fired.clone()), *now);
         let t1 = steps::clamp_now(ws.loaded.stamp, now);
         // the decision is the step module's: a row due at the instant, or none
         let due = steps::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
         let Some(c) = due else {
             // a sweep of the schedule's document that finds nothing due
-            f.idle = true;
             let rows = ws.loaded.rows.clone();
             self.note(Note::SweepBegin { flight: f.id, target: ws.target.clone(), now: t1 });
             let mut commit = self.commit_new(ws, rows, t1, false, fired);
@@ -753,7 +743,7 @@ impl State {
     /// Then the schedule, advanced, with the key fired.
     fn fire_advance(&mut self, mut f: Flight, ctx: FireCtx, schedules: Vec<Schedule>, t: u64) {
         let Work::Fire { schedule, fired, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
-        let (id, fired) = (schedule.clone(), fired.clone());
+        let (id, fired) = (schedule.clone(), Some(fired.clone()));
         self.note(Note::AdvanceBegin { flight: f.id, schedule: id, now: t, at: ctx.at, next: ctx.next });
         let FireCtx { ws, .. } = ctx;
         let mut commit = self.commit_new(ws, schedules, t, false, fired);

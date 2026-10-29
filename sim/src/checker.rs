@@ -1,8 +1,8 @@
 //! A run as a trace of the Resonate model, checked by `accordant`.
 //!
 //! The history becomes the checker's trace: every request a client made is
-//! an `Invoke` at the instant it was sent (its `head.debug_time`, the
-//! earliest the node decides it at, which its retries keep) and, if it was
+//! an `Invoke` at the instant it was sent (the injected clock's current
+//! instant) and, if it was
 //! answered, a `Return` at the instant the answer came; every message the
 //! bus carried is a `Receive`; and the clock moves (`Clock`) at every
 //! instant something happened, the nodes' own steps included. The checker
@@ -12,8 +12,8 @@
 //! nodes' own account enters but the instants: the check is black-box. The
 //! model is partitioned by origin, as the documents are.
 //!
-//! One clock. A request is decided at its `head.debug_time`, or at the
-//! document's stamp if that is later; the stamp is an instant some step was
+//! One clock. A request is decided at its invoke time, or at the document's
+//! stamp if that is later; the stamp is an instant some step was
 //! decided at, which the trace carries as a clock move. So the run's nodes
 //! must keep the one clock too: with skew, drift or jumps a node sweeps at
 //! an instant of its own, and the model, whose deadlines are exact, would
@@ -35,7 +35,7 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
     // invokes, so a call never returns before it is invoked in the trace
     // order and a message is received where the clock had already reached.
     // The clock moves to the instants the nodes stamp at: a request's
-    // `debug_time`, its invoke, and the nodes' own steps (`marks`). A return
+    // invoke time, and the nodes' own steps (`marks`). A return
     // or a receive moves it nowhere: nothing is stamped at those instants,
     // and every instant the clock visits while a call is open is one more
     // place the model may land its effect.

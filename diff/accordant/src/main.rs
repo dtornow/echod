@@ -5,17 +5,12 @@
 //! specification in Verus of the Resonate protocol as the Lean specification
 //! has it: what every request does, what runs on its own (a deadline, a lease,
 //! a resume, a redispatch, a schedule's occurrence), what the server sends.
-//! Its fuzz example drives the model itself; this drives echod. A run resets
-//! echod, then takes the model's own actions (`Explore::suggest`, steered by
-//! what the model has seen least, or `Explore::arbitrary`, random) one at a
-//! time: a request is sent with the run's clock as `head.debug_time` and its
-//! answer recorded; a clock move is recorded and then handed to echod as
-//! `debug.tick`, so the sweep runs at the instant the model's timers fire;
-//! every `execute` and `unblock` the sink receives is recorded as a dispatch.
-//! Then the model's `finish` actions: read everything, delete the schedules,
-//! move the clock past every deadline, read again. The trace is checked with
-//! certificates, and the marks of the execution that explains it are the
-//! coverage.
+//! Its fuzz example drives the model itself; this drives an isolated echod
+//! process per run. Requests, responses, and every `execute` and `unblock`
+//! received by the sink form the trace. Production timers run normally;
+//! short model clock moves wait for wall time, while long synthetic jumps
+//! are skipped. The trace is checked with certificates, and the marks of the
+//! execution that explains it are the coverage.
 //!
 //! The model and echod are meant to say the same thing everywhere, so
 //! nothing is translated: a fence that creates a promise in another origin
@@ -41,23 +36,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use accordant::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
+use accordant::{
+    marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation,
+};
 use clap::Parser;
 use resonate::{Create, Dispatch, Fenced, Request, Resonate, Response, Server as Model, MARKS};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
-use crate::wire::{decode, encode, model_state, prec};
+use crate::wire::{decode, encode, prec};
 
 #[derive(Parser, Debug)]
-#[command(name = "echod-accordant", about = "echod driven by accordant's Resonate model, over HTTP")]
+#[command(
+    name = "echod-accordant",
+    about = "echod driven by accordant's Resonate model, over HTTP"
+)]
 struct Cli {
     #[arg(long, default_value = "../../target/release/echod")]
     echod: PathBuf,
     /// Runs per mode (random, guided).
     #[arg(long, default_value_t = 200)]
     runs: u64,
-    /// Actions per run, besides the model's finishing reads.
+    /// Actions per isolated run.
     #[arg(long, default_value_t = 30)]
     requests: usize,
     /// The first seed.
@@ -78,8 +78,6 @@ struct Cli {
 }
 
 type Trace = Vec<Event<Request, Response, Dispatch>>;
-
-const T0: u64 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // Driving
@@ -118,8 +116,14 @@ impl Driver {
             .await
             .into_iter()
             .filter_map(|(address, m)| match m["kind"].as_str()? {
-                "execute" => Some(Dispatch::Execute { id: m["data"]["task"]["id"].as_str()?.to_string(), version: m["data"]["task"]["version"].as_u64()? as u32 }),
-                "unblock" => Some(Dispatch::Unblock { address, promise: prec(&m["data"]["promise"])? }),
+                "execute" => Some(Dispatch::Execute {
+                    id: m["data"]["task"]["id"].as_str()?.to_string(),
+                    version: m["data"]["task"]["version"].as_u64()? as u32,
+                }),
+                "unblock" => Some(Dispatch::Unblock {
+                    address,
+                    promise: prec(&m["data"]["promise"])?,
+                }),
                 _ => None,
             })
             .collect()
@@ -128,13 +132,8 @@ impl Driver {
     async fn send(&mut self, kind: &str, data: &Value, now: u64) -> (u16, Value) {
         self.corr += 1;
         let corr = format!("a{}", self.corr);
-        self.client.send(&self.echod, kind, data, now as i64, &corr).await
-    }
-
-    async fn snap(&mut self, now: u64) -> Model {
-        let (status, data) = self.send("debug.snap", &json!({}), now).await;
-        assert_eq!(status, 200, "debug.snap: {data}");
-        model_state(&data)
+        let _ = now;
+        self.client.send(&self.echod, kind, data, &corr).await
     }
 
     /// echod's one concession to the SDKs as they are: a timer created with a
@@ -144,8 +143,13 @@ impl Driver {
         let timer_with_target = |c: &Create| c.tags.timer && c.tags.target;
         match a {
             Action::Request(Request::CreatePromise(c)) => timer_with_target(c),
-            Action::Request(Request::FenceTask { action: Fenced::Create(c), .. }) => timer_with_target(c),
-            Action::Request(Request::CreateSchedule(c)) => c.promise_tags.timer && c.promise_tags.target,
+            Action::Request(Request::FenceTask {
+                action: Fenced::Create(c),
+                ..
+            }) => timer_with_target(c),
+            Action::Request(Request::CreateSchedule(c)) => {
+                c.promise_tags.timer && c.promise_tags.target
+            }
             _ => false,
         }
     }
@@ -156,7 +160,9 @@ impl Driver {
     /// nothing receives them, which the model allows.
     fn addressed(&self, a: Action<Request>) -> Action<Request> {
         match a {
-            Action::Request(Request::RegisterListener { awaited, address }) if address.starts_with("http://listener/") => {
+            Action::Request(Request::RegisterListener { awaited, address })
+                if address.starts_with("http://listener/") =>
+            {
                 let address = format!("{}{}", self.worker, address.trim_start_matches("http://"));
                 Action::Request(Request::RegisterListener { awaited, address })
             }
@@ -174,10 +180,13 @@ impl Driver {
                 if at <= *now {
                     return;
                 }
-                *now = at;
-                trace.push(Event::Clock { at });
-                let (status, data) = self.send("debug.tick", &json!({ "time": at }), at).await;
-                assert_eq!(status, 200, "debug.tick: {data}");
+                let wait = at - *now;
+                if wait > 5_000 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                *now = resonate_core::util::system_time_ms().max(0) as u64;
+                trace.push(Event::Clock { at: *now });
                 for d in self.dispatches().await {
                     trace.push(Event::Receive { msg: d });
                 }
@@ -185,7 +194,10 @@ impl Driver {
             Action::Request(req) => {
                 *call += 1;
                 let (kind, data) = encode(&req, &self.worker);
-                trace.push(Event::Invoke { call: *call, req: req.clone() });
+                trace.push(Event::Invoke {
+                    call: *call,
+                    req: req.clone(),
+                });
                 let (status, body) = self.send(kind, &data, *now).await;
                 let res = decode(kind, status, &body);
                 // what the request made the server send comes before its answer
@@ -198,17 +210,13 @@ impl Driver {
         }
     }
 
-    /// One run: echod reset, `requests` actions from the model, then its
-    /// finishing reads. Returns the trace as a client saw it.
+    /// One isolated-process run as a client saw it.
     async fn run(&mut self, requests: usize, guided: bool, choices: &mut Choices) -> Trace {
-        let (status, _) = self.send("debug.reset", &json!({}), T0).await;
-        assert_eq!(status, 200);
-        self.drain().await;
-        let mut trace: Trace = vec![Event::Clock { at: T0 }];
-        let mut now = T0;
+        let mut now = resonate_core::util::system_time_ms().max(0) as u64;
+        let mut trace: Trace = vec![Event::Clock { at: now }];
         let mut call: u64 = 0;
+        let state = Model::default();
         for _ in 0..requests {
-            let state = self.snap(now).await;
             let a = if guided {
                 let suggested = self.model.suggest(&state, now);
                 // one time in four, anything; otherwise a suggestion taken least
@@ -221,10 +229,6 @@ impl Driver {
             } else {
                 self.model.arbitrary(&state, now, &mut |n| choices.pick(n))
             };
-            self.act(a, &mut now, &mut call, &mut trace).await;
-        }
-        let state = self.snap(now).await;
-        for a in self.model.finish(&state, now) {
             self.act(a, &mut now, &mut call, &mut trace).await;
         }
         trace
@@ -242,10 +246,22 @@ enum Outcome {
 }
 
 fn check(model: &Resonate, trace: &Trace) -> Outcome {
-    let m = Resonate { retry_timeout: model.retry_timeout, fire_within: 0 };
-    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
+    let m = Resonate {
+        retry_timeout: model.retry_timeout,
+        fire_within: model.fire_within,
+    };
+    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(
+        m,
+        Model::default(),
+        Config {
+            certify: true,
+            ..Config::default()
+        },
+    );
     match Verdict::from(c.check_certified(trace.clone())) {
-        Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
+        Verdict::Ok(cert) => Outcome::Ok(
+            marks(model, Model::default(), trace, &cert).expect("the certificate replays"),
+        ),
         Verdict::Ko(v) => Outcome::Ko(v),
         Verdict::Unknown(v) => Outcome::Unknown(v),
     }
@@ -268,19 +284,15 @@ fn show(trace: &Trace, upto: usize) -> String {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let sink = Arc::new(Sink::default());
-    let worker = start_sink(Arc::clone(&sink)).await;
-    let echod = spawn_echod(&cli.echod, "http://localhost:8001", cli.retry_timeout, &cli.logs);
-    let client = Client::new();
-    client.wait_ready(&echod).await;
-    eprintln!("[accordant] echod at {}, worker at {worker}", echod.url);
-    // `debug.tick` lets every due step land before the next request: fires are exact.
-    let model = Resonate { retry_timeout: cli.retry_timeout, fire_within: 0 };
-    let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
-
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();
-    println!("{} runs of {} requests each against echod, retry timeout {} ms\n", cli.runs, cli.requests, cli.retry_timeout);
-    println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>14}", "mode", "ok", "ko", "unknown", "marks", "first ko (seed)");
+    println!(
+        "{} runs of {} requests each against echod, retry timeout {} ms\n",
+        cli.runs, cli.requests, cli.retry_timeout
+    );
+    println!(
+        "{:<8} {:>4} {:>4} {:>8} {:>9} {:>14}",
+        "mode", "ok", "ko", "unknown", "marks", "first ko (seed)"
+    );
     let mut examples: Vec<String> = Vec::new();
     let mut kos_total = 0;
     for (k, guided) in [false, true].into_iter().enumerate() {
@@ -288,10 +300,36 @@ async fn main() {
         let tried = Tried::default();
         let mut classes: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for seed in cli.seed..cli.seed + cli.runs {
+            let sink = Arc::new(Sink::default());
+            let worker = start_sink(Arc::clone(&sink)).await;
+            let echod = spawn_echod(
+                &cli.echod,
+                "http://localhost:8001",
+                cli.retry_timeout,
+                &cli.logs,
+            );
+            let client = Client::new();
+            client.wait_ready(&echod).await;
+            let model = Resonate {
+                retry_timeout: cli.retry_timeout,
+                fire_within: 5_000,
+            };
+            let mut d = Driver {
+                client,
+                echod,
+                sink,
+                worker,
+                model,
+                quiet_ms: cli.quiet_ms,
+                corr: 0,
+            };
             let mut choices = Choices::random(seed).learning(&tried);
             let trace = d.run(cli.requests, guided, &mut choices).await;
             if cli.trace {
-                eprintln!("[run seed={seed} guided={guided}]\n{}", show(&trace, trace.len()));
+                eprintln!(
+                    "[run seed={seed} guided={guided}]\n{}",
+                    show(&trace, trace.len())
+                );
             }
             match check(&d.model, &trace) {
                 Outcome::Ok(seen) => {
@@ -310,14 +348,22 @@ async fn main() {
                                 Event::Invoke { call: c, req } if c == call => Some(req),
                                 _ => None,
                             });
-                            format!("{} ← {res:?}", req.map(|r| short_req(r)).unwrap_or_default())
+                            format!(
+                                "{} ← {res:?}",
+                                req.map(|r| short_req(r)).unwrap_or_default()
+                            )
                         }
                         Some(Event::Receive { msg }) => format!("⇐ {msg:?}"),
                         Some(Event::Clock { .. }) => "clock".to_string(),
                         Some(Event::Invoke { req, .. }) => format!("→ {}", short_req(req)),
                         None => "end".to_string(),
                     };
-                    let e = classes.entry(class).or_insert_with(|| (0, format!("seed {seed}: {}\n{}", v.reason, show(&trace, v.index))));
+                    let e = classes.entry(class).or_insert_with(|| {
+                        (
+                            0,
+                            format!("seed {seed}: {}\n{}", v.reason, show(&trace, v.index)),
+                        )
+                    });
                     e.0 += 1;
                 }
                 Outcome::Unknown(v) => {
@@ -325,24 +371,30 @@ async fn main() {
                     eprintln!("unknown (seed {seed}): {v}");
                 }
             }
+            drop(d);
         }
         kos_total += ko;
         let covered = table.values().filter(|n| n[k] > 0).count();
         let mode = if guided { "guided" } else { "random" };
         let first = first_ko.map_or("-".to_string(), |s| s.to_string());
-        println!("{mode:<8} {ok:>4} {ko:>4} {unknown:>8} {:>9} {first:>14}", format!("{covered}/{}", MARKS.len()));
+        println!(
+            "{mode:<8} {ok:>4} {ko:>4} {unknown:>8} {:>9} {first:>14}",
+            format!("{covered}/{}", MARKS.len())
+        );
         for (class, (n, example)) in classes {
             examples.push(format!("[{mode}] {n} run(s) stop at: {class}\n{example}"));
         }
     }
-    println!("\n{:<50} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");
+    println!(
+        "\n{:<50} {:>7} {:>7}",
+        "mark (runs that reached it)", "random", "guided"
+    );
     for (m, [a, b]) in &table {
         println!("{m:<50} {a:>7} {b:>7}");
     }
     for e in &examples {
         println!("\n{e}");
     }
-    drop(d);
     if kos_total > 0 {
         std::process::exit(1);
     }
@@ -350,5 +402,8 @@ async fn main() {
 
 fn short_req(r: &Request) -> String {
     let s = format!("{r:?}");
-    s.split(|c: char| c == '(' || c == ' ').next().unwrap_or(&s).to_string()
+    s.split(|c: char| c == '(' || c == ' ')
+        .next()
+        .unwrap_or(&s)
+        .to_string()
 }

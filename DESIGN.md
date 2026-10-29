@@ -29,9 +29,8 @@ and the node depend on `resonate-core` for the traits and protocol types. Origin
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
 objects, schedules and an outbox; 18 request handlers and 6 internal steps
-(`debug.*` and `*.search` left out), plus one of this design's own, the
-fence's check with no action, for the detached create; a catalogue of 92
-properties. The kernel
+(`*.search` left out), plus one of this design's own, the fence's check with
+no action, for the detached create; a catalogue of 92 properties. The kernel
 is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
 on the state it leaves, `legal` on the pair, and for an internal step the two
 sweeper entries.
@@ -200,9 +199,9 @@ intent replaces the executor's prior intent; a note goes to the metrics,
 the log, and whoever listens. The completion returns the timer identity
 and generation unchanged. The core ignores replaced generations and
 invalidates the current one while stopping. A running core always emits
-maintenance intent; debug withholds completion while simulation delivers
-it on virtual time. The simulation supplies the clock and the listener;
-everything else it supplies is the store.
+maintenance intent, and the executor always schedules its completion. The
+simulation supplies an injected clock and runs the same scheduler on paused
+virtual time; everything else it supplies is the store.
 
 ### The bucket
 
@@ -444,9 +443,9 @@ execution of the model must show exactly what the clients saw and the bus
 carried, the model's internal work (a deadline, a lease's end, a resume, a
 retry, an occurrence) placed where the checker likes. The trace is what a
 client could record: every request as an invoke at the instant it was sent
-(its `head.debug_time`, which is the instant the node decides it at) and a
-return where its answer came, every message the bus carried as a receive,
-and the clock moving to the instants the nodes stamp at, the requests'
+(from the simulator's injected clock) and a return where its answer came,
+every message the bus carried as a receive, and the clock moving to the
+instants the nodes stamp at, the requests'
 and, through the notes port, the nodes' own sweeps and fires; a return or
 a receive moves the clock nowhere, since every instant the clock visits
 while a call is open is one more place the model may land its effect.
@@ -471,51 +470,29 @@ answered 200 at least once, and the history overlapped.
 processes answering HTTP, on one seeded request stream: the reference's
 own differential's (its `diff/port.rs`), the same operation mix over the
 same small pools of ids, steered towards the operations not yet covered.
-Time is `head.debug_time` and moves only through `debug.tick`, which both
-servers honour in debug mode; echod answers `debug.tick`, `debug.snap` and
-`debug.reset` from `logic/debug.rs`, as machines over store calls like
-everything else: a tick sweeps every origin at the instant and fires every
-schedule due, again and again until none is, as the timers would have had
-the clock passed through every instant on the way.
+Each process owns isolated volatile storage. echod uses its production clock
+and maintenance timers; the planner learns only from protocol responses.
 
 Every step sends one request to each server in turn and compares the
 response, the messages pushed to the harness's worker while it was
 answered (the sink is given a quiet moment, since echod pushes after it
-answers), and the `debug.snap` of the whole state afterwards. A run stops
-at its coverage plateau or at a step cap, over several seeds, and reports
-every divergence by class with the first example; a snapshot divergence
-ends the episode, since the states have parted.
+answers). A run stops at its coverage plateau or at a step cap, over several
+seeds, and reports every divergence by class with the first example.
 
 What is compared modulo known differences: `preload` (echod answers an
-empty one), `head.serverUrl` in execute messages, and an internal promise
-past its deadline (projected as expired in both, as the reference's
-harness does). Error reasons are compared word for word: the kernel
+empty one) and `head.serverUrl` in execute messages. Error reasons are
+compared word for word: the kernel
 proves the status, and `wire::reason_for` says why in the reference's
 words, by kind and status, and where one status has several causes (a
 callback's awaiter missing, or not a task, or the awaited not awaitable)
 by the state the step left, which the refusing checks did not change.
 The simulator's model renders its answers through the same function, so
-the checker compares like with like. One more is a
-deviation of the reference from the specification: on fulfilling a task
-it deletes that task from every promise's callbacks, pending ones
-included, which the catalogue's `monotone_promise_callbacks_grow_while_pending`
-forbids. echod removes a callback only when it is consumed, as the
-specification's `processCallback` does, so such callbacks are dropped
-from both snapshots before the comparison (`--strict-callbacks` keeps
-them). A second one: on a callback registered on a promise already
-settled, the reference resumes the awaiter at once, where the
-specification's `promiseRegisterCallback` answers the record and changes
-nothing; it shows in a task's `resumes` count, dropped likewise
-(`--strict-resumes` keeps it). The search operations are not in the
+the checker compares like with like. Internal callback and resume
+collections are outside this differential's public observations. The search operations are not in the
 stream: echod does not serve them. Nor is a fence creating a promise in
 another origin, where the two part by design ("The detached create"
 below); the simulator's workload has none either, its model being one
 origin at a time.
-
-Run over four seeds to their coverage plateaus, 164,800 steps in all,
-every response, message and snapshot agreed modulo the above; the two
-reference deviations were the only divergence classes found. Rerun after
-the detached create (two seeds, 63,200 steps), the same.
 
 ### The accordant model
 
@@ -527,14 +504,12 @@ and checks every recorded trace against it: an execution of the model must
 produce exactly the observations, with the model's internal work (a
 deadline, a lease, a resume, a retry, an occurrence) placed where the
 checker likes. A run resets echod and takes the model's own actions, the
-ones it suggests from the state it reads back through `debug.snap` (fences
-at the held and a stale version, the clock to just before and at each
-deadline, a settle while a task awaits, a schedule's run) or random ones; a
-request is sent with the run's clock as `head.debug_time`, a clock move is
-handed to echod as `debug.tick`, and every `execute` and `unblock` the sink
-receives is a dispatch, with the address it came to. Then the model's
-finishing reads. The marks of the execution that explains an accepted trace
-are the coverage. echod runs with the model's retry timeout.
+ones it suggests from an initially empty model or random ones. Every run
+starts an isolated echod process. Requests, responses, and every `execute`
+and `unblock` the sink receives form the trace; production maintenance
+timers run normally. Short model clock moves wait for wall time and long
+synthetic jumps are skipped. The marks of the execution that explains an
+accepted trace are the coverage. echod runs with the model's retry timeout.
 
 Nothing is translated: a detached create is sent as any other fence, and
 `task.create` in every state. One request is not sent: a timer created with

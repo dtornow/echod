@@ -29,7 +29,7 @@ crashes, outages and lost acks.
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
 | [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, every run checked against the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant) |
-| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; every response, message and snapshot compared. `diff/accordant/`: echod driven by the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant), every trace checked against it |
+| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; public responses and messages compared. `diff/accordant/`: isolated echod processes driven by the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant), every public-observation trace checked against it |
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |
 
@@ -59,10 +59,11 @@ cargo run --release -p echod-diff -- --resonate <path to a resonate binary> --se
 
 The differential wants the reference server built from `resonatehq/resonate`
 (`impl/server/core`, `cargo build --release --bin resonate`); it starts it
-and echod in debug mode and drives both over HTTP. `diff/accordant` is a
-workspace of its own (`cd diff/accordant && cargo run --release`): it
-builds against accordant's pin of Verus's `vstd`, which is not the
-kernel's.
+and echod as isolated processes and drives both over public HTTP. The
+external reference process requires its development-mode flag; echod runs
+with its production clock and timers. `diff/accordant` is a workspace of
+its own (`cd diff/accordant && cargo run --release`): it builds against
+accordant's pin of Verus's `vstd`, which is not the kernel's.
 
 `verify.sh` wants a Verus source tree with a release build in `VERUS_DIR`
 (default `~/verus-lang/verus/source`) and z3 beside it. `cargo build` is

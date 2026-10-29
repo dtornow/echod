@@ -297,7 +297,6 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             (k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
         }
         "promise.search" | "task.search" | "schedule.search" => return err(403, "Search operations are not supported"),
-        "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are disabled"),
         _ => return err(400, &format!("Unknown operation: {kind}")),
     };
     // A request about a schedule is served on its document; the rest on

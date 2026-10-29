@@ -107,7 +107,9 @@ impl Node {
         // Small buckets, so the tests cross bucket boundaries.
         cfg.timer_bucket_ms = 400;
         let server = Server::new(cfg, store);
-        server.init(false).await.unwrap();
+        // The external trait's compatibility boolean is deliberately ignored;
+        // maintenance timers must run for either value.
+        server.init(true).await.unwrap();
         let (stop, rx) = tokio::sync::watch::channel(false);
         let (addr, _) = gateway::serve(Arc::clone(&server), &addr.to_string(), rx).await.unwrap();
         Self { server, addr, stop }
@@ -296,8 +298,6 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
 
     // what is refused
     let (status, _, _) = node.send("promise.search", json!({})).await;
-    assert_eq!(status, 403);
-    let (status, _, _) = node.send("debug.tick", json!({})).await;
     assert_eq!(status, 403);
     let (status, _, _) = node.send("promise.frobnicate", json!({})).await;
     assert_eq!(status, 400);

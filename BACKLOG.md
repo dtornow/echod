@@ -87,9 +87,8 @@ shows the panels with data.
   `echod-sim` gives it two timer buckets. A deadline and a lease's end,
   by contrast, are read as passed the moment they pass (DESIGN,
   "Writing"), and a retry rearms on a grid, so nothing else a client sees
-  depends on when a node sweeps. `echod-accordant` and `echod-diff` move
-  the clock with `debug.tick`, which lets every due step land before the
-  next request.
+  depends on when a node sweeps. External differential tools observe
+  production timer behavior through responses and worker messages.
 - **Stamps are decision instants.** A step's `created_at`, `settled_at`,
   `acquired_at` and the like are the instant the node decided it at, and
   the write lands later; a read on another node between the two sees the

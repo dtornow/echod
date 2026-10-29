@@ -123,9 +123,13 @@ impl Harness {
     }
 
     fn request(&mut self, kind: &str, data: Value) -> (u16, Value) {
+        self.request_with_reported_time(kind, data, None)
+    }
+
+    fn request_with_reported_time(&mut self, kind: &str, data: Value, reported_time: Option<i64>) -> (u16, Value) {
         let id = self.next_request;
         self.next_request += 1;
-        let envelope = RequestEnvelope { kind: kind.to_string(), head: RequestHead { corr_id: format!("c{id}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: None }, data };
+        let envelope = RequestEnvelope { kind: kind.to_string(), head: RequestHead { corr_id: format!("c{id}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: reported_time }, data };
         self.apply(Event::Request { id, envelope, clock: self.clock });
         let (rid, r) = self.replies.pop().expect("an answer");
         assert_eq!(rid, id);
@@ -150,6 +154,21 @@ impl Harness {
     fn keys(&self, prefix: &str) -> Vec<String> {
         self.bucket.objects.keys().filter(|k| k.starts_with(prefix)).cloned().collect()
     }
+}
+
+#[test]
+fn request_head_time_does_not_override_the_injected_clock() {
+    let mut h = Harness::new("n1");
+    h.apply(Event::Start { clock: h.clock });
+    h.advance(100);
+    let decided_at = h.clock;
+    let (status, data) = h.request_with_reported_time(
+        "promise.create",
+        json!({ "id": "a:1", "timeoutAt": decided_at + 500, "tags": { "resonate:scope": "global" } }),
+        Some(1),
+    );
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["promise"]["createdAt"].as_u64(), Some(decided_at));
 }
 
 #[test]
@@ -308,47 +327,6 @@ fn replaced_and_stopped_timer_generations_are_ignored() {
     h.apply(Event::TimerFired { timer: replacement.timer, clock: h.clock });
     assert_eq!(h.state.now(), stopped_clock);
     assert!(h.scheduled_timer.is_none());
-}
-
-#[test]
-fn the_debug_operations_own_the_clock() {
-    let mut h = Harness::new("n1");
-    h.state = Concrete::new({
-        let mut cfg = Config::memory("n1");
-        cfg.debug = true;
-        cfg
-    });
-    h.apply(Event::Start { clock: h.clock });
-    let far = h.clock + 10_000;
-    let (status, _) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } }));
-    assert_eq!(status, 200);
-    let (status, _) = h.request("promise.register_listener", json!({ "awaited": "a:1", "address": "http://worker/" }));
-    assert_eq!(status, 200);
-
-    // the snapshot: the promise, its deadline, its listener
-    let (status, snap) = h.request("debug.snap", json!({}));
-    assert_eq!(status, 200, "{snap}");
-    assert_eq!(snap["promises"].as_array().map(Vec::len), Some(1));
-    assert_eq!(snap["promiseTimeouts"][0]["timeout"].as_u64(), Some(far));
-    assert_eq!(snap["listeners"][0]["id"], "a:1");
-    assert_eq!(snap["tasks"].as_array().map(Vec::len), Some(0));
-
-    // the tick: time moves, the sweep runs, the listener hears
-    let (status, data) = h.request("debug.tick", json!({ "time": far + 1 }));
-    assert_eq!(status, 200, "{data}");
-    let (_, snap) = h.request("debug.snap", json!({}));
-    assert_eq!(snap["promises"][0]["state"], "rejected_timedout", "{snap}");
-    assert!(snap["promiseTimeouts"].as_array().is_some_and(Vec::is_empty));
-    assert_eq!(h.sent.len(), 1, "{:?}", h.sent);
-
-    // the reset: nothing left
-    let (status, _) = h.request("debug.reset", json!({}));
-    assert_eq!(status, 200);
-    assert!(h.keys("wf/").is_empty());
-    let (status, _) = h.request("promise.get", json!({ "id": "a:1" }));
-    assert_eq!(status, 404);
-    let (_, snap) = h.request("debug.snap", json!({}));
-    assert!(snap["promises"].as_array().is_some_and(Vec::is_empty));
 }
 
 /// A fence whose create targets another origin: the create commits first, on

@@ -16,8 +16,8 @@ pub struct Entry {
     pub id: u64,
     pub client: String,
     pub req: Request,
-    /// The instant the client sent this attempt at, `head.debug_time`: the
-    /// instant the node decides it at. A retry carries its own.
+    /// The instant the client sent this attempt at on the injected clock.
+    /// A retry carries its own.
     pub now: u64,
     pub invoke: u64,
     pub ret: u64,

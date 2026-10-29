@@ -1,40 +1,26 @@
 //! echod-diff: echod against the Resonate reference server, both over
 //! HTTP, on one seeded request stream.
 //!
-//! Two processes are started, the reference (`resonate dev --debug`, SQLite
-//! in memory) and echod (`--debug`, an in-memory store), and one sink the
-//! workers' messages are pushed to. Every step builds one request, sends
-//! it to each in turn, and compares what came back: the response, the
-//! messages pushed while it was answered, and the `debug.snap` of the
-//! whole state afterwards. Time is `head.debug_time` and moves only
-//! through `debug.tick`, so both run at the same instants; the sweep each
-//! runs on a tick is where the deadlines are compared.
+//! Two isolated processes are started, the external reference server
+//! (SQLite in memory) and echod (an isolated in-memory-store prefix), plus
+//! one sink for worker messages. Every step sends one request to each and
+//! compares only public observations: the response and messages pushed while
+//! it was answered. The planner learns records from those responses.
 //!
 //! The stream is the reference's own differential's (`gen.rs`). A run
 //! stops at its coverage plateau or at the step cap, and reports every
 //! divergence it met by class, with the first example of each. A
-//! snapshot divergence ends the episode, since the two states have
-//! parted; a response or message divergence is recorded and the run goes
-//! on, since the states may still agree.
+//! response or message divergence is recorded and the run continues.
 //!
 //! What is compared modulo known differences: `preload` is dropped from
 //! responses (echod answers an empty one), `head.serverUrl` from execute
-//! messages (each stamps its own URL), and an internal promise past its
-//! deadline is projected as expired in both snapshots, as the reference's
-//! harness does, since echod expires it when it sweeps and the reference
-//! when it is next read. Error reasons are compared word for word unless
+//! messages (each stamps its own URL). Error reasons are compared word for word unless
 //! `--lax-reasons` tables them instead. One more, where the reference departs from the
 //! specification: when a task is fulfilled the reference deletes it from
 //! every promise's callbacks, pending ones included, which the catalogue's
 //! `monotone_promise_callbacks_grow_while_pending` forbids; echod removes
 //! a callback only when it is consumed, as the specification's internal
-//! step does. Such callbacks are dropped from both snapshots before the
-//! comparison, and `--strict-callbacks` keeps them. And on a callback
-//! registered on a promise already settled, the reference resumes the
-//! awaiter at once, where the specification's `promiseRegisterCallback`
-//! answers the record and changes nothing; a task's `resumes` count is
-//! where that shows, so it is dropped from both snapshots too, and
-//! `--strict-resumes` keeps it. Everything else must be identical.
+//! step does. Internal collections are not inspected by this tool.
 //!
 //! ```text
 //! echod-diff --resonate <bin> --echod target/release/echod --seeds 5
@@ -50,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use echod_sim::rng::Rng;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::gen::{Ids, Model, ALL_OPS};
 use crate::harness::{free_port, spawn_echod, spawn_reference, start_sink, Client, Server, Sink};
@@ -73,9 +59,6 @@ struct Cli {
     /// Steps per seed, at most.
     #[arg(long, default_value_t = 200_000)]
     max_steps: usize,
-    /// Steps before everything is reset.
-    #[arg(long, default_value_t = 200)]
-    episode: usize,
     /// Batches of 200 steps with no new coarse signature before a seed stops.
     #[arg(long, default_value_t = 20)]
     plateau: usize,
@@ -91,12 +74,6 @@ struct Cli {
     /// Report a differing error reason as a table entry, not a divergence.
     #[arg(long, default_value_t = false)]
     lax_reasons: bool,
-    /// Keep the callbacks of fulfilled tasks in the comparison.
-    #[arg(long, default_value_t = false)]
-    strict_callbacks: bool,
-    /// Keep the tasks' resume counts in the comparison.
-    #[arg(long, default_value_t = false)]
-    strict_resumes: bool,
     /// Where the servers' logs go.
     #[arg(long, default_value = "target/echod-diff")]
     logs: PathBuf,
@@ -148,91 +125,6 @@ fn normalize_msgs(mut msgs: Vec<Value>) -> Vec<Value> {
     msgs
 }
 
-/// A snapshot as compared: messages dropped, every list sorted, and the
-/// internal promises past their deadline projected as expired.
-fn normalize_snap(mut snap: Value, now: i64, strict_callbacks: bool, strict_resumes: bool) -> Value {
-    if !strict_resumes {
-        if let Some(ts) = snap.get_mut("tasks").and_then(|v| v.as_array_mut()) {
-            for t in ts.iter_mut() {
-                if let Some(o) = t.as_object_mut() {
-                    o.remove("resumes");
-                }
-            }
-        }
-    }
-    if !strict_callbacks {
-        let fulfilled: HashSet<String> = snap["tasks"].as_array().map(|ts| ts.iter().filter(|t| t["state"].as_str() == Some("fulfilled")).filter_map(|t| t["id"].as_str().map(str::to_string)).collect()).unwrap_or_default();
-        if let Some(cbs) = snap.get_mut("callbacks").and_then(|v| v.as_array_mut()) {
-            cbs.retain(|c| !c["awaiter"].as_str().is_some_and(|a| fulfilled.contains(a)));
-        }
-    }
-    if let Some(o) = snap.as_object_mut() {
-        o.remove("messages");
-        // echod's snapshot lists the schedules too; the reference's does not.
-        o.remove("schedules");
-        for (_, v) in o.iter_mut() {
-            if let Some(a) = v.as_array_mut() {
-                a.sort_by_key(|x| x.to_string());
-            }
-        }
-    }
-    project(&mut snap, now);
-    if let Some(o) = snap.as_object_mut() {
-        for (_, v) in o.iter_mut() {
-            if let Some(a) = v.as_array_mut() {
-                a.sort_by_key(|x| x.to_string());
-            }
-        }
-    }
-    snap
-}
-
-/// The specification's `Object.project`, narrowed to internal promises:
-/// the one kind whose expiry a backend may write down whenever it likes,
-/// since nothing arms it, nothing awaits it and nothing runs it. See the
-/// reference's `diff/port.rs`.
-fn project(snap: &mut Value, now: i64) {
-    let Some(obj) = snap.as_object_mut() else { return };
-    let mut expired: HashSet<String> = HashSet::new();
-    if let Some(promises) = obj.get_mut("promises").and_then(|v| v.as_array_mut()) {
-        for p in promises.iter_mut() {
-            if internal(p) && expire(p, now) {
-                expired.insert(p["id"].as_str().unwrap_or("").to_string());
-            }
-        }
-    }
-    if expired.is_empty() {
-        return;
-    }
-    for (key, field) in [("tasks", "id"), ("promiseTimeouts", "id"), ("callbacks", "awaiter"), ("listeners", "id")] {
-        if let Some(rows) = obj.get(key).and_then(|v| v.as_array()) {
-            for r in rows {
-                if let Some(id) = r[field].as_str() {
-                    assert!(!expired.contains(id), "internal promise {id} is past its deadline, yet `{key}` holds a row for it");
-                }
-            }
-        }
-    }
-}
-
-fn internal(p: &Value) -> bool {
-    let tags = &p["tags"];
-    tags["resonate:target"].is_null() && tags["resonate:external"].as_str() != Some("true") && tags["resonate:scope"].as_str() != Some("global") && tags["resonate:timer"].as_str() != Some("true")
-}
-
-fn expire(p: &mut Value, now: i64) -> bool {
-    let pending = p["state"].as_str() == Some("pending");
-    let due = p["timeoutAt"].as_i64().is_some_and(|t| t <= now);
-    if !(pending && due) {
-        return false;
-    }
-    let timer = p["tags"]["resonate:timer"].as_str() == Some("true");
-    let timeout_at = p["timeoutAt"].clone();
-    p["state"] = json!(if timer { "resolved" } else { "rejected_timedout" });
-    p["settledAt"] = timeout_at;
-    true
-}
-
 /// The paths at which two JSON values differ, array indices erased, so
 /// divergences of one shape fall into one class.
 fn diff_paths(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
@@ -273,42 +165,6 @@ fn short(v: &Value, max: usize) -> String {
     }
 }
 
-/// The coarse class the plateau counts on: which collections are present.
-fn plateau_class(snap: &Value) -> u8 {
-    let mut c = 0u8;
-    for (i, key) in ["promises", "tasks", "callbacks", "listeners", "promiseTimeouts", "taskTimeouts"].iter().enumerate() {
-        if snap.get(key).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
-            c |= 1 << i;
-        }
-    }
-    c
-}
-
-/// The rich class the report counts: which promise and task states are
-/// present, and which collections.
-fn state_class(snap: &Value) -> u32 {
-    let mut c = 0u32;
-    let present = |key: &str, states: &[&str]| -> u32 {
-        let mut bits = 0u32;
-        if let Some(rows) = snap.get(key).and_then(|v| v.as_array()) {
-            for r in rows {
-                if let Some(i) = r["state"].as_str().and_then(|s| states.iter().position(|x| *x == s)) {
-                    bits |= 1 << i;
-                }
-            }
-        }
-        bits
-    };
-    c |= present("promises", &["pending", "resolved", "rejected", "rejected_canceled", "rejected_timedout"]);
-    c |= present("tasks", &["pending", "acquired", "suspended", "halted", "fulfilled"]) << 5;
-    for (i, key) in ["callbacks", "listeners", "promiseTimeouts", "taskTimeouts"].iter().enumerate() {
-        if snap.get(key).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
-            c |= 1 << (10 + i);
-        }
-    }
-    c
-}
-
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -335,12 +191,11 @@ struct Run<'a> {
     corr: u64,
 }
 
-const T0: i64 = 1_000_000_000;
 const BATCH: usize = 200;
 
 /// Operations whose 2xx may push a message, so the sink is given time.
 fn may_emit(kind: &str) -> bool {
-    !matches!(kind, "promise.get" | "task.get" | "schedule.get" | "task.heartbeat" | "debug.snap" | "debug.reset")
+    !matches!(kind, "promise.get" | "task.get" | "schedule.get" | "task.heartbeat")
 }
 
 impl<'a> Run<'a> {
@@ -372,33 +227,15 @@ impl<'a> Run<'a> {
 
     /// One request to both, each answered and its messages taken before
     /// the next is asked.
-    async fn step(&mut self, kind: &str, data: &Value, now: i64) -> ((u16, Value, Vec<Value>), (u16, Value, Vec<Value>)) {
+    async fn step(&mut self, kind: &str, data: &Value) -> ((u16, Value, Vec<Value>), (u16, Value, Vec<Value>)) {
         let corr = self.corr();
-        let (sa, mut da) = self.client.send(&self.reference, kind, data, now, &corr).await;
+        let (sa, mut da) = self.client.send(&self.reference, kind, data, &corr).await;
         let ma = self.drain(sa < 300 && may_emit(kind)).await;
-        let (sb, mut db) = self.client.send(&self.echod, kind, data, now, &corr).await;
+        let (sb, mut db) = self.client.send(&self.echod, kind, data, &corr).await;
         let mb = self.drain(sb < 300 && may_emit(kind)).await;
         normalize_resp(&mut da);
         normalize_resp(&mut db);
         ((sa, da, normalize_msgs(ma)), (sb, db, normalize_msgs(mb)))
-    }
-
-    async fn snaps(&mut self, now: i64) -> (Value, Value) {
-        let corr = self.corr();
-        let (sa, a) = self.client.send(&self.reference, "debug.snap", &json!({}), now, &corr).await;
-        let (sb, b) = self.client.send(&self.echod, "debug.snap", &json!({}), now, &corr).await;
-        assert_eq!(sa, 200, "reference debug.snap: {a}");
-        assert_eq!(sb, 200, "echod debug.snap: {b}");
-        (a, b)
-    }
-
-    async fn reset(&mut self) {
-        let corr = self.corr();
-        let (sa, _) = self.client.send(&self.reference, "debug.reset", &json!({}), T0, &corr).await;
-        let (sb, b) = self.client.send(&self.echod, "debug.reset", &json!({}), T0, &corr).await;
-        assert_eq!(sa, 200, "reference debug.reset");
-        assert_eq!(sb, 200, "echod debug.reset: {b}");
-        self.drain(true).await;
     }
 
     fn record(&mut self, seed: u64, step: usize, kind: &str, what: &str, paths: &[String], detail: String) -> bool {
@@ -415,18 +252,16 @@ impl<'a> Run<'a> {
         fresh
     }
 
-    /// One seed: episodes until the plateau or the cap.
+    /// One seed: public requests until the plateau or the cap.
     async fn seed(&mut self, seed: u64) -> (usize, usize, usize, Vec<&'static str>) {
         let mut rng = Rng::new(seed);
         let mut model = Model::default();
-        let mut now = T0;
+        let mut now = resonate_core::util::system_time_ms();
         let mut covered: HashMap<String, usize> = HashMap::new();
         let mut total = 0usize;
-        let mut rich: HashSet<(String, u16, u32)> = HashSet::new();
-        let mut coarse: HashSet<(String, u16, u8)> = HashSet::new();
+        let mut rich: HashSet<(String, u16, String)> = HashSet::new();
+        let mut coarse: HashSet<(String, u16)> = HashSet::new();
         let mut plateau = 0usize;
-        let mut in_episode = self.cli.episode; // the first step resets
-        let mut episodes = 0usize;
         let worker = self.worker.clone();
         let ids = Ids { worker: &worker };
         let started = Instant::now();
@@ -437,33 +272,23 @@ impl<'a> Run<'a> {
                 if total >= self.cli.max_steps {
                     break 'outer;
                 }
-                if in_episode >= self.cli.episode {
-                    self.reset().await;
-                    model.reset();
-                    now = T0;
-                    in_episode = 0;
-                    episodes += 1;
-                }
-                in_episode += 1;
+                now = now.max(resonate_core::util::system_time_ms());
                 let op = gen::pick_op(&mut rng, &model, &covered);
                 let (kind, data, now_after) = gen::build(op, &mut rng, &model, now, &ids);
-                let pre_class = {
-                    let (a, _) = self.snaps(now).await;
-                    (plateau_class(&a), state_class(&a))
-                };
                 now = now_after;
                 total += 1;
                 if self.cli.trace {
                     eprintln!("[step] seed={seed} step={total} now={now} {kind} {data}");
                 }
 
-                let ((sa, da, ma), (sb, db, mb)) = self.step(kind, &data, now).await;
+                let ((sa, da, ma), (sb, db, mb)) = self.step(kind, &data).await;
                 if sa < 300 {
                     covered.entry(kind.to_string()).or_insert(total);
-                    model.schedule_answered(kind, if kind == "schedule.delete" { &data } else { &da });
                 }
-                rich.insert((kind.to_string(), sa, pre_class.1));
-                coarse.insert((kind.to_string(), sa, pre_class.0));
+                model.observe(kind, &data, sa, &da);
+                let shape = da.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(",")).unwrap_or_else(|| da.to_string());
+                rich.insert((kind.to_string(), sa, shape));
+                coarse.insert((kind.to_string(), sa));
 
                 let mut stop = false;
                 let reason_only = sa == sb && sa >= 400 && da.is_string() && db.is_string() && da != db;
@@ -489,19 +314,6 @@ impl<'a> Run<'a> {
                     let detail = format!("request {kind} now={now} {data}\n  reference pushed: {}\n  echod pushed:     {}", short(&Value::Array(ma), 900), short(&Value::Array(mb), 900));
                     stop |= self.record(seed, total, kind, "messages", &paths, detail) && self.cli.stop;
                 }
-                let (a, b) = self.snaps(now).await;
-                let (sc, sr) = (self.cli.strict_callbacks, self.cli.strict_resumes);
-                let (a, b) = (normalize_snap(a, now, sc, sr), normalize_snap(b, now, sc, sr));
-                if a != b {
-                    let mut paths = Vec::new();
-                    diff_paths(&a, &b, "", &mut paths);
-                    let detail = format!("request {kind} now={now} {data}\n  reference: {}\n  echod:     {}", short(&a, 1500), short(&b, 1500));
-                    stop |= self.record(seed, total, kind, "snapshot", &paths, detail) && self.cli.stop;
-                    // the states have parted: a new episode
-                    in_episode = self.cli.episode;
-                } else {
-                    model.read(&a);
-                }
                 if stop {
                     break 'outer;
                 }
@@ -512,7 +324,7 @@ impl<'a> Run<'a> {
                 plateau = if new == 0 { plateau + 1 } else { 0 };
             }
             eprintln!(
-                "[seed {seed}] {total} steps, {episodes} episodes, {} coarse / {} rich signatures, {} ops covered, plateau {plateau}/{}, {} divergence classes, {:.0}s",
+                "[seed {seed}] {total} steps, {} coarse / {} rich signatures, {} ops covered, plateau {plateau}/{}, {} divergence classes, {:.0}s",
                 coarse.len(),
                 rich.len(),
                 covered.len(),
@@ -576,7 +388,7 @@ async fn main() {
     }
     let ok = run.divergences.is_empty() && missing_any.is_empty();
     if ok {
-        println!("\nPARITY: every response, message and snapshot agreed");
+        println!("\nPARITY: every response and message agreed");
     }
     // `exit` skips the destructors that stop the servers
     drop(run);

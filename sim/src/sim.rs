@@ -232,7 +232,6 @@ impl World {
         cfg.timer_bucket_ms = self.opts.timer_bucket_ms;
         cfg.heartbeat_ms = self.opts.heartbeat_ms;
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
-        cfg.debug = true; // the clock is the request's
         let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
         let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>);
         // Deliver core timer intents on paused Tokio time; the simulation
@@ -358,12 +357,10 @@ impl World {
     /// One request, retried until answered, backing off as a client does (a
     /// node cut off from the store answers nothing useful for seconds, and
     /// every attempt in that time is one more call the checker must place).
-    /// Every attempt is its own entry and carries its own instant as
-    /// `debug_time`, the clock when it was sent: one that got no answer may
-    /// have taken effect, and a retry of it is not the same operation again
-    /// (an acquire retried after a lost answer is refused), nor is it decided
-    /// as of the first attempt's instant, which a server on its own clock
-    /// would not do either. The answer's data, if one came.
+    /// Every attempt is its own entry at the injected clock's current
+    /// instant: one that got no answer may have taken effect, and a retry of
+    /// it is not the same operation again (an acquire retried after a lost
+    /// answer is refused). The answer's data, if one came.
     async fn issue(&self, name: &str, req: Request, rng: &mut Rng) -> Option<serde_json::Value> {
         let target = target_of(&req);
         let (kind, data) = encode(&req, WORKER);
@@ -382,7 +379,7 @@ impl World {
             self.history.attempt(entry);
             let envelope = RequestEnvelope {
                 kind: kind.to_string(),
-                head: RequestHead { corr_id: format!("c{entry}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: Some(now as i64) },
+                head: RequestHead { corr_id: format!("c{entry}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: None },
                 data: data.clone(),
             };
             let mut crashed = server.crashed();
