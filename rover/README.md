@@ -16,6 +16,8 @@ refinement.
   submit conditional-write candidates.
 - `Resonate/Refinement.lean` — the forward simulation and end-to-end
   `boundary_refinement` theorem.
+- `Resonate/TraceChecker.lean` — executable certificate search, verified
+  replay into an abstract Rover execution, and checker soundness.
 - `Resonate/Examples.lean` — executable checks for create, successful commit,
   duplicate stale commit, and a three-node theorem instantiation.
 
@@ -37,16 +39,42 @@ or admitted obligations, that every legal concrete boundary trace is a valid
 trace of the single-process abstract model for arbitrary duplicate-free server
 lists under conditional writes.
 
-## Later trace checker
+## Trace checker
 
-`Resonate.BoundaryEvent` is the stable checker-facing format. A checker can:
+Import `Resonate.TraceChecker`, construct a `List Resonate.BoundaryEvent`, and
+call:
 
-1. decode input/output records into `BoundaryEvent`;
-2. replay candidate abstract states with `Resonate.run`;
-3. report an executable witness or mismatch;
-4. rely on `boundary_refinement` for concrete-to-abstract soundness.
+```lean
+open Resonate
 
-The current `#guard` examples already exercise the pure transition data that
-such a checker will consume; no unproved checker is trusted by the theorem.
+def result :=
+  TraceChecker.check ({} : Resonate.Config) TraceChecker.createTrace
+
+#guard result.isSome
+```
+
+`TraceChecker.check config events` returns
+`Option (TraceChecker.Certificate × Rover.Execution Resonate.Abstract.model)`.
+`some (certificate, execution)` means the trace was accepted and includes the
+replayed concrete abstract execution; `none` means the bounded search found no
+certificate. Search completeness is not claimed.
+
+To validate a stored or externally produced certificate exactly, use:
+
+```lean
+def replayed :=
+  match result with
+  | some (certificate, _) =>
+      TraceChecker.replay ({} : Resonate.Config)
+        TraceChecker.createTrace certificate
+  | none => none
+```
+
+Replay checks monotone times, request presence in Rover's append-only network,
+membership in `Resonate.run`, and the exact output batch emitted by each
+process step. `TraceChecker.check_sound` proves that every `some` result from
+`check` implies `Resonate.Abstract.ValidBoundaryTrace` for the supplied config
+and events; `TraceChecker.replay_valid` provides the corresponding theorem for
+any successfully replayed certificate.
 
 Build with `lake build`.
