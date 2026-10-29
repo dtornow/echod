@@ -24,7 +24,7 @@ origin timer, schedule timer, node, and membership objects.
 
 ## Verification
 
-`./verify.sh` verifies the byte/model implementation and 131 obligations without
+`./verify.sh` verifies the byte/model implementation and 183 obligations without
 trusted stubs or proof escape hatches. It proves executable/spec agreement for
 primitive decoders, UTF-8 validation, blobs, options, sequences, envelopes, and
 records; their canonical round trips; kind separation; and model-level typed
@@ -37,10 +37,15 @@ validator equivalent to `vstd::utf8::valid_utf8`, uses vstd's specified
 Promise/Schedule field conversion. Executable bridge-composition functions
 prove kernel→model→kernel and model→kernel→model round trips.
 
-`runtime.rs` only assembles the already specified primitive codecs into the
-public `Result`-returning API and is exercised by rejection and round-trip
-tests. It is not claimed as an additional end-to-end Verus refinement theorem;
-the typed format and bridge theorems on either side of it are proved.
+`runtime.rs` is part of the verified build. Every public typed encoder refines
+its canonical byte model and, on a successful encoding satisfying the model's
+explicit size/well-formedness predicate, establishes the corresponding decoder
+round trip. Every public typed decoder establishes an exact two-way result:
+`Ok(value)` means the format model decodes to that value, while `Err` means the
+format model rejects the input. These contracts cover Header, Announcement,
+Membership, Promise, Schedule, every StoreKey variant, and the kernel
+Promise/Schedule APIs. The kernel decoder contracts additionally prove that the
+decoded model is the verified UTF-8 bridge image of the returned kernel row.
 
 Run:
 

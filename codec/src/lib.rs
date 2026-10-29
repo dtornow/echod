@@ -16,5 +16,4 @@ pub mod record;
 pub mod text;
 pub mod types;
 
-#[cfg(not(verus_keep_ghost))]
 mod runtime;
