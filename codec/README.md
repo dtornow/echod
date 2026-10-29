@@ -22,22 +22,25 @@ Kinds are assigned for Header, Promise, Schedule, node Announcement,
 Membership, and StoreKey. Store keys have variants for document, schedule,
 origin timer, schedule timer, node, and membership objects.
 
-## Verification boundary
+## Verification
 
-`./verify.sh` verifies the byte/model implementation and 71 obligations without
+`./verify.sh` verifies the byte/model implementation and 131 obligations without
 trusted stubs or proof escape hatches. It proves executable/spec agreement for
 primitive decoders, UTF-8 validation, blobs, options, sequences, envelopes, and
 records; their canonical round trips; kind separation; and model-level typed
 round trips for Header, Announcement, Membership, Value, Task, Promise,
 Schedule, and every StoreKey variant.
 
-The isolated proof boundary is `bridge.rs`: current Verus `String` has a
-`Seq<char>` view but no proved UTF-8 relation for `str::as_bytes` or
-`String::from_utf8`. The module is ordinary Rust and is excluded from Verus.
-It contains the kernel Promise/Schedule conversion and typed runtime assembly.
-The typed model laws are proved, while the ordinary-Rust implementation of
-that bridge is covered by executable round-trip and rejection tests rather
-than a false theorem about `String`. No axiom is used to hide that gap.
+`bridge.rs` is part of the verified build. It proves the custom canonical UTF-8
+validator equivalent to `vstd::utf8::valid_utf8`, uses vstd's specified
+`str`/`String` operations, and verifies both directions of every nested
+Promise/Schedule field conversion. Executable bridge-composition functions
+prove kernel→model→kernel and model→kernel→model round trips.
+
+`runtime.rs` only assembles the already specified primitive codecs into the
+public `Result`-returning API and is exercised by rejection and round-trip
+tests. It is not claimed as an additional end-to-end Verus refinement theorem;
+the typed format and bridge theorems on either side of it are proved.
 
 Run:
 

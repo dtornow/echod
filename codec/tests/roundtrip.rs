@@ -5,7 +5,7 @@ use echod_codec::types::*;
 use echod_kernel::{PromiseState, TaskState};
 
 fn text(value: &str) -> echod_codec::text::Text {
-    string_to_text(value)
+    string_to_text(&value.to_string())
 }
 
 fn kernel_promise() -> echod_kernel::Promise {
@@ -183,4 +183,33 @@ fn utf8_validation_is_iterative_for_large_text() {
             .bytes,
         bytes,
     );
+}
+
+#[test]
+fn verified_string_and_kernel_bridges_round_trip() {
+    let string = "nul:\0, 東京, 🦀, e\u{301}".to_string();
+    assert_eq!(echod_codec::text::round_trip_string(string.clone()), string,);
+
+    let promise = kernel_promise();
+    let promise_before = promise_model(&promise);
+    let promise_after = echod_codec::bridge::round_trip_kernel_promise(promise);
+    assert_eq!(promise_model(&promise_after), promise_before);
+
+    let schedule = echod_kernel::Schedule {
+        id: "计划:日".into(),
+        cron: "0 0 * * *".into(),
+        promise_id: "订单:{{timestamp}}".into(),
+        promise_timeout: 100,
+        promise_param: echod_kernel::Value {
+            headers: vec![("语言".into(), "日本語".into())],
+            data: Some("🦀".into()),
+        },
+        promise_tags: vec![],
+        next_run_at: 200,
+        last_run_at: None,
+        created_at: 1,
+    };
+    let schedule_before = schedule_model(&schedule);
+    let schedule_after = echod_codec::bridge::round_trip_kernel_schedule(schedule);
+    assert_eq!(schedule_model(&schedule_after), schedule_before);
 }

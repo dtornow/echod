@@ -1,6 +1,7 @@
 //! Validated Unicode text represented by canonical UTF-8 bytes.
 
 use vstd::prelude::*;
+use vstd::string::{StrSliceExecFns, StringExecFns, StringSliceAdditionalSpecFns};
 
 #[cfg(verus_keep_ghost)]
 use crate::primitives::decode_blob_spec;
@@ -62,6 +63,113 @@ pub open spec fn valid_utf8(bytes: Seq<u8>) -> bool
         let width = utf8_unit_width(bytes);
         0 < width <= bytes.len()
             && valid_utf8(bytes.subrange(width as int, bytes.len() as int))
+    }
+}
+
+#[verifier::bit_vector]
+proof fn lemma_width_2_conditions(b0: u8, b1: u8)
+    requires
+        0xc0 <= b0 <= 0xdf,
+        0x80 <= b1 <= 0xbf,
+    ensures
+        vstd::utf8::not_overlong_encoding(
+            vstd::utf8::codepoint_width_2(b0, b1), 2,
+        ) <==> 0xc2 <= b0,
+        vstd::utf8::not_surrogate(vstd::utf8::codepoint_width_2(b0, b1)),
+{
+}
+
+#[verifier::bit_vector]
+proof fn lemma_width_3_conditions(b0: u8, b1: u8, b2: u8)
+    requires
+        0xe0 <= b0 <= 0xef,
+        0x80 <= b1 <= 0xbf,
+        0x80 <= b2 <= 0xbf,
+    ensures
+        vstd::utf8::not_overlong_encoding(
+            vstd::utf8::codepoint_width_3(b0, b1, b2), 3,
+        ) <==> (b0 != 0xe0 || b1 >= 0xa0),
+        vstd::utf8::not_surrogate(
+            vstd::utf8::codepoint_width_3(b0, b1, b2),
+        ) <==> (b0 != 0xed || b1 <= 0x9f),
+{
+}
+
+#[verifier::bit_vector]
+proof fn lemma_width_4_conditions(b0: u8, b1: u8, b2: u8, b3: u8)
+    requires
+        0xf0 <= b0 <= 0xf7,
+        0x80 <= b1 <= 0xbf,
+        0x80 <= b2 <= 0xbf,
+        0x80 <= b3 <= 0xbf,
+    ensures
+        vstd::utf8::not_overlong_encoding(
+            vstd::utf8::codepoint_width_4(b0, b1, b2, b3), 4,
+        ) <==> (
+            (b0 == 0xf0 && b1 >= 0x90)
+            || (0xf1 <= b0 <= 0xf3)
+            || (b0 == 0xf4 && b1 <= 0x8f)
+        ),
+        vstd::utf8::not_overlong_encoding(
+            vstd::utf8::codepoint_width_4(b0, b1, b2, b3), 4,
+        ) ==> vstd::utf8::not_surrogate(
+                vstd::utf8::codepoint_width_4(b0, b1, b2, b3),
+            ),
+{
+}
+
+proof fn lemma_unit_matches_vstd(bytes: Seq<u8>)
+    ensures
+        utf8_unit_width(bytes) > 0
+            <==> vstd::utf8::valid_first_scalar(bytes),
+        utf8_unit_width(bytes) > 0 ==> {
+            &&& utf8_unit_width(bytes)
+                == vstd::utf8::length_of_first_scalar(bytes)
+            &&& bytes.subrange(
+                utf8_unit_width(bytes) as int, bytes.len() as int,
+            ) == vstd::utf8::pop_first_scalar(bytes)
+        },
+{
+    if bytes.len() > 0 {
+        let b0 = bytes[0];
+        if bytes.len() >= 2 {
+            let b1 = bytes[1];
+            if 0xc0 <= b0 <= 0xdf && 0x80 <= b1 <= 0xbf {
+                lemma_width_2_conditions(b0, b1);
+            }
+            if bytes.len() >= 3 {
+                let b2 = bytes[2];
+                if 0xe0 <= b0 <= 0xef
+                    && 0x80 <= b1 <= 0xbf
+                    && 0x80 <= b2 <= 0xbf {
+                    lemma_width_3_conditions(b0, b1, b2);
+                }
+                if bytes.len() >= 4 {
+                    let b3 = bytes[3];
+                    if 0xf0 <= b0 <= 0xf7
+                        && 0x80 <= b1 <= 0xbf
+                        && 0x80 <= b2 <= 0xbf
+                        && 0x80 <= b3 <= 0xbf {
+                        lemma_width_4_conditions(b0, b1, b2, b3);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_valid_utf8_equiv(bytes: Seq<u8>)
+    ensures
+        valid_utf8(bytes) == vstd::utf8::valid_utf8(bytes),
+    decreases bytes.len(),
+{
+    if bytes.len() > 0 {
+        lemma_unit_matches_vstd(bytes);
+        let width = utf8_unit_width(bytes);
+        if width > 0 {
+            let rest = bytes.subrange(width as int, bytes.len() as int);
+            lemma_valid_utf8_equiv(rest);
+        }
     }
 }
 
@@ -198,6 +306,80 @@ impl Text {
     {
         self.bytes
     }
+
+    pub fn from_string(value: &String) -> (text: Text)
+        ensures
+            text@ == vstd::utf8::encode_utf8(value@),
+            text.wf(),
+    {
+        let bytes = value.as_str().as_bytes_vec();
+        proof {
+            vstd::utf8::encode_utf8_valid_utf8(value@);
+            lemma_valid_utf8_equiv(bytes@);
+        }
+        Text { bytes }
+    }
+
+    pub fn into_string(self) -> (value: String)
+        requires self.wf(),
+        ensures value@ == vstd::utf8::decode_utf8(self@),
+    {
+        let ghost bytes_view = self@;
+        proof {
+            lemma_valid_utf8_equiv(bytes_view);
+        }
+        let bytes = self.bytes;
+        let slice = bytes.as_slice();
+        let string_slice = unsafe { str::from_utf8_unchecked(slice) };
+        let value = <String as StringExecFns>::from_str(string_slice);
+        proof {
+            assert(string_slice.spec_bytes() == bytes_view);
+            assert(vstd::utf8::encode_utf8(string_slice@) == bytes_view);
+            vstd::utf8::encode_utf8_decode_utf8(string_slice@);
+            assert(vstd::utf8::decode_utf8(bytes_view) == string_slice@);
+        }
+        value
+    }
+}
+
+pub proof fn lemma_string_text_model_round_trip(chars: Seq<char>)
+    ensures
+        vstd::utf8::decode_utf8(vstd::utf8::encode_utf8(chars)) == chars,
+{
+    vstd::utf8::encode_utf8_decode_utf8(chars);
+}
+
+pub proof fn lemma_text_string_model_round_trip(bytes: Seq<u8>)
+    requires valid_utf8(bytes),
+    ensures
+        vstd::utf8::encode_utf8(vstd::utf8::decode_utf8(bytes)) == bytes,
+{
+    lemma_valid_utf8_equiv(bytes);
+    vstd::utf8::decode_utf8_encode_utf8(bytes);
+}
+
+pub fn round_trip_string(value: String) -> (result: String)
+    ensures result@ == value@,
+{
+    let text = Text::from_string(&value);
+    let result = text.into_string();
+    proof {
+        vstd::utf8::encode_utf8_decode_utf8(value@);
+    }
+    result
+}
+
+pub fn round_trip_text(value: Text) -> (result: Text)
+    requires value.wf(),
+    ensures result@ == value@,
+{
+    let ghost original = value@;
+    let string = value.into_string();
+    let result = Text::from_string(&string);
+    proof {
+        lemma_text_string_model_round_trip(original);
+    }
+    result
 }
 
 pub open spec fn text_bytes(text: Seq<u8>) -> Seq<u8> {
