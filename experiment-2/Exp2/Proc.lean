@@ -188,6 +188,48 @@ def advance (main : Proc E S M Unit) (e : E) (now : Time) :
       | some (a, m, rest) => advance main e now fuel s rest (k a m now)
       | none => [(⟨s, mb, .receive acc k⟩, [])]
 
+theorem advance_receive_some (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb rest : List (Addr × M))
+    (accept : Addr → M → Bool) (k : Addr → M → Time → Proc E S M Unit)
+    (a : Addr) (m : M) (h : take? accept mb = some (a, m, rest)) :
+    advance main e now (fuel + 1) s mb (.receive accept k) =
+      advance main e now fuel s rest (k a m now) := by
+  simp [advance, h]
+
+theorem advance_receive_none (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb : List (Addr × M))
+    (accept : Addr → M → Bool) (k : Addr → M → Time → Proc E S M Unit)
+    (h : take? accept mb = none) :
+    advance main e now (fuel + 1) s mb (.receive accept k) =
+      [(⟨s, mb, .receive accept k⟩, [])] := by
+  simp [advance, h]
+
+theorem advance_ask (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb : List (Addr × M)) (k : E → Proc E S M Unit) :
+    advance main e now (fuel + 1) s mb (.ask k) =
+      advance main e now fuel s mb (k e) := rfl
+
+theorem advance_load (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb : List (Addr × M)) (k : S → Proc E S M Unit) :
+    advance main e now (fuel + 1) s mb (.load k) =
+      advance main e now fuel s mb (k s) := rfl
+
+theorem advance_store (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s s' : S) (mb : List (Addr × M)) (k : Proc E S M Unit) :
+    advance main e now (fuel + 1) s mb (.store s' k) =
+      advance main e now fuel s' mb k := rfl
+
+theorem advance_emit (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb : List (Addr × M)) (o : Out M) (k : Proc E S M Unit) :
+    advance main e now (fuel + 1) s mb (.emit o k) =
+      (advance main e now fuel s mb k).map fun (r, outs) => (r, o :: outs) := rfl
+
+theorem advance_emitMany (main : Proc E S M Unit) (e : E) (now : Time)
+    (fuel : Nat) (s : S) (mb : List (Addr × M)) (outs : List (Out M))
+    (k : Proc E S M Unit) :
+    advance main e now (fuel + 1) s mb (.emitMany outs k) =
+      (advance main e now fuel s mb k).map fun (r, rest) => (r, outs ++ rest) := rfl
+
 /-- A list we know is never empty, as one; `d` if it were. -/
 def someOr {α : Type} (xs : List α) (d : α) : Some α :=
   match xs with

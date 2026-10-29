@@ -111,12 +111,16 @@ def loadK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
 
 /-- One request, through: load, decide with the abstract handler, write
     conditionally, answer. `tries` more after a lost race. -/
-@[irreducible] def serve (c : Addr) (id : CallId) (r : Request) (now : Time)
-    (tries : Nat) : NodeP Unit := do
+def startK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
+    (c : Addr) (id : CallId) (r : Request) (now : Time) : NodeP Unit := do
   let cfg ← read
   let op ← fresh
   send cfg.store (.get op r.key)
-  loadK tries (fun k _ => serve c id r now k) c id r now op
+  loadK tries retry c id r now op
+
+@[irreducible] def serve (c : Addr) (id : CallId) (r : Request) (now : Time)
+    (tries : Nat) : NodeP Unit :=
+  startK tries (fun k _ => serve c id r now k) c id r now
 termination_by tries
 decreasing_by omega
 

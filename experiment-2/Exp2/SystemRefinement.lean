@@ -10,10 +10,10 @@ service. Conditional writes are necessary: the `lost` counterexample shows
 the statement is false without them. Request time is carried in `Msg.req` and
 is kept through retries, independently of the later CAS instant.
 
-`drive_refines_of_simulation` closes all generic semantic plumbing.  What
-remains for the general theorem is the system-specific simulation invariant:
-mailboxes and in-flight store operations must be related to pending abstract
-requests, including writes that fail after landing.
+`drive_refines_of_simulationOn` closes the generic semantic plumbing.
+`StorageSimulation.lean` supplies the system-specific invariant for mailboxes,
+in-flight store operations, and writes that fail after landing, then proves
+the general theorem.
 -/
 
 namespace Exp2

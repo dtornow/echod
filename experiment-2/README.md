@@ -28,6 +28,8 @@ scheduler. This experiment takes that shape and plugs it into experiment
   control states, key-extensional store representation, local-to-global
   handler transport, and proved abstract linearization steps for unchanged
   reads, successful CAS writes, and writes that land but report failure.
+  `storage_simulationOn` proves every driven transition is simulated;
+  `system_refines` proves `Refines cfg` for every configuration.
 - `Exp2/ProofExamples.lean`: semantic witnesses for `safe`, `queued`,
   `ghost` (a failed write that landed), and `delayedCas`.
   These do not trust the executable checker: each gives an explicit abstract
@@ -45,8 +47,7 @@ scheduler. This experiment takes that shape and plugs it into experiment
 
 No spawn, so a node serves one request at a time. The handler embedding is
 proved, as are four end-to-end examples. The general storage-node property
-is `Refines cfg`; it necessarily assumes conditional writes, because `lost`
-is a counterexample without them. Its system-specific simulation invariant
-is still open.
+is `Refines cfg`; `system_refines` proves it. The property necessarily assumes
+conditional writes, because `lost` is a counterexample without them.
 
 `lake build` builds experiment 1 too (a path dependency).
