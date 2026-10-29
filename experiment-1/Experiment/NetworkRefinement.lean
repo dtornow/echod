@@ -88,6 +88,21 @@ def Simulation (ccfg : concrete.Config) (acfg : abstract.Config)
   ∀ {c l outs c' a}, rel c a → Step concrete ccfg c l outs c' →
     ∃ a', Matches acfg view a l a' ∧ rel c' a'
 
+/-- Every concrete label in an execution is admitted by `ok`. -/
+def Admitted (ok : Label concrete.Msg → Prop) : Execution concrete → Prop
+  | [] => True
+  | (l, _, _) :: rest => ok l ∧ Admitted ok rest
+
+/-- A simulation restricted to the labels an actual driver can produce.
+This excludes hostile client injections of a service's internal protocol
+messages while retaining every process and delivery step. -/
+def SimulationOn (ccfg : concrete.Config) (acfg : abstract.Config)
+    (view : Label concrete.Msg → Option (Experiment.Label abstract.Msg))
+    (ok : Label concrete.Msg → Prop)
+    (rel : Conf concrete → Experiment.Conf abstract → Prop) : Prop :=
+  ∀ {c l outs c' a}, rel c a → Step concrete ccfg c l outs c' → ok l →
+    ∃ a', Matches acfg view a l a' ∧ rel c' a'
+
 /-- A simulation matches every legal concrete execution, preserving exactly
 its projected client trace. -/
 theorem simulate {ccfg : concrete.Config} {acfg : abstract.Config}
@@ -112,6 +127,31 @@ theorem simulate {ccfg : concrete.Config} {acfg : abstract.Config}
     · rw [abstractEnd_append, hend]
       exact htrel
 
+/-- The admitted-label form of `simulate`. -/
+theorem simulateOn {ccfg : concrete.Config} {acfg : abstract.Config}
+    {view : Label concrete.Msg → Option (Experiment.Label abstract.Msg)}
+    {ok : Label concrete.Msg → Prop}
+    {rel : Conf concrete → Experiment.Conf abstract → Prop}
+    (hsim : SimulationOn ccfg acfg view ok rel)
+    {c : Conf concrete} {x : Execution concrete} {a : Experiment.Conf abstract}
+    (hr : rel c a) (hx : Legal concrete ccfg c x) (hok : Admitted ok x) :
+    ∃ ax, Experiment.Legal abstract acfg a ax ∧
+      Experiment.observe ax = project view x ∧
+      rel (endOf c x) (abstractEnd a ax) := by
+  induction x generalizing c a with
+  | nil => exact ⟨[], trivial, rfl, hr⟩
+  | cons step rest ih =>
+    obtain ⟨l, outs, c'⟩ := step
+    obtain ⟨hstep, hrest⟩ := hx
+    obtain ⟨hokStep, hokRest⟩ := hok
+    obtain ⟨a', ⟨mid, hmid, hobs, hend⟩, hr'⟩ := hsim hr hstep hokStep
+    obtain ⟨tail, htail, htobs, htrel⟩ := ih hr' hrest hokRest
+    refine ⟨mid ++ tail, abstract_legal_append hmid (hend ▸ htail), ?_, ?_⟩
+    · rw [abstract_observe_append, hobs, htobs]
+      rfl
+    · rw [abstractEnd_append, hend]
+      exact htrel
+
 /-- Trace inclusion: a related initial pair and a forward simulation make
 every legal concrete execution's client projection a valid abstract trace. -/
 theorem refines {ccfg : concrete.Config} {acfg : abstract.Config}
@@ -123,6 +163,20 @@ theorem refines {ccfg : concrete.Config} {acfg : abstract.Config}
     {x : Execution concrete} (hx : Legal concrete ccfg (initial states) x) :
     Experiment.Valid abstract acfg init (project view x) := by
   obtain ⟨ax, hlegal, hobs, _⟩ := simulate hsim hinit hx
+  exact ⟨ax, hlegal, hobs⟩
+
+/-- Trace inclusion from a simulation over the driver's admitted labels. -/
+theorem refinesOn {ccfg : concrete.Config} {acfg : abstract.Config}
+    {view : Label concrete.Msg → Option (Experiment.Label abstract.Msg)}
+    {ok : Label concrete.Msg → Prop}
+    {rel : Conf concrete → Experiment.Conf abstract → Prop}
+    (hsim : SimulationOn ccfg acfg view ok rel)
+    {states : List (Addr × concrete.State)} {init : abstract.State}
+    (hinit : rel (initial states) (Experiment.initial init))
+    {x : Execution concrete} (hx : Legal concrete ccfg (initial states) x)
+    (hok : Admitted ok x) :
+    Experiment.Valid abstract acfg init (project view x) := by
+  obtain ⟨ax, hlegal, hobs, _⟩ := simulateOn hsim hinit hx hok
   exact ⟨ax, hlegal, hobs⟩
 
 end Experiment.Network

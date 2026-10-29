@@ -43,40 +43,77 @@ def answers (op : Nat) : Addr → CMsg → Bool
 
 def answer (c : Addr) (id : CallId) (res : Response) : NodeP Unit := send c (.app (.res id res))
 
-/-- One request, through: load, decide with the abstract handler, write
-    conditionally, answer. `tries` more after a lost race. -/
-def serve (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) : NodeP Unit := do
-    let cfg ← read
-    let op ← fresh
-    send cfg.store (.get op r.key)
-    let (_, reply, _) ← recv (answers op)
-    let .got _ doc := reply | answer c id ⟨503, none⟩
-    let before : Experiment.State := { promises := doc.toList.map (·.1) }
-    let (res, after, outs) := pick ((Experiment.request r now).run cfg.app before) 0
-    for o in outs do
-      match o with
-      | .always n ok => Proc.emit (.always n ok) (Proc.pure ())
-      | .sometimes n hit => Proc.emit (.sometimes n hit) (Proc.pure ())
-      | .send _ _ => return
-    if after == before then
+def note : List (Out Msg) → NodeP Unit
+  | [] => pure ()
+  | .always n ok :: rest => do Proc.emit (.always n ok) (Proc.pure ()); note rest
+  | .sometimes n hit :: rest => do Proc.emit (.sometimes n hit) (Proc.pure ()); note rest
+  | .send _ _ :: rest => note rest
+
+def sendAll : List (Addr × Msg) → NodeP Unit
+  | [] => pure ()
+  | (a, m) :: rest => do send a (.app m); sendAll rest
+
+structure Candidate where
+  client : Addr
+  id     : CallId
+  req    : Request
+  now    : Time
+  tries  : Nat
+  doc    : Option (Experiment.Promise × Experiment.Storage.Version)
+  res    : Response
+  after  : Experiment.State
+  outs   : List (Out Msg)
+  promise : Experiment.Promise
+
+/-- The residual process while a conditional write is outstanding. `retry`
+is the structurally smaller recursive call supplied by `serve`. -/
+def writeK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
+    (cand : Candidate) (op : Nat) : NodeP Unit := do
+  let (_, written, _) ← recv (answers op)
+  match written with
+  | .written _ => do answer cand.client cand.id cand.res; sendAll (sends cand.outs)
+  | .conflict _ =>
+    match tries with
+    | k + 1 => retry k (Nat.lt_succ_self k)
+    | 0 => answer cand.client cand.id ⟨503, none⟩
+  | _ => answer cand.client cand.id ⟨503, none⟩
+
+/-- Continue after the store returned the document. -/
+def decideK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
+    (c : Addr) (id : CallId) (r : Request) (now : Time)
+    (cfg : Config) (doc : Option (Experiment.Promise × Experiment.Storage.Version))
+    (before : Experiment.State) :
+    Response × Experiment.State × List (Out Msg) → NodeP Unit
+  | (res, after, outs) => do
+    note outs
+    if after == before then do
       answer c id res
-      for (a, m) in sends outs do send a (.app m)
+      sendAll (sends outs)
     else
       match after.promises.find? (·.id == r.key) with
       | none => answer c id ⟨503, none⟩
       | some p =>
-        let op' ← fresh
-        send cfg.store (.put op' r.key p (doc.map (·.2)))
-        let (_, written, _) ← recv (answers op')
-        match written with
-        | .written _ =>
-          answer c id res
-          for (a, m) in sends outs do send a (.app m)
-        | .conflict _ =>
-          match _h : tries with
-          | k + 1 => serve c id r now k
-          | 0 => answer c id ⟨503, none⟩
-        | _ => answer c id ⟨503, none⟩
+        let op ← fresh
+        send cfg.store (.put op r.key p (doc.map (·.2)))
+        writeK tries retry ⟨c, id, r, now, tries, doc, res, after, outs, p⟩ op
+
+/-- The residual process while the document load is outstanding. -/
+def loadK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
+    (c : Addr) (id : CallId) (r : Request) (now : Time) (op : Nat) : NodeP Unit := do
+  let (_, reply, _) ← recv (answers op)
+  let .got _ doc := reply | answer c id ⟨503, none⟩
+  let cfg ← read
+  let before : Experiment.State := { promises := doc.toList.map (·.1) }
+  decideK tries retry c id r now cfg doc before
+    (pick ((Experiment.request r now).run cfg.app before) 0)
+
+/-- One request, through: load, decide with the abstract handler, write
+    conditionally, answer. `tries` more after a lost race. -/
+def serve (c : Addr) (id : CallId) (r : Request) (now : Time) (tries : Nat) : NodeP Unit := do
+  let cfg ← read
+  let op ← fresh
+  send cfg.store (.get op r.key)
+  loadK tries (fun k _ => serve c id r now k) c id r now op
 termination_by tries
 decreasing_by omega
 
