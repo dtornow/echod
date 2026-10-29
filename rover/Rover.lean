@@ -1,6 +1,6 @@
 import Rover.World
-import Rover.Protocol
-import Rover.Abstract.Model
-import Rover.Concrete.Model
-import Rover.Refinement
-import Rover.Examples
+import Resonate
+import Resonate.Abstract
+import Resonate.Concrete
+import Resonate.Refinement
+import Resonate.Examples

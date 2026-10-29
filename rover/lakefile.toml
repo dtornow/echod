@@ -7,3 +7,6 @@ path = "../experiment-1"
 
 [[lean_lib]]
 name = "Rover"
+
+[[lean_lib]]
+name = "Resonate"

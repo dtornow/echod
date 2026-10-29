@@ -1,8 +1,8 @@
-import Rover.Abstract.Model
-import Rover.Concrete.Model
+import Resonate.Abstract
+import Resonate.Concrete
 
 /-!
-# Concrete-to-abstract Rover refinement
+# Concrete-to-abstract Resonate refinement
 
 The simulation keeps the concrete store equal to the single abstract process.
 It also records the causal fact needed by an append-only network: every
@@ -12,15 +12,15 @@ linearization point. All loads, snapshots, conflicts, retries, timeouts, and
 duplicate deliveries are hidden stuttering steps.
 -/
 
-namespace Rover.Refinement
+namespace Resonate.Refinement
 
-open Protocol
+open Rover
 
 abbrev AModel := Abstract.model
-abbrev CModel (nodes : List Addr) (appConfig : Protocol.Config) :=
+abbrev CModel (nodes : List Addr) (appConfig : Resonate.Config) :=
   Concrete.model nodes appConfig
 
-structure Related (nodes : List Addr) (appConfig : Protocol.Config)
+structure Related (nodes : List Addr) (appConfig : Resonate.Config)
     (concrete : World (CModel nodes appConfig))
     (abstract : World AModel) : Prop where
   time : abstract.now ≤ concrete.now
@@ -34,7 +34,7 @@ structure Related (nodes : List Addr) (appConfig : Protocol.Config)
       abstract.network
 
 theorem result_sent_call
-    {appConfig : Protocol.Config} {config : Concrete.Config}
+    {appConfig : Resonate.Config} {config : Concrete.Config}
     {pid : Concrete.Pid} {localState : Concrete.Local} {time : Time}
     {event : Event Concrete.Pid (Concrete.Msg appConfig)}
     {result : Result Concrete.Pid Concrete.Local (Concrete.Msg appConfig)}
@@ -58,7 +58,7 @@ theorem result_sent_call
           Concrete.Msg.call?, Outcomes.one]
 
 theorem known_after_land
-    {nodes : List Addr} {appConfig : Protocol.Config}
+    {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
     {concrete : World (CModel nodes appConfig)} {abstract : World AModel}
     {pid : Concrete.Pid} {time : Time}
@@ -89,7 +89,7 @@ theorem known_after_land
     exact related.known hvalid hincoming
 
 theorem server_result_internal
-    {appConfig : Protocol.Config} {config : Concrete.Config}
+    {appConfig : Resonate.Config} {config : Concrete.Config}
     {address : Addr} {localState : Concrete.Local} {time : Time}
     {event : Event Concrete.Pid (Concrete.Msg appConfig)}
     {result : Result Concrete.Pid Concrete.Local (Concrete.Msg appConfig)}
@@ -104,7 +104,7 @@ theorem server_result_internal
         grind [Concrete.step, Concrete.candidateResults, Outcomes.one]
 
 theorem store_result_classify
-    {appConfig : Protocol.Config} {config : Concrete.Config}
+    {appConfig : Resonate.Config} {config : Concrete.Config}
     {state : State} {version time : Nat}
     {event : Event Concrete.Pid (Concrete.Msg appConfig)}
     {result : Result Concrete.Pid Concrete.Local (Concrete.Msg appConfig)}
@@ -127,12 +127,12 @@ theorem store_result_classify
       cases sender <;> cases incoming <;>
         grind [Concrete.step, Outcomes.one]
 
-def concreteObservation {nodes : List Addr} {appConfig : Protocol.Config}
-    (label : Label (CModel nodes appConfig)) : List Protocol.BoundaryEvent :=
+def concreteObservation {nodes : List Addr} {appConfig : Resonate.Config}
+    (label : Label (CModel nodes appConfig)) : List Resonate.BoundaryEvent :=
   label.observe.filterMap (Concrete.boundaryEvent nodes appConfig)
 
 def abstractObservation (label : Label AModel) :
-    List Protocol.BoundaryEvent :=
+    List Resonate.BoundaryEvent :=
   label.observe.filterMap Abstract.boundaryEvent
 
 def labelTime {model : Model} : Label model → Time
@@ -144,7 +144,7 @@ def labelPid {model : Model} : Label model → model.Pid
   | .process pid _ _ _ => pid
 
 theorem concrete_process_cases {nodes : List Addr}
-    {appConfig : Protocol.Config} {pid : Concrete.Pid}
+    {appConfig : Resonate.Config} {pid : Concrete.Pid}
     (h : (CModel nodes appConfig).isProcess pid) :
     (∃ address, pid = .server address) ∨ pid = .store := by
   cases pid with
@@ -167,7 +167,7 @@ theorem concrete_process_cases {nodes : List Addr}
       some (.notification time client record) := rfl
 
 theorem outputs_observe_same (nodes : List Addr)
-    (appConfig : Protocol.Config) (time : Time)
+    (appConfig : Resonate.Config) (time : Time)
     (abstractEvent : Event Abstract.Pid Message)
     (concreteEvent : Event Concrete.Pid (Concrete.Msg appConfig))
     (outputs : List Output) :
@@ -214,7 +214,7 @@ theorem outputs_observe_same (nodes : List Addr)
           exact congrArg (List.cons (.notification time client record)) ih
 
 theorem simulate_step
-    {nodes : List Addr} {appConfig : Protocol.Config}
+    {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config} (_hconditional : config.conditional = true)
     {concrete next : World (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
@@ -377,7 +377,7 @@ theorem abstract_boundaryTrace_append
   exact List.filterMap_append
 
 theorem concrete_boundaryTrace_cons
-    {nodes : List Addr} {appConfig : Protocol.Config}
+    {nodes : List Addr} {appConfig : Resonate.Config}
     (label : Label (CModel nodes appConfig))
     (next : World (CModel nodes appConfig))
     (rest : Execution (CModel nodes appConfig)) :
@@ -388,7 +388,7 @@ theorem concrete_boundaryTrace_cons
     List.filterMap_append]
 
 theorem simulate_execution
-    {nodes : List Addr} {appConfig : Protocol.Config}
+    {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config} (hconditional : config.conditional = true)
     {concrete : World (CModel nodes appConfig)}
     {execution : Execution (CModel nodes appConfig)}
@@ -417,7 +417,7 @@ theorem simulate_execution
           concrete_boundaryTrace_cons]
 
 theorem initial_related
-    {nodes : List Addr} {appConfig : Protocol.Config}
+    {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
@@ -436,7 +436,7 @@ theorem initial_related
 every legal append-only concrete boundary trace is a boundary trace of the
 one-process abstract promise service. -/
 theorem boundary_refinement
-    (nodes : List Addr) (appConfig : Protocol.Config) (config : Concrete.Config)
+    (nodes : List Addr) (appConfig : Resonate.Config) (config : Concrete.Config)
     (hconditional : config.conditional = true) :
     ∀ events,
       Concrete.ValidBoundaryTrace nodes appConfig config events →
@@ -450,4 +450,4 @@ theorem boundary_refinement
       abstractLegal⟩,
     abstractTrace.trans htrace⟩
 
-end Rover.Refinement
+end Resonate.Refinement

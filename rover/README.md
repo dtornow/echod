@@ -7,16 +7,16 @@ refinement.
 
 - `Rover/World.lean` — generic worlds, injection, process steps, append-only
   message history, legal executions, `Behavior`, and raw boundary traces.
-- `Rover/Protocol.lean` — shared calls, responses, notifications, clean
+- `Resonate.lean` — shared calls, responses, notifications, clean
   boundary events, and the promise transition reused from experiment 1.
-- `Rover/Abstract/Model.lean` — exactly one real process containing the global
+- `Resonate/Abstract.lean` — exactly one real process containing the global
   promise state.
-- `Rover/Concrete/Model.lean` — any duplicate-free list of stateless server
+- `Resonate/Concrete.lean` — any duplicate-free list of stateless server
   addresses plus one versioned object store. Servers load, evaluate, and
   submit conditional-write candidates.
-- `Rover/Refinement.lean` — the forward simulation and end-to-end
+- `Resonate/Refinement.lean` — the forward simulation and end-to-end
   `boundary_refinement` theorem.
-- `Rover/Examples.lean` — executable checks for create, successful commit,
+- `Resonate/Examples.lean` — executable checks for create, successful commit,
   duplicate stale commit, and a three-node theorem instantiation.
 
 The network records every message ever sent. Receiving checks membership and
@@ -32,17 +32,17 @@ from a versioned snapshot. Only a candidate whose version and prior state both
 match may update the store and publish its response/notifications. Replaying a
 successful CAS message therefore conflicts and requests a new snapshot.
 
-`Rover.Refinement.boundary_refinement` proves, without project-specific axioms
+`Resonate.Refinement.boundary_refinement` proves, without project-specific axioms
 or admitted obligations, that every legal concrete boundary trace is a valid
 trace of the single-process abstract model for arbitrary duplicate-free server
 lists under conditional writes.
 
 ## Later trace checker
 
-`Protocol.BoundaryEvent` is the stable checker-facing format. A checker can:
+`Resonate.BoundaryEvent` is the stable checker-facing format. A checker can:
 
 1. decode input/output records into `BoundaryEvent`;
-2. replay candidate abstract states with `Protocol.run`;
+2. replay candidate abstract states with `Resonate.run`;
 3. report an executable witness or mismatch;
 4. rely on `boundary_refinement` for concrete-to-abstract soundness.
 

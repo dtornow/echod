@@ -2,7 +2,7 @@ import Rover.World
 import Experiment.Promise
 
 /-!
-# Rover's shared promise protocol
+# Resonate's shared protocol
 
 The abstract service and the concrete server/store deployment use the same
 client calls and boundary messages.  The promise data and handlers are reused
@@ -11,7 +11,9 @@ append-only transport and a boundary type that does not expose internal
 process identifiers.
 -/
 
-namespace Rover.Protocol
+namespace Resonate
+
+open Rover
 
 abbrev Addr := Experiment.Addr
 abbrev CallId := Experiment.CallId
@@ -83,4 +85,4 @@ def run (config : Config) (call : Call) (state : State) :
       (Experiment.promises.step config state call.requestedAt
         (.msg call.client (.req call.id call.requestedAt call.request))).property⟩
 
-end Rover.Protocol
+end Resonate

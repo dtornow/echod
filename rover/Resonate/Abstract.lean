@@ -1,15 +1,15 @@
-import Rover.Protocol
+import Resonate
 
 /-!
-# The abstract Rover
+# Abstract Resonate
 
 There is exactly one real process.  Its local state is the complete promise
 state, so a receive is one atomic protocol linearization.
 -/
 
-namespace Rover.Abstract
+namespace Resonate.Abstract
 
-open Protocol
+open Rover
 
 inductive Pid where
   | outside
@@ -20,7 +20,7 @@ def step (config : Config) (pid : Pid) (state : State) (_now : Time)
     (event : Event Pid Message) : Outcomes (Result Pid State Message) :=
   match pid, event with
   | .service, .receive .outside (.request call) =>
-      let outcomes := Protocol.run config call state
+      let outcomes := Resonate.run config call state
       ⟨outcomes.val.map fun (next, outputs) =>
           { state := next
             send := outputs.map fun output => (.outside, .output output) },
@@ -43,15 +43,15 @@ abbrev model : Model where
 theorem only_real_process {pid : Pid} (h : model.isProcess pid) :
     pid = .service := h
 
-def boundaryEvent : Rover.BoundaryEvent model → Option Protocol.BoundaryEvent
+def boundaryEvent : Rover.BoundaryEvent model → Option Resonate.BoundaryEvent
   | .input _ time message => message.observeInput time
   | .output _ time message => message.observeOutput time
 
-def boundaryTrace (execution : Execution model) : List Protocol.BoundaryEvent :=
+def boundaryTrace (execution : Execution model) : List Resonate.BoundaryEvent :=
   (Rover.trace execution).filterMap boundaryEvent
 
 def ValidBoundaryTrace (config : Config)
-    (events : List Protocol.BoundaryEvent) : Prop :=
+    (events : List Resonate.BoundaryEvent) : Prop :=
   ∃ execution,
     Behavior model config execution ∧
     boundaryTrace execution = events
@@ -61,4 +61,4 @@ def initialProcess : Pid → State := fun _ => {}
 theorem initialProcess_valid (config : Config) :
     model.init config initialProcess := rfl
 
-end Rover.Abstract
+end Resonate.Abstract

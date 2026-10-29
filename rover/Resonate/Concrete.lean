@@ -1,8 +1,8 @@
-import Rover.Protocol
+import Resonate
 import Experiment.Storage
 
 /-!
-# The concrete Rover
+# Concrete Resonate
 
 A deployment has any duplicate-free list of server addresses and one object
 store. Servers are stateless: they load a snapshot, evaluate the shared
@@ -15,9 +15,9 @@ retried; only a candidate matching both the current version and state can
 publish its response and notifications.
 -/
 
-namespace Rover.Concrete
+namespace Resonate.Concrete
 
-open Protocol
+open Rover
 
 abbrev Config := Experiment.Storage.Config
 
@@ -30,15 +30,15 @@ inductive Pid where
 /-- A server-computed state transition, with its semantic justification.
 Keeping the witness in the internal message makes the trust boundary explicit:
 the object store accepts only candidates produced by the shared protocol. -/
-structure Candidate (config : Protocol.Config) where
+structure Candidate (config : Resonate.Config) where
   call : Call
   before : State
   version : Nat
   after : State
   outputs : List Output
-  valid : (after, outputs) ∈ (Protocol.run config call before).val
+  valid : (after, outputs) ∈ (Resonate.run config call before).val
 
-inductive Msg (config : Protocol.Config) where
+inductive Msg (config : Resonate.Config) where
   | request (call : Call)
   | output (output : Output)
   | load (call : Call)
@@ -51,7 +51,7 @@ inductive Local where
   | node
   | store (state : State) (version : Nat)
 
-def Msg.call? {config : Protocol.Config} : Msg config → Option Call
+def Msg.call? {config : Resonate.Config} : Msg config → Option Call
   | .request call => some call
   | .output _ => none
   | .load call => some call
@@ -59,10 +59,10 @@ def Msg.call? {config : Protocol.Config} : Msg config → Option Call
   | .cas candidate => some candidate.call
   | .retry call => some call
 
-def candidateResults (config : Protocol.Config) (call : Call)
+def candidateResults (config : Resonate.Config) (call : Call)
     (before : State) (version : Nat) :
     Outcomes (Result (Pid) Local (Msg config)) :=
-  let outcomes := Protocol.run config call before
+  let outcomes := Resonate.run config call before
   let attached := outcomes.val.attach
   ⟨attached.map fun outcome =>
       { state := .node
@@ -84,7 +84,7 @@ def candidateResults (config : Protocol.Config) (call : Call)
         simp [attached]
       exact List.ne_nil_of_mem (List.mem_map_of_mem hattach)⟩
 
-def step (appConfig : Protocol.Config) (config : Config) (pid : Pid)
+def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
     (localState : Local) (_now : Time) (event : Event Pid (Msg appConfig)) :
     Outcomes (Result Pid Local (Msg appConfig)) :=
   match pid, localState, event with
@@ -111,7 +111,7 @@ def step (appConfig : Protocol.Config) (config : Config) (pid : Pid)
           send := [(.server server, .retry candidate.call)] }
   | _, _, _ => Outcomes.one { state := localState, send := [] }
 
-abbrev model (nodes : List Addr) (appConfig : Protocol.Config) : Model where
+abbrev model (nodes : List Addr) (appConfig : Resonate.Config) : Model where
   Config := Config
   Pid := Pid
   State := Local
@@ -135,15 +135,15 @@ def initialProcess : Pid → Local
   | .server _ => .node
   | .store => .store {} 0
 
-theorem initialProcess_valid (nodes : List Addr) (appConfig : Protocol.Config)
+theorem initialProcess_valid (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Config) (hnodup : nodes.Nodup) :
     (model nodes appConfig).init config initialProcess := by
   refine ⟨hnodup, rfl, ?_⟩
   intros
   rfl
 
-def boundaryEvent (nodes : List Addr) (appConfig : Protocol.Config) :
-    Rover.BoundaryEvent (model nodes appConfig) → Option Protocol.BoundaryEvent
+def boundaryEvent (nodes : List Addr) (appConfig : Resonate.Config) :
+    Rover.BoundaryEvent (model nodes appConfig) → Option Resonate.BoundaryEvent
   | .input _ time (.request call) => some (.request time call)
   | .output _ time (.output (.response client id response)) =>
       some (.response time client id response)
@@ -151,15 +151,15 @@ def boundaryEvent (nodes : List Addr) (appConfig : Protocol.Config) :
       some (.notification time client record)
   | _ => none
 
-def boundaryTrace (nodes : List Addr) (appConfig : Protocol.Config)
+def boundaryTrace (nodes : List Addr) (appConfig : Resonate.Config)
     (execution : Execution (model nodes appConfig)) :
-    List Protocol.BoundaryEvent :=
+    List Resonate.BoundaryEvent :=
   (Rover.trace execution).filterMap (boundaryEvent nodes appConfig)
 
-def ValidBoundaryTrace (nodes : List Addr) (appConfig : Protocol.Config)
-    (config : Config) (events : List Protocol.BoundaryEvent) : Prop :=
+def ValidBoundaryTrace (nodes : List Addr) (appConfig : Resonate.Config)
+    (config : Config) (events : List Resonate.BoundaryEvent) : Prop :=
   ∃ execution,
     Behavior (model nodes appConfig) config execution ∧
     boundaryTrace nodes appConfig execution = events
 
-end Rover.Concrete
+end Resonate.Concrete

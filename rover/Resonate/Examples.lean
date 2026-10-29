@@ -1,17 +1,17 @@
-import Rover.Refinement
+import Resonate.Refinement
 
 /-!
 # Executable Rover examples
 
 These checks exercise the shared transition and the concrete conditional-write
 boundary. They are intentionally data-oriented: a later trace checker can
-decode boundary events, replay the same `Protocol.run` transitions, and use
+decode boundary events, replay the same `Resonate.run` transitions, and use
 `Refinement.boundary_refinement` as its semantic justification.
 -/
 
-namespace Rover.Examples
+namespace Resonate.Examples
 
-open Protocol
+open Rover
 
 def createCall : Call := {
   client := "client-a"
@@ -21,10 +21,10 @@ def createCall : Call := {
 }
 
 def createOutcome : State × List Output :=
-  (Protocol.run {} createCall {}).val.headD ({}, [])
+  (Resonate.run {} createCall {}).val.headD ({}, [])
 
 theorem createOutcome_valid :
-    createOutcome ∈ (Protocol.run {} createCall {}).val := by
+    createOutcome ∈ (Resonate.run {} createCall {}).val := by
   native_decide
 
 #guard createOutcome.1.promises.length == 1
@@ -41,7 +41,7 @@ theorem createOutcome_valid :
     }
   }]
 
-def candidate : Concrete.Candidate ({} : Protocol.Config) := {
+def candidate : Concrete.Candidate ({} : Resonate.Config) := {
   call := createCall
   before := {}
   version := 0
@@ -51,7 +51,7 @@ def candidate : Concrete.Candidate ({} : Protocol.Config) := {
 }
 
 def commitResult : Result Concrete.Pid Concrete.Local
-    (Concrete.Msg ({} : Protocol.Config)) :=
+    (Concrete.Msg ({} : Resonate.Config)) :=
   (Concrete.step {} {} .store (.store {} 0) 0
     (.receive (.server "node-a") (.cas candidate))).val.headD {
       state := .outside
@@ -68,7 +68,7 @@ def commitResult : Result Concrete.Pid Concrete.Local
 /-- Receiving the same append-only CAS message again cannot publish twice:
 its old version conflicts and the store requests a fresh snapshot. -/
 def duplicateResult : Result Concrete.Pid Concrete.Local
-    (Concrete.Msg ({} : Protocol.Config)) :=
+    (Concrete.Msg ({} : Resonate.Config)) :=
   (Concrete.step {} {} .store (.store createOutcome.1 1) 1
     (.receive (.server "node-a") (.cas candidate))).val.headD {
       state := .outside
@@ -86,4 +86,4 @@ example : ∀ events,
   Refinement.boundary_refinement
     ["node-a", "node-b", "node-c"] {} {} rfl
 
-end Rover.Examples
+end Resonate.Examples
