@@ -100,6 +100,11 @@ def send (to : Addr) (m : Msg) : Handler Unit := emit (.send to m)
 def always (name : String) (ok : Bool) : Handler Unit := emit (.always name ok)
 def sometimes (name : String) (hit : Bool) : Handler Unit := emit (.sometimes name hit)
 
+/-- The part of configuration read by promise handlers. In particular,
+`dispatch` is independent of the unreliable-service wrapper. -/
+def readDefaultTimeout : Handler Time :=
+  fun cfg s => .one (cfg.defaultTimeout, s, [])
+
 /-! ## Helpers -/
 
 def save (p : Promise) : Handler Unit :=
@@ -154,7 +159,7 @@ def promiseCreate (id : Ident) (timeoutAt : Option Time) (now : Time) : Handler 
     sometimes "create finds the promise settled" (p.state != .pending)
     return ok p
   | none =>
-    let timeoutAt := timeoutAt.getD (now + (← read).defaultTimeout)
+    let timeoutAt := timeoutAt.getD (now + (← readDefaultTimeout))
     let p : Promise :=
       { id, timeoutAt, state := if timeoutAt ≤ now then .rejectedTimedout else .pending }
     save p

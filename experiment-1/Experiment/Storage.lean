@@ -134,7 +134,9 @@ def answer (f : Flight) (res : Response) : NodeH Unit := send f.client (.app (.r
     changed: answer now. Something did: write it, conditionally. -/
 def decideStep (f : Flight) (doc : Option (Promise × Version)) : NodeH Unit := do
   let before : Experiment.State := { promises := doc.toList.map (·.1) }
-  let (res, after, outs) := pick ((Experiment.request f.req f.now).run (← read).app before) 0
+  let cfg ← read
+  let (res, after, outs) :=
+    pick ((Experiment.request f.req f.now).run { cfg.app with unreliable := true } before) 0
   for o in outs do
     match o with
     | .always n ok => emit (.always n ok)

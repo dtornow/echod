@@ -87,7 +87,8 @@ def resume (w : Wait) (_ : Addr) (m : CMsg) (_stepNow : Time) : N Unit :=
   | .loading c id r now tries, .got _ doc => do
     let cfg ← read
     let before : Experiment.State := { promises := doc.toList.map (·.1) }
-    decided c id r now tries cfg doc before (pick ((Experiment.request r now).run cfg.app before) 0)
+    decided c id r now tries cfg doc before
+      (pick ((Experiment.request r now).run { cfg.app with unreliable := true } before) 0)
   | .writing c id _ _ res notify _, .written _ => do
     answer c id res
     sendAll notify

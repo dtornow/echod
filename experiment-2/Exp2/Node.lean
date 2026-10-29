@@ -105,7 +105,7 @@ def loadK (tries : Nat) (retry : (k : Nat) → k < tries → NodeP Unit)
   let cfg ← read
   let before : Experiment.State := { promises := doc.toList.map (·.1) }
   decideK tries retry c id r now cfg doc before
-    (pick ((Experiment.request r now).run cfg.app before) 0)
+    (pick ((Experiment.request r now).run { cfg.app with unreliable := true } before) 0)
 
 /-- One request, through: load, decide with the abstract handler, write
     conditionally, answer. `tries` more after a lost race. -/
