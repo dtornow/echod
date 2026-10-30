@@ -1,4 +1,5 @@
-import «abstract».Model
+import Rover
+import «concrete».Internal
 
 /-!
 # Concrete Resonate over a versioned document store
@@ -66,6 +67,11 @@ inductive Msg where
 structure Versioned (key : DocumentKey) where
   document : Document key
   version : Version
+
+/-- A dependent cache entry: the value's type is fixed by its key. -/
+structure CacheEntry where
+  key : DocumentKey
+  value : Versioned key
 
 /-- The physical store has one optional, independently versioned value for
 each dependent document key. `keys` is only the finite discovery index. -/
@@ -174,6 +180,19 @@ def pendingWorkflow (entries : List PendingEntry) :
         PendingEntry.toWorkflow?, Function.comp_apply] at ih ⊢
       exact ih
 
+@[simp] theorem map_fromWorkflow_pendingWorkflow
+    (entries : List PendingEntry) :
+    (pendingWorkflow entries).map PendingEntry.fromWorkflow = entries := by
+  induction entries with
+  | nil => rfl
+  | cons entry rest ih =>
+      obtain ⟨request, instant⟩ := entry
+      simp only [pendingWorkflow, PendingEntry.toWorkflow?,
+        PendingEntry.fromWorkflow, List.filterMap_cons,
+        Option.toList_some, List.map_cons] at ih ⊢
+      exact congrArg
+        (fun tail => PendingEntry.occurrence request instant :: tail) ih
+
 inductive Transaction where
   | external (call : Call)
   | work (item : WorkItem) (now : Time) (rest : List PendingEntry)
@@ -246,6 +265,9 @@ structure Flight where
 structure Node where
   nextOp : OpId := 0
   flights : List (OpId × Flight) := []
+  /-- A non-authoritative node-local read cache. Every decision is still
+  validated by a raw conditional PUT. -/
+  cache : List CacheEntry := []
   /-- Keys whose document transaction received a definite written reply. -/
   known : List DocumentKey := []
   /-- Process-local schedule occurrence and timeout workflow. -/
@@ -264,6 +286,21 @@ def Node.remember (node : Node) (key : DocumentKey) : Node :=
   if node.known.contains key then node
   else { node with known := node.known ++ [key] }
 
+def CacheEntry.read (entry : CacheEntry) (key : DocumentKey) :
+    Option (Versioned key) :=
+  if h : entry.key = key then some (h ▸ entry.value) else none
+
+def Node.cacheRead (node : Node) (key : DocumentKey) : Option (Versioned key) :=
+  node.cache.findSome? (·.read key)
+
+def Node.cachePut (node : Node) (key : DocumentKey)
+    (value : Versioned key) : Node :=
+  { node with
+    cache := { key, value } :: node.cache.filter (·.key != key) }
+
+def Node.cacheInvalidate (node : Node) (key : DocumentKey) : Node :=
+  { node with cache := node.cache.filter (·.key != key) }
+
 def Node.takeFlight (node : Node) (op : OpId) : Option Flight × Node :=
   let flight := (node.flights.find? (·.1 == op)).map (·.2)
   (flight, { node with flights := node.flights.filter (·.1 != op) })
@@ -279,6 +316,12 @@ def Node.await (node : Node) (flight : Flight)
 def sendOutputs (outputs : List Output) : List (Pid × Msg) :=
   outputs.map fun output => (.outside, .output output)
 
+/-- A concrete document decision and its node-local effects. -/
+structure Candidate (key : DocumentKey) where
+  document : Document key
+  outputs : List Output
+  continuations : List PendingEntry
+
 /-- The protocol has operation-specific response types, so a transport
 failure uses the existing unreliable abstract transition rather than
 fabricating a response of the wrong constructor. Until that transition is
@@ -287,60 +330,230 @@ def failureOutputs : Transaction → List Output
   | .external call => [Resonate.unavailable call]
   | .work _ _ _ | .scan _ _ _ => []
 
-def singleState (key : DocumentKey) (document : Document key) : State :=
-  { store := ({} : Resonate.Store).write key document }
-
-def selectedExternal (appConfig : Resonate.Config) (call : Call)
-    (key : DocumentKey) (document : Document key) :
-    State × List Output :=
-  Resonate.run { appConfig with unreliable := true } call
-    (singleState key document)
-
-def selectedWork (appConfig : Resonate.Config) (item : WorkItem)
-    (now : Time) (rest : List PendingEntry)
-    (key : DocumentKey) (document : Document key) :
-    State × List Output :=
-  Resonate.runWork { appConfig with unreliable := true } item now
-    (pendingWorkflow rest)
-    (singleState key document)
-
 def Transaction.isExternal : Transaction → Bool
   | .external _ => true
   | .work _ _ _ | .scan _ _ _ => false
 
-structure Candidate (key : DocumentKey) where
-  document : Document key
-  outputs : List Output
-  continuations : List PendingEntry
+def Candidate.cast {left right : DocumentKey} (h : left = right)
+    (candidate : Candidate left) : Candidate right :=
+  h ▸ candidate
+
+def externalCandidate {key : DocumentKey} (appConfig : Resonate.Config)
+    (call : Call) (document : Document key)
+    (action : Decision.Handler key α) (wrap : α → Response) :
+    Candidate key :=
+  let (response, next, emitted) :=
+    Decision.run appConfig.toServerConfig action document
+  { document := next
+    outputs := .response call.client call.id (wrap response) ::
+      emitted.map .message
+    continuations := [] }
+
+def selectedExternalCandidate (appConfig : Resonate.Config) (call : Call)
+    (key : DocumentKey) (document : Document key) :
+    Option (Candidate key) :=
+  match call.request with
+  | .promiseGet req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.promiseGet req call.requestedAt) .promiseGet).cast h)
+      else none
+  | .promiseCreate req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.promiseCreate req call.requestedAt) .promiseCreate).cast h)
+      else none
+  | .promiseSettle req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.promiseSettle req call.requestedAt) .promiseSettle).cast h)
+      else none
+  | .promiseRegisterCallback req =>
+      if h : DocumentKey.origin req.awaited.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.promiseRegisterCallback req call.requestedAt)
+          .promiseRegisterCallback).cast h)
+      else none
+  | .promiseRegisterListener req =>
+      if h : DocumentKey.origin req.awaited.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.promiseRegisterListener req call.requestedAt)
+          .promiseRegisterListener).cast h)
+      else none
+  | .scheduleGet req =>
+      if h : DocumentKey.schedule req.id = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.scheduleGet req call.requestedAt) .scheduleGet).cast h)
+      else none
+  | .scheduleCreate req =>
+      if h : DocumentKey.schedule req.id = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.scheduleCreate req call.requestedAt) .scheduleCreate).cast h)
+      else none
+  | .scheduleDelete req =>
+      if h : DocumentKey.schedule req.id = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.scheduleDelete req call.requestedAt) .scheduleDelete).cast h)
+      else none
+  | .taskGet req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskGet req call.requestedAt) .taskGet).cast h)
+      else none
+  | .taskCreate req =>
+      if h : DocumentKey.origin req.action.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskCreate req call.requestedAt) .taskCreate).cast h)
+      else none
+  | .taskAcquire req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskAcquire req call.requestedAt) .taskAcquire).cast h)
+      else none
+  | .taskFence req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskFence req call.requestedAt) .taskFence).cast h)
+      else none
+  | .taskHeartbeat req =>
+      match req.tasks with
+      | [] => none
+      | first :: _ =>
+          if h : DocumentKey.origin first.id.origin = key then
+            some ((externalCandidate appConfig call (h ▸ document)
+              (Decision.taskHeartbeat first.id.origin req call.requestedAt)
+              .taskHeartbeat).cast h)
+          else none
+  | .taskSuspend req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskSuspend req call.requestedAt) .taskSuspend).cast h)
+      else none
+  | .taskFulfill req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskFulfill req call.requestedAt) .taskFulfill).cast h)
+      else none
+  | .taskRelease req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskRelease req call.requestedAt) .taskRelease).cast h)
+      else none
+  | .taskHalt req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskHalt req call.requestedAt) .taskHalt).cast h)
+      else none
+  | .taskContinue req =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((externalCandidate appConfig call (h ▸ document)
+          (Decision.taskContinue req call.requestedAt) .taskContinue).cast h)
+      else none
+  | .promiseSearch _ | .scheduleSearch _ | .taskSearch _ => none
+
+def workCandidate {key : DocumentKey} (appConfig : Resonate.Config)
+    (document : Document key) (action : Decision.Handler key α)
+    (continuations : List PendingEntry) : Candidate key :=
+  let (_, next, emitted) :=
+    Decision.run appConfig.toServerConfig action document
+  { document := next
+    outputs := emitted.map .message
+    continuations }
+
+def selectedWorkCandidate (appConfig : Resonate.Config) (item : WorkItem)
+    (now : Time) (rest : List PendingEntry)
+    (key : DocumentKey) (document : Document key) :
+    Option (Candidate key) :=
+  match item with
+  | .promiseTimeout id =>
+      if h : DocumentKey.origin id.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processPromiseTimeout id now) rest).cast h)
+      else none
+  | .callback req =>
+      if h : DocumentKey.origin req.awaited.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processCallback req now) rest).cast h)
+      else none
+  | .listener req =>
+      if h : DocumentKey.origin req.awaited.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processListener req now) rest).cast h)
+      else none
+  | .taskLeaseTimeout id =>
+      if h : DocumentKey.origin id.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processLeaseTimeout id now) rest).cast h)
+      else none
+  | .taskRetryTimeout id =>
+      if h : DocumentKey.origin id.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processRetryTimeout id now) rest).cast h)
+      else none
+  | .scheduleTimeout id =>
+      if h : DocumentKey.schedule id = key then
+        let (occurrences, next, emitted) :=
+          Decision.run appConfig.toServerConfig
+            (Decision.processSchedule id now) (h ▸ document)
+        some (({
+          document := next
+          outputs := emitted.map .message
+          continuations := rest ++
+            occurrences.filterMap fun
+              | .occurrence request instant =>
+                  some (.occurrence request instant)
+              | _ => none
+        } : Candidate (.schedule id)).cast h)
+      else none
+  | .occurrence req instant =>
+      if h : DocumentKey.origin req.id.origin = key then
+        some ((workCandidate appConfig (h ▸ document)
+          (Decision.processOccurrence req instant) rest).cast h)
+      else none
+
+def singleState (key : DocumentKey) (document : Document key) : State :=
+  { store := ({} : Resonate.Store).write key document }
+
+/-- Proof-facing logical result of the independently computed concrete
+request decision. -/
+def selectedExternal (appConfig : Resonate.Config) (call : Call)
+    (key : DocumentKey) (document : Document key) :
+    State × List Output :=
+  match selectedExternalCandidate appConfig call key document with
+  | some candidate =>
+      ({ store := ({} : Resonate.Store).write key candidate.document
+         workflow := { pending := pendingWorkflow candidate.continuations } },
+       candidate.outputs)
+  | none => (singleState key document, [])
+
+/-- Proof-facing logical result of an independently computed concrete work
+decision. -/
+def selectedWork (appConfig : Resonate.Config) (item : WorkItem)
+    (now : Time) (rest : List PendingEntry)
+    (key : DocumentKey) (document : Document key) :
+    State × List Output :=
+  match selectedWorkCandidate appConfig item now rest key document with
+  | some candidate =>
+      ({ store := ({} : Resonate.Store).write key candidate.document
+         workflow := { pending := pendingWorkflow candidate.continuations } },
+       candidate.outputs)
+  | none => (singleState key document, [])
 
 def selectScan (appConfig : Resonate.Config) (key : DocumentKey)
     (now : Time) (rest : List PendingEntry) (document : Document key) :
     Option (Candidate key) :=
   match key with
   | .origin origin =>
-      match (Direct.originWork origin document now).head? with
+      match (Decision.originWork origin document now).head? with
       | none => none
       | some item =>
-          let result := selectedWork appConfig item now rest
-            (.origin origin) document
-          some {
-            document := result.1.store.read (.origin origin)
-            outputs := result.2
-            continuations :=
-              result.1.workflow.pending.map PendingEntry.fromWorkflow
-          }
+          selectedWorkCandidate appConfig item now rest (.origin origin) document
   | .schedule id =>
       match document with
       | some schedule =>
           if schedule.nextRunAt ≤ now then
-            let result := selectedWork appConfig (.scheduleTimeout id)
+            selectedWorkCandidate appConfig (.scheduleTimeout id)
               now rest (.schedule id) document
-            some {
-              document := result.1.store.read (.schedule id)
-              outputs := result.2
-              continuations :=
-                result.1.workflow.pending.map PendingEntry.fromWorkflow
-            }
           else none
       | none => none
 
@@ -352,14 +565,14 @@ theorem selectScan_origin_some
       selectScan appConfig (.origin origin) now rest document =
         some candidate) :
     ∃ item,
-      item ∈ Direct.originWork origin document now ∧
+      item ∈ Decision.originWork origin document now ∧
       let result := selectedWork appConfig item now rest
         (.origin origin) document
       candidate.document = result.1.store.read (.origin origin) ∧
       candidate.outputs = result.2 ∧
       candidate.continuations =
         result.1.workflow.pending.map PendingEntry.fromWorkflow := by
-  cases hhead : (Direct.originWork origin document now).head? with
+  cases hhead : (Decision.originWork origin document now).head? with
   | none =>
       simp only [selectScan] at hselect
       rw [hhead] at hselect
@@ -367,24 +580,11 @@ theorem selectScan_origin_some
   | some item =>
       simp only [selectScan] at hselect
       rw [hhead] at hselect
-      have hcandidate : candidate = {
-          document :=
-            (selectedWork appConfig item now rest
-              (.origin origin) document).1.store.read (.origin origin)
-          outputs :=
-            (selectedWork appConfig item now rest
-              (.origin origin) document).2
-          continuations :=
-            (selectedWork appConfig item now rest
-              (.origin origin) document).1.workflow.pending.map
-                PendingEntry.fromWorkflow
-        } := by
-        exact (Option.some.inj hselect).symm
-      subst candidate
-      refine ⟨item, ?_, rfl, rfl, rfl⟩
+      refine ⟨item, ?_, ?_⟩
       obtain ⟨remaining, hitems⟩ := List.head?_eq_some_iff.mp hhead
       rw [hitems]
-      exact List.mem_cons_self
+      · exact List.mem_cons_self
+      · simp [selectedWork, hselect]
 
 theorem selectScan_schedule_some
     (appConfig : Resonate.Config) (id : ServerModel.Ident) (now : Time)
@@ -411,21 +611,8 @@ theorem selectScan_schedule_some
       simp only [selectScan] at hselect
       by_cases hdue : schedule.nextRunAt ≤ now
       · simp only [if_pos hdue] at hselect
-        have hcandidate : candidate = {
-            document :=
-              (selectedWork appConfig (.scheduleTimeout id) now rest
-                (.schedule id) (some schedule)).1.store.read (.schedule id)
-            outputs :=
-              (selectedWork appConfig (.scheduleTimeout id) now rest
-                (.schedule id) (some schedule)).2
-            continuations :=
-              (selectedWork appConfig (.scheduleTimeout id) now rest
-                (.schedule id) (some schedule)).1.workflow.pending.map
-                  PendingEntry.fromWorkflow
-          } := by
-          exact (Option.some.inj hselect).symm
-        subst candidate
-        exact ⟨schedule, rfl, hdue, rfl, rfl, rfl⟩
+        refine ⟨schedule, rfl, hdue, ?_⟩
+        simp [selectedWork, hselect]
       · simp only [if_neg hdue] at hselect
         contradiction
 
@@ -435,24 +622,9 @@ def select (appConfig : Resonate.Config) (flight : Flight)
   let document := loaded.map (·.1) |>.getD (emptyDocument flight.key)
   match flight.transaction with
   | .external call =>
-      let result := selectedExternal appConfig call flight.key document
-      some {
-        document := result.1.store.read flight.key
-        outputs := result.2
-        continuations :=
-          result.1.workflow.pending.map PendingEntry.fromWorkflow
-      }
+      selectedExternalCandidate appConfig call flight.key document
   | .work item now rest =>
-      if item.key = flight.key then
-        let result :=
-          selectedWork appConfig item now rest flight.key document
-        some {
-          document := result.1.store.read flight.key
-          outputs := result.2
-          continuations :=
-            result.1.workflow.pending.map PendingEntry.fromWorkflow
-        }
-      else none
+      selectedWorkCandidate appConfig item now rest flight.key document
   | .scan key now rest =>
       if h : key = flight.key then
         h ▸ selectScan appConfig key now rest (h.symm ▸ document)
@@ -521,16 +693,35 @@ def storePut (config : Config) (sender : Pid) (store : Store)
         send := [(sender, .storeReply { op, payload := .written })]
       }
 
-def start (node : Node) (transaction : Transaction)
+def start (appConfig : Resonate.Config) (node : Node) (transaction : Transaction)
     (key : DocumentKey) : Result Pid Local Msg :=
   let flight : Flight := { key, transaction }
-  let (next, request) := node.await flight (.get key)
-  { state := .node next, send := [request] }
+  match node.cacheRead key with
+  | some value =>
+      decide appConfig node flight (some (value.document, value.version))
+  | none =>
+      let (next, request) := node.await flight (.get key)
+      { state := .node next, send := [request] }
 
-def pureExternal (appConfig : Resonate.Config) (node : Node) (call : Call) :
+def pureResponse : Request → Response
+  | .promiseRegisterCallback _ =>
+      .promiseRegisterCallback { status := 400 }
+  | .promiseSearch _ => .promiseSearch { status := 501 }
+  | .scheduleSearch _ => .scheduleSearch { status := 501 }
+  | .taskFence _ => .taskFence { status := 400 }
+  | .taskHeartbeat req =>
+      if req.tasks.isEmpty then .taskHeartbeat { status := 200 }
+      else .taskHeartbeat { status := 400 }
+  | .taskSuspend _ => .taskSuspend { status := 400 }
+  | .taskFulfill _ => .taskFulfill { status := 400 }
+  | .taskSearch _ => .taskSearch { status := 501 }
+  | request => unavailableResponse request
+
+def pureExternal (_appConfig : Resonate.Config) (node : Node) (call : Call) :
     Result Pid Local Msg :=
-  let result := Resonate.run { appConfig with unreliable := true } call {}
-  { state := .node node, send := sendOutputs result.2 }
+  { state := .node node
+    send := sendOutputs
+      [.response call.client call.id (pureResponse call.request)] }
 
 def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
     (localState : Local) (now : Time) (event : Event Pid Msg) :
@@ -541,7 +732,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
         Outcomes.one { state := .node node, send := [] }
       else
         match (Transaction.external call).key? with
-        | some key => Outcomes.one (start node (.external call) key)
+        | some key => Outcomes.one (start appConfig node (.external call) key)
         | none => Outcomes.one (pureExternal appConfig node call)
   | .node address, .node node, .timeout =>
       if address != config.workflowNode || node.workflowBlocked ||
@@ -554,12 +745,12 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
               match entry with
               | .occurrence request instant =>
                   Transaction.work (.occurrence request instant) instant rest
-            Outcomes.one (start { node with pending := [] }
+            Outcomes.one (start appConfig { node with pending := [] }
               transaction entry.key)
         | [] =>
             match node.known.head? with
             | some key =>
-                Outcomes.one (start node (.scan key now []) key)
+                Outcomes.one (start appConfig node (.scan key now []) key)
             | none => Outcomes.one { state := .node node, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .got key loaded }) =>
@@ -569,7 +760,13 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
           if h : key = flight.key then
             match flight.phase with
             | .loading =>
-                Outcomes.one (decide appConfig next flight (h ▸ loaded))
+                let loaded' := h ▸ loaded
+                let cached :=
+                  match loaded' with
+                  | some (document, version) =>
+                      next.cachePut flight.key { document, version }
+                  | none => next.cacheInvalidate flight.key
+                Outcomes.one (decide appConfig cached flight loaded')
             | .writing =>
                 Outcomes.one { state := .node next, send := [] }
           else
@@ -598,10 +795,13 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
           match flight.phase with
           | .writing =>
               if flight.transaction.isExternal then
-                Outcomes.one (retry config next flight)
+                Outcomes.one
+                  (retry config (next.cacheInvalidate flight.key) flight)
               else
                 Outcomes.one {
-                  state := .node { next with workflowBlocked := true }
+                  state := .node {
+                    next.cacheInvalidate flight.key with
+                    workflowBlocked := true }
                   send := []
                 }
           | .loading => Outcomes.one { state := .node next, send := [] }
@@ -613,7 +813,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       | some flight =>
           Outcomes.one {
             state := .node {
-              next with workflowBlocked :=
+              next.cacheInvalidate flight.key with workflowBlocked :=
                 next.workflowBlocked || !flight.transaction.isExternal }
             send := sendOutputs (failureOutputs flight.transaction)
           }

@@ -9,41 +9,6 @@ namespace Resonate
 open Rover
 open ServerModel
 
-/-- Runtime handler settings plus the abstract availability policy used by
-the concrete refinement. The direct handlers consume only `server`; the
-Rover-level model uses `unreliable` to admit infrastructure failure paths. -/
-structure Config extends Direct.ServerConfig where
-  unreliable : Bool := false
-  deriving Repr
-
-def unavailableResponse : Request → Response
-  | .promiseGet _ => .promiseGet { status := 503 }
-  | .promiseCreate _ => .promiseCreate { status := 503, promise := none }
-  | .promiseSettle _ => .promiseSettle { status := 503 }
-  | .promiseRegisterCallback _ =>
-      .promiseRegisterCallback { status := 503 }
-  | .promiseRegisterListener _ =>
-      .promiseRegisterListener { status := 503 }
-  | .promiseSearch _ => .promiseSearch { status := 503 }
-  | .scheduleGet _ => .scheduleGet { status := 503 }
-  | .scheduleCreate _ => .scheduleCreate { status := 503 }
-  | .scheduleDelete _ => .scheduleDelete { status := 503 }
-  | .scheduleSearch _ => .scheduleSearch { status := 503 }
-  | .taskGet _ => .taskGet { status := 503 }
-  | .taskCreate _ => .taskCreate { status := 503 }
-  | .taskAcquire _ => .taskAcquire { status := 503 }
-  | .taskFence _ => .taskFence { status := 503 }
-  | .taskHeartbeat _ => .taskHeartbeat { status := 503 }
-  | .taskSuspend _ => .taskSuspend { status := 503 }
-  | .taskFulfill _ => .taskFulfill { status := 503 }
-  | .taskRelease _ => .taskRelease { status := 503 }
-  | .taskHalt _ => .taskHalt { status := 503 }
-  | .taskContinue _ => .taskContinue { status := 503 }
-  | .taskSearch _ => .taskSearch { status := 503 }
-
-def unavailable (call : Call) : Output :=
-  .response call.client call.id (unavailableResponse call.request)
-
 /-- Run one fixed-key handler against the process store. This is the only
 global-store bridge used by external and internal dispatch. -/
 def runDocument (config : Config) (key : DocumentKey)
@@ -71,18 +36,6 @@ theorem runDocument_atMostOne (config : Config) (key : DocumentKey)
 def pureRequest (response : Response) (state : State) :
     Response × State × List OutboxEntry :=
   (response, state, [])
-
-def sameOriginRefs (origin : String) (refs : List TaskRef) : Bool :=
-  refs.all (·.id.origin == origin)
-
-def WorkItem.key : WorkItem → DocumentKey
-  | .promiseTimeout id => .origin id.origin
-  | .callback req => .origin req.awaited.origin
-  | .listener req => .origin req.awaited.origin
-  | .taskLeaseTimeout id => .origin id.origin
-  | .taskRetryTimeout id => .origin id.origin
-  | .scheduleTimeout id => .schedule id
-  | .occurrence req _ => .origin req.id.origin
 
 /-- Dispatch all 21 public operations. Multi-id requests are rejected before a
 document is supplied unless every touched id has one origin. Unsupported

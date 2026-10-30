@@ -65,11 +65,21 @@ model reuses the public `PromiseObject`, `TaskObject`, `Object`, and
 `src/concrete/Model.lean` models `Resonate.Concrete`: any duplicate-free list
 of server nodes and one
 physical store over the same dependent `DocumentKey`/`Document` family.
+`src/concrete/Machine.lean`, `External.lean`, and `Internal.lean` implement
+the concrete decision logic independently; they reuse protocol/domain values
+but never invoke an abstract handler or transition. The architecture check in
+`scripts/check-concrete-architecture.sh` enforces that boundary.
 Store payloads are exactly `get key` and
 `put key document expectedVersion`; operation ids are in separate
 `RpcRequest`/`RpcReply` envelopes. Calls, loaded snapshots, selected responses
 and emissions, workflow continuations, phase, and retry count remain in
 node-local flights.
+
+A node first consults its non-authoritative versioned cache. A miss sends GET;
+a hit proceeds directly to an independently computed decision. Every decision,
+including an unchanged document, is validated by conditional PUT before any
+response is released. Conflict or ambiguous failure invalidates the cache and
+retries through GET.
 
 Each document has an optional independent version. Conditional PUT has
 acknowledged-written, landed-but-failed, and candidate-not-landed failed
@@ -84,8 +94,9 @@ later origin-document transactions.
 `src/concrete/Refinement.lean` defines `Resonate.Refinement`, including ghost
 raw-PUT provenance, per-document store
 representation, duplicate reply/PUT lemmas, the reachable one-step simulation
-interface, and a proved execution fold preserving the complete boundary
-trace. `boundary_refinement` proves
+interface, per-handler/work correspondence theorems between the independent
+concrete and abstract implementations, and a proved execution fold preserving
+the complete boundary trace. `boundary_refinement` proves
 `Concrete.ValidBoundaryTrace → Abstract.ValidBoundaryTrace` for arbitrary
 duplicate-free node lists when conditional writes are enabled.
 
