@@ -24,6 +24,7 @@ use echod_kernel::store::AState as KState;
 use echod_kernel::types as kernel;
 use echod_kernel::types::{AOccurrence, APromise, ARequest, ASchedule, ATaskRef, APromiseRegisterCallbackReq};
 
+use crate::sweep_sim::not_self;
 use crate::*;
 
 verus! {
@@ -936,6 +937,484 @@ pub proof fn lemma_handle_local(k: KState, r: KState, f: Ids, g: Ids, req: ARequ
         ARequest::ScheduleCreate(q) => lemma_schedule_create_local(k, r, g, q, now),
         ARequest::ScheduleDelete(q) => lemma_schedule_delete_local(k, r, g, q, now),
         _ => lemma_handle_local_objects(k, r, f, g, req, now),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The sweep's steps on one object
+// ---------------------------------------------------------------------------
+//
+// Each is `gobj`-local and keeps the document inside its ids and its
+// callbacks inside them: the sweep never adds a callback, so `callbacks_inside`
+// is kept by every step, and `not_self` too.
+
+/// Every id in `f`.
+pub open spec fn ids_inside(ids: Seq<Chars>, f: Ids) -> bool {
+    forall|i: int| 0 <= i < ids.len() ==> f(#[trigger] ids[i])
+}
+
+pub proof fn lemma_ids_inside_drop_last(ids: Seq<Chars>, f: Ids)
+    requires ids_inside(ids, f), ids.len() > 0,
+    ensures ids_inside(ids.drop_last(), f), f(ids.last()),
+{
+    assert forall|i: int| 0 <= i < ids.drop_last().len() implies f(#[trigger] ids.drop_last()[i]) by {
+        assert(ids.drop_last()[i] == ids[i]);
+    }
+}
+
+/// What a sweep step keeps of a document: inside its ids, its callbacks
+/// inside them, no promise its own callback.
+pub open spec fn sweep_shape(k: KState, f: Ids) -> bool {
+    &&& inside_obj(k, f)
+    &&& callbacks_inside(k, f)
+    &&& not_self(k)
+}
+
+/// Writing `p` at `id` with no new callback keeps the shape.
+proof fn lemma_shape_write(k: KState, f: Ids, id: Chars, p: APromise)
+    requires
+        sweep_shape(k, f), f(id), p.id == id || k.objects.contains_key(id) && p.id == k.objects[id].id,
+        forall|y: Chars| #[trigger] p.callbacks.contains(y) ==> k.objects.contains_key(id) && k.objects[id].callbacks.contains(y),
+    ensures sweep_shape(kext::with_objects(k, k.objects.insert(id, p)), f),
+{
+    let k2 = kext::with_objects(k, k.objects.insert(id, p));
+    assert forall|x: Chars, y: Chars| #[trigger] k2.objects.contains_key(x) && #[trigger] k2.objects[x].callbacks.contains(y) implies f(y) by {
+        if x != id {
+            assert(k.objects.contains_key(x) && k.objects[x].callbacks.contains(y));
+        }
+    }
+}
+
+/// The three object edits the sweep makes keep the callbacks: a projection,
+/// a task written, a settlement.
+proof fn lemma_project_callbacks(p: APromise, now: nat)
+    ensures p.project(now).callbacks == p.callbacks, p.project(now).id == p.id,
+{
+}
+
+pub proof fn lemma_promise_timeout_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, id: Chars, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(id),
+    ensures ({
+        let k2 = kext::with_objects(k, kint::promise_timeout_objects(k, id, now));
+        &&& kext::with_objects(gobj(k, r, c), kint::promise_timeout_objects(gobj(k, r, c), id, now)) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_gobj_has(k, r, c, f, id);
+    if k.objects.contains_key(id) {
+        let p = k.objects[id].project(now);
+        lemma_gobj_insert(k, r, c, f, id, p);
+        lemma_project_callbacks(k.objects[id], now);
+        lemma_shape_write(k, f, id, p);
+    }
+}
+
+pub proof fn lemma_lease_timeout_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, id: Chars, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(id),
+    ensures ({
+        let k2 = kext::with_objects(k, kint::lease_timeout_objects(k, id, now));
+        &&& kext::with_objects(gobj(k, r, c), kint::lease_timeout_objects(gobj(k, r, c), id, now)) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_gobj_has(k, r, c, f, id);
+    if k.objects.contains_key(id) && kint::lease_due(k.objects[id], now) {
+        let q = k.objects[id];
+        let p = q.with_task(q.task.unwrap().release(q.task.unwrap().lease_timeout_at.unwrap() as nat));
+        lemma_gobj_insert(k, r, c, f, id, p);
+        lemma_shape_write(k, f, id, p);
+    }
+}
+
+pub proof fn lemma_retry_timeout_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, id: Chars, now: nat, rt: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(id),
+    ensures ({
+        let k2 = kint::retry_timeout_state(k, id, now, rt);
+        &&& kint::retry_timeout_state(gobj(k, r, c), id, now, rt) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_gobj_has(k, r, c, f, id);
+    if k.objects.contains_key(id) && kint::retry_due(k.objects[id], now) {
+        let q = k.objects[id];
+        let p = q.with_task(q.task.unwrap().rearm(now, rt));
+        lemma_gobj_insert(k, r, c, f, id, p);
+        lemma_shape_write(k, f, id, p);
+        assert(kint::retry_timeout_state(k, id, now, rt).objects == kext::with_objects(k, k.objects.insert(id, p)).objects);
+    }
+}
+
+pub proof fn lemma_listener_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, x: Chars, address: Chars, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(x),
+    ensures ({
+        let k2 = kint::listener_state(k, x, address, now);
+        &&& kint::listener_state(gobj(k, r, c), x, address, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_gobj_has(k, r, c, f, x);
+    if k.objects.contains_key(x) {
+        let p = k.objects[x].project(now);
+        lemma_project_callbacks(k.objects[x], now);
+        lemma_gobj_insert(k, r, c, f, x, p);
+        lemma_shape_write(k, f, x, p);
+        let k1 = kext::with_objects(k, k.objects.insert(x, p));
+        if p.state == kernel::PromiseState::Pending || !p.listeners.contains(address) {
+        } else {
+            let q = p.remove_listener(address);
+            lemma_gobj_insert(k1, r, c, f, x, q);
+            lemma_shape_write(k1, f, x, q);
+            assert(kint::listener_state(k, x, address, now).objects == kext::with_objects(k1, k1.objects.insert(x, q)).objects);
+        }
+    }
+}
+
+pub proof fn lemma_callback_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, x: Chars, y: Chars, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(x), f(y),
+    ensures ({
+        let k2 = kint::callback_state(k, x, y, now);
+        &&& kint::callback_state(gobj(k, r, c), x, y, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_gobj_has(k, r, c, f, x);
+    if k.objects.contains_key(x) {
+        let p = k.objects[x].project(now);
+        lemma_project_callbacks(k.objects[x], now);
+        lemma_gobj_insert(k, r, c, f, x, p);
+        lemma_shape_write(k, f, x, p);
+        let k1 = kext::with_objects(k, k.objects.insert(x, p));
+        if p.state == kernel::PromiseState::Pending || !p.callbacks.contains(y) {
+        } else {
+            let p2 = p.remove_callback(y);
+            assert forall|z: Chars| #[trigger] p2.callbacks.contains(z) implies p.callbacks.contains(z) by {
+                echod_kernel::object_proof::lemma_without_contains(p.callbacks, y, z);
+            }
+            lemma_gobj_insert(k1, r, c, f, x, p2);
+            lemma_shape_write(k1, f, x, p2);
+            let k2 = kext::with_objects(k1, k1.objects.insert(x, p2));
+            lemma_gobj_has(k2, r, c, f, y);
+            if k2.objects.contains_key(y) {
+                let q = k2.objects[y].project(now);
+                lemma_project_callbacks(k2.objects[y], now);
+                lemma_gobj_insert(k2, r, c, f, y, q);
+                lemma_shape_write(k2, f, y, q);
+                let k3 = kext::with_objects(k2, k2.objects.insert(y, q));
+                match q.task {
+                    None => {}
+                    Some(t) => {
+                        if t.state == kernel::TaskState::Suspended {
+                            let q2 = q.with_task(t.wake(x, echod_kernel::properties::opt_or_zero(p.settled_at)));
+                            lemma_gobj_insert(k3, r, c, f, y, q2);
+                            lemma_shape_write(k3, f, y, q2);
+                        } else if t.state != kernel::TaskState::Fulfilled {
+                            let q2 = q.with_task(t.buffer(x));
+                            lemma_gobj_insert(k3, r, c, f, y, q2);
+                            lemma_shape_write(k3, f, y, q2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The sweep's phases
+// ---------------------------------------------------------------------------
+
+pub proof fn lemma_deadlines_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, ids: Seq<Chars>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(ids, f),
+    ensures ({
+        let k2 = ksteps::executable_deadlines(k, ids, now);
+        &&& ksteps::executable_deadlines(gobj(k, r, c), ids, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(ids, f);
+        lemma_deadlines_local(k, r, c, f, ids.drop_last(), now);
+        let k1 = ksteps::executable_deadlines(k, ids.drop_last(), now);
+        lemma_promise_timeout_local(k1, r, c, f, ids.last(), now);
+    }
+}
+
+pub proof fn lemma_leases_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, ids: Seq<Chars>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(ids, f),
+    ensures ({
+        let k2 = ksteps::executable_leases(k, ids, now);
+        &&& ksteps::executable_leases(gobj(k, r, c), ids, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(ids, f);
+        lemma_leases_local(k, r, c, f, ids.drop_last(), now);
+        let k1 = ksteps::executable_leases(k, ids.drop_last(), now);
+        lemma_lease_timeout_local(k1, r, c, f, ids.last(), now);
+    }
+}
+
+/// Every owed row is in `f`, and so is every callback it lists.
+pub open spec fn owed_inside(owed: Seq<ksteps::AOwed>, f: Ids) -> bool {
+    forall|i: int| 0 <= i < owed.len() ==> f(#[trigger] owed[i].awaited) && ids_inside(owed[i].callbacks, f)
+}
+
+pub proof fn lemma_owed_snapshot_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, ids: Seq<Chars>)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(ids, f),
+    ensures
+        ksteps::executable_owed_snapshot(gobj(k, r, c), ids) == ksteps::executable_owed_snapshot(k, ids),
+        owed_inside(ksteps::executable_owed_snapshot(k, ids), f),
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(ids, f);
+        lemma_owed_snapshot_local(k, r, c, f, ids.drop_last());
+        let x = ids.last();
+        lemma_gobj_has(k, r, c, f, x);
+        let prior = ksteps::executable_owed_snapshot(k, ids.drop_last());
+        let owed = ksteps::executable_owed_snapshot(k, ids);
+        if k.objects.contains_key(x) && k.objects[x].state != kernel::PromiseState::Pending
+            && (k.objects[x].callbacks.len() > 0 || k.objects[x].listeners.len() > 0) {
+            let item = ksteps::AOwed { awaited: x, callbacks: k.objects[x].callbacks, listeners: k.objects[x].listeners };
+            assert(owed == prior.push(item));
+            assert(ids_inside(item.callbacks, f)) by {
+                assert forall|i: int| 0 <= i < item.callbacks.len() implies f(#[trigger] item.callbacks[i]) by {
+                    assert(k.objects[x].callbacks.contains(item.callbacks[i]));
+                }
+            }
+            assert forall|i: int| 0 <= i < owed.len() implies f(#[trigger] owed[i].awaited) && ids_inside(owed[i].callbacks, f) by {
+                if i < prior.len() {
+                    assert(owed[i] == prior[i]);
+                } else {
+                    assert(owed[i] == item);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_callbacks_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, x: Chars, cbs: Seq<Chars>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(x), ids_inside(cbs, f),
+    ensures ({
+        let k2 = ksteps::executable_callbacks(k, x, cbs, now);
+        &&& ksteps::executable_callbacks(gobj(k, r, c), x, cbs, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases cbs.len(),
+{
+    if cbs.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(cbs, f);
+        lemma_callbacks_local(k, r, c, f, x, cbs.drop_last(), now);
+        let k1 = ksteps::executable_callbacks(k, x, cbs.drop_last(), now);
+        lemma_callback_local(k1, r, c, f, x, cbs.last(), now);
+    }
+}
+
+pub proof fn lemma_owed_inside_drop_last(owed: Seq<ksteps::AOwed>, f: Ids)
+    requires owed_inside(owed, f), owed.len() > 0,
+    ensures owed_inside(owed.drop_last(), f), f(owed.last().awaited), ids_inside(owed.last().callbacks, f),
+{
+    assert forall|i: int| 0 <= i < owed.drop_last().len() implies f(#[trigger] owed.drop_last()[i].awaited) && ids_inside(owed.drop_last()[i].callbacks, f) by {
+        assert(owed.drop_last()[i] == owed[i]);
+        assert(f(owed[i].awaited) && ids_inside(owed[i].callbacks, f));
+    }
+    assert(f(owed[owed.len() - 1].awaited) && ids_inside(owed[owed.len() - 1].callbacks, f));
+}
+
+pub proof fn lemma_owed_callbacks_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, owed: Seq<ksteps::AOwed>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), owed_inside(owed, f),
+    ensures ({
+        let k2 = ksteps::executable_owed_callbacks(k, owed, now);
+        &&& ksteps::executable_owed_callbacks(gobj(k, r, c), owed, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases owed.len(),
+{
+    if owed.len() == 0 {
+    } else {
+        lemma_owed_inside_drop_last(owed, f);
+        lemma_owed_callbacks_local(k, r, c, f, owed.drop_last(), now);
+        let k1 = ksteps::executable_owed_callbacks(k, owed.drop_last(), now);
+        lemma_callbacks_local(k1, r, c, f, owed.last().awaited, owed.last().callbacks, now);
+    }
+}
+
+pub proof fn lemma_listeners_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, x: Chars, ls: Seq<Chars>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(x),
+    ensures ({
+        let k2 = ksteps::executable_listeners(k, x, ls, now);
+        &&& ksteps::executable_listeners(gobj(k, r, c), x, ls, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases ls.len(),
+{
+    if ls.len() == 0 {
+    } else {
+        lemma_listeners_local(k, r, c, f, x, ls.drop_last(), now);
+        let k1 = ksteps::executable_listeners(k, x, ls.drop_last(), now);
+        lemma_listener_local(k1, r, c, f, x, ls.last(), now);
+    }
+}
+
+pub proof fn lemma_owed_listeners_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, owed: Seq<ksteps::AOwed>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), owed_inside(owed, f),
+    ensures ({
+        let k2 = ksteps::executable_owed_listeners(k, owed, now);
+        &&& ksteps::executable_owed_listeners(gobj(k, r, c), owed, now) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases owed.len(),
+{
+    if owed.len() == 0 {
+    } else {
+        lemma_owed_inside_drop_last(owed, f);
+        lemma_owed_listeners_local(k, r, c, f, owed.drop_last(), now);
+        let k1 = ksteps::executable_owed_listeners(k, owed.drop_last(), now);
+        lemma_listeners_local(k1, r, c, f, owed.last().awaited, owed.last().listeners, now);
+    }
+}
+
+pub proof fn lemma_due_snapshot_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, ids: Seq<Chars>, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(ids, f),
+    ensures
+        ksteps::executable_due_snapshot(gobj(k, r, c), ids, now) == ksteps::executable_due_snapshot(k, ids, now),
+        ids_inside(ksteps::executable_due_snapshot(k, ids, now), f),
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(ids, f);
+        lemma_due_snapshot_local(k, r, c, f, ids.drop_last(), now);
+        let x = ids.last();
+        lemma_gobj_has(k, r, c, f, x);
+        let prior = ksteps::executable_due_snapshot(k, ids.drop_last(), now);
+        let due = ksteps::executable_due_snapshot(k, ids, now);
+        if k.objects.contains_key(x) && kint::retry_due(k.objects[x], now) {
+            assert(due == prior.push(x));
+            assert forall|i: int| 0 <= i < due.len() implies f(#[trigger] due[i]) by {
+                if i < prior.len() {
+                    assert(due[i] == prior[i]);
+                } else {
+                    assert(due[i] == x);
+                }
+            }
+        }
+    }
+}
+
+pub proof fn lemma_due_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, due: Seq<Chars>, now: nat, rt: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(due, f),
+    ensures ({
+        let k2 = ksteps::executable_due(k, due, now, rt);
+        &&& ksteps::executable_due(gobj(k, r, c), due, now, rt) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+    decreases due.len(),
+{
+    if due.len() == 0 {
+    } else {
+        lemma_ids_inside_drop_last(due, f);
+        lemma_due_local(k, r, c, f, due.drop_last(), now, rt);
+        let k1 = ksteps::executable_due(k, due.drop_last(), now, rt);
+        lemma_retry_timeout_local(k1, r, c, f, due.last(), now, rt);
+    }
+}
+
+/// The whole sweep is local: on the glue it is the sweep of the document,
+/// glued back, and the document keeps its shape and its schedules.
+pub proof fn lemma_single_pass_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, ids: Seq<Chars>, now: nat, rt: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), ids_inside(ids, f),
+    ensures ({
+        let k2 = ksteps::executable_single_pass(k, ids, now, rt);
+        &&& ksteps::executable_single_pass(gobj(k, r, c), ids, now, rt) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+    }),
+{
+    lemma_deadlines_local(k, r, c, f, ids, now);
+    let k1 = ksteps::executable_deadlines(k, ids, now);
+    lemma_leases_local(k1, r, c, f, ids, now);
+    let k2 = ksteps::executable_leases(k1, ids, now);
+    lemma_owed_snapshot_local(k2, r, c, f, ids);
+    let owed = ksteps::executable_owed_snapshot(k2, ids);
+    lemma_owed_callbacks_local(k2, r, c, f, owed, now);
+    let k3 = ksteps::executable_owed_callbacks(k2, owed, now);
+    lemma_owed_listeners_local(k3, r, c, f, owed, now);
+    let k4 = ksteps::executable_owed_listeners(k3, owed, now);
+    lemma_due_snapshot_local(k4, r, c, f, ids, now);
+    let due = ksteps::executable_due_snapshot(k4, ids, now);
+    lemma_due_local(k4, r, c, f, due, now, rt);
+}
+
+// ---------------------------------------------------------------------------
+// The fire
+// ---------------------------------------------------------------------------
+
+/// Every occurrence's promise is in `f`.
+pub open spec fn occs_inside(occs: Seq<AOccurrence>, f: Ids) -> bool {
+    forall|j: int| 0 <= j < occs.len() ==> f(#[trigger] occs[j].promise_id)
+}
+
+pub proof fn lemma_fire_step_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, sch: ASchedule, o: AOccurrence, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), f(o.promise_id),
+    ensures ({
+        let k2 = kint::fire_step(now, k, sch, o);
+        &&& kint::fire_step(now, gobj(k, r, c), sch, o) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+        &&& k2.outbox == k.outbox
+    }),
+{
+    let x = o.promise_id;
+    lemma_gobj_has(k, r, c, f, x);
+    if !k.objects.contains_key(x) {
+        let p = kint::born_occurrence(sch, o);
+        assert(p.callbacks == Seq::<Chars>::empty());
+        lemma_gobj_insert(k, r, c, f, x, p);
+        let k2 = kext::with_objects(k, k.objects.insert(x, p));
+        assert forall|z: Chars, y: Chars| #[trigger] k2.objects.contains_key(z) && #[trigger] k2.objects[z].callbacks.contains(y) implies f(y) by {
+            if z != x {
+                assert(k.objects.contains_key(z) && k.objects[z].callbacks.contains(y));
+            }
+        }
+    }
+}
+
+pub proof fn lemma_fire_fold_local(k: KState, r: KState, c: Map<Chars, ASchedule>, f: Ids, sch: ASchedule, occs: Seq<AOccurrence>, j: int, now: nat)
+    requires sweep_shape(k, f), outside_obj(r, f), occs_inside(occs, f), 0 <= j <= occs.len(),
+    ensures ({
+        let k2 = kint::fire_fold(now, k, sch, occs, j);
+        &&& kint::fire_fold(now, gobj(k, r, c), sch, occs, j) == gobj(k2, r, c)
+        &&& sweep_shape(k2, f)
+        &&& k2.schedules == k.schedules
+        &&& k2.outbox == k.outbox
+    }),
+    decreases j,
+{
+    if j <= 0 {
+    } else {
+        lemma_fire_fold_local(k, r, c, f, sch, occs, j - 1, now);
+        let k1 = kint::fire_fold(now, k, sch, occs, j - 1);
+        lemma_fire_step_local(k1, r, c, f, sch, occs[j - 1], now);
     }
 }
 
