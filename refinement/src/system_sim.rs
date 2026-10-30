@@ -31,7 +31,7 @@ use echod_kernel::steps::{full, strip, joint, objects_only, schedules_only, Doc,
 use echod_kernel::store::{object_order, AState as KState};
 use echod_kernel::types as kernel;
 use echod_kernel::types::{origin, AOccurrence, APromise, ARequest, AResponse, ASchedule};
-use echod_kernel::node::{Id, Origin};
+use echod_kernel::node::*;
 use echod_kernel::commit::*;
 use echod_system::model::*;
 use echod_system::theorems as sys;
@@ -847,6 +847,421 @@ pub proof fn lemma_advance_step(l: KState, r: KState, a: AState, st: Origin, sid
     }
     lemma_lift_run(a, seq![act], t, rt);
     lemma_internal_run_one(a, act, t, rt);
+}
+
+// ---------------------------------------------------------------------------
+// The refinement invariant
+// ---------------------------------------------------------------------------
+
+/// The observable: each request served, with its answer, as the Abstract's.
+pub open spec fn observed(log: Seq<Served>) -> Seq<AbsResponse> {
+    log.map_values(|sv: Served| response(sv.req, sv.resp))
+}
+
+/// `acts` explains the cluster: the Abstract's run by `acts` from its
+/// initial state ends related to the bucket and answers exactly the log.
+pub open spec fn explains(s: Cluster, acts: Seq<AbsAction>) -> bool {
+    &&& doc_related(bucket(s), abs_run(abstract_init(), acts, s.rt as u64))
+    &&& abs_responses(abstract_init(), acts, s.rt as u64) == observed(s.log)
+}
+
+/// Some Abstract run explains the cluster.
+pub open spec fn refines(s: Cluster) -> bool {
+    exists|acts: Seq<AbsAction>| explains(s, acts)
+}
+
+/// A request in flight: the kernel's three functions on what was loaded,
+/// with the doors its handler needs. `m` is the swept document.
+pub open spec fn request_shape(rt: nat, o: Origin, x: Flight, req: ARequest, m: Doc) -> bool {
+    &&& x.then is None
+    &&& computed_request(x.loaded, req, x.t, rt, m, x.new)
+    &&& kprops::inv(x.t, full(m))
+    &&& doc_headroom(full(m))
+    &&& request_doors(req, x.t as u64)
+    &&& request_inside(req, in_origin(o), sched_in(o))
+}
+
+/// The fire's second half, as a flight on the schedule's document: the
+/// row `sid` advanced past the occurrence the first half fired, to `next`.
+pub open spec fn advanced(o: Origin, x: Flight, sid: Chars, next: u64) -> bool {
+    let c = x.loaded.schedules[sid];
+    &&& o == sched_target(sid)
+    &&& x.loaded.objects == Map::<Chars, APromise>::empty()
+    &&& x.loaded.schedules.contains_key(sid)
+    &&& c.next_run_at <= x.t
+    &&& c.next_run_at < next
+    &&& x.new == Doc { objects: Map::empty(), schedules: x.loaded.schedules.insert(sid, ASchedule { last_run_at: Some(c.next_run_at), next_run_at: next, ..c }) }
+}
+
+pub open spec fn second_half(o: Origin, x: Flight) -> bool {
+    exists|sid: Chars, next: u64| advanced(o, x, sid, next)
+}
+
+/// A fire in flight: the kernel's functions on the origin's objects and the
+/// schedule's row as read, the second half decided with it.
+pub open spec fn fire_shape(rt: nat, o: Origin, x: Flight, sid: Chars, pid: Chars, next: u64) -> bool {
+    match x.then {
+        None => false,
+        Some(p) => {
+            let c = p.loaded.schedules[sid];
+            let fired = kint::spec_fire(joint(x.loaded, p.loaded), sid, seq![AOccurrence { at: c.next_run_at, promise_id: pid }], next, x.t);
+            &&& p.target == sched_target(sid)
+            &&& p.pid == pid
+            &&& origin(pid) == o
+            &&& canonical(pid)
+            &&& p.loaded.schedules.contains_key(sid)
+            &&& c.next_run_at <= x.t
+            &&& c.next_run_at < next
+            &&& computed_fire(fired, x.t, rt, x.new)
+            &&& p.new == Doc { objects: Map::empty(), schedules: p.loaded.schedules.insert(sid, ASchedule { last_run_at: Some(c.next_run_at), next_run_at: next, ..c }) }
+        }
+    }
+}
+
+/// What a flight is: the kernel's functions for its work on what it loaded.
+pub open spec fn flight_shape(rt: nat, o: Origin, x: Flight) -> bool {
+    match x.work {
+        Work::Request(req, m) => request_shape(rt, o, x, req, m),
+        Work::Sweep(_) => x.then is None && (computed_sweep(x.loaded, x.t, rt, x.new) || second_half(o, x)),
+        Work::Fire(_, sid, pid, next, _) => fire_shape(rt, o, x, sid, pid, next),
+    }
+}
+
+pub open spec fn flights_shaped(s: Cluster) -> bool {
+    forall|i: Id, o: Origin| s.nodes.contains_key(i) && #[trigger] s.nodes[i].txns.contains_key(o) ==> flight_shape(s.rt, o, s.nodes[i].txns[o])
+}
+
+/// A fire's schedule document is as the fire read it until the promise's
+/// commit. A hypothesis on behaviours: the fleet commits the promise
+/// without re-reading the schedule.
+pub open spec fn schedule_held(s: Cluster) -> bool {
+    forall|i: Id, o: Origin| s.nodes.contains_key(i) && #[trigger] s.nodes[i].txns.contains_key(o) ==> match s.nodes[i].txns[o].then {
+        Some(p) => !(s.nodes[i].txns[o].phase is Process) ==> s.store.doc(p.target) == p.loaded,
+        None => true,
+    }
+}
+
+/// The doors on a step: the bucket within the wire's bounds and the fire's
+/// schedule held; a prepared request's doors, its swept document within
+/// the bounds, a heartbeat's refs of one origin; a fire's promise id well
+/// formed.
+pub open spec fn admitted(s: Cluster, st: Step) -> bool {
+    &&& store_headroom(s)
+    &&& schedule_held(s)
+    &&& match st {
+        Step::Prepare(i, o, t, work, new, did, deadline) => match work {
+            Work::Request(req, m) => {
+                &&& request_doors(req, t as u64)
+                &&& doc_headroom(full(m))
+                &&& match req { ARequest::TaskHeartbeat(q) => refs_inside(q.tasks, in_origin(o)), _ => true }
+            }
+            Work::Fire(_, _, pid, _, _) => canonical(pid),
+            Work::Sweep(_) => true,
+        },
+        _ => true,
+    }
+}
+
+/// A step of the fleet within the doors.
+pub open spec fn next_admitted() -> spec_fn(Cluster, Cluster) -> bool {
+    |s: Cluster, s2: Cluster| exists|st: Step| #[trigger] next_step(s, s2, st) && admitted(s, st)
+}
+
+/// The refinement's part of the invariant.
+pub open spec fn ref_state(s: Cluster) -> bool {
+    &&& partitioned(s)
+    &&& flights_shaped(s)
+    &&& refines(s)
+}
+
+pub open spec fn inv_ref() -> spec_fn(Cluster) -> bool {
+    |s: Cluster| {
+        &&& sys::inv()(s)
+        &&& s.rt <= kernel::MAX_TIME
+        &&& ref_state(s)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frames
+// ---------------------------------------------------------------------------
+
+/// A step that leaves the bucket and the log alone is explained as before.
+pub proof fn lemma_stutter(s: Cluster, s2: Cluster)
+    requires refines(s), bucket(s2) == bucket(s), s2.log == s.log, s2.rt == s.rt,
+    ensures refines(s2),
+{
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    assert(explains(s2, acts));
+}
+
+/// A step that leaves the documents alone.
+pub proof fn lemma_stutter_docs(s: Cluster, s2: Cluster)
+    requires refines(s), partitioned(s), s2.store.docs == s.store.docs, s2.log == s.log, s2.rt == s.rt,
+    ensures refines(s2), partitioned(s2),
+{
+    lemma_bucket_same(s, s2);
+    lemma_stutter(s, s2);
+}
+
+/// A flight's shape is of its work, loaded and new documents, instant and
+/// second half: the commit's progress does not touch it.
+pub proof fn lemma_shape_same(rt: nat, o: Origin, x: Flight, x2: Flight)
+    requires
+        flight_shape(rt, o, x),
+        x2.work == x.work, x2.then == x.then, x2.loaded == x.loaded, x2.new == x.new, x2.t == x.t,
+    ensures flight_shape(rt, o, x2),
+{
+    match x.work {
+        Work::Request(req, m) => {}
+        Work::Sweep(_) => {
+            if second_half(o, x) {
+                let (sid, next) = choose|sid: Chars, next: u64| advanced(o, x, sid, next);
+                assert(advanced(o, x2, sid, next));
+            }
+        }
+        Work::Fire(_, sid, pid, next, _) => {}
+    }
+}
+
+/// Flights keep their shape when only node `i`'s change, and those are shaped.
+pub proof fn lemma_shapes_frame(s: Cluster, s2: Cluster, i: Id)
+    requires
+        flights_shaped(s), s2.rt == s.rt,
+        forall|j: Id| #[trigger] s2.nodes.contains_key(j) && j != i ==> s.nodes.contains_key(j) && s2.nodes[j].txns == s.nodes[j].txns,
+        s2.nodes.contains_key(i) ==> forall|o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) ==> flight_shape(s.rt, o, s2.nodes[i].txns[o]),
+    ensures flights_shaped(s2),
+{
+    assert forall|j: Id, o: Origin| s2.nodes.contains_key(j) && #[trigger] s2.nodes[j].txns.contains_key(o) implies flight_shape(s2.rt, o, s2.nodes[j].txns[o]) by {
+        if j != i {
+            assert(s.nodes[j].txns.contains_key(o));
+        }
+    }
+}
+
+/// Node `i` keeps its flights, or drops one: the shapes stay.
+pub proof fn lemma_shapes_kept(s: Cluster, s2: Cluster, i: Id)
+    requires
+        flights_shaped(s), s2.rt == s.rt, s.nodes.contains_key(i),
+        forall|j: Id| #[trigger] s2.nodes.contains_key(j) && j != i ==> s.nodes.contains_key(j) && s2.nodes[j].txns == s.nodes[j].txns,
+        s2.nodes.contains_key(i) ==> forall|o: Origin| #[trigger] s2.nodes[i].txns.contains_key(o) ==> s.nodes[i].txns.contains_key(o) && s2.nodes[i].txns[o] == s.nodes[i].txns[o],
+    ensures flights_shaped(s2),
+{
+    lemma_shapes_frame(s, s2, i);
+}
+
+/// The second half continued from a shaped fire is shaped.
+pub proof fn lemma_continued_shape(s: Cluster, rt: nat, o: Origin, x: Flight, core: ANode)
+    requires
+        flight_shape(rt, o, x),
+        x.then is Some,
+        shaped(x.then.unwrap().target, x.then.unwrap().loaded),
+    ensures flight_shape(rt, x.then.unwrap().target, continued(s, core, x.then.unwrap(), x.t)),
+{
+    let p = x.then.unwrap();
+    let y = continued(s, core, p, x.t);
+    match x.work {
+        Work::Request(req, m) => {}
+        Work::Sweep(_) => {}
+        Work::Fire(_, sid, pid, next, _) => {
+            assert(is_sched(p.target)) by { lemma_sched_target_is_sched(sid); }
+            assert(advanced(p.target, y, sid, next));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The steps that move only a node, or a timer
+// ---------------------------------------------------------------------------
+
+pub proof fn lemma_ref_tick(s: Cluster, s2: Cluster, i: Id, d: nat)
+    requires ref_state(s), tick(s, i, d) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_join(s: Cluster, s2: Cluster, i: Id, c: nat)
+    requires ref_state(s), join(s, i, c) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_frame(s, s2, i);
+}
+
+pub proof fn lemma_ref_crash(s: Cluster, s2: Cluster, i: Id)
+    requires ref_state(s), crash(s, i) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_forget(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), forget(s, i, o) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_arm(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey)
+    requires ref_state(s), arm(s, i, o, k) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let x2 = s2.nodes[i].txns[o];
+    assert(flight_shape(s.rt, o, x));
+    lemma_shape_same(s.rt, o, x, x2);
+    assert forall|q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies flight_shape(s.rt, q, s2.nodes[i].txns[q]) by {
+        if q != o {
+            assert(s.nodes[i].txns.contains_key(q));
+        }
+    }
+    lemma_shapes_frame(s, s2, i);
+}
+
+pub proof fn lemma_ref_give_up(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), s.nodes.contains_key(i), s2 == give_up(s, i, o),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_commit_fail(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), commit_fail(s, i, o) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_collect_fail(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), collect_fail(s, i, o) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_disarm(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), disarm(s, i, o) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt, s2.nodes == s.nodes,
+{
+    lemma_stutter_docs(s, s2);
+}
+
+/// The second half of a flight on `o` at node `i`, if any, is shaped for
+/// its document: what `finish` and `done` need of the system invariant.
+pub open spec fn pending_shaped(s: Cluster, i: Id, o: Origin) -> bool {
+    match s.nodes[i].txns[o].then {
+        Some(p) => shaped(p.target, p.loaded),
+        None => true,
+    }
+}
+
+pub proof fn lemma_pending_shaped(s: Cluster, i: Id, o: Origin)
+    requires sys::inv()(s), s.nodes.contains_key(i), s.nodes[i].txns.contains_key(o),
+    ensures pending_shaped(s, i, o),
+{
+    sys::disassemble(s);
+    assert(sys::inv_txn(s, i, o));
+}
+
+/// The node's flights once the one on `o` is done: those it had, less that
+/// one, plus the second half it continues into.
+pub proof fn lemma_ref_after(s: Cluster, s2: Cluster, i: Id, o: Origin, core: ANode)
+    requires
+        ref_state(s), s.nodes.contains_key(i), s.nodes[i].txns.contains_key(o), pending_shaped(s, i, o),
+        s2.rt == s.rt, s2.nodes.contains_key(i),
+        s2.nodes[i].txns == after(s, core, s.nodes[i], o),
+        forall|j: Id| #[trigger] s2.nodes.contains_key(j) && j != i ==> s.nodes.contains_key(j) && s2.nodes[j].txns == s.nodes[j].txns,
+    ensures flights_shaped(s2),
+{
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    assert(flight_shape(s.rt, o, x));
+    match x.then {
+        Some(p) => {
+            lemma_continued_shape(s, s.rt, o, x, core);
+            assert forall|q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies flight_shape(s.rt, q, s2.nodes[i].txns[q]) by {
+                if q != p.target {
+                    assert(n.txns.contains_key(q));
+                }
+            }
+        }
+        None => {
+            assert forall|q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies flight_shape(s.rt, q, s2.nodes[i].txns[q]) by {
+                assert(n.txns.contains_key(q));
+            }
+        }
+    }
+    lemma_shapes_frame(s, s2, i);
+}
+
+pub proof fn lemma_ref_finish(s: Cluster, s2: Cluster, i: Id, o: Origin, deleted: bool)
+    requires ref_state(s), pending_shaped(s, i, o), finish(s, i, o, deleted) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    let core1 = spec_finish(n.core, x.c, x.cur.unwrap());
+    let core2 = match x.c.fired {
+        Some(k) => if deleted { spec_collected(core1, o, k) } else { core1 },
+        None => core1,
+    };
+    assert(s2.nodes[i].txns == after(s, core2, n, o));
+    lemma_ref_after(s, s2, i, o, core2);
+}
+
+pub proof fn lemma_ref_done(s: Cluster, s2: Cluster, i: Id, o: Origin)
+    requires ref_state(s), pending_shaped(s, i, o), done(s, i, o) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_stutter_docs(s, s2);
+    let n = s.nodes[i];
+    assert(s2.nodes[i].txns == after(s, n.core, n, o));
+    lemma_ref_after(s, s2, i, o, n.core);
+}
+
+/// The document a collecting rewrite puts back is the one in the bucket.
+pub proof fn lemma_collect_rewrites(s: Cluster, i: Id, o: Origin)
+    requires
+        sys::inv()(s), s.nodes.contains_key(i), s.nodes[i].txns.contains_key(o),
+        s.nodes[i].txns[o].phase is Prepare, sys::live(s, o, s.nodes[i].txns[o]),
+    ensures s.store.doc(o) == s.nodes[i].txns[o].loaded,
+{
+    sys::disassemble(s);
+    assert(sys::inv_txn(s, i, o));
+}
+
+pub proof fn lemma_ref_collect(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires sys::inv()(s), ref_state(s), collect(s, i, o, e) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_collect_rewrites(s, i, o);
+    lemma_rewritten(s, s2, o);
+    lemma_stutter(s, s2);
+    lemma_shapes_kept(s, s2, i);
+}
+
+pub proof fn lemma_ref_collect_unknown(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool)
+    requires sys::inv()(s), ref_state(s), collect_unknown(s, i, o, e, landed) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    if landed {
+        lemma_collect_rewrites(s, i, o);
+        lemma_rewritten(s, s2, o);
+        lemma_stutter(s, s2);
+    } else {
+        lemma_stutter_docs(s, s2);
+    }
+    lemma_shapes_kept(s, s2, i);
 }
 
 } // verus!
