@@ -1,6 +1,16 @@
 {"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [],
- "name": "accordant",
+ "packages":
+ [{"url": "https://github.com/resonatehq/resonate",
+   "type": "git",
+   "subDir": "spec",
+   "scope": "",
+   "rev": "9c72d818721b1776edd6b1b2939a83b3c0b248a6",
+   "name": "«resonate-spec»",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "9c72d818721b1776edd6b1b2939a83b3c0b248a6",
+   "inherited": false,
+   "configFile": "lakefile.lean"}],
+ "name": "rover",
  "lakeDir": ".lake",
  "fixedToolchain": false}
