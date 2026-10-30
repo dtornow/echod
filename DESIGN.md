@@ -492,22 +492,27 @@ origin at a time.
 
 A fence whose create names a promise in another origin starts a detached
 workflow. The two live on different documents, so they cannot commit as
-one write: the create goes first, as a request of its own on its origin's
-document, and the fence's check (`task_fence_check`, the kernel's fence
-with no action) follows on the task's. A stale fence still leaves the
-promise created, and answers its 409; the fence's answer is the check's
-status with the create's record inside when it held. `dispatch::decode`
-splits the request in two (`Decoded::then`), `flight::Stage` carries the
-request through its two commits. A settle in another origin is refused,
-as the reference server refuses it. The reference allows a cross-origin
-create of a root id alone (an id with no `:`), and checks the fence first;
-echod allows any id, and creates first.
+one write. The order is the fence's check first (`task_fence_check`, the
+kernel's fence with no action) on the task's document, a read that
+commits nothing; a fence that does not hold is answered there, with its
+409 or 404, and creates nothing. When it holds, the create follows as a
+request of its own on its origin's document, and the fence's answer is
+200 with the record created inside. Between the two, anything may happen:
+a fence whose lease lapses after its check still creates, and the client
+is told it held. `dispatch::decode` splits the request in two
+(`Decoded::then`), `flight::Stage` carries it from the check to the
+create. A settle in another origin is refused, as the reference server
+refuses it. The reference checks the fence first too, and allows a
+cross-origin create of a root id alone (an id with no `:`); echod allows
+any id.
 
-The Abstract model in `abstract/` makes the same split rather than claiming
-an atomicity the system does not have: `system::decompose` turns a detached
-fence into `PromiseCreate` then `TaskFenceCheck`, `compose_detached` builds
-the fence's answer from the two, and the checker admits any work between
-them. A schedule's fire is split the same way, `ScheduleFire` (the
+The Abstract model in `abstract/` does exactly the same, step for step,
+rather than claiming an atomicity the system does not have:
+`system::decompose` turns a detached fence into `TaskFenceCheck` then
+`PromiseCreate`, the create enabled only by a check that held,
+`compose_detached` builds the fence's answer from the check's status and
+the record created, and the checker admits any work between the two
+steps. A schedule's fire is split the same way, `ScheduleFire` (the
 occurrence's promise, if absent) then `ScheduleAdvance` (enabled only once
 that promise exists), which is the Occurrences theorem stated as two
 Abstract steps: a crash between them re-fires the same occurrence, never

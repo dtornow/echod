@@ -14,7 +14,7 @@
 //!
 //! The model and echod are meant to say the same thing everywhere, so
 //! nothing is translated: a fence that creates a promise in another origin
-//! (a detached workflow, the create first and then the fence's check) is sent
+//! (a detached workflow, the fence's check first and then the create) is sent
 //! as any other request, and `task.create` in every state too. One request is
 //! not sent: a timer created with a target (by a create, a fence or a
 //! schedule), which echod accepts with the target dropped (a concession to

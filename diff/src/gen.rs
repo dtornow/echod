@@ -334,9 +334,9 @@ pub fn build(op: Op, rng: &mut Rng, m: &Model, now: i64, ids: &Ids) -> (&'static
             let task_origin = task_id.split(':').next().unwrap_or("").to_string();
             // same origin only: a settle shares the task's origin, and so does
             // a create. A create in another origin (a detached workflow) is
-            // where the two servers part by design: the reference allows a
-            // root id alone and checks the fence first, echod allows any id
-            // and creates first (BACKLOG, "Detached creates").
+            // where the two servers part by design: both check the fence
+            // first, but the reference allows a root id alone and echod any
+            // id (BACKLOG, "Detached creates").
             let pending_p: Vec<String> = m.pending_promise_ids().into_iter().filter(|p| p.split(':').next().unwrap_or("") == task_origin).collect();
             let do_settle = !pending_p.is_empty() && chance(rng, 4) != 0;
             if !do_settle {
