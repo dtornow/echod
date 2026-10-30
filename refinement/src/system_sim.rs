@@ -1264,4 +1264,556 @@ pub proof fn lemma_ref_collect_unknown(s: Cluster, s2: Cluster, i: Id, o: Origin
     lemma_shapes_kept(s, s2, i);
 }
 
+// ---------------------------------------------------------------------------
+// A commit, explained: the flight's kernel step on its document is an
+// Abstract run from the run that explains the bucket
+// ---------------------------------------------------------------------------
+
+/// The Abstract run that explains `s` extended by one more: the bucket
+/// after is related to where the extension ends, and the extension answers
+/// what the log gained.
+pub proof fn lemma_explains_step(s: Cluster, s2: Cluster, acts: Seq<AbsAction>, racts: Seq<AbsAction>, resp: Seq<AbsResponse>)
+    requires
+        explains(s, acts), s2.rt == s.rt,
+        doc_related(bucket(s2), abs_run(abs_run(abstract_init(), acts, s.rt as u64), racts, s.rt as u64)),
+        abs_responses(abs_run(abstract_init(), acts, s.rt as u64), racts, s.rt as u64) == resp,
+        observed(s2.log) == observed(s.log) + resp,
+    ensures explains(s2, acts + racts), refines(s2),
+{
+    lemma_abs_run_app(abstract_init(), acts, racts, s.rt as u64);
+    assert(explains(s2, acts + racts));
+}
+
+pub proof fn lemma_observed_same(log: Seq<Served>)
+    ensures observed(log) == observed(log) + Seq::<AbsResponse>::empty(),
+{
+    assert(observed(log) =~= observed(log) + Seq::<AbsResponse>::empty());
+}
+
+pub proof fn lemma_observed_push(log: Seq<Served>, sv: Served)
+    ensures observed(log.push(sv)) == observed(log) + seq![response(sv.req, sv.resp)],
+{
+    assert(observed(log.push(sv)) =~= observed(log) + seq![response(sv.req, sv.resp)]);
+}
+
+/// `racts` explains a request's flight `x` on `o` from the run `a`: the
+/// Abstract ends related to the written document beside the rest of the
+/// bucket, and answers the request's response alone.
+pub open spec fn request_explains(s: Cluster, o: Origin, x: Flight, req: ARequest, m: Doc, a: AState, racts: Seq<AbsAction>) -> bool {
+    let r = rest(s, in_origin(o), sched_in(o));
+    let rt = s.rt as u64;
+    &&& doc_related(glue(full(x.new), r), abs_run(a, racts, rt))
+    &&& abs_responses(a, racts, rt) == seq![response(req, kext::spec_handle(full(m), req, x.t).1)]
+}
+
+/// A request's flight, as read from the bucket, is an Abstract run.
+pub proof fn lemma_request_run(s: Cluster, o: Origin, x: Flight, req: ARequest, m: Doc, a: AState)
+    requires
+        sys::inv()(s), partitioned(s), store_headroom(s), s.rt <= kernel::MAX_TIME,
+        request_shape(s.rt, o, x, req, m),
+        s.store.doc(o) == x.loaded,
+        x.t <= kernel::MAX_TIME,
+        kprops::inv(x.t, full(x.loaded)),
+        doc_related(bucket(s), a),
+    ensures
+        exists|racts: Seq<AbsAction>| request_explains(s, o, x, req, m, a, racts),
+        doc_inside(x.new, o),
+{
+    let r = rest(s, in_origin(o), sched_in(o));
+    let k = full(x.loaded);
+    let t = x.t as u64;
+    let rt = s.rt as u64;
+    assert(t as nat == x.t);
+    assert(rt as nat == s.rt);
+    lemma_split_doc(s, o);
+    lemma_rest_basics(s, in_origin(o), sched_in(o));
+    let (ids1, ids2) = choose|ids1: Seq<Chars>, ids2: Seq<Chars>| {
+        &&& #[trigger] object_order(k, ids1)
+        &&& m == strip(ksteps::executable_single_pass(k, ids1, x.t, s.rt))
+        &&& #[trigger] object_order(kext::spec_handle(full(m), req, x.t).0, ids2)
+        &&& x.new == strip(ksteps::executable_single_pass(kext::spec_handle(full(m), req, x.t).0, ids2, x.t, s.rt))
+    };
+    lemma_request_step(k, r, a, o, ids1, m, req, ids2, t, rt);
+    let racts = request_step_actions(k, r, ids1, m, req, ids2, t, rt);
+    assert(request_explains(s, o, x, req, m, a, racts));
+}
+
+/// The commit of a request's flight: the document written, the response
+/// logged.
+pub proof fn lemma_commit_request(s: Cluster, s2: Cluster, o: Origin, x: Flight, req: ARequest, m: Doc)
+    requires
+        sys::inv()(s), partitioned(s), refines(s), store_headroom(s), s.rt <= kernel::MAX_TIME,
+        request_shape(s.rt, o, x, req, m),
+        x.work == Work::Request(req, m),
+        s.store.doc(o) == x.loaded,
+        x.t <= kernel::MAX_TIME,
+        kprops::inv(x.t, full(x.loaded)),
+        s2.store.docs == s.store.docs.insert(o, x.new),
+        s2.log == answered(s, o, x),
+        s2.rt == s.rt,
+    ensures partitioned(s2), refines(s2),
+{
+    let rt = s.rt as u64;
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    let a = abs_run(abstract_init(), acts, rt);
+    lemma_request_run(s, o, x, req, m, a);
+    let racts = choose|racts: Seq<AbsAction>| request_explains(s, o, x, req, m, a, racts);
+    lemma_written_doc(s, s2, o, x.new);
+    let res = kext::spec_handle(full(m), req, x.t).1;
+    lemma_observed_push(s.log, Served { origin: o, at: x.t, req, resp: res });
+    lemma_explains_step(s, s2, acts, racts, seq![response(req, res)]);
+}
+
+/// The commit of a sweep's flight: the document written, nothing logged.
+pub proof fn lemma_commit_sweep(s: Cluster, s2: Cluster, o: Origin, x: Flight)
+    requires
+        sys::inv()(s), partitioned(s), refines(s), store_headroom(s), s.rt <= kernel::MAX_TIME,
+        computed_sweep(x.loaded, x.t, s.rt, x.new),
+        s.store.doc(o) == x.loaded,
+        x.t <= kernel::MAX_TIME,
+        kprops::inv(x.t, full(x.loaded)),
+        s2.store.docs == s.store.docs.insert(o, x.new),
+        s2.log == s.log,
+        s2.rt == s.rt,
+    ensures partitioned(s2), refines(s2),
+{
+    let rt = s.rt as u64;
+    let t = x.t as u64;
+    assert(t as nat == x.t);
+    assert(rt as nat == s.rt);
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    let a = abs_run(abstract_init(), acts, rt);
+    let r = rest(s, in_origin(o), sched_in(o));
+    let k = full(x.loaded);
+    lemma_split_doc(s, o);
+    lemma_rest_basics(s, in_origin(o), sched_in(o));
+    lemma_inv_shape(x.t, k, o);
+    let ids = choose|ids: Seq<Chars>| #[trigger] object_order(k, ids) && x.new == strip(ksteps::executable_single_pass(k, ids, x.t, s.rt));
+    lemma_sweep_step(k, r, a, in_origin(o), ids, t, rt);
+    let k2 = ksteps::executable_single_pass(k, ids, x.t, s.rt);
+    assert(doc_inside(x.new, o)) by {
+        assert(full(x.new).objects == k2.objects);
+        assert(full(x.new).schedules == k.schedules);
+    }
+    lemma_written_doc(s, s2, o, x.new);
+    lemma_observed_same(s.log);
+    lemma_explains_step(s, s2, acts, sweep_step_actions(k, r, ids, t, rt), Seq::empty());
+}
+
+/// The commit of a fire's second half: the schedule's row advanced past
+/// the occurrence whose promise the first half committed.
+pub proof fn lemma_commit_advance(s: Cluster, s2: Cluster, o: Origin, x: Flight, sid: Chars, next: u64)
+    requires
+        sys::inv()(s), partitioned(s), refines(s), s.rt <= kernel::MAX_TIME,
+        advanced(o, x, sid, next),
+        sys::runs_have_promises(s, x.new),
+        s.store.doc(o) == x.loaded,
+        x.t <= kernel::MAX_TIME,
+        s2.store.docs == s.store.docs.insert(o, x.new),
+        s2.log == s.log,
+        s2.rt == s.rt,
+    ensures partitioned(s2), refines(s2),
+{
+    let rt = s.rt as u64;
+    let t = x.t as u64;
+    assert(t as nat == x.t);
+    assert(rt as nat == s.rt);
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    let a = abs_run(abstract_init(), acts, rt);
+    let r = rest(s, in_origin(o), sched_in(o));
+    let l = full(x.loaded);
+    lemma_split_doc(s, o);
+    let c = x.loaded.schedules[sid];
+    let c2 = ASchedule { last_run_at: Some(c.next_run_at), next_run_at: next, ..c };
+    let pid = expand(c.promise_id, sid, c.next_run_at as nat);
+    // the occurrence's promise is in the bucket: the row's last run has it
+    assert(x.new.schedules.contains_key(sid) && x.new.schedules[sid] == c2);
+    assert(sys::has_promise(s, c2, sid, c.next_run_at as nat));
+    lemma_bucket_has(s);
+    assert(s.store.doc(origin(pid)) == s.store.docs[origin(pid)]);
+    assert(bucket_objects(s).contains_key(pid));
+    let last = AOccurrence { at: c.next_run_at, promise_id: pid };
+    lemma_advance_step(l, r, a, o, sid, last, next, t, rt);
+    assert(full(x.new) == KState { schedules: l.schedules.insert(sid, c2), ..l });
+    assert(doc_inside(x.new, o)) by {
+        assert forall|q: Chars| #[trigger] full(x.new).schedules.contains_key(q) implies sched_in(o)(q) by {
+            if q != sid {
+                assert(l.schedules.contains_key(q));
+            }
+        }
+    }
+    lemma_written_doc(s, s2, o, x.new);
+    lemma_observed_same(s.log);
+    lemma_explains_step(s, s2, acts, advance_step_actions(sid, last, next, t), Seq::empty());
+}
+
+/// The commit of a fire's first half: the origin's objects written with the
+/// occurrence's promise, beside the schedule's document as the fire read it.
+pub proof fn lemma_commit_fire(s: Cluster, s2: Cluster, o: Origin, x: Flight, sid: Chars, pid: Chars, next: u64)
+    requires
+        sys::inv()(s), partitioned(s), refines(s), store_headroom(s), s.rt <= kernel::MAX_TIME,
+        fire_shape(s.rt, o, x, sid, pid, next),
+        s.store.doc(o) == x.loaded,
+        s.store.doc(x.then.unwrap().target) == x.then.unwrap().loaded,
+        x.t <= kernel::MAX_TIME,
+        kprops::inv(x.t, full(x.loaded)),
+        kprops::inv(x.t, full(x.then.unwrap().loaded)),
+        shaped(o, x.loaded), shaped(o, x.new),
+        shaped(x.then.unwrap().target, x.then.unwrap().loaded),
+        s2.store.docs == s.store.docs.insert(o, x.new),
+        s2.log == s.log,
+        s2.rt == s.rt,
+    ensures partitioned(s2), refines(s2),
+{
+    let rt = s.rt as u64;
+    let t = x.t as u64;
+    assert(t as nat == x.t);
+    assert(rt as nat == s.rt);
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    let a = abs_run(abstract_init(), acts, rt);
+    let p = x.then.unwrap();
+    let st = p.target;
+    sys::lemma_origin_not_sched(pid);
+    lemma_sched_target_is_sched(sid);
+    lemma_split_joint(s, o, st);
+    let j = joint(x.loaded, p.loaded);
+    let r = rest(s, in_origin(o), sched_in(st));
+    ksteps::lemma_inv_joint(x.t, x.loaded, p.loaded);
+    lemma_rest_basics(s, in_origin(o), sched_in(st));
+    let c = p.loaded.schedules[sid];
+    let occ = AOccurrence { at: c.next_run_at, promise_id: pid };
+    let fired = kint::spec_fire(j, sid, seq![occ], next, x.t);
+    let ids = choose|ids: Seq<Chars>| #[trigger] object_order(fired, ids) && x.new == objects_only(ksteps::executable_single_pass(fired, ids, x.t, s.rt));
+    assert(j.schedules[sid] == c);
+    lemma_fire_step(j, r, a, o, st, sid, pid, next, ids, t, rt);
+    assert(joint(x.new, p.loaded) == KState { objects: x.new.objects, schedules: j.schedules, outbox: Map::empty() });
+    assert(doc_inside(x.new, o)) by {
+        assert(full(x.new).schedules == Map::<Chars, ASchedule>::empty());
+    }
+    lemma_written_joint(s, s2, o, st, x.new);
+    lemma_observed_same(s.log);
+    lemma_explains_step(s, s2, acts, fire_step_actions(j, r, sid, pid, ids, t, rt), Seq::empty());
+}
+
+/// The commit: the flight's document written at a new version, its answer
+/// logged. Its shape says which kernel step it is; the bucket's relation
+/// and the system invariant say the step is from the bucket.
+pub proof fn lemma_ref_commit(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>)
+    requires
+        sys::inv()(s), s.rt <= kernel::MAX_TIME, ref_state(s), store_headroom(s), schedule_held(s),
+        commit(s, i, o, e) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    let n = s.nodes[i];
+    let x = n.txns[o];
+    sys::disassemble(s);
+    assert(sys::inv_txn(s, i, o));
+    assert(!(x.phase is Process));
+    assert(sys::live(s, o, x));
+    assert(s.store.doc(o) == x.loaded);
+    assert(flight_shape(s.rt, o, x));
+    // the flights: the one on `o` moves to its write, the rest stay
+    let x2 = s2.nodes[i].txns[o];
+    lemma_shape_same(s.rt, o, x, x2);
+    assert forall|q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies flight_shape(s.rt, q, s2.nodes[i].txns[q]) by {
+        if q != o {
+            assert(n.txns.contains_key(q));
+        }
+    }
+    lemma_shapes_frame(s, s2, i);
+    // the bucket and the log
+    match x.work {
+        Work::Request(req, m) => {
+            lemma_commit_request(s, s2, o, x, req, m);
+        }
+        Work::Sweep(_) => {
+            if second_half(o, x) {
+                let (sid, next) = choose|sid: Chars, next: u64| advanced(o, x, sid, next);
+                lemma_commit_advance(s, s2, o, x, sid, next);
+            } else {
+                lemma_commit_sweep(s, s2, o, x);
+            }
+        }
+        Work::Fire(_, sid, pid, next, _) => {
+            let p = x.then.unwrap();
+            assert(sys::inv_pending(s, o, x, p));
+            assert(s.store.doc(p.target) == p.loaded);
+            lemma_commit_fire(s, s2, o, x, sid, pid, next);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The read: a flight begins, shaped; a request that changed nothing is
+// answered here
+// ---------------------------------------------------------------------------
+
+/// The flight `prepare` puts up is shaped: what the node computes is the
+/// kernel's functions on what it loaded, with the doors the step admits.
+pub proof fn lemma_prepared_shape(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
+    requires
+        sys::inv()(s2),
+        admitted(s, Step::Prepare(i, o, t, work, new, did, deadline)),
+        prepare(s, i, o, t, work, new, did, deadline) == Some(s2),
+    ensures flight_shape(s.rt, o, s2.nodes[i].txns[o]),
+{
+    let loaded = s.store.doc(o);
+    let x = s2.nodes[i].txns[o];
+    sys::disassemble(s2);
+    assert(s2.nodes.contains_key(i) && s2.nodes[i].txns.contains_key(o));
+    assert(sys::inv_txn(s2, i, o));
+    assert(x.loaded == loaded && x.new == new && x.t == t && x.work == work);
+    match work {
+        Work::Request(req, m) => {
+            let d = choose|d: bool| #[trigger] ksteps::swept_by(t, full(loaded), full(m), d);
+            ksteps::lemma_reach_inv(t, full(loaded), full(m));
+            lemma_target_inside(req, o);
+            assert(request_shape(s.rt, o, x, req, m));
+        }
+        Work::Sweep(k) => {
+            assert(x.then is None);
+            assert(computed_sweep(x.loaded, x.t, s.rt, x.new));
+        }
+        Work::Fire(k, sid, pid, next, deadline_s) => {
+            let st = sched_target(sid);
+            let sd = s.store.doc(st);
+            let p = fire_pending(s, k, sid, pid, next, t, deadline_s, loaded);
+            assert(x.then == Some(p));
+            let c = sd.schedules[sid];
+            let occ = AOccurrence { at: c.next_run_at, promise_id: pid };
+            let occs: Seq<AOccurrence> = seq![occ];
+            assert(occs.len() == 1);
+            let j = joint(loaded, sd);
+            let fired = kint::spec_fire(j, sid, occs, next, t);
+            lemma_fire_fold_schedules(t, j, c, occs, 1);
+            let c2 = ASchedule { last_run_at: Some(c.next_run_at), next_run_at: next, ..c };
+            assert(fired.schedules == sd.schedules.insert(sid, c2));
+            assert(p.new == Doc { objects: Map::empty(), schedules: sd.schedules.insert(sid, c2) });
+            assert(fire_shape(s.rt, o, x, sid, pid, next));
+        }
+    }
+}
+
+/// A request that changed nothing, answered from the read: the document is
+/// as it was, and the request's run from the bucket ends related to it.
+pub proof fn lemma_prepare_answered(s: Cluster, s2: Cluster, i: Id, o: Origin, req: ARequest, m: Doc)
+    requires
+        sys::inv()(s), sys::inv()(s2), s.rt <= kernel::MAX_TIME, ref_state(s), store_headroom(s),
+        s2.store.docs == s.store.docs, s2.rt == s.rt,
+        s2.nodes.contains_key(i), s2.nodes[i].txns.contains_key(o),
+        s2.nodes[i].txns[o].work == Work::Request(req, m),
+        request_shape(s.rt, o, s2.nodes[i].txns[o], req, m),
+        s2.nodes[i].txns[o].loaded == s.store.doc(o),
+        s2.nodes[i].txns[o].new == s2.nodes[i].txns[o].loaded,
+        s2.log == answered(s, o, s2.nodes[i].txns[o]),
+    ensures partitioned(s2), refines(s2),
+{
+    let x = s2.nodes[i].txns[o];
+    sys::disassemble(s2);
+    assert(sys::inv_txn(s2, i, o));
+    lemma_bucket_same(s, s2);
+    let rt = s.rt as u64;
+    let acts = choose|acts: Seq<AbsAction>| explains(s, acts);
+    let a = abs_run(abstract_init(), acts, rt);
+    lemma_request_run(s, o, x, req, m, a);
+    let racts = choose|racts: Seq<AbsAction>| request_explains(s, o, x, req, m, a, racts);
+    lemma_split_doc(s, o);
+    assert(glue(full(x.new), rest(s, in_origin(o), sched_in(o))) == bucket(s2));
+    let res = kext::spec_handle(full(m), req, x.t).1;
+    lemma_observed_push(s.log, Served { origin: o, at: x.t, req, resp: res });
+    lemma_explains_step(s, s2, acts, racts, seq![response(req, res)]);
+}
+
+pub proof fn lemma_ref_prepare(s: Cluster, s2: Cluster, i: Id, o: Origin, t: nat, work: Work, new: Doc, did: bool, deadline: Option<nat>)
+    requires
+        sys::inv()(s), sys::inv()(s2), s.rt <= kernel::MAX_TIME, ref_state(s), store_headroom(s),
+        admitted(s, Step::Prepare(i, o, t, work, new, did, deadline)),
+        prepare(s, i, o, t, work, new, did, deadline) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    let n = s.nodes[i];
+    let loaded = s.store.doc(o);
+    let x = s2.nodes[i].txns[o];
+    let changed = did || new != loaded;
+    lemma_prepared_shape(s, s2, i, o, t, work, new, did, deadline);
+    assert forall|q: Origin| #[trigger] s2.nodes[i].txns.contains_key(q) implies flight_shape(s.rt, q, s2.nodes[i].txns[q]) by {
+        if q != o {
+            assert(n.txns.contains_key(q));
+        }
+    }
+    lemma_shapes_frame(s, s2, i);
+    assert(s2.store.docs == s.store.docs && s2.rt == s.rt);
+    match work {
+        Work::Request(req, m) => {
+            if changed {
+                assert(s2.log == s.log);
+                lemma_stutter_docs(s, s2);
+            } else {
+                assert(s2.log == answered(s, o, x));
+                assert(x.work == work && x.loaded == loaded && x.new == new);
+                lemma_prepare_answered(s, s2, i, o, req, m);
+            }
+        }
+        Work::Sweep(_) => {
+            assert(s2.log == s.log);
+            lemma_stutter_docs(s, s2);
+        }
+        Work::Fire(..) => {
+            assert(s2.log == s.log);
+            lemma_stutter_docs(s, s2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The round trips, by outcome
+// ---------------------------------------------------------------------------
+
+pub proof fn lemma_ref_add_timer(s: Cluster, s2: Cluster, i: Id, o: Origin, k: AKey, out: Outcome)
+    requires ref_state(s), add_timer(s, i, o, k, out) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    match out {
+        Outcome::Applied => lemma_ref_arm(s, s2, i, o, k),
+        Outcome::Refused => {}
+        Outcome::Unknown(landed) => {
+            if landed {
+                let s1 = arm(s, i, o, k).unwrap();
+                lemma_ref_arm(s, s1, i, o, k);
+                lemma_ref_give_up(s1, s2, i, o);
+            } else {
+                lemma_ref_give_up(s, s2, i, o);
+            }
+        }
+    }
+}
+
+pub proof fn lemma_ref_commit_unknown(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, landed: bool)
+    requires
+        sys::inv()(s), s.rt <= kernel::MAX_TIME, ref_state(s), store_headroom(s), schedule_held(s),
+        commit_unknown(s, i, o, e, landed) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    if landed {
+        let s1 = commit(s, i, o, e).unwrap();
+        lemma_ref_commit(s, s1, i, o, e);
+        lemma_ref_give_up(s1, s2, i, o);
+    } else {
+        lemma_ref_give_up(s, s2, i, o);
+    }
+}
+
+pub proof fn lemma_ref_process_doc(s: Cluster, s2: Cluster, i: Id, o: Origin, e: Seq<char>, out: Outcome)
+    requires
+        sys::inv()(s), s.rt <= kernel::MAX_TIME, ref_state(s), store_headroom(s), schedule_held(s),
+        process_doc(s, i, o, e, out) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    let n = s.nodes[i];
+    if s.nodes.contains_key(i) && n.txns.contains_key(o) && n.txns[o].c.changed {
+        match out {
+            Outcome::Applied => lemma_ref_commit(s, s2, i, o, e),
+            Outcome::Refused => lemma_ref_commit_fail(s, s2, i, o),
+            Outcome::Unknown(landed) => lemma_ref_commit_unknown(s, s2, i, o, e, landed),
+        }
+    } else {
+        match out {
+            Outcome::Applied => lemma_ref_collect(s, s2, i, o, e),
+            Outcome::Refused => lemma_ref_collect_fail(s, s2, i, o),
+            Outcome::Unknown(landed) => lemma_ref_collect_unknown(s, s2, i, o, e, landed),
+        }
+    }
+}
+
+pub proof fn lemma_ref_del_timer(s: Cluster, s2: Cluster, i: Id, o: Origin, prev: bool, fired: bool)
+    requires sys::inv()(s), ref_state(s), del_timer(s, i, o, prev, fired) == Some(s2),
+    ensures ref_state(s2), s2.rt == s.rt,
+{
+    lemma_pending_shaped(s, i, o);
+    let s1 = if prev { disarm(s, i, o).unwrap() } else { s };
+    if prev {
+        lemma_ref_disarm(s, s1, i, o);
+    }
+    assert(pending_shaped(s1, i, o));
+    lemma_ref_finish(s1, s2, i, o, fired);
+}
+
+// ---------------------------------------------------------------------------
+// The induction, and the theorem
+// ---------------------------------------------------------------------------
+
+/// The empty bucket is the kernel's empty document, related to the
+/// Abstract's empty state; nothing is served.
+pub proof fn lemma_ref_init(s: Cluster)
+    requires init()(s),
+    ensures inv_ref()(s),
+{
+    sys::lemma_init(s);
+    assert(partitioned(s));
+    lemma_bucket_has(s);
+    assert forall|id: Chars| !(#[trigger] bucket_objects(s).contains_key(id)) by {
+        assert(s.store.doc(origin(id)) == empty_doc());
+    }
+    assert forall|sid: Chars| !(#[trigger] bucket_schedules(s).contains_key(sid)) by {
+        assert(s.store.doc(sched_target(sid)) == empty_doc());
+    }
+    assert(bucket(s).objects =~= kernel_init().objects);
+    assert(bucket(s).schedules =~= kernel_init().schedules);
+    assert(bucket(s) == kernel_init());
+    lemma_init_doc_related();
+    let acts = Seq::<AbsAction>::empty();
+    assert(observed(s.log) =~= Seq::<AbsResponse>::empty());
+    assert(explains(s, acts));
+    assert(flights_shaped(s));
+}
+
+/// Every admitted step keeps the invariant.
+pub proof fn lemma_ref_next(s: Cluster, s2: Cluster)
+    requires inv_ref()(s), next_admitted()(s, s2),
+    ensures inv_ref()(s2),
+{
+    let st = choose|st: Step| #[trigger] next_step(s, s2, st) && admitted(s, st);
+    assert(next()(s, s2));
+    sys::lemma_next(s, s2);
+    match st {
+        Step::Tick(i, d) => lemma_ref_tick(s, s2, i, d),
+        Step::Join(i, c) => lemma_ref_join(s, s2, i, c),
+        Step::Crash(i) => lemma_ref_crash(s, s2, i),
+        Step::Forget(i, o) => lemma_ref_forget(s, s2, i, o),
+        Step::Prepare(i, o, t, work, new, did, deadline) => lemma_ref_prepare(s, s2, i, o, t, work, new, did, deadline),
+        Step::AddTimer(i, o, k, out) => lemma_ref_add_timer(s, s2, i, o, k, out),
+        Step::Process(i, o, e, out) => lemma_ref_process_doc(s, s2, i, o, e, out),
+        Step::DelTimer(i, o, prev, fired) => lemma_ref_del_timer(s, s2, i, o, prev, fired),
+        Step::Done(i, o) => {
+            lemma_pending_shaped(s, i, o);
+            lemma_ref_done(s, s2, i, o);
+        }
+    }
+}
+
+/// The fleet refines the Abstract: in every execution that starts in
+/// `init` and steps by `next` within the doors, the requests served so far
+/// are always the responses of some Abstract run from its initial state —
+/// one that ends related to the bucket.
+pub proof fn theorem_system_refines_abstract(spec: TempPred<Cluster>)
+    requires
+        spec.entails(lift_state(init())),
+        spec.entails(always(lift_action(next_admitted()))),
+    ensures
+        spec.entails(always(lift_state(|s: Cluster| refines(s)))),
+{
+    assert forall|s: Cluster| #[trigger] init()(s) implies inv_ref()(s) by { lemma_ref_init(s); }
+    assert forall|s: Cluster, s2: Cluster| inv_ref()(s) && #[trigger] next_admitted()(s, s2) implies inv_ref()(s2) by { lemma_ref_next(s, s2); }
+    init_invariant::<Cluster>(spec, init(), next_admitted(), inv_ref());
+    let p = lift_state(inv_ref());
+    let q = lift_state(|s: Cluster| refines(s));
+    assert forall|ex: Execution<Cluster>| #[trigger] p.implies(q).satisfied_by(ex) by {
+        if p.satisfied_by(ex) {
+            assert(inv_ref()(ex.head()));
+            assert(refines(ex.head()));
+        }
+    }
+    always_weaken::<Cluster>(spec, p, q);
+}
+
 } // verus!
