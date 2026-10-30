@@ -1,4 +1,4 @@
-import Rover.World
+import Rover
 import «02-abstract».«system»
 
 /-!

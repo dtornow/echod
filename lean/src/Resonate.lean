@@ -1,4 +1,4 @@
-import Rover.World
+import Rover
 import Protocol
 import «abstract».Machine
 import «abstract».Handlers
