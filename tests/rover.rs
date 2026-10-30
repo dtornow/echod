@@ -119,6 +119,12 @@ fn append_only_delivery_can_be_duplicated() {
 }
 
 #[test]
+fn append_only_output_can_be_observed_twice() {
+    let trace = [input(0, 2), output(1, 2), output(2, 2)];
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4 }).is_some());
+}
+
+#[test]
 fn outputs_can_be_observed_in_a_different_order() {
     let trace = [input(0, 1), input(0, 10), output(1, 11), output(2, 1)];
     assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 8 }).is_some());
@@ -128,4 +134,57 @@ fn outputs_can_be_observed_in_a_different_order() {
 fn replay_rejects_nonmonotone_time() {
     let trace = [input(2, 1), output(1, 1)];
     assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4 }).is_none());
+}
+
+#[test]
+fn a_bound_limits_search_without_claiming_invalidity() {
+    let trace = [input(0, 3), output(1, 3)];
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 2 }).is_none());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 3 }).is_some());
+}
+
+#[test]
+fn independent_replay_rejects_a_bad_outcome_index() {
+    let trace = [input(0, 3), output(1, 3)];
+    let certificate = vec![
+        Action::Inject {
+            recipient: Pid::Service,
+            at: 0,
+            message: Message::Add(3),
+        },
+        Action::Process {
+            slot: 0,
+            process: Pid::Service,
+            at: 1,
+            event: ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Add(3),
+            },
+            outcome: 1,
+        },
+        Action::Observe {
+            sender: Pid::Service,
+            at: 1,
+            message: Message::Value(3),
+        },
+    ];
+
+    assert_eq!(replay(&Counter, &(), &trace, &certificate), Err(1));
+}
+
+#[test]
+fn injection_checks_the_boundary_policy_and_recipient() {
+    let noninjectable = [Event::Input {
+        recipient: Pid::Service,
+        at: 0,
+        message: Message::Value(7),
+    }];
+    let outside = [Event::Input {
+        recipient: Pid::Outside,
+        at: 0,
+        message: Message::Add(7),
+    }];
+
+    assert!(check(&Counter, &(), &noninjectable, CheckConfig { max_steps: 1 }).is_none());
+    assert!(check(&Counter, &(), &outside, CheckConfig { max_steps: 1 }).is_none());
 }
