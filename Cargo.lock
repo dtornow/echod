@@ -1165,6 +1165,7 @@ dependencies = [
  "echod-abstract",
  "echod-concrete",
  "echod-kernel",
+ "echod-system",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
