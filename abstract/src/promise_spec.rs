@@ -343,6 +343,14 @@ pub open spec fn spec_promise_get_action(
     }
 }
 
+/// Every create first drops a timer's target. A targeted timer is thus not
+/// refused but accepted as a timer alone; the 400 guard that follows can no
+/// longer fire for that reason and remains only as the Lean text's guard.
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_normalize_create(req: APromiseCreateReq) -> APromiseCreateReq {
+    APromiseCreateReq { tags: spec_strip_timer_target(req.tags), ..req }
+}
+
 #[cfg(verus_keep_ghost)]
 pub open spec fn spec_promise_create_action(
     state: AState,
@@ -350,6 +358,7 @@ pub open spec fn spec_promise_create_action(
     now: u64,
     materialize: bool,
 ) -> APromiseActionResult {
+    let req = spec_normalize_create(req);
     if spec_tags_timer_targeted(req.tags) {
         spec_promise_finish(state, spec_promise_error(400), Seq::empty())
     } else {
@@ -529,7 +538,7 @@ pub open spec fn spec_promise_search_action(
     spec_promise_search_finish(
         state,
         APromiseSearchRes {
-            status: 501,
+            status: 403,
             promises: Seq::empty(),
             cursor: None,
         },

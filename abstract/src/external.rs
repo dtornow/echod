@@ -1,7 +1,8 @@
-//! All 21 external semantic actions from `02-abstract/external.lean`.
+//! All 21 external semantic actions from `02-abstract/external.lean`, plus
+//! `task_fence_check_action`, the second step of a detached fence.
 //!
-//! Search actions intentionally return 501 because that is their complete
-//! Lean semantics. No action records Invoke/Return observations.
+//! Search actions return 403: the protocol refuses them, as the node does.
+//! No action records Invoke/Return observations.
 
 use vstd::prelude::*;
 use crate::promise_spec::*;
@@ -116,16 +117,16 @@ fn suspend_response(status: u16) -> (r: TaskSuspendRes)
 
 fn task_search_unsupported() -> (r: TaskSearchRes)
     ensures r@ == (ATaskSearchRes {
-        status: 501,
+        status: 403,
         tasks: Seq::empty(),
         cursor: None,
     }),
 {
     let tasks = Vec::new();
     assert(tasks.deep_view() =~= Seq::<ATaskRecord>::empty());
-    let r = TaskSearchRes { status: 501, tasks, cursor: None };
+    let r = TaskSearchRes { status: 403, tasks, cursor: None };
     assert(r@ == (ATaskSearchRes {
-        status: 501,
+        status: 403,
         tasks: Seq::empty(),
         cursor: None,
     }));
@@ -179,6 +180,20 @@ pub fn promise_get_action(
     }
 }
 
+/// The wire's normalization of a create: a timer's target is dropped.
+pub fn normalize_create(req: PromiseCreateReq) -> (r: PromiseCreateReq)
+    ensures r@ == spec_normalize_create(req@),
+{
+    let ghost request = req@;
+    let tags = strip_timer_target(req.tags);
+    let r = PromiseCreateReq { id: req.id, timeout_at: req.timeout_at, param: req.param, tags };
+    assert(r@.id == request.id);
+    assert(r@.timeout_at == request.timeout_at);
+    assert(r@.param == request.param);
+    assert(r@.tags == spec_strip_timer_target(request.tags));
+    r
+}
+
 pub fn promise_create_action(
     state: &State, req: PromiseCreateReq, now: u64, materialize: bool,
 ) -> (result: Transition<PromiseCreateRes>)
@@ -190,6 +205,7 @@ pub fn promise_create_action(
         spec_apply_all(state@, result.effects.deep_view()) ==
             spec_promise_create_action(state@, req@, now, materialize).next_state,
 {
+    let req = normalize_create(req);
     if tags_timer_targeted(&req.tags) {
         return Transition { response: promise_error(400), effects: Vec::new() };
     }
@@ -345,7 +361,7 @@ pub fn promise_search_action(
         assert(effects.deep_view() =~= Seq::<AEffect>::empty());
     }
     Transition {
-        response: PromiseSearchRes { status: 501, promises, cursor: None },
+        response: PromiseSearchRes { status: 403, promises, cursor: None },
         effects,
     }
 }
@@ -395,6 +411,13 @@ pub fn task_create_action(
     proof {
         lemma_task_create_next_state(state@, req@, now, materialize);
     }
+    let ghost original = req@;
+    let action = normalize_create(req.action);
+    let req = TaskCreateReq { pid: req.pid, ttl: req.ttl, action };
+    assert(req@ == (ATaskCreateReq {
+        action: spec_normalize_create(original.action),
+        ..original
+    }));
     let ghost request = req@;
     let a = req.action;
     if tags_otype(&a.tags) != OType::Runnable || tags_timer_targeted(&a.tags)
@@ -574,6 +597,43 @@ pub fn task_fence_action(
             }
         }
     }
+}
+
+pub fn task_fence_check_action(
+    state: &State, req: &TaskFenceCheckReq, now: u64, materialize: bool,
+) -> (result: Transition<StatusRes>)
+    ensures
+        result.response@ ==
+            spec_task_fence_check_action(state@, req@, now, materialize).response,
+        result.effects.deep_view() =~=
+            spec_task_fence_check_action(state@, req@, now, materialize).effects,
+        spec_apply_all(state@, result.effects.deep_view()) ==
+            spec_task_fence_check_action(state@, req@, now, materialize).next_state,
+{
+    let read = read_task_object(state, &req.id, now, materialize);
+    let o = match read.object {
+        None => return Transition {
+            response: StatusRes { status: 404 },
+            effects: read.effects,
+        },
+        Some(o) => o,
+    };
+    let t = match &o.task {
+        None => return Transition {
+            response: StatusRes { status: 404 },
+            effects: read.effects,
+        },
+        Some(t) => t,
+    };
+    if t.state != TaskState::Acquired || o.promise.state != PromiseState::Pending
+        || t.version != req.version
+    {
+        return Transition {
+            response: StatusRes { status: 409 },
+            effects: read.effects,
+        };
+    }
+    Transition { response: StatusRes { status: 200 }, effects: read.effects }
 }
 
 fn heartbeat_one(
@@ -1291,6 +1351,17 @@ pub fn schedule_create_action(
             state@, req@, req@.next_run_at, now, materialize,
         );
     }
+    let ghost original = req@;
+    let promise_tags = strip_timer_target(req.promise_tags);
+    let req = ScheduleCreateReq {
+        id: req.id, cron: req.cron, promise_id: req.promise_id,
+        promise_timeout: req.promise_timeout, promise_param: req.promise_param,
+        promise_tags, next_run_at: req.next_run_at,
+    };
+    assert(req@ == (AScheduleCreateReq {
+        promise_tags: spec_strip_timer_target(original.promise_tags),
+        ..original
+    }));
     if tags_timer_targeted(&req.promise_tags) {
         return Transition {
             response: ScheduleRes { status: 400, schedule: None }, effects: Vec::new(),
@@ -1358,7 +1429,7 @@ pub fn schedule_search_action(
         assert(effects.deep_view() =~= Seq::<AEffect>::empty());
     }
     Transition {
-        response: ScheduleSearchRes { status: 501, schedules, cursor: None },
+        response: ScheduleSearchRes { status: 403, schedules, cursor: None },
         effects,
     }
 }

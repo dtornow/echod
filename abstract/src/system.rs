@@ -35,6 +35,8 @@ pub enum ExternalAction {
     TaskHalt(TaskHaltReq),
     TaskContinue(TaskContinueReq),
     TaskSearch(TaskSearchReq),
+    /// The second half of a detached fence; see `decompose`.
+    TaskFenceCheck(TaskFenceCheckReq),
 }
 
 pub enum InternalAction {
@@ -43,7 +45,10 @@ pub enum InternalAction {
     Listener(PromiseRegisterListenerReq),
     TaskLeaseTimeout(TaskLeaseTimeoutReq),
     TaskRetryTimeout(TaskRetryTimeoutReq),
-    ScheduleTimeout(ScheduleTimeoutReq),
+    /// A schedule's occurrence becomes a promise.
+    ScheduleFire(ScheduleFireReq),
+    /// A schedule moves past an occurrence whose promise exists.
+    ScheduleAdvance(ScheduleAdvanceReq),
 }
 
 pub enum SemanticAction {
@@ -74,7 +79,104 @@ pub enum Response {
     TaskHalt(TaskHaltRes),
     TaskContinue(TaskContinueRes),
     TaskSearch(TaskSearchRes),
+    TaskFenceCheck(StatusRes),
     Silent,
+}
+
+// Protocol requests that are more than one action ---------------------------
+
+/// How a protocol request runs: as the one action it names, or, for a fence
+/// whose create lives in another origin than the task, as two. The create
+/// commits first, on its own; the fence's check follows on the task's. Any
+/// action may interleave between them, and a stale fence still leaves the
+/// promise created and answers its 409. The atomic `TaskFence` action keeps
+/// refusing such a request with 400: it is the dispatcher that splits it,
+/// exactly as the node's does.
+pub enum Request {
+    Whole(ExternalAction),
+    Detached { create: PromiseCreateReq, check: TaskFenceCheckReq },
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_detached(
+    id: AIdent, version: u64, action: ATaskFenceAction,
+) -> Option<(APromiseCreateReq, ATaskFenceCheckReq)> {
+    match action {
+        ATaskFenceAction::Create(create) if create.id.origin != id.origin =>
+            Some((create, ATaskFenceCheckReq { id, version })),
+        _ => None,
+    }
+}
+
+pub fn decompose(action: ExternalAction) -> (r: Request)
+    ensures match action {
+        ExternalAction::TaskFence(q) => match spec_detached(q@.id, q@.version, q@.action) {
+            Some((create, check)) => r is Detached
+                && r->create@ == create && r->check@ == check,
+            None => r is Whole && r->Whole_0 == action,
+        },
+        _ => r is Whole && r->Whole_0 == action,
+    },
+{
+    match action {
+        ExternalAction::TaskFence(q) => {
+            let cross = match &q.action {
+                TaskFenceAction::Create(c) => !c.id.same_origin(&q.id),
+                TaskFenceAction::Settle(_) => false,
+            };
+            if cross {
+                match q.action {
+                    TaskFenceAction::Create(create) => Request::Detached {
+                        create,
+                        check: TaskFenceCheckReq { id: q.id, version: q.version },
+                    },
+                    TaskFenceAction::Settle(settle) => {
+                        // unreachable: `cross` is false for a settle
+                        assert(false);
+                        Request::Whole(ExternalAction::TaskFence(TaskFenceReq {
+                            id: q.id, version: q.version, action: TaskFenceAction::Settle(settle),
+                        }))
+                    }
+                }
+            } else {
+                Request::Whole(ExternalAction::TaskFence(q))
+            }
+        }
+        other => Request::Whole(other),
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_compose_detached(
+    inner: APromiseRes, check: AStatusRes,
+) -> ATaskFenceRes {
+    ATaskFenceRes {
+        status: check.status,
+        action: if check.status == 200 {
+            Some(ATaskFenceInnerRes::Create(inner))
+        } else {
+            None
+        },
+        preload: Seq::empty(),
+    }
+}
+
+/// The fence's answer: the check's status, with the create's record inside
+/// when the check held.
+pub fn compose_detached(inner: PromiseRes, check: StatusRes) -> (r: TaskFenceRes)
+    ensures r@ == spec_compose_detached(inner@, check@),
+{
+    let ghost inner_spec = inner@;
+    let preload = Vec::new();
+    assert(preload.deep_view() =~= Seq::<APromiseRecord>::empty());
+    let action = if check.status == 200 {
+        Some(TaskFenceInnerRes::Create(inner))
+    } else {
+        None
+    };
+    let r = TaskFenceRes { status: check.status, action, preload };
+    assert(r@ == spec_compose_detached(inner_spec, check@));
+    r
 }
 
 pub fn handle_external(
@@ -165,6 +267,10 @@ pub fn handle_external(
             let x = task_search_action(state, &q, now, materialize);
             Transition { response: Response::TaskSearch(x.response), effects: x.effects }
         }
+        ExternalAction::TaskFenceCheck(q) => {
+            let x = task_fence_check_action(state, &q, now, materialize);
+            Transition { response: Response::TaskFenceCheck(x.response), effects: x.effects }
+        }
     }
 }
 
@@ -182,8 +288,10 @@ pub fn handle_internal(
             process_lease_timeout_action(state, &q, now, config),
         InternalAction::TaskRetryTimeout(q) =>
             process_retry_timeout_action(state, &q, now, config),
-        InternalAction::ScheduleTimeout(q) =>
-            process_schedule_action(state, &q, now, config),
+        InternalAction::ScheduleFire(q) =>
+            process_schedule_fire_action(state, &q, now, config),
+        InternalAction::ScheduleAdvance(q) =>
+            process_schedule_advance_action(state, &q, now, config),
     }
 }
 

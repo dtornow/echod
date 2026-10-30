@@ -119,6 +119,10 @@ pub open spec fn spec_schedule_create_action(
     now: u64,
     _materialize: bool,
 ) -> AScheduleActionResult {
+    let req = AScheduleCreateReq {
+        promise_tags: spec_strip_timer_target(req.promise_tags),
+        ..req
+    };
     if spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags) {
         spec_schedule_finish(
             state,
@@ -175,7 +179,7 @@ pub open spec fn spec_schedule_search_action(
     spec_schedule_search_finish(
         state,
         AScheduleSearchRes {
-            status: 501,
+            status: 403,
             schedules: Seq::empty(),
             cursor: None,
         },

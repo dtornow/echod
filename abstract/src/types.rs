@@ -5,6 +5,7 @@
 
 use vstd::contrib::{make_spec_type, self_view};
 use vstd::prelude::*;
+use vstd::string::StrSliceExecFns;
 
 verus! {
 
@@ -412,6 +413,13 @@ pub type ATaskLeaseTimeoutReq = TaskLeaseTimeoutReqSpec;
 #[cfg(verus_keep_ghost)]
 pub type ATaskRetryTimeoutReq = TaskRetryTimeoutReqSpec;
 
+/// `task.fence` with no action: the check alone. A fence whose create targets
+/// another origin is two protocol steps, the create first and then this one,
+/// so the promise may exist while the fence still answers 409.
+#[make_spec_type] pub struct TaskFenceCheckReq { pub id: Ident, pub version: u64 }
+#[cfg(verus_keep_ghost)]
+pub type ATaskFenceCheckReq = TaskFenceCheckReqSpec;
+
 #[make_spec_type]
 pub struct Occurrence {
     pub at: u64,
@@ -419,19 +427,30 @@ pub struct Occurrence {
     pub promise_id: Ident,
 }
 
+/// A schedule fires one occurrence: its promise is created if absent. The
+/// schedule itself is not touched; that is `ScheduleAdvanceReq`, a later step.
 #[make_spec_type]
-pub struct ScheduleTimeoutReq {
+pub struct ScheduleFireReq {
     pub schedule: Ident,
-    /// Executable witness for Lean's opaque `occurrences`, in Lean list order.
-    pub occurrences: Vec<Occurrence>,
-    /// `nextCron cron last`, used only when `occurrences` is nonempty.
+    pub occurrence: Occurrence,
+}
+
+/// A schedule advances past an occurrence whose promise exists: `last_run_at`
+/// becomes the occurrence, `next_run_at` the supplied `nextCron` witness.
+#[make_spec_type]
+pub struct ScheduleAdvanceReq {
+    pub schedule: Ident,
+    pub occurrence: Occurrence,
+    /// `nextCron cron occurrence.at`, strictly after the occurrence.
     pub next_run_at: u64,
 }
 
 #[cfg(verus_keep_ghost)]
 pub type AOccurrence = OccurrenceSpec;
 #[cfg(verus_keep_ghost)]
-pub type AScheduleTimeoutReq = ScheduleTimeoutReqSpec;
+pub type AScheduleFireReq = ScheduleFireReqSpec;
+#[cfg(verus_keep_ghost)]
+pub type AScheduleAdvanceReq = ScheduleAdvanceReqSpec;
 
 #[make_spec_type]
 pub struct ResumeReq {
@@ -458,6 +477,7 @@ pub struct ResumeRes {
 // Responses ----------------------------------------------------------------
 
 #[make_spec_type]
+#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, PartialEq, Eq))]
 pub struct PromiseRes { pub status: u16, pub promise: Option<PromiseRecord> }
 #[cfg(verus_keep_ghost)]
 pub type APromiseRes = PromiseResSpec;
@@ -570,6 +590,7 @@ impl View for TaskFenceRes {
 }
 
 #[make_spec_type]
+#[cfg_attr(not(verus_keep_ghost), derive(Clone, Copy, Debug, PartialEq, Eq))]
 pub struct StatusRes { pub status: u16 }
 #[cfg(verus_keep_ghost)]
 pub type AStatusRes = StatusResSpec;
@@ -946,6 +967,362 @@ pub fn parse_nat_bounded(x: &Text) -> (r: u64)
         i += 1;
     }
     acc
+}
+
+// Literals ------------------------------------------------------------------
+
+/// The `Text` of a literal's scalar values.
+pub fn text_of_str(s: &str) -> (r: Text)
+    ensures r@ == (AText { chars: s@ }),
+{
+    let n = s.unicode_len();
+    let mut chars: Vec<char> = Vec::new();
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            i <= n,
+            n == s@.len(),
+            chars@ == s@.take(i as int),
+        decreases n - i,
+    {
+        let c = s.get_char(i);
+        chars.push(c);
+        assert(chars@ =~= s@.take(i as int + 1));
+        i += 1;
+    }
+    assert(chars@ =~= s@);
+    let r = Text { chars };
+    assert(r@.chars =~= s@);
+    r
+}
+
+/// `x` spells the literal `s`.
+pub fn text_is(x: &Text, s: &str) -> (r: bool)
+    ensures r == (x@.chars == s@),
+{
+    let n = s.unicode_len();
+    if x.chars.len() != n {
+        proof {
+            if x@.chars == s@ {
+                assert(x@.chars.len() == s@.len());
+                assert(false);
+            }
+        }
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            i <= n,
+            n == s@.len(),
+            x.chars@.len() == n,
+            forall|j: int| 0 <= j < i ==> x.chars@[j] == s@[j],
+        decreases n - i,
+    {
+        if x.chars[i] != s.get_char(i) {
+            proof {
+                if x@.chars == s@ {
+                    assert(x@.chars[i as int] == s@[i as int]);
+                    assert(false);
+                }
+            }
+            return false;
+        }
+        i += 1;
+    }
+    assert(x@.chars =~= s@);
+    true
+}
+
+/// `origin`, or `origin:suffix`: the id as the protocol spells it.
+pub open spec fn spec_ident_text(id: AIdent) -> AText {
+    if id.suffix.chars.len() == 0 {
+        id.origin
+    } else {
+        AText { chars: id.origin.chars + seq![':'] + id.suffix.chars }
+    }
+}
+
+pub fn ident_text(id: &Ident) -> (r: Text)
+    ensures r@ == spec_ident_text(id@),
+{
+    if id.suffix.chars.len() == 0 {
+        assert(id@.suffix.chars.len() == 0);
+        return id.origin.dup();
+    }
+    assert(id@.suffix.chars.len() != 0);
+    let mut chars: Vec<char> = Vec::new();
+    let mut i: usize = 0;
+    while i < id.origin.chars.len()
+        invariant
+            i <= id.origin.chars@.len(),
+            chars@ == id.origin.chars@.take(i as int),
+        decreases id.origin.chars@.len() - i,
+    {
+        chars.push(id.origin.chars[i]);
+        assert(chars@ =~= id.origin.chars@.take(i as int + 1));
+        i += 1;
+    }
+    assert(chars@ =~= id.origin.chars@);
+    chars.push(':');
+    let ghost mid = chars@;
+    assert(mid =~= id.origin.chars@ + seq![':']);
+    let mut j: usize = 0;
+    while j < id.suffix.chars.len()
+        invariant
+            j <= id.suffix.chars@.len(),
+            chars@ == mid + id.suffix.chars@.take(j as int),
+        decreases id.suffix.chars@.len() - j,
+    {
+        chars.push(id.suffix.chars[j]);
+        assert(chars@ =~= mid + id.suffix.chars@.take(j as int + 1));
+        j += 1;
+    }
+    assert(chars@ =~= id.origin.chars@ + seq![':'] + id.suffix.chars@);
+    let r = Text { chars };
+    assert(r@.chars =~= id@.origin.chars + seq![':'] + id@.suffix.chars);
+    r
+}
+
+// Timer targets -------------------------------------------------------------
+
+/// The tags without any `resonate:target`, in order.
+pub open spec fn spec_without_target(tags: ATags) -> ATags
+    decreases tags.len(),
+{
+    if tags.len() == 0 {
+        Seq::empty()
+    } else if spec_tag_key(tags[0].key.chars, 0) {
+        spec_without_target(tags.drop_first())
+    } else {
+        seq![tags[0]] + spec_without_target(tags.drop_first())
+    }
+}
+
+/// The wire's concession to the SDKs: a timer created with a target is
+/// accepted as a timer alone. Every create normalizes its tags this way
+/// before anything else looks at them.
+pub open spec fn spec_strip_timer_target(tags: ATags) -> ATags {
+    if spec_is_timer(tags) { spec_without_target(tags) } else { tags }
+}
+
+pub fn strip_timer_target(tags: Tags) -> (r: Tags)
+    ensures r.deep_view() == spec_strip_timer_target(tags.deep_view()),
+{
+    if !tags_is_timer(&tags) {
+        return tags;
+    }
+    let ghost s = tags.deep_view();
+    let mut out: Tags = Vec::new();
+    let mut i: usize = 0;
+    assert(s.skip(0) =~= s);
+    assert(out.deep_view() =~= Seq::<ATag>::empty());
+    while i < tags.len()
+        invariant
+            i <= tags@.len(),
+            s == tags.deep_view(),
+            out.deep_view() + spec_without_target(s.skip(i as int))
+                == spec_without_target(s),
+        decreases tags@.len() - i,
+    {
+        let ghost rest = s.skip(i as int);
+        assert(rest.len() > 0);
+        assert(rest[0] == s[i as int]);
+        assert(rest.drop_first() =~= s.skip(i as int + 1));
+        if key_target(&tags[i].key) {
+            assert(spec_without_target(rest)
+                == spec_without_target(s.skip(i as int + 1)));
+        } else {
+            let next = Tag { key: tags[i].key.dup(), value: tags[i].value.dup() };
+            assert(next@ == tags[i as int]@);
+            let ghost before = out.deep_view();
+            out.push(next);
+            assert(out.deep_view() =~= before.push(s[i as int]));
+            assert(spec_without_target(rest)
+                == seq![s[i as int]] + spec_without_target(s.skip(i as int + 1)));
+            assert(before.push(s[i as int]) + spec_without_target(s.skip(i as int + 1))
+                =~= before + (seq![s[i as int]] + spec_without_target(s.skip(i as int + 1))));
+        }
+        i += 1;
+    }
+    assert(s.skip(s.len() as int) =~= Seq::<ATag>::empty());
+    assert(out.deep_view() + Seq::<ATag>::empty() =~= out.deep_view());
+    out
+}
+
+// Lineage -------------------------------------------------------------------
+
+/// The keys a schedule's firing stamps; a template's own are dropped first.
+pub open spec fn spec_stamped_key(k: Seq<char>) -> bool {
+    ||| k == "resonate:schedule"@
+    ||| k == "resonate:origin"@
+    ||| k == "resonate:branch"@
+    ||| k == "resonate:parent"@
+    ||| k == "resonate:prefix"@
+}
+
+pub fn is_stamped_key(k: &Text) -> (r: bool)
+    ensures r == spec_stamped_key(k@.chars),
+{
+    text_is(k, "resonate:schedule") || text_is(k, "resonate:origin")
+        || text_is(k, "resonate:branch") || text_is(k, "resonate:parent")
+        || text_is(k, "resonate:prefix")
+}
+
+/// The template without the stamped keys, in order.
+pub open spec fn spec_strip_stamped(tags: ATags) -> ATags
+    decreases tags.len(),
+{
+    if tags.len() == 0 {
+        Seq::empty()
+    } else if spec_stamped_key(tags[0].key.chars) {
+        spec_strip_stamped(tags.drop_first())
+    } else {
+        seq![tags[0]] + spec_strip_stamped(tags.drop_first())
+    }
+}
+
+/// What a firing stamps: the schedule, and the lineage, which for a root
+/// promise is itself four times over.
+pub open spec fn spec_lineage(sid: AIdent, pid: AIdent) -> ATags {
+    let s = spec_ident_text(sid);
+    let p = spec_ident_text(pid);
+    seq![
+        ATag { key: AText { chars: "resonate:schedule"@ }, value: s },
+        ATag { key: AText { chars: "resonate:origin"@ }, value: p },
+        ATag { key: AText { chars: "resonate:branch"@ }, value: p },
+        ATag { key: AText { chars: "resonate:parent"@ }, value: p },
+        ATag { key: AText { chars: "resonate:prefix"@ }, value: p },
+    ]
+}
+
+/// The tags of the promise schedule `sid` fires at `pid`: the template
+/// stripped, then the stamp.
+pub open spec fn spec_stamp(tags: ATags, sid: AIdent, pid: AIdent) -> ATags {
+    spec_strip_stamped(tags) + spec_lineage(sid, pid)
+}
+
+fn lineage(sid: &Ident, pid: &Ident) -> (r: Tags)
+    ensures r.deep_view() == spec_lineage(sid@, pid@),
+{
+    let s = ident_text(sid);
+    let p = ident_text(pid);
+    let mut out: Tags = Vec::new();
+    let t0 = Tag { key: text_of_str("resonate:schedule"), value: s };
+    let t1 = Tag { key: text_of_str("resonate:origin"), value: p.dup() };
+    let t2 = Tag { key: text_of_str("resonate:branch"), value: p.dup() };
+    let t3 = Tag { key: text_of_str("resonate:parent"), value: p.dup() };
+    let t4 = Tag { key: text_of_str("resonate:prefix"), value: p };
+    assert(t0@ == spec_lineage(sid@, pid@)[0]);
+    assert(t1@ == spec_lineage(sid@, pid@)[1]);
+    assert(t2@ == spec_lineage(sid@, pid@)[2]);
+    assert(t3@ == spec_lineage(sid@, pid@)[3]);
+    assert(t4@ == spec_lineage(sid@, pid@)[4]);
+    out.push(t0);
+    out.push(t1);
+    out.push(t2);
+    out.push(t3);
+    out.push(t4);
+    assert(out.deep_view() =~= spec_lineage(sid@, pid@));
+    out
+}
+
+pub fn stamp_tags(tags: &Tags, sid: &Ident, pid: &Ident) -> (r: Tags)
+    ensures r.deep_view() == spec_stamp(tags.deep_view(), sid@, pid@),
+{
+    let ghost s = tags.deep_view();
+    let mut out: Tags = Vec::new();
+    let mut i: usize = 0;
+    assert(s.skip(0) =~= s);
+    assert(out.deep_view() =~= Seq::<ATag>::empty());
+    while i < tags.len()
+        invariant
+            i <= tags@.len(),
+            s == tags.deep_view(),
+            out.deep_view() + spec_strip_stamped(s.skip(i as int))
+                == spec_strip_stamped(s),
+        decreases tags@.len() - i,
+    {
+        let ghost rest = s.skip(i as int);
+        assert(rest.len() > 0);
+        assert(rest[0] == s[i as int]);
+        assert(rest.drop_first() =~= s.skip(i as int + 1));
+        if is_stamped_key(&tags[i].key) {
+            assert(spec_strip_stamped(rest)
+                == spec_strip_stamped(s.skip(i as int + 1)));
+        } else {
+            let next = Tag { key: tags[i].key.dup(), value: tags[i].value.dup() };
+            assert(next@ == tags[i as int]@);
+            let ghost before = out.deep_view();
+            out.push(next);
+            assert(out.deep_view() =~= before.push(s[i as int]));
+            assert(spec_strip_stamped(rest)
+                == seq![s[i as int]] + spec_strip_stamped(s.skip(i as int + 1)));
+            assert(before.push(s[i as int]) + spec_strip_stamped(s.skip(i as int + 1))
+                =~= before + (seq![s[i as int]] + spec_strip_stamped(s.skip(i as int + 1))));
+        }
+        i += 1;
+    }
+    assert(s.skip(s.len() as int) =~= Seq::<ATag>::empty());
+    assert(out.deep_view() =~= spec_strip_stamped(s));
+    let ghost stripped = out.deep_view();
+    let more = lineage(sid, pid);
+    let ghost lin = more.deep_view();
+    let mut k: usize = 0;
+    while k < more.len()
+        invariant
+            k <= more@.len(),
+            lin == more.deep_view(),
+            out.deep_view() == stripped + lin.take(k as int),
+        decreases more@.len() - k,
+    {
+        let next = Tag { key: more[k].key.dup(), value: more[k].value.dup() };
+        assert(next@ == more[k as int]@);
+        let ghost before = out.deep_view();
+        out.push(next);
+        assert(out.deep_view() =~= before.push(lin[k as int]));
+        assert(stripped + lin.take(k as int + 1)
+            =~= (stripped + lin.take(k as int)).push(lin[k as int]));
+        k += 1;
+    }
+    assert(lin.take(lin.len() as int) =~= lin);
+    out
+}
+
+// The retry grid ------------------------------------------------------------
+
+/// The anchored retry grid: the first point `due + k * t` strictly after
+/// `now`, or `due` itself while it is still ahead. A node that dispatches
+/// late does not shift the grid; the task keeps the cadence it was given.
+pub open spec fn spec_next_offer(due: u64, now: u64, t: u64) -> u64 {
+    if t == 0 || now < due {
+        due
+    } else {
+        let next = due + t * ((now - due) / (t as int) + 1);
+        if next > u64::MAX { u64::MAX } else { next as u64 }
+    }
+}
+
+pub fn next_offer(due: u64, now: u64, t: u64) -> (r: u64)
+    ensures r == spec_next_offer(due, now, t),
+{
+    if t == 0 || now < due {
+        return due;
+    }
+    let x = now - due;
+    let q = x / t;
+    proof {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x as int, t as int);
+        vstd::arithmetic::div_mod::lemma_mod_bound(x as int, t as int);
+        assert(t * q <= x);
+        assert(t * (q + 1) == t * q + t) by (nonlinear_arith);
+    }
+    let base = due + t * q;
+    if t <= u64::MAX - base {
+        base + t
+    } else {
+        u64::MAX
+    }
 }
 
 } // verus!

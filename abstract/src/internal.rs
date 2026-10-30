@@ -88,8 +88,11 @@ pub open spec fn promise_timeout_semantics(
     internal_read_effects(state, req.id, now, true)
 }
 
+/// `resumeOne`: a suspended awaiter wakes with its first offer due at
+/// `since`, the instant the awaited promise settled, not the instant the
+/// callback happened to be processed.
 pub open spec fn resume_one_semantics(
-    state: AState, awaited: AIdent, awaiter: AIdent, now: u64,
+    state: AState, awaited: AIdent, awaiter: AIdent, now: u64, since: u64,
 ) -> Seq<AEffect> {
     let reads = internal_read_task_effects(state, awaiter, now, true);
     match internal_read_task_object(state, awaiter, now) {
@@ -99,7 +102,7 @@ pub open spec fn resume_one_semantics(
                     TaskState::Suspended => Some(ATaskObject {
                         state: TaskState::Pending,
                         resumes: seq![awaited],
-                        retry_timeout_at: Some(now),
+                        retry_timeout_at: Some(since),
                         ..t
                     }),
                     TaskState::Pending | TaskState::Acquired | TaskState::Halted =>
@@ -121,6 +124,13 @@ pub open spec fn resume_one_semantics(
     }
 }
 
+pub open spec fn settled_since(p: APromiseObject) -> u64 {
+    match p.settled_at {
+        Some(x) => x,
+        None => 0,
+    }
+}
+
 pub open spec fn callback_semantics(
     state: AState, req: APromiseRegisterCallbackReq, now: u64,
 ) -> Seq<AEffect> {
@@ -134,7 +144,9 @@ pub open spec fn callback_semantics(
             };
             reads
                 + seq![AEffect::SetPromise(o.id, promise)]
-                + resume_one_semantics(state, o.id, req.awaiter, now)
+                + resume_one_semantics(
+                    state, o.id, req.awaiter, now, settled_since(o.promise),
+                )
         }
         _ => reads,
     }
@@ -165,6 +177,9 @@ pub open spec fn listener_semantics(
     }
 }
 
+/// `processLeaseTimeout`: a lapsed lease returns the task to pending with
+/// its first offer due at the lease's end, which is when the lapse happened,
+/// whenever the node gets to it.
 pub open spec fn lease_timeout_semantics(
     state: AState, req: ATaskLeaseTimeoutReq, now: u64,
 ) -> Seq<AEffect> {
@@ -179,7 +194,7 @@ pub open spec fn lease_timeout_semantics(
                         pid: None,
                         ttl: None,
                         lease_timeout_at: None,
-                        retry_timeout_at: Some(now),
+                        retry_timeout_at: Some(deadline),
                         ..t
                     };
                     reads + seq![AEffect::SetTask(o.id, next)]
@@ -207,6 +222,8 @@ pub open spec fn internal_target_or_empty(tags: ATags) -> AText {
     }
 }
 
+/// `processRetryTimeout`: a due offer is made and the next one armed on the
+/// task's own grid, `due + k * retry_timeout`, not `now + retry_timeout`.
 pub open spec fn retry_timeout_semantics(
     state: AState, req: ATaskRetryTimeoutReq, now: u64, retry_timeout: u64,
 ) -> Seq<AEffect> {
@@ -217,7 +234,7 @@ pub open spec fn retry_timeout_semantics(
                 Some(due) if t.state == TaskState::Pending && due <= now
                     && o.promise.state == PromiseState::Pending => {
                     let next = ATaskObject {
-                        retry_timeout_at: Some(internal_sat_add(now, retry_timeout)),
+                        retry_timeout_at: Some(spec_next_offer(due, now, retry_timeout)),
                         ..t
                     };
                     let message = AMessage {
@@ -240,6 +257,20 @@ pub open spec fn retry_timeout_semantics(
     }
 }
 
+// Schedules ---------------------------------------------------------------
+//
+// A schedule's firing is two actions, not one, because the occurrence's
+// promise and the schedule are different objects and this model claims no
+// atomicity across objects. `ScheduleFire` creates the occurrence's promise
+// if it is absent; `ScheduleAdvance` moves the schedule past the occurrence
+// and is enabled only once that promise exists. Between the two, a client may
+// see the promise beside the unadvanced schedule; after a crash between the
+// two, the fire runs again, finds the promise, and the advance follows. An
+// occurrence is therefore never lost, and never created twice.
+
+/// The create request an occurrence stands for: the template's tags
+/// stripped of any earlier stamp, then stamped with the schedule and the
+/// promise's own lineage.
 pub open spec fn occurrence_create_req(
     schedule: ASchedule, occurrence: AOccurrence,
 ) -> APromiseCreateReq {
@@ -247,10 +278,11 @@ pub open spec fn occurrence_create_req(
         id: occurrence.promise_id,
         timeout_at: internal_sat_add(occurrence.at, schedule.promise_timeout),
         param: schedule.promise_param,
-        tags: schedule.promise_tags,
+        tags: spec_stamp(schedule.promise_tags, schedule.id, occurrence.promise_id),
     }
 }
 
+/// `createIfAbsent`, as of the occurrence's own instant.
 pub open spec fn fire_occurrence_semantics(
     state: AState, schedule: ASchedule, occurrence: AOccurrence,
 ) -> Seq<AEffect> {
@@ -265,58 +297,56 @@ pub open spec fn fire_occurrence_semantics(
     }
 }
 
-pub open spec fn fire_all_semantics(
-    state: AState,
-    schedule: ASchedule,
-    occurrences: Seq<AOccurrence>,
-    now: u64,
-) -> Seq<AEffect>
-    decreases occurrences.len(),
-{
-    if occurrences.len() == 0 {
-        Seq::empty()
-    } else {
-        let prior = fire_all_semantics(
-            state, schedule, occurrences.drop_last(), now,
-        );
-        if occurrences.last().at <= now {
-            prior + fire_occurrence_semantics(state, schedule, occurrences.last())
-        } else {
-            prior
-        }
-    }
+/// The occurrence is one the schedule owes: at or after its next run, and
+/// not in the future.
+pub open spec fn occurrence_due(
+    schedule: ASchedule, occurrence: AOccurrence, now: u64,
+) -> bool {
+    schedule.next_run_at <= occurrence.at && occurrence.at <= now
 }
 
-pub open spec fn last_due_occurrence(
-    occurrences: Seq<AOccurrence>, now: u64,
-) -> Option<u64>
-    decreases occurrences.len(),
-{
-    if occurrences.len() == 0 {
-        None
-    } else if occurrences.last().at <= now {
-        Some(occurrences.last().at)
-    } else {
-        last_due_occurrence(occurrences.drop_last(), now)
-    }
-}
-
-pub open spec fn schedule_timeout_semantics(
-    state: AState, req: AScheduleTimeoutReq, now: u64,
+pub open spec fn schedule_fire_semantics(
+    state: AState, req: AScheduleFireReq, now: u64,
 ) -> Seq<AEffect> {
     match spec_find_schedule(state.schedules, req.schedule) {
         None => Seq::empty(),
-        Some(schedule) => {
-            let fired = fire_all_semantics(state, schedule, req.occurrences, now);
-            match last_due_occurrence(req.occurrences, now) {
-                None => fired,
-                Some(at) => fired.push(AEffect::SetSchedule(ASchedule {
-                    last_run_at: Some(at),
-                    next_run_at: req.next_run_at,
-                    ..schedule
-                })),
-            }
-        }
+        Some(schedule) => if occurrence_due(schedule, req.occurrence, now) {
+            fire_occurrence_semantics(state, schedule, req.occurrence)
+        } else {
+            Seq::empty()
+        },
+    }
+}
+
+/// The advance is enabled only once the occurrence's promise exists.
+pub open spec fn advance_enabled(
+    state: AState, schedule: ASchedule, req: AScheduleAdvanceReq, now: u64,
+) -> bool {
+    &&& occurrence_due(schedule, req.occurrence, now)
+    &&& req.occurrence.at < req.next_run_at
+    &&& spec_find_object(state.objects, req.occurrence.promise_id) is Some
+}
+
+pub open spec fn advanced_schedule(
+    schedule: ASchedule, req: AScheduleAdvanceReq,
+) -> ASchedule {
+    ASchedule {
+        last_run_at: Some(req.occurrence.at),
+        next_run_at: req.next_run_at,
+        ..schedule
+    }
+}
+
+pub open spec fn schedule_advance_semantics(
+    state: AState, req: AScheduleAdvanceReq, now: u64,
+) -> Seq<AEffect> {
+    match spec_find_schedule(state.schedules, req.schedule) {
+        None => Seq::empty(),
+        Some(schedule) => if advance_enabled(state, schedule, req, now) {
+            seq![AEffect::SetSchedule(advanced_schedule(schedule, req))]
+        } else {
+            Seq::empty()
+        },
     }
 }
 
@@ -389,10 +419,10 @@ pub fn process_promise_timeout_action(
 }
 
 fn resume_one(
-    state: &State, awaited: &Ident, awaiter: &Ident, now: u64,
+    state: &State, awaited: &Ident, awaiter: &Ident, now: u64, since: u64,
 ) -> (effects: Vec<Effect>)
     ensures effects.deep_view()
-        == resume_one_semantics(state@, awaited@, awaiter@, now),
+        == resume_one_semantics(state@, awaited@, awaiter@, now, since),
 {
     let read = read_task_object(state, awaiter, now, true);
     let o = match read.object {
@@ -411,18 +441,18 @@ fn resume_one(
             t.state = TaskState::Pending;
             t.resumes = Vec::new();
             t.resumes.push(awaited.dup());
-            t.retry_timeout_at = Some(now);
+            t.retry_timeout_at = Some(since);
             assert(t.deep_view().state == TaskState::Pending);
             assert(t.deep_view().version == original.version);
             assert(t.deep_view().ttl == original.ttl);
             assert(t.deep_view().pid == original.pid);
             assert(t.deep_view().lease_timeout_at == original.lease_timeout_at);
-            assert(t.deep_view().retry_timeout_at == Some(now));
+            assert(t.deep_view().retry_timeout_at == Some(since));
             assert(t.deep_view().resumes =~= seq![awaited@]);
             assert(t.deep_view() == (ATaskObject {
                 state: TaskState::Pending,
                 resumes: seq![awaited@],
-                retry_timeout_at: Some(now),
+                retry_timeout_at: Some(since),
                 ..original
             }));
             write = true;
@@ -462,11 +492,13 @@ pub fn process_callback_action(
     }
     let found = ident_vec_contains(&o.promise.callbacks, &req.awaiter);
     if !found { return read.effects; }
+    let since = match o.promise.settled_at { Some(x) => x, None => 0 };
+    assert(since == settled_since(o.promise@));
     let mut effects = read.effects;
     effects.push(Effect::SetPromise(
         o.id.dup(), o.promise.dup().remove_callback(&req.awaiter),
     ));
-    append_effects(effects, resume_one(state, &o.id, &req.awaiter, now))
+    append_effects(effects, resume_one(state, &o.id, &req.awaiter, now, since))
 }
 
 pub fn process_listener_action(
@@ -525,7 +557,7 @@ pub fn process_lease_timeout_action(
         t.pid = None;
         t.ttl = None;
         t.lease_timeout_at = None;
-        t.retry_timeout_at = Some(now);
+        t.retry_timeout_at = Some(deadline);
         effects.push(Effect::SetTask(o.id, t));
     }
     effects
@@ -555,9 +587,9 @@ pub fn process_retry_timeout_action(
         && o.promise.state == PromiseState::Pending
     {
         let mut t = t0.dup();
-        t.retry_timeout_at = Some(checked_add(now, config.retry_timeout));
+        t.retry_timeout_at = Some(next_offer(due, now, config.retry_timeout));
         assert(t.deep_view() == (ATaskObject {
-            retry_timeout_at: Some(internal_sat_add(now, config.retry_timeout)),
+            retry_timeout_at: Some(spec_next_offer(due, now, config.retry_timeout)),
             ..t0.deep_view()
         }));
         effects.push(Effect::SetTask(o.id.dup(), t));
@@ -592,7 +624,7 @@ fn fire_occurrence(
                 id: occurrence.promise_id.dup(),
                 timeout_at: checked_add(occurrence.at, schedule.promise_timeout),
                 param: schedule.promise_param.dup(),
-                tags: dup_tags(&schedule.promise_tags),
+                tags: stamp_tags(&schedule.promise_tags, &schedule.id, &occurrence.promise_id),
             };
             assert(req@ == occurrence_create_req(schedule@, occurrence@));
             let made = create_promise(req, occurrence.at);
@@ -601,78 +633,49 @@ fn fire_occurrence(
     }
 }
 
-pub fn process_schedule_action(
-    state: &State, req: &ScheduleTimeoutReq, now: u64, _config: &Config,
+pub fn process_schedule_fire_action(
+    state: &State, req: &ScheduleFireReq, now: u64, _config: &Config,
 ) -> (effects: Vec<Effect>)
-    ensures effects.deep_view() == schedule_timeout_semantics(state@, req@, now),
+    ensures effects.deep_view() == schedule_fire_semantics(state@, req@, now),
 {
     let si = match state.find_schedule(&req.schedule) {
         None => return Vec::new(),
         Some(i) => i,
     };
     let schedule = &state.schedules[si];
-    let ghost schedule_spec = schedule@;
-    let ghost occurrences = req.occurrences.deep_view();
-    let mut effects = Vec::new();
-    let mut last: Option<u64> = None;
-    let mut i: usize = 0;
-    // The request carries Lean's opaque `occurrences` result in list order.
-    // The filter is stable, exactly `List.filter (· ≤ now)`.
-    while i < req.occurrences.len()
-        invariant
-            i <= req.occurrences@.len(),
-            schedule@ == schedule_spec,
-            req.occurrences.deep_view() == occurrences,
-            effects.deep_view() == fire_all_semantics(
-                state@, schedule_spec, occurrences.take(i as int), now,
-            ),
-            last == last_due_occurrence(occurrences.take(i as int), now),
-        decreases req.occurrences@.len() - i,
+    if !(schedule.next_run_at <= req.occurrence.at && req.occurrence.at <= now) {
+        return Vec::new();
+    }
+    fire_occurrence(state, schedule, &req.occurrence)
+}
+
+pub fn process_schedule_advance_action(
+    state: &State, req: &ScheduleAdvanceReq, now: u64, _config: &Config,
+) -> (effects: Vec<Effect>)
+    ensures effects.deep_view() == schedule_advance_semantics(state@, req@, now),
+{
+    let si = match state.find_schedule(&req.schedule) {
+        None => return Vec::new(),
+        Some(i) => i,
+    };
+    let schedule = &state.schedules[si];
+    if !(schedule.next_run_at <= req.occurrence.at && req.occurrence.at <= now
+        && req.occurrence.at < req.next_run_at)
     {
-        if req.occurrences[i].at <= now {
-            effects = append_effects(
-                effects, fire_occurrence(state, schedule, &req.occurrences[i]),
-            );
-            last = Some(req.occurrences[i].at);
-        }
-        let ghost prefix = occurrences.take(i as int);
-        let ghost occurrence = occurrences[i as int];
-        assert(prefix.push(occurrence).drop_last() =~= prefix);
-        assert(prefix.push(occurrence).last() == occurrence);
-        assert(fire_all_semantics(
-            state@, schedule_spec, prefix.push(occurrence), now,
-        ) == if occurrence.at <= now {
-            fire_all_semantics(state@, schedule_spec, prefix, now)
-                + fire_occurrence_semantics(state@, schedule_spec, occurrence)
-        } else {
-            fire_all_semantics(state@, schedule_spec, prefix, now)
-        });
-        assert(last_due_occurrence(prefix.push(occurrence), now)
-            == if occurrence.at <= now {
-                Some(occurrence.at)
-            } else {
-                last_due_occurrence(prefix, now)
-            });
-        assert(occurrences.take(i as int + 1)
-            =~= prefix.push(occurrence));
-        i += 1;
+        return Vec::new();
     }
-    assert(occurrences.take(occurrences.len() as int) =~= occurrences);
-    match last {
-        None => effects,
-        Some(at) => {
-            let mut next = schedule.dup();
-            next.last_run_at = Some(at);
-            next.next_run_at = req.next_run_at;
-            assert(next@ == (ASchedule {
-                last_run_at: Some(at),
-                next_run_at: req.next_run_at,
-                ..schedule_spec
-            }));
-            effects.push(Effect::SetSchedule(next));
-            effects
-        }
+    // The promise first: an advance never outruns the occurrence it stands for.
+    if state.find_object(&req.occurrence.promise_id).is_none() {
+        return Vec::new();
     }
+    let mut next = schedule.dup();
+    next.last_run_at = Some(req.occurrence.at);
+    next.next_run_at = req.next_run_at;
+    assert(next@ == advanced_schedule(schedule@, req@));
+    let mut effects = Vec::new();
+    effects.push(Effect::SetSchedule(next));
+    assert(effects.deep_view() =~= seq![AEffect::SetSchedule(advanced_schedule(schedule@, req@))]);
+    effects
 }
 
 } // verus!

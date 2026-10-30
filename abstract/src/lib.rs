@@ -18,7 +18,8 @@ pub mod types;
 
 pub use state::{apply_all, Config, Effect, State, Transition};
 pub use system::{
-    handle_external, handle_internal, handle_semantic, run_semantic, ExternalAction,
-    InternalAction, Observation, Response, SemanticAction,
+    compose_detached, decompose, handle_external, handle_internal, handle_semantic,
+    run_semantic, ExternalAction, InternalAction, Observation, Request, Response,
+    SemanticAction,
 };
 pub use types::*;

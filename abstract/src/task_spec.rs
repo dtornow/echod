@@ -218,6 +218,10 @@ pub open spec fn spec_task_create_action(
     now: u64,
     materialize: bool,
 ) -> ATaskActionResult<ATaskClaimRes> {
+    let req = ATaskCreateReq {
+        action: crate::promise_spec::spec_normalize_create(req.action),
+        ..req
+    };
     if spec_tags_otype(req.action.tags) != OType::Runnable
         || spec_tags_timer_targeted(req.action.tags)
     {
@@ -383,6 +387,35 @@ pub open spec fn spec_task_fence_action(
                 }
             },
         }
+    }
+}
+
+/// `task.fence` with no action: the check alone, the second step of a
+/// detached fence. The same read and the same three answers as the fence's
+/// own guard; nothing is written beyond the read's materialization.
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_task_fence_check_action(
+    state: AState,
+    req: ATaskFenceCheckReq,
+    now: u64,
+    materialize: bool,
+) -> ATaskActionResult<AStatusRes> {
+    let read = spec_task_read(state, req.id, now, materialize);
+    match read.object {
+        None => spec_task_finish(state, AStatusRes { status: 404 }, read.effects),
+        Some(object) => match object.task {
+            None => spec_task_finish(state, AStatusRes { status: 404 }, read.effects),
+            Some(task) => {
+                if task.state != TaskState::Acquired
+                    || object.promise.state != PromiseState::Pending
+                    || task.version != req.version
+                {
+                    spec_task_finish(state, AStatusRes { status: 409 }, read.effects)
+                } else {
+                    spec_task_finish(state, AStatusRes { status: 200 }, read.effects)
+                }
+            }
+        },
     }
 }
 
@@ -891,7 +924,7 @@ pub open spec fn spec_task_search_action(
     spec_task_finish(
         state,
         ATaskSearchRes {
-            status: 501,
+            status: 403,
             tasks: Seq::empty(),
             cursor: None,
         },
