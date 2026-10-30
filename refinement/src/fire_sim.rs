@@ -157,6 +157,40 @@ pub proof fn lemma_fire_fold_sim(k: KState, a: AState, sid: Chars, c: ASchedule,
     }
 }
 
+/// The schedule moved past an occurrence whose promise is there: the kernel's
+/// write of the advanced row is the Abstract `ScheduleAdvance`. The fleet
+/// commits this on the schedule's document after the promise's own.
+pub proof fn lemma_advance_sim(k: KState, a: AState, sid: Chars, last: AOccurrence, next: u64, now: u64, rt: u64)
+    requires
+        doc_related(k, a),
+        canonical(sid),
+        canonical(last.promise_id),
+        k.schedules.contains_key(sid),
+        k.schedules[sid].next_run_at <= last.at,
+        last.at <= now,
+        last.at < next,
+        k.objects.contains_key(last.promise_id),
+    ensures ({
+        let c = k.schedules[sid];
+        let c2 = ASchedule { last_run_at: Some(last.at), next_run_at: next, ..c };
+        doc_related(
+            KState { schedules: k.schedules.insert(sid, c2), ..k },
+            internal_step(a, AbsInternal::ScheduleAdvance(advance_req(sid, last, next)), now, rt))
+    }),
+{
+    let c = k.schedules[sid];
+    assert(spec_find_schedule(a.schedules, ident(sid)) == Some(schedule(c)));
+    assert(c.id == sid);
+    lemma_related_contains(k.objects, a.objects, last.promise_id);
+    let req = advance_req(sid, last, next);
+    assert(aint::advance_enabled(a, schedule(c), req, now));
+    let c2 = ASchedule { last_run_at: Some(last.at), next_run_at: next, ..c };
+    assert(canonical_schedule(c2));
+    assert(schedule(c2) == aint::advanced_schedule(schedule(c), req));
+    lemma_set_schedule(k.schedules, a.schedules, c2);
+    lemma_apply_all_one(a, AEffect::SetSchedule(schedule(c2)));
+}
+
 /// `processSchedule` as a run: the fires, then the advance past the last
 /// occurrence.
 pub proof fn lemma_spec_fire_sim(k: KState, a: AState, sid: Chars, occs: Seq<AOccurrence>, next: u64, now: u64, rt: u64)
