@@ -194,6 +194,12 @@ pub fn encode(req: &ExternalAction) -> (&'static str, Value) {
         ExternalAction::TaskHalt(q) => ("task.halt", json!({ "id": ident_string(&q.id) })),
         ExternalAction::TaskContinue(q) => ("task.continue", json!({ "id": ident_string(&q.id) })),
         ExternalAction::TaskSearch(_) => ("task.search", json!({})),
+        // The check alone is never a wire request: it is the second half of
+        // a detached fence, which the client sends whole.
+        ExternalAction::TaskFenceCheck(q) => (
+            "task.fence",
+            json!({ "id": ident_string(&q.id), "version": q.version }),
+        ),
     }
 }
 
@@ -400,6 +406,7 @@ pub fn model_response_view(value: &Response) -> ResponseView {
         Response::TaskSuspend(r) => response(r.status, None, None, None),
         Response::TaskFulfill(r) => response(r.status, r.promise.as_ref(), None, None),
         Response::TaskSearch(r) => response(r.status, None, None, None),
+        Response::TaskFenceCheck(r) => response(r.status, None, None, None),
         Response::Silent => response(0, None, None, None),
     }
 }
@@ -583,6 +590,12 @@ pub fn clone_action(a: &ExternalAction) -> ExternalAction {
                 state: q.state,
                 limit: q.limit,
                 cursor: q.cursor.as_ref().map(Text::dup),
+            })
+        }
+        ExternalAction::TaskFenceCheck(q) => {
+            ExternalAction::TaskFenceCheck(echod_abstract::TaskFenceCheckReq {
+                id: q.id.dup(),
+                version: q.version,
             })
         }
     }

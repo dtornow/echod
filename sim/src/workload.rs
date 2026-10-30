@@ -41,6 +41,7 @@ pub fn target_of(req: &ExternalAction) -> String {
         ExternalAction::TaskRelease(q) => origin(&q.id),
         ExternalAction::TaskHalt(q) => origin(&q.id),
         ExternalAction::TaskContinue(q) => origin(&q.id),
+        ExternalAction::TaskFenceCheck(q) => origin(&q.id),
         ExternalAction::ScheduleCreate(q) => format!("sched:{}", ident_string(&q.id)),
         ExternalAction::ScheduleGet(q) => format!("sched:{}", ident_string(&q.id)),
         ExternalAction::ScheduleDelete(q) => format!("sched:{}", ident_string(&q.id)),

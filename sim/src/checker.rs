@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use echod_abstract::state::{MessageKind, OutboxEntry};
 use echod_abstract::{
-    apply_all, handle_external, handle_internal, Config, Effect, ExternalAction, Ident,
-    InternalAction, Occurrence, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
-    PromiseState, PromiseTimeoutReq, ScheduleTimeoutReq, State, TaskLeaseTimeoutReq,
-    TaskRetryTimeoutReq, TaskState,
+    apply_all, compose_detached, decompose, handle_external, handle_internal, Config, Effect,
+    ExternalAction, Ident, InternalAction, Occurrence, PromiseRegisterCallbackReq,
+    PromiseRegisterListenerReq, PromiseRes, PromiseState, PromiseTimeoutReq, Request, Response,
+    ScheduleAdvanceReq, ScheduleFireReq, State, TaskLeaseTimeoutReq, TaskRetryTimeoutReq,
+    TaskState,
 };
 
 use crate::bus::Sent;
@@ -219,6 +220,7 @@ fn action_ids(action: &ExternalAction) -> Option<Vec<String>> {
         ExternalAction::TaskRelease(q) => one(&q.id),
         ExternalAction::TaskHalt(q) => one(&q.id),
         ExternalAction::TaskContinue(q) => one(&q.id),
+        ExternalAction::TaskFenceCheck(q) => one(&q.id),
     }
 }
 
@@ -287,6 +289,9 @@ struct Candidate {
     /// Earliest instant at which this exact semantic state exists.
     floor: u64,
     pending: BTreeSet<u64>,
+    /// Detached fences whose create has linearized but whose check has not:
+    /// the create's answer, kept for the fence's composed response.
+    partial: BTreeMap<u64, PromiseRes>,
     done: BTreeMap<u64, ResponseView>,
     emitted: VecDeque<OutboxEntry>,
 }
@@ -298,6 +303,7 @@ impl Candidate {
             now: 0,
             floor: 0,
             pending: BTreeSet::new(),
+            partial: BTreeMap::new(),
             done: BTreeMap::new(),
             emitted: VecDeque::new(),
         }
@@ -602,19 +608,57 @@ impl Search<'_> {
                 continue;
             };
             for materialize in [false, true] {
-                let step = handle_external(
-                    &candidate.state,
-                    clone_action(action),
-                    candidate.now,
-                    materialize,
-                );
-                let response = model_response_view(&step.response);
+                // A detached fence is two steps; anything may run between them.
+                let (step, response) = match decompose(clone_action(action)) {
+                    Request::Whole(action) => {
+                        let step =
+                            handle_external(&candidate.state, action, candidate.now, materialize);
+                        let response = model_response_view(&step.response);
+                        (step, Some(response))
+                    }
+                    Request::Detached { create, check } => match candidate.partial.get(call) {
+                        None => {
+                            let step = handle_external(
+                                &candidate.state,
+                                ExternalAction::PromiseCreate(create),
+                                candidate.now,
+                                materialize,
+                            );
+                            (step, None)
+                        }
+                        Some(inner) => {
+                            let step = handle_external(
+                                &candidate.state,
+                                ExternalAction::TaskFenceCheck(check),
+                                candidate.now,
+                                materialize,
+                            );
+                            let Response::TaskFenceCheck(status) = &step.response else {
+                                continue;
+                            };
+                            let fence = compose_detached(inner.clone(), *status);
+                            let response = model_response_view(&Response::TaskFence(fence));
+                            (step, Some(response))
+                        }
+                    },
+                };
                 let mut next = candidate.clone();
                 append_messages(&mut next.emitted, &step.effects);
-                next.state = canonical(apply_all(next.state, step.effects));
                 next.floor = candidate.now;
-                next.pending.remove(call);
-                next.done.insert(*call, response);
+                match response {
+                    Some(response) => {
+                        next.pending.remove(call);
+                        next.partial.remove(call);
+                        next.done.insert(*call, response);
+                    }
+                    None => {
+                        let Response::PromiseCreate(inner) = step.response else {
+                            continue;
+                        };
+                        next.partial.insert(*call, inner);
+                    }
+                }
+                next.state = canonical(apply_all(next.state, step.effects));
                 push_candidate(out, keys, next);
             }
         }
@@ -753,14 +797,27 @@ fn internal_actions(state: &State, now: u64) -> Vec<InternalAction> {
             let cron = text_string(&schedule.cron);
             let next_run_at = resonate_core::util::compute_next_cron(&cron, at as i64)
                 .max(at.saturating_add(1) as i64) as u64;
-            out.push(InternalAction::ScheduleTimeout(ScheduleTimeoutReq {
-                schedule: schedule.id.dup(),
-                occurrences: vec![Occurrence {
-                    at,
-                    promise_id: ident(&promise_id),
-                }],
-                next_run_at,
-            }));
+            let occurrence = Occurrence {
+                at,
+                promise_id: ident(&promise_id),
+            };
+            // The promise first; the schedule moves only once it exists.
+            let exists = state
+                .objects
+                .iter()
+                .any(|o| ident_string(&o.id) == promise_id);
+            if exists {
+                out.push(InternalAction::ScheduleAdvance(ScheduleAdvanceReq {
+                    schedule: schedule.id.dup(),
+                    occurrence,
+                    next_run_at,
+                }));
+            } else {
+                out.push(InternalAction::ScheduleFire(ScheduleFireReq {
+                    schedule: schedule.id.dup(),
+                    occurrence,
+                }));
+            }
         }
     }
     out
@@ -796,7 +853,12 @@ fn internal_times(state: &State, action: &InternalAction, floor: u64, now: u64) 
             .iter()
             .find(|o| ident_string(&o.id) == ident_string(&q.id))
             .and_then(|o| o.task.as_ref()?.retry_timeout_at),
-        InternalAction::ScheduleTimeout(q) => state
+        InternalAction::ScheduleFire(q) => state
+            .schedules
+            .iter()
+            .find(|s| ident_string(&s.id) == ident_string(&q.schedule))
+            .map(|s| s.next_run_at),
+        InternalAction::ScheduleAdvance(q) => state
             .schedules
             .iter()
             .find(|s| ident_string(&s.id) == ident_string(&q.schedule))
@@ -827,16 +889,19 @@ fn clone_internal(action: &InternalAction) -> InternalAction {
         InternalAction::TaskRetryTimeout(q) => {
             InternalAction::TaskRetryTimeout(TaskRetryTimeoutReq { id: q.id.dup() })
         }
-        InternalAction::ScheduleTimeout(q) => InternalAction::ScheduleTimeout(ScheduleTimeoutReq {
+        InternalAction::ScheduleFire(q) => InternalAction::ScheduleFire(ScheduleFireReq {
             schedule: q.schedule.dup(),
-            occurrences: q
-                .occurrences
-                .iter()
-                .map(|o| Occurrence {
-                    at: o.at,
-                    promise_id: o.promise_id.dup(),
-                })
-                .collect(),
+            occurrence: Occurrence {
+                at: q.occurrence.at,
+                promise_id: q.occurrence.promise_id.dup(),
+            },
+        }),
+        InternalAction::ScheduleAdvance(q) => InternalAction::ScheduleAdvance(ScheduleAdvanceReq {
+            schedule: q.schedule.dup(),
+            occurrence: Occurrence {
+                at: q.occurrence.at,
+                promise_id: q.occurrence.promise_id.dup(),
+            },
             next_run_at: q.next_run_at,
         }),
     }
@@ -912,8 +977,9 @@ fn fair_truncate(values: Vec<Candidate>, width: usize) -> Vec<Candidate> {
     let mut groups: BTreeMap<String, VecDeque<Candidate>> = BTreeMap::new();
     for candidate in values {
         let key = format!(
-            "{:?}|{:?}|{}",
+            "{:?}|{:?}|{:?}|{}",
             candidate.pending,
+            candidate.partial.keys().collect::<Vec<_>>(),
             candidate.done.keys().collect::<Vec<_>>(),
             candidate.emitted.len()
         );
@@ -1057,16 +1123,29 @@ mod tests {
         });
         let create = handle_external(&State::new(), clone_action(&schedule), 1_000, false);
         let mut state = apply_all(State::new(), create.effects);
+        let occurrence = || Occurrence {
+            at: 2_000,
+            promise_id: ident("o:tick-2000"),
+        };
         state = apply_all(
             state.clone(),
             handle_internal(
                 &state,
-                InternalAction::ScheduleTimeout(ScheduleTimeoutReq {
+                InternalAction::ScheduleFire(ScheduleFireReq {
                     schedule: ident("tick"),
-                    occurrences: vec![Occurrence {
-                        at: 2_000,
-                        promise_id: ident("o:tick-2000"),
-                    }],
+                    occurrence: occurrence(),
+                }),
+                2_000,
+                &Config { retry_timeout: 100 },
+            ),
+        );
+        state = apply_all(
+            state.clone(),
+            handle_internal(
+                &state,
+                InternalAction::ScheduleAdvance(ScheduleAdvanceReq {
+                    schedule: ident("tick"),
+                    occurrence: occurrence(),
                     next_run_at: 3_000,
                 }),
                 2_000,
