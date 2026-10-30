@@ -1,4 +1,4 @@
-import «abstract».Handlers
+import «abstract».External
 
 namespace Resonate.Direct
 

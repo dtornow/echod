@@ -20,7 +20,7 @@ abstract protocol pinned in `lakefile.toml`.
   `Direct.runWith_changedOnly` prove that committing a handler frames every
   differently indexed document. Origin and schedule keys are disjoint by
   constructor.
-- `src/abstract/Handlers.lean` implements the 21 external operations as indexed
+- `src/abstract/External.lean` implements the 21 external operations as indexed
   handlers or, for unsupported searches, pure 501 responses. Multi-id
   operations validate one origin before receiving one origin document.
 - `src/abstract/Internal.lean` implements promise, callback, listener, lease,
