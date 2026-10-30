@@ -246,6 +246,7 @@ pub proof fn lemma_promise_create_sim(k: KState, a: AState, req: kernel::APromis
         let made = abs_state::spec_create_promise_effects(areq, now);
         assert(Seq::<AEffect>::empty() + made =~= made);
         lemma_create_absent(k, a, req, now);
+        lemma_create_shape(req, now);
         lemma_promise_record(kobject::spec_create(req, now as nat));
     }
 }
