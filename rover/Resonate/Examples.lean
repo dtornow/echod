@@ -108,7 +108,15 @@ def occurrenceContinuation : WorkItem :=
 def occurrenceState : State :=
   { scheduleFireFirst.1 with
     workflow := {
-      pending := [.work occurrenceContinuation 10] } }
+      pending := [{
+        request := {
+          id := ident "scheduled-promise"
+          timeoutAt := 110
+          param := {}
+          tags := []
+        }
+        instant := 10
+      }] } }
 
 def scheduleFireSecond : State × List Output :=
   Resonate.runTimeout {} 10 occurrenceState
@@ -149,10 +157,8 @@ def listenerResult : State × List Output :=
 Rover delivers a timeout; the event carries no internal request. -/
 def listenerRoverResult :
     Rover.Result Abstract.Pid State Message :=
-  let discovered := (Resonate.runTimeout {} 2 listenerState).1
-  (Abstract.step {} .service discovered 3
-    .timeout)
-    |>.val.headD { state := {}, send := [] }
+  (Abstract.step {} .service listenerState 3 .timeout).val.drop 1
+    |>.headD { state := {}, send := [] }
 
 #guard (listenerRoverResult.state.originDocument "example").head?.map
   (·.promise.listeners) == some []
@@ -196,8 +202,89 @@ def timeoutResult : State × List Output :=
 #guard (timeoutResult.1.originDocument "example").head?.map (·.promise.state) ==
   some .rejectedTimedout
 
-/-- Work enabled by an internal handler is absent from that timeout's snapshot
-and runs on the next timeout. -/
+/-- The finite timeout relation includes firing exactly at the due instant. -/
+def timeoutSettledAt (state : State) : Option Nat :=
+  (state.originDocument "example").head?.bind (·.promise.settledAt)
+
+def canFireAtDue : Bool :=
+  (Resonate.documentTimeoutChoices {} 5 timeoutState).any
+    (fun outcome => timeoutSettledAt outcome.1 == some 5)
+
+#guard canFireAtDue
+
+def dueDocument (origin : String) : OriginDocument origin := [{
+  suffix := "due"
+  promise := {
+    state := .pending
+    param := {}
+    tags := []
+    timeoutAt := 5
+    createdAt := 0
+  }
+}]
+
+def orderingState : State :=
+  (State.init.withOrigin "first" (dueDocument "first")).withOrigin
+    "second" (dueDocument "second")
+
+def timedOut (state : State) (origin : String) : Bool :=
+  (state.originDocument origin).head?.map (·.promise.state) ==
+    some .rejectedTimedout
+
+def pending (state : State) (origin : String) : Bool :=
+  (state.originDocument origin).head?.map (·.promise.state) == some .pending
+
+def firstOnly (state : State) : Bool :=
+  timedOut state "first" && pending state "second"
+
+def secondOnly (state : State) : Bool :=
+  pending state "first" && timedOut state "second"
+
+def orderingChoices : List (State × List Output) :=
+  Resonate.documentTimeoutChoices {} 5 orderingState
+
+/-- Either eligible document may fire first. -/
+def canFireFirstOriginFirst : Bool :=
+  orderingChoices.any (fun outcome => firstOnly outcome.1)
+
+def canFireSecondOriginFirst : Bool :=
+  orderingChoices.any (fun outcome => secondOnly outcome.1)
+
+#guard canFireFirstOriginFirst
+#guard canFireSecondOriginFirst
+
+def firstThenState : State :=
+  (orderingChoices.find? (fun outcome => firstOnly outcome.1)).map (·.1)
+    |>.getD orderingState
+
+def secondThenState : State :=
+  (orderingChoices.find? (fun outcome => secondOnly outcome.1)).map (·.1)
+    |>.getD orderingState
+
+/-- Repeated timeouts admit both orders. -/
+def canFinishFirstThenSecond : Bool :=
+  (Resonate.documentTimeoutChoices {} 6 firstThenState).any (fun outcome =>
+    timedOut outcome.1 "first" && timedOut outcome.1 "second")
+
+def canFinishSecondThenFirst : Bool :=
+  (Resonate.documentTimeoutChoices {} 6 secondThenState).any (fun outcome =>
+    timedOut outcome.1 "first" && timedOut outcome.1 "second")
+
+#guard canFinishFirstThenSecond
+#guard canFinishSecondThenFirst
+
+def stutterChoice : State × List Output :=
+  (Resonate.runTimeoutChoices {} 5 orderingState).val.headD ({}, [])
+
+/-- Stutter, either singleton subset, and both-document completion are all
+executable across repeated timeout steps. -/
+def stutterLeavesBothPending : Bool :=
+  pending stutterChoice.1 "first" && pending stutterChoice.1 "second"
+
+#guard stutterLeavesBothPending
+#guard stutterChoice.2.isEmpty
+
+/-- Work enabled by an internal handler runs only on a later timeout. -/
 def deferredRetryState : State :=
   State.init.withOrigin "example" [
     {
@@ -229,16 +316,14 @@ def deferredRetryState : State :=
   ]
 
 def deferredRetryFirst : State × List Output :=
-  Resonate.runTimeout {} 3
-    (Resonate.runTimeout {} 2 deferredRetryState).1
+  Resonate.runTimeout {} 2 deferredRetryState
 
 #guard deferredRetryFirst.2.isEmpty
 #guard ((((deferredRetryFirst.1.originDocument "example").find?
   (·.suffix == "awaiter")).bind (·.task)).map (·.state)) == some .pending
 
 def deferredRetrySecond : State × List Output :=
-  let discovered := (Resonate.runTimeout {} 4 deferredRetryFirst.1).1
-  Resonate.runTimeout {} 5 discovered
+  Resonate.runTimeout {} 5 deferredRetryFirst.1
 
 #guard match deferredRetrySecond.2 with
   | [.message { address := "queue", message := .execute taskId 0 }] =>
@@ -271,9 +356,25 @@ def retryState : State :=
     }
   }]
 
+/-- A retry can fire at its due instant or at a later logical instant bounded
+by the Rover timeout; its re-armed due time exposes which instant was chosen. -/
+def retryDue (state : State) : Option Nat :=
+  ((state.originDocument "example").head?.bind (·.task)).bind
+    (·.retryTimeoutAt)
+
+def canRetryAtDue : Bool :=
+  (Resonate.documentTimeoutChoices { retryTimeout := 7 } 3
+    retryState).any (fun outcome => retryDue outcome.1 == some 10)
+
+def canRetryLater : Bool :=
+  (Resonate.documentTimeoutChoices { retryTimeout := 7 } 5
+    retryState).any (fun outcome => retryDue outcome.1 == some 12)
+
+#guard canRetryAtDue
+#guard canRetryLater
+
 def retryResult : State × List Output :=
-  Resonate.runTimeout { retryTimeout := 7 } 4
-    (Resonate.runTimeout { retryTimeout := 7 } 3 retryState).1
+  Resonate.runTimeout { retryTimeout := 7 } 3 retryState
 
 #guard match retryResult.2 with
   | [.message { address := "queue", message := .execute taskId 4 }] =>

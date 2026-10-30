@@ -66,26 +66,28 @@ theorem unconditional_duplicate_put_relands
 serialized in `StoreRequest.put`. -/
 inductive Selected (appConfig : Resonate.Config) :
     (key : DocumentKey) → Concrete.Transaction →
-    Document key → Document key → List Output → List WorkflowEntry → Prop
+    Document key → Document key → List Output →
+      List Concrete.PendingEntry → Prop
   | external {key call before after outputs} :
       (Concrete.Transaction.external call).key? = some key →
       Resonate.run { appConfig with unreliable := true } call
           (Concrete.singleState key before) =
         (after, outputs) →
       Selected appConfig key (.external call) before
-        (after.store.read key) outputs after.workflow.pending
+        (after.store.read key) outputs
+          (after.workflow.pending.map Concrete.PendingEntry.fromWorkflow)
   | work {item now rest before after outputs} :
-      Resonate.runWork { appConfig with unreliable := true } item now rest
+      Resonate.runWork { appConfig with unreliable := true } item now
+          (Concrete.pendingWorkflow rest)
           (Concrete.singleState item.key before) =
         (after, outputs) →
       Selected appConfig item.key (.work item now rest) before
-        (after.store.read item.key) outputs after.workflow.pending
-  | scan {key now rest before after outputs} :
-      Resonate.runScan { appConfig with unreliable := true } key now rest
-          (Concrete.singleState key before) =
-        (after, outputs) →
+        (after.store.read item.key) outputs
+          (after.workflow.pending.map Concrete.PendingEntry.fromWorkflow)
+  | scan {key now rest before candidate} :
+      Concrete.selectScan appConfig key now rest before = some candidate →
       Selected appConfig key (.scan key now rest) before
-        (after.store.read key) outputs after.workflow.pending
+        candidate.document candidate.outputs candidate.continuations
 
 theorem originSettledWork_key {origin : String}
     {object : OriginObject origin} {item : WorkItem}
@@ -167,8 +169,7 @@ theorem select_valid {appConfig : Resonate.Config}
       split at hselect
       next heq =>
         subst flightKey
-        cases hselect
-        exact .scan rfl
+        exact .scan hselect
       next _ => contradiction
 
 /-- Reachable raw-PUT provenance. `loaded`, transaction, response/emissions,
@@ -179,7 +180,7 @@ structure PutProvenance (appConfig : Resonate.Config)
   transaction : Concrete.Transaction
   loaded : Option (Document key × Concrete.Version)
   outputs : List Output
-  continuations : List WorkflowEntry
+  continuations : List Concrete.PendingEntry
   expected_eq : loaded.map (·.2) = expectedVersion
   selected : Selected appConfig key transaction
     (loaded.map (·.1) |>.getD (emptyDocument key))
@@ -324,7 +325,7 @@ theorem external_locality
 theorem Selected.external_continuations_nil
     {appConfig : Resonate.Config} {key : DocumentKey} {call : Call}
     {before after : Document key} {outputs : List Output}
-    {continuations : List WorkflowEntry}
+    {continuations : List Concrete.PendingEntry}
     (hselected :
       Selected appConfig key (.external call) before after outputs
         continuations) :
@@ -420,21 +421,6 @@ theorem work_store_locality
       Concrete.singleState, Direct.runWith, WorkItem.key] at hread ⊢
   all_goals rw [hread]
   all_goals simp
-
-theorem scan_locality
-    (config : Resonate.Config) (key : DocumentKey) (now : Time)
-    (rest : List WorkflowEntry) (before : Document key) (global : State)
-    (hread : global.store.read key = before) :
-    let selected := Resonate.runScan config key now rest
-      (Concrete.singleState key before)
-    let lifted := Resonate.runScan config key now rest global
-    lifted.1.store.read key = selected.1.store.read key ∧
-    lifted.1.workflow = selected.1.workflow ∧
-    lifted.2 = selected.2 := by
-  cases key <;>
-    simp [Resonate.runScan, Resonate.runDocument,
-      Concrete.singleState, Direct.runWith] at hread ⊢ <;>
-    rw [hread] <;> simp
 
 theorem external_key_mem
     (config : Resonate.Config) (call : Call) (state : State)
@@ -560,13 +546,6 @@ theorem work_key_mem
     simp [Resonate.runWork, Resonate.runDocument, Direct.runWith,
       WorkItem.key]
 
-theorem scan_key_mem
-    (config : Resonate.Config) (key : DocumentKey) (now : Time)
-    (rest : List WorkflowEntry) (state : State) :
-    key ∈ (Resonate.runScan config key now rest state).1.store.keys := by
-  cases key <;>
-    simp [Resonate.runScan, Resonate.runDocument, Direct.runWith]
-
 @[simp] theorem Store.key_mem_write_of_mem
     (store : Resonate.Store) (writtenKey other : DocumentKey)
     (document : Document writtenKey) (hmem : other ∈ store.keys) :
@@ -593,15 +572,6 @@ theorem work_keys_mono
   cases item <;>
     simp [Resonate.runWork, Resonate.runDocument, Direct.runWith,
       WorkItem.key, hkey]
-
-theorem scan_keys_mono
-    (config : Resonate.Config) (scanKey : DocumentKey) (now : Time)
-    (rest : List WorkflowEntry) (state : State) :
-    ∀ key ∈ state.store.keys,
-      key ∈ (Resonate.runScan config scanKey now rest state).1.store.keys := by
-  intro key hkey
-  cases scanKey <;>
-    simp [Resonate.runScan, Resonate.runDocument, Direct.runWith, hkey]
 
 /-- Per-document representation. The concrete finite key index may contain
 empty documents produced by rejected requests, but those cannot yield work. -/
@@ -723,14 +693,16 @@ theorem work_cas_transport
     {expectedVersion : Option Concrete.Version}
     (provenance :
       PutProvenance appConfig key document expectedVersion)
-    {item : WorkItem} {now : Time} {rest : List WorkflowEntry}
+    {item : WorkItem} {now : Time} {rest : List Concrete.PendingEntry}
     (htransaction : provenance.transaction = .work item now rest)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted := Resonate.runWork
-      { appConfig with unreliable := true } item now rest abstract
+      { appConfig with unreliable := true } item now
+        (Concrete.pendingWorkflow rest) abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
-      lifted.1.workflow.pending = provenance.continuations := by
+      lifted.1.workflow.pending =
+        Concrete.pendingWorkflow provenance.continuations := by
   cases provenance with
   | mk transaction loaded outputs continuations expected_eq selected =>
     simp only at htransaction ⊢
@@ -744,21 +716,24 @@ theorem work_cas_transport
               (emptyDocument item.key) := by
         rw [← hrep item.key, hbefore]
       have hlocal := work_locality
-        { appConfig with unreliable := true } item now rest item.key
+        { appConfig with unreliable := true } item now
+        (Concrete.pendingWorkflow rest) item.key
         ((loaded.map (·.1)).getD
           (emptyDocument item.key))
         abstract rfl habstract
       rw [hselected] at hlocal
-      refine ⟨?_, hlocal.2.2,
-        congrArg WorkflowState.pending hlocal.2.1⟩
-      intro other
-      by_cases hother : other = item.key
-      · subst other
-        simp [hlocal.1]
-      · rw [Concrete.Store.toAbstract_commit]
-        simp [hother, Resonate.runWork_frame
-          { appConfig with unreliable := true } item now rest
-          abstract other hother, hrep other]
+      refine ⟨?_, hlocal.2.2, ?_⟩
+      · intro other
+        by_cases hother : other = item.key
+        · subst other
+          simp [hlocal.1]
+        · rw [Concrete.Store.toAbstract_commit]
+          simp [hother, Resonate.runWork_frame
+            { appConfig with unreliable := true } item now
+            (Concrete.pendingWorkflow rest)
+            abstract other hother, hrep other]
+      · rw [← hlocal.2.1]
+        exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm
 
 theorem scan_cas_transport
     {appConfig : Resonate.Config}
@@ -768,17 +743,23 @@ theorem scan_cas_transport
     {expectedVersion : Option Concrete.Version}
     (provenance :
       PutProvenance appConfig key document expectedVersion)
-    {now : Time} {rest : List WorkflowEntry}
+    {now : Time} {rest : List Concrete.PendingEntry}
     (htransaction : provenance.transaction = .scan key now rest)
-    (hcurrent : physical.read key = provenance.loaded) :
-    let lifted := Resonate.runScan
-      { appConfig with unreliable := true } key now rest abstract
-    StoreRep (physical.commit key document) lifted.1 ∧
-      lifted.2 = provenance.outputs ∧
-      lifted.1.workflow.pending = provenance.continuations := by
+    (hcurrent : physical.read key = provenance.loaded)
+    (hkeymem : key ∈ abstract.store.keys) :
+    ∃ item,
+      item.key = key ∧
+      item ∈ Resonate.eligibleWorkAt abstract now ∧
+      let lifted := Resonate.runWork
+        { appConfig with unreliable := true } item now
+          (Concrete.pendingWorkflow rest) abstract
+      StoreRep (physical.commit key document) lifted.1 ∧
+        lifted.2 = provenance.outputs ∧
+        lifted.1.workflow.pending =
+          Concrete.pendingWorkflow provenance.continuations := by
   cases provenance with
   | mk transaction loaded outputs continuations expected_eq selected =>
-    simp only at htransaction ⊢
+    simp only at htransaction
     subst transaction
     cases selected with
     | scan hselected =>
@@ -787,21 +768,86 @@ theorem scan_cas_transport
           abstract.store.read key =
             (loaded.map (·.1)).getD (emptyDocument key) := by
         rw [← hrep key, hbefore]
-      have hlocal := scan_locality
-        { appConfig with unreliable := true } key now rest
-        ((loaded.map (·.1)).getD (emptyDocument key))
-        abstract habstract
-      rw [hselected] at hlocal
-      refine ⟨?_, hlocal.2.2,
-        congrArg WorkflowState.pending hlocal.2.1⟩
-      intro other
-      by_cases hother : other = key
-      · subst other
-        simp [hlocal.1]
-      · rw [Concrete.Store.toAbstract_commit]
-        simp [hother, Resonate.runScan_frame
-          { appConfig with unreliable := true } key now rest
-          abstract other hother, hrep other]
+      cases key with
+      | origin origin =>
+          obtain ⟨item, hitem, hdocument, houtputs, hcontinuations⟩ :=
+            Concrete.selectScan_origin_some appConfig origin now rest
+              ((loaded.map (·.1)).getD
+                (emptyDocument (.origin origin))) _ hselected
+          have hlocal := work_locality
+            { appConfig with unreliable := true } item now
+            (Concrete.pendingWorkflow rest) (.origin origin)
+            ((loaded.map (·.1)).getD
+              (emptyDocument (.origin origin)))
+            abstract (originWork_key hitem)
+            habstract
+          refine ⟨item, originWork_key hitem, ?_, ?_,
+            hlocal.2.2.trans houtputs.symm, ?_⟩
+          · simp only [Resonate.eligibleWorkAt, List.mem_flatMap]
+            exact ⟨.origin origin, hkeymem, by
+              change item ∈ Direct.originWork origin
+                (abstract.store.read (.origin origin)) now
+              rw [habstract]
+              exact hitem⟩
+          · intro other
+            by_cases hother : other = .origin origin
+            · subst other
+              simp only [Concrete.Store.toAbstract_commit,
+                Resonate.Store.read_write_same]
+              simpa only [Concrete.selectedWork] using
+                hdocument.trans hlocal.1.symm
+            · rw [Concrete.Store.toAbstract_commit]
+              simp [hother, Resonate.runWork_frame
+                { appConfig with unreliable := true } item now
+                (Concrete.pendingWorkflow rest) abstract other
+                (by
+                  intro heq
+                  apply hother
+                  rw [← originWork_key hitem]
+                  exact heq), hrep other]
+          · rw [hlocal.2.1]
+            simp only [Concrete.selectedWork] at hcontinuations
+            exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
+              (congrArg Concrete.pendingWorkflow hcontinuations.symm)
+      | schedule id =>
+          obtain ⟨schedule, hschedule, hdue, hdocument, houtputs,
+              hcontinuations⟩ :=
+            Concrete.selectScan_schedule_some appConfig id now rest
+              ((loaded.map (·.1)).getD
+                (emptyDocument (.schedule id))) _ hselected
+          have hlocal := work_locality
+            { appConfig with unreliable := true }
+            (.scheduleTimeout id) now
+            (Concrete.pendingWorkflow rest) (.schedule id)
+            ((loaded.map (·.1)).getD
+              (emptyDocument (.schedule id)))
+            abstract rfl habstract
+          refine ⟨.scheduleTimeout id, rfl, ?_, ?_,
+            hlocal.2.2.trans houtputs.symm, ?_⟩
+          · have habstractSchedule :
+                abstract.store.read (.schedule id) = some schedule :=
+              habstract.trans hschedule
+            simp only [Resonate.eligibleWorkAt, List.mem_flatMap]
+            exact ⟨.schedule id, hkeymem, by
+              simp [habstractSchedule, hdue]⟩
+          · intro other
+            by_cases hother : other = .schedule id
+            · subst other
+              simp only [Concrete.Store.toAbstract_commit,
+                Resonate.Store.read_write_same]
+              simpa only [Concrete.selectedWork] using
+                hdocument.trans hlocal.1.symm
+            · rw [Concrete.Store.toAbstract_commit]
+              simp [hother, Resonate.runWork_frame
+                { appConfig with unreliable := true }
+                (.scheduleTimeout id) now
+                (Concrete.pendingWorkflow rest) abstract other
+                hother, hrep other]
+          · rw [hlocal.2.1]
+            simp only [Concrete.selectedWork] at hcontinuations
+            exact
+              (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
+                (congrArg Concrete.pendingWorkflow hcontinuations.symm)
 
 theorem takeFlight_once (node : Concrete.Node) (op : Concrete.OpId) :
     ((node.takeFlight op).2.takeFlight op).1 = none := by
@@ -815,18 +861,25 @@ def concreteObservation
 
 /-- Local flight provenance, reconstructed from the continuation rather than
 carried by a store request. -/
+def WorkShaped : Concrete.Transaction → Prop
+  | .work item _ _ =>
+      ∃ request semanticTime,
+        item = .occurrence request semanticTime
+  | .external _ | .scan _ _ _ => True
+
 def FlightValid (appConfig : Resonate.Config)
     (flight : Concrete.Flight) : Prop :=
   flight.transaction.key? = some flight.key ∧
-  match flight.phase with
-  | .loading => True
-  | .writing =>
-      ∃ document,
-        flight.document = some document ∧
-        Selected appConfig flight.key flight.transaction
-          (flight.loaded.map (·.1) |>.getD
-            (emptyDocument flight.key))
-          document flight.selected flight.continuations
+  (match flight.phase with
+   | .loading => True
+   | .writing =>
+       ∃ document,
+         flight.document = some document ∧
+         Selected appConfig flight.key flight.transaction
+           (flight.loaded.map (·.1) |>.getD
+             (emptyDocument flight.key))
+           document flight.selected flight.continuations) ∧
+  WorkShaped flight.transaction
 
 theorem FlightValid.writingProvenance
     {appConfig : Resonate.Config} {flight : Concrete.Flight}
@@ -842,7 +895,7 @@ theorem FlightValid.writingProvenance
         provenance.outputs = flight.selected ∧
         provenance.continuations = flight.continuations := by
   rw [FlightValid, hphase] at hvalid
-  obtain ⟨document, hdocument, hselected⟩ := hvalid.2
+  obtain ⟨document, hdocument, hselected⟩ := hvalid.2.1
   refine ⟨document, hdocument, {
     transaction := flight.transaction
     loaded := flight.loaded
@@ -855,6 +908,9 @@ theorem FlightValid.writingProvenance
 theorem FlightValid.select_ne_none
     {appConfig : Resonate.Config} {flight : Concrete.Flight}
     (hvalid : FlightValid appConfig flight)
+    (hnotScan :
+      ∀ key instant rest,
+        flight.transaction ≠ .scan key instant rest)
     (loaded : Option (Document flight.key × Concrete.Version)) :
     Concrete.select appConfig flight loaded ≠ none := by
   cases flight with
@@ -866,9 +922,7 @@ theorem FlightValid.select_ne_none
             Option.some.injEq] at hvalid
           simp [Concrete.select, hvalid.1]
       | scan scanKey instant rest =>
-          simp only [FlightValid, Concrete.Transaction.key?,
-            Option.some.injEq] at hvalid
-          simp [Concrete.select, hvalid.1]
+          exact (hnotScan scanKey instant rest rfl).elim
 
 def NodeValid (appConfig : Resonate.Config)
     (node : Concrete.Node) : Prop :=
@@ -974,12 +1028,13 @@ theorem NodeValid.await {appConfig : Resonate.Config}
 theorem NodeValid.start {appConfig : Resonate.Config}
     {node : Concrete.Node} (hnode : NodeValid appConfig node)
     (transaction : Concrete.Transaction) (key : DocumentKey)
-    (hkey : transaction.key? = some key) :
+    (hkey : transaction.key? = some key)
+    (hshape : WorkShaped transaction) :
     ∃ next, (Concrete.start node transaction key).state = .node next ∧
       NodeValid appConfig next := by
   refine ⟨node.await { key, transaction } (.get key) |>.1,
     rfl, ?_⟩
-  exact NodeValid.await hnode ⟨hkey, trivial⟩ _
+  exact NodeValid.await hnode ⟨hkey, trivial, hshape⟩ _
 
 theorem NodeValid.decide {appConfig : Resonate.Config}
     {node : Concrete.Node} (hnode : NodeValid appConfig node)
@@ -1003,8 +1058,8 @@ theorem NodeValid.decide {appConfig : Resonate.Config}
           (.put flight.key candidate.document (loaded.map (·.2)))).1,
         by simp [Concrete.decide, hselect, writing], ?_⟩
       apply NodeValid.await hnode
-      exact ⟨hflight.1, candidate.document, rfl,
-        select_valid hflight.1 hselect⟩
+      exact ⟨hflight.1, ⟨candidate.document, rfl,
+        select_valid hflight.1 hselect⟩, hflight.2.2⟩
 
 theorem NodeValid.retry {appConfig : Resonate.Config}
     {config : Concrete.Config}
@@ -1026,7 +1081,7 @@ theorem NodeValid.retry {appConfig : Resonate.Config}
     refine ⟨(node.await loading (.get flight.key)).1,
       by simp [loading], ?_⟩
     apply NodeValid.await hnode
-    simp [FlightValid, loading, hflight.1]
+    simpa [FlightValid, loading] using And.intro hflight.1 hflight.2.2
   · exact ⟨node, rfl, hnode⟩
 
 theorem node_step_valid
@@ -1057,22 +1112,17 @@ theorem node_step_valid
             | some key =>
                 simp only [hk, Outcomes.one, List.mem_singleton] at hresult
                 subst result
-                exact ⟨{ node with pending := [.scan key now] },
-                  rfl, by
-                    intro op flight hmem
-                    exact hnode op flight hmem⟩
+                exact NodeValid.start hnode (.scan key now []) key rfl trivial
         | cons entry rest =>
             simp only [hp, Outcomes.one, List.mem_singleton] at hresult
             subst result
             cases entry with
-            | scan key instant =>
+            | occurrence request instant =>
                 exact NodeValid.start
                   (node := { node with pending := [] }) hnode
-                  (.scan key instant rest) key rfl
-            | work item instant =>
-                exact NodeValid.start
-                  (node := { node with pending := [] }) hnode
-                  (.work item instant rest) item.key rfl
+                  (.work (.occurrence request instant) instant rest)
+                  (.origin request.id.origin) rfl
+                  ⟨request, instant, rfl⟩
   | receive sender message =>
       cases sender <;> cases message <;>
         simp only [Concrete.step] at hresult
@@ -1094,7 +1144,7 @@ theorem node_step_valid
           | some key =>
               simp only [hk, Outcomes.one, List.mem_singleton] at hresult
               subst result
-              exact NodeValid.start hnode (.external call) key hk
+              exact NodeValid.start hnode (.external call) key hk trivial
       case store.storeReply rpc =>
         obtain ⟨op, payload⟩ := rpc
         cases payload with
@@ -1244,8 +1294,10 @@ theorem node_step_ids
             | some key =>
                 simp [hk, Outcomes.one] at hresult
                 subst result
-                exact ⟨{ node with pending := [.scan key now] },
-                  rfl, Nat.le_refl _, by simp, by simp⟩
+                refine ⟨_, rfl, by simp [Concrete.Node.await], ?_, ?_⟩
+                · simp [Concrete.start, Concrete.Node.await]
+                · intros
+                  simp_all [Concrete.start, Concrete.Node.await]
         | cons entry rest =>
             simp [hp, Concrete.start, Concrete.Node.await,
               Outcomes.one] at hresult
@@ -1473,22 +1525,10 @@ theorem node_step_old_flight
                   match localState with
                   | .node value => value.flights
                   | _ => []) hstate
-                change node.flights = next.flights at hflights
-                exact hflights ▸ hmem
-        | cons entry rest =>
-            cases entry with
-            | scan key instant =>
-                simp [hpending, Concrete.start, Concrete.Node.await,
-                  Outcomes.one] at hresult
-                subst result
-                have hflights := congrArg (fun localState =>
-                  match localState with
-                  | .node value => value.flights
-                  | _ => []) hstate
                 change
                   (node.nextOp,
                     ({ key := key
-                       transaction := .scan key instant rest } :
+                       transaction := .scan key now [] } :
                       Concrete.Flight)) ::
                     node.flights = next.flights at hflights
                 rw [← hflights] at hmem
@@ -1498,7 +1538,9 @@ theorem node_step_old_flight
                     simpa using congrArg Prod.fst hnew
                   exact (Nat.ne_of_lt hop heq).elim
                 · exact hold
-            | work item instant =>
+        | cons entry rest =>
+            cases entry with
+            | occurrence request instant =>
                 simp [hpending, Concrete.start, Concrete.Node.await,
                   Outcomes.one] at hresult
                 subst result
@@ -1508,8 +1550,9 @@ theorem node_step_old_flight
                   | _ => []) hstate
                 change
                   (node.nextOp,
-                    ({ key := item.key
-                       transaction := .work item instant rest } :
+                    ({ key := .origin request.id.origin
+                       transaction :=
+                         .work (.occurrence request instant) instant rest } :
                       Concrete.Flight)) ::
                     node.flights = next.flights at hflights
                 rw [← hflights] at hmem
@@ -1660,6 +1703,7 @@ theorem node_step_old_flight
             simp_all [Concrete.Node.takeFlight, Concrete.Node.remember,
               Outcomes.one]
             all_goals grind
+
         | conflict =>
             simp only [Concrete.step] at hresult
             cases ht : node.takeFlight replyOp with
@@ -1804,6 +1848,161 @@ theorem node_step_preserves_writing_flight
               Concrete.Node.await, Concrete.Node.remember, Outcomes.one]
           all_goals grind
 
+def NodeScansValid (bound : Time) (node : Concrete.Node) : Prop :=
+  ∀ op flight, (op, flight) ∈ node.flights →
+    ∀ key instant rest,
+      flight.transaction = .scan key instant rest →
+      instant ≤ bound ∧ key ∈ node.known ∧ rest = []
+
+theorem node_step_scans_valid
+    {appConfig : Resonate.Config} {config : Concrete.Config}
+    {address : Addr} {node next : Concrete.Node}
+    {before now : Time} (htime : before ≤ now)
+    (hscan : NodeScansValid before node)
+    {event : Event Concrete.Pid Concrete.Msg}
+    {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
+    (hresult :
+      result ∈
+        (Concrete.step appConfig config (.node address) (.node node)
+          now event).val)
+    (hstate : result.state = .node next) :
+    NodeScansValid now next := by
+  intro op flight hflight key instant rest htransaction
+  cases event with
+  | timeout =>
+      simp only [Concrete.step] at hresult
+      split at hresult
+      · simp [Outcomes.one] at hresult
+        subst result
+        cases Concrete.Local.node.inj hstate
+        obtain ⟨hinstant, hknown, hrest⟩ :=
+          hscan op flight hflight key instant rest htransaction
+        exact ⟨Nat.le_trans hinstant htime, hknown, hrest⟩
+      · cases hpending : node.pending with
+        | nil =>
+            simp only [hpending] at hresult
+            cases hknown : node.known.head? with
+            | none =>
+                simp [hknown, Outcomes.one] at hresult
+                subst result
+                cases Concrete.Local.node.inj hstate
+                obtain ⟨hinstant, hknown, hrest⟩ :=
+                  hscan op flight hflight key instant rest htransaction
+                exact ⟨Nat.le_trans hinstant htime, hknown, hrest⟩
+            | some scanKey =>
+                simp [hknown, Concrete.start, Concrete.Node.await,
+                  Outcomes.one] at hresult
+                subst result
+                cases Concrete.Local.node.inj hstate
+                simp only [List.mem_cons] at hflight
+                rcases hflight with hnew | hold
+                · cases hnew
+                  cases htransaction
+                  refine ⟨Nat.le_refl _, ?_, rfl⟩
+                  obtain ⟨tail, hkeys⟩ :=
+                    List.head?_eq_some_iff.mp hknown
+                  rw [hkeys]
+                  exact List.mem_cons_self
+                · obtain ⟨hinstant, hknown, hrest⟩ :=
+                    hscan op flight hold key instant rest htransaction
+                  exact ⟨Nat.le_trans hinstant htime, by simpa using hknown,
+                    hrest⟩
+        | cons entry remaining =>
+            simp [hpending, Concrete.start, Concrete.Node.await,
+              Outcomes.one] at hresult
+            subst result
+            cases Concrete.Local.node.inj hstate
+            simp only [List.mem_cons] at hflight
+            rcases hflight with hnew | hold
+            · have htx := congrArg
+                (fun pair : Concrete.OpId × Concrete.Flight =>
+                  pair.2.transaction) hnew
+              rw [htransaction] at htx
+              cases entry
+              contradiction
+            · obtain ⟨hinstant, hknown, hrest⟩ :=
+                hscan op flight hold key instant rest htransaction
+              exact ⟨Nat.le_trans hinstant htime, by simpa using hknown,
+                hrest⟩
+  | receive sender message =>
+      cases sender <;> cases message <;>
+        simp only [Concrete.step] at hresult
+      all_goals
+        repeat' first | split at hresult
+      all_goals
+        try subst result
+        try cases Concrete.Local.node.inj hstate
+        simp_all [NodeScansValid, Concrete.Node.takeFlight,
+          Concrete.decide, Concrete.retry, Concrete.start,
+          Concrete.pureExternal,
+          Concrete.Node.await, Concrete.Node.remember, Outcomes.one]
+      all_goals grind
+
+def NodesScansValid
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    (world : World (CModel nodes appConfig)) : Prop :=
+  ∀ address, address ∈ nodes →
+    ∃ node,
+      world.process (.node address) = .node node ∧
+      NodeScansValid world.now node
+
+theorem nodesScansValid_initial
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {process : Concrete.Pid → Concrete.Local}
+    (hinit : (CModel nodes appConfig).init config process) :
+    NodesScansValid (nodes := nodes) (appConfig := appConfig)
+      (World.initial process) := by
+  intro address haddress
+  exact ⟨{}, hinit.2.2 address haddress, by
+    simp [NodeScansValid]⟩
+
+theorem nodesScansValid_step
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {world next : World (CModel nodes appConfig)}
+    {label : Label (CModel nodes appConfig)}
+    (hvalidNodes :
+      ∀ address, address ∈ nodes → ∀ node,
+        world.process (.node address) = .node node →
+        NodeValid appConfig node)
+    (hinvariant : NodesScansValid world)
+    (hstep : Step (CModel nodes appConfig) config world label next) :
+    NodesScansValid next := by
+  cases hstep with
+  | inject htime _ _ =>
+      intro address haddress
+      obtain ⟨node, hnode, hscan⟩ := hinvariant address haddress
+      refine ⟨node, by simpa [World.inject] using hnode, ?_⟩
+      intro op flight hflight key instant rest htransaction
+      obtain ⟨hinstant, hknown, hrest⟩ :=
+        hscan op flight hflight key instant rest htransaction
+      exact ⟨Nat.le_trans hinstant htime, hknown, hrest⟩
+  | outside htime _ =>
+      intro address haddress
+      obtain ⟨node, hnode, hscan⟩ := hinvariant address haddress
+      refine ⟨node, by simpa [World.observeOutside] using hnode, ?_⟩
+      intro op flight hflight key instant rest htransaction
+      obtain ⟨hinstant, hknown, hrest⟩ :=
+        hscan op flight hflight key instant rest htransaction
+      exact ⟨Nat.le_trans hinstant htime, hknown, hrest⟩
+  | @process pid now event result htime hprocess hvalid hresult =>
+      intro address haddress
+      obtain ⟨node, hnode, hscan⟩ := hinvariant address haddress
+      by_cases hp : pid = .node address
+      · subst pid
+        have hnodeValid := hvalidNodes address haddress node hnode
+        obtain ⟨after, hstate, _⟩ :=
+          node_step_valid hnodeValid (hnode ▸ hresult)
+        have hafter :=
+          node_step_scans_valid htime hscan (hnode ▸ hresult) hstate
+        exact ⟨after, by simp [World.land, hstate], hafter⟩
+      · refine ⟨node, by simp [World.land, Ne.symm hp, hnode], ?_⟩
+        intro op flight hflight key instant rest htransaction
+        obtain ⟨hinstant, hknown, hrest⟩ :=
+          hscan op flight hflight key instant rest htransaction
+        exact ⟨Nat.le_trans hinstant htime, hknown, hrest⟩
+
 def NodeSerial (node : Concrete.Node) : Prop :=
   node.flights.length ≤ 1
 
@@ -1869,7 +2068,9 @@ theorem node_step_serial
             | some key =>
                 simp [hk, Outcomes.one] at hresult
                 subst result
-                exact ⟨_, rfl, hserial⟩
+                have hempty : node.flights = [] := by simp_all
+                simp [NodeSerial, Concrete.start, Concrete.Node.await,
+                  hempty]
         | cons entry rest =>
             simp [hp, Concrete.start, Concrete.Node.await,
               Outcomes.one] at hresult
@@ -1978,7 +2179,8 @@ theorem node_step_internal_clean
                 simp [hk, Outcomes.one] at hresult
                 subst result
                 exact ⟨_, rfl, by
-                  simp [NodeInternalClean, hflights]⟩
+                  simp [NodeInternalClean, Concrete.start,
+                    Concrete.Node.await, hflights, hblocked, hp]⟩
         | cons entry rest =>
             simp [hp, Concrete.start, Concrete.Node.await,
               Outcomes.one] at hresult
@@ -2324,7 +2526,7 @@ theorem nodesValid_step
     (hstep : Step (CModel nodes appConfig) config world label next) :
     NodesValid next := by
   cases hstep with
-  | inject =>
+  | inject htime _ _ =>
       intro address haddress
       simpa [World.inject] using hinvariant address haddress
   | outside =>
@@ -2353,6 +2555,43 @@ theorem reachable_nodes_valid
   induction hreachable with
   | init hinit => exact nodesValid_initial hinit
   | step _ hstep ih => exact nodesValid_step ih hstep
+
+theorem reachable_nodes_scans_valid
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {world : World (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config world) :
+    NodesScansValid world := by
+  induction hreachable with
+  | init hinit => exact nodesScansValid_initial hinit
+  | step hreachable hstep ih =>
+      exact nodesScansValid_step (fun address haddress node hnode =>
+        by
+          obtain ⟨actual, hactual, hvalid⟩ :=
+            reachable_nodes_valid hreachable address haddress
+          rw [hnode] at hactual
+          cases Concrete.Local.node.inj hactual
+          exact hvalid) ih hstep
+
+theorem reachable_scan_flight_valid
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {world : World (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {address : Addr} (haddress : address ∈ nodes)
+    {node : Concrete.Node}
+    (hnode : world.process (.node address) = .node node)
+    {op : Concrete.OpId} {flight : Concrete.Flight}
+    (hflight : (op, flight) ∈ node.flights)
+    {key : DocumentKey} {instant : Time}
+    {rest : List Concrete.PendingEntry}
+    (htransaction : flight.transaction = .scan key instant rest) :
+    instant ≤ world.now ∧ key ∈ node.known ∧ rest = [] := by
+  obtain ⟨actual, hactual, hscan⟩ :=
+    reachable_nodes_scans_valid hreachable address haddress
+  rw [hnode] at hactual
+  cases Concrete.Local.node.inj hactual
+  exact hscan op flight hflight key instant rest htransaction
 
 def StoreRequestsFresh
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -2402,7 +2641,7 @@ theorem rpcIds_step
     (hstep : Step (CModel nodes appConfig) config world label next) :
     RpcIds next := by
   cases hstep with
-  | inject =>
+  | inject htime _ _ =>
       constructor
       · intro address node rpc haddress hnode hmem
         simp only [World.inject, List.mem_append,
@@ -2612,7 +2851,14 @@ theorem node_step_loading_gets
             | some key =>
                 simp [hk, Outcomes.one] at hresult
                 subst result
-                exact ⟨_, rfl, hold node hinvariant⟩
+                refine ⟨_, rfl, ?_⟩
+                intro op flight hmem hphase
+                simp only [Concrete.start, Concrete.Node.await,
+                  List.mem_cons] at hmem
+                rcases hmem with hnew | holdMem
+                · cases hnew
+                  simp [World.land, Concrete.start, Concrete.Node.await]
+                · exact hold node hinvariant holdMem hphase
         | cons entry rest =>
             simp [hp, Concrete.start, Concrete.Node.await,
               Outcomes.one] at hresult
@@ -2853,8 +3099,16 @@ theorem node_step_writing_puts
             | some key =>
                 simp [hk, Outcomes.one] at hresult
                 subst result
-                exact ⟨{ node with pending := [.scan key now] },
-                  rfl, hold node hinvariant⟩
+                refine ⟨_, rfl, ?_⟩
+                intro op flight hmem hphase
+                simp only [Concrete.start, Concrete.Node.await,
+                  List.mem_cons] at hmem
+                rcases hmem with hnew | holdMem
+                · have hp := congrArg
+                    (fun pair : Concrete.OpId × Concrete.Flight =>
+                      pair.2.phase) hnew
+                  simp [hphase] at hp
+                · exact hold node hinvariant holdMem hphase
         | cons entry rest =>
             simp [hp, Concrete.start, Concrete.Node.await,
               Outcomes.one] at hresult
@@ -3929,6 +4183,17 @@ theorem reachable_got_snapshots
       exact gotSnapshots_step
         (reachable_store_exists hreachable) hinvariant hstep
 
+def TransactionOrigin
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    (world : World (CModel nodes appConfig)) (address : Addr) :
+    Concrete.Transaction → Prop
+  | .external call =>
+      (Concrete.Pid.outside, .node address, .request call) ∈ world.network
+  | .work item _ _ =>
+      ∃ request semanticTime,
+        item = .occurrence request semanticTime
+  | .scan _ instant _ => instant ≤ world.now
+
 def FlightRequestOrigins
     {nodes : List Addr} {appConfig : Resonate.Config}
     (world : World (CModel nodes appConfig)) : Prop :=
@@ -3938,14 +4203,6 @@ def FlightRequestOrigins
     (op, flight) ∈ node.flights →
     flight.transaction = .external call →
     (Concrete.Pid.outside, .node address, .request call) ∈ world.network
-
-def TransactionOrigin
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) (address : Addr) :
-    Concrete.Transaction → Prop
-  | .external call =>
-      (Concrete.Pid.outside, .node address, .request call) ∈ world.network
-  | .work _ _ _ | .scan _ _ _ => True
 
 theorem node_step_sent_put_snapshot
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -4072,8 +4329,10 @@ theorem node_step_sent_put_origin
     (haddress : address ∈ nodes)
     (hnodeLocal : world.process (.node address) = .node node)
     (hnode : NodeValid appConfig node)
+    (hscans : NodeScansValid world.now node)
     (horigins : FlightRequestOrigins world)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
+    (htime : world.now ≤ now)
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult : result ∈
       (Concrete.step appConfig config (.node address) (.node node)
@@ -4088,7 +4347,8 @@ theorem node_step_sent_put_origin
       }) ∈ result.send) :
     ∃ provenance :
         PutProvenance appConfig key document expectedVersion,
-      TransactionOrigin world address provenance.transaction := by
+      TransactionOrigin (world.land (.node address) now result)
+        address provenance.transaction := by
   cases event with
   | timeout =>
       simp only [Concrete.step] at hresult
@@ -4164,12 +4424,21 @@ theorem node_step_sent_put_origin
                           hselect, hloaded, houtputs, hcontinuations⟩ :=
                         decide_put_provenance_complete hflight hsend
                       refine ⟨provenance, ?_⟩
-                      cases ht : provenance.transaction with
+                      cases hprovenance : provenance.transaction with
                       | external call =>
-                          exact horigins haddress hnodeLocal hflightMem
-                            (htransaction.symm.trans ht)
-                      | work item instant rest => trivial
-                      | scan scanKey instant rest => trivial
+                          exact List.mem_append_left _
+                            (horigins haddress hnodeLocal hflightMem
+                              (htransaction.symm.trans hprovenance))
+                      | work item instant rest =>
+                          have hshape := hflight.2.2
+                          rw [← htransaction, hprovenance,
+                            WorkShaped] at hshape
+                          exact hshape
+                      | scan scanKey instant rest =>
+                          exact Nat.le_trans
+                            (hscans replyOp flight hflightMem scanKey instant
+                              rest (htransaction.symm.trans hprovenance)).1
+                            htime
                   | writing =>
                       simp [hp, Outcomes.one] at hresult
                       subst result
@@ -4573,16 +4842,13 @@ theorem node_step_flight_request_origins
                   match localState with
                   | .node value => value.flights
                   | _ => []) hstate
-                change node.flights = next.flights at hflights
+                change
+                  (node.nextOp,
+                    ({ key := key
+                       transaction := .scan key now [] } :
+                      Concrete.Flight)) :: node.flights =
+                    next.flights at hflights
                 rw [← hflights] at hmem
-                exact hold hmem htransaction
-        | cons entry rest =>
-            cases entry with
-            | scan key instant =>
-                simp [hp, Concrete.start, Concrete.Node.await,
-                  Outcomes.one] at hresult
-                subst result
-                cases Concrete.Local.node.inj hstate
                 simp only [List.mem_cons] at hmem
                 rcases hmem with hnew | holdMem
                 · have htx := congrArg
@@ -4591,7 +4857,9 @@ theorem node_step_flight_request_origins
                   rw [htransaction] at htx
                   contradiction
                 · exact hold holdMem htransaction
-            | work item instant =>
+        | cons entry rest =>
+            cases entry with
+            | occurrence request instant =>
                 simp [hp, Concrete.start, Concrete.Node.await,
                   Outcomes.one] at hresult
                 subst result
@@ -4919,11 +5187,13 @@ theorem TransactionOrigin.mono
     {world next : World (CModel nodes appConfig)}
     {address : Addr} {transaction : Concrete.Transaction}
     (horigin : TransactionOrigin world address transaction)
+    (htime : world.now ≤ next.now)
     (hnetwork : ∀ message ∈ world.network, message ∈ next.network) :
     TransactionOrigin next address transaction := by
   cases transaction with
   | external call => exact hnetwork _ horigin
-  | work item instant rest | scan key instant rest => trivial
+  | work item instant rest => exact horigin
+  | scan key instant rest => exact Nat.le_trans horigin htime
 
 def PutRequestOrigins
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -4957,23 +5227,28 @@ theorem putRequestOrigins_step
     (hstep : Step (CModel nodes appConfig) config world label next) :
     PutRequestOrigins next := by
   cases hstep with
-  | inject =>
+  | inject htime _ _ =>
       intro address op key document expected hmem
       simp only [World.inject, List.mem_append,
         List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · obtain ⟨provenance, horigin⟩ := hinvariant hold
-        exact ⟨provenance, horigin.mono fun message hmessage =>
+        exact ⟨provenance, horigin.mono htime fun message hmessage =>
           List.mem_append_left _ hmessage⟩
       · simp at hnew
-  | outside =>
-      exact hinvariant
+  | outside htime _ =>
+      intro address op key document expected hmem
+      obtain ⟨provenance, horigin⟩ :=
+        hinvariant (by simpa [World.observeOutside] using hmem)
+      exact ⟨provenance, horigin.mono htime (by
+        intro message hmessage
+        simpa [World.observeOutside] using hmessage)⟩
   | @process pid now event result htime hprocess hvalid hresult =>
       intro address op key document expected hmem
       simp only [World.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · obtain ⟨provenance, horigin⟩ := hinvariant hold
-        exact ⟨provenance, horigin.mono fun message hmessage =>
+        exact ⟨provenance, horigin.mono htime fun message hmessage =>
           List.mem_append_left _ hmessage⟩
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
         obtain ⟨recipient, message⟩ := sent
@@ -4981,12 +5256,15 @@ theorem putRequestOrigins_step
         obtain ⟨rfl, rfl, rfl⟩ := heq
         obtain ⟨node, hnodeLocal, hnode⟩ :=
           reachable_nodes_valid hreachable address hprocess
+        obtain ⟨scanNode, hscanNode, hscans⟩ :=
+          reachable_nodes_scans_valid hreachable address hprocess
+        rw [hnodeLocal] at hscanNode
+        cases Concrete.Local.node.inj hscanNode
         obtain ⟨provenance, horigin⟩ :=
-          node_step_sent_put_origin hprocess hnodeLocal hnode
-            (reachable_flight_request_origins hreachable)
+          node_step_sent_put_origin hprocess hnodeLocal hnode hscans
+            (reachable_flight_request_origins hreachable) htime
             (hnodeLocal ▸ hresult) hsent
-        exact ⟨provenance, horigin.mono fun triple htriple =>
-          List.mem_append_left _ htriple⟩
+        exact ⟨provenance, horigin⟩
 
 theorem reachable_put_request_origins
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -5047,11 +5325,13 @@ theorem node_step_sent_put_stageable
     (hnodeLocal : world.process (.node address) = .node node)
     (hstore : world.process .store = .store store)
     (hnode : NodeValid appConfig node)
+    (hscans : NodeScansValid world.now node)
     (hserial : NodeSerial node)
     (hgots : GotSnapshots world)
     (horigins : FlightRequestOrigins world)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
     (hvalid : event.Valid world (.node address))
+    (htime : world.now ≤ now)
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult : result ∈
       (Concrete.step appConfig config (.node address) (.node node)
@@ -5067,7 +5347,8 @@ theorem node_step_sent_put_stageable
     ∃ provenance :
         PutProvenance appConfig key document expectedVersion,
       Snapshot store key provenance.loaded ∧
-        TransactionOrigin world address provenance.transaction ∧
+        TransactionOrigin (world.land (.node address) now result)
+          address provenance.transaction ∧
         (∀ next flight,
           result.state = .node next →
           (op, flight) ∈ next.flights →
@@ -5165,10 +5446,20 @@ theorem node_step_sent_put_stageable
                       refine ⟨provenance, hsnapshot, ?_, ?_, ?_⟩
                       · cases hprovenance : provenance.transaction with
                         | external call =>
-                            exact horigins haddress hnodeLocal hflightMem
-                              (htransaction.symm.trans hprovenance)
-                        | work item instant rest => trivial
-                        | scan scanKey instant rest => trivial
+                            exact List.mem_append_left _
+                              (horigins haddress hnodeLocal hflightMem
+                                (htransaction.symm.trans hprovenance))
+                        | work item instant rest =>
+                            have hshape := hflight.2.2
+                            rw [← htransaction, hprovenance,
+                              WorkShaped] at hshape
+                            exact hshape
+                        | scan scanKey instant rest =>
+                            exact Nat.le_trans
+                              (hscans replyOp flight hflightMem scanKey
+                                instant rest
+                                (htransaction.symm.trans hprovenance)).1
+                              htime
                       · intro resultNode active hstate hactive hactivePhase
                         have hempty :
                             next.flights = [] := by
@@ -5243,7 +5534,7 @@ theorem stageablePuts_step
     (hstep : Step (CModel nodes appConfig) config world label next) :
     StageablePuts next := by
   cases hstep with
-  | inject =>
+  | inject htime _ _ =>
       intro store address op key document expectedVersion hstore hmem
       simp only [World.inject, List.mem_append,
         List.mem_singleton] at hmem
@@ -5252,7 +5543,7 @@ theorem stageablePuts_step
           heligible⟩ :=
           hinvariant hstore hold
         refine ⟨provenance, hsnapshot,
-          horigin.mono fun message hmessage =>
+          horigin.mono htime fun message hmessage =>
             List.mem_append_left _ hmessage, ?_, ?_⟩
         · intro node flight hnode hflight hphase
           exact hagreement node flight
@@ -5269,8 +5560,26 @@ theorem stageablePuts_step
           · exact hnoreply reply hreply hold
           · simp at hnew
       · simp at hnew
-  | outside =>
-      exact hinvariant
+  | outside htime _ =>
+      intro store address op key document expectedVersion hstore hmem
+      obtain ⟨provenance, hsnapshot, horigin, hagreement, heligible⟩ :=
+        hinvariant (by simpa [World.observeOutside] using hstore)
+          (by simpa [World.observeOutside] using hmem)
+      refine ⟨provenance, hsnapshot, horigin.mono htime (by
+        intro message hmessage
+        simpa [World.observeOutside] using hmessage), ?_, ?_⟩
+      · intro node flight hnode hflight hphase
+        exact hagreement node flight
+          (by simpa [World.observeOutside] using hnode) hflight hphase
+      · intro hmatch
+        obtain ⟨node, flight, hnode, hflight, hphase, hnoreply⟩ :=
+          heligible hmatch
+        refine ⟨node, flight,
+          by simpa [World.observeOutside] using hnode,
+          hflight, hphase, ?_⟩
+        intro reply hreply hreplyMem
+        exact hnoreply reply hreply
+          (by simpa [World.observeOutside] using hreplyMem)
   | @process pid now event result htime hprocess hvalid hresult =>
       intro nextStore address op key document expectedVersion
         hnextStore hmem
@@ -5303,7 +5612,7 @@ theorem stageablePuts_step
           heligible⟩ :=
           hinvariant hstore hold
         refine ⟨provenance, ?_,
-          horigin.mono fun message hmessage =>
+          horigin.mono htime fun message hmessage =>
             List.mem_append_left _ hmessage, ?_, ?_⟩
         rcases heffect with rfl | ⟨writtenKey, written, rfl⟩
         · exact hsnapshot
@@ -5463,20 +5772,22 @@ theorem stageablePuts_step
           reachable_nodes_serial hreachable address hprocess
         rw [hnodeState] at hserialNode
         cases Concrete.Local.node.inj hserialNode
+        obtain ⟨scanNode, hscanNode, hscans⟩ :=
+          reachable_nodes_scans_valid hreachable address hprocess
+        rw [hnodeState] at hscanNode
+        cases Concrete.Local.node.inj hscanNode
         obtain ⟨provenance, hsnapshot, horigin, hagreement,
             hactiveNew⟩ :=
           node_step_sent_put_stageable hprocess hnodeState hstore
-            hnodeValid hserial (reachable_got_snapshots hreachable)
+            hnodeValid hscans hserial (reachable_got_snapshots hreachable)
             (reachable_flight_request_origins hreachable)
-            hvalid (hnodeState ▸ hresult) hsent
+            hvalid htime (hnodeState ▸ hresult) hsent
         have hsame : nextStore = store := by
           have hx : store = nextStore := by
             simpa [World.land, hstore] using hnextStore
           exact hx.symm
         subst nextStore
-        refine ⟨provenance, hsnapshot,
-          horigin.mono fun message hmessage =>
-            List.mem_append_left _ hmessage, ?_, ?_⟩
+        refine ⟨provenance, hsnapshot, horigin, ?_, ?_⟩
         intro nextNode flight hnodeNext hflight hphase
         have hstate : result.state = .node nextNode := by
           simpa [World.land] using hnodeNext
@@ -5552,26 +5863,38 @@ theorem covered_sent
     ⟨output, houtput, rfl⟩, rfl⟩
 
 def FlightWorkflowStage (flight : Concrete.Flight)
-    (nodePending abstractPending : List WorkflowEntry) : Prop :=
+    (nodePending : List Concrete.PendingEntry)
+    (abstractPending : List WorkflowEntry) : Prop :=
   match flight.transaction with
-  | .external _ => abstractPending = nodePending
+  | .external _ =>
+      abstractPending = Concrete.pendingWorkflow nodePending
   | .work item instant rest =>
       match flight.phase with
-      | .loading => abstractPending = .work item instant :: rest
+      | .loading =>
+          abstractPending =
+            (Resonate.occurrenceEntry? item).toList ++
+              Concrete.pendingWorkflow rest
       | .writing =>
-          abstractPending = .work item instant :: rest ∨
-          abstractPending = flight.continuations
+          abstractPending =
+              (Resonate.occurrenceEntry? item).toList ++
+                Concrete.pendingWorkflow rest ∨
+          abstractPending =
+            Concrete.pendingWorkflow flight.continuations
   | .scan key instant rest =>
       match flight.phase with
-      | .loading => abstractPending = .scan key instant :: rest
+      | .loading =>
+          abstractPending = Concrete.pendingWorkflow rest
       | .writing =>
-          abstractPending = .scan key instant :: rest ∨
-          abstractPending = flight.continuations
+          abstractPending = Concrete.pendingWorkflow rest ∨
+          abstractPending =
+            Concrete.pendingWorkflow flight.continuations
 
 def TransactionPending : Concrete.Transaction → Option (List WorkflowEntry)
   | .external _ => none
-  | .work item instant rest => some (.work item instant :: rest)
-  | .scan key instant rest => some (.scan key instant :: rest)
+  | .work item _ rest =>
+      some ((Resonate.occurrenceEntry? item).toList ++
+        Concrete.pendingWorkflow rest)
+  | .scan _ _ rest => some (Concrete.pendingWorkflow rest)
 
 def WorkflowAligned
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -5583,7 +5906,8 @@ def WorkflowAligned
       concrete.process (.node config.workflowNode) = .node node ∧
       (node.workflowBlocked = true ∨
        (node.flights = [] ∧
-          (abstract.process .service).workflow.pending = node.pending) ∨
+          (abstract.process .service).workflow.pending =
+            Concrete.pendingWorkflow node.pending) ∨
        ∃ op flight,
          (op, flight) ∈ node.flights ∧
          FlightWorkflowStage flight node.pending
@@ -5684,7 +6008,7 @@ structure Related (nodes : List Addr) (appConfig : Resonate.Config)
           Covered abstract flight.selected ∧
           (TransactionPending flight.transaction = none ∨
             (abstract.process .service).workflow.pending =
-              flight.continuations)) ∧
+              Concrete.pendingWorkflow flight.continuations)) ∧
       ((Concrete.Pid.store, .node address,
           .storeReply { op, payload := .failed }) ∈ concrete.network →
         Covered abstract
@@ -6283,7 +6607,7 @@ theorem related_after_land
             Covered abstractNext flight.selected ∧
             (TransactionPending flight.transaction = none ∨
               (abstractNext.process .service).workflow.pending =
-                flight.continuations)) ∧
+                Concrete.pendingWorkflow flight.continuations)) ∧
         ((Concrete.Pid.store, .node address,
             .storeReply { op, payload := .failed }) ∈
               (concrete.land pid now result).network →
@@ -7288,7 +7612,8 @@ theorem simulate_internal_committed_store
     (htransport :
       StoreRep (physical.commit key document) lifted.1 ∧
         lifted.2 = provenance.outputs ∧
-        lifted.1.workflow.pending = provenance.continuations)
+        lifted.1.workflow.pending =
+          Concrete.pendingWorkflow provenance.continuations)
     (hkeys :
       ∀ knownKey ∈ (abstract.process .service).store.keys,
         knownKey ∈ lifted.1.store.keys)
@@ -7773,9 +8098,12 @@ theorem simulate_matching_put_store
   rw [hphysical] at hrepresented
   cases Concrete.Local.store.inj hrepresented
   have hwork
-      {item : WorkItem} {instant : Time} {rest : List WorkflowEntry}
+      {request : ServerModel.PromiseCreateReq}
+      {semanticTime instant : Time}
+      {rest : List Concrete.PendingEntry}
       (htransaction :
-        provenance.transaction = .work item instant rest)
+        provenance.transaction =
+          .work (.occurrence request semanticTime) instant rest)
       {reply : StoreReply}
       (hreply : reply = .written ∨ reply = .failed)
       (hconcreteResult :
@@ -7800,6 +8128,7 @@ theorem simulate_matching_put_store
           })
           (endOf abstract execution) ∧
         Abstract.boundaryTrace execution = [] := by
+    let item : WorkItem := .occurrence request semanticTime
     have hitemKey : item.key = key := by
       have hvalid :=
         related.flights address node op flight haddress hnode hflight
@@ -7809,21 +8138,24 @@ theorem simulate_matching_put_store
       exact htx.trans hkey.symm
     let lifted :=
       Resonate.runWork { appConfig with unreliable := true }
-        item instant rest (abstract.process .service)
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service)
+    let entry : WorkflowEntry := { request, instant := semanticTime }
     have hpendingTransaction :
         TransactionPending provenance.transaction =
-          some (.work item instant :: rest) := by
+          some (entry :: Concrete.pendingWorkflow rest) := by
       rw [htransaction]
       rfl
     have hpending :
         (abstract.process .service).workflow.pending =
-          .work item instant :: rest := by
+          entry :: Concrete.pendingWorkflow rest := by
       have hversion :
           flight.loaded.map (·.2) = physical.version flight.key := by
         subst key
         simpa [hloaded] using provenance.expected_eq.trans hmatch
       exact (related.currentWorkflow physical address node op flight
-        (.work item instant :: rest) haddress hphysical hnode hflight
+        (entry :: Concrete.pendingWorkflow rest)
+        haddress hphysical hnode hflight
         hphase hversion (by
           rw [← hflightTransaction]
           exact hpendingTransaction)).2
@@ -7832,13 +8164,15 @@ theorem simulate_matching_put_store
           (Resonate.runTimeoutChoices
             { appConfig with unreliable := true } now
             (abstract.process .service)).val := by
-      simp [lifted, Resonate.runTimeoutChoices, hpending,
-        Resonate.runWorkflowEntry, Outcomes.one]
+      simp [lifted, item, entry, Resonate.runTimeoutChoices,
+        Resonate.timeoutChoices, Resonate.pendingTimeoutChoices,
+        hpending, Resonate.runWork, WorkflowEntry.item]
     have htransport :=
       work_cas_transport hrep provenance htransaction hcurrent
     have hitemMem :=
       work_key_mem { appConfig with unreliable := true }
-        item instant rest (abstract.process .service)
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service)
     rw [hitemKey] at hitemMem
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance hsnapshot hmatch
@@ -7847,12 +8181,13 @@ theorem simulate_matching_put_store
       haddress hnode hflight hphase hkey hloaded hflightTransaction
       houtputs hcontinuations lifted hchoice htransport
       (work_keys_mono { appConfig with unreliable := true }
-        item instant rest (abstract.process .service))
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service))
       (by simpa [lifted] using hitemMem)
       hreply htime hconcreteResult
   have hscan
       {scanKey : DocumentKey} {instant : Time}
-      {rest : List WorkflowEntry}
+      {rest : List Concrete.PendingEntry}
       (htransaction :
         provenance.transaction = .scan scanKey instant rest)
       {reply : StoreReply}
@@ -7887,45 +8222,71 @@ theorem simulate_matching_put_store
       simp only [Concrete.Transaction.key?, Option.some.injEq] at htx
       exact htx.trans hkey.symm
     subst scanKey
-    let lifted :=
-      Resonate.runScan { appConfig with unreliable := true }
-        key instant rest (abstract.process .service)
     have hpendingTransaction :
         TransactionPending provenance.transaction =
-          some (.scan key instant :: rest) := by
+          some (Concrete.pendingWorkflow rest) := by
       rw [htransaction]
       rfl
     have hpending :
         (abstract.process .service).workflow.pending =
-          .scan key instant :: rest := by
+          Concrete.pendingWorkflow rest := by
       have hversion :
           flight.loaded.map (·.2) = physical.version flight.key := by
         subst key
         simpa [hloaded] using provenance.expected_eq.trans hmatch
       exact (related.currentWorkflow physical address node op flight
-        (.scan key instant :: rest) haddress hphysical hnode hflight
+        (Concrete.pendingWorkflow rest)
+        haddress hphysical hnode hflight
         hphase hversion (by
           rw [← hflightTransaction]
           exact hpendingTransaction)).2
+    have hknown :
+        key ∈ node.known := by
+      exact (reachable_scan_flight_valid hreachable haddress hnode hflight
+        (hflightTransaction.symm.trans htransaction)).2.1
+    have hkeyMem :
+        key ∈ (abstract.process .service).store.keys :=
+      related.known address node key haddress hnode hknown
+    obtain ⟨item, hitemKey, hitem, htransport⟩ :=
+      scan_cas_transport hrep provenance htransaction hcurrent hkeyMem
+    let lifted :=
+      Resonate.runWork { appConfig with unreliable := true }
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service)
+    have hinstant :
+        instant ≤ now :=
+      Nat.le_trans
+        (reachable_scan_flight_valid hreachable haddress hnode hflight
+          (hflightTransaction.symm.trans htransaction)).1
+        htime
     have hchoice :
         lifted ∈
           (Resonate.runTimeoutChoices
             { appConfig with unreliable := true } now
             (abstract.process .service)).val := by
-      simp [lifted, Resonate.runTimeoutChoices, hpending,
-        Resonate.runWorkflowEntry, Outcomes.one]
-    have htransport :=
-      scan_cas_transport hrep provenance htransaction hcurrent
+      simp only [Resonate.runTimeoutChoices, List.mem_cons]
+      right
+      simp only [Resonate.timeoutChoices, List.mem_append]
+      right
+      simp only [Resonate.documentTimeoutChoices, List.mem_flatMap,
+        List.mem_map]
+      exact ⟨instant, List.mem_range.mpr (Nat.lt_succ_iff.mpr hinstant),
+        item, hitem, by simp [lifted, hpending]⟩
+    have hitemKeyMem :=
+      work_key_mem { appConfig with unreliable := true }
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service)
+    rw [hitemKey] at hitemKeyMem
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance hsnapshot hmatch
       (htransactionPending := hpendingTransaction)
       (hfailure := by simp [htransaction, Concrete.failureOutputs])
       haddress hnode hflight hphase hkey hloaded hflightTransaction
       houtputs hcontinuations lifted hchoice htransport
-      (scan_keys_mono { appConfig with unreliable := true }
-        key instant rest (abstract.process .service))
-      (scan_key_mem { appConfig with unreliable := true }
-        key instant rest (abstract.process .service))
+      (work_keys_mono { appConfig with unreliable := true }
+        item instant (Concrete.pendingWorkflow rest)
+          (abstract.process .service))
+      (by simpa [lifted] using hitemKeyMem)
       hreply htime hconcreteResult
   have hinternalFence
       (hfailure : Concrete.failureOutputs provenance.transaction = [])
@@ -7983,6 +8344,12 @@ theorem simulate_matching_put_store
           horigin haddress hnode hflight hphase hkey hflightTransaction
           houtputs htime
   | work item instant rest =>
+      have hvalid :=
+        related.flights address node op flight haddress hnode hflight
+      have hshape := hvalid.2.2
+      rw [← hflightTransaction, htransaction, WorkShaped] at hshape
+      obtain ⟨request, semanticTime, hitem⟩ := hshape
+      subst item
       by_cases hflaky : config.flaky = true
       · simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
           hflaky] at hresult
@@ -8198,7 +8565,7 @@ theorem related_after_node_land
             Covered abstractNext flight.selected ∧
             (TransactionPending flight.transaction = none ∨
               (abstractNext.process .service).workflow.pending =
-                flight.continuations)) ∧
+                Concrete.pendingWorkflow flight.continuations)) ∧
         ((Concrete.Pid.store, .node currentAddress,
             .storeReply { op, payload := .failed }) ∈
               (concrete.land (.node address) now result).network →
@@ -8434,162 +8801,6 @@ theorem simulate_pure_external_node
       exact (hfailed (by simpa [World.land] using hreply)).land
         abstractResult
 
-theorem simulate_idle_scan_capture
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
-    (hreachable : Reachable (CModel nodes appConfig) config concrete)
-    (related : Related nodes appConfig config concrete abstract)
-    {address : Addr} (haddress : address ∈ nodes)
-    (howner : address = config.workflowNode)
-    {node : Concrete.Node}
-    (hnode : concrete.process (.node address) = .node node)
-    (hblocked : node.workflowBlocked = false)
-    (hflights : node.flights = [])
-    (hpendingNode : node.pending = [])
-    {key : DocumentKey} (hknownHead : node.known.head? = some key)
-    {now : Time} (htime : concrete.now ≤ now)
-    (hresult :
-      ({
-        state := .node { node with pending := [.scan key now] }
-        send := []
-      } : Result Concrete.Pid Concrete.Local Concrete.Msg) ∈
-        (Concrete.step appConfig config (.node address) (.node node)
-          now .timeout).val) :
-    ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
-        abstract execution ∧
-      Related nodes appConfig config
-        (concrete.land (.node address) now {
-          state := .node { node with pending := [.scan key now] }
-          send := []
-        })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
-  subst address
-  have habstractPending :
-      (abstract.process .service).workflow.pending = [] := by
-    simpa [WorkflowAligned, haddress, hnode, hblocked, hflights,
-      hpendingNode] using related.workflow
-  have hknownMem : key ∈ node.known := by
-    cases hknown : node.known with
-    | nil => simp [hknown] at hknownHead
-    | cons first rest =>
-        simp [hknown] at hknownHead
-        subst first
-        simp [hknown]
-  have habstractKey :
-      key ∈ (abstract.process .service).store.keys :=
-    related.known config.workflowNode node key haddress hnode hknownMem
-  let captured : State := {
-    abstract.process .service with
-      workflow := { pending := [.scan key now] }
-  }
-  let abstractResult : Result Abstract.Pid State Message := {
-    state := captured
-    send := []
-  }
-  let abstractNext := abstract.land .service now abstractResult
-  have hchoice :
-      (captured, []) ∈
-        (Resonate.runTimeoutChoices
-          { appConfig with unreliable := true } now
-          (abstract.process .service)).val := by
-    simp [Resonate.runTimeoutChoices, habstractPending, captured,
-      habstractKey]
-  have habstractResult :
-      abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
-          .service (abstract.process .service) now .timeout).val := by
-    simp only [Abstract.step]
-    exact List.mem_map.mpr ⟨(captured, []), hchoice, by
-      simp [abstractResult, Abstract.sends]⟩
-  have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
-        (.process .service now .timeout []) abstractNext :=
-    Step.process (event := .timeout)
-      (Nat.le_trans related.time htime) rfl trivial habstractResult
-  refine ⟨[((.process .service now .timeout []), abstractNext)],
-    ⟨habstractStep, trivial⟩, ?_, rfl⟩
-  let nextNode : Concrete.Node :=
-    { node with pending := [.scan key now] }
-  have hnextFlights : nextNode.flights = [] := by
-    simp [nextNode, hflights]
-  have hprocessWorkflow :
-      (concrete.land (.node config.workflowNode) now {
-        state := .node nextNode
-        send := []
-      }).process (.node config.workflowNode) = .node nextNode := by
-    simp [World.land]
-  change Related nodes appConfig config
-    (concrete.land (.node config.workflowNode) now {
-      state := .node nextNode
-      send := []
-    }) abstractNext
-  apply related_after_node_land hreachable related haddress hnode
-      (event := .timeout) htime trivial hresult
-  · simp [abstractNext, World.land]
-  · intro message hmessage
-    exact List.mem_append_left _ hmessage
-  · intro knownKey hknown
-    simpa [abstractNext, World.land, abstractResult, captured] using hknown
-  · obtain ⟨physical, hphysical, hrep⟩ := related.store
-    refine ⟨physical, by simpa [World.land] using hphysical, ?_⟩
-    intro other
-    simpa [abstractNext, World.land, abstractResult, captured] using
-      hrep other
-  · simp only [WorkflowAligned, haddress]
-    refine ⟨nextNode, hprocessWorkflow, Or.inr (Or.inl ⟨hnextFlights, ?_⟩)⟩
-    simp [abstractNext, World.land, abstractResult, captured, nextNode]
-  · intro physical currentAddress currentNode op flight pending
-      hcurrentAddress hphysical hcurrentNode hflight hphase hversion
-      hpending
-    by_cases heq : currentAddress = config.workflowNode
-    · subst currentAddress
-      rw [hprocessWorkflow] at hcurrentNode
-      cases Concrete.Local.node.inj hcurrentNode
-      rw [hnextFlights] at hflight
-      contradiction
-    · have hcurrentNodeOld :
-          concrete.process (.node currentAddress) = .node currentNode := by
-        simpa [World.land, heq] using hcurrentNode
-      exact (heq (reachable_flight_owner hreachable hcurrentAddress
-        hcurrentNodeOld hflight)).elim
-  · intro currentAddress currentNode knownKey hcurrentAddress hcurrentNode
-      hknown
-    by_cases heq : currentAddress = config.workflowNode
-    · subst currentAddress
-      rw [hprocessWorkflow] at hcurrentNode
-      cases Concrete.Local.node.inj hcurrentNode
-      have hold :=
-        related.known config.workflowNode node knownKey haddress hnode hknown
-      simpa [abstractNext, World.land, abstractResult, captured] using hold
-    · have hcurrentNodeOld :
-          concrete.process (.node currentAddress) = .node currentNode := by
-        simpa [World.land, heq] using hcurrentNode
-      have hold :=
-        related.known currentAddress currentNode knownKey hcurrentAddress
-          hcurrentNodeOld hknown
-      simpa [abstractNext, World.land, abstractResult, captured] using hold
-  · intro target call hsend
-    contradiction
-  · intro output hsend
-    contradiction
-  · intro currentAddress currentNode op flight hcurrentAddress hcurrentNode
-      hflight
-    by_cases heq : currentAddress = config.workflowNode
-    · subst currentAddress
-      rw [hprocessWorkflow] at hcurrentNode
-      cases Concrete.Local.node.inj hcurrentNode
-      rw [hnextFlights] at hflight
-      contradiction
-    · have hcurrentNodeOld :
-          concrete.process (.node currentAddress) = .node currentNode := by
-        simpa [World.land, heq] using hcurrentNode
-      exact (heq (reachable_flight_owner hreachable hcurrentAddress
-        hcurrentNodeOld hflight)).elim
-
 theorem related_after_start_node
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
@@ -8744,6 +8955,53 @@ theorem related_after_start_node
         simpa [World.land, heq] using hcurrentNode
       exact (heq (reachable_flight_owner hreachable hcurrentAddress
         hcurrentNodeOld hcurrentFlight)).elim
+
+theorem simulate_idle_scan_start
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {concrete : World (CModel nodes appConfig)}
+    {abstract : World AModel}
+    (hreachable : Reachable (CModel nodes appConfig) config concrete)
+    (related : Related nodes appConfig config concrete abstract)
+    {address : Addr} (haddress : address ∈ nodes)
+    (howner : address = config.workflowNode)
+    {node : Concrete.Node}
+    (hnode : concrete.process (.node address) = .node node)
+    (hblocked : node.workflowBlocked = false)
+    (hflights : node.flights = [])
+    (hpendingNode : node.pending = [])
+    {key : DocumentKey} (hknownHead : node.known.head? = some key)
+    {now : Time} (htime : concrete.now ≤ now)
+    (hresult :
+      Concrete.start node (.scan key now []) key ∈
+        (Concrete.step appConfig config (.node address) (.node node)
+          now .timeout).val) :
+    ∃ execution,
+      Legal AModel { appConfig with unreliable := true }
+        abstract execution ∧
+      Related nodes appConfig config
+        (concrete.land (.node address) now
+          (Concrete.start node (.scan key now []) key))
+        (endOf abstract execution) ∧
+      Abstract.boundaryTrace execution = [] := by
+  have habstractPending :
+      (abstract.process .service).workflow.pending = [] := by
+    simpa [WorkflowAligned, howner ▸ haddress, howner ▸ hnode,
+      hblocked, hflights, hpendingNode, Concrete.pendingWorkflow] using
+        related.workflow
+  refine ⟨[], trivial, ?_, rfl⟩
+  have hstage :
+      node.workflowBlocked = true ∨
+        FlightWorkflowStage
+          ({ key, transaction := .scan key now [] } : Concrete.Flight)
+          node.pending (abstract.process .service).workflow.pending := by
+    right
+    simp [FlightWorkflowStage, hpendingNode, habstractPending,
+      Concrete.pendingWorkflow]
+  apply related_after_start_node hreachable related haddress howner hnode
+      (base := node) rfl hflights rfl
+      (transaction := .scan key now []) (key := key) hstage
+      (event := .timeout) htime trivial hresult
 
 theorem related_after_loading_await_node
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -8993,13 +9251,13 @@ theorem related_after_written_node
   have hworkflowNext :
       nextNode.workflowBlocked = true ∨
         (abstract.process .service).workflow.pending =
-          nextNode.pending := by
+          Concrete.pendingWorkflow nextNode.pending := by
     cases htransaction : flight.transaction with
     | external call =>
         have hvalid :=
           related.flights address node op flight haddress hnode hflight
         rw [FlightValid, hphase] at hvalid
-        obtain ⟨document, hdocument, hselected⟩ := hvalid.2
+        obtain ⟨document, hdocument, hselected⟩ := hvalid.2.1
         rw [htransaction] at hselected
         have hcontinuations :
             flight.continuations = [] :=
@@ -9025,10 +9283,12 @@ theorem related_after_written_node
               NodeSerial.eq_of_mem hserial hactiveFlight hflight
             cases hpairs
             calc
-              (abstract.process .service).workflow.pending = node.pending := by
+              (abstract.process .service).workflow.pending =
+                  Concrete.pendingWorkflow node.pending := by
                 simpa [FlightWorkflowStage, htransaction] using hstage
-              _ = nextNode.pending := by
-                simp [nextNode, hcontinuations, hnextPending]
+              _ = Concrete.pendingWorkflow nextNode.pending := by
+                simp [nextNode, hcontinuations, hnextPending,
+                  Concrete.pendingWorkflow]
     | work item instant rest =>
         have hclean :=
           reachable_internal_flight_clean hreachable haddress hnode hflight
@@ -9247,28 +9507,30 @@ theorem related_after_decide_node
               haddress hnode hflight (by rw [ht]; rfl)
             rw [hblocked] at hclean
             cases hclean.2
-          · have : (abstract.process .service).workflow.pending =
-                .work item instant :: rest := by
+          · have hbefore :
+                (abstract.process .service).workflow.pending =
+                  (Resonate.occurrenceEntry? item).toList ++
+                    Concrete.pendingWorkflow rest := by
               simpa [FlightWorkflowStage, ht, hphase] using hstage
-            have hpendingEq : pending = .work item instant :: rest := by
-              symm
+            have hpendingEq :
+                (Resonate.occurrenceEntry? item).toList ++
+                    Concrete.pendingWorkflow rest = pending := by
               simpa [writing, ht, TransactionPending] using hpending
-            exact ⟨howner, by
-              simpa [hpendingEq] using this⟩
+            exact ⟨howner, hbefore.trans hpendingEq⟩
       | scan key instant rest =>
           rcases hworkflowCase with hblocked | hstage
           · have hclean := reachable_internal_flight_clean hreachable
               haddress hnode hflight (by rw [ht]; rfl)
             rw [hblocked] at hclean
             cases hclean.2
-          · have : (abstract.process .service).workflow.pending =
-                .scan key instant :: rest := by
+          · have hbefore :
+                (abstract.process .service).workflow.pending =
+                  Concrete.pendingWorkflow rest := by
               simpa [FlightWorkflowStage, ht, hphase] using hstage
-            have hpendingEq : pending = .scan key instant :: rest := by
-              symm
+            have hpendingEq :
+                Concrete.pendingWorkflow rest = pending := by
               simpa [writing, ht, TransactionPending] using hpending
-            exact ⟨howner, by
-              simpa [hpendingEq] using this⟩
+            exact ⟨howner, hbefore.trans hpendingEq⟩
     · have old :
           concrete.process (.node currentAddress) = .node currentNode := by
         simpa [World.land, heq] using hcurrentNode
@@ -9377,7 +9639,8 @@ theorem related_after_terminal_node
     (hnextKnown : nextNode.known = node.known)
     (hworkflow :
       nextNode.workflowBlocked = true ∨
-        (abstract.process .service).workflow.pending = nextNode.pending)
+        (abstract.process .service).workflow.pending =
+          Concrete.pendingWorkflow nextNode.pending)
     {outputs : List Output} (hcovered : Covered abstract outputs)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
     (htime : concrete.now ≤ now)
@@ -9471,7 +9734,8 @@ theorem workflow_after_external_flight_removed
     (htake : node.takeFlight op = (some flight, remaining))
     {call : Call} (htransaction : flight.transaction = .external call) :
     remaining.workflowBlocked = true ∨
-      (abstract.process .service).workflow.pending = remaining.pending := by
+      (abstract.process .service).workflow.pending =
+        Concrete.pendingWorkflow remaining.pending := by
   have hflight := takeFlight_some_mem htake
   have howner :=
     reachable_flight_owner hreachable haddress hnode hflight
@@ -9497,6 +9761,55 @@ theorem workflow_after_external_flight_removed
     rw [takeFlight_pending htake]
     simpa [FlightWorkflowStage, htransaction] using hstage
 
+theorem workflow_after_scan_flight_removed
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
+    {concrete : World (CModel nodes appConfig)}
+    {abstract : World AModel}
+    (hreachable : Reachable (CModel nodes appConfig) config concrete)
+    (related : Related nodes appConfig config concrete abstract)
+    {address : Addr} (haddress : address ∈ nodes)
+    {node remaining : Concrete.Node}
+    (hnode : concrete.process (.node address) = .node node)
+    {op : Concrete.OpId} {flight : Concrete.Flight}
+    (htake : node.takeFlight op = (some flight, remaining))
+    (hphase : flight.phase = .loading)
+    {key : DocumentKey} {instant : Time}
+    {rest : List Concrete.PendingEntry}
+    (htransaction : flight.transaction = .scan key instant rest) :
+    remaining.workflowBlocked = true ∨
+      (abstract.process .service).workflow.pending =
+        Concrete.pendingWorkflow remaining.pending := by
+  have hflight := takeFlight_some_mem htake
+  have howner :=
+    reachable_flight_owner hreachable haddress hnode hflight
+  obtain ⟨serialNode, hserialNode, hserial⟩ :=
+    reachable_nodes_serial hreachable address haddress
+  rw [hnode] at hserialNode
+  cases Concrete.Local.node.inj hserialNode
+  have hclean :=
+    reachable_internal_flight_clean hreachable haddress hnode hflight
+      (by simp [htransaction, Concrete.Transaction.isExternal])
+  have hrest :=
+    (reachable_scan_flight_valid hreachable haddress hnode hflight
+      htransaction).2.2
+  have hold := related.workflow
+  simp only [WorkflowAligned, howner ▸ haddress] at hold
+  obtain ⟨workflowNode, hworkflowNode, haligned⟩ := hold
+  rw [← howner, hnode] at hworkflowNode
+  cases Concrete.Local.node.inj hworkflowNode
+  rcases haligned with hblocked | hidle | hactive
+  · rw [hblocked] at hclean
+    cases hclean.2
+  · rw [hidle.1] at hflight
+    contradiction
+  · obtain ⟨activeOp, activeFlight, hactiveFlight, hstage⟩ := hactive
+    have hpairs := NodeSerial.eq_of_mem hserial hactiveFlight hflight
+    cases hpairs
+    right
+    rw [takeFlight_pending htake, hclean.1]
+    simpa [FlightWorkflowStage, htransaction, hphase, hrest] using hstage
+
 theorem simulate_external_shed_terminal_node
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
@@ -9514,7 +9827,8 @@ theorem simulate_external_shed_terminal_node
     (hnextKnown : nextNode.known = node.known)
     (hworkflow :
       nextNode.workflowBlocked = true ∨
-        (abstract.process .service).workflow.pending = nextNode.pending)
+        (abstract.process .service).workflow.pending =
+          Concrete.pendingWorkflow nextNode.pending)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
     (htime : concrete.now ≤ now)
     (hvalid : event.Valid concrete (.node address))
@@ -9723,7 +10037,7 @@ theorem simulate_node_process
             | some key =>
                 simp [hknown, Outcomes.one] at hresult
                 subst result
-                exact simulate_idle_scan_capture hreachable related haddress
+                exact simulate_idle_scan_start hreachable related haddress
                   howner hnode hblocked hflights hpending hknown htime
                   (by simp [Concrete.step, hguard, hpending, hknown,
                     Outcomes.one])
@@ -9733,32 +10047,22 @@ theorem simulate_node_process
             subst result
             have habstractPending :
                 (abstract.process .service).workflow.pending =
-                  entry :: rest := by
+                  Concrete.pendingWorkflow (entry :: rest) := by
               simpa [WorkflowAligned, howner ▸ haddress, howner ▸ hnode,
                 hblocked, hflights, hpending] using related.workflow
             cases entry with
-            | work item instant =>
+            | occurrence request instant =>
                 exact ⟨[], trivial,
                   related_after_start_node hreachable related haddress howner
                     hnode (base := { node with pending := [] })
                     (by rfl) (by simp [hflights]) (by rfl)
-                    (transaction := .work item instant rest)
-                    (key := item.key)
+                    (transaction :=
+                      .work (.occurrence request instant) instant rest)
+                    (key := .origin request.id.origin)
                     (.inr (by
-                      simpa [FlightWorkflowStage] using habstractPending))
-                    (event := .timeout) htime trivial (by
-                      simp [Concrete.step, hguard, hpending, Outcomes.one]
-                      cases item <;> rfl),
-                  rfl⟩
-            | scan key instant =>
-                exact ⟨[], trivial,
-                  related_after_start_node hreachable related haddress howner
-                    hnode (base := { node with pending := [] })
-                    (by rfl) (by simp [hflights]) (by rfl)
-                    (transaction := .scan key instant rest)
-                    (key := key)
-                    (.inr (by
-                      simpa [FlightWorkflowStage] using habstractPending))
+                      simpa [FlightWorkflowStage, Concrete.pendingWorkflow,
+                        Concrete.PendingEntry.toWorkflow?,
+                        Resonate.occurrenceEntry?] using habstractPending))
                     (event := .timeout) htime trivial (by
                       simp [Concrete.step, hguard, hpending, Outcomes.one]
                       rfl),
@@ -9810,7 +10114,7 @@ theorem simulate_node_process
                     cases ht : node.workflowBlocked <;> simp_all
                   have hpending :
                       (abstract.process .service).workflow.pending =
-                        node.pending := by
+                        Concrete.pendingWorkflow node.pending := by
                     simpa [WorkflowAligned, howner ▸ haddress,
                       howner ▸ hnode, hbfalse, hflights] using
                       related.workflow
@@ -9866,8 +10170,44 @@ theorem simulate_node_process
                             have hvalidFlight :=
                               related.flights address node replyOp flight
                                 haddress hnode hflight
-                            exact
-                              (hvalidFlight.select_ne_none loaded hs).elim
+                            cases htransaction : flight.transaction with
+                            | external call =>
+                                exact (hvalidFlight.select_ne_none
+                                  (by
+                                    intro key instant rest hscan
+                                    simp [htransaction] at hscan)
+                                  loaded hs).elim
+                            | work item instant rest =>
+                                exact (hvalidFlight.select_ne_none
+                                  (by
+                                    intro key scanInstant scanRest hscan
+                                    simp [htransaction] at hscan)
+                                  loaded hs).elim
+                            | scan key instant rest =>
+                                simp [ht, hp, Concrete.decide, hs,
+                                  Outcomes.one] at hresult
+                                subst result
+                                obtain ⟨serialNode, hserialNode, hserial⟩ :=
+                                  reachable_nodes_serial hreachable address
+                                    haddress
+                                rw [hnode] at hserialNode
+                                cases Concrete.Local.node.inj hserialNode
+                                have hremainingFlights :=
+                                  takeFlight_remaining_empty hserial ht
+                                have hremainingKnown := takeFlight_known ht
+                                have hworkflow :=
+                                  workflow_after_scan_flight_removed hreachable
+                                    related haddress hnode ht hp htransaction
+                                exact ⟨[], trivial,
+                                  related_after_terminal_node hreachable related
+                                    haddress hnode hflight hremainingFlights
+                                    hremainingKnown hworkflow
+                                    (outputs := []) (by simp [Covered])
+                                    htime hvalid (by
+                                      simp [Concrete.step, ht, hp,
+                                        Concrete.decide, Concrete.sendOutputs,
+                                        hs, Outcomes.one]),
+                                  rfl⟩
                         | some candidate =>
                             simp [ht, hp, Concrete.decide, hs,
                               Outcomes.one] at hresult

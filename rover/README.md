@@ -27,20 +27,21 @@ abstract protocol pinned in `lakefile.toml`.
   transport envelopes. `Resonate.run` executes external calls at
   `Call.requestedAt`; `runTimeout` advances at most one document transaction.
 - `Resonate/Abstract.lean` has one service process. Only external calls are
-  injectable. A timeout carries no internal request. Pending local workflow
-  continuations run first; otherwise the service captures one current document
-  key and the timeout instant without inspecting that document. A later timeout
-  reads the document's then-current contents and processes its captured-time
-  scan as one transaction. A schedule scan updates only its schedule document
-  and queues each occurrence; every occurrence updates its origin document on
-  a separate later timeout. Work newly enabled by a handler waits for a later
-  key capture.
+  injectable. A timeout carries no internal request and nondeterministically
+  stutters, executes one pending schedule occurrence, or executes one currently
+  eligible document item at a logical firing instant no later than the Rover
+  step time. The item's own due predicate holds at that logical instant. The
+  finite executable relation enumerates all such instants. Schedule work
+  updates only its schedule document and queues occurrences; every occurrence
+  updates its origin document on a separate later timeout at the occurrence
+  instant. Work newly enabled by a handler waits for a later timeout.
 - The service sends Writer emissions directly into the Rover network alongside
   boundary responses. Internal work is never represented as a wire message.
 - `Resonate/TraceChecker.lean` searches the full request/response/message
   boundary protocol. A successful certificate is replayed against Rover and
   `check_valid_sound` proves that every `valid` verdict is a real abstract
-  behavior. Exhaustion is conservatively `unknown`.
+  behavior. Its timeout action enumerates every finite abstract timeout choice.
+  Exhaustion is conservatively `unknown`.
 - `Resonate/Examples.lean` contains executable promise, task,
   read-your-own-writes, schedule, ordered and non-deduplicated message,
   timeout-sweep, deferred-work, retry, and trace-checking tests.
@@ -64,9 +65,10 @@ acknowledged-written, landed-but-failed, and candidate-not-landed failed
 outcomes. The latter consumes the expected version while retaining the old
 logical document, so a raw duplicate cannot land after its continuation was
 discarded. Flights consume an operation reply at most once. Node timeouts
-first capture a key/time cursor and later execute its validated document
-transaction; schedule occurrence continuations are separate later
-origin-document transactions.
+start a private key/time scan, then execute only work selected from the
+validated GET snapshot using that retained logical time. This machinery is
+absent from abstract state. Schedule occurrence continuations are separate
+later origin-document transactions.
 
 `Resonate.Refinement` defines ghost raw-PUT provenance, per-document store
 representation, duplicate reply/PUT lemmas, the reachable one-step simulation

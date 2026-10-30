@@ -201,10 +201,6 @@ def WorkItem.key : WorkItem → DocumentKey
   | .scheduleTimeout id => .schedule id
   | .occurrence req _ => .origin req.id.origin
 
-def WorkflowEntry.key : WorkflowEntry → DocumentKey
-  | .scan key _ => key
-  | .work item _ => item.key
-
 /-- Dispatch all 21 public operations. Multi-id requests are rejected before a
 document is supplied unless every touched id has one origin. Unsupported
 searches are process-level pure responses. -/
@@ -451,10 +447,9 @@ theorem run_atMostOneDocument (config : Config) (call : Call)
   simpa [run] using
     handleExternal_atMostOneDocument config call.request call.requestedAt state
 
-def occurrenceEntry (fallback : Time) (work : WorkItem) : WorkflowEntry :=
-  match work with
-  | .occurrence _ time => .work work time
-  | _ => .work work fallback
+def occurrenceEntry? : WorkItem → Option WorkflowEntry
+  | .occurrence request instant => some { request, instant }
+  | _ => none
 
 def runWork (config : Config) (work : WorkItem) (now : Time)
     (rest : List WorkflowEntry) (state : State) : State × List Output :=
@@ -489,7 +484,7 @@ def runWork (config : Config) (work : WorkItem) (now : Time)
         runDocument config (.schedule id)
           (Direct.processSchedule id now) state
       ({ next with workflow := {
-          pending := rest ++ occurrences.map (occurrenceEntry now) } },
+          pending := rest ++ occurrences.filterMap occurrenceEntry? } },
         emitted.map .message)
   | .occurrence req time =>
       let (_, next, emitted) :=
@@ -523,107 +518,102 @@ def runInternal (config : Config) (step : InternalStep) (now : Time)
     | .scheduleTimeout req => .scheduleTimeout req.schedule
   runWork config work now state.workflow.pending state
 
-/-- Execute one captured document scan. Origin work is snapshotted and
-processed in one origin-document transaction. A schedule transaction appends
-separate occurrence-origin continuations. -/
-def runScan (config : Config) (key : DocumentKey) (instant : Time)
-    (rest : List WorkflowEntry) (state : State) : State × List Output :=
-  match key with
-  | .origin origin =>
-      let (_, next, emitted) :=
-        runDocument config (.origin origin)
-          (Direct.processOriginScan origin instant) state
-      ({ next with workflow := { pending := rest } }, emitted.map .message)
-  | .schedule id =>
-      let (occurrences, next, emitted) :=
-        runDocument config (.schedule id)
-          (Direct.processSchedule id instant) state
-      ({ next with workflow := {
-          pending := rest ++ occurrences.map (occurrenceEntry instant) } },
-        emitted.map .message)
+/-- Work whose own due predicate holds at the chosen logical firing instant.
+Schedule work is eligible exactly when its next occurrence is due. -/
+def eligibleWorkAt (state : State) (instant : Time) : List WorkItem :=
+  state.store.keys.flatMap fun key =>
+    match key with
+    | .origin origin =>
+        Direct.originWork origin (state.store.read (.origin origin)) instant
+    | .schedule id =>
+        match state.store.read (.schedule id) with
+        | some schedule =>
+            if schedule.nextRunAt ≤ instant then [.scheduleTimeout id] else []
+        | none => []
 
-theorem runScan_frame (config : Config) (key : DocumentKey) (instant : Time)
-    (rest : List WorkflowEntry) (state : State) (other : DocumentKey)
-    (h : other ≠ key) :
-    (runScan config key instant rest state).1.store.read other =
-      state.store.read other := by
-  cases key <;>
-    simp [runScan, runDocument, Direct.runWith, h]
+/-- A pending occurrence may be selected in any order; selecting it removes
+only that continuation. -/
+def pendingTimeoutChoices (config : Config) (state : State) :
+    List (State × List Output) :=
+  state.workflow.pending.mapIdx fun index entry =>
+    runWork config entry.item entry.instant
+      (state.workflow.pending.eraseIdx index) state
 
-def runWorkflowEntry (config : Config) (entry : WorkflowEntry)
-    (rest : List WorkflowEntry) (state : State) : State × List Output :=
-  match entry with
-  | .scan key instant => runScan config key instant rest state
-  | .work item instant => runWork config item instant rest state
+/-- Finite executable enumeration of all document work and logical firing
+instants no later than the Rover timeout step. -/
+def documentTimeoutChoices (config : Config) (now : Time) (state : State) :
+    List (State × List Output) :=
+  (List.range (now + 1)).flatMap fun instant =>
+    (eligibleWorkAt state instant).map fun item =>
+      runWork config item instant state.workflow.pending state
 
-/-- An idle timeout captures only a current key as a finite scan cursor. A
-later timeout reads and processes that key's then-current document at the
-captured semantic instant. -/
+def timeoutChoices (config : Config) (now : Time) (state : State) :
+    List (State × List Output) :=
+  pendingTimeoutChoices config state ++
+    documentTimeoutChoices config now state
+
+/-- A deterministic executable representative used by focused examples. The
+abstract Rover transition and full trace checker admit every enumerated choice
+and stutter. -/
 def runTimeout (config : Config) (now : Time) (state : State) :
     State × List Output :=
-  match state.workflow.pending with
-  | entry :: rest => runWorkflowEntry config entry rest state
-  | [] =>
-      match state.store.keys with
-      | [] => (state, [])
-      | key :: _ =>
-          ({ state with workflow := {
-            pending := [.scan key now] } }, [])
+  (timeoutChoices config now state).head?.getD (state, [])
 
-/-- A concrete node can know only keys whose writes were acknowledged. The
-abstract machine therefore permits an idle timeout to retain an empty cursor
-or capture any one current key. No document is inspected in this step. -/
 def runTimeoutChoices (config : Config) (now : Time) (state : State) :
     Outcomes (State × List Output) :=
-  match state.workflow.pending with
-  | entry :: rest =>
-      Outcomes.one (runWorkflowEntry config entry rest state)
-  | [] =>
-      ⟨(state, []) ::
-          state.store.keys.map fun key =>
-            ({ state with workflow := {
-              pending := [.scan key now] } }, []),
-        by simp⟩
+  ⟨(state, []) :: timeoutChoices config now state, by simp⟩
 
 theorem runTimeout_mem_choices (config : Config) (now : Time)
     (state : State) :
     runTimeout config now state ∈ (runTimeoutChoices config now state).val := by
-  cases hp : state.workflow.pending with
-  | nil =>
-      cases hk : state.store.keys with
-      | nil => simp [runTimeout, runTimeoutChoices, hp, hk]
-      | cons key rest =>
-          simp [runTimeout, runTimeoutChoices, hp, hk]
-  | cons entry rest =>
-      simp [runTimeout, runTimeoutChoices, hp, Outcomes.one]
+  cases h : timeoutChoices config now state with
+  | nil => simp [runTimeout, runTimeoutChoices, h]
+  | cons choice rest => simp [runTimeout, runTimeoutChoices, h]
 
-/-- Every timeout process step either leaves all documents unchanged or frames
-all but one key. Local workflow advancement does not weaken this store frame. -/
+theorem runTimeoutChoice_atMostOneDocument
+    (config : Config) (now : Time) (state next : State)
+    (outputs : List Output)
+    (hchoice :
+      (next, outputs) ∈ (runTimeoutChoices config now state).val) :
+    Direct.Store.AtMostOneDocument state.store next.store := by
+  simp only [runTimeoutChoices, List.mem_cons,
+    timeoutChoices, List.mem_append] at hchoice
+  rcases hchoice with hstutter | hpending | hdocument
+  · cases hstutter
+    left
+    intro key
+    rfl
+  · simp only [pendingTimeoutChoices, List.mem_mapIdx] at hpending
+    obtain ⟨index, hindex, heq⟩ := hpending
+    let entry := state.workflow.pending[index]
+    have hstate :
+        (runWork config entry.item entry.instant
+          (state.workflow.pending.eraseIdx index) state).1 = next := by
+      rw [heq]
+    right
+    refine ⟨entry.key, ?_⟩
+    intro other hother
+    rw [← hstate]
+    exact runWork_frame config entry.item entry.instant
+      (state.workflow.pending.eraseIdx index) state other hother
+  · simp only [documentTimeoutChoices, List.mem_flatMap,
+      List.mem_map] at hdocument
+    obtain ⟨instant, hinstant, item, hitem, heq⟩ := hdocument
+    have hstate :
+        (runWork config item instant state.workflow.pending state).1 =
+          next := by rw [heq]
+    right
+    refine ⟨item.key, ?_⟩
+    intro other hother
+    rw [← hstate]
+    exact runWork_frame config item instant state.workflow.pending
+      state other hother
+
 theorem runTimeout_atMostOneDocument (config : Config) (now : Time)
     (state : State) :
     Direct.Store.AtMostOneDocument state.store
-      (runTimeout config now state).1.store := by
-  cases hp : state.workflow.pending with
-  | nil =>
-      cases hk : state.store.keys with
-      | nil =>
-          left
-          intro other
-          simp [runTimeout, hp, hk]
-      | cons key tail =>
-          left
-          intro other
-          simp [runTimeout, hp, hk]
-  | cons entry rest =>
-      right
-      refine ⟨entry.key, ?_⟩
-      intro other h
-      cases entry with
-      | scan key instant =>
-          simpa [runTimeout, hp, runWorkflowEntry, WorkflowEntry.key] using
-            runScan_frame config key instant rest state other h
-      | work item instant =>
-          simpa [runTimeout, hp, runWorkflowEntry, WorkflowEntry.key] using
-            runWork_frame config item instant rest state other h
+      (runTimeout config now state).1.store :=
+  runTimeoutChoice_atMostOneDocument config now state _ _
+    (runTimeout_mem_choices config now state)
 
 end Resonate

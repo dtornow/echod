@@ -146,20 +146,21 @@ inductive WorkItem where
   | occurrence (req : PromiseCreateReq) (time : Nat)
   deriving Repr
 
-/-- A workflow timeout first captures only a document key and its semantic
-instant.  The document is read and its enabled work is decided only when this
-continuation is later executed.  Schedule transactions append occurrence work,
-whose embedded occurrence instant is likewise retained until its separate
-origin-document transaction. -/
-inductive WorkflowEntry where
-  | scan (key : DocumentKey) (instant : Nat)
-  | work (item : WorkItem) (instant : Nat)
+/-- The only abstract local workflow state is genuine cross-document schedule
+occurrence work. A timeout chooses eligible document work directly, without
+storing generic discovery state. -/
+structure WorkflowEntry where
+  request : PromiseCreateReq
+  instant : Nat
   deriving Repr
 
-def WorkflowEntry.instant : WorkflowEntry → Nat
-  | .scan _ instant | .work _ instant => instant
+def WorkflowEntry.item (entry : WorkflowEntry) : WorkItem :=
+  .occurrence entry.request entry.instant
 
-/-- Process-local scan and occurrence continuations. -/
+def WorkflowEntry.key (entry : WorkflowEntry) : DocumentKey :=
+  .origin entry.request.id.origin
+
+/-- Process-local cross-document occurrence continuations. -/
 structure WorkflowState where
   pending : List WorkflowEntry := []
   deriving Repr

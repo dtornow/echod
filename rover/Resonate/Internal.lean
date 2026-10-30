@@ -133,8 +133,8 @@ def processOccurrence (req : PromiseCreateReq) (time : Nat) :
     Handler (.origin req.id.origin) Unit :=
   createIfAbsent req time
 
-/-- Execute one item from an origin scan without permitting a cross-document
-access.  The equality checks are redundant for items produced by
+/-- Execute one item selected from an origin document without permitting
+cross-document access. The equality checks are redundant for items produced by
 `originWork`, but make the fixed-key restriction explicit in the type. -/
 def processOriginWorkItem (origin : String) (item : WorkItem) (now : Nat) :
     Handler (.origin origin) Unit :=
@@ -206,18 +206,5 @@ newly enabled work is discovered only on a later Rover timeout. -/
 def originWork (origin : String) (document : OriginDocument origin) (now : Nat) :
     List WorkItem :=
   document.flatMap fun object => originObjectWork object now
-
-/-- An origin scan snapshots enabled work from the document supplied to this
-one transaction, then performs that snapshot within the same fixed-key
-handler. Work enabled by those handlers waits for a later scan. -/
-def processOriginScan (origin : String) (now : Nat) :
-    Handler (.origin origin) Unit := do
-  let document ← get
-  processOriginWorkItems origin (originWork origin document now) now
-
-def discoverWork (store : Store) (now : Nat) : List WorkItem :=
-  (store.originKeys.flatMap fun origin =>
-    originWork origin (store.read (.origin origin)) now) ++
-  (store.scheduleKeys.map .scheduleTimeout)
 
 end Resonate.Direct

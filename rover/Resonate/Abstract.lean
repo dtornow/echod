@@ -5,11 +5,11 @@ import Resonate
 
 There is exactly one real process. Its state contains a dependent global
 document store plus local continuation state. Every external receive executes
-at most one origin or schedule document handler. Every timeout executes at
-most one document handler or captures one key/time scan cursor without reading
-the document. Schedule occurrences are queued continuations and therefore run
-in later timeout steps. Writer emissions go directly to Rover's network and
-are not durable state.
+at most one origin or schedule document handler. Every timeout stutters or
+executes at most one eligible document handler at a bounded logical firing
+instant. Schedule occurrences are queued continuations and therefore run in
+later timeout steps. Writer emissions go directly to Rover's network and are
+not durable state.
 -/
 
 namespace Resonate.Abstract

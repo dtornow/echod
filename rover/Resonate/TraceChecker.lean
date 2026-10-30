@@ -22,7 +22,7 @@ inductive Action where
   | external (time : Time) (call : Call)
   | externalLose (time : Time) (call : Call)
   | externalShed (time : Time) (call : Call)
-  | timeout (time : Time)
+  | timeout (time : Time) (choice : Nat)
   | observe (time : Time) (output : Output)
   deriving Repr
 
@@ -163,17 +163,21 @@ def actionStep (config : Config) (world : World AModel) (action : Action) :
           else none
         else none
       else none
-  | .timeout time =>
+  | .timeout time choice =>
       if world.now ≤ time then
-        let (nextState, outputs) :=
-          Resonate.runTimeout config time (world.process .service)
-        let result : Result Abstract.Pid State Message := {
-          state := nextState
-          send := Abstract.sends outputs
-        }
-        let label : Label AModel :=
-          .process .service time .timeout result.send
-        some (label, world.land .service time result)
+        let choices :=
+          (Resonate.runTimeoutChoices config time
+            (world.process .service)).val
+        if hchoice : choice < choices.length then
+          let (nextState, outputs) := choices[choice]
+          let result : Result Abstract.Pid State Message := {
+            state := nextState
+            send := Abstract.sends outputs
+          }
+          let label : Label AModel :=
+            .process .service time .timeout result.send
+          some (label, world.land .service time result)
+        else none
       else none
   | .observe time output =>
       if world.now ≤ time then
@@ -269,28 +273,27 @@ theorem actionStep_sound {config : Config} {world : World AModel}
           next _ => contradiction
         next _ => contradiction
       next _ => contradiction
-  | timeout time =>
+  | timeout time choice =>
       simp only [actionStep] at h
       split at h
       next htime =>
-        cases h
-        refine Step.process
-          (event := .timeout)
-          (result := {
-            state := (Resonate.runTimeout config time
-              (world.process .service)).1
-            send := Abstract.sends
-              (Resonate.runTimeout config time
-                (world.process .service)).2
-          })
-          htime rfl ?_ ?_
-        · simp [Event.Valid]
-        simp only [Abstract.step, List.mem_map]
-        exact ⟨Resonate.runTimeout config time
-            (world.process .service),
-          Resonate.runTimeout_mem_choices config time
-            (world.process .service),
-          rfl⟩
+        split at h
+        next hchoice =>
+          cases h
+          let choices :=
+            (Resonate.runTimeoutChoices config time
+              (world.process .service)).val
+          refine Step.process
+            (event := .timeout)
+            (result := {
+              state := choices[choice].1
+              send := Abstract.sends choices[choice].2
+            })
+            htime rfl ?_ ?_
+          · simp [Event.Valid]
+          simp only [Abstract.step, List.mem_map]
+          exact ⟨choices[choice], List.get_mem choices ⟨choice, hchoice⟩, rfl⟩
+        next _ => contradiction
       next _ => contradiction
   | observe time output =>
       simp only [actionStep] at h
@@ -385,7 +388,10 @@ def processActions (config : Config) (world : World AModel)
           [.external time call, .externalLose time call,
             .externalShed time call]
         else [.external time call]
-    | _, _, _ => []) ++ [.timeout time]
+    | _, _, _ => []) ++
+  (List.range
+    ((Resonate.runTimeoutChoices config time
+      (world.process .service)).val.length)).map (.timeout time)
 
 def observeActions (world : World AModel) (time : Time)
     (event : BoundaryEvent) : List Action :=
