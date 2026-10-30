@@ -23,7 +23,7 @@ use crate::semantics::{self, Cfg, Execution, ExternalOp, Label};
 use crate::{CallId, Event, Model, Sched, Time};
 
 mod proof;
-mod trusted;
+pub(crate) mod trusted;
 
 use trusted::{copy, same};
 

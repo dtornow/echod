@@ -36,6 +36,7 @@ mod hashed_map;
 mod hashed_set;
 mod intern;
 pub mod refinement;
+pub mod rover;
 pub mod semantics;
 
 pub use certificate::{certify, marks, Certificate, Silent};

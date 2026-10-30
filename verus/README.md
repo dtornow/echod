@@ -16,6 +16,29 @@ They live in the crate now, next to the code they are about:
 The model's interface (`Model`, with `spec` twins of `external` and
 `internal`) is in `src/lib.rs`, inside `verus!`.
 
+## Rover
+
+`src/rover/` is the Rust + Verus counterpart of the Lean Rover world:
+
+- `RoverModel` is the pluggable executable protocol interface. `initial`,
+  `injectable`, and `step` have `spec_*` twins, so a model can verify that its
+  running transition code computes the relation used by proofs.
+- `semantics.rs` defines the append-only message network, process steps,
+  explicit outside observations, legal executions, boundary projection, and
+  `valid_trace`.
+- `checker.rs` performs bounded certificate search. Search failure is not a
+  proof that a trace is invalid.
+- `replay.rs` independently executes a certificate. Verus proves
+  `replay(...).is_ok() ==> valid_trace(model, config, trace)`, so search is
+  outside the trusted argument.
+- `tests/rover.rs` is an executable counter protocol demonstrating delayed,
+  reordered, and duplicate message delivery as well as rejected traces.
+
+Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
+stored or externally generated certificate exactly. Model-specific invariants
+can be stated over the public `rover::semantics::{World, step, legal,
+valid_trace}` definitions.
+
 ## Running it
 
 Checked with Verus `0.2026.10.13.96607e2` (a rolling release from

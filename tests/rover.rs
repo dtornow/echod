@@ -1,0 +1,131 @@
+//! Executable examples for the Rust + Verus Rover world.
+
+use accordant::rover::{
+    check, replay, Action, BoundaryEvent, CheckConfig, ProcessEvent, RoverModel, StepResult,
+};
+use accordant::Time;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Pid {
+    Outside,
+    Service,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Message {
+    Add(u64),
+    Value(u64),
+}
+
+struct Counter;
+
+impl RoverModel for Counter {
+    type Config = ();
+    type Pid = Pid;
+    type State = u64;
+    type Message = Message;
+
+    fn outside(&self) -> Pid {
+        Pid::Outside
+    }
+
+    fn initial(&self, _: &()) -> Vec<(Pid, u64)> {
+        vec![(Pid::Service, 0)]
+    }
+
+    fn injectable(&self, _: &(), message: &Message) -> bool {
+        matches!(message, Message::Add(_))
+    }
+
+    fn step(
+        &self,
+        _: &(),
+        pid: &Pid,
+        state: &u64,
+        _: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<StepResult<Self>> {
+        match (pid, event) {
+            (
+                Pid::Service,
+                ProcessEvent::Receive {
+                    sender: Pid::Outside,
+                    message: Message::Add(amount),
+                },
+            ) => {
+                let next = state + amount;
+                vec![StepResult {
+                    state: next,
+                    send: vec![(Pid::Outside, Message::Value(next))],
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+type Event = BoundaryEvent<Pid, Message>;
+
+fn input(at: Time, amount: u64) -> Event {
+    Event::Input {
+        recipient: Pid::Service,
+        at,
+        message: Message::Add(amount),
+    }
+}
+
+fn output(at: Time, value: u64) -> Event {
+    Event::Output {
+        sender: Pid::Service,
+        at,
+        message: Message::Value(value),
+    }
+}
+
+#[test]
+fn check_finds_and_replays_a_valid_trace() {
+    let trace = [input(0, 3), output(1, 3)];
+    let certificate = check(
+        &Counter,
+        &(),
+        &trace,
+        CheckConfig::for_trace_len(trace.len()),
+    )
+    .expect("valid trace");
+
+    assert_eq!(certificate.len(), 3);
+    assert!(matches!(certificate[1], Action::Process { outcome: 0, .. }));
+    assert_eq!(replay(&Counter, &(), &trace, &certificate), Ok(()));
+}
+
+#[test]
+fn check_rejects_an_output_the_model_never_sent() {
+    let trace = [input(0, 3), output(1, 4)];
+    assert!(check(
+        &Counter,
+        &(),
+        &trace,
+        CheckConfig::for_trace_len(trace.len())
+    )
+    .is_none());
+}
+
+#[test]
+fn append_only_delivery_can_be_duplicated() {
+    // The same injected request is received twice. Receiving never consumes
+    // its network envelope, so the two hidden steps produce values 2 and 4.
+    let trace = [input(0, 2), output(1, 2), output(2, 4)];
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 6 }).is_some());
+}
+
+#[test]
+fn outputs_can_be_observed_in_a_different_order() {
+    let trace = [input(0, 1), input(0, 10), output(1, 11), output(2, 1)];
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 8 }).is_some());
+}
+
+#[test]
+fn replay_rejects_nonmonotone_time() {
+    let trace = [input(2, 1), output(1, 1)];
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4 }).is_none());
+}
