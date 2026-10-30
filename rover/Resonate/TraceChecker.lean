@@ -3,10 +3,10 @@ import Resonate.Abstract
 /-!
 # Executable checking for the full Resonate boundary protocol
 
-Certificates use only legal Rover actions. Internal work is hidden behind a
-timeout at the sole service process; no internal request can be supplied by
-the environment. Observations consume the ordered Writer emissions that the
-service placed directly in the network. Successful search results are
+Certificates use only legal Rover actions. Each timeout advances at most one
+document-scoped internal work item at the sole service process; no internal
+request can be supplied by the environment. Observations consume ordered
+Writer emissions placed directly in the network. Successful search results are
 independently replayed before `valid` is returned. Resource exhaustion is
 conservatively `unknown`.
 -/
@@ -20,6 +20,8 @@ abbrev AModel := Abstract.model
 inductive Action where
   | inject (time : Time) (call : Call)
   | external (time : Time) (call : Call)
+  | externalLose (time : Time) (call : Call)
+  | externalShed (time : Time) (call : Call)
   | timeout (time : Time)
   | observe (time : Time) (output : Output)
   deriving Repr
@@ -128,6 +130,39 @@ def actionStep (config : Config) (world : World AModel) (action : Action) :
           some (label, world.land .service time result)
         else none
       else none
+  | .externalLose time call =>
+      if world.now ≤ time then
+        if config.unreliable then
+          if (Abstract.Pid.outside, Abstract.Pid.service,
+              Message.request call) ∈ world.network then
+            let result := Resonate.runLose config call
+              (world.process .service)
+            let landed : Result Abstract.Pid State Message := {
+              state := result.1
+              send := Abstract.sends result.2
+            }
+            some (.process .service time
+              (.receive .outside (.request call)) landed.send,
+              world.land .service time landed)
+          else none
+        else none
+      else none
+  | .externalShed time call =>
+      if world.now ≤ time then
+        if config.unreliable then
+          if (Abstract.Pid.outside, Abstract.Pid.service,
+              Message.request call) ∈ world.network then
+            let result := Resonate.runShed call (world.process .service)
+            let landed : Result Abstract.Pid State Message := {
+              state := result.1
+              send := Abstract.sends result.2
+            }
+            some (.process .service time
+              (.receive .outside (.request call)) landed.send,
+              world.land .service time landed)
+          else none
+        else none
+      else none
   | .timeout time =>
       if world.now ≤ time then
         let (nextState, outputs) :=
@@ -179,6 +214,59 @@ theorem actionStep_sound {config : Config} {world : World AModel}
             htime rfl ?_ ?_
           · exact hrequest
           simp [Abstract.step, Outcomes.one]
+          split <;> simp
+        next _ => contradiction
+      next _ => contradiction
+  | externalLose time call =>
+      simp only [actionStep] at h
+      split at h
+      next htime =>
+        split at h
+        next hunreliable =>
+          split at h
+          next hrequest =>
+            cases h
+            refine Step.process
+              (event := .receive Abstract.Pid.outside
+                (Message.request call))
+              (result := {
+                state := (Resonate.runLose config call
+                  (world.process .service)).1
+                send := Abstract.sends
+                  (Resonate.runLose config call
+                    (world.process .service)).2
+              }) htime rfl
+                (show Event.Valid world Abstract.Pid.service
+                  (.receive Abstract.Pid.outside
+                    (Message.request call)) from hrequest) ?_
+            simp [Abstract.step, hunreliable]
+          next _ => contradiction
+        next _ => contradiction
+      next _ => contradiction
+  | externalShed time call =>
+      simp only [actionStep] at h
+      split at h
+      next htime =>
+        split at h
+        next hunreliable =>
+          split at h
+          next hrequest =>
+            cases h
+            refine Step.process
+              (event := .receive Abstract.Pid.outside
+                (Message.request call))
+              (result := {
+                state := (Resonate.runShed call
+                  (world.process .service)).1
+                send := Abstract.sends
+                  (Resonate.runShed call
+                    (world.process .service)).2
+              }) htime rfl
+                (show Event.Valid world Abstract.Pid.service
+                  (.receive Abstract.Pid.outside
+                    (Message.request call)) from hrequest) ?_
+            simp [Abstract.step, hunreliable]
+          next _ => contradiction
         next _ => contradiction
       next _ => contradiction
   | timeout time =>
@@ -197,7 +285,12 @@ theorem actionStep_sound {config : Config} {world : World AModel}
           })
           htime rfl ?_ ?_
         · simp [Event.Valid]
-        simp [Abstract.step, Outcomes.one]
+        simp only [Abstract.step, List.mem_map]
+        exact ⟨Resonate.runTimeout config time
+            (world.process .service),
+          Resonate.runTimeout_mem_choices config time
+            (world.process .service),
+          rfl⟩
       next _ => contradiction
   | observe time output =>
       simp only [actionStep] at h
@@ -283,11 +376,16 @@ structure SearchContext where
   world : World AModel
   certificate : Certificate
 
-def processActions (world : World AModel) (time : Time) : List Action :=
-  (world.network.filterMap fun (sender, recipient, message) =>
+def processActions (config : Config) (world : World AModel)
+    (time : Time) : List Action :=
+  (world.network.flatMap fun (sender, recipient, message) =>
     match sender, recipient, message with
-    | .outside, .service, .request call => some (.external time call)
-    | _, _, _ => none) ++ [.timeout time]
+    | .outside, .service, .request call =>
+        if config.unreliable then
+          [.external time call, .externalLose time call,
+            .externalShed time call]
+        else [.external time call]
+    | _, _, _ => []) ++ [.timeout time]
 
 def observeActions (world : World AModel) (time : Time)
     (event : BoundaryEvent) : List Action :=
@@ -332,7 +430,8 @@ def searchFrom (config : Config) :
         (observeActions context.world time event).map fun action =>
           (action, true)
       let processing :=
-        (processActions context.world time).map fun action => (action, false)
+        (processActions config context.world time).map fun action =>
+          (action, false)
       explore (observations ++ processing) fun (action, consumed) =>
         match advance config context action with
         | none => .unknown
