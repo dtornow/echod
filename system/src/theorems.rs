@@ -1924,6 +1924,7 @@ pub proof fn not_vacuous(o: Origin)
             order: Map::empty().insert(Event::Born(e), 0),
         },
         log: Seq::empty(),
+        rt: 0,
     };
     lemma_inv_empty(0);
     assert(shaped(o, empty));
