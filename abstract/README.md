@@ -43,14 +43,40 @@ All 21 external names are present and dispatched:
 | Family | Actions | Semantics |
 |---|---|---|
 | Promise | get, create, settle, register callback, register listener | executable |
-| Promise | search | exact Lean result: 501, no effects |
-| Task | get, create, acquire, fence, heartbeat, suspend, fulfill, release, halt, continue | executable and proved |
-| Task | search | exact Lean result: 501, no effects |
+| Promise | search | refused: 403, no effects |
+| Task | get, create, acquire, fence, fence check, heartbeat, suspend, fulfill, release, halt, continue | executable and proved |
+| Task | search | refused: 403, no effects |
 | Schedule | get, create, delete | executable |
-| Schedule | search | exact Lean result: 501, no effects |
+| Schedule | search | refused: 403, no effects |
 
-All six internal names are executable: promise timeout, callback, listener,
-task lease timeout, task retry timeout, and schedule timeout.
+All seven internal names are executable: promise timeout, callback, listener,
+task lease timeout, task retry timeout, schedule fire, and schedule advance.
+
+### Non-atomic multi-object steps
+
+The model never claims atomicity across objects. Where the protocol touches
+two documents, the Abstract machine exposes two actions and the checker
+admits any interleaving between them:
+
+- Schedule firing is `ScheduleFire` (create the occurrence promise, stamped
+  with `resonate:schedule`, `resonate:origin`, `resonate:branch`,
+  `resonate:parent`, `resonate:prefix` lineage tags) followed by
+  `ScheduleAdvance` (move `last_run_at`/`next_run_at`). Advance is enabled
+  only once the occurrence promise exists, so a crash between the two steps
+  re-fires the same occurrence instead of skipping it. Both steps are
+  idempotent.
+- A detached fence is `PromiseCreate` on the target origin followed by
+  `TaskFenceCheck` on the task origin. `system::decompose` splits the
+  request, `system::compose_detached` reassembles the protocol response.
+
+### Timing rules
+
+- Retries rearm on the task's anchored grid: `spec_next_offer(due, now, t)`
+  is the first `due + k*t` strictly after `now`, never `now + t`.
+- A lapsed lease releases with its retry instant at the lease `deadline`.
+- A callback resume wakes the task at the awaited promise's `settled_at`.
+- `resonate:target` is dropped from timer promises on create
+  (`normalize_create`) rather than rejected.
 
 Each internal handler has an independently stated ghost semantics and an
 executable postcondition proving its exact ordered `Seq<AEffect>` result.
@@ -82,12 +108,13 @@ Lean declares `nextCron`, `occurrences`, and `expand` opaque. Executable
 schedule requests therefore carry their computed witnesses:
 
 - `ScheduleCreateReq.next_run_at`
-- `ScheduleTimeoutReq.occurrences` (including expanded promise ids)
-- `ScheduleTimeoutReq.next_run_at`
+- `ScheduleFireReq.occurrence` (the expanded promise id and its instant)
+- `ScheduleAdvanceReq.occurrence` and `ScheduleAdvanceReq.next_run_at`
 
-The action preserves the supplied occurrence list order and applies the same
-stable `≤ now` filter as Lean. A future checker must obtain these witnesses
-from its cron/expansion implementation and validate that boundary.
+Fire ignores occurrences later than `now`; advance refuses to move the
+schedule until the occurrence promise is present. A checker must obtain
+these witnesses from its cron/expansion implementation and validate that
+boundary.
 
 Lean uses unbounded `Nat`; the executable carrier is `u64`. Handlers do not
 invent rejection responses at the carrier boundary: arithmetic saturates

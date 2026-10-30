@@ -7,7 +7,7 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `abstract/` | `echod-abstract`: an independent executable Verus port of the Resonate abstract machine. Its own protocol state and ordered writer effects; one named semantic action for each of 21 external handlers and 6 internal actions. Invoke/return/receive/clock bookkeeping is separate. It depends only on Verus, not on the kernel, Concrete, Accordant or checker |
+| `abstract/` | `echod-abstract`: an independent executable Verus port of the Resonate abstract machine. Its own protocol state and ordered writer effects; one named semantic action for each of 22 external handlers (the 21 protocol handlers and the fence's check) and 7 internal actions (a schedule fires in two: create the occurrence's promise, then advance). Invoke/return/receive/clock bookkeeping is separate. It depends only on Verus, not on the kernel, Concrete, Accordant or checker |
 | `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
 | `codec/` | `echod-codec`: the executable verified persistence format. Canonical UTF-8 and typed codecs for every object/key, appendable origin/schedule document segments, strict malformed-input rejection, last-row-wins folding and compaction laws |
 | `concrete/` | `echod-concrete`: the deterministic raw object-store automaton: one configured bucket of keyed bytes and opaque versions, conditional writes/appends/listings, and explicit fail-before-apply/apply-with-lost-ack/refusal choices. Decoded documents and auxiliary objects are verified derived views |
@@ -497,6 +497,16 @@ request through its two commits. A settle in another origin is refused,
 as the reference server refuses it. The reference allows a cross-origin
 create of a root id alone (an id with no `:`), and checks the fence first;
 echod allows any id, and creates first.
+
+The Abstract model in `abstract/` makes the same split rather than claiming
+an atomicity the system does not have: `system::decompose` turns a detached
+fence into `PromiseCreate` then `TaskFenceCheck`, `compose_detached` builds
+the fence's answer from the two, and the checker admits any work between
+them. A schedule's fire is split the same way, `ScheduleFire` (the
+occurrence's promise, if absent) then `ScheduleAdvance` (enabled only once
+that promise exists), which is the Occurrences theorem stated as two
+Abstract steps: a crash between them re-fires the same occurrence, never
+skips it.
 
 ## echod-system
 
