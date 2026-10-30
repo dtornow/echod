@@ -575,8 +575,10 @@ document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
 one. `DelTimer` deletes the key replaced and the key fired, and the node
 remembers the key kept. `Done` closes a request that changed nothing,
-with no round trip. A request's response joins a ghost log at `Process`
-or at `Done`, when the client is answered. Each put carries the store's
+with no round trip. A request's response joins a ghost log at `Process`,
+when its write lands, or at `Prepare` when it changed nothing — at the
+read its answer was decided from, which is the instant the answer is
+linearized at. Each put carries the store's
 answer: applied, refused by its condition — both decided by the bucket's
 contents — or unknown, where the bucket applied it or did not,
 nondeterministically, and the node, told only that it failed, forgets
