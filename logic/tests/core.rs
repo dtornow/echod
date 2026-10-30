@@ -329,12 +329,12 @@ fn replaced_and_stopped_timer_generations_are_ignored() {
     assert!(h.scheduled_timer.is_none());
 }
 
-/// A fence whose create targets another origin: the create commits first, on
-/// its own document, then the fence's check on the task's. A stale fence
-/// still leaves the promise created, and answers its 409; a settle in
-/// another origin is refused outright.
+/// A fence whose create targets another origin: the fence's check runs
+/// first, on the task's document, then the create on its own. A stale fence
+/// answers its 409 and creates nothing; a settle in another origin is
+/// refused outright.
 #[test]
-fn a_detached_create_lands_before_the_fence_is_checked() {
+fn a_detached_fence_is_checked_before_its_create_lands() {
     let mut h = Harness::new("n1");
     h.apply(Event::Start { clock: h.clock });
     h.advance(100);
@@ -349,19 +349,22 @@ fn a_detached_create_lands_before_the_fence_is_checked() {
     assert_eq!(status, 409, "{data}");
     assert_eq!(data, json!("Version mismatch"));
     let (status, data) = h.request("promise.get", json!({ "id": "d:x" }));
-    assert_eq!(status, 200, "a stale detached create still lands: {data}");
-    assert_eq!(data["promise"]["state"], "pending");
+    assert_eq!(status, 404, "a stale fence creates nothing: {data}");
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:ghost", "version": 0, "action": create("d:y") }));
     assert_eq!(status, 404, "{data}");
     let (status, _) = h.request("promise.get", json!({ "id": "d:y" }));
-    assert_eq!(status, 200, "a detached create from a missing task lands too");
+    assert_eq!(status, 404, "a fence from a missing task creates nothing either");
+    assert_eq!(h.keys("wf/").len(), 1, "only the task's document so far: {:?}", h.keys("wf/"));
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": create("d:z") }));
     assert_eq!(status, 200, "{data}");
     assert_eq!(data["action"]["head"]["status"], 200);
     assert_eq!(data["action"]["data"]["promise"]["id"], "d:z");
     assert_eq!(data["preload"], json!([]));
+    let (status, data) = h.request("promise.get", json!({ "id": "d:z" }));
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["promise"]["state"], "pending");
     assert_eq!(h.keys("wf/").len(), 2, "two origins' documents: {:?}", h.keys("wf/"));
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("a:n") }));

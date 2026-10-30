@@ -385,7 +385,7 @@ fn lease_lapse_offers_from_the_leases_end() {
 }
 
 #[test]
-fn a_detached_fence_is_two_steps_and_a_stale_check_keeps_the_promise() {
+fn a_detached_fence_checks_first_and_a_stale_check_creates_nothing() {
     // task in origin `a`, acquired at version 1
     let create = TaskCreateReq {
         pid: text("p1"),
@@ -400,7 +400,7 @@ fn a_detached_fence_is_two_steps_and_a_stale_check_keeps_the_promise() {
     let made = handle_external(&State::new(), ExternalAction::TaskCreate(create), 1_000, false);
     let state = apply_all(State::new(), made.effects);
 
-    let fence = ExternalAction::TaskFence(TaskFenceReq {
+    let fence = || ExternalAction::TaskFence(TaskFenceReq {
         id: id("a", "root"),
         version: 1,
         action: TaskFenceAction::Create(PromiseCreateReq {
@@ -410,15 +410,16 @@ fn a_detached_fence_is_two_steps_and_a_stale_check_keeps_the_promise() {
             tags: vec![],
         }),
     });
-    let Request::Detached { create, check } = decompose(fence) else { panic!("cross-origin create must detach") };
+    let Request::Detached { check, create } = decompose(fence()) else { panic!("cross-origin create must detach") };
     assert_eq!(check.id, id("a", "root"));
     assert_eq!(check.version, 1);
 
-    // step one: the create lands on its own
-    let first = handle_external(&state, ExternalAction::PromiseCreate(create), 1_100, false);
-    let Response::PromiseCreate(inner) = first.response else { panic!("shape") };
+    // step one: the check, on the task's origin; it holds
+    let first = handle_external(&state, ExternalAction::TaskFenceCheck(check), 1_100, false);
+    let Response::TaskFenceCheck(status) = first.response else { panic!("shape") };
+    assert_eq!(status.status, 200);
     let state = apply_all(state, first.effects);
-    assert!(state.objects.iter().any(|o| o.id == id("b", "child")));
+    assert!(!state.objects.iter().any(|o| o.id == id("b", "child")), "the check creates nothing");
 
     // something interleaves: the lease lapses and the task is released
     let lapse = handle_internal(
@@ -429,14 +430,23 @@ fn a_detached_fence_is_two_steps_and_a_stale_check_keeps_the_promise() {
     );
     let state = apply_all(state, lapse);
 
-    // step two: the check is stale; the promise stays
-    let second = handle_external(&state, ExternalAction::TaskFenceCheck(check), 1_700, false);
-    let Response::TaskFenceCheck(status) = second.response else { panic!("shape") };
-    let fence_res = compose_detached(inner, status);
-    assert_eq!(fence_res.status, 409);
-    assert!(fence_res.action.is_none());
+    // step two: the create, on its own origin; the fence that held is answered with its record
+    let second = handle_external(&state, ExternalAction::PromiseCreate(create), 1_700, false);
+    let Response::PromiseCreate(inner) = second.response else { panic!("shape") };
     let state = apply_all(state, second.effects);
     assert!(state.objects.iter().any(|o| o.id == id("b", "child")));
+    let fence_res = compose_detached(status, Some(inner));
+    assert_eq!(fence_res.status, 200);
+    assert!(matches!(fence_res.action, Some(TaskFenceInnerRes::Create(_))));
+
+    // the same fence now: the check is stale, it is answered alone, and no create follows
+    let Request::Detached { check, .. } = decompose(fence()) else { panic!("cross-origin create must detach") };
+    let stale = handle_external(&state, ExternalAction::TaskFenceCheck(check), 1_800, false);
+    let Response::TaskFenceCheck(status) = stale.response else { panic!("shape") };
+    assert_eq!(status.status, 409);
+    let fence_res = compose_detached(status, None);
+    assert_eq!(fence_res.status, 409);
+    assert!(fence_res.action.is_none());
 }
 
 #[test]

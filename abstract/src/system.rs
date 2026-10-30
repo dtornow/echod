@@ -86,15 +86,17 @@ pub enum Response {
 // Protocol requests that are more than one action ---------------------------
 
 /// How a protocol request runs: as the one action it names, or, for a fence
-/// whose create lives in another origin than the task, as two. The create
-/// commits first, on its own; the fence's check follows on the task's. Any
-/// action may interleave between them, and a stale fence still leaves the
-/// promise created and answers its 409. The atomic `TaskFence` action keeps
-/// refusing such a request with 400: it is the dispatcher that splits it,
-/// exactly as the node's does.
+/// whose create lives in another origin than the task, as two. The fence's
+/// check runs first, on the task's; a fence that does not hold answers its
+/// status there and creates nothing. When it holds, the create follows on
+/// its own origin, and the fence answers with the record created. Any
+/// action may interleave between the two: a fence that lapses after its
+/// check still creates. Nothing is claimed atomic across the two origins.
+/// The atomic `TaskFence` action keeps refusing such a request with 400:
+/// it is the dispatcher that splits it, exactly as the node's does.
 pub enum Request {
     Whole(ExternalAction),
-    Detached { create: PromiseCreateReq, check: TaskFenceCheckReq },
+    Detached { check: TaskFenceCheckReq, create: PromiseCreateReq },
 }
 
 #[cfg(verus_keep_ghost)]
@@ -127,8 +129,8 @@ pub fn decompose(action: ExternalAction) -> (r: Request)
             if cross {
                 match q.action {
                     TaskFenceAction::Create(create) => Request::Detached {
-                        create,
                         check: TaskFenceCheckReq { id: q.id, version: q.version },
+                        create,
                     },
                     TaskFenceAction::Settle(settle) => {
                         // unreachable: `cross` is false for a settle
@@ -148,12 +150,15 @@ pub fn decompose(action: ExternalAction) -> (r: Request)
 
 #[cfg(verus_keep_ghost)]
 pub open spec fn spec_compose_detached(
-    inner: APromiseRes, check: AStatusRes,
+    check: AStatusRes, inner: Option<APromiseRes>,
 ) -> ATaskFenceRes {
     ATaskFenceRes {
         status: check.status,
         action: if check.status == 200 {
-            Some(ATaskFenceInnerRes::Create(inner))
+            match inner {
+                Some(inner) => Some(ATaskFenceInnerRes::Create(inner)),
+                None => None,
+            }
         } else {
             None
         },
@@ -161,21 +166,33 @@ pub open spec fn spec_compose_detached(
     }
 }
 
-/// The fence's answer: the check's status, with the create's record inside
-/// when the check held.
-pub fn compose_detached(inner: PromiseRes, check: StatusRes) -> (r: TaskFenceRes)
-    ensures r@ == spec_compose_detached(inner@, check@),
+#[cfg(verus_keep_ghost)]
+pub open spec fn spec_view_opt(inner: Option<PromiseRes>) -> Option<APromiseRes> {
+    match inner {
+        Some(inner) => Some(inner@),
+        None => None,
+    }
+}
+
+/// The fence's answer: the check's status, with the record of the create
+/// that followed inside when the check held. A check that did not hold is
+/// answered alone; no create follows it.
+pub fn compose_detached(check: StatusRes, inner: Option<PromiseRes>) -> (r: TaskFenceRes)
+    ensures r@ == spec_compose_detached(check@, spec_view_opt(inner)),
 {
-    let ghost inner_spec = inner@;
+    let ghost inner_spec = spec_view_opt(inner);
     let preload = Vec::new();
     assert(preload.deep_view() =~= Seq::<APromiseRecord>::empty());
     let action = if check.status == 200 {
-        Some(TaskFenceInnerRes::Create(inner))
+        match inner {
+            Some(inner) => Some(TaskFenceInnerRes::Create(inner)),
+            None => None,
+        }
     } else {
         None
     };
     let r = TaskFenceRes { status: check.status, action, preload };
-    assert(r@ == spec_compose_detached(inner_spec, check@));
+    assert(r@ == spec_compose_detached(check@, inner_spec));
     r
 }
 

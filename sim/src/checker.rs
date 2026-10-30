@@ -14,9 +14,9 @@ use echod_abstract::state::{MessageKind, OutboxEntry};
 use echod_abstract::{
     apply_all, compose_detached, decompose, handle_external, handle_internal, Config, Effect,
     ExternalAction, Ident, InternalAction, Occurrence, PromiseRegisterCallbackReq,
-    PromiseRegisterListenerReq, PromiseRes, PromiseState, PromiseTimeoutReq, Request, Response,
-    ScheduleAdvanceReq, ScheduleFireReq, State, TaskLeaseTimeoutReq, TaskRetryTimeoutReq,
-    TaskState,
+    PromiseRegisterListenerReq, PromiseState, PromiseTimeoutReq, Request, Response,
+    ScheduleAdvanceReq, ScheduleFireReq, State, StatusRes, TaskLeaseTimeoutReq,
+    TaskRetryTimeoutReq, TaskState,
 };
 
 use crate::bus::Sent;
@@ -289,9 +289,9 @@ struct Candidate {
     /// Earliest instant at which this exact semantic state exists.
     floor: u64,
     pending: BTreeSet<u64>,
-    /// Detached fences whose create has linearized but whose check has not:
-    /// the create's answer, kept for the fence's composed response.
-    partial: BTreeMap<u64, PromiseRes>,
+    /// Detached fences whose check has linearized and held but whose create
+    /// has not: the check's answer, kept for the fence's composed response.
+    partial: BTreeMap<u64, StatusRes>,
     done: BTreeMap<u64, ResponseView>,
     emitted: VecDeque<OutboxEntry>,
 }
@@ -616,17 +616,10 @@ impl Search<'_> {
                         let response = model_response_view(&step.response);
                         (step, Some(response))
                     }
-                    Request::Detached { create, check } => match candidate.partial.get(call) {
+                    Request::Detached { check, create } => match candidate.partial.get(call) {
                         None => {
-                            let step = handle_external(
-                                &candidate.state,
-                                ExternalAction::PromiseCreate(create),
-                                candidate.now,
-                                materialize,
-                            );
-                            (step, None)
-                        }
-                        Some(inner) => {
+                            // the check first: a fence that does not hold is
+                            // answered here and creates nothing
                             let step = handle_external(
                                 &candidate.state,
                                 ExternalAction::TaskFenceCheck(check),
@@ -636,7 +629,26 @@ impl Search<'_> {
                             let Response::TaskFenceCheck(status) = &step.response else {
                                 continue;
                             };
-                            let fence = compose_detached(inner.clone(), *status);
+                            if status.status == 200 {
+                                (step, None)
+                            } else {
+                                let fence = compose_detached(*status, None);
+                                let response = model_response_view(&Response::TaskFence(fence));
+                                (step, Some(response))
+                            }
+                        }
+                        Some(status) => {
+                            // the create, on its own origin, once the check held
+                            let step = handle_external(
+                                &candidate.state,
+                                ExternalAction::PromiseCreate(create),
+                                candidate.now,
+                                materialize,
+                            );
+                            let Response::PromiseCreate(inner) = &step.response else {
+                                continue;
+                            };
+                            let fence = compose_detached(*status, Some(inner.clone()));
                             let response = model_response_view(&Response::TaskFence(fence));
                             (step, Some(response))
                         }
@@ -652,10 +664,10 @@ impl Search<'_> {
                         next.done.insert(*call, response);
                     }
                     None => {
-                        let Response::PromiseCreate(inner) = step.response else {
+                        let Response::TaskFenceCheck(status) = step.response else {
                             continue;
                         };
-                        next.partial.insert(*call, inner);
+                        next.partial.insert(*call, status);
                     }
                 }
                 next.state = canonical(apply_all(next.state, step.effects));

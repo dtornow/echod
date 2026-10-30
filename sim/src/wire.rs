@@ -194,7 +194,7 @@ pub fn encode(req: &ExternalAction) -> (&'static str, Value) {
         ExternalAction::TaskHalt(q) => ("task.halt", json!({ "id": ident_string(&q.id) })),
         ExternalAction::TaskContinue(q) => ("task.continue", json!({ "id": ident_string(&q.id) })),
         ExternalAction::TaskSearch(_) => ("task.search", json!({})),
-        // The check alone is never a wire request: it is the second half of
+        // The check alone is never a wire request: it is the first half of
         // a detached fence, which the client sends whole.
         ExternalAction::TaskFenceCheck(q) => (
             "task.fence",

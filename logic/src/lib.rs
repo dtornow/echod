@@ -290,7 +290,7 @@ impl State {
             Err(resp) => self.emit(Effect::Reply { id, response: Ok(resp) }),
             Ok(d) => {
                 let stage = match d.then {
-                    Some((then, check)) => flight::Stage::Detached { then, check: Some(Box::new(check)) },
+                    Some((then, create)) => flight::Stage::Check { then, create: Some(Box::new(create)) },
                     None => flight::Stage::Whole,
                 };
                 let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now, stage };

@@ -414,8 +414,9 @@ pub type ATaskLeaseTimeoutReq = TaskLeaseTimeoutReqSpec;
 pub type ATaskRetryTimeoutReq = TaskRetryTimeoutReqSpec;
 
 /// `task.fence` with no action: the check alone. A fence whose create targets
-/// another origin is two protocol steps, the create first and then this one,
-/// so the promise may exist while the fence still answers 409.
+/// another origin is two protocol steps, this one first and then the create,
+/// so a fence that does not hold creates nothing, and one that lapses after
+/// its check still creates.
 #[make_spec_type] pub struct TaskFenceCheckReq { pub id: Ident, pub version: u64 }
 #[cfg(verus_keep_ghost)]
 pub type ATaskFenceCheckReq = TaskFenceCheckReqSpec;
