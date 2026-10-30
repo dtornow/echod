@@ -5,6 +5,12 @@ defaultTargets = ["Rover"]
 name = "experiment-1"
 path = "../experiment-1"
 
+[[require]]
+name = "resonate-spec"
+git = "https://github.com/resonatehq/resonate"
+rev = "9c72d818721b1776edd6b1b2939a83b3c0b248a6"
+subDir = "spec"
+
 [[lean_lib]]
 name = "Rover"
 
