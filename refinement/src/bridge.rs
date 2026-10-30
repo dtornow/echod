@@ -493,4 +493,91 @@ pub proof fn lemma_without_text(s: Seq<Chars>, x: Chars)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stamping: a schedule's template, stripped and stamped with its lineage
+// ---------------------------------------------------------------------------
+
+/// A canonical id spells back from its `AIdent`.
+pub proof fn lemma_ident_text(id: Chars)
+    requires canonical(id),
+    ensures abs::spec_ident_text(ident(id)) == text(id),
+{
+    lemma_split_id(id);
+    if has_colon(id) {
+        assert(suffix(id).len() > 0);
+        assert(abs::spec_ident_text(ident(id)).chars == kernel::origin(id) + seq![':'] + suffix(id));
+    } else {
+        assert(abs::spec_ident_text(ident(id)) == text(kernel::origin(id)));
+    }
+}
+
+pub proof fn lemma_tags_app(xs: Seq<(Chars, Chars)>, ys: Seq<(Chars, Chars)>)
+    ensures tags(xs + ys) == tags(xs) + tags(ys),
+{
+    lemma_tags_index(xs);
+    lemma_tags_index(ys);
+    lemma_tags_index(xs + ys);
+    assert forall|i: int| 0 <= i < xs.len() + ys.len() implies tags(xs + ys)[i] == (tags(xs) + tags(ys))[i] by {
+        if i < xs.len() {
+            assert((xs + ys)[i] == xs[i]);
+        } else {
+            assert((xs + ys)[i] == ys[i - xs.len()]);
+        }
+    }
+    assert(tags(xs + ys) =~= tags(xs) + tags(ys));
+}
+
+pub proof fn lemma_tags_one(x: (Chars, Chars))
+    ensures tags(seq![x]) == seq![tag(x)],
+{
+    lemma_tags_index(seq![x]);
+    assert(tags(seq![x]) =~= seq![tag(x)]);
+}
+
+/// The kernel's `strip` and the Abstract's `spec_strip_stamped` drop the same
+/// keys.
+pub proof fn lemma_strip(xs: Seq<(Chars, Chars)>)
+    ensures tags(ktags::strip(xs)) == abs::spec_strip_stamped(tags(xs)),
+    decreases xs.len(),
+{
+    lemma_tags_index(xs);
+    if xs.len() == 0 {
+        assert(tags(xs) =~= Seq::<abs::ATag>::empty());
+    } else {
+        let rest = xs.drop_first();
+        lemma_tags_index(rest);
+        assert(tags(xs).drop_first() =~= tags(rest));
+        assert(tags(xs)[0] == tag(xs[0]));
+        lemma_strip(rest);
+        if ktags::stamped_key(xs[0].0) {
+            assert(abs::spec_stamped_key(tags(xs)[0].key.chars));
+        } else {
+            assert(!abs::spec_stamped_key(tags(xs)[0].key.chars));
+            lemma_tags_app(seq![xs[0]], ktags::strip(rest));
+            lemma_tags_one(xs[0]);
+        }
+    }
+}
+
+pub proof fn lemma_lineage(sid: Chars, pid: Chars)
+    requires canonical(sid), canonical(pid),
+    ensures tags(ktags::lineage(sid, pid)) == abs::spec_lineage(ident(sid), ident(pid)),
+{
+    lemma_ident_text(sid);
+    lemma_ident_text(pid);
+    let l = ktags::lineage(sid, pid);
+    lemma_tags_index(l);
+    assert(tags(l) =~= abs::spec_lineage(ident(sid), ident(pid)));
+}
+
+/// Stamping commutes with the mapping.
+pub proof fn lemma_stamp(xs: Seq<(Chars, Chars)>, sid: Chars, pid: Chars)
+    requires canonical(sid), canonical(pid),
+    ensures tags(ktags::spec_stamp(xs, sid, pid)) == abs::spec_stamp(tags(xs), ident(sid), ident(pid)),
+{
+    lemma_tags_app(ktags::strip(xs), ktags::lineage(sid, pid));
+    lemma_strip(xs);
+    lemma_lineage(sid, pid);
+}
+
 } // verus!

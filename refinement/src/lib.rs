@@ -8,7 +8,9 @@
 #![cfg(verus_keep_ghost)]
 #![allow(unused_imports)]
 
+pub mod actions;
 pub mod bridge;
+pub mod fire_sim;
 pub mod heartbeat_sim;
 pub mod internal_sim;
 pub mod promise_sim;

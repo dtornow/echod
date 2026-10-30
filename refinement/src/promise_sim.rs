@@ -243,40 +243,60 @@ pub proof fn lemma_promise_create_sim(k: KState, a: AState, req: kernel::APromis
         lemma_promise_record(q);
     } else {
         lemma_read_absent(k, a, id, now);
-        let p = kobject::spec_create(req, now as nat);
-        lemma_create_shape(req, now);
-        let ap = abs_state::spec_created_promise(areq, now);
         let made = abs_state::spec_create_promise_effects(areq, now);
         assert(Seq::<AEffect>::empty() + made =~= made);
-        let base = seq![AEffect::SetPromise(aid, ap)];
-        lemma_apply_all_one(a, AEffect::SetPromise(aid, ap));
-        assert(id_list(Seq::<Chars>::empty()) =~= Seq::<abs::AIdent>::empty());
-        assert(canonical_list(Seq::<Chars>::empty()));
-        let p0 = APromise { task: None, ..p };
-        assert(canonical_promise(p0));
-        assert(promise(p0) == ap);
-        assert(task_opt(p0.task) == None::<abs_state::ATaskObject>);
-        lemma_set_promise(k.objects, a.objects, id, p0);
-        let a1 = spec_apply_effect(a, AEffect::SetPromise(aid, ap));
-        let k1 = k.objects.insert(id, p0);
-        assert(objects_related(k1, a1.objects));
-        match p.task {
-            Some(t) => {
-                assert(abs_state::spec_created_task(ap, now) == Some(task(t)));
-                assert(made == base.push(AEffect::SetTask(aid, task(t))));
-                lemma_apply_all_push(a, base, AEffect::SetTask(aid, task(t)));
-                assert(canonical_task(t));
-                lemma_set_task(k1, a1.objects, id, t);
-                assert(k1[id].with_task(t) == p);
-                assert(k1.insert(id, p) =~= k.objects.insert(id, p));
-            }
-            None => {
-                assert(abs_state::spec_created_task(ap, now) is None);
-                assert(made == base);
-                assert(p0 == p);
-            }
+        lemma_create_absent(k, a, req, now);
+        lemma_promise_record(kobject::spec_create(req, now as nat));
+    }
+}
+
+/// A promise born at a fresh id: the kernel inserts `spec_create`, the
+/// Abstract commits `spec_create_promise_effects`.
+pub proof fn lemma_create_absent(k: KState, a: AState, req: kernel::APromiseCreateReq, now: u64)
+    requires
+        doc_related(k, a),
+        canonical(req.id),
+        !k.objects.contains_key(req.id),
+    ensures
+        doc_related(
+            KState { objects: k.objects.insert(req.id, kobject::spec_create(req, now as nat)), ..k },
+            spec_apply_all(a, abs_state::spec_create_promise_effects(promise_create_req(req), now))),
+{
+    let id = req.id;
+    let aid = ident(id);
+    let areq = promise_create_req(req);
+    let p = kobject::spec_create(req, now as nat);
+    lemma_create_shape(req, now);
+    let ap = abs_state::spec_created_promise(areq, now);
+    let made = abs_state::spec_create_promise_effects(areq, now);
+    let base = seq![AEffect::SetPromise(aid, ap)];
+    lemma_apply_all_one(a, AEffect::SetPromise(aid, ap));
+    assert(id_list(Seq::<Chars>::empty()) =~= Seq::<abs::AIdent>::empty());
+    assert(canonical_list(Seq::<Chars>::empty()));
+    lemma_related_contains(k.objects, a.objects, id);
+    let p0 = APromise { task: None, ..p };
+    assert(canonical_promise(p0));
+    assert(promise(p0) == ap);
+    assert(task_opt(p0.task) == None::<abs_state::ATaskObject>);
+    lemma_set_promise(k.objects, a.objects, id, p0);
+    let a1 = spec_apply_effect(a, AEffect::SetPromise(aid, ap));
+    let k1 = k.objects.insert(id, p0);
+    assert(objects_related(k1, a1.objects));
+    match p.task {
+        Some(t) => {
+            assert(abs_state::spec_created_task(ap, now) == Some(task(t)));
+            assert(made == base.push(AEffect::SetTask(aid, task(t))));
+            lemma_apply_all_push(a, base, AEffect::SetTask(aid, task(t)));
+            assert(canonical_task(t));
+            lemma_set_task(k1, a1.objects, id, t);
+            assert(k1[id].with_task(t) == p);
+            assert(k1.insert(id, p) =~= k.objects.insert(id, p));
         }
-        lemma_promise_record(p);
+        None => {
+            assert(abs_state::spec_created_task(ap, now) is None);
+            assert(made == base);
+            assert(p0 == p);
+        }
     }
 }
 
