@@ -5,13 +5,28 @@
 //! protocol objects and actions. Bucket listing order is erased at this
 //! refinement boundary by comparing derived keyed meanings.
 //!
-//! The theorem is `trace::theorem_trace_inclusion`: from related states,
+//! Two theorems. `trace::theorem_trace_inclusion`: from related states,
 //! every run of kernel steps on a document that the kernel admits — sweeps,
 //! requests handled, schedules fired, in any order — is a run of Abstract
 //! actions (`trace::trace_actions`, constructed) that ends related to it and
 //! answers the same responses in the same order. The relation is
 //! `relation::doc_related`: the document's objects and schedules, under the
 //! mapping in this file, are the Abstract state's, first match by id.
+//!
+//! `system_sim::theorem_system_refines_abstract`: the system model — many
+//! nodes over one bucket, crashes, lost acknowledgements, the commit
+//! protocol — refines the Abstract. In every execution from `init` by
+//! `next` within the doors (`system_sim::admitted`), it is always the case
+//! that the requests served so far, with their answers, are the responses
+//! of some Abstract run from its initial state, one that ends related to
+//! the bucket read as one kernel state. The observable is the served log;
+//! the states are related through the bucket, not aligned step by step.
+//! The proof is an invariant (`system_sim::inv_ref`) by the embedding's
+//! induction rule: the bucket is partitioned, every flight is the kernel's
+//! functions on what it loaded, and some run explains the cluster; each
+//! step either leaves the bucket and the log alone, or commits one
+//! document's kernel step, which by locality (`local`) is a kernel step on
+//! the bucket, and so by the first theorem an Abstract run.
 //!
 //! ```text
 //! lib.rs          the mapping: kernel rows, records, ids and tags to Abstract values; the bucket-level relation
@@ -28,14 +43,23 @@
 //! fire_sim.rs     `processSchedule` as Abstract fires and one advance
 //! sweep_sim.rs    `executable_single_pass` as a run of internal actions
 //! trace.rs        the Concrete document's steps, the Abstract's actions, trace inclusion
+//! local.rs        locality: a kernel step on one document is the step on the bucket beside the rest
+//! system_sim.rs   the bucket as one kernel state; the fleet's steps; the system refines the Abstract
 //! ```
 //!
-//! What the theorem takes as given, beyond the kernel's own preconditions:
+//! What the first theorem takes as given, beyond the kernel's own preconditions:
 //! ids are canonical (`bridge::canonical`: no `origin:` with an empty
 //! suffix, which `AIdent` cannot spell); instants and ttls are inside the
 //! kernel's time door `MAX_TIME`; a create's tags are not a targeted timer;
 //! and for the task handlers that answer a version, the document is within
-//! the wire's `u32` (`task_sim::doc_headroom`). Two kernel steps are more
+//! the wire's `u32` (`task_sim::doc_headroom`). The second takes the same
+//! doors on each step (`system_sim::admitted`), a heartbeat's refs of one
+//! origin, a well-formed id for each occurrence's promise, and one
+//! hypothesis on behaviours, `system_sim::schedule_held`: a fire's schedule
+//! document is as the fire read it until the promise's commit. The fleet
+//! commits the promise without re-reading the schedule, so another node may
+//! delete and recreate the schedule in between; then the promise is one the
+//! Abstract never creates. Two kernel steps are more
 //! than one Abstract action: a callback whose awaiter is a bare promise is
 //! the Abstract callback and then a promise timeout on the awaiter
 //! (`internal_sim::callback_actions`); a schedule's firing is an Abstract

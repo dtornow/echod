@@ -11,7 +11,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
 | `codec/` | `echod-codec`: the executable verified persistence format. Canonical UTF-8 and typed codecs for every object/key, appendable origin/schedule document segments, strict malformed-input rejection, last-row-wins folding and compaction laws |
 | `concrete/` | `echod-concrete`: the deterministic raw object-store automaton: one configured bucket of keyed bytes and opaque versions, conditional writes/appends/listings, and explicit fail-before-apply/apply-with-lost-ack/refusal choices. Decoded documents and auxiliary objects are verified derived views |
-| `refinement/` | `echod-refinement`: the local proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency. Proved: `theorem_trace_inclusion`, every admitted run of kernel steps on a document (sweeps, the 19 requests, schedule firings) is a run of Abstract actions ending in a related state with the same responses; the Abstract run is constructed, not assumed |
+| `refinement/` | `echod-refinement`: the proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency. Proved: `theorem_trace_inclusion`, every admitted run of kernel steps on a document (sweeps, the 19 requests, schedule firings) is a run of Abstract actions ending in a related state with the same responses; and `theorem_system_refines_abstract`, in every admitted execution of the system model the requests served so far are always the responses of some Abstract run that ends related to the bucket; the Abstract run is constructed, not assumed |
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
@@ -20,9 +20,11 @@ durable executions in V8. Built inside out, from the stored data up.
 The Abstract, kernel, Concrete-bucket and system layers verify
 independently. `refinement/` proves the document-level link from the kernel
 to the Abstract (`theorem_trace_inclusion`): every admitted run of kernel
-steps on a document is an Abstract run with the same responses. The
-remaining work is the link from the complete `logic::on_event`
-orchestration over many documents. `echod` performs the logic's
+steps on a document is an Abstract run with the same responses; and from
+it the system-level link (`theorem_system_refines_abstract`): the system
+model refines the Abstract on what is observed, the log of requests
+served. The remaining work is the link from the complete `logic::on_event`
+orchestration to the system model. `echod` performs the logic's
 effects; simulation is executable evidence at the same boundary. The core
 and the node depend on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
@@ -635,6 +637,47 @@ All four as corollaries of one invariant that `init` establishes and every
 action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
 rule. A witness shows the invariant is not vacuous. Nothing is assumed of
 any clock.
+
+A fifth theorem, in `refinement/` (`system_sim.rs`,
+`theorem_system_refines_abstract`), is the one the others serve:
+
+- **Refinement.** In every execution from `init` by `next` within the
+  doors, it is always the case that the requests served so far, with the
+  answers they were given, are the responses of some Abstract run from the
+  Abstract's initial state — a run that ends related to the bucket read as
+  one kernel state, every object in its origin's document and every
+  schedule in its own. The Abstract run is constructed, step by step.
+
+The statement is on what is observed, the ghost log; the states are
+related through the bucket, not aligned step by step, so the fleet's
+interleavings, retries and lost acknowledgements are free. The proof is an
+invariant by the same induction rule: the bucket is partitioned, every
+flight is the kernel's functions on what it loaded, and some Abstract run
+explains the cluster. A step that moves only a node or a timer, or
+rewrites a document with its own content, keeps the run; a commit writes
+one document's kernel step, which by locality is that step on the whole
+bucket, and so, by the document-level theorem, an Abstract run; a fire is
+two commits, the promise's then the schedule's advance, as the Abstract
+fires in two. A request that changed nothing is answered at its read,
+where its answer was decided; the model logs it there, which is what made
+the log linearizable.
+
+The doors (`admitted`) are the document theorem's on each step — the
+wire's numeric bounds, canonical ids, no targeted timer — with a
+heartbeat's refs of one origin and a well-formed id for each occurrence's
+promise. One hypothesis is on behaviours, not on inputs: `schedule_held`,
+that a fire's schedule document is as the fire read it until the promise's
+commit. The proof found it. The node commits the occurrence's promise on
+the origin's document conditionally on that document's version alone;
+another node may delete and recreate the schedule between the fire's read
+and that commit, and then the promise written is one the Abstract never
+creates, since its fire is of a schedule that exists. The fix is the
+node's: carry the schedule's version into the origin's commit, or re-read
+the schedule before it. Until then the theorem holds of the executions in
+which a schedule's document does not move while a fire from it is between
+its read and the promise's commit — which also sets aside the benign case
+of two nodes firing the same occurrence, where the second finds the
+promise already there.
 
 The proof changed the design twice. A node that fires a key could delete
 it while a commit that armed it was still between its key and its

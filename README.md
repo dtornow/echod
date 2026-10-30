@@ -23,7 +23,7 @@ model in [`abstract/`](abstract) under crashes, outages and lost acks.
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
 | [`codec/`](codec) | the executable verified persistence format: canonical UTF-8, typed object/key codecs, appendable document segments, compaction and malformed-input rejection |
 | [`concrete/`](concrete) | the deterministic raw object-store automaton: keyed bytes and opaque versions with explicit failure choices; decoded documents, timers, announcements and membership are verified derived views |
-| [`refinement/`](refinement) | the local Concrete-to-Abstract proof boundary: independent type/state translation and refinement relation, with no checker-framework dependency; proved: trace inclusion on a document, every admitted run of kernel steps (sweeps, requests, schedule firings) is a run of Abstract actions ending related and answering the same responses |
+| [`refinement/`](refinement) | the Concrete-to-Abstract proof boundary: independent type/state translation and refinement relation, with no checker-framework dependency; proved: trace inclusion on a document, every admitted run of kernel steps (sweeps, requests, schedule firings) is a run of Abstract actions ending related and answering the same responses; and the system refines the Abstract, in every admitted execution of the fleet the requests served are always the responses of some Abstract run |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
@@ -35,8 +35,13 @@ model in [`abstract/`](abstract) under crashes, outages and lost acks.
 `abstract/`, `kernel/`, `concrete/` and `system/` verify independently.
 `refinement/` proves the document-level link from the kernel to the
 Abstract: every admitted run of kernel steps is an Abstract run
-(`refinement/src/trace.rs`, `theorem_trace_inclusion`). The link from the
-full `logic/` orchestration over many documents remains to be proved. `logic/` runs with no runtime: its tests feed it events
+(`refinement/src/trace.rs`, `theorem_trace_inclusion`); and from it the
+system-level one: in every admitted execution of the system model — nodes
+over one bucket, crashes, lost acknowledgements, the commit protocol — the
+requests served so far are always the responses of some Abstract run
+(`refinement/src/system_sim.rs`, `theorem_system_refines_abstract`, under
+the doors `admitted` and the hypothesis `schedule_held`). The link from the
+`logic/` orchestration to the system model remains to be proved. `logic/` runs with no runtime: its tests feed it events
 by hand. `echod/` performs what it asks. `sim/` is the executable evidence.
 [DESIGN.md](DESIGN.md) is the design;
 [BACKLOG.md](BACKLOG.md) is what is next. Each crate's `lib.rs` opens with
