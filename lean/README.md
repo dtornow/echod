@@ -39,11 +39,19 @@ abstract protocol pinned in `lakefile.toml`.
   instant. Work newly enabled by a handler waits for a later timeout.
 - The service sends Writer emissions directly into the Rover network alongside
   boundary responses. Internal work is never represented as a wire message.
-- `src/TraceChecker.lean` searches the full request/response/message
-  boundary protocol. A successful certificate is replayed against Rover and
-  `check_valid_sound` proves that every `valid` verdict is a real abstract
-  behavior. Its timeout action enumerates every finite abstract timeout choice.
-  Exhaustion is conservatively `unknown`.
+- `lib/Rover/Check.lean` provides generic executable Rover actions,
+  independently checked certificate replay, bounded search, tri-state
+  verdicts, and soundness/completeness theorems. Every semantic Rover step has
+  a canonical indexed action. Global completeness is derived from local
+  initial-state uniqueness and finite action-enumeration coverage, with the
+  explaining execution's length as a sufficient bound.
+- `src/Check.lean` supplies only the Resonate projection, initial state,
+  finite action candidates, and monotone-time invalidity proof. A successful
+  certificate is replayed before `valid`. Before an expected event at time
+  `T`, the adapter enumerates every receive/timeout outcome at every finite
+  time through `T`; monotonicity proves this covers each relevant hidden step.
+  Exhaustive closure is `invalid`, while any branch reaching its resource
+  bound keeps the result `unknown`.
 - `src/Examples.lean` contains executable promise, task,
   read-your-own-writes, schedule, ordered and non-deduplicated message,
   timeout-sweep, deferred-work, retry, and trace-checking tests.
@@ -82,8 +90,8 @@ trace. `boundary_refinement` proves
 duplicate-free node lists when conditional writes are enabled.
 
 With abstract `Config.unreliable`, the Rover process admits normal service,
-landed-but-lost service, and pre-transaction shedding. The trace checker
-searches and replays all three branches.
+landed-but-lost service, and pre-transaction shedding. The checker searches
+and replays all three branches.
 
 Build with:
 

@@ -71,9 +71,16 @@ abbrev model : Model where
   decEqPid := inferInstance
   outside := .outside
   isProcess := (· = .service)
+  decIsProcess := inferInstance
   outside_not_process := by simp
   injectable := fun _ message => ∃ call, message = .request call
-  init := fun _ process => process .service = State.init
+  decInjectable := by
+    intro _ message
+    cases message with
+    | request call => exact isTrue ⟨call, rfl⟩
+    | output output =>
+        exact isFalse (by rintro ⟨call, h⟩; contradiction)
+  init := fun _ process => process = fun _ => State.init
   step := step
 
 theorem only_real_process {pid : Pid} (h : model.isProcess pid) :

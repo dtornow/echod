@@ -24,6 +24,6 @@ roots = [
   "abstract.Model",
   "concrete.Model",
   "concrete.Refinement",
-  "TraceChecker",
+  "Check",
   "Examples",
 ]

@@ -46,10 +46,12 @@ structure Model where
   /-- The stateless endpoint representing everything outside the model. -/
   outside : Pid
   isProcess : Pid → Prop
+  decIsProcess : DecidablePred isProcess
   outside_not_process : ¬ isProcess outside
 
   /-- Which messages the environment may inject as requests. -/
   injectable : Config → Msg → Prop
+  decInjectable : ∀ config, DecidablePred (injectable config)
 
   /-- Allowed initial local states. The network initially contains nothing. -/
   init : Config → (Pid → State) → Prop

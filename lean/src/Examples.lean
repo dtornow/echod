@@ -1,4 +1,4 @@
-import TraceChecker
+import Check
 import «concrete».Model
 
 /-! Focused executable checks for every state family and timeout delivery. -/
@@ -399,24 +399,27 @@ def createTrace : List BoundaryEvent := [
   .response 1 "client" 1 createResponse
 ]
 
-#guard (TraceChecker.check {} createTrace).isValid
+#guard (Check.check {} createTrace).isValid
 
 def nonmonotoneTrace : List BoundaryEvent := [
   .request 2 createCall,
   .response 1 "client" 1 createResponse
 ]
 
-#guard (TraceChecker.check {} nonmonotoneTrace).isInvalid
+#guard (Check.check {} nonmonotoneTrace).isInvalid
 
 -- A zero resource bound cannot inspect a valid nonempty trace.
-#guard (TraceChecker.checkWithBound 0 {} createTrace).isUnknown
+#guard (Check.checkWithBound 0 {} createTrace).isUnknown
 
 def unsupportedTrace : List BoundaryEvent := [
   .response 0 "client" 1 createResponse
 ]
 
 -- Exhausting an ordered but unsupported trace is not a refutation.
-#guard (TraceChecker.check {} unsupportedTrace).isUnknown
+#guard (Check.check {} unsupportedTrace).isUnknown
+
+-- Every process time through the next observed event is enumerated.
+#guard Check.adapter.complete
 
 def unavailableCreateTrace : List BoundaryEvent := [
   .request 0 createCall,
@@ -424,7 +427,7 @@ def unavailableCreateTrace : List BoundaryEvent := [
 ]
 
 -- The full checker explores serve, landed-but-lost, and shed branches.
-#guard (TraceChecker.check { unreliable := true }
+#guard (Check.check { unreliable := true }
   unavailableCreateTrace).isValid
 
 /-- Store application payloads contain only the dependent key, document, and

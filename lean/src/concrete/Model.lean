@@ -642,8 +642,24 @@ abbrev model (nodes : List Addr) (appConfig : Resonate.Config) : Model where
     | .node address => address ∈ nodes
     | .store => True
     | .outside => False
+  decIsProcess := by
+    intro pid
+    cases pid with
+    | outside => exact isFalse (by simp)
+    | node address => exact inferInstance
+    | store => exact isTrue trivial
   outside_not_process := by simp
   injectable := fun _ message => ∃ call, message = .request call
+  decInjectable := by
+    intro _ message
+    cases message with
+    | request call => exact isTrue ⟨call, rfl⟩
+    | output output =>
+        exact isFalse (by rintro ⟨call, h⟩; contradiction)
+    | storeRequest request =>
+        exact isFalse (by rintro ⟨call, h⟩; contradiction)
+    | storeReply reply =>
+        exact isFalse (by rintro ⟨call, h⟩; contradiction)
   init := fun _ process =>
     nodes.Nodup ∧
     process .store = .store {} ∧

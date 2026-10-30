@@ -436,7 +436,7 @@ def timeoutChoices (config : Config) (now : Time) (state : State) :
     documentTimeoutChoices config now state
 
 /-- A deterministic executable representative used by focused examples. The
-abstract Rover transition and full trace checker admit every enumerated choice
+abstract Rover transition and generic checker admit every enumerated choice
 and stutter. -/
 def runTimeout (config : Config) (now : Time) (state : State) :
     State × List Output :=
