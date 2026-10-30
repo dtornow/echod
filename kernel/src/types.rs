@@ -763,10 +763,9 @@ impl AResponse {
 // ---------------------------------------------------------------------------
 //
 // An id is `origin:suffix`; the origin is everything before the first `:`.
-// `same_origin`, `str_eq` and `parse_nat` are `external_body`: their bodies
-// are ordinary Rust and their `ensures` are assumed, not proved. With
-// `clone_string` they are the whole of the kernel's trusted computing base
-// beyond vstd.
+// `same_origin` and `str_eq` are `external_body`: their bodies are ordinary
+// Rust and their `ensures` are assumed, not proved. With `clone_string` they
+// are the whole of the kernel's trusted computing base beyond vstd.
 
 /// Everything before the first `:`, or the whole string if there is none.
 pub open spec fn origin(s: Seq<char>) -> Seq<char>
@@ -809,22 +808,97 @@ pub fn str_eq(a: &str, b: &str) -> (r: bool)
     a == b
 }
 
-/// `parseNat` of the specification, saturating at `MAX_TIME`.
-pub uninterp spec fn spec_parse_nat(s: Seq<char>) -> nat;
+/// A decimal digit's value; any other character counts as `0`.
+pub open spec fn spec_digit(c: char) -> nat {
+    match c {
+        '0' => 0, '1' => 1, '2' => 2, '3' => 3, '4' => 4,
+        '5' => 5, '6' => 6, '7' => 7, '8' => 8, '9' => 9,
+        _ => 0,
+    }
+}
 
-#[verifier::external_body]
+/// The decimal fold from `start` with accumulator `acc`, saturating at
+/// `MAX_TIME`. Stated character by character so that the independent
+/// Abstract model's fold can be proved equal to it.
+pub open spec fn spec_parse_nat_at(s: Seq<char>, start: nat, acc: nat) -> nat
+    decreases s.len() - start,
+{
+    if start >= s.len() {
+        acc
+    } else {
+        let d = spec_digit(s[start as int]);
+        if acc > MAX_TIME as nat / 10 {
+            MAX_TIME as nat
+        } else {
+            let ten = acc * 10;
+            if d > MAX_TIME as nat - ten {
+                MAX_TIME as nat
+            } else {
+                spec_parse_nat_at(s, start + 1, ten + d)
+            }
+        }
+    }
+}
+
+/// `parseNat` of the specification, saturating at `MAX_TIME`.
+pub open spec fn spec_parse_nat(s: Seq<char>) -> nat {
+    spec_parse_nat_at(s, 0, 0)
+}
+
+pub proof fn lemma_parse_nat_at_bound(s: Seq<char>, start: nat, acc: nat)
+    requires acc <= MAX_TIME,
+    ensures spec_parse_nat_at(s, start, acc) <= MAX_TIME,
+    decreases s.len() - start,
+{
+    if start < s.len() {
+        let d = spec_digit(s[start as int]);
+        if acc <= MAX_TIME as nat / 10 {
+            let ten = acc * 10;
+            if d <= MAX_TIME as nat - ten {
+                lemma_parse_nat_at_bound(s, start + 1, ten + d);
+            }
+        }
+    }
+}
+
+pub fn parse_digit(c: char) -> (d: u64)
+    ensures d as nat == spec_digit(c),
+{
+    match c {
+        '0' => 0, '1' => 1, '2' => 2, '3' => 3, '4' => 4,
+        '5' => 5, '6' => 6, '7' => 7, '8' => 8, '9' => 9,
+        _ => 0,
+    }
+}
+
 pub fn parse_nat(s: &String) -> (r: u64)
     ensures
         r as nat == spec_parse_nat(s@),
         r <= MAX_TIME,
 {
+    use vstd::string::StrSliceExecFns;
+    let n = s.as_str().unicode_len();
     let mut acc: u64 = 0;
-    for c in s.chars() {
-        let d = (c as u32).wrapping_sub('0' as u32) as u64;
-        acc = acc.saturating_mul(10).saturating_add(d);
-        if acc > MAX_TIME {
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            n as nat == s@.len(),
+            i <= n,
+            acc <= MAX_TIME,
+            spec_parse_nat_at(s@, i as nat, acc as nat) == spec_parse_nat(s@),
+        decreases n - i,
+    {
+        let c = s.as_str().get_char(i);
+        let d = parse_digit(c);
+        if acc > MAX_TIME / 10 {
             return MAX_TIME;
         }
+        let ten = acc * 10;
+        if d > MAX_TIME - ten {
+            return MAX_TIME;
+        }
+        acc = ten + d;
+        i += 1;
     }
     acc
 }
