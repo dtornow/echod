@@ -13,6 +13,7 @@ pub mod promise_sim;
 pub mod read_sim;
 pub mod relation;
 pub mod schedule_sim;
+pub mod task_sim;
 
 use vstd::prelude::*;
 
