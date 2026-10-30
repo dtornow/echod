@@ -8,6 +8,10 @@
 #![cfg(verus_keep_ghost)]
 #![allow(unused_imports)]
 
+pub mod bridge;
+pub mod read_sim;
+pub mod relation;
+
 use vstd::prelude::*;
 
 use echod_abstract::state as abs_state;
