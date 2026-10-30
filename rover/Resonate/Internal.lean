@@ -130,9 +130,16 @@ def handleInternal : InternalStep → Nat → H Unit
   | .taskRetryTimeout req, now => processRetryTimeout req now
   | .scheduleTimeout req, now => processSchedule req now
 
-/-- All process-local work currently represented by the fused state.
-These values are sent only from the service to itself; they are never
-accepted by the model's injection predicate. -/
+/-- Run a fixed list of process-local work in order. Reader+State bind makes
+each handler observe the writes of every earlier handler in the pass. -/
+def handleInternals (steps : List InternalStep) (now : Nat) : H Unit :=
+  match steps with
+  | [] => pure ()
+  | step :: rest => do
+      handleInternal step now
+      handleInternals rest now
+
+/-- All process-local work represented by a snapshot of the fused state. -/
 def internalSteps (state : ServerState) : List InternalStep :=
   let objects := state.objects.flatMap fun o =>
     ([Abstraction.InternalStep.promiseTimeout { id := o.id }] :

@@ -106,10 +106,8 @@ inductive Output where
   | message (entry : OutboxEntry)
   deriving Repr, BEq, DecidableEq
 
-/-- Internal work is a real process-local message, but is not injectable. -/
 inductive Message where
   | request (call : Call)
-  | internal (step : InternalStep)
   | output (output : Output)
   deriving Repr, DecidableEq
 
@@ -177,6 +175,17 @@ def runInternal (config : Config) (step : InternalStep) (now : Time)
     (state : State) : State × List Output :=
   let (_, next) :=
     Direct.runWith config (Direct.handleInternal step now) state
+  (next, transitionOutputs state next)
+
+/-- Execute one deterministic timeout pass. The candidate list is computed
+from the pre-timeout state, while the handlers themselves share one threaded
+Reader+State computation. Work enabled only by this pass waits for a later
+timeout. -/
+def runTimeout (config : Config) (now : Time) (state : State) :
+    State × List Output :=
+  let steps := Direct.internalSteps state
+  let (_, next) :=
+    Direct.runWith config (Direct.handleInternals steps now) state
   (next, transitionOutputs state next)
 
 end Resonate

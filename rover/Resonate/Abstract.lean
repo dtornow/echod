@@ -4,7 +4,7 @@ import Resonate
 # Abstract Resonate
 
 There is exactly one real process. Its local state is the complete fused
-Resonate server state. External requests and process-local internal messages
+Resonate server state. External requests and deterministic timeout passes
 each execute one direct-state atomic transition.
 -/
 
@@ -17,20 +17,18 @@ inductive Pid where
   | service
   deriving DecidableEq, Repr
 
-def sends (state : State) (outputs : List Output) : List (Pid × Message) :=
-  outputs.map (fun output => (Pid.outside, Message.output output)) ++
-    (Direct.internalSteps state).map fun action =>
-      (Pid.service, Message.internal action)
+def sends (outputs : List Output) : List (Pid × Message) :=
+  outputs.map fun output => (Pid.outside, Message.output output)
 
 def step (config : Config) (pid : Pid) (state : State) (now : Time)
     (event : Event Pid Message) : Outcomes (Result Pid State Message) :=
   match pid, event with
   | .service, .receive .outside (.request call) =>
       let (next, outputs) := Resonate.run config call state
-      Outcomes.one { state := next, send := sends next outputs }
-  | .service, .receive .service (.internal action) =>
-      let (next, outputs) := Resonate.runInternal config action now state
-      Outcomes.one { state := next, send := sends next outputs }
+      Outcomes.one { state := next, send := sends outputs }
+  | .service, .timeout =>
+      let (next, outputs) := Resonate.runTimeout config now state
+      Outcomes.one { state := next, send := sends outputs }
   | _, _ => Outcomes.one { state := state, send := [] }
 
 abbrev model : Model where

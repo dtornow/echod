@@ -1,6 +1,6 @@
 import Resonate.TraceChecker
 
-/-! Focused executable checks for every state family and internal delivery. -/
+/-! Focused executable checks for every state family and timeout delivery. -/
 
 namespace Resonate.Examples
 
@@ -112,17 +112,20 @@ def listenerResult : State × List Output :=
       promise.id == ident "settled"
   | _ => false
 
-/-- The same internal action is executable as a non-injectable, self-addressed
-Rover process event. -/
+/-- The service discovers and executes the listener work from its state when
+Rover delivers a timeout; the event carries no internal request. -/
 def listenerRoverResult :
     Rover.Result Abstract.Pid State Message :=
   (Abstract.step {} .service listenerState 2
-    (.receive .service
-      (.internal
-        (.listener { awaited := ident "settled", address := "listener" }))))
+    .timeout)
     |>.val.headD { state := {}, send := [] }
 
 #guard listenerRoverResult.state.outbox.length == 1
+#guard match listenerRoverResult.send with
+  | [(.outside, .output (.message
+      { address := "listener", message := .unblock promise }))] =>
+      promise.id == ident "settled"
+  | _ => false
 
 def timeoutState : State := {
   objects := [{
@@ -138,8 +141,7 @@ def timeoutState : State := {
 }
 
 def timeoutResult : State × List Output :=
-  Resonate.runInternal {}
-    (.promiseTimeout { id := ident "timeout" }) 5 timeoutState
+  Resonate.runTimeout {} 5 timeoutState
 
 #guard timeoutResult.1.objects.head?.map (·.promise.state) ==
   some .rejectedTimedout
@@ -171,8 +173,7 @@ def retryState : State := {
 }
 
 def retryResult : State × List Output :=
-  Resonate.runInternal { retryTimeout := 7 }
-    (.taskRetryTimeout { id := ident "retry" }) 3 retryState
+  Resonate.runTimeout { retryTimeout := 7 } 3 retryState
 
 #guard match retryResult.2 with
   | [.message { address := "queue", message := .execute taskId 4 }] =>

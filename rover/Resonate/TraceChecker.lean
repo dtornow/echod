@@ -3,10 +3,10 @@ import Resonate.Abstract
 /-!
 # Executable checking for the full Resonate boundary protocol
 
-Certificates use only legal Rover actions.  Internal actions are receives of
-self-addressed messages; the certificate language has no way to inject one.
-Successful search results are independently replayed before `valid` is
-returned. Resource exhaustion is conservatively `unknown`.
+Certificates use only legal Rover actions. Internal work is hidden behind a
+timeout at the sole service process; no internal request can be supplied by
+the environment. Successful search results are independently replayed before
+`valid` is returned. Resource exhaustion is conservatively `unknown`.
 -/
 
 namespace Resonate.TraceChecker
@@ -18,7 +18,7 @@ abbrev AModel := Abstract.model
 inductive Action where
   | inject (time : Time) (call : Call)
   | external (time : Time) (call : Call)
-  | internal (time : Time) (step : InternalStep)
+  | timeout (time : Time)
   | observe (time : Time) (output : Output)
   deriving Repr
 
@@ -80,11 +80,6 @@ theorem legal_boundary_times (config : Config) (world : World AModel)
               simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
                 Abstract.boundaryEvent, Message.observeOutput,
                 World.observeOutside] using htail
-          | internal action =>
-              apply monotoneFrom_weaken htime
-              simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
-                Abstract.boundaryEvent, Message.observeOutput,
-                World.observeOutside] using htail
           | output output =>
               cases output with
               | response client id response =>
@@ -123,7 +118,7 @@ def actionStep (config : Config) (world : World AModel) (action : Action) :
             Resonate.run config call (world.process .service)
           let result : Result Abstract.Pid State Message := {
             state := nextState
-            send := Abstract.sends nextState outputs
+            send := Abstract.sends outputs
           }
           let label : Label AModel :=
             .process .service time
@@ -131,21 +126,17 @@ def actionStep (config : Config) (world : World AModel) (action : Action) :
           some (label, world.land .service time result)
         else none
       else none
-  | .internal time step =>
+  | .timeout time =>
       if world.now ≤ time then
-        if (Abstract.Pid.service, Abstract.Pid.service,
-            Message.internal step) ∈ world.network then
-          let (nextState, outputs) :=
-            Resonate.runInternal config step time (world.process .service)
-          let result : Result Abstract.Pid State Message := {
-            state := nextState
-            send := Abstract.sends nextState outputs
-          }
-          let label : Label AModel :=
-            .process .service time
-              (.receive .service (.internal step)) result.send
-          some (label, world.land .service time result)
-        else none
+        let (nextState, outputs) :=
+          Resonate.runTimeout config time (world.process .service)
+        let result : Result Abstract.Pid State Message := {
+          state := nextState
+          send := Abstract.sends outputs
+        }
+        let label : Label AModel :=
+          .process .service time .timeout result.send
+        some (label, world.land .service time result)
       else none
   | .observe time output =>
       if world.now ≤ time then
@@ -181,7 +172,6 @@ theorem actionStep_sound {config : Config} {world : World AModel}
               state := (Resonate.run config call
                 (world.process .service)).1
               send := Abstract.sends
-                (Resonate.run config call (world.process .service)).1
                 (Resonate.run config call (world.process .service)).2
             })
             htime rfl ?_ ?_
@@ -189,28 +179,23 @@ theorem actionStep_sound {config : Config} {world : World AModel}
           simp [Abstract.step, Outcomes.one]
         next _ => contradiction
       next _ => contradiction
-  | internal time action =>
+  | timeout time =>
       simp only [actionStep] at h
       split at h
       next htime =>
-        split at h
-        next hrequest =>
-          cases h
-          refine Step.process
-            (event := .receive Abstract.Pid.service (Message.internal action))
-            (result := {
-              state := (Resonate.runInternal config action time
-                (world.process .service)).1
-              send := Abstract.sends
-                (Resonate.runInternal config action time
-                  (world.process .service)).1
-                (Resonate.runInternal config action time
-                  (world.process .service)).2
-            })
-            htime rfl ?_ ?_
-          · exact hrequest
-          simp [Abstract.step, Outcomes.one]
-        next _ => contradiction
+        cases h
+        refine Step.process
+          (event := .timeout)
+          (result := {
+            state := (Resonate.runTimeout config time
+              (world.process .service)).1
+            send := Abstract.sends
+              (Resonate.runTimeout config time
+                (world.process .service)).2
+          })
+          htime rfl ?_ ?_
+        · simp [Event.Valid]
+        simp [Abstract.step, Outcomes.one]
       next _ => contradiction
   | observe time output =>
       simp only [actionStep] at h
@@ -297,11 +282,10 @@ structure SearchContext where
   certificate : Certificate
 
 def processActions (world : World AModel) (time : Time) : List Action :=
-  world.network.filterMap fun (sender, recipient, message) =>
+  (world.network.filterMap fun (sender, recipient, message) =>
     match sender, recipient, message with
     | .outside, .service, .request call => some (.external time call)
-    | .service, .service, .internal action => some (.internal time action)
-    | _, _, _ => none
+    | _, _, _ => none) ++ [.timeout time]
 
 def observeActions (world : World AModel) (time : Time)
     (event : BoundaryEvent) : List Action :=

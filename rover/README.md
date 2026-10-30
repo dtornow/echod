@@ -14,11 +14,17 @@ abstract protocol pinned in `lakefile.toml`.
 - `Resonate.lean` uses the public protocol request, response, record, task,
   schedule, and outbox types. Rover adds only client correlation and transport
   envelopes. `Resonate.run` executes external calls at `Call.requestedAt`;
-  `runInternal` executes process-local actions at the Rover step time.
+  `runTimeout` executes process-local work at the Rover timeout time.
 - `Resonate/Abstract.lean` has one service process. Only external calls are
-  injectable. Internal work is represented by self-addressed messages derived
-  from the fused state, so it is executable but cannot be supplied by the
-  environment.
+  injectable. A timeout event carries no internal request: the service
+  snapshots `Direct.internalSteps` from its current fused state and executes
+  that finite list in one deterministic Reader+State pass. The order is each
+  object in stored order, with promise timeout, callbacks in stored order,
+  listeners in stored order, then task lease timeout and retry timeout,
+  followed by schedules in stored order. Later handlers observe earlier
+  writes; work newly enabled by the pass waits for a later timeout.
+- The service sends only boundary responses and outbox messages. Internal work
+  is never represented as a wire message.
 - `Resonate/TraceChecker.lean` searches the full request/response/outbox
   boundary protocol. A successful certificate is replayed against Rover and
   `check_valid_sound` proves that every `valid` verdict is a real abstract
