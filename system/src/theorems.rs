@@ -402,7 +402,7 @@ proof fn lemma_origin_no_colon(id: Seq<char>)
     }
 }
 
-proof fn lemma_origin_not_sched(id: Seq<char>)
+pub proof fn lemma_origin_not_sched(id: Seq<char>)
     ensures !is_sched(origin(id)),
 {
     lemma_origin_no_colon(id);

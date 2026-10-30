@@ -223,7 +223,12 @@ pub open spec fn request_target(req: ARequest) -> Option<Origin> {
 /// Ghost: a request answered — where, at what instant it was decided, what
 /// it asked, and what it was told. A request is answered when its write
 /// lands, or at once when it changed nothing; one that lost its race is
-/// decided again and answered then.
+/// decided again and answered then. The log records each at its
+/// linearization point: a write at its commit, which is conditional on the
+/// version it read, so the document is then as read; a request that
+/// changed nothing at its read, which is what its answer was computed on
+/// and all it depends on. The node sends that answer later, but nothing it
+/// sends depends on anything after the read.
 pub struct Served {
     pub origin: Origin,
     pub at: nat,
@@ -498,7 +503,12 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
         };
-        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
+        Some(Cluster {
+            nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }),
+            // a request that changed nothing is answered from this read
+            log: if changed { s.log } else { answered(s, o, x) },
+            ..s
+        })
     } else {
         None
     }
@@ -541,8 +551,9 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
 }
 
 /// The write may go once the key is armed, if one had to be.
-/// The log once the commit `x` on `o` is answered: its request and the
-/// response the kernel gave it on the document it loaded.
+/// The log once the step `x` on `o` is answered: its request and the
+/// response the kernel gave it on the document it loaded. Anything but a
+/// request answers nothing.
 pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
     match x.work {
         Work::Request(req, m) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(m), req, x.t).1 }),
@@ -699,7 +710,7 @@ pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is None {
-        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), log: answered(s, o, x), ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), ..s })
     } else {
         None
     }
