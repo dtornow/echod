@@ -402,7 +402,7 @@ proof fn lemma_origin_no_colon(id: Seq<char>)
     }
 }
 
-proof fn lemma_origin_not_sched(id: Seq<char>)
+pub proof fn lemma_origin_not_sched(id: Seq<char>)
     ensures !is_sched(origin(id)),
 {
     lemma_origin_no_colon(id);
@@ -1924,6 +1924,7 @@ pub proof fn not_vacuous(o: Origin)
             order: Map::empty().insert(Event::Born(e), 0),
         },
         log: Seq::empty(),
+        rt: 0,
     };
     lemma_inv_empty(0);
     assert(shaped(o, empty));

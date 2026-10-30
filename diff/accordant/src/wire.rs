@@ -2,9 +2,9 @@
 //! carries it, and an answer as the model types it. Shared by the driver and
 //! the simulator (`#[path]`).
 
-use std::collections::BTreeMap;
-
-use resonate::{Create, Fenced, PMap, PSet, PState, Promise, PromiseRec, Request, Response, Schedule, Server as Model, TState, Tags, Task, TaskRec};
+use resonate::{
+    Create, Fenced, PState, PromiseRec, Request, Response, Schedule, TState, Tags, TaskRec,
+};
 use serde_json::{json, Value};
 
 pub fn tags(t: &Tags, worker: &str) -> Value {
@@ -23,7 +23,6 @@ pub fn tags(t: &Tags, worker: &str) -> Value {
     }
     Value::Object(m)
 }
-
 pub fn value(data: &Option<String>) -> Value {
     match data {
         Some(d) => json!({ "data": d }),
@@ -40,25 +39,73 @@ pub fn encode(req: &Request, worker: &str) -> (&'static str, Value) {
     match req {
         Request::CreatePromise(c) => ("promise.create", create_data(c, worker)),
         Request::GetPromise(id) => ("promise.get", json!({ "id": id })),
-        Request::SettlePromise(s) => ("promise.settle", json!({ "id": s.id, "state": s.state, "value": value(&s.data) })),
-        Request::RegisterCallback { awaited, awaiter } => ("promise.register_callback", json!({ "awaited": awaited, "awaiter": awaiter })),
-        Request::RegisterListener { awaited, address } => ("promise.register_listener", json!({ "awaited": awaited, "address": address })),
+        Request::SettlePromise(s) => (
+            "promise.settle",
+            json!({ "id": s.id, "state": s.state, "value": value(&s.data) }),
+        ),
+        Request::RegisterCallback { awaited, awaiter } => (
+            "promise.register_callback",
+            json!({ "awaited": awaited, "awaiter": awaiter }),
+        ),
+        Request::RegisterListener { awaited, address } => (
+            "promise.register_listener",
+            json!({ "awaited": awaited, "address": address }),
+        ),
         Request::GetTask(id) => ("task.get", json!({ "id": id })),
-        Request::CreateTask { pid, ttl, action } => ("task.create", json!({ "pid": pid, "ttl": ttl, "action": { "kind": "promise.create", "head": {}, "data": create_data(action, worker) } })),
-        Request::AcquireTask { id, version, pid, ttl } => ("task.acquire", json!({ "id": id, "version": version, "pid": pid, "ttl": ttl })),
-        Request::ReleaseTask { id, version } => ("task.release", json!({ "id": id, "version": version })),
-        Request::FulfillTask { id, version, state, data } => ("task.fulfill", json!({ "id": id, "version": version, "action": { "kind": "promise.settle", "head": {}, "data": { "id": id, "state": state, "value": value(data) } } })),
-        Request::HeartbeatTask { pid, tasks } => ("task.heartbeat", json!({ "pid": pid, "tasks": tasks.iter().map(|t| json!({ "id": t.id, "version": t.version })).collect::<Vec<_>>() })),
-        Request::SuspendTask { id, version, awaited } => (
+        Request::CreateTask { pid, ttl, action } => (
+            "task.create",
+            json!({ "pid": pid, "ttl": ttl, "action": { "kind": "promise.create", "head": {}, "data": create_data(action, worker) } }),
+        ),
+        Request::AcquireTask {
+            id,
+            version,
+            pid,
+            ttl,
+        } => (
+            "task.acquire",
+            json!({ "id": id, "version": version, "pid": pid, "ttl": ttl }),
+        ),
+        Request::ReleaseTask { id, version } => {
+            ("task.release", json!({ "id": id, "version": version }))
+        }
+        Request::FulfillTask {
+            id,
+            version,
+            state,
+            data,
+        } => (
+            "task.fulfill",
+            json!({ "id": id, "version": version, "action": { "kind": "promise.settle", "head": {}, "data": { "id": id, "state": state, "value": value(data) } } }),
+        ),
+        Request::HeartbeatTask { pid, tasks } => (
+            "task.heartbeat",
+            json!({ "pid": pid, "tasks": tasks.iter().map(|t| json!({ "id": t.id, "version": t.version })).collect::<Vec<_>>() }),
+        ),
+        Request::SuspendTask {
+            id,
+            version,
+            awaited,
+        } => (
             "task.suspend",
             json!({ "id": id, "version": version, "actions": awaited.iter().map(|a| json!({ "kind": "promise.register_callback", "head": {}, "data": { "awaited": a, "awaiter": id } })).collect::<Vec<_>>() }),
         ),
-        Request::FenceTask { id, version, action } => {
+        Request::FenceTask {
+            id,
+            version,
+            action,
+        } => {
             let action = match action {
-                Fenced::Create(c) => json!({ "kind": "promise.create", "head": {}, "data": create_data(c, worker) }),
-                Fenced::Settle(s) => json!({ "kind": "promise.settle", "head": {}, "data": { "id": s.id, "state": s.state, "value": value(&s.data) } }),
+                Fenced::Create(c) => {
+                    json!({ "kind": "promise.create", "head": {}, "data": create_data(c, worker) })
+                }
+                Fenced::Settle(s) => {
+                    json!({ "kind": "promise.settle", "head": {}, "data": { "id": s.id, "state": s.state, "value": value(&s.data) } })
+                }
             };
-            ("task.fence", json!({ "id": id, "version": version, "action": action }))
+            (
+                "task.fence",
+                json!({ "id": id, "version": version, "action": action }),
+            )
         }
         Request::HaltTask(id) => ("task.halt", json!({ "id": id })),
         Request::ContinueTask(id) => ("task.continue", json!({ "id": id })),
@@ -154,7 +201,11 @@ pub fn decode(kind: &str, status: u16, data: &Value) -> Response {
             }
         }
     }
-    let body = if kind == "task.fence" { &data["action"]["data"] } else { data };
+    let body = if kind == "task.fence" {
+        &data["action"]["data"]
+    } else {
+        data
+    };
     if kind.starts_with("schedule.") {
         return match srec(&body["schedule"]) {
             Some(c) => Response::Schedule(c),
@@ -168,65 +219,3 @@ pub fn decode(kind: &str, status: u16, data: &Value) -> Response {
         (None, None) => Response::Status(status),
     }
 }
-
-/// The model's state, from echod's snapshot: what the suggestions read.
-pub fn model_state(snap: &Value) -> Model {
-    let mut promises: PMap<Promise> = PMap::empty();
-    let mut callbacks: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for c in snap["callbacks"].as_array().into_iter().flatten() {
-        if let (Some(a), Some(w)) = (c["awaited"].as_str(), c["awaiter"].as_str()) {
-            callbacks.entry(a.to_string()).or_default().push(w.to_string());
-        }
-    }
-    let mut listeners: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for l in snap["listeners"].as_array().into_iter().flatten() {
-        if let (Some(id), Some(a)) = (l["id"].as_str(), l["address"].as_str()) {
-            listeners.entry(id.to_string()).or_default().push(a.to_string());
-        }
-    }
-    for p in snap["promises"].as_array().into_iter().flatten() {
-        let Some(r) = prec(p) else { continue };
-        let mut cbs = PSet::empty();
-        for w in callbacks.get(&r.id).into_iter().flatten() {
-            cbs.insert(w.clone());
-        }
-        let mut ls = PSet::empty();
-        for a in listeners.get(&r.id).into_iter().flatten() {
-            ls.insert(a.clone());
-        }
-        promises.insert(
-            r.id.clone(),
-            Promise { state: r.state, value: r.value, param: r.param, timeout_at: r.timeout_at, created_at: r.created_at, settled_at: r.settled_at, tags: r.tags, callbacks: cbs, listeners: ls },
-        );
-    }
-    let mut leases: BTreeMap<String, u64> = BTreeMap::new();
-    let mut retries: BTreeMap<String, u64> = BTreeMap::new();
-    for t in snap["taskTimeouts"].as_array().into_iter().flatten() {
-        if let (Some(id), Some(at)) = (t["id"].as_str(), t["timeout"].as_u64()) {
-            match t["type"].as_u64() {
-                Some(1) => leases.insert(id.to_string(), at),
-                Some(0) => retries.insert(id.to_string(), at),
-                _ => None,
-            };
-        }
-    }
-    let mut tasks: PMap<Task> = PMap::empty();
-    for t in snap["tasks"].as_array().into_iter().flatten() {
-        let Some(r) = trec(t) else { continue };
-        let acquired_at = match (leases.get(&r.id), r.ttl) {
-            (Some(at), Some(ttl)) => at.saturating_sub(ttl),
-            _ => 0,
-        };
-        // the count is what the record carries; the ids are not
-        let resumes = (0..r.resumes).map(|i| format!("resume-{i}")).collect();
-        tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at, retry_at: retries.get(&r.id).copied(), resumes });
-    }
-    let mut schedules: PMap<Schedule> = PMap::empty();
-    for c in snap["schedules"].as_array().into_iter().flatten() {
-        if let Some(c) = srec(c) {
-            schedules.insert(c.id.clone(), c);
-        }
-    }
-    Model { promises, tasks, schedules }
-}
-

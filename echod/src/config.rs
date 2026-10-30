@@ -75,11 +75,6 @@ pub struct Config {
     /// Bytes of documents held in the read cache, at most, by object size.
     #[arg(long, env = "ECHOD_CACHE_BYTES", default_value_t = 256 * 1024 * 1024)]
     pub cache_bytes: u64,
-
-    /// Debug mode: the clock is the request's `resonate:debug_time`, and no
-    /// loop runs on wall time.
-    #[arg(long, env = "ECHOD_DEBUG", default_value_t = false)]
-    pub debug: bool,
 }
 
 impl Config {
@@ -102,7 +97,6 @@ impl Config {
             node_ttl_ms: 2_000,
             cache_entries: 1_000,
             cache_bytes: 16 * 1024 * 1024,
-            debug: false,
         }
     }
 
@@ -125,7 +119,6 @@ impl Config {
             node_ttl_ms: self.node_ttl_ms,
             cache_entries: self.cache_entries,
             cache_bytes: self.cache_bytes,
-            debug: self.debug,
         }
     }
 }

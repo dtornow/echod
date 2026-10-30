@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use echod::store::{Etag, MemoryStore, Read, Store, StoreError};
+use echod::store::{
+    Environment, Etag, MemoryStore, Read, Store, StoreCall, StoreError, StoreOutcome,
+};
 
 use crate::rng::Rng;
 
@@ -44,7 +46,12 @@ pub struct FaultyStore {
 
 impl FaultyStore {
     pub fn new(inner: Arc<MemoryStore>, faults: Faults, rng: Rng) -> Self {
-        Self { inner, faults, rng: Mutex::new(rng), counters: Mutex::new(Counters::default()) }
+        Self {
+            inner,
+            faults,
+            rng: Mutex::new(rng),
+            counters: Mutex::new(Counters::default()),
+        }
     }
 
     pub fn counters(&self) -> Counters {
@@ -65,86 +72,145 @@ impl FaultyStore {
         }
     }
 
-    fn unavailable(&self) -> Option<StoreError> {
-        if self.roll(self.faults.unavailable_percent) {
-            self.counters.lock().unwrap().unavailable += 1;
-            Some(StoreError::Unavailable("injected".into()))
-        } else {
-            None
-        }
+    fn increment(&self, counter: fn(&mut Counters) -> &mut u64) {
+        *counter(&mut self.counters.lock().unwrap()) += 1;
     }
 
-    /// After a write landed: maybe say it did not.
-    fn lost_ack<T>(&self, r: Result<T, StoreError>) -> Result<T, StoreError> {
-        if r.is_ok() && self.roll(self.faults.lost_ack_percent) {
-            self.counters.lock().unwrap().lost_acks += 1;
-            return Err(StoreError::Unavailable("injected: ack lost".into()));
-        }
-        r
+    async fn execute(&self, call: StoreCall) -> StoreOutcome {
+        self.delay().await;
+        let conditional = matches!(
+            &call,
+            StoreCall::PutIfMatch { .. }
+                | StoreCall::PutIfNoneMatch { .. }
+                | StoreCall::AppendIfMatch { .. }
+        );
+        let mutation = matches!(
+            &call,
+            StoreCall::PutIfMatch { .. }
+                | StoreCall::PutIfNoneMatch { .. }
+                | StoreCall::AppendIfMatch { .. }
+                | StoreCall::Put { .. }
+                | StoreCall::Delete { .. }
+        );
+        self.inner
+            .execute_selecting_environment(call, |can_refuse, can_lose_ack| {
+                if self.roll(self.faults.unavailable_percent) {
+                    self.increment(|c| &mut c.unavailable);
+                    return Environment::FailBeforeApply;
+                }
+                // Draw for every conditional request, but select Refused only
+                // when that is a valid raw transition in the locked state.
+                if conditional && self.roll(self.faults.conflict_percent) && can_refuse {
+                    self.increment(|c| &mut c.conflicts);
+                    return Environment::Refused;
+                }
+                // Eligibility is known before the one automaton step.
+                if mutation && can_lose_ack && self.roll(self.faults.lost_ack_percent) {
+                    self.increment(|c| &mut c.lost_acks);
+                    return Environment::ApplyButLostAck;
+                }
+                Environment::Normal
+            })
+            .1
     }
 
-    fn conflict(&self) -> Option<StoreError> {
-        if self.roll(self.faults.conflict_percent) {
-            self.counters.lock().unwrap().conflicts += 1;
-            Some(StoreError::PreconditionFailed)
-        } else {
-            None
-        }
+    fn unexpected(expected: &str) -> StoreError {
+        StoreError::Unavailable(format!(
+            "raw store returned an outcome other than {expected}"
+        ))
     }
 }
 
 #[async_trait]
 impl Store for FaultyStore {
     async fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self.execute(StoreCall::Get { key: key.into() }).await {
+            StoreOutcome::Got(value) => Ok(value),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Get")),
         }
-        self.inner.get(key).await
     }
 
     async fn get_if_none_match(&self, key: &str, etag: &Etag) -> Result<Read, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self
+            .execute(StoreCall::GetIfNoneMatch {
+                key: key.into(),
+                etag: etag.clone(),
+            })
+            .await
+        {
+            StoreOutcome::Read(value) => Ok(value),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("GetIfNoneMatch")),
         }
-        self.inner.get_if_none_match(key, etag).await
     }
 
-    async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+    async fn put_if_match(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        etag: &Etag,
+    ) -> Result<Etag, StoreError> {
+        match self
+            .execute(StoreCall::PutIfMatch {
+                key: key.into(),
+                body,
+                etag: etag.clone(),
+            })
+            .await
+        {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("PutIfMatch")),
         }
-        if let Some(e) = self.conflict() {
-            return Err(e);
-        }
-        let r = self.inner.put_if_match(key, body, etag).await;
-        self.lost_ack(r)
     }
 
     async fn put_if_none_match(&self, key: &str, body: Vec<u8>) -> Result<Etag, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self
+            .execute(StoreCall::PutIfNoneMatch {
+                key: key.into(),
+                body,
+            })
+            .await
+        {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("PutIfNoneMatch")),
         }
-        if let Some(e) = self.conflict() {
-            return Err(e);
-        }
-        let r = self.inner.put_if_none_match(key, body).await;
-        self.lost_ack(r)
     }
 
-    async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+    async fn append_if_match(
+        &self,
+        key: &str,
+        offset: u64,
+        body: Vec<u8>,
+        etag: &Etag,
+    ) -> Result<Etag, StoreError> {
+        if !self.inner.supports_append() {
+            self.delay().await;
+            if self.roll(self.faults.unavailable_percent) {
+                self.increment(|c| &mut c.unavailable);
+                return Err(StoreError::Unavailable("injected".into()));
+            }
+            if self.roll(self.faults.conflict_percent) {
+                self.increment(|c| &mut c.conflicts);
+                return Err(StoreError::PreconditionFailed);
+            }
+            return Err(StoreError::Unavailable("this store does not append".into()));
         }
-        if let Some(e) = self.conflict() {
-            return Err(e);
+        match self
+            .execute(StoreCall::AppendIfMatch {
+                key: key.into(),
+                offset,
+                body,
+                etag: etag.clone(),
+            })
+            .await
+        {
+            StoreOutcome::Written(etag) => Ok(etag),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("AppendIfMatch")),
         }
-        let r = self.inner.append_if_match(key, offset, body, etag).await;
-        self.lost_ack(r)
     }
 
     fn supports_append(&self) -> bool {
@@ -152,37 +218,52 @@ impl Store for FaultyStore {
     }
 
     async fn put(&self, key: &str, body: Vec<u8>) -> Result<(), StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self
+            .execute(StoreCall::Put {
+                key: key.into(),
+                body,
+            })
+            .await
+        {
+            StoreOutcome::Done => Ok(()),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Put")),
         }
-        let r = self.inner.put(key, body).await;
-        self.lost_ack(r)
     }
 
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self.execute(StoreCall::Delete { key: key.into() }).await {
+            StoreOutcome::Done => Ok(()),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("Delete")),
         }
-        let r = self.inner.delete(key).await;
-        self.lost_ack(r)
     }
 
     async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self
+            .execute(StoreCall::List {
+                prefix: prefix.into(),
+                max_keys,
+            })
+            .await
+        {
+            StoreOutcome::Listed(keys) => Ok(keys),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("List")),
         }
-        self.inner.list(prefix, max_keys).await
     }
 
     async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
-        self.delay().await;
-        if let Some(e) = self.unavailable() {
-            return Err(e);
+        match self
+            .execute(StoreCall::ListPrefixes {
+                prefix: prefix.into(),
+            })
+            .await
+        {
+            StoreOutcome::Listed(prefixes) => Ok(prefixes),
+            StoreOutcome::Failed(error) => Err(error),
+            _ => Err(Self::unexpected("ListPrefixes")),
         }
-        self.inner.list_prefixes(prefix).await
     }
 
     async fn ready(&self) -> bool {
@@ -199,7 +280,10 @@ pub struct NodeStore {
 
 impl NodeStore {
     pub fn new(shared: Arc<FaultyStore>) -> Self {
-        Self { shared, cut: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            shared,
+            cut: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub fn set_cut(&self, cut: bool) {
@@ -209,7 +293,9 @@ impl NodeStore {
     async fn gate(&self) -> Result<(), StoreError> {
         if self.cut.load(std::sync::atomic::Ordering::Relaxed) {
             tokio::task::yield_now().await;
-            return Err(StoreError::Unavailable("this node cannot reach the store".into()));
+            return Err(StoreError::Unavailable(
+                "this node cannot reach the store".into(),
+            ));
         }
         Ok(())
     }
@@ -225,7 +311,12 @@ impl Store for NodeStore {
         self.gate().await?;
         self.shared.get_if_none_match(key, etag).await
     }
-    async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
+    async fn put_if_match(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        etag: &Etag,
+    ) -> Result<Etag, StoreError> {
         self.gate().await?;
         self.shared.put_if_match(key, body, etag).await
     }
@@ -233,7 +324,13 @@ impl Store for NodeStore {
         self.gate().await?;
         self.shared.put_if_none_match(key, body).await
     }
-    async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
+    async fn append_if_match(
+        &self,
+        key: &str,
+        offset: u64,
+        body: Vec<u8>,
+        etag: &Etag,
+    ) -> Result<Etag, StoreError> {
         self.gate().await?;
         self.shared.append_if_match(key, offset, body, etag).await
     }
@@ -258,5 +355,83 @@ impl Store for NodeStore {
     }
     async fn ready(&self) -> bool {
         !self.cut.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn faulty(inner: Arc<MemoryStore>, faults: Faults) -> FaultyStore {
+        FaultyStore::new(inner, faults, Rng::new(1))
+    }
+
+    #[tokio::test]
+    async fn unavailable_is_selected_before_the_raw_step() {
+        let inner = Arc::new(MemoryStore::new());
+        let store = faulty(
+            Arc::clone(&inner),
+            Faults {
+                unavailable_percent: 100,
+                ..Faults::default()
+            },
+        );
+
+        assert!(matches!(
+            store.put("k", b"value".to_vec()).await,
+            Err(StoreError::Unavailable(_))
+        ));
+        assert_eq!(inner.get("k").await.unwrap(), None);
+        assert_eq!(store.counters().operations, 1);
+        assert_eq!(store.counters().unavailable, 1);
+    }
+
+    #[tokio::test]
+    async fn lost_ack_is_an_apply_but_lost_ack_raw_step() {
+        let inner = Arc::new(MemoryStore::new());
+        let store = faulty(
+            Arc::clone(&inner),
+            Faults {
+                lost_ack_percent: 100,
+                ..Faults::default()
+            },
+        );
+
+        assert!(matches!(
+            store.put("k", b"value".to_vec()).await,
+            Err(StoreError::Unavailable(_))
+        ));
+        assert_eq!(inner.get("k").await.unwrap().unwrap().0, b"value");
+        assert_eq!(store.counters().operations, 1);
+        assert_eq!(store.counters().lost_acks, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_conflict_is_a_refused_raw_step() {
+        let inner = Arc::new(MemoryStore::new());
+        let current = inner
+            .put_if_none_match("k", b"value".to_vec())
+            .await
+            .unwrap();
+        let store = faulty(
+            Arc::clone(&inner),
+            Faults {
+                conflict_percent: 100,
+                lost_ack_percent: 100,
+                ..Faults::default()
+            },
+        );
+
+        assert_eq!(
+            store.put_if_none_match("k", b"other".to_vec()).await,
+            Err(StoreError::PreconditionFailed)
+        );
+        assert_eq!(
+            inner.get("k").await.unwrap(),
+            Some((b"value".to_vec(), current))
+        );
+        assert_eq!(store.counters().operations, 1);
+        assert_eq!(store.counters().conflicts, 1);
+        assert_eq!(store.counters().lost_acks, 0);
     }
 }

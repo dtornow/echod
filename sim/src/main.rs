@@ -66,10 +66,10 @@ struct Knobs {
     /// stamp precedes the read, which the model's one clock cannot show.
     #[arg(long, default_value_t = 0)]
     misroute: u64,
-    /// The checker's budget: nodes to explore, at most. For a failing seed,
+    /// The checker's budget: semantic successors to explore, at most. For a failing seed,
     /// `ECHOD_SIM_DUMP=1` prints the trace up to the event and the steps the
     /// nodes reported; `ECHOD_SIM_PROGRESS=n` a line every n events;
-    /// `ECHOD_SIM_WIDTH=n` gives up at a narrower profile and shows it.
+    /// `ECHOD_SIM_WIDTH=n` overrides the retained-profile budget (default 512).
     #[arg(long, default_value_t = 2_000_000)]
     budget: u64,
 }
@@ -83,7 +83,12 @@ impl Knobs {
             operations: self.operations,
             origins: self.origins,
             schedules: self.schedules,
-            faults: Faults { unavailable_percent: self.unavailable, lost_ack_percent: self.lost_ack, conflict_percent: self.conflict, latency_ms: self.latency },
+            faults: Faults {
+                unavailable_percent: self.unavailable,
+                lost_ack_percent: self.lost_ack,
+                conflict_percent: self.conflict,
+                latency_ms: self.latency,
+            },
             crash_percent: self.crash,
             stop_percent: self.stop,
             join_percent: self.join,
@@ -120,7 +125,12 @@ enum Cmd {
 }
 
 fn main() {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "error".into())).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "error".into()),
+        )
+        .init();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Run { seed, knobs } => {

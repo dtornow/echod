@@ -401,10 +401,11 @@ pub open spec fn spec_task_fence(a: AState, req: ATaskFenceReq, now: nat) -> (AS
 
 
 /// `task.fence` with no action: the check alone. A fence whose create targets
-/// another origin runs the create first, as a request of its own on that
-/// origin's document, and then this on the task's: the two documents commit one
-/// at a time, the create before the check, so a stale fence still leaves the
-/// promise created and answers its 409.
+/// another origin runs this first, on the task's document, and then the
+/// create as a request of its own on that origin's: the two documents
+/// commit one at a time, the check before the create, so a fence that does
+/// not hold creates nothing, and one that lapses after its check still
+/// creates.
 pub open spec fn spec_task_fence_check(a: AState, req: ATaskFenceCheckReq, now: nat) -> (AState, AStatusRes) {
     if !a.has_task(req.id) {
         (a, AStatusRes { status: 404 })
@@ -657,6 +658,7 @@ impl State {
             final(self).outbox == old(self).outbox,
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
             match r {
                 None => {
                     &&& !old(self)@.objects.contains_key(id@)
@@ -683,6 +685,7 @@ impl State {
                 }
                 self.objects[i].project(now);
                 proof {
+                    lemma_object_ids_update(before, i as int, self.objects@[i as int]);
                     crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)
@@ -1021,6 +1024,7 @@ impl State {
             final(self).outbox == old(self).outbox,
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
             match r {
                 None => {
                     &&& *final(self) == *old(self)
@@ -1049,6 +1053,7 @@ impl State {
                 let ghost before = self.objects@;
                 self.objects[i].project(now);
                 proof {
+                    lemma_object_ids_update(before, i as int, self.objects@[i as int]);
                     crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
                 }
                 Some(i)

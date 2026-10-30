@@ -97,6 +97,87 @@ pub open spec fn retry_timeout_objects(a: AState, id: Seq<char>, now: nat, retry
     }
 }
 
+/// The complete state computed by one executable retry step, including the
+/// keyed outbox upsert.  `retry_timeout_objects` predates the executable
+/// sweep bridge and intentionally describes only the object map.
+pub open spec fn retry_timeout_state(a: AState, id: Seq<char>, now: nat, retry_timeout: nat) -> AState {
+    if a.objects.contains_key(id) && retry_due(a.objects[id], now) {
+        let p = a.objects[id];
+        AState {
+            objects: retry_timeout_objects(a, id, now, retry_timeout),
+            outbox: a.outbox.insert(
+                OutboxKey::Execute(id),
+                AOutboxEntry {
+                    address: target_or_empty(p),
+                    message: AMessage::Execute { task_id: id, version: p.task.unwrap().version },
+                },
+            ),
+            ..a
+        }
+    } else {
+        a
+    }
+}
+
+/// The complete state computed by `processListener`.
+pub open spec fn listener_state(a: AState, x: Seq<char>, address: Seq<char>, now: nat) -> AState {
+    if !a.objects.contains_key(x) {
+        a
+    } else {
+        let p = a.objects[x].project(now);
+        let a1 = with_objects(a, a.objects.insert(x, p));
+        if p.state == PromiseState::Pending || !p.listeners.contains(address) {
+            a1
+        } else {
+            let q = p.remove_listener(address);
+            AState {
+                objects: a1.objects.insert(x, q),
+                outbox: a1.outbox.insert(
+                    OutboxKey::Notify(x, address),
+                    AOutboxEntry { address, message: AMessage::Unblock(q.to_record()) },
+                ),
+                ..a1
+            }
+        }
+    }
+}
+
+/// The complete state computed by `processCallback`.
+pub open spec fn callback_state(a: AState, x: Seq<char>, y: Seq<char>, now: nat) -> AState {
+    if !a.objects.contains_key(x) {
+        a
+    } else {
+        let p = a.objects[x].project(now);
+        let a1 = with_objects(a, a.objects.insert(x, p));
+        if p.state == PromiseState::Pending || !p.callbacks.contains(y) {
+            a1
+        } else {
+            let a2 = with_objects(a1, a1.objects.insert(x, p.remove_callback(y)));
+            if !a2.objects.contains_key(y) {
+                a2
+            } else {
+                let q = a2.objects[y].project(now);
+                let a3 = with_objects(a2, a2.objects.insert(y, q));
+                match q.task {
+                    None => a3,
+                    Some(t) => {
+                        if t.state == TaskState::Suspended {
+                            with_objects(a3, a3.objects.insert(
+                                y,
+                                q.with_task(t.wake(x, opt_or_zero(p.settled_at))),
+                            ))
+                        } else if t.state != TaskState::Fulfilled {
+                            with_objects(a3, a3.objects.insert(y, q.with_task(t.buffer(x))))
+                        } else {
+                            a3
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
 impl State {
     /// `processPromiseTimeout`: touch the object.
     pub fn process_promise_timeout(&mut self, req: &PromiseTimeoutReq, now: u64, cfg: &Config)
@@ -107,6 +188,8 @@ impl State {
             final(self)@.objects == promise_timeout_objects(old(self)@, req.id@, now as nat),
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            final(self).outbox == old(self).outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
     {
         let ghost a = self@;
         match self.read_object(&req.id, now) {
@@ -134,6 +217,8 @@ impl State {
             final(self)@.objects == lease_timeout_objects(old(self)@, req.id@, now as nat),
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.outbox == old(self)@.outbox,
+            final(self).outbox == old(self).outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
     {
         let ghost a = self@;
         proof {
@@ -159,6 +244,7 @@ impl State {
         self.objects[i].task_release(end);
         proof {
             let x = req.id@;
+            lemma_object_ids_update(before, i as int, self.objects@[i as int]);
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(end as nat))));
             lemma_release_legal(now as nat, a, self@, x, end as nat);
@@ -175,6 +261,17 @@ impl State {
             final(self)@.objects == retry_timeout_objects(old(self)@, req.id@, now as nat, cfg.retry_timeout as nat),
             final(self)@.schedules == old(self)@.schedules,
             !(old(self)@.objects.contains_key(req.id@) && retry_due(old(self)@.objects[req.id@], now as nat)) ==> final(self)@.outbox == old(self)@.outbox,
+            final(self)@ == retry_timeout_state(old(self)@, req.id@, now as nat, cfg.retry_timeout as nat),
+            outbox_keys(*final(self)) == if old(self)@.objects.contains_key(req.id@)
+                && retry_due(old(self)@.objects[req.id@], now as nat) {
+                    upsert_outbox_order(
+                        outbox_keys(*old(self)),
+                        OutboxKey::Execute(req.id@),
+                    )
+                } else {
+                    outbox_keys(*old(self))
+                },
+            object_ids(*final(self)) == object_ids(*old(self)),
     {
         let ghost a = self@;
         proof {
@@ -200,6 +297,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].task_rearm(now, cfg.retry_timeout);
         proof {
+            lemma_object_ids_update(before, i as int, self.objects@[i as int]);
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
@@ -221,6 +319,18 @@ impl State {
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.objects.dom() == old(self)@.objects.dom(),
+            final(self)@ == listener_state(old(self)@, req.awaited@, req.address@, now as nat),
+            outbox_keys(*final(self)) == if old(self)@.objects.contains_key(req.awaited@)
+                && old(self)@.objects[req.awaited@].project(now as nat).state != PromiseState::Pending
+                && old(self)@.objects[req.awaited@].project(now as nat).listeners.contains(req.address@) {
+                    upsert_outbox_order(
+                        outbox_keys(*old(self)),
+                        OutboxKey::Notify(req.awaited@, req.address@),
+                    )
+                } else {
+                    outbox_keys(*old(self))
+                },
+            object_ids(*final(self)) == object_ids(*old(self)),
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
@@ -248,6 +358,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_listener(&req.address);
         proof {
+            lemma_object_ids_update(before, i as int, self.objects@[i as int]);
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let rec = self.objects[i].to_record();
@@ -273,6 +384,9 @@ impl State {
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
             final(self)@.objects.dom() == old(self)@.objects.dom(),
+            final(self)@ == callback_state(old(self)@, req.awaited@, req.awaiter@, now as nat),
+            final(self).outbox == old(self).outbox,
+            object_ids(*final(self)) == object_ids(*old(self)),
     {
         let ghost a = self@;
         let i = match self.read_object(&req.awaited, now) {
@@ -306,6 +420,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_callback(&req.awaiter);
         proof {
+            lemma_object_ids_update(before, i as int, self.objects@[i as int]);
             crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
@@ -337,6 +452,7 @@ impl State {
             self.objects[j].task_buffer(&req.awaited);
         }
         proof {
+            lemma_object_ids_update(before2, j as int, self.objects@[j as int]);
             crate::store_proof::lemma_fold_update(before2, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
             lemma_callback_legal(now as nat, a, self@, x, y, true);
         }

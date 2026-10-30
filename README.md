@@ -13,26 +13,37 @@ deadline keys is the kernel too, each decision proved to compute its
 specification. What several nodes do to one bucket is the system model,
 proved safe whatever the clocks do. What the proof stops at, the shim between
 the verified core and S3, a deterministic simulator holds to the Resonate
-model of [dtornow/accordant](https://github.com/dtornow/accordant) under
-crashes, outages and lost acks.
+model in [`abstract/`](abstract) under crashes, outages and lost acks.
 
 ## Layout
 
 | | |
 |---|---|
+| [`abstract/`](abstract) | the independent executable Abstract Resonate machine: all 21 protocol handlers and all 6 autonomous actions, with observation bookkeeping separate from semantics; Verus-only dependencies, no kernel, Concrete, Accordant or checker dependency |
 | [`kernel/`](kernel) | everything verified that runs: the Resonate state machine on one document, every step proved against the catalogue; and a node's decisions about membership, cache versions and deadline keys, the commit, the sweep, each proved to compute its specification |
+| [`codec/`](codec) | the executable verified persistence format: canonical UTF-8, typed object/key codecs, appendable document segments, compaction and malformed-input rejection |
+| [`concrete/`](concrete) | the deterministic raw object-store automaton: keyed bytes and opaque versions with explicit failure choices; decoded documents, timers, announcements and membership are verified derived views |
+| [`refinement/`](refinement) | the Concrete-to-Abstract proof boundary: independent type/state translation and refinement relation, with no checker-framework dependency; proved: trace inclusion on a document, every admitted run of kernel steps (sweeps, requests, schedule firings) is a run of Abstract actions ending related and answering the same responses; and the system refines the Abstract, in every admitted execution of the fleet the requests served are always the responses of some Abstract run |
 | [`system/`](system) | the system: nodes over one bucket as a TLA-style state machine over the kernel; four theorems, no clock assumed anything of; proof only |
 | [`logic/`](logic) | the decision core: a pure state machine, events in, effects out, no I/O; every store call a submission, every answer a completion; the verified core takes every decision inside it |
 | [`echod/`](echod) | the node: the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| [`sim/`](sim) | `echod-sim`: the node under deterministic simulation, every run checked against the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant) |
-| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; every response, message and snapshot compared. `diff/accordant/`: echod driven by the Resonate model of [dtornow/accordant](https://github.com/dtornow/accordant), every trace checked against it |
+| [`sim/`](sim) | `echod-sim`: deterministic multi-node chaos whose finite public trace is searched against the local executable Abstract model; `Ok` requires a witness, exhausted search is `Ko`, bounded search is `Unknown` |
+| [`diff/`](diff) | `echod-diff`: echod against the Resonate reference server, both over HTTP, on one seeded request stream; public responses and messages compared |
 | [`examples/ts/`](examples/ts) | the TypeScript SDK against the node |
 | [`scripts/`](scripts) | the store and end-to-end tests against a real S3 API |
 
-`kernel/` and `system/` are proved. `logic/` is the shim the proof stops at,
-with nothing in it but the order of calls, and it runs with no runtime:
-its tests feed it events by hand. `echod/` performs what it asks. `sim/` is
-the evidence for both. [DESIGN.md](DESIGN.md) is the design;
+`abstract/`, `kernel/`, `concrete/` and `system/` verify independently.
+`refinement/` proves the document-level link from the kernel to the
+Abstract: every admitted run of kernel steps is an Abstract run
+(`refinement/src/trace.rs`, `theorem_trace_inclusion`); and from it the
+system-level one: in every admitted execution of the system model — nodes
+over one bucket, crashes, lost acknowledgements, the commit protocol — the
+requests served so far are always the responses of some Abstract run
+(`refinement/src/system_sim.rs`, `theorem_system_refines_abstract`, under
+the doors `admitted` and the hypothesis `schedule_held`). The link from the
+`logic/` orchestration to the system model remains to be proved. `logic/` runs with no runtime: its tests feed it events
+by hand. `echod/` performs what it asks. `sim/` is the executable evidence.
+[DESIGN.md](DESIGN.md) is the design;
 [BACKLOG.md](BACKLOG.md) is what is next. Each crate's `lib.rs` opens with
 a map of its files.
 
@@ -41,7 +52,11 @@ a map of its files.
 ```
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
+(cd abstract && ./verify.sh)            # the independent Abstract protocol machine
 (cd kernel && ./verify.sh)              # the kernel under Verus
+(cd codec && ./verify.sh)               # byte/object/document/key codec laws
+(cd concrete && ./verify.sh)            # raw-byte Concrete store and decoded view
+(cd refinement && ./verify.sh)          # local Concrete-to-Abstract relation
 (cd system && ./verify.sh)              # the system model under Verus, importing the kernel
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001
@@ -50,10 +65,9 @@ cargo run --release -p echod-diff -- --resonate <path to a resonate binary> --se
 
 The differential wants the reference server built from `resonatehq/resonate`
 (`impl/server/core`, `cargo build --release --bin resonate`); it starts it
-and echod in debug mode and drives both over HTTP. `diff/accordant` is a
-workspace of its own (`cd diff/accordant && cargo run --release`): it
-builds against accordant's pin of Verus's `vstd`, which is not the
-kernel's.
+and echod as isolated processes and drives both over public HTTP. The
+external reference process requires its development-mode flag; echod runs
+with its production clock and timers.
 
 `verify.sh` wants a Verus source tree with a release build in `VERUS_DIR`
 (default `~/verus-lang/verus/source`) and z3 beside it. `cargo build` is

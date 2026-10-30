@@ -5,9 +5,8 @@
 //! (Apache-2.0): the same operation mix, the same id pools, the same way
 //! of steering towards the operations not yet covered. The search
 //! operations are left out: echod does not serve them, and says so with a
-//! 403 that the reference does not give. The planner reads the reference's
-//! snapshot after every step instead of an in-process model, so this
-//! harness needs nothing of the reference but its HTTP port.
+//! 403 that the reference does not give. The planner learns only from
+//! protocol responses, so the harness needs nothing but public HTTP ports.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -44,11 +43,9 @@ pub const ALL_OPS: &[&str] = &[
     "schedule.create",
     "schedule.get",
     "schedule.delete",
-    "debug.tick",
 ];
 
-/// What the planner knows of the state: the reference's last snapshot,
-/// plus the schedules, which the snapshot does not carry.
+/// What the planner has observed in successful protocol responses.
 #[derive(Default, Clone)]
 pub struct Model {
     /// id -> (state, tags, timeout_at)
@@ -59,49 +56,50 @@ pub struct Model {
 }
 
 impl Model {
-    /// Take the reference's snapshot on.
-    pub fn read(&mut self, snap: &Value) {
-        self.promises.clear();
-        self.tasks.clear();
-        if let Some(ps) = snap["promises"].as_array() {
-            for p in ps {
-                let id = p["id"].as_str().unwrap_or_default().to_string();
-                let state = p["state"].as_str().unwrap_or_default().to_string();
-                let tags: BTreeMap<String, String> = p["tags"].as_object().map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect()).unwrap_or_default();
-                let timeout = p["timeoutAt"].as_i64().unwrap_or(0);
-                self.promises.insert(id, (state, tags, timeout));
-            }
-        }
-        if let Some(ts) = snap["tasks"].as_array() {
-            for t in ts {
-                let id = t["id"].as_str().unwrap_or_default().to_string();
-                let state = t["state"].as_str().unwrap_or_default().to_string();
-                let version = t["version"].as_i64().unwrap_or(0);
-                self.tasks.insert(id, (state, version));
-            }
-        }
-    }
-
-    /// A schedule request answered 200: the set moved.
-    pub fn schedule_answered(&mut self, kind: &str, data: &Value) {
-        match kind {
-            "schedule.create" => {
-                if let Some(id) = data["schedule"]["id"].as_str() {
-                    self.schedules.insert(id.to_string());
+    /// Fold one public response into the planner's best-effort view.
+    pub fn observe(&mut self, kind: &str, request: &Value, status: u16, response: &Value) {
+        fn visit(model: &mut Model, value: &Value) {
+            if let Some(p) = value.get("promise") {
+                if let (Some(id), Some(state)) = (p["id"].as_str(), p["state"].as_str()) {
+                    let tags = p["tags"].as_object().map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect()).unwrap_or_default();
+                    model.promises.insert(id.to_string(), (state.to_string(), tags, p["timeoutAt"].as_i64().unwrap_or(0)));
                 }
             }
-            "schedule.delete" => {
-                // the id is in the request, which the caller passes as data here
-                if let Some(id) = data["id"].as_str() {
+            if let Some(t) = value.get("task") {
+                if let (Some(id), Some(state)) = (t["id"].as_str(), t["state"].as_str()) {
+                    model.tasks.insert(id.to_string(), (state.to_string(), t["version"].as_i64().unwrap_or(0)));
+                }
+            }
+            if let Some(s) = value.get("schedule").and_then(|s| s["id"].as_str()) {
+                model.schedules.insert(s.to_string());
+            }
+            if let Some(object) = value.as_object() {
+                for child in object.values() {
+                    visit(model, child);
+                }
+            } else if let Some(array) = value.as_array() {
+                for child in array {
+                    visit(model, child);
+                }
+            }
+        }
+        if status < 300 {
+            visit(self, response);
+            if kind == "schedule.delete" {
+                if let Some(id) = request["id"].as_str() {
                     self.schedules.remove(id);
                 }
             }
-            _ => {}
+        } else if status == 404 {
+            if let Some(id) = request["id"].as_str() {
+                match kind {
+                    "promise.get" => { self.promises.remove(id); }
+                    "task.get" => { self.tasks.remove(id); }
+                    "schedule.get" => { self.schedules.remove(id); }
+                    _ => {}
+                }
+            }
         }
-    }
-
-    pub fn reset(&mut self) {
-        *self = Model::default();
     }
 
     fn all_promise_ids(&self) -> Vec<String> {
@@ -158,7 +156,6 @@ pub enum Op {
     ScheduleCreate,
     ScheduleGet,
     ScheduleDelete,
-    DebugTick,
 }
 
 fn pick<T: Clone>(rng: &mut Rng, v: &[T]) -> Option<T> {
@@ -237,7 +234,7 @@ pub fn pick_op(rng: &mut Rng, m: &Model, covered: &HashMap<String, usize>) -> Op
         78..=80 => Op::ScheduleGet,
         81..=83 => Op::ScheduleDelete,
         84..=85 => Op::ScheduleGet,
-        _ => Op::DebugTick,
+        _ => Op::PromiseCreate,
     }
 }
 
@@ -337,9 +334,9 @@ pub fn build(op: Op, rng: &mut Rng, m: &Model, now: i64, ids: &Ids) -> (&'static
             let task_origin = task_id.split(':').next().unwrap_or("").to_string();
             // same origin only: a settle shares the task's origin, and so does
             // a create. A create in another origin (a detached workflow) is
-            // where the two servers part by design: the reference allows a
-            // root id alone and checks the fence first, echod allows any id
-            // and creates first (BACKLOG, "Detached creates").
+            // where the two servers part by design: both check the fence
+            // first, but the reference allows a root id alone and echod any
+            // id (BACKLOG, "Detached creates").
             let pending_p: Vec<String> = m.pending_promise_ids().into_iter().filter(|p| p.split(':').next().unwrap_or("") == task_origin).collect();
             let do_settle = !pending_p.is_empty() && chance(rng, 4) != 0;
             if !do_settle {
@@ -411,10 +408,6 @@ pub fn build(op: Op, rng: &mut Rng, m: &Model, now: i64, ids: &Ids) -> (&'static
             let s = m.schedule_ids();
             let id = pick(rng, &s).unwrap_or_else(|| random_schedule_id(rng));
             ("schedule.delete", json!({ "id": id }), now)
-        }
-        Op::DebugTick => {
-            let new_now = now + rng.range(0, 49_999) as i64;
-            ("debug.tick", json!({ "time": new_now }), new_now)
         }
     }
 }

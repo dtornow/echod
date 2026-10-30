@@ -43,6 +43,7 @@ use echod_kernel::steps::*;
 use crate::tla::action::*;
 use echod_kernel::external::spec_handle;
 use echod_kernel::internal::spec_fire;
+use echod_kernel::store::object_order;
 use echod_kernel::types::*;
 
 verus! {
@@ -222,7 +223,12 @@ pub open spec fn request_target(req: ARequest) -> Option<Origin> {
 /// Ghost: a request answered — where, at what instant it was decided, what
 /// it asked, and what it was told. A request is answered when its write
 /// lands, or at once when it changed nothing; one that lost its race is
-/// decided again and answered then.
+/// decided again and answered then. The log records each at its
+/// linearization point: a write at its commit, which is conditional on the
+/// version it read, so the document is then as read; a request that
+/// changed nothing at its read, which is what its answer was computed on
+/// and all it depends on. The node sends that answer later, but nothing it
+/// sends depends on anything after the read.
 pub struct Served {
     pub origin: Origin,
     pub at: nat,
@@ -237,6 +243,9 @@ pub struct Cluster {
     pub hist: History,
     /// Ghost: every request served, in order.
     pub log: Seq<Served>,
+    /// The fleet's one configured retry timeout (`Config::retry_timeout`),
+    /// the kernel's `cfg.retry_timeout`: every node runs the sweep with it.
+    pub rt: nat,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +271,38 @@ pub open spec fn swept(t: nat, a: Doc, b: Doc, did: bool) -> bool {
     &&& echod_kernel::properties::inv(t, full(a))
     &&& exists |m: echod_kernel::store::AState, sb: echod_kernel::store::AState|
         #[trigger] swept_by(t, full(a), m, did) && #[trigger] drained(t, m, sb) && strip(sb) == b
+}
+
+// What the node computes, as the kernel's functions. `logic::flight::decide`
+// runs the verified `sweep` and `handle` on the document it loaded, and
+// `process_schedule` then `sweep` for a fire; each is proved to compute the
+// spec function named here, so these are the step's values, not a contract
+// on them. The relational facts above (`swept`, `kreach_from`,
+// `kreach_fire`) are what the same functions ensure; `sweep`'s postcondition
+// states both at once, which is what keeps the two conjuncts consistent.
+
+/// A timer's step: the single pass over the document's rows in stored order.
+pub open spec fn computed_sweep(loaded: Doc, t: nat, rt: nat, new: Doc) -> bool {
+    exists |ids: Seq<Seq<char>>| #[trigger] object_order(full(loaded), ids)
+        && new == strip(executable_single_pass(full(loaded), ids, t, rt))
+}
+
+/// A request's step: sweep, the handler, sweep. `m` is the swept document
+/// the handler ran on; its answer is what the request is told.
+pub open spec fn computed_request(loaded: Doc, req: ARequest, t: nat, rt: nat, m: Doc, new: Doc) -> bool {
+    exists |ids1: Seq<Seq<char>>, ids2: Seq<Seq<char>>| {
+        &&& #[trigger] object_order(full(loaded), ids1)
+        &&& m == strip(executable_single_pass(full(loaded), ids1, t, rt))
+        &&& #[trigger] object_order(spec_handle(full(m), req, t).0, ids2)
+        &&& new == strip(executable_single_pass(spec_handle(full(m), req, t).0, ids2, t, rt))
+    }
+}
+
+/// A fire's step on the two documents: `process_schedule`, then the sweep
+/// of the origin's rows (the occurrence's promise among them).
+pub open spec fn computed_fire(fired: echod_kernel::store::AState, t: nat, rt: nat, new: Doc) -> bool {
+    exists |ids: Seq<Seq<char>>| #[trigger] object_order(fired, ids)
+        && new == objects_only(executable_single_pass(fired, ids, t, rt))
 }
 
 pub open spec fn next_is(d: Doc, deadline: Option<nat>) -> bool {
@@ -329,6 +370,7 @@ pub open spec fn init_state(s: Cluster) -> bool {
     &&& s.hist.counter == 0
     &&& s.hist.order == Map::<Event, nat>::empty()
     &&& s.log == Seq::<Served>::empty()
+    &&& s.rt <= MAX_TIME
 }
 
 /// A node's clock advances, by any amount.
@@ -408,13 +450,15 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
         && (match work {
             // a sweep: `sweep` then `drain`; on a schedule's document, `schedule_due` found nothing due
             Work::Sweep(k) => k.origin == o && k.at <= n.clock && s.hist.armer.contains_key(k) && swept(t, loaded, new, did)
+                && computed_sweep(loaded, t, s.rt, new)
                 && (is_sched(o) ==> schedules_idle(t, loaded.schedules)),
             // a request: `sweep` (every lease and deadline on the document read
             // against the clock, as Lean's `Object.project` reads them), then
             // its handler on the swept document, then `drain`
             Work::Request(req, m) => !did && request_target(req) == Some(o)
                 && (exists |d: bool| #[trigger] swept_by(t, full(loaded), full(m), d))
-                && kreach_from(t, spec_handle(full(m), req, t).0, new),
+                && kreach_from(t, spec_handle(full(m), req, t).0, new)
+                && computed_request(loaded, req, t, s.rt, m, new),
             Work::Fire(k, sid, pid, next, deadline_s) => {
                 let st = sched_target(sid);
                 let sd = s.store.doc(st);
@@ -428,6 +472,7 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
                 &&& pid == expand(sd.schedules[sid].promise_id, sid, sd.schedules[sid].next_run_at as nat)
                 &&& next > sd.schedules[sid].next_run_at && next <= MAX_TIME
                 &&& kreach_fire(t, spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t), new, p.new)
+                &&& computed_fire(spec_fire(joint(loaded, sd), sid, seq![AOccurrence { at: sd.schedules[sid].next_run_at, promise_id: pid }], next, t), t, s.rt, new)
                 &&& next_is(p.new, deadline_s)
             }
         })
@@ -458,7 +503,12 @@ pub open spec fn prepare(s: Cluster, i: Id, o: Origin, t: nat, work: Work, new: 
             letag: s.store.etag(o),
             lseq: match s.store.etag(o) { Some(e) => s.hist.order[Event::Born(e)], None => 0 },
         };
-        Some(Cluster { nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }), ..s })
+        Some(Cluster {
+            nodes: s.nodes.insert(i, Node { core, bodies, txns: n.txns.insert(o, x), ..n }),
+            // a request that changed nothing is answered from this read
+            log: if changed { s.log } else { answered(s, o, x) },
+            ..s
+        })
     } else {
         None
     }
@@ -501,8 +551,9 @@ pub open spec fn written(s: Cluster, e: Seq<char>, d: Doc, i: Id, keeper: Map<Or
 }
 
 /// The write may go once the key is armed, if one had to be.
-/// The log once the commit `x` on `o` is answered: its request and the
-/// response the kernel gave it on the document it loaded.
+/// The log once the step `x` on `o` is answered: its request and the
+/// response the kernel gave it on the document it loaded. Anything but a
+/// request answers nothing.
 pub open spec fn answered(s: Cluster, o: Origin, x: Flight) -> Seq<Served> {
     match x.work {
         Work::Request(req, m) => s.log.push(Served { origin: o, at: x.t, req, resp: spec_handle(full(m), req, x.t).1 }),
@@ -659,7 +710,7 @@ pub open spec fn done(s: Cluster, i: Id, o: Origin) -> Option<Cluster> {
     let n = s.nodes[i];
     let x = n.txns[o];
     if s.nodes.contains_key(i) && n.alive && n.txns.contains_key(o) && x.phase is Prepare && !x.c.changed && x.c.fired is None {
-        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), log: answered(s, o, x), ..s })
+        Some(Cluster { nodes: s.nodes.insert(i, Node { txns: after(s, n.core, n, o), ..n }), ..s })
     } else {
         None
     }

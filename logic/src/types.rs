@@ -21,6 +21,18 @@ pub type RequestId = u64;
 /// Names one step on one document, from its start to its answer.
 pub type FlightId = u64;
 
+/// A versioned maintenance-timer intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Timer {
+    pub identity: TimerIdentity,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimerIdentity {
+    Maintenance,
+}
+
 /// A version of an object in the store, as the store names it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Etag(pub String);
@@ -46,7 +58,7 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 /// What a conditional read answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Body(Vec<u8>, Etag),
     NotModified,
@@ -60,17 +72,15 @@ pub enum Read {
 /// What the core is told. Every event carries the node's clock as the
 /// executor read it when the event happened; the core never reads a clock.
 pub enum Event {
-    /// The node starts. `loops` says whether it keeps itself going: the
-    /// heartbeat and the timers. Without them it answers requests and does
-    /// nothing on its own.
-    Start { clock: u64, loops: bool },
+    /// The node starts and begins maintaining membership and deadlines.
+    Start { clock: u64 },
     /// A request came in; the answer goes out as `Effect::Reply` under `id`.
     Request { id: RequestId, envelope: RequestEnvelope, clock: u64 },
     /// A store call the core issued has an answer.
     Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
-    /// Time passed: the wake the core asked for, or any other moment the
-    /// executor chooses to let the core look at the clock.
-    Tick { clock: u64 },
+    /// The executor delivered this exact timer intent. Replaced generations
+    /// are ignored.
+    TimerFired { timer: Timer, clock: u64 },
     /// The node stops: it withdraws its announcement and runs no loop.
     Stop { clock: u64 },
 }
@@ -105,7 +115,7 @@ impl StoreCall {
 }
 
 /// What a store call answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreOutcome {
     /// `Get`: the object and its version, or nothing.
     Got(Option<(Vec<u8>, Etag)>),
@@ -125,6 +135,12 @@ pub enum StoreOutcome {
 // ---------------------------------------------------------------------------
 
 /// What the core asks the executor to do.
+///
+/// The surrounding `Vec<Effect>` is ordered: the shell submits effects from
+/// first to last. Submission does not serialize asynchronous work; operations
+/// carrying an [`OpId`] may complete in any order, each through its own
+/// [`Event::Completed`]. Effects without a completion event are deliberately
+/// one-way.
 pub enum Effect {
     /// Make this call on the store and answer with `Event::Completed { op }`.
     Store { op: OpId, call: StoreCall },
@@ -133,9 +149,9 @@ pub enum Effect {
     Reply { id: RequestId, response: Result<ResponseEnvelope, Unavailable> },
     /// Push a message to a worker. At most once; nothing is reported back.
     Send { address: String, message: Message },
-    /// Send `Event::Tick` once `after_ms` have passed, replacing any wake
-    /// asked for before.
-    Wake { after_ms: u64 },
+    /// Deliver `Event::TimerFired { timer }` after `after_ms`, replacing the
+    /// executor's prior intent for the same identity.
+    ScheduleTimer { timer: Timer, after_ms: u64 },
     /// Something happened that an operator, a log or a simulation may want
     /// to know. Nothing depends on it.
     Note(Note),

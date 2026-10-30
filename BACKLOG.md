@@ -70,10 +70,10 @@ shows the panels with data.
 - **Preload.** `task.acquire`, `task.suspend` and `task.fence` answer an
   empty `preload`; the reference returns up to a limit of the promises
   the task may read next.
-- **Detached creates.** A fence creating a promise in another origin: the
-  reference allows a root id alone and checks the fence first; echod allows
-  any id and creates first, then checks (DESIGN, "The detached create").
-  `echod-diff` does not generate them; `echod-accordant` does.
+- **Detached creates.** A fence creating a promise in another origin: both
+  check the fence first and create after, but the reference allows a root
+  id alone and echod any id (DESIGN, "The detached create"). `echod-diff`
+  does not generate them; `echod-accordant` does.
 - **A targeted timer.** The reference runs it as a task; the Lean
   specification and the accordant model refuse it; echod drops the target
   (an SDK's sleep). `echod-accordant` does not send one.
@@ -87,9 +87,8 @@ shows the panels with data.
   `echod-sim` gives it two timer buckets. A deadline and a lease's end,
   by contrast, are read as passed the moment they pass (DESIGN,
   "Writing"), and a retry rearms on a grid, so nothing else a client sees
-  depends on when a node sweeps. `echod-accordant` and `echod-diff` move
-  the clock with `debug.tick`, which lets every due step land before the
-  next request.
+  depends on when a node sweeps. External differential tools observe
+  production timer behavior through responses and worker messages.
 - **Stamps are decision instants.** A step's `created_at`, `settled_at`,
   `acquired_at` and the like are the instant the node decided it at, and
   the write lands later; a read on another node between the two sees the
@@ -139,6 +138,40 @@ shows the panels with data.
   task's target and a heartbeat's origins. Next: echod's own system model
   against the store machine, where the clocks and the stamps live, and
   schedules once the fire's shape is settled.
+
+## A fire's schedule under its commit
+
+`theorem_system_refines_abstract` (`refinement/src/system_sim.rs`) carries
+one hypothesis on behaviours, `schedule_held`: a fire's schedule document
+is as the fire read it until the occurrence's promise is committed. The
+proof found the gap. The node reads the origin and the schedule, and
+commits the promise on the origin conditionally on the origin's version
+alone; another node may delete and recreate the schedule in between, and
+the promise then written is one the Abstract never creates. A conditional
+put is on one key, so the origin's commit cannot also condition on the
+schedule's version, and re-reading the schedule before the put narrows the
+window without closing it. Closing it means the schedule's document
+records the fire before the promise is written — a fire in three commits,
+mark, promise, advance, where a delete of a marked schedule waits or
+cancels — or the Abstract admitting the orphan promise, which the
+specification does not. Advancing the schedule first is what the
+Occurrences theorem forbids. Done: the hypothesis gone from the theorem,
+and `echod-sim` deleting schedules under fires.
+
+## `logic/` against the system model
+
+The proof's last link: that `logic::on_event` — the Rust orchestration of
+flights, membership and timers over many documents — is an implementation
+of the system model's steps, so that the five system theorems and the
+refinement speak of the running node. The model's node actions are
+already the kernel's `node`, `commit` and `steps` specification functions,
+which `logic` calls; what is left is the shim: that each `Event` the
+executor feeds back moves the logic's `State` as one `Step` of the model
+moves a `Node`, with the store's answers as the step's `Outcome`. The
+shape is a forward simulation from `logic::State` to the model's `Node`
+and the flights in it, under the same doors. Done: `theorem_logic_refines_system`
+in `refinement/`, or a statement of why a piece of `logic` is outside the
+model and trusted.
 
 ## Smaller items
 

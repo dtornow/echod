@@ -1,0 +1,25 @@
+[package]
+name = "echod-refinement"
+description = "Local forward refinement from the document-bucket Concrete model to the independent Abstract Resonate model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_refinement"
+path = "src/lib.rs"
+
+[dependencies]
+echod-abstract = { path = "../abstract" }
+echod-concrete = { path = "../concrete" }
+echod-kernel = { path = "../kernel" }
+echod-system = { path = "../system" }
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

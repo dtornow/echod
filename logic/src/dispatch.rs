@@ -45,8 +45,9 @@ pub struct Decoded {
     pub target: Target,
     pub request: k::Request,
     pub action_kind: Option<String>,
-    /// A second request, on another document, once the first has
-    /// committed: a detached create's fence check on the task's origin.
+    /// A second request, on another document, once the first has held: a
+    /// detached fence's create on its own origin, after the check on the
+    /// task's.
     pub then: Option<(Target, k::Request)>,
 }
 
@@ -123,8 +124,8 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             }
         };
     }
-    // A fence whose create targets another origin: the create goes first,
-    // on its own document, then the fence's check on the task's.
+    // A fence whose create targets another origin: the fence's check goes
+    // first, on the task's document, then the create on its own.
     let mut detached: Option<(String, k::Request)> = None;
     let (q, schedule, action_kind): (k::Request, Option<String>, Option<String>) = match kind.as_str() {
         "promise.get" => {
@@ -229,12 +230,13 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             };
             // A fence and its action commit as one write on one document, so
             // a settle must live in the task's origin. A create in another
-            // origin is a detached workflow: it commits first, on its own
-            // document, and the fence's check follows on the task's.
+            // origin is a detached workflow: the fence's check runs first,
+            // on the task's document, and the create follows on its own
+            // when the check held.
             match action {
                 k::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
-                    detached = Some((origin_of(&c.id).to_string(), k::Request::TaskFenceCheck(k::TaskFenceCheckReq { id: d.id.clone(), version })));
-                    (k::Request::PromiseCreate(c), None, Some(d.action.kind))
+                    detached = Some((origin_of(&c.id).to_string(), k::Request::PromiseCreate(c)));
+                    (k::Request::TaskFenceCheck(k::TaskFenceCheckReq { id: d.id, version }), None, Some(d.action.kind))
                 }
                 k::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
                     return err(400, "Action must belong to the task's origin");
@@ -297,14 +299,13 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             (k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
         }
         "promise.search" | "task.search" | "schedule.search" => return err(403, "Search operations are not supported"),
-        "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are disabled"),
         _ => return err(400, &format!("Unknown operation: {kind}")),
     };
     // A request about a schedule is served on its document; the rest on
     // their id's origin.
     let (target, then) = match (schedule, origin, detached) {
         (Some(id), _, _) => (Target::Schedule(id), None),
-        (None, Some(task_origin), Some((create_origin, check))) => (Target::Origin(create_origin), Some((Target::Origin(task_origin), check))),
+        (None, Some(task_origin), Some((create_origin, create))) => (Target::Origin(task_origin), Some((Target::Origin(create_origin), create))),
         (None, Some(o), None) => (Target::Origin(o), None),
         (None, None, _) => return err(400, "Request data does not name an id"),
     };

@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
-use echod_logic::{Config, State};
+use echod_logic::types::{Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome, Timer};
+use echod_logic::{on_event, Concrete, Config};
 use resonate_core::types::{RequestEnvelope, RequestHead, ResponseEnvelope, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 
@@ -74,14 +74,20 @@ impl Bucket {
 
 /// A node and its world: the state, the bucket, the clock, and what came
 /// out that was not a store call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScheduledTimer {
+    timer: Timer,
+    at: u64,
+}
+
 struct Harness {
-    state: State,
+    state: Concrete,
     bucket: Bucket,
     clock: u64,
     replies: Vec<(u64, Result<ResponseEnvelope, resonate_core::Unavailable>)>,
     sent: Vec<String>,
     notes: Vec<Note>,
-    wake_after: Option<u64>,
+    scheduled_timer: Option<ScheduledTimer>,
     next_request: u64,
 }
 
@@ -91,24 +97,24 @@ impl Harness {
         cfg.timer_bucket_ms = 1_000;
         cfg.heartbeat_ms = 100;
         cfg.node_ttl_ms = 1_000;
-        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, next_request: 1 }
+        Self { state: Concrete::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), scheduled_timer: None, next_request: 1 }
     }
 
     /// One event in, and every store call it leads to answered, until the
     /// core asks for nothing more of the store.
     fn apply(&mut self, event: Event) {
-        let mut pending = self.state.on_event(event);
+        let mut pending = on_event(&mut self.state, event);
         while !pending.is_empty() {
             let mut next = Vec::new();
             for e in pending {
                 match e {
                     Effect::Store { op, call } => {
                         let outcome = self.bucket.call(call);
-                        next.extend(self.state.on_event(Event::Completed { op, outcome, clock: self.clock }));
+                        next.extend(on_event(&mut self.state, Event::Completed { op, outcome, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => self.sent.push(format!("{address} {}", serde_json::to_string(&message).unwrap())),
-                    Effect::Wake { after_ms } => self.wake_after = Some(after_ms),
+                    Effect::ScheduleTimer { timer, after_ms } => self.scheduled_timer = Some(ScheduledTimer { timer, at: self.clock + after_ms }),
                     Effect::Note(n) => self.notes.push(n),
                 }
             }
@@ -117,9 +123,13 @@ impl Harness {
     }
 
     fn request(&mut self, kind: &str, data: Value) -> (u16, Value) {
+        self.request_with_reported_time(kind, data, None)
+    }
+
+    fn request_with_reported_time(&mut self, kind: &str, data: Value, reported_time: Option<i64>) -> (u16, Value) {
         let id = self.next_request;
         self.next_request += 1;
-        let envelope = RequestEnvelope { kind: kind.to_string(), head: RequestHead { corr_id: format!("c{id}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: None }, data };
+        let envelope = RequestEnvelope { kind: kind.to_string(), head: RequestHead { corr_id: format!("c{id}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: reported_time }, data };
         self.apply(Event::Request { id, envelope, clock: self.clock });
         let (rid, r) = self.replies.pop().expect("an answer");
         assert_eq!(rid, id);
@@ -127,16 +137,18 @@ impl Harness {
         (r.head.status as u16, r.data)
     }
 
-    /// Time passes: the clock moves and the core gets a tick whenever it
-    /// asked for one, as the executor's timer would give it.
+    /// Time passes: only due timer intents are delivered.
     fn advance(&mut self, ms: u64) {
         let until = self.clock + ms;
-        while self.clock < until {
-            let step = self.wake_after.unwrap_or(until - self.clock).min(until - self.clock).max(1);
-            self.clock += step;
-            self.wake_after = None;
-            self.apply(Event::Tick { clock: self.clock });
+        while let Some(scheduled) = self.scheduled_timer {
+            if scheduled.at > until {
+                break;
+            }
+            self.clock = scheduled.at;
+            self.scheduled_timer = None;
+            self.apply(Event::TimerFired { timer: scheduled.timer, clock: self.clock });
         }
+        self.clock = until;
     }
 
     fn keys(&self, prefix: &str) -> Vec<String> {
@@ -145,9 +157,24 @@ impl Harness {
 }
 
 #[test]
+fn request_head_time_does_not_override_the_injected_clock() {
+    let mut h = Harness::new("n1");
+    h.apply(Event::Start { clock: h.clock });
+    h.advance(100);
+    let decided_at = h.clock;
+    let (status, data) = h.request_with_reported_time(
+        "promise.create",
+        json!({ "id": "a:1", "timeoutAt": decided_at + 500, "tags": { "resonate:scope": "global" } }),
+        Some(1),
+    );
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["promise"]["createdAt"].as_u64(), Some(decided_at));
+}
+
+#[test]
 fn a_promise_is_created_timed_out_and_the_key_collected() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.apply(Event::Start { clock: h.clock });
     // announced; the configuration naming this node is written by the
     // first refresh and read by the next heartbeat
     assert_eq!(h.keys("nodes/"), vec!["nodes/n1".to_string()]);
@@ -155,7 +182,7 @@ fn a_promise_is_created_timed_out_and_the_key_collected() {
     h.advance(100);
     assert!(h.state.acting(), "one node, one member, fresh");
     assert_eq!(h.state.membership().members, vec!["n1".to_string()]);
-    assert!(h.wake_after.is_some(), "the heartbeat is scheduled");
+    assert!(h.scheduled_timer.is_some(), "the heartbeat is scheduled");
 
     // a promise with a deadline: a document, and a key put before it
     let (status, data) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": h.clock + 500, "tags": { "resonate:scope": "global" } }));
@@ -190,7 +217,7 @@ fn a_promise_is_created_timed_out_and_the_key_collected() {
 #[test]
 fn a_schedule_fires_into_its_origin() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.apply(Event::Start { clock: h.clock });
     h.advance(100);
     let (status, data) = h.request("schedule.create", json!({ "id": "tick", "cron": "* * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200, "{data}");
@@ -216,7 +243,7 @@ fn a_schedule_fires_into_its_origin() {
 #[test]
 fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.apply(Event::Start { clock: h.clock });
     h.advance(100);
     let bucket_ms = 1_000; // the harness's `timer_bucket_ms`
     let current = h.clock - h.clock % bucket_ms;
@@ -238,7 +265,7 @@ fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
 #[test]
 fn a_schedule_recreated_after_its_delete_fires_again() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.apply(Event::Start { clock: h.clock });
     h.advance(100);
     let (status, _) = h.request("schedule.create", json!({ "id": "tick", "cron": "*/2 * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200);
@@ -262,7 +289,7 @@ fn a_schedule_recreated_after_its_delete_fires_again() {
 fn the_same_events_give_the_same_effects() {
     let run = || {
         let mut h = Harness::new("n1");
-        h.apply(Event::Start { clock: h.clock, loops: true });
+        h.apply(Event::Start { clock: h.clock });
         h.advance(100);
         h.request("promise.create", json!({ "id": "a:1", "timeoutAt": h.clock + 500, "tags": { "resonate:scope": "global" } }));
         h.advance(600);
@@ -272,54 +299,44 @@ fn the_same_events_give_the_same_effects() {
 }
 
 #[test]
-fn the_debug_operations_own_the_clock() {
+fn replaced_and_stopped_timer_generations_are_ignored() {
     let mut h = Harness::new("n1");
-    h.state = State::new({
-        let mut cfg = Config::memory("n1");
-        cfg.debug = true;
-        cfg
-    });
-    h.apply(Event::Start { clock: h.clock, loops: false });
-    let far = h.clock + 10_000;
-    let (status, _) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } }));
-    assert_eq!(status, 200);
-    let (status, _) = h.request("promise.register_listener", json!({ "awaited": "a:1", "address": "http://worker/" }));
-    assert_eq!(status, 200);
+    h.apply(Event::Start { clock: h.clock });
+    let first = h.scheduled_timer.take().expect("startup schedules maintenance");
 
-    // the snapshot: the promise, its deadline, its listener
-    let (status, snap) = h.request("debug.snap", json!({}));
-    assert_eq!(status, 200, "{snap}");
-    assert_eq!(snap["promises"].as_array().map(Vec::len), Some(1));
-    assert_eq!(snap["promiseTimeouts"][0]["timeout"].as_u64(), Some(far));
-    assert_eq!(snap["listeners"][0]["id"], "a:1");
-    assert_eq!(snap["tasks"].as_array().map(Vec::len), Some(0));
+    // An early delivery is valid, but it is replaced with a new generation.
+    h.apply(Event::TimerFired { timer: first.timer, clock: h.clock });
+    let replacement = h.scheduled_timer.expect("maintenance is rescheduled");
+    assert_eq!(replacement.timer.identity, first.timer.identity);
+    assert!(replacement.timer.generation > first.timer.generation);
 
-    // the tick: time moves, the sweep runs, the listener hears
-    let (status, data) = h.request("debug.tick", json!({ "time": far + 1 }));
-    assert_eq!(status, 200, "{data}");
-    let (_, snap) = h.request("debug.snap", json!({}));
-    assert_eq!(snap["promises"][0]["state"], "rejected_timedout", "{snap}");
-    assert!(snap["promiseTimeouts"].as_array().is_some_and(Vec::is_empty));
-    assert_eq!(h.sent.len(), 1, "{:?}", h.sent);
+    // A delayed duplicate of the old completion changes neither the clock nor
+    // the current intent.
+    let core_clock = h.state.now();
+    h.clock += 50;
+    h.apply(Event::TimerFired { timer: first.timer, clock: h.clock });
+    assert_eq!(h.state.now(), core_clock);
+    assert_eq!(h.scheduled_timer, Some(replacement));
 
-    // the reset: nothing left
-    let (status, _) = h.request("debug.reset", json!({}));
-    assert_eq!(status, 200);
-    assert!(h.keys("wf/").is_empty());
-    let (status, _) = h.request("promise.get", json!({ "id": "a:1" }));
-    assert_eq!(status, 404);
-    let (_, snap) = h.request("debug.snap", json!({}));
-    assert!(snap["promises"].as_array().is_some_and(Vec::is_empty));
+    // Stop invalidates the live generation too.
+    h.apply(Event::Stop { clock: h.clock });
+    assert!(h.state.stopped());
+    h.scheduled_timer = None;
+    let stopped_clock = h.state.now();
+    h.clock += 50;
+    h.apply(Event::TimerFired { timer: replacement.timer, clock: h.clock });
+    assert_eq!(h.state.now(), stopped_clock);
+    assert!(h.scheduled_timer.is_none());
 }
 
-/// A fence whose create targets another origin: the create commits first, on
-/// its own document, then the fence's check on the task's. A stale fence
-/// still leaves the promise created, and answers its 409; a settle in
-/// another origin is refused outright.
+/// A fence whose create targets another origin: the fence's check runs
+/// first, on the task's document, then the create on its own. A stale fence
+/// answers its 409 and creates nothing; a settle in another origin is
+/// refused outright.
 #[test]
-fn a_detached_create_lands_before_the_fence_is_checked() {
+fn a_detached_fence_is_checked_before_its_create_lands() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.apply(Event::Start { clock: h.clock });
     h.advance(100);
     let far = h.clock + 100_000;
     let (status, _) = h.request("promise.create", json!({ "id": "a:t", "timeoutAt": far, "tags": { "resonate:target": "poll://w" } }));
@@ -332,19 +349,22 @@ fn a_detached_create_lands_before_the_fence_is_checked() {
     assert_eq!(status, 409, "{data}");
     assert_eq!(data, json!("Version mismatch"));
     let (status, data) = h.request("promise.get", json!({ "id": "d:x" }));
-    assert_eq!(status, 200, "a stale detached create still lands: {data}");
-    assert_eq!(data["promise"]["state"], "pending");
+    assert_eq!(status, 404, "a stale fence creates nothing: {data}");
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:ghost", "version": 0, "action": create("d:y") }));
     assert_eq!(status, 404, "{data}");
     let (status, _) = h.request("promise.get", json!({ "id": "d:y" }));
-    assert_eq!(status, 200, "a detached create from a missing task lands too");
+    assert_eq!(status, 404, "a fence from a missing task creates nothing either");
+    assert_eq!(h.keys("wf/").len(), 1, "only the task's document so far: {:?}", h.keys("wf/"));
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": create("d:z") }));
     assert_eq!(status, 200, "{data}");
     assert_eq!(data["action"]["head"]["status"], 200);
     assert_eq!(data["action"]["data"]["promise"]["id"], "d:z");
     assert_eq!(data["preload"], json!([]));
+    let (status, data) = h.request("promise.get", json!({ "id": "d:z" }));
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["promise"]["state"], "pending");
     assert_eq!(h.keys("wf/").len(), 2, "two origins' documents: {:?}", h.keys("wf/"));
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("a:n") }));

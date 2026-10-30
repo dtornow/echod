@@ -8,13 +8,12 @@ use std::time::Duration;
 use echod::env::{Clock, Notes};
 use echod::store::{MemoryStore, Store};
 use echod::{Config, Node as Server};
+use echod_abstract::{ExternalAction, PromiseGetReq, ScheduleGetReq, TaskGetReq};
 use echod_logic::keys::{KeySpace, TimerEntry};
 use echod_logic::Note;
 use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use resonate_core::ResonateServer;
 use serde::Serialize;
-
-use resonate::Request;
 
 use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};
@@ -22,8 +21,8 @@ use crate::clock::{NodeClock, SimClock};
 use crate::history::History;
 use crate::rng::Rng;
 use crate::store::{Counters, Faults, FaultyStore, NodeStore};
-use crate::wire::encode;
-use crate::workload::{target_of, Generator, Seen, SCHEDULES, WORKER};
+use crate::wire::{encode, ident};
+use crate::workload::{target_of, Generator, Seen, SCHEDULES};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -69,7 +68,7 @@ pub struct Options {
     pub think_ms: u64,
     /// How long the run idles after the last request so deadlines fire.
     pub settle_ms: u64,
-    /// The checker's budget: nodes to explore, at most.
+    /// The checker's budget: semantic successors to explore, at most.
     pub budget: u64,
 }
 
@@ -95,7 +94,12 @@ impl Default for Options {
             origins: 6,
             promises_per_origin: 3,
             schedules: false,
-            faults: Faults { unavailable_percent: 2, lost_ack_percent: 2, conflict_percent: 2, latency_ms: 20 },
+            faults: Faults {
+                unavailable_percent: 2,
+                lost_ack_percent: 2,
+                conflict_percent: 2,
+                latency_ms: 20,
+            },
             crash_percent: 10,
             stop_percent: 5,
             join_percent: 8,
@@ -145,8 +149,14 @@ pub struct Report {
     pub unblocks: u64,
     /// Events in the checker's trace.
     pub events: usize,
-    /// Nodes the checker explored.
+    /// Semantic successors the checker explored.
     pub search_steps: u64,
+    /// `ok`, `ko`, or `unknown`.
+    pub checker_verdict: String,
+    /// Configured semantic-successor budget.
+    pub search_budget: u64,
+    /// Maximum retained search profile width.
+    pub search_width: usize,
     pub failures: Vec<String>,
 }
 
@@ -222,7 +232,12 @@ impl World {
             let drift = rng.range(0, 2 * self.opts.drift_ppm) as i64 - self.opts.drift_ppm as i64;
             (skew, drift)
         };
-        let clock = Arc::new(NodeClock::new(Arc::clone(&self.clock), skew, drift, self.opts.jump_ms as i64));
+        let clock = Arc::new(NodeClock::new(
+            Arc::clone(&self.clock),
+            skew,
+            drift,
+            self.opts.jump_ms as i64,
+        ));
         let node_store = Arc::new(NodeStore::new(Arc::clone(&self.store)));
         let mut cfg = Config::memory("sim");
         cfg.node_id = Some(id.clone());
@@ -232,13 +247,26 @@ impl World {
         cfg.timer_bucket_ms = self.opts.timer_bucket_ms;
         cfg.heartbeat_ms = self.opts.heartbeat_ms;
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
-        cfg.debug = true; // the clock is the request's
         let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
-        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>);
-        // A node that cannot reach the store keeps trying on its own.
+        let server = Server::with_env(
+            cfg,
+            store,
+            Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            Arc::clone(&self.notes) as Arc<dyn Notes>,
+        );
+        // Deliver core timer intents on paused Tokio time; the simulation
+        // controls when virtual time reaches each versioned completion.
         server.init(false).await.expect("a node starts");
         tracing::info!(node = %id, skew, drift, at = self.clock.now(), "started");
-        self.fleet.lock().unwrap().live.insert(id, Node { server: Arc::clone(&server), clock, store: node_store });
+        self.fleet.lock().unwrap().live.insert(
+            id,
+            Node {
+                server: Arc::clone(&server),
+                clock,
+                store: node_store,
+            },
+        );
         server
     }
 
@@ -253,7 +281,9 @@ impl World {
 
     /// Kill a node where it stands and start a replacement.
     async fn crash_one(&self, rng: &mut Rng) {
-        let Some(victim) = self.pick_node(rng) else { return };
+        let Some(victim) = self.pick_node(rng) else {
+            return;
+        };
         let node = self.fleet.lock().unwrap().live.remove(&victim);
         if let Some(node) = node {
             node.server.crash().await;
@@ -268,7 +298,9 @@ impl World {
         if self.live_ids().len() <= 1 {
             return;
         }
-        let Some(victim) = self.pick_node(rng) else { return };
+        let Some(victim) = self.pick_node(rng) else {
+            return;
+        };
         let node = self.fleet.lock().unwrap().live.remove(&victim);
         if let Some(node) = node {
             let _ = node.server.stop().await;
@@ -289,7 +321,9 @@ impl World {
     /// A node loses the store for a while: long enough, sometimes, for its
     /// view of the membership to go stale.
     fn outage(self: &Arc<Self>, rng: &mut Rng) {
-        let Some(id) = self.pick_node(rng) else { return };
+        let Some(id) = self.pick_node(rng) else {
+            return;
+        };
         let store = match self.fleet.lock().unwrap().live.get(&id) {
             Some(n) => Arc::clone(&n.store),
             None => return,
@@ -306,7 +340,9 @@ impl World {
 
     /// A node's clock jumps, forwards or back.
     fn jump(&self, rng: &mut Rng) {
-        let Some(id) = self.pick_node(rng) else { return };
+        let Some(id) = self.pick_node(rng) else {
+            return;
+        };
         let delta = rng.range(0, 2 * self.opts.jump_ms) as i64 - self.opts.jump_ms as i64;
         if let Some(n) = self.fleet.lock().unwrap().live.get(&id) {
             n.clock.jump(delta);
@@ -337,12 +373,22 @@ impl World {
         // cache; a read there may miss a write the owner has decided and
         // not yet landed, whose stamp precedes the read, which the model's
         // one clock cannot show.
-        let i = if rng.percent(self.opts.misroute_percent) { rng.below(live.len() as u64) as usize } else { (echod_logic::keys::fnv1a(origin) % live.len() as u64) as usize };
+        let i = if rng.percent(self.opts.misroute_percent) {
+            rng.below(live.len() as u64) as usize
+        } else {
+            (echod_logic::keys::fnv1a(origin) % live.len() as u64) as usize
+        };
         Some(Arc::clone(&live[i].server))
     }
 
     async fn client(self: Arc<Self>, name: String, mut rng: Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
+        let gen = Generator {
+            origins: self.opts.origins,
+            promises_per_origin: self.opts.promises_per_origin,
+            schedules: self.opts.schedules,
+            timeout_ms: self.opts.timeout_ms,
+            ttl_ms: self.opts.ttl_ms,
+        };
         let mut seen = Seen::default();
         while self.issued.fetch_add(1, Ordering::Relaxed) < self.opts.operations {
             let now = self.clock.now();
@@ -357,15 +403,19 @@ impl World {
     /// One request, retried until answered, backing off as a client does (a
     /// node cut off from the store answers nothing useful for seconds, and
     /// every attempt in that time is one more call the checker must place).
-    /// Every attempt is its own entry and carries its own instant as
-    /// `debug_time`, the clock when it was sent: one that got no answer may
-    /// have taken effect, and a retry of it is not the same operation again
-    /// (an acquire retried after a lost answer is refused), nor is it decided
-    /// as of the first attempt's instant, which a server on its own clock
-    /// would not do either. The answer's data, if one came.
-    async fn issue(&self, name: &str, req: Request, rng: &mut Rng) -> Option<serde_json::Value> {
+    /// Every attempt is its own entry at the injected clock's current
+    /// instant: one that got no answer may have taken effect, and a retry of
+    /// it is not the same operation again (an acquire retried after a lost
+    /// answer is refused). The answer's data, if one came.
+    async fn issue(
+        &self,
+        name: &str,
+        req: ExternalAction,
+        rng: &mut Rng,
+    ) -> Option<serde_json::Value> {
+        let req = Arc::new(req);
         let target = target_of(&req);
-        let (kind, data) = encode(&req, WORKER);
+        let (kind, data) = encode(&req);
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -377,11 +427,16 @@ impl World {
                 continue;
             };
             let now = self.clock.now();
-            let entry = self.history.begin(name, req.clone(), now, now);
+            let entry = self.history.begin(name, Arc::clone(&req), now, now);
             self.history.attempt(entry);
             let envelope = RequestEnvelope {
                 kind: kind.to_string(),
-                head: RequestHead { corr_id: format!("c{entry}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: Some(now as i64) },
+                head: RequestHead {
+                    corr_id: format!("c{entry}"),
+                    version: PROTOCOL_VERSION.to_string(),
+                    auth: None,
+                    debug_time: None,
+                },
                 data: data.clone(),
             };
             let mut crashed = server.crashed();
@@ -392,7 +447,11 @@ impl World {
             };
             match answer {
                 Ok(resp) => {
-                    self.history.end(entry, self.clock.now(), Some((resp.head.status as u16, resp.data.clone())));
+                    self.history.end(
+                        entry,
+                        self.clock.now(),
+                        Some((resp.head.status as u16, resp.data.clone())),
+                    );
                     return Some(resp.data);
                 }
                 Err(_) => {
@@ -411,15 +470,23 @@ impl World {
     /// The finishing reads: every id the run may have named, read once the
     /// run has settled, so what the bucket holds is what the model shows.
     async fn final_reads(&self, rng: &mut Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
+        let gen = Generator {
+            origins: self.opts.origins,
+            promises_per_origin: self.opts.promises_per_origin,
+            schedules: self.opts.schedules,
+            timeout_ms: self.opts.timeout_ms,
+            ttl_ms: self.opts.ttl_ms,
+        };
         let mut reads = Vec::new();
         for id in gen.ids() {
-            reads.push(Request::GetPromise(id.clone()));
-            reads.push(Request::GetTask(id));
+            reads.push(ExternalAction::PromiseGet(PromiseGetReq { id: ident(&id) }));
+            reads.push(ExternalAction::TaskGet(TaskGetReq { id: ident(&id) }));
         }
         if self.opts.schedules {
             for id in SCHEDULES {
-                reads.push(Request::GetSchedule(id.to_string()));
+                reads.push(ExternalAction::ScheduleGet(ScheduleGetReq {
+                    id: ident(id),
+                }));
             }
         }
         for req in reads {
@@ -430,19 +497,35 @@ impl World {
 
 /// One run, on its own runtime, under the paused clock.
 pub fn run(opts: Options) -> Report {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().expect("a runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .expect("a runtime");
     rt.block_on(simulate(opts))
 }
 
 async fn simulate(opts: Options) -> Report {
     let mut rng = Rng::new(opts.seed);
     let appendable = rng.percent(50);
-    let inner = Arc::new(if appendable { MemoryStore::appendable() } else { MemoryStore::new() });
-    let store = Arc::new(FaultyStore::new(Arc::clone(&inner), opts.faults, rng.fork()));
+    let inner = Arc::new(if appendable {
+        MemoryStore::appendable()
+    } else {
+        MemoryStore::new()
+    });
+    let store = Arc::new(FaultyStore::new(
+        Arc::clone(&inner),
+        opts.faults,
+        rng.fork(),
+    ));
     let clock = Arc::new(SimClock::new(1_700_000_000_000));
     let history = Arc::new(History::new());
     let keys = KeySpace::new("", opts.timer_bucket_ms);
-    let bus = Arc::new(RecordingBus::new(Arc::clone(&inner), keys.clone(), Arc::clone(&clock) as Arc<dyn Clock>));
+    let bus = Arc::new(RecordingBus::new(
+        Arc::clone(&inner),
+        keys.clone(),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    ));
     let world = Arc::new(World {
         opts: opts.clone(),
         inner,
@@ -450,7 +533,11 @@ async fn simulate(opts: Options) -> Report {
         clock,
         bus,
         history: Arc::clone(&history),
-        notes: Arc::new(StepNotes { history, sweeps: AtomicU64::new(0), fires: AtomicU64::new(0) }),
+        notes: Arc::new(StepNotes {
+            history,
+            sweeps: AtomicU64::new(0),
+            fires: AtomicU64::new(0),
+        }),
         keys,
         fleet: Mutex::new(Fleet::default()),
         issued: AtomicU64::new(0),
@@ -462,11 +549,16 @@ async fn simulate(opts: Options) -> Report {
     }
     // Let the nodes meet before the load arrives: a configuration naming
     // them. Nothing is unsafe before that; requests would just not route.
-    tokio::time::sleep(Duration::from_millis(opts.node_ttl_ms + opts.heartbeat_ms * 4)).await;
+    tokio::time::sleep(Duration::from_millis(
+        opts.node_ttl_ms + opts.heartbeat_ms * 4,
+    ))
+    .await;
 
     let mut clients = Vec::new();
     for c in 0..opts.clients {
-        clients.push(tokio::spawn(Arc::clone(&world).client(format!("client{c}"), rng.fork())));
+        clients.push(tokio::spawn(
+            Arc::clone(&world).client(format!("client{c}"), rng.fork()),
+        ));
     }
     let chaos = {
         let world = Arc::clone(&world);
@@ -506,7 +598,14 @@ async fn simulate(opts: Options) -> Report {
     }
     tokio::time::sleep(Duration::from_millis(opts.settle_ms)).await;
     world.final_reads(&mut rng).await;
-    let live: Vec<Arc<Server>> = world.fleet.lock().unwrap().live.values().map(|n| Arc::clone(&n.server)).collect();
+    let live: Vec<Arc<Server>> = world
+        .fleet
+        .lock()
+        .unwrap()
+        .live
+        .values()
+        .map(|n| Arc::clone(&n.server))
+        .collect();
     for s in &live {
         let _ = s.stop().await;
     }
@@ -518,7 +617,17 @@ async fn simulate(opts: Options) -> Report {
 async fn check(world: &World) -> Report {
     let opts = &world.opts;
     let entries = world.history.entries();
-    let mut report = Report { seed: opts.seed, entries: entries.len(), ..Default::default() };
+    let mut report = Report {
+        seed: opts.seed,
+        entries: entries.len(),
+        ..Default::default()
+    };
+    report.search_budget = opts.budget;
+    report.search_width = std::env::var("ECHOD_SIM_WIDTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(checker::DEFAULT_MAX_WIDTH);
     report.sweeps = world.notes.sweeps.load(Ordering::Relaxed) as usize;
     report.fires = world.notes.fires.load(Ordering::Relaxed) as usize;
     {
@@ -546,17 +655,39 @@ async fn check(world: &World) -> Report {
 
     // Coverage: every kind answered 200 at least once, and the history overlapped.
     let all_kinds: BTreeSet<String> = [
-        "promise.get", "promise.create", "promise.settle", "promise.register_callback", "promise.register_listener",
-        "task.get", "task.create", "task.acquire", "task.fulfill", "task.release", "task.heartbeat", "task.suspend", "task.fence", "task.halt", "task.continue",
-        "schedule.get", "schedule.create", "schedule.delete",
-    ].iter().map(|s| s.to_string()).collect();
+        "promise.get",
+        "promise.create",
+        "promise.settle",
+        "promise.register_callback",
+        "promise.register_listener",
+        "task.get",
+        "task.create",
+        "task.acquire",
+        "task.fulfill",
+        "task.release",
+        "task.heartbeat",
+        "task.suspend",
+        "task.fence",
+        "task.halt",
+        "task.continue",
+        "schedule.get",
+        "schedule.create",
+        "schedule.delete",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     for e in &entries {
         if let Some((200, _)) = &e.outcome {
-            report.kinds_succeeded.insert(encode(&e.req, WORKER).0.to_string());
+            report.kinds_succeeded.insert(encode(&e.req).0.to_string());
         }
     }
-    report.kinds_missing = all_kinds.difference(&report.kinds_succeeded).cloned().collect();
-    let clients: Vec<&crate::history::Entry> = entries.iter().filter(|e| e.client != "final").collect();
+    report.kinds_missing = all_kinds
+        .difference(&report.kinds_succeeded)
+        .cloned()
+        .collect();
+    let clients: Vec<&crate::history::Entry> =
+        entries.iter().filter(|e| e.client != "final").collect();
     for (i, a) in clients.iter().enumerate() {
         for b in &clients[i + 1..] {
             if b.invoke < a.ret && a.invoke <= b.invoke {
@@ -565,16 +696,34 @@ async fn check(world: &World) -> Report {
         }
     }
     if report.overlapping_pairs == 0 && opts.clients > 1 {
-        report.failures.push("the history never overlapped: nothing concurrent was checked".into());
+        report
+            .failures
+            .push("the history never overlapped: nothing concurrent was checked".into());
     }
 
-    // The run as a trace of the model, checked by accordant.
+    // The run as a trace of the workspace Abstract model.
     let trace = checker::trace(&entries, &world.history.marks(), &sent);
     report.events = trace.len();
-    match checker::check(&trace, opts.retry_timeout_ms, opts.fire_within(), opts.budget) {
-        Verdict::Ok { explored } => report.search_steps = explored as u64,
+    match checker::check(
+        &trace,
+        opts.retry_timeout_ms,
+        opts.fire_within(),
+        opts.budget,
+    ) {
+        Verdict::Ok { explored } => {
+            report.checker_verdict = "ok".into();
+            report.search_steps = explored as u64;
+        }
         Verdict::Ko(v) => {
-            report.failures.push(format!("no execution of the model explains event {} of {}: {}: {}", v.index, trace.len(), v.event, v.reason));
+            report.checker_verdict = "ko".into();
+            report.search_steps = v.explored;
+            report.failures.push(format!(
+                "no execution of the model explains event {} of {}: {}: {}",
+                v.index,
+                trace.len(),
+                v.event,
+                v.reason
+            ));
             // `ECHOD_SIM_DUMP=1`: the trace up to the event, one per line, and
             // the candidates that could not explain it
             if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
@@ -585,7 +734,14 @@ async fn check(world: &World) -> Report {
             }
         }
         Verdict::Unknown(v) => {
-            report.failures.push(format!("undecided at event {} of {}: {}", v.index, trace.len(), v.reason));
+            report.checker_verdict = "unknown".into();
+            report.search_steps = v.explored;
+            report.failures.push(format!(
+                "undecided at event {} of {}: {}",
+                v.index,
+                trace.len(),
+                v.reason
+            ));
             if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
                 eprint!("{}", checker::show(&trace, v.index));
                 for n in v.profile.iter().take(6) {
@@ -600,30 +756,64 @@ async fn check(world: &World) -> Report {
     let armed: BTreeSet<(String, u64)> = timer_keys
         .iter()
         .filter_map(|k| match world.keys.parse_timer_key(k) {
-            Some(TimerEntry::Origin { origin, deadline, .. }) => Some((origin, deadline)),
-            Some(TimerEntry::Schedule { id, deadline, .. }) => Some((format!("sched:{id}"), deadline)),
+            Some(TimerEntry::Origin {
+                origin, deadline, ..
+            }) => Some((origin, deadline)),
+            Some(TimerEntry::Schedule { id, deadline, .. }) => {
+                Some((format!("sched:{id}"), deadline))
+            }
             None => None,
         })
         .collect();
-    for key in world.inner.list("wf/", usize::MAX).await.unwrap_or_default() {
-        let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let rows = echod_logic::doc::decode::<echod_kernel::Promise>(&bytes).map(|l| l.rows).unwrap_or_default();
+    for key in world
+        .inner
+        .list("wf/", usize::MAX)
+        .await
+        .unwrap_or_default()
+    {
+        let Ok(Some((bytes, _))) = world.inner.get(&key).await else {
+            continue;
+        };
+        let rows = echod_logic::doc::decode::<echod_kernel::Promise>(&bytes)
+            .map(|l| l.rows)
+            .unwrap_or_default();
         let origin = key.trim_start_matches("wf/");
         let origin = echod_logic::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
-        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
+        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State {
+            objects: rows,
+            schedules: Vec::new(),
+            outbox: Vec::new(),
+        }) {
             if !armed.contains(&(origin.clone(), d)) {
-                report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
+                report.failures.push(format!(
+                    "origin {origin}: owes a deadline at {d} and the bucket holds no key for it"
+                ));
             }
         }
     }
-    for key in world.inner.list("sched/", usize::MAX).await.unwrap_or_default() {
-        let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let rows = echod_logic::doc::decode::<echod_kernel::Schedule>(&bytes).map(|l| l.rows).unwrap_or_default();
+    for key in world
+        .inner
+        .list("sched/", usize::MAX)
+        .await
+        .unwrap_or_default()
+    {
+        let Ok(Some((bytes, _))) = world.inner.get(&key).await else {
+            continue;
+        };
+        let rows = echod_logic::doc::decode::<echod_kernel::Schedule>(&bytes)
+            .map(|l| l.rows)
+            .unwrap_or_default();
         let id = key.trim_start_matches("sched/");
         let id = echod_logic::keys::decode_key(id).unwrap_or_else(|| id.to_string());
-        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }) {
+        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State {
+            objects: Vec::new(),
+            schedules: rows,
+            outbox: Vec::new(),
+        }) {
             if !armed.contains(&(format!("sched:{id}"), d)) {
-                report.failures.push(format!("schedule {id}: owes its next run at {d} and the bucket holds no key for it"));
+                report.failures.push(format!(
+                    "schedule {id}: owes its next run at {d} and the bucket holds no key for it"
+                ));
             }
         }
     }

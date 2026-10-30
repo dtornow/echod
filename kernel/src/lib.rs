@@ -19,7 +19,7 @@
 //! external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
 //! internal.rs    the 6 internal steps
 //! internal_proof.rs  their lemmas
-//! steps.rs       what a node runs around a request: sweep, drain, next_deadline, clamp_now, schedule_due
+//! steps.rs       exact stored-order single-pass normalization; next_deadline, clamp_now, schedule_due
 //! node.rs        what a node remembers and decides: membership, cache versions, armed keys; step for step with its spec
 //! commit.rs      the commit's decisions: which key to arm before the write, which to remove after, which to remember
 //! ```

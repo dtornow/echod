@@ -1,7 +1,8 @@
 //! echod-logic: the decision core of a node, with no I/O in it.
 //!
-//! The core is a state machine: `State`, `Event` in, `Effect`s out,
-//! `on_event` the only step. Every call on the store leaves as an
+//! The core is the deterministic concrete model: `State`, `Event` in,
+//! ordered `Effect`s out, with [`on_event`] as its only behavioral step.
+//! Every call on the store leaves as an
 //! `Effect::Store` under an op id and comes back as `Event::Completed`
 //! under the same id; every answer to a client leaves as `Effect::Reply`;
 //! the clock is read by whoever drives the core and handed in on every
@@ -20,14 +21,13 @@
 //! flight.rs     one step on one document, from load to commit: the verified protocol, one store call at a time; the fire across two
 //! members.rs    the nodes: announce, list, read the configuration, write the next epoch
 //! timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
-//! debug.rs      debug.reset, debug.snap, debug.tick: what a test that owns the clock asks for
 //! ```
 //!
-//! What stays verified beneath, all of it the kernel's: `handle` runs every
-//! request, `NodeCore` and `Commit` take every decision about membership,
-//! cache and deadline keys, and `steps` runs the sweep and the drain.
-//! The core is the shim the proof stops at, now with nothing in it but
-//! the order of calls.
+//! The verified kernel beneath supplies `handle`, `NodeCore`, `Commit`, and
+//! the exact ordered, single-pass sweep/drain transition. This crate adds the
+//! deterministic orchestration around them. Proving [`on_event`] computes
+//! its specification is the implementation-to-Concrete obligation; it is not
+//! hidden inside an alternative model.
 
 use std::collections::HashMap;
 
@@ -41,7 +41,6 @@ use crate::types::*;
 
 pub mod cache;
 pub mod config;
-pub mod debug;
 pub mod dispatch;
 pub mod doc;
 pub mod flight;
@@ -53,18 +52,31 @@ pub mod wire;
 
 pub use config::Config;
 pub use dispatch::Target;
-pub use types::{Effect, Event, Note};
+pub use types::{Effect, Event, Note, Timer, TimerIdentity};
 
 /// Who waits for a store call's answer.
 pub(crate) enum Owner {
     Flight(FlightId),
     Members,
     Timers,
-    Debug,
     /// The node's announcement being withdrawn: its answer ends the node.
     Leaving,
     /// Nobody: a best-effort call whose answer changes nothing.
     Ignored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifecycle {
+    Created,
+    Running,
+    Stopping,
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+struct TimerIntent {
+    timer: Timer,
+    at: u64,
 }
 
 /// What a node holds and decides with: the verified core, the cache, the
@@ -88,13 +100,27 @@ pub struct State {
     pub(crate) flights: flight::Flights,
     pub(crate) members: members::Members,
     pub(crate) timers: timers::Timers,
-    pub(crate) debug: debug::Debug,
-    /// Whether the node keeps itself going: heartbeats and timers.
-    pub(crate) loops: bool,
-    pub(crate) stopping: bool,
-    stopped: bool,
+    lifecycle: Lifecycle,
     out: Vec<Effect>,
-    last_wake: Option<u64>,
+    next_timer_generation: u64,
+    timer_intent: Option<TimerIntent>,
+}
+
+/// The deterministic concrete model executed by both the production shell
+/// and deterministic simulation. This is an alias, not a second
+/// implementation: the executable logic is the concrete model.
+pub type Concrete = State;
+
+/// Effects are ordered. The shell submits them in this order; asynchronous
+/// completions may return in any order and re-enter as distinct [`Event`]s.
+pub type Effects = Vec<Effect>;
+
+/// Advance the concrete model by exactly one event.
+///
+/// Adapters do not mutate [`State`] and do not make decisions while
+/// interpreting effects.
+pub fn on_event(state: &mut Concrete, event: Event) -> Effects {
+    state.transition(event)
 }
 
 /// What an observer reads of the node at a glance.
@@ -132,22 +158,28 @@ impl State {
             flights: flight::Flights::new(),
             members,
             timers: timers::Timers::new(),
-            debug: debug::Debug::default(),
-            loops: false,
-            stopping: false,
-            stopped: false,
+            lifecycle: Lifecycle::Created,
             out: Vec::new(),
-            last_wake: None,
+            next_timer_generation: 0,
+            timer_intent: None,
             cfg,
         }
     }
 
-    /// The one step: an event in, the effects it calls for out.
-    pub fn on_event(&mut self, event: Event) -> Vec<Effect> {
+    /// The implementation of the one public [`on_event`] step.
+    fn transition(&mut self, event: Event) -> Effects {
+        if let Event::TimerFired { timer, .. } = &event {
+            if self.timer_intent.map(|intent| intent.timer) != Some(*timer) {
+                return Vec::new();
+            }
+        }
         match event {
-            Event::Start { clock, loops } => {
+            Event::Start { clock } => {
+                if self.lifecycle != Lifecycle::Created {
+                    return Vec::new();
+                }
                 self.clock = clock;
-                self.loops = loops;
+                self.lifecycle = Lifecycle::Running;
                 let now = self.now();
                 self.members_refresh(now);
             }
@@ -161,16 +193,14 @@ impl State {
                     Some(Owner::Flight(f)) => self.flight_completed(f, op, outcome),
                     Some(Owner::Members) => self.members_completed(op, outcome),
                     Some(Owner::Timers) => self.timers_completed(op, outcome),
-                    Some(Owner::Debug) => self.debug_completed(op, outcome),
-                    Some(Owner::Leaving) => self.stopped = true,
+                    Some(Owner::Leaving) => self.lifecycle = Lifecycle::Stopped,
                     Some(Owner::Ignored) | None => {}
                 }
             }
-            Event::Tick { clock } => {
+            Event::TimerFired { clock, .. } => {
                 self.clock = clock;
-                // A wake that came early asks again below.
-                self.last_wake = None;
-                if self.loops && !self.stopping {
+                self.timer_intent = None;
+                if self.running() {
                     let now = self.now();
                     self.members_tick(now);
                     self.timers_run(now);
@@ -181,7 +211,7 @@ impl State {
                 self.stop();
             }
         }
-        self.schedule_wake();
+        self.schedule_timer();
         std::mem::take(&mut self.out)
     }
 
@@ -229,7 +259,7 @@ impl State {
 
     /// The node has withdrawn its announcement: nothing more to do.
     pub fn stopped(&self) -> bool {
-        self.stopped
+        self.lifecycle == Lifecycle::Stopped
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -255,29 +285,26 @@ impl State {
     // -----------------------------------------------------------------------
 
     fn request(&mut self, id: RequestId, envelope: RequestEnvelope) {
-        if self.cfg.debug && envelope.kind.starts_with("debug.") {
-            return self.debug_request(id, envelope);
-        }
-        let now = match (self.cfg.debug, envelope.head.debug_time) {
-            (true, Some(t)) => t.max(0) as u64,
-            _ => self.now(),
-        };
+        let now = self.now();
         match dispatch::decode(&envelope, now) {
             Err(resp) => self.emit(Effect::Reply { id, response: Ok(resp) }),
             Ok(d) => {
                 let stage = match d.then {
-                    Some((then, check)) => flight::Stage::Detached { then, check: Some(Box::new(check)) },
+                    Some((then, create)) => flight::Stage::Check { then, create: Some(Box::new(create)) },
                     None => flight::Stage::Whole,
                 };
                 let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now, stage };
-                self.submit(d.target, work, None, false);
+                self.submit(d.target, work, None);
             }
         }
     }
 
     fn stop(&mut self) {
-        self.stopping = true;
-        self.loops = false;
+        if matches!(self.lifecycle, Lifecycle::Stopping | Lifecycle::Stopped) {
+            return;
+        }
+        self.lifecycle = Lifecycle::Stopping;
+        self.timer_intent = None;
         // A refresh in flight finishes first, so the announcement it
         // writes does not outlive the withdrawal.
         if self.members.refreshing() {
@@ -344,19 +371,28 @@ impl State {
         self.core.forget(origin);
     }
 
-    /// Ask for a tick at the earliest instant anything is due, when that
-    /// moved.
-    fn schedule_wake(&mut self) {
-        if !self.loops || self.stopping {
+    pub(crate) fn running(&self) -> bool {
+        self.lifecycle == Lifecycle::Running
+    }
+
+    /// State the current versioned timer intent when the earliest due
+    /// instant changes.
+    fn schedule_timer(&mut self) {
+        if !self.running() {
+            self.timer_intent = None;
             return;
         }
         let now = self.now();
         let at = [self.members.wake_at(), self.timers.wake_at(now)].into_iter().flatten().min();
-        if at != self.last_wake {
-            if let Some(at) = at {
-                self.emit(Effect::Wake { after_ms: at.saturating_sub(now).max(1) });
-            }
-            self.last_wake = at;
+        if at == self.timer_intent.map(|intent| intent.at) {
+            return;
+        }
+        self.timer_intent = None;
+        if let Some(at) = at {
+            self.next_timer_generation = self.next_timer_generation.checked_add(1).expect("timer generation exhausted");
+            let timer = Timer { identity: TimerIdentity::Maintenance, generation: self.next_timer_generation };
+            self.timer_intent = Some(TimerIntent { timer, at });
+            self.emit(Effect::ScheduleTimer { timer, after_ms: at.saturating_sub(now).max(1) });
         }
     }
 }
