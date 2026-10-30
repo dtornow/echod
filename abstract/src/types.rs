@@ -9,7 +9,7 @@ use vstd::string::StrSliceExecFns;
 
 verus! {
 
-pub const MAX_TIME: u64 = 0x3fff_ffff_ffff_ffff;
+pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
 
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, Default, PartialEq, Eq))]
