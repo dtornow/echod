@@ -9,6 +9,7 @@
 #![allow(unused_imports)]
 
 pub mod bridge;
+pub mod heartbeat_sim;
 pub mod promise_sim;
 pub mod read_sim;
 pub mod relation;
