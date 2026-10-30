@@ -65,31 +65,56 @@ open Resonate
 def result :=
   TraceChecker.check ({} : Resonate.Config) TraceChecker.createTrace
 
-#guard result.isSome
+#guard result.isValid
 ```
 
-`TraceChecker.check config events` returns
-`Option (TraceChecker.Certificate × Rover.Execution Resonate.Abstract.model)`.
-`some (certificate, execution)` means the trace was accepted and includes the
-replayed concrete abstract execution; `none` means the bounded search found no
-certificate. Search completeness is not claimed.
+`TraceChecker.check config events` returns `TraceChecker.Verdict`:
+
+- `valid certificate execution` includes the independently replayed
+  certificate and actual abstract Rover execution.
+- `invalid` is a definitive rejection. The checker proves that a valid
+  boundary trace can never receive this verdict. This includes nonmonotone
+  traces and impossible 404 create responses.
+- `unknown` carries no validity claim. It covers every resource cutoff and
+  every exhausted case not justified by the checker’s proved refutation
+  invariant.
+
+Use `TraceChecker.checkWithBound bound config events` to select the resource
+bound explicitly. For example,
+`(TraceChecker.checkWithBound 0 {} TraceChecker.createTrace).isUnknown` is
+true. Retained state-changing hidden processing consumes the bound.
+
+Search removes hidden timeout/no-op actions (with a trace-existence erasure
+proof), keeps only outputs relevant to the remaining trace, saturates duplicate
+append-only outputs at one, and skips repeated semantic contexts. Full
+finite-state completeness of the promise state quotient is not claimed:
+ordered exhausted traces that satisfy the proved response-origin invariant
+remain `unknown` when no certificate is found. This residual class includes
+unsupported output values, notifications, and state-dependent impossibilities
+other than the proved create/404 case.
 
 To validate a stored or externally produced certificate exactly, use:
 
 ```lean
 def replayed :=
   match result with
-  | some (certificate, _) =>
+  | .valid certificate _ =>
       TraceChecker.replay ({} : Resonate.Config)
         TraceChecker.createTrace certificate
-  | none => none
+  | _ => none
 ```
 
 Replay checks monotone times, request presence in Rover's append-only network,
 membership in `Resonate.run`, and the exact output batch emitted by each
-process step. `TraceChecker.check_sound` proves that every `some` result from
-`check` implies `Resonate.Abstract.ValidBoundaryTrace` for the supplied config
-and events; `TraceChecker.replay_valid` provides the corresponding theorem for
-any successfully replayed certificate.
+process step. `TraceChecker.check_valid_sound` proves that every `valid` result
+implies `Resonate.Abstract.ValidBoundaryTrace`;
+`TraceChecker.check_invalid_sound` proves that every `invalid` result implies
+its negation. `TraceChecker.valid_ne_invalid` gives the equivalent statement
+for every explicit bound. `TraceChecker.legal_normalizes` shows that arbitrary
+legal abstract Rover executions—including timeout/no-op steps, duplicate
+request processing, delayed/reordered observations, and append-only message
+duplication—have exact replay certificates.
+`TraceChecker.valid_has_noop_free_certificate` separately proves that those
+inert steps can be erased without changing trace existence.
 
 Build with `lake build`.
