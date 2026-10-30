@@ -106,7 +106,7 @@ def listenerResult : State × List Output :=
     (.listener { awaited := ident "settled", address := "listener" })
     2 listenerState
 
-#guard listenerResult.1.outbox.length == 1
+#guard listenerResult.1.objects.head?.map (·.promise.listeners) == some []
 #guard match listenerResult.2 with
   | [.message { address := "listener", message := .unblock promise }] =>
       promise.id == ident "settled"
@@ -120,11 +120,27 @@ def listenerRoverResult :
     .timeout)
     |>.val.headD { state := {}, send := [] }
 
-#guard listenerRoverResult.state.outbox.length == 1
+#guard listenerRoverResult.state.objects.head?.map (·.promise.listeners) ==
+  some []
 #guard match listenerRoverResult.send with
   | [(.outside, .output (.message
       { address := "listener", message := .unblock promise }))] =>
       promise.id == ident "settled"
+  | _ => false
+
+/-- Equal-key messages are transient emissions: both survive, in order, while
+the abstract state remains unchanged. -/
+def duplicateEmissionResult : Unit × State × List OutboxEntry :=
+  Direct.run (do
+    Direct.setMessage "queue" (.execute (ident "duplicate") 1)
+    Direct.setMessage "queue" (.execute (ident "duplicate") 2)) {}
+
+#guard match duplicateEmissionResult with
+  | (_, state, [
+      { address := "queue", message := .execute first 1 },
+      { address := "queue", message := .execute second 2 }]) =>
+      state.objects.isEmpty && state.schedules.isEmpty &&
+        first == ident "duplicate" && second == ident "duplicate"
   | _ => false
 
 def timeoutState : State := {
@@ -145,6 +161,54 @@ def timeoutResult : State × List Output :=
 
 #guard timeoutResult.1.objects.head?.map (·.promise.state) ==
   some .rejectedTimedout
+
+/-- Work enabled by an internal handler is absent from that timeout's snapshot
+and runs on the next timeout. -/
+def deferredRetryState : State := {
+  objects := [
+    {
+      id := ident "awaited"
+      promise := {
+        state := .resolved
+        param := {}
+        tags := []
+        timeoutAt := 10
+        createdAt := 0
+        settledAt := some 1
+        callbacks := [ident "awaiter"]
+      }
+    },
+    {
+      id := ident "awaiter"
+      promise := {
+        state := .pending
+        param := {}
+        tags := [("resonate:target", "queue")]
+        timeoutAt := 100
+        createdAt := 0
+      }
+      task := some {
+        state := .suspended
+        version := 0
+      }
+    }
+  ]
+}
+
+def deferredRetryFirst : State × List Output :=
+  Resonate.runTimeout {} 2 deferredRetryState
+
+#guard deferredRetryFirst.2.isEmpty
+#guard (((deferredRetryFirst.1.objects.find?
+  (·.id == ident "awaiter")).bind (·.task)).map (·.state)) == some .pending
+
+def deferredRetrySecond : State × List Output :=
+  Resonate.runTimeout {} 2 deferredRetryFirst.1
+
+#guard match deferredRetrySecond.2 with
+  | [.message { address := "queue", message := .execute taskId 0 }] =>
+      taskId == ident "awaiter"
+  | _ => false
 
 def absentScheduleStep : State × List Output :=
   Resonate.runInternal {}

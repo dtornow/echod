@@ -6,7 +6,7 @@ open ServerModel
 abbrev InternalStep := Abstraction.InternalStep
 
 def resumeOne (awaited awaiter : Ident) (now : Nat) : H Unit := do
-  match ← touchTaskObject awaiter now with
+  match ← readTaskObject awaiter now with
   | none => pure ()
   | some o =>
       match o.task with
@@ -25,12 +25,9 @@ def resumeOne (awaited awaiter : Ident) (now : Nat) : H Unit := do
                   { t with resumes := t.resumes ++ [awaited] }
           | .fulfilled => pure ()
 
-def processPromiseTimeout (req : PromiseTimeoutReq) (now : Nat) : H Unit := do
-  let _ ← touchObject req.id now
-
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
     H Unit := do
-  match ← touchObject req.awaited now with
+  match ← readObject req.awaited now with
   | none => pure ()
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
@@ -42,7 +39,7 @@ def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
 
 def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
     H Unit := do
-  match ← touchObject req.awaited now with
+  match ← readObject req.awaited now with
   | none => pure ()
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
@@ -123,15 +120,18 @@ def processSchedule (req : ScheduleTimeoutReq) (now : Nat) : H Unit := do
       | none => pure ()
 
 def handleInternal : InternalStep → Nat → H Unit
-  | .promiseTimeout req, now => processPromiseTimeout req now
+  | .promiseTimeout req, now =>
+      modify fun state =>
+        { state with objects := state.objects.map fun object =>
+            if object.id == req.id then object.project now else object }
   | .callback req, now => processCallback req now
   | .listener req, now => processListener req now
   | .taskLeaseTimeout req, now => processLeaseTimeout req now
   | .taskRetryTimeout req, now => processRetryTimeout req now
   | .scheduleTimeout req, now => processSchedule req now
 
-/-- Run a fixed list of process-local work in order. Reader+State bind makes
-each handler observe the writes of every earlier handler in the pass. -/
+/-- Run a fixed list of process-local work in order. Reader+State+Writer bind
+makes each handler observe earlier writes and preserves emission order. -/
 def handleInternals (steps : List InternalStep) (now : Nat) : H Unit :=
   match steps with
   | [] => pure ()
@@ -139,20 +139,32 @@ def handleInternals (steps : List InternalStep) (now : Nat) : H Unit :=
       handleInternal step now
       handleInternals rest now
 
-/-- All process-local work represented by a snapshot of the fused state. -/
-def internalSteps (state : ServerState) : List InternalStep :=
+/-- Work enabled in one projected-state snapshot. Handlers may enable later
+work, but it is absent from this list until the next timeout. -/
+def internalSteps (state : State) (now : Nat) : List InternalStep :=
   let objects := state.objects.flatMap fun o =>
-    ([Abstraction.InternalStep.promiseTimeout { id := o.id }] :
-      List InternalStep) ++
-    (o.promise.callbacks.map fun awaiter =>
-      Abstraction.InternalStep.callback { awaited := o.id, awaiter }) ++
-    (o.promise.listeners.map fun address =>
-      Abstraction.InternalStep.listener { awaited := o.id, address }) ++
+    (if o.promise.state == .pending then [] else
+      (o.promise.callbacks.map fun awaiter =>
+        Abstraction.InternalStep.callback { awaited := o.id, awaiter }) ++
+      (o.promise.listeners.map fun address =>
+        Abstraction.InternalStep.listener { awaited := o.id, address })) ++
     (match o.task with
      | none => []
-     | some _ =>
-         [Abstraction.InternalStep.taskLeaseTimeout { id := o.id },
-          Abstraction.InternalStep.taskRetryTimeout { id := o.id }])
+     | some task =>
+         (match task.leaseTimeoutAt with
+          | some due =>
+              if task.state == .acquired ∧ due ≤ now ∧
+                  o.promise.state == .pending then
+                [Abstraction.InternalStep.taskLeaseTimeout { id := o.id }]
+              else []
+          | none => []) ++
+         (match task.retryTimeoutAt with
+          | some due =>
+              if task.state == .pending ∧ due ≤ now ∧
+                  o.promise.state == .pending then
+                [Abstraction.InternalStep.taskRetryTimeout { id := o.id }]
+              else []
+          | none => []))
   objects ++ state.schedules.map fun schedule =>
     Abstraction.InternalStep.scheduleTimeout { schedule := schedule.id }
 

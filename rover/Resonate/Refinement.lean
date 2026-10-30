@@ -5,10 +5,10 @@ import Resonate.Concrete
 
 The former end-to-end theorem related a one-document promise handler to this
 store. Full Resonate transitions can atomically touch several fused objects,
-schedules, and outbox keys, while this wire protocol carries exactly one
-promise document. There is therefore no state representation relation under
-which that old theorem states full-protocol refinement. The raw PUT facts are
-kept here without widening their claim.
+schedules, and emit boundary messages, while this wire protocol carries
+exactly one promise document. There is therefore no state representation
+relation under which that old theorem states full-protocol refinement. The raw
+PUT facts are kept here without widening their claim.
 -/
 
 namespace Resonate.PromiseSlice.Refinement
@@ -33,6 +33,6 @@ theorem duplicate_absent_put_conflicts (key : Key) (document : Promise) :
 def fullRefinementBlocker : String :=
   "the concrete wire store writes one legacy promise document, but a full " ++
   "Resonate handler may atomically update multiple fused promise/task rows, " ++
-  "schedules, and outbox entries"
+  "schedules, and emit boundary messages"
 
 end Resonate.PromiseSlice.Refinement

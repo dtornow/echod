@@ -5,8 +5,10 @@ import Resonate.Abstract
 
 Certificates use only legal Rover actions. Internal work is hidden behind a
 timeout at the sole service process; no internal request can be supplied by
-the environment. Successful search results are independently replayed before
-`valid` is returned. Resource exhaustion is conservatively `unknown`.
+the environment. Observations consume the ordered Writer emissions that the
+service placed directly in the network. Successful search results are
+independently replayed before `valid` is returned. Resource exhaustion is
+conservatively `unknown`.
 -/
 
 namespace Resonate.TraceChecker

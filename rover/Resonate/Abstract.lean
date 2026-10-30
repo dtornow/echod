@@ -4,8 +4,9 @@ import Resonate
 # Abstract Resonate
 
 There is exactly one real process. Its local state is the complete fused
-Resonate server state. External requests and deterministic timeout passes
-each execute one direct-state atomic transition.
+Resonate state of fused objects and schedules. External requests and
+deterministic timeout passes each execute one direct-state atomic transition
+and send its transient Writer emissions directly into the Rover network.
 -/
 
 namespace Resonate.Abstract
@@ -41,7 +42,7 @@ abbrev model : Model where
   isProcess := (· = .service)
   outside_not_process := by simp
   injectable := fun _ message => ∃ call, message = .request call
-  init := fun _ process => process .service = AbstractModel.ServerState.init
+  init := fun _ process => process .service = State.init
   step := step
 
 theorem only_real_process {pid : Pid} (h : model.isProcess pid) :
@@ -61,7 +62,7 @@ def ValidBoundaryTrace (config : Config)
     boundaryTrace execution = events
 
 def initialProcess : Pid → State :=
-  fun _ => AbstractModel.ServerState.init
+  fun _ => State.init
 
 theorem initialProcess_valid (config : Config) :
     model.init config initialProcess := rfl

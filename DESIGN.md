@@ -647,8 +647,8 @@ create a promise in another origin.
 
 | Lean specification | Rust |
 |---|---|
-| `ServerState { objects, schedules, outbox }` | `Server { promises, tasks, schedules }`; the clock is the checker's, passed in as `now`; the outbox is what the steps `send` |
-| `readObject` with `project now` (a promise past its deadline, a lease past its end: `TaskObject.lapse`) | the deadline is a timer step that settles the promise (and fulfills its task), the lease's end a timer step that makes the task pending; a pending promise is always live and an acquired task always holds its lease |
+| Rover `State { objects, schedules }` plus ordered Writer emissions | `Server { promises, tasks, schedules }`; the clock is the checker's, passed in as `now`; emitted messages are what the steps `send` |
+| Rover projects every fused object once at the start of `runTimeout`; ordinary `readObject` returns a projected view without persisting it | the deadline is a timer step that settles the promise (and fulfills its task), the lease's end a timer step that makes the task pending; a pending promise is always live and an acquired task always holds its lease |
 | `ServerConfig.retryTimeout` | `Resonate { retry_timeout }`; the other dial, `fire_within`, is the checker's, not Lean's (below) |
 | `nextOffer due now T` | `next_offer`: a pending task's offers are on the grid `due + n·T` from the instant it came to be pending, so a retry run late is rearmed where an exact one would be; a reclaimed lease retries from its end, a resume from the awaited promise's `settled_at`. What a step writes never depends on when it ran |
 | internal steps enabled by the state, fired by a fair scheduler | each is work the step that enables it starts: `Timer(at, Objects(ids))` at the instant it falls due, `Later` when due at once; `internal` does whatever is due on the ids, in the order Lean's steps become enabled |

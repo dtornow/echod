@@ -4,9 +4,9 @@ import Resonate.Internal
 /-!
 # Full Resonate protocol and direct abstract semantics
 
-The request, response, record, schedule, task, and outbox payloads below are
-the public types from the pinned `resonatehq/resonate` specification.  Rover
-adds only transport envelopes and request correlation.
+The request, response, record, schedule, task, and emitted-message payloads
+below are the public types from the pinned `resonatehq/resonate`
+specification. Rover adds only transport envelopes and request correlation.
 -/
 
 namespace Resonate
@@ -19,7 +19,6 @@ abbrev CallId := Nat
 abbrev Request := Equivalence.Request
 abbrev Response := Equivalence.Response
 abbrev InternalStep := Abstraction.InternalStep
-abbrev State := Direct.ServerState
 abbrev Config := Direct.ServerConfig
 
 deriving instance DecidableEq for PromiseGetReq
@@ -100,7 +99,7 @@ structure Call where
   request : Request
   deriving Repr, BEq, DecidableEq
 
-/-- Publicly observable emissions: correlated replies and outbox messages. -/
+/-- Publicly observable emissions: correlated replies and boundary messages. -/
 inductive Output where
   | response (client : Addr) (id : CallId) (response : Response)
   | message (entry : OutboxEntry)
@@ -154,38 +153,32 @@ def handleExternal (request : Request) (now : Time) : Direct.H Response :=
   | .taskContinue req => .taskContinue <$> Direct.taskContinue req now
   | .taskSearch req => .taskSearch <$> Direct.taskSearch req now
 
-/-- Entries newly inserted or replaced by one atomic transition. -/
-def outboxDelta (before after : State) : List OutboxEntry :=
-  after.outbox.filter fun entry =>
-    !(before.outbox.any fun old => old == entry)
-
-def transitionOutputs (before after : State) : List Output :=
-  (outboxDelta before after).map .message
-
 /-- Apply one of all 21 external handlers at the request's own timestamp. -/
 def run (config : Config) (call : Call) (state : State) :
     State × List Output :=
-  let (response, next) :=
+  let (response, next, emitted) :=
     Direct.runWith config (handleExternal call.request call.requestedAt) state
   (next, .response call.client call.id response ::
-    transitionOutputs state next)
+    emitted.map .message)
 
 /-- Apply one of all six process-local handlers at the Rover step time. -/
 def runInternal (config : Config) (step : InternalStep) (now : Time)
     (state : State) : State × List Output :=
-  let (_, next) :=
+  let (_, next, emitted) :=
     Direct.runWith config (Direct.handleInternal step now) state
-  (next, transitionOutputs state next)
+  (next, emitted.map .message)
 
-/-- Execute one deterministic timeout pass. The candidate list is computed
-from the pre-timeout state, while the handlers themselves share one threaded
-Reader+State computation. Work enabled only by this pass waits for a later
-timeout. -/
+/-- Execute one deterministic timeout pass. First project every fused object
+at `now` in one state update, then snapshot and run the work enabled by that
+projected state. Handler writes are threaded, but work they newly enable waits
+for a later timeout. -/
 def runTimeout (config : Config) (now : Time) (state : State) :
     State × List Output :=
-  let steps := Direct.internalSteps state
-  let (_, next) :=
-    Direct.runWith config (Direct.handleInternals steps now) state
-  (next, transitionOutputs state next)
+  let projected :=
+    { state with objects := state.objects.map (·.project now) }
+  let steps := Direct.internalSteps projected now
+  let (_, next, emitted) :=
+    Direct.runWith config (Direct.handleInternals steps now) projected
+  (next, emitted.map .message)
 
 end Resonate
