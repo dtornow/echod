@@ -4,6 +4,43 @@
 //! Concrete owns document-local persisted row order; Abstract owns independent
 //! protocol objects and actions. Bucket listing order is erased at this
 //! refinement boundary by comparing derived keyed meanings.
+//!
+//! The theorem is `trace::theorem_trace_inclusion`: from related states,
+//! every run of kernel steps on a document that the kernel admits — sweeps,
+//! requests handled, schedules fired, in any order — is a run of Abstract
+//! actions (`trace::trace_actions`, constructed) that ends related to it and
+//! answers the same responses in the same order. The relation is
+//! `relation::doc_related`: the document's objects and schedules, under the
+//! mapping in this file, are the Abstract state's, first match by id.
+//!
+//! ```text
+//! lib.rs          the mapping: kernel rows, records, ids and tags to Abstract values; the bucket-level relation
+//! bridge.rs       the two vocabularies agree: tags, ids, parsing, stamping
+//! relation.rs     doc_related, and each Abstract effect as a kernel map edit
+//! read_sim.rs     projection: the kernel's `spec_read` is the Abstract's materializing read
+//! promise_sim.rs  the five promise handlers
+//! schedule_sim.rs the three schedule handlers
+//! task_sim.rs     the single-object task handlers and the fence
+//! heartbeat_sim.rs  `task.heartbeat` over any list of refs
+//! suspend_sim.rs  `task.suspend` over any list of awaits
+//! internal_sim.rs the per-object internal steps: deadline, lease, retry, callback, listener
+//! actions.rs      the Abstract's internal actions as spec values; runs of them
+//! fire_sim.rs     `processSchedule` as Abstract fires and one advance
+//! sweep_sim.rs    `executable_single_pass` as a run of internal actions
+//! trace.rs        the Concrete document's steps, the Abstract's actions, trace inclusion
+//! ```
+//!
+//! What the theorem takes as given, beyond the kernel's own preconditions:
+//! ids are canonical (`bridge::canonical`: no `origin:` with an empty
+//! suffix, which `AIdent` cannot spell); instants and ttls are inside the
+//! kernel's time door `MAX_TIME`; a create's tags are not a targeted timer;
+//! and for the task handlers that answer a version, the document is within
+//! the wire's `u32` (`task_sim::doc_headroom`). Two kernel steps are more
+//! than one Abstract action: a callback whose awaiter is a bare promise is
+//! the Abstract callback and then a promise timeout on the awaiter
+//! (`internal_sim::callback_actions`); a schedule's firing is an Abstract
+//! fire per occurrence whose promise is absent and one advance
+//! (`fire_sim::fire_actions`).
 
 #![cfg(verus_keep_ghost)]
 #![allow(unused_imports)]

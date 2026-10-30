@@ -11,15 +11,18 @@ durable executions in V8. Built inside out, from the stored data up.
 | `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
 | `codec/` | `echod-codec`: the executable verified persistence format. Canonical UTF-8 and typed codecs for every object/key, appendable origin/schedule document segments, strict malformed-input rejection, last-row-wins folding and compaction laws |
 | `concrete/` | `echod-concrete`: the deterministic raw object-store automaton: one configured bucket of keyed bytes and opaque versions, conditional writes/appends/listings, and explicit fail-before-apply/apply-with-lost-ack/refusal choices. Decoded documents and auxiliary objects are verified derived views |
-| `refinement/` | `echod-refinement`: the local proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency |
+| `refinement/` | `echod-refinement`: the local proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency. Proved: `theorem_trace_inclusion`, every admitted run of kernel steps on a document (sweeps, the 19 requests, schedule firings) is a run of Abstract actions ending in a related state with the same responses; the Abstract run is constructed, not assumed |
 | `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
 | `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
 | `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
 | `sim/` | `echod-sim`: deterministic multi-node chaos, one seed and no sockets; finite public traces are searched directly against `echod-abstract`, with witness/exhausted/bounded outcomes |
 
 The Abstract, kernel, Concrete-bucket and system layers verify
-independently. The remaining work is the refinement chain between them and
-the complete `logic::on_event` orchestration. `echod` performs the logic's
+independently. `refinement/` proves the document-level link from the kernel
+to the Abstract (`theorem_trace_inclusion`): every admitted run of kernel
+steps on a document is an Abstract run with the same responses. The
+remaining work is the link from the complete `logic::on_event`
+orchestration over many documents. `echod` performs the logic's
 effects; simulation is executable evidence at the same boundary. The core
 and the node depend on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
