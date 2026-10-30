@@ -12,7 +12,7 @@ else
   export VERUS_Z3_PATH="${VERUS_Z3_PATH:-$VERUS_DIR/z3}"
 fi
 
-mkdir -p kernel/target-verus codec/target-verus abstract/target-verus concrete/target-verus
+mkdir -p kernel/target-verus codec/target-verus abstract/target-verus concrete/target-verus system/target-verus
 
 "$VERUS" --crate-type=lib kernel/src/lib.rs \
   --export kernel/target-verus/echod_kernel.vir \
@@ -42,6 +42,14 @@ mkdir -p kernel/target-verus codec/target-verus abstract/target-verus concrete/t
   --compile --out-dir concrete/target-verus --crate-name echod_concrete \
   --triggers-mode silent --multiple-errors 20 --no-auto-recommends-check
 
+"$VERUS" --crate-type=lib system/src/lib.rs \
+  --import echod_kernel=kernel/target-verus/echod_kernel.vir \
+  --extern echod_kernel=kernel/target-verus/libechod_kernel.rlib \
+  -L kernel/target-verus \
+  --export system/target-verus/echod_system.vir \
+  --compile --out-dir system/target-verus --crate-name echod_system \
+  --triggers-mode silent --multiple-errors 20 --no-auto-recommends-check
+
 "$VERUS" --crate-type=lib refinement/src/lib.rs \
   --import echod_kernel=kernel/target-verus/echod_kernel.vir \
   --extern echod_kernel=kernel/target-verus/libechod_kernel.rlib \
@@ -51,5 +59,7 @@ mkdir -p kernel/target-verus codec/target-verus abstract/target-verus concrete/t
   --extern echod_concrete=concrete/target-verus/libechod_concrete.rlib \
   --import echod_codec=codec/target-verus/echod_codec.vir \
   --extern echod_codec=codec/target-verus/libechod_codec.rlib \
-  -L kernel/target-verus -L codec/target-verus -L abstract/target-verus -L concrete/target-verus \
+  --import echod_system=system/target-verus/echod_system.vir \
+  --extern echod_system=system/target-verus/libechod_system.rlib \
+  -L kernel/target-verus -L codec/target-verus -L abstract/target-verus -L concrete/target-verus -L system/target-verus \
   --triggers-mode silent --multiple-errors 20 --no-auto-recommends-check

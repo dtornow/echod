@@ -13,6 +13,7 @@ path = "src/lib.rs"
 echod-abstract = { path = "../abstract" }
 echod-concrete = { path = "../concrete" }
 echod-kernel = { path = "../kernel" }
+echod-system = { path = "../system" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"
