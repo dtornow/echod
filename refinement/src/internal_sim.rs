@@ -27,6 +27,7 @@ use echod_kernel::store::AState as KState;
 use echod_kernel::types as kernel;
 use echod_kernel::types::{APromise, ATask};
 
+use crate::actions::*;
 use crate::bridge::*;
 use crate::promise_sim::lemma_find_via_relation;
 use crate::read_sim::*;
@@ -260,15 +261,25 @@ pub proof fn lemma_without_index(s: Seq<Chars>, x: Chars)
 }
 
 /// The kernel's callback drain touches the awaiter even when it is a bare
-/// promise; the Abstract's does not. The tail the kernel step then owes.
-pub open spec fn callback_tail(k: KState, a: AState, x: Chars, y: Chars, now: u64) -> Seq<AEffect> {
-    if k.objects.contains_key(x) && {
+/// promise; the Abstract's does not. The kernel step then owes the Abstract
+/// a promise timeout on the awaiter after the callback.
+pub open spec fn callback_touches_bare_awaiter(k: KState, x: Chars, y: Chars, now: u64) -> bool {
+    &&& k.objects.contains_key(x)
+    &&& {
         let p = k.objects[x].project(now as nat);
         p.state != kernel::PromiseState::Pending && p.callbacks.contains(y)
-    } && k.objects.contains_key(y) && !k.has_task(y) {
-        aint::promise_timeout_semantics(a, promise_timeout_req(y), now)
+    }
+    &&& k.objects.contains_key(y)
+    &&& !k.has_task(y)
+}
+
+/// The Abstract actions one kernel callback step is: the callback, then, for
+/// a bare awaiter, its promise timeout.
+pub open spec fn callback_actions(k: KState, x: Chars, y: Chars, now: u64) -> Seq<AbsInternal> {
+    if callback_touches_bare_awaiter(k, x, y, now) {
+        seq![AbsInternal::Callback(callback_req(x, y)), AbsInternal::PromiseTimeout(promise_timeout_req(y))]
     } else {
-        Seq::empty()
+        seq![AbsInternal::Callback(callback_req(x, y))]
     }
 }
 
@@ -364,19 +375,29 @@ pub proof fn lemma_resume_sim(k: KState, a: AState, k2: KState, a2: AState, x: C
     }
 }
 
-pub proof fn lemma_callback_sim(k: KState, a: AState, x: Chars, y: Chars, now: u64)
+pub proof fn lemma_callback_sim(k: KState, a: AState, x: Chars, y: Chars, now: u64, rt: u64)
     requires doc_related(k, a), canonical(x), canonical(y), x != y,
     ensures doc_related(
         kint::callback_state(k, x, y, now as nat),
-        spec_apply_all(a, aint::callback_semantics(a, callback_req(x, y), now) + callback_tail(k, a, x, y, now))),
+        internal_run(a, callback_actions(k, x, y, now), now, rt)),
 {
     let ax = ident(x);
     let ay = ident(y);
     let cb = aint::callback_semantics(a, callback_req(x, y), now);
-    let tail = callback_tail(k, a, x, y, now);
+    let one = AbsInternal::Callback(callback_req(x, y));
+    let acts = callback_actions(k, x, y, now);
+    let a_cb = spec_apply_all(a, cb);
+    lemma_internal_run_one(a, one, now, rt);
+    if callback_touches_bare_awaiter(k, x, y, now) {
+        let two = AbsInternal::PromiseTimeout(promise_timeout_req(y));
+        assert(acts =~= seq![one].push(two));
+        lemma_internal_run_push(a, seq![one], two, now, rt);
+        assert(internal_run(a, acts, now, rt) == internal_step(a_cb, two, now, rt));
+    } else {
+        assert(internal_run(a, acts, now, rt) == a_cb);
+    }
     if !k.objects.contains_key(x) {
         lemma_read_absent(k, a, x, now);
-        assert(cb + tail =~= Seq::<AEffect>::empty());
         lemma_apply_all_empty(a);
     } else {
         lemma_read_sim(k, a, x, now);
@@ -388,7 +409,7 @@ pub proof fn lemma_callback_sim(k: KState, a: AState, x: Chars, y: Chars, now: u
         assert(k1 == kext::with_objects(k, k.objects.insert(x, p)));
         lemma_id_list_contains(p.callbacks, y);
         if p.state == kernel::PromiseState::Pending || !p.callbacks.contains(y) {
-            assert(cb + tail =~= reads);
+            assert(cb == reads);
         } else {
             // The callback comes off the awaited promise.
             let px = p.remove_callback(y);
@@ -420,8 +441,7 @@ pub proof fn lemma_callback_sim(k: KState, a: AState, x: Chars, y: Chars, now: u
             if !k.objects.contains_key(y) {
                 lemma_read_task_sim(k, a, y, now);
                 assert(resume =~= Seq::<AEffect>::empty());
-                assert(tail =~= Seq::<AEffect>::empty());
-                assert(cb + tail =~= head);
+                assert(cb =~= head);
                 assert(kint::callback_state(k, x, y, now as nat) == k2);
             } else if !k.has_task(y) {
                 // A bare promise: the Abstract callback leaves it; the
@@ -433,15 +453,13 @@ pub proof fn lemma_callback_sim(k: KState, a: AState, x: Chars, y: Chars, now: u
                 let k3 = kext::spec_read(k2, y, now as nat);
                 assert(k3 == kext::with_objects(k2, k2.objects.insert(y, q)));
                 assert(resume =~= Seq::<AEffect>::empty());
-                assert(head + resume =~= head);
-                assert(tail == reads_y);
-                assert(cb + tail =~= head + reads_y);
-                lemma_apply_all_app(a, head, reads_y);
+                assert(cb =~= head);
+                assert(a_cb == a2);
+                lemma_find_via_relation(k, a, k2, a2, y);
+                assert(abs_state::spec_read_effects(a2, ay, now, true) == reads_y);
                 assert(q.task is None);
                 assert(kint::callback_state(k, x, y, now as nat) == k3);
             } else {
-                assert(tail =~= Seq::<AEffect>::empty());
-                assert(cb + tail =~= cb);
                 lemma_resume_sim(k, a, k2, a2, x, y, now, since);
                 assert(kint::callback_state(k, x, y, now as nat) == resume_state(k2, x, y, now as nat, since as nat));
             }

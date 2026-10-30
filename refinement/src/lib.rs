@@ -18,6 +18,7 @@ pub mod read_sim;
 pub mod relation;
 pub mod schedule_sim;
 pub mod suspend_sim;
+pub mod sweep_sim;
 pub mod task_sim;
 
 use vstd::prelude::*;
