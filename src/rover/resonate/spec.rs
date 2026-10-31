@@ -21,11 +21,11 @@
 
 use vstd::prelude::*;
 
-use accordant::semantics::{ExternalOutcomeV, InternalOutcomeV};
-use accordant::{ExternalOutcome, InternalOutcome, Model, Sched};
+use crate::semantics::{ExternalOutcomeV, InternalOutcomeV};
+use crate::{ExternalOutcome, InternalOutcome, Model, Sched};
 
-use crate::collections::*;
-use crate::exec::*;
+use super::collections::*;
+use super::exec::*;
 
 verus! {
 

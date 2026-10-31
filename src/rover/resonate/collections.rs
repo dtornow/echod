@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use accordant::HashedMap;
+use crate::HashedMap;
 use vstd::prelude::*;
 
 verus! {
@@ -170,7 +170,7 @@ pub fn same_origin(a: &String, b: &String) -> (r: bool)
     ensures
         r == (origin(a@) == origin(b@)),
 {
-    crate::model::origin(a) == crate::model::origin(b)
+    super::model::origin(a) == super::model::origin(b)
 }
 
 /// Any absolute URL, as the spec sees it: what `address_valid` decides.
@@ -182,17 +182,17 @@ pub fn address_valid(addr: &String) -> (r: bool)
     ensures
         r == spec_address_valid(addr@),
 {
-    crate::model::address_valid(addr)
+    super::model::address_valid(addr)
 }
 
 /// The state a client may settle a promise to, by name; never `Pending`.
-pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::exec::PState> {
+pub open spec fn spec_settable(s: Seq<char>) -> Option<super::exec::PState> {
     if s == "resolved"@ {
-        Some(crate::exec::PState::Resolved)
+        Some(super::exec::PState::Resolved)
     } else if s == "rejected"@ {
-        Some(crate::exec::PState::Rejected)
+        Some(super::exec::PState::Rejected)
     } else if s == "rejected_canceled"@ {
-        Some(crate::exec::PState::Canceled)
+        Some(super::exec::PState::Canceled)
     } else {
         None
     }
@@ -200,15 +200,15 @@ pub open spec fn spec_settable(s: Seq<char>) -> Option<crate::exec::PState> {
 
 /// The state a client may settle a promise to, by name; never `Pending`.
 #[verifier::external_body]
-pub fn settable(s: &String) -> (r: Option<crate::exec::PState>)
+pub fn settable(s: &String) -> (r: Option<super::exec::PState>)
     ensures
         r == spec_settable(s@),
-        r != Some(crate::exec::PState::Pending),
+        r != Some(super::exec::PState::Pending),
 {
     match s.as_str() {
-        "resolved" => Some(crate::exec::PState::Resolved),
-        "rejected" => Some(crate::exec::PState::Rejected),
-        "rejected_canceled" => Some(crate::exec::PState::Canceled),
+        "resolved" => Some(super::exec::PState::Resolved),
+        "rejected" => Some(super::exec::PState::Rejected),
+        "rejected_canceled" => Some(super::exec::PState::Canceled),
         _ => None,
     }
 }
@@ -237,7 +237,7 @@ pub fn cron_valid(cron: &String) -> (r: bool)
     ensures
         r == spec_cron_valid(cron@),
 {
-    crate::model::cron_valid(cron)
+    super::model::cron_valid(cron)
 }
 
 /// Lean's `nextCron`, as the spec sees it: strictly after `after`.
@@ -258,7 +258,7 @@ pub fn next_cron(cron: &String, after: u64) -> (r: u64)
         r == spec_next_cron(cron@, after),
         r > after,
 {
-    crate::model::next_cron(cron, after)
+    super::model::next_cron(cron, after)
 }
 
 /// Lean's `expand`, as the spec sees it.
@@ -271,7 +271,7 @@ pub fn expand(template: &String, id: &String, at: u64) -> (r: String)
     ensures
         r@ == spec_expand(template@, id@, at),
 {
-    crate::model::expand(template, id, at)
+    super::model::expand(template, id, at)
 }
 
 // ------------------------------------------------------------------- axioms

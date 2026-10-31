@@ -126,6 +126,9 @@ fn search_from<M: RoverModel>(
         for action in hidden_actions(&world, at) {
             let mut next = world.clone();
             if matches!(next.apply(&action), Ok(None)) {
+                if next.same_snapshot(&world) {
+                    continue;
+                }
                 certificate.push(action);
                 if search_from(next, events, visible, remaining - 1, certificate) {
                     return true;

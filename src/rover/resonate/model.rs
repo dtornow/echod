@@ -3,9 +3,9 @@
 //! to, and holds the cron engine the spec trusts. None of it decides what the
 //! server does: the `Model` impl itself is verified, in `spec.rs`.
 
-use accordant::{Footprint, Partitioned, Touches};
+use crate::{Footprint, Partitioned, Touches};
 
-use crate::exec::*;
+use super::exec::*;
 
 /// The step on these objects, as the model names it: the awaited promise
 /// first, then its awaiter.

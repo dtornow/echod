@@ -1,229 +1,206 @@
-//! Standalone Rover Resonate model traces.
+//! The complete standalone Resonate protocol through Rover's world.
 
 use accordant::rover::resonate::abstract_model::{Model, Pid};
-use accordant::rover::resonate::{
-    Call, Config, Message, Output, PromiseState, Record, Request, Response,
-};
-use accordant::rover::{check, BoundaryEvent, CheckConfig};
+use accordant::rover::resonate::*;
+use accordant::rover::{check, BoundaryEvent, CheckConfig, ProcessEvent, RoverModel};
 
 type Event = BoundaryEvent<Pid, Message>;
 
-fn input(at: u64, call: Call) -> Event {
-    Event::Input {
-        recipient: Pid::Service,
-        at,
-        message: Message::Request(call),
+fn create(id: &str) -> Create {
+    Create {
+        id: id.into(),
+        timeout_at: 10_000,
+        data: Some("value".into()),
+        tags: PLAIN,
     }
 }
 
-fn response(at: u64, client: u64, id: u64, response: Response) -> Event {
-    Event::Output {
-        sender: Pid::Service,
-        at,
-        message: Message::Output(Output::Response {
-            client,
-            id,
-            response,
+/// Build one concrete execution using the standalone handler, then ask Rover
+/// to rediscover and certify it from boundary events alone.
+fn trace_for(requests: Vec<Request>) -> Vec<Event> {
+    let logic = Resonate::default();
+    let mut server = Server::default();
+    let mut trace = Vec::new();
+
+    for (i, request) in requests.into_iter().enumerate() {
+        let call = Call {
+            client: "client".into(),
+            id: i as u64,
+            requested_at: 0,
+            request: request.clone(),
+        };
+        let mut outcomes = logic.request(&request, &server, 0);
+        let outcome = outcomes.remove(0);
+
+        trace.push(Event::Input {
+            recipient: Pid::Service,
+            at: 0,
+            message: Message::Request(call),
+        });
+        trace.push(Event::Output {
+            sender: Pid::Service,
+            at: 0,
+            message: Message::Output(Output::Response {
+                client: "client".into(),
+                id: i as u64,
+                response: outcome.resp.clone(),
+            }),
+        });
+        trace.extend(outcome.send.iter().cloned().map(|dispatch| Event::Output {
+            sender: Pid::Service,
+            at: 0,
+            message: Message::Output(Output::Dispatch(dispatch)),
+        }));
+        server = outcome.next;
+    }
+
+    trace
+}
+
+#[test]
+fn every_request_family_runs_through_rover() {
+    let requests = vec![
+        Request::CreatePromise(create("o:p")),
+        Request::GetPromise("o:p".into()),
+        Request::RegisterListener {
+            awaited: "o:p".into(),
+            address: "https://listener".into(),
+        },
+        Request::CreatePromise(create("o:awaiter")),
+        Request::RegisterCallback {
+            awaited: "o:p".into(),
+            awaiter: "o:awaiter".into(),
+        },
+        Request::SettlePromise(Settle {
+            id: "o:p".into(),
+            state: "resolved".into(),
+            data: Some("done".into()),
         }),
+        Request::CreateTask {
+            pid: "worker".into(),
+            ttl: 1_000,
+            action: create("o:task"),
+        },
+        Request::GetTask("o:task".into()),
+        Request::AcquireTask {
+            id: "o:task".into(),
+            version: 1,
+            pid: "worker".into(),
+            ttl: 1_000,
+        },
+        Request::ReleaseTask {
+            id: "o:task".into(),
+            version: 1,
+        },
+        Request::HeartbeatTask {
+            pid: "worker".into(),
+            tasks: vec![TaskRef {
+                id: "o:task".into(),
+                version: 1,
+            }],
+        },
+        Request::SuspendTask {
+            id: "o:task".into(),
+            version: 1,
+            awaited: vec!["o:p".into()],
+        },
+        Request::FenceTask {
+            id: "o:task".into(),
+            version: 1,
+            action: Fenced::Create(create("o:fenced")),
+        },
+        Request::FulfillTask {
+            id: "o:task".into(),
+            version: 1,
+            state: "resolved".into(),
+            data: Some("done".into()),
+        },
+        Request::HaltTask("o:task".into()),
+        Request::ContinueTask("o:task".into()),
+        Request::CreateSchedule(ScheduleCreate {
+            id: "schedule".into(),
+            cron: "* * * * *".into(),
+            promise_id: "o:{{.id}}:{{.timestamp}}".into(),
+            promise_timeout: 60_000,
+            promise_param: None,
+            promise_tags: PLAIN,
+        }),
+        Request::GetSchedule("schedule".into()),
+        Request::DeleteSchedule("schedule".into()),
+    ];
+    for request in requests {
+        let trace = trace_for(vec![request.clone()]);
+        assert!(
+            check(
+                &Model,
+                &Resonate::default(),
+                &trace,
+                CheckConfig { max_steps: 12 },
+            )
+            .is_some(),
+            "Rover rejected {request:?}",
+        );
     }
 }
 
-fn pending(id: u64, timeout_at: u64) -> Record {
-    Record {
-        id,
-        state: PromiseState::Pending,
-        value: 0,
-        timeout_at,
-    }
-}
-
 #[test]
-fn create_get_listen_and_settle() {
-    let created = pending(10, 100);
-    let settled = Record {
-        state: PromiseState::Resolved,
-        value: 42,
-        ..created
+fn an_unpredicted_response_is_rejected() {
+    let mut trace = trace_for(vec![Request::GetPromise("missing".into())]);
+    let Event::Output { message, .. } = &mut trace[1] else {
+        unreachable!()
     };
-    let trace = vec![
-        input(
-            0,
-            Call {
-                client: 1,
-                id: 1,
-                requested_at: 0,
-                request: Request::Create {
-                    id: 10,
-                    timeout_at: Some(100),
-                },
-            },
-        ),
-        response(
-            1,
-            1,
-            1,
-            Response {
-                status: 200,
-                promise: Some(created),
-            },
-        ),
-        input(
-            1,
-            Call {
-                client: 1,
-                id: 2,
-                requested_at: 1,
-                request: Request::Listen { id: 10, address: 7 },
-            },
-        ),
-        response(
-            2,
-            1,
-            2,
-            Response {
-                status: 200,
-                promise: Some(created),
-            },
-        ),
-        input(
-            2,
-            Call {
-                client: 1,
-                id: 3,
-                requested_at: 2,
-                request: Request::Settle {
-                    id: 10,
-                    state: PromiseState::Resolved,
-                    value: 42,
-                },
-            },
-        ),
-        response(
-            3,
-            1,
-            3,
-            Response {
-                status: 200,
-                promise: Some(settled),
-            },
-        ),
-        Event::Output {
-            sender: Pid::Service,
-            at: 4,
-            message: Message::Output(Output::Notification {
-                address: 7,
-                promise: settled,
-            }),
-        },
-    ];
+    *message = Message::Output(Output::Response {
+        client: "client".into(),
+        id: 0,
+        response: Response::Status(200),
+    });
 
     assert!(check(
         &Model,
-        &Config::default(),
+        &Resonate::default(),
         &trace,
-        CheckConfig { max_steps: 14 },
+        CheckConfig { max_steps: 8 },
     )
-    .is_some());
+    .is_none());
 }
 
 #[test]
-fn timeout_is_a_complete_process_event() {
-    let created = pending(20, 5);
-    let timed_out = Record {
-        state: PromiseState::TimedOut,
-        value: 0,
-        ..created
+fn timeout_runs_the_internal_work_started_by_a_request() {
+    let config = Resonate::default();
+    let mut initial = Model.initial(&config);
+    let state = initial.remove(0).1;
+    let call = Call {
+        client: "client".into(),
+        id: 1,
+        requested_at: 0,
+        request: Request::CreatePromise(Create {
+            id: "o:deadline".into(),
+            timeout_at: 10,
+            data: None,
+            tags: PLAIN,
+        }),
     };
-    let trace = vec![
-        input(
-            0,
-            Call {
-                client: 1,
-                id: 1,
-                requested_at: 0,
-                request: Request::Create {
-                    id: 20,
-                    timeout_at: Some(5),
-                },
-            },
-        ),
-        response(
-            1,
-            1,
-            1,
-            Response {
-                status: 200,
-                promise: Some(created),
-            },
-        ),
-        input(
-            1,
-            Call {
-                client: 1,
-                id: 2,
-                requested_at: 1,
-                request: Request::Listen { id: 20, address: 9 },
-            },
-        ),
-        response(
-            2,
-            1,
-            2,
-            Response {
-                status: 200,
-                promise: Some(created),
-            },
-        ),
-        Event::Output {
-            sender: Pid::Service,
-            at: 6,
-            message: Message::Output(Output::Notification {
-                address: 9,
-                promise: timed_out,
-            }),
-        },
-    ];
+    let event = ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    };
+    let created = Model.on_event(&config, &Pid::Service, &state, 0, &event);
+    assert!(!created[0].state.pending.is_empty());
 
-    assert!(check(
-        &Model,
-        &Config::default(),
-        &trace,
-        CheckConfig { max_steps: 12 },
-    )
-    .is_some());
-}
-
-#[test]
-fn unreliable_request_may_be_shed() {
-    let trace = vec![
-        input(
-            0,
-            Call {
-                client: 1,
-                id: 1,
-                requested_at: 0,
-                request: Request::Get { id: 99 },
-            },
-        ),
-        response(
-            1,
-            1,
-            1,
-            Response {
-                status: 503,
-                promise: None,
-            },
-        ),
-    ];
-
-    assert!(check(
-        &Model,
-        &Config {
-            unreliable: true,
-            ..Config::default()
-        },
-        &trace,
-        CheckConfig::for_trace_len(trace.len()),
-    )
-    .is_some());
+    let timed_out = Model.on_event(
+        &config,
+        &Pid::Service,
+        &created[0].state,
+        10,
+        &ProcessEvent::Timeout,
+    );
+    assert!(!timed_out.is_empty());
+    assert!(timed_out.iter().any(|result| {
+        result
+            .state
+            .server
+            .promises
+            .get(&"o:deadline".to_string())
+            .is_some_and(|promise| promise.state == PState::TimedOut)
+    }));
 }

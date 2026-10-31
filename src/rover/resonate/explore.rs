@@ -3,10 +3,10 @@
 //! spec marks its own branches (`mk` in `exec.rs`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
-use accordant::{Action, Explore, Time};
+use crate::{Action, Explore, Time};
 
-use crate::model::origin;
-use crate::exec::*;
+use super::model::origin;
+use super::exec::*;
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `exec.rs`.

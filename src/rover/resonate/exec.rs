@@ -67,12 +67,12 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use accordant::Sched;
+use crate::Sched;
 
-use crate::collections::*;
-use crate::spec::MAX_VERSION;
+use super::collections::*;
+use super::spec::MAX_VERSION;
 #[cfg(verus_keep_ghost)]
-use crate::spec::{Chars, DispatchV, InternalV, PromiseV, ResponseV, ServerV, TaskV, acquired_v, advance_v, all_external, all_in_origin, all_present, any_settled, arm_fire_v, at_v, deadlines_fold, distinct, due_fold, echo_v, ext, external_v, fenced_target, fire_v, fulfilled_v, group_views, held_v, later2_v, lease_expires_v, live_v, next_offer_v, on_v, one_origin, one_v, ostr, outs_v, prec_v, promise_create_v, promise_register_callback_v, promise_register_listener_v, promise_settle_v, record_run_v, released_v, resume_v, resumes_fold, resumes_inner, sat_add, schedule_create_v, schedule_delete_v, sends, settle_v, settled_work_v, status_v, strs, task_acquire_v, task_continue_v, task_create_v, task_fence_detached_v, task_fence_v, task_fulfill_v, task_halt_v, task_heartbeat_fold, task_heartbeat_v, task_release_v, task_suspend_v, trec_v, with_callbacks, works};
+use super::spec::{Chars, DispatchV, InternalV, PromiseV, ResponseV, ServerV, TaskV, acquired_v, advance_v, all_external, all_in_origin, all_present, any_settled, arm_fire_v, at_v, deadlines_fold, distinct, due_fold, echo_v, ext, external_v, fenced_target, fire_v, fulfilled_v, group_views, held_v, later2_v, lease_expires_v, live_v, next_offer_v, on_v, one_origin, one_v, ostr, outs_v, prec_v, promise_create_v, promise_register_callback_v, promise_register_listener_v, promise_settle_v, record_run_v, released_v, resume_v, resumes_fold, resumes_inner, sat_add, schedule_create_v, schedule_delete_v, sends, settle_v, settled_work_v, status_v, strs, task_acquire_v, task_continue_v, task_create_v, task_fence_detached_v, task_fence_v, task_fulfill_v, task_halt_v, task_heartbeat_fold, task_heartbeat_v, task_release_v, task_suspend_v, trec_v, with_callbacks, works};
 
 verus! {
 

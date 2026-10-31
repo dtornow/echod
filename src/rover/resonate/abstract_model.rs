@@ -1,8 +1,9 @@
-//! Standalone abstract Resonate process.
+//! Complete one-process abstract Resonate model.
 //!
-//! `on_event` is executable and powers Rover trace checking.
-//! `spec_on_event` is its proof model. Their match trees are deliberately
-//! parallel; helper functions follow the same convention.
+//! The executable `on_event` and mathematical `spec_on_event` have parallel
+//! match trees. Requests atomically run the complete Resonate handler. Timeout
+//! events run any enabled internal item: promise deadlines, task leases,
+//! callbacks, retries, listener notification, and schedule fire/advance work.
 
 use vstd::prelude::*;
 
@@ -10,12 +11,16 @@ use crate::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use crate::rover::semantics::StepResultV;
 use crate::rover::{ProcessEvent, RoverModel, StepResult};
-use crate::Time;
+use crate::{Sched, Time};
 
-use super::{
-    Address, Call, Config, Message, Output, Promise, PromiseId, PromiseState, Promises, Record,
-    Request, Response, State,
+use super::exec::{Dispatch, InOut, Out, Resonate, Response, Server, Work};
+use super::protocol::{Call, Message, Output};
+#[cfg(verus_keep_ghost)]
+use super::spec::{
+    ext, group_views, int, lemma_lift_dispatch, lemma_lift_response, DispatchV, InOutV, OutV,
+    ResponseV,
 };
+use super::spec::{InternalV, ServerV};
 
 verus! {
 
@@ -25,853 +30,552 @@ pub enum Pid {
     Service,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct State {
+    pub server: Server,
+    pub pending: Vec<Work>,
+}
+
+pub struct StateV {
+    pub server: ServerV,
+    pub pending: Seq<Sched<InternalV>>,
+}
+
+impl View for State {
+    type V = StateV;
+
+    open spec fn view(&self) -> StateV {
+        StateV {
+            server: self.server@,
+            pending: self.pending@.map_values(|work: Work| work@),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Model;
 
-pub open spec fn spec_record(promise: Promise) -> Record {
-    Record {
-        id: promise.id,
-        state: promise.state,
-        value: promise.value,
-        timeout_at: promise.timeout_at,
+pub open spec fn empty_server() -> ServerV {
+    ServerV {
+        promises: Map::empty(),
+        tasks: Map::empty(),
+        schedules: Map::empty(),
     }
 }
 
-pub fn record(promise: &Promise) -> (result: Record)
+fn initial_server() -> (server: Server)
     ensures
-        result == spec_record(*promise),
+        server@ == empty_server(),
 {
-    Record {
-        id: promise.id,
-        state: promise.state,
-        value: promise.value,
-        timeout_at: promise.timeout_at,
+    let server = Server {
+        promises: super::collections::PMap::empty(),
+        tasks: super::collections::PMap::empty(),
+        schedules: super::collections::PMap::empty(),
+    };
+    proof {
+        broadcast use group_views;
+        assert(server.promises@.map_values(|p: super::exec::Promise| p@) =~= Map::empty());
+        assert(server.tasks@.map_values(|t: super::exec::Task| t@) =~= Map::empty());
+        assert(server.schedules@.map_values(|s: super::exec::Schedule| s@) =~= Map::empty());
     }
+    server
 }
 
-pub open spec fn spec_remove(promises: Promises, id: PromiseId) -> Promises
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => Promises::Nil,
-        Promises::Cons(promise, rest) => {
-            let tail = spec_remove(*rest, id);
-            if promise.id == id {
-                tail
-            } else {
-                Promises::Cons(promise, Box::new(tail))
-            }
-        }
-    }
-}
-
-pub fn remove(promises: &Promises, id: PromiseId) -> (result: Promises)
-    ensures
-        result == spec_remove(*promises, id),
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => Promises::Nil,
-        Promises::Cons(promise, rest) => {
-            let tail = remove(rest, id);
-            if promise.id == id {
-                tail
-            } else {
-                Promises::Cons(*promise, Box::new(tail))
-            }
-        }
-    }
-}
-
-pub open spec fn spec_lookup(promises: Promises, id: PromiseId) -> Option<Promise>
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => None,
-        Promises::Cons(promise, rest) => {
-            if promise.id == id {
-                Some(promise)
-            } else {
-                spec_lookup(*rest, id)
-            }
-        }
-    }
-}
-
-pub fn lookup(promises: &Promises, id: PromiseId) -> (result: Option<Promise>)
-    ensures
-        result == spec_lookup(*promises, id),
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => None,
-        Promises::Cons(promise, rest) => {
-            if promise.id == id {
-                Some(*promise)
-            } else {
-                lookup(rest, id)
-            }
-        }
-    }
-}
-
-pub open spec fn spec_save(state: State, promise: Promise) -> State {
-    State {
-        promises: Promises::Cons(
-            promise,
-            Box::new(spec_remove(state.promises, promise.id)),
-        ),
-    }
-}
-
-pub fn save(state: &State, promise: Promise) -> (result: State)
-    ensures
-        result == spec_save(*state, promise),
-{
-    State {
-        promises: Promises::Cons(
-            promise,
-            Box::new(remove(&state.promises, promise.id)),
-        ),
-    }
-}
-
-pub open spec fn spec_notification(
-    listener: Option<Address>,
-    promise: Promise,
-) -> Seq<Output> {
-    match listener {
-        Some(address) => seq![Output::Notification {
-            address,
-            promise: spec_record(promise),
-        }],
-        None => Seq::empty(),
-    }
-}
-
-pub fn notification(
-    listener: Option<Address>,
-    promise: &Promise,
-) -> (outputs: Vec<Output>)
-    ensures
-        outputs@ == spec_notification(listener, *promise),
-{
-    match listener {
-        Some(address) => vec![Output::Notification {
-            address,
-            promise: record(promise),
-        }],
-        None => Vec::new(),
-    }
-}
-
-pub struct Loaded {
-    pub state: State,
-    pub promise: Option<Promise>,
-    pub outputs: Vec<Output>,
-}
-
-pub struct LoadedV {
-    pub state: State,
-    pub promise: Option<Promise>,
-    pub outputs: Seq<Output>,
-}
-
-pub open spec fn spec_load(state: State, id: PromiseId, now: Time) -> LoadedV {
-    match spec_lookup(state.promises, id) {
-        None => LoadedV {
-            state,
-            promise: None,
-            outputs: Seq::empty(),
-        },
-        Some(promise) => {
-            if promise.state == PromiseState::Pending && promise.timeout_at <= now {
-                let settled = Promise {
-                    state: PromiseState::TimedOut,
-                    value: 0,
-                    listener: None,
-                    ..promise
-                };
-                LoadedV {
-                    state: spec_save(state, settled),
-                    promise: Some(settled),
-                    outputs: spec_notification(promise.listener, settled),
-                }
-            } else {
-                LoadedV {
-                    state,
-                    promise: Some(promise),
-                    outputs: Seq::empty(),
-                }
-            }
-        }
-    }
-}
-
-pub fn load(state: &State, id: PromiseId, now: Time) -> (result: Loaded)
-    ensures
-        result.state == spec_load(*state, id, now).state,
-        result.promise == spec_load(*state, id, now).promise,
-        result.outputs@ == spec_load(*state, id, now).outputs,
-{
-    match lookup(&state.promises, id) {
-        None => Loaded {
-            state: copy(state),
-            promise: None,
-            outputs: Vec::new(),
-        },
-        Some(promise) => {
-            if promise.state == PromiseState::Pending && promise.timeout_at <= now {
-                let settled = Promise {
-                    state: PromiseState::TimedOut,
-                    value: 0,
-                    listener: None,
-                    ..promise
-                };
-                Loaded {
-                    state: save(state, settled),
-                    promise: Some(settled),
-                    outputs: notification(promise.listener, &settled),
-                }
-            } else {
-                Loaded {
-                    state: copy(state),
-                    promise: Some(promise),
-                    outputs: Vec::new(),
-                }
-            }
-        }
-    }
-}
-
-pub struct Handled {
-    pub state: State,
-    pub response: Response,
-    pub outputs: Vec<Output>,
-}
-
-pub struct HandledV {
-    pub state: State,
-    pub response: Response,
-    pub outputs: Seq<Output>,
-}
-
-pub open spec fn spec_ok(promise: Promise) -> Response {
-    Response {
-        status: 200,
-        promise: Some(spec_record(promise)),
-    }
-}
-
-pub fn ok(promise: &Promise) -> (response: Response)
-    ensures
-        response == spec_ok(*promise),
-{
-    Response {
-        status: 200,
-        promise: Some(record(promise)),
-    }
-}
-
-pub open spec fn spec_status(status: u16) -> Response {
-    Response {
-        status,
-        promise: None,
-    }
-}
-
-pub open spec fn spec_sat_add(a: u64, b: u64) -> u64 {
-    if a > u64::MAX - b {
-        u64::MAX
-    } else {
-        (a + b) as u64
-    }
-}
-
-pub fn sat_add(a: u64, b: u64) -> (result: u64)
-    ensures
-        result == spec_sat_add(a, b),
-{
-    if a > u64::MAX - b {
-        u64::MAX
-    } else {
-        a + b
-    }
-}
-
-pub open spec fn spec_handle(
-    config: Config,
-    state: State,
-    request: Request,
-    now: Time,
-) -> HandledV {
-    let loaded = spec_load(state, request.spec_key(), now);
-    match request {
-        Request::Get { .. } => match loaded.promise {
-            Some(promise) => HandledV {
-                state: loaded.state,
-                response: spec_ok(promise),
-                outputs: loaded.outputs,
-            },
-            None => HandledV {
-                state: loaded.state,
-                response: spec_status(404),
-                outputs: loaded.outputs,
-            },
-        },
-        Request::Create { id, timeout_at } => match loaded.promise {
-            Some(promise) => HandledV {
-                state: loaded.state,
-                response: spec_ok(promise),
-                outputs: loaded.outputs,
-            },
-            None => {
-                let timeout = match timeout_at {
-                    Some(timeout) => timeout,
-                    None => spec_sat_add(now, config.default_timeout),
-                };
-                let promise = Promise {
-                    id,
-                    state: if timeout <= now {
-                        PromiseState::TimedOut
-                    } else {
-                        PromiseState::Pending
-                    },
-                    value: 0,
-                    timeout_at: timeout,
-                    listener: None,
-                };
-                HandledV {
-                    state: spec_save(loaded.state, promise),
-                    response: spec_ok(promise),
-                    outputs: loaded.outputs,
-                }
-            }
-        },
-        Request::Settle {
-            state: next_state,
-            value,
-            ..
-        } => {
-            if !next_state.spec_settable() {
-                HandledV {
-                    state: loaded.state,
-                    response: spec_status(400),
-                    outputs: loaded.outputs,
-                }
-            } else {
-                match loaded.promise {
-                    None => HandledV {
-                        state: loaded.state,
-                        response: spec_status(404),
-                        outputs: loaded.outputs,
-                    },
-                    Some(promise) => {
-                        if promise.state == PromiseState::Pending {
-                            let settled = Promise {
-                                state: next_state,
-                                value,
-                                listener: None,
-                                ..promise
-                            };
-                            HandledV {
-                                state: spec_save(loaded.state, settled),
-                                response: spec_ok(settled),
-                                outputs: loaded.outputs
-                                    + spec_notification(promise.listener, settled),
-                            }
-                        } else {
-                            HandledV {
-                                state: loaded.state,
-                                response: spec_ok(promise),
-                                outputs: loaded.outputs,
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Request::Listen { address, .. } => match loaded.promise {
-            None => HandledV {
-                state: loaded.state,
-                response: spec_status(404),
-                outputs: loaded.outputs,
-            },
-            Some(promise) => {
-                let listened = if promise.state == PromiseState::Pending {
-                    Promise {
-                        listener: Some(address),
-                        ..promise
-                    }
-                } else {
-                    promise
-                };
-                HandledV {
-                    state: spec_save(loaded.state, listened),
-                    response: spec_ok(listened),
-                    outputs: loaded.outputs,
-                }
-            }
-        },
-    }
-}
-
-pub fn handle(
-    config: Config,
-    state: &State,
-    request: Request,
-    now: Time,
-) -> (result: Handled)
-    ensures
-        result.state == spec_handle(config, *state, request, now).state,
-        result.response == spec_handle(config, *state, request, now).response,
-        result.outputs@ == spec_handle(config, *state, request, now).outputs,
-{
-    let loaded = load(state, request.key(), now);
-    match request {
-        Request::Get { .. } => match loaded.promise {
-            Some(promise) => Handled {
-                state: loaded.state,
-                response: ok(&promise),
-                outputs: loaded.outputs,
-            },
-            None => Handled {
-                state: loaded.state,
-                response: Response {
-                    status: 404,
-                    promise: None,
-                },
-                outputs: loaded.outputs,
-            },
-        },
-        Request::Create { id, timeout_at } => match loaded.promise {
-            Some(promise) => Handled {
-                state: loaded.state,
-                response: ok(&promise),
-                outputs: loaded.outputs,
-            },
-            None => {
-                let timeout = match timeout_at {
-                    Some(timeout) => timeout,
-                    None => sat_add(now, config.default_timeout),
-                };
-                let promise = Promise {
-                    id,
-                    state: if timeout <= now {
-                        PromiseState::TimedOut
-                    } else {
-                        PromiseState::Pending
-                    },
-                    value: 0,
-                    timeout_at: timeout,
-                    listener: None,
-                };
-                Handled {
-                    state: save(&loaded.state, promise),
-                    response: ok(&promise),
-                    outputs: loaded.outputs,
-                }
-            }
-        },
-        Request::Settle {
-            state: next_state,
-            value,
-            ..
-        } => {
-            if !next_state.settable() {
-                Handled {
-                    state: loaded.state,
-                    response: Response {
-                        status: 400,
-                        promise: None,
-                    },
-                    outputs: loaded.outputs,
-                }
-            } else {
-                match loaded.promise {
-                    None => Handled {
-                        state: loaded.state,
-                        response: Response {
-                            status: 404,
-                            promise: None,
-                        },
-                        outputs: loaded.outputs,
-                    },
-                    Some(promise) => {
-                        if promise.state == PromiseState::Pending {
-                            let settled = Promise {
-                                state: next_state,
-                                value,
-                                listener: None,
-                                ..promise
-                            };
-                            let mut outputs = loaded.outputs;
-                            outputs.append(&mut notification(promise.listener, &settled));
-                            Handled {
-                                state: save(&loaded.state, settled),
-                                response: ok(&settled),
-                                outputs,
-                            }
-                        } else {
-                            Handled {
-                                state: loaded.state,
-                                response: ok(&promise),
-                                outputs: loaded.outputs,
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Request::Listen { address, .. } => match loaded.promise {
-            None => Handled {
-                state: loaded.state,
-                response: Response {
-                    status: 404,
-                    promise: None,
-                },
-                outputs: loaded.outputs,
-            },
-            Some(promise) => {
-                let listened = if promise.state == PromiseState::Pending {
-                    Promise {
-                        listener: Some(address),
-                        ..promise
-                    }
-                } else {
-                    promise
-                };
-                Handled {
-                    state: save(&loaded.state, listened),
-                    response: ok(&listened),
-                    outputs: loaded.outputs,
-                }
-            }
-        },
-    }
-}
-
-pub open spec fn spec_messages(call: Call, handled: HandledV, status: u16) -> Seq<(Pid, Message)> {
-    handled.outputs.map_values(|output: Output| (
-        Pid::Outside,
-        Message::Output(output),
-    )).push((
+pub open spec fn spec_send(
+    call: Call,
+    response: ResponseV,
+    dispatches: Seq<DispatchV>,
+) -> Seq<(Pid, Message)> {
+    seq![(
         Pid::Outside,
         Message::Output(Output::Response {
             client: call.client,
             id: call.id,
-            response: Response {
-                status,
-                promise: if status == handled.response.status {
-                    handled.response.promise
-                } else {
-                    None
-                },
-            },
+            response: super::spec::lift_response(response),
         }),
+    )] + dispatches.map_values(|dispatch: DispatchV| (
+        Pid::Outside,
+        Message::Output(Output::Dispatch(
+            super::spec::lift_dispatch(dispatch),
+        )),
     ))
 }
 
-pub open spec fn spec_request_results(
-    config: Config,
-    state: State,
+pub open spec fn spec_request_outcome(
+    before: StateV,
     call: Call,
-) -> Seq<StepResultV<State, Pid, Message>> {
-    let handled = spec_handle(config, state, call.request, call.requested_at);
-    let served = StepResultV {
-        state: handled.state,
-        send: spec_messages(call, handled, handled.response.status),
-    };
-    if config.unreliable {
-        seq![
-            served,
-            StepResultV {
-                state,
-                send: spec_messages(
-                    call,
-                    HandledV {
-                        state,
-                        response: spec_status(503),
-                        outputs: Seq::empty(),
-                    },
-                    503,
-                ),
-            },
-            StepResultV {
-                state: handled.state,
-                send: spec_messages(call, handled, 503),
-            },
-        ]
-    } else {
-        seq![served]
+    outcome: OutV,
+) -> StepResultV<StateV, Pid, Message> {
+    StepResultV {
+        state: StateV {
+            server: outcome.next,
+            pending: before.pending + outcome.work,
+        },
+        send: spec_send(call, outcome.resp, outcome.send),
     }
 }
 
-pub open spec fn spec_idle(state: State) -> Seq<StepResultV<State, Pid, Message>> {
+fn send(
+    call: &Call,
+    response: Response,
+    mut dispatches: Vec<Dispatch>,
+) -> (messages: Vec<(Pid, Message)>)
+    ensures
+        messages@ == spec_send(*call, response@, dispatches@.map_values(|d: Dispatch| d@)),
+{
+    let ghost all = dispatches@;
+    let ghost response_value = response;
+    let mut messages = Vec::new();
+    let first = (
+        Pid::Outside,
+        Message::Output(Output::Response {
+            client: copy(&call.client),
+            id: call.id,
+            response,
+        }),
+    );
+    messages.push(first);
+    while !dispatches.is_empty()
+        invariant
+            messages@.len() >= 1,
+            messages@[0] == first,
+            messages@.len() + dispatches@.len() == 1 + all.len(),
+            dispatches@ == all.skip(messages@.len() - 1),
+            messages@.skip(1) == all
+                .take(messages@.len() - 1)
+                .map_values(|dispatch: Dispatch| (
+                    Pid::Outside,
+                    Message::Output(Output::Dispatch(dispatch)),
+                )),
+        decreases dispatches.len(),
+    {
+        let ghost i = messages@.len() as int - 1;
+        assert(dispatches@.len() > 0);
+        assert(i + dispatches@.len() == all.len());
+        assert(0 <= i);
+        assert(i < all.len());
+        assert(0 <= i < all.len());
+        let ghost before = messages@;
+        let dispatch = dispatches.remove(0);
+        assert(dispatch == all[i]);
+        assert(all.skip(i).remove(0) =~= all.skip(i + 1));
+        assert(all.take(i + 1) =~= all.take(i).push(all[i]));
+        messages.push((
+            Pid::Outside,
+            Message::Output(Output::Dispatch(dispatch)),
+        ));
+        proof {
+            assert(messages@ == before.push((
+                Pid::Outside,
+                Message::Output(Output::Dispatch(dispatch)),
+            )));
+            assert(messages@.skip(1) == before.skip(1).push((
+                Pid::Outside,
+                Message::Output(Output::Dispatch(dispatch)),
+            )));
+            assert(all.take(i + 1).map_values(|dispatch: Dispatch| (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(dispatch)),
+            )) =~= all.take(i).map_values(|dispatch: Dispatch| (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(dispatch)),
+            )).push((
+                Pid::Outside,
+                Message::Output(Output::Dispatch(all[i])),
+            )));
+            assert(messages@.skip(1) =~= all
+                .take(i + 1)
+                .map_values(|dispatch: Dispatch| (
+                    Pid::Outside,
+                    Message::Output(Output::Dispatch(dispatch)),
+                )));
+        }
+    }
+    proof {
+        lemma_lift_response(response);
+        assert(all.take(all.len() as int) =~= all);
+        assert(messages@.skip(1) =~= all.map_values(|dispatch: Dispatch| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(dispatch)),
+        )));
+        assert forall|i: int| 0 <= i < all.len() implies
+            super::spec::lift_dispatch(all[i]@) == all[i] by {
+            lemma_lift_dispatch(all[i]);
+        }
+        assert(all.map_values(|dispatch: Dispatch| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(dispatch)),
+        )) =~= all.map_values(|dispatch: Dispatch| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(
+                super::spec::lift_dispatch(dispatch@),
+            )),
+        )));
+        assert(first == (
+            Pid::Outside,
+            Message::Output(Output::Response {
+                client: call.client,
+                id: call.id,
+                response: super::spec::lift_response(response_value@),
+            }),
+        ));
+        assert(messages@ =~= seq![messages@[0]] + messages@.skip(1));
+        assert(messages@ =~= spec_send(*call, response@, all.map_values(|d: Dispatch| d@)));
+    }
+    messages
+}
+
+fn append_work(
+    pending: &Vec<Work>,
+    mut work: Vec<Work>,
+) -> (result: Vec<Work>)
+    ensures
+        result@.map_values(|item: Work| item@)
+            == pending@.map_values(|item: Work| item@)
+                + work@.map_values(|item: Work| item@),
+{
+    let mut result = copy(pending);
+    result.append(&mut work);
+    result
+}
+
+fn request_outcome(
+    before: &State,
+    call: &Call,
+    outcome: Out,
+) -> (result: StepResult<Model>)
+    ensures
+        (StepResultV {
+            state: result.state@,
+            send: result.send@,
+        }) == spec_request_outcome(before@, *call, outcome@),
+{
+    let Out {
+        resp,
+        next,
+        work,
+        send: dispatches,
+        marks: _,
+    } = outcome;
+    StepResult {
+        state: State {
+            server: next,
+            pending: append_work(&before.pending, work),
+        },
+        send: send(call, resp, dispatches),
+    }
+}
+
+fn request_results(
+    config: &Resonate,
+    state: &State,
+    call: &Call,
+) -> (results: Vec<StepResult<Model>>)
+    ensures
+        results@.map_values(|result: StepResult<Model>| StepResultV {
+            state: result.state@,
+            send: result.send@,
+        }) == ext(*config, call.request@, state.server@, call.requested_at)
+            .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)),
+{
+    let mut outcomes =
+        config.request(&call.request, &state.server, call.requested_at);
+    let ghost all = outcomes@;
+    let mut results = Vec::new();
+    while !outcomes.is_empty()
+        invariant
+            outcomes@ == all.skip(results@.len() as int),
+            results@.len() + outcomes@.len() == all.len(),
+            results@.map_values(|result: StepResult<Model>| StepResultV {
+                state: result.state@,
+                send: result.send@,
+            }) == all.take(results@.len() as int)
+                .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@)),
+        decreases outcomes.len(),
+    {
+        let ghost i = results@.len() as int;
+        let ghost before = results@;
+        let ghost actual_before = results@.map_values(|result: StepResult<Model>| StepResultV {
+            state: result.state@,
+            send: result.send@,
+        });
+        let outcome = outcomes.remove(0);
+        assert(outcome == all[i]);
+        assert(all.skip(i).remove(0) =~= all.skip(i + 1));
+        assert(all.take(i + 1) =~= all.take(i).push(all[i]));
+        results.push(request_outcome(state, call, outcome));
+        proof {
+            assert(results@ == before.push(results@[i]));
+            assert(results@.map_values(|result: StepResult<Model>| StepResultV {
+                state: result.state@,
+                send: result.send@,
+            }) == actual_before.push(StepResultV {
+                state: results@[i].state@,
+                send: results@[i].send@,
+            }));
+            assert(all.take(i + 1)
+                .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@))
+                =~= all.take(i)
+                    .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@))
+                    .push(spec_request_outcome(state@, *call, all[i]@)));
+            assert(results@.map_values(|result: StepResult<Model>| StepResultV {
+                state: result.state@,
+                send: result.send@,
+            }) =~= all.take(i + 1)
+                .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@)));
+        }
+    }
+    proof {
+        assert(all.take(all.len() as int) =~= all);
+        assert(all.map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@))
+            =~= ext(*config, call.request@, state.server@, call.requested_at)
+                .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)));
+    }
+    results
+}
+
+pub open spec fn spec_ready(work: Sched<InternalV>, now: Time) -> bool {
+    match work {
+        Sched::Later(_) => true,
+        Sched::Timer(at, _) => at <= now,
+    }
+}
+
+pub open spec fn spec_work_req(work: Sched<InternalV>) -> InternalV {
+    match work {
+        Sched::Later(request) | Sched::Timer(_, request) => request,
+    }
+}
+
+fn ready(work: &Work, now: Time) -> (is_ready: bool)
+    ensures
+        is_ready == spec_ready(work@, now),
+{
+    match work {
+        Work::Later(_) => true,
+        Work::Timer(at, _) => *at <= now,
+    }
+}
+
+fn run_internal(
+    config: &Resonate,
+    server: &Server,
+    work: &Work,
+    now: Time,
+) -> (result: InOut)
+    ensures
+        result@ == int(*config, spec_work_req(work@), server@, now),
+{
+    match work {
+        Work::Later(super::exec::Step::Objects(ids))
+        | Work::Timer(_, super::exec::Step::Objects(ids)) => {
+            config.objects(ids, server, now)
+        }
+        Work::Later(super::exec::Step::Fire {
+            schedule,
+            at,
+            promise,
+        })
+        | Work::Timer(
+            _,
+            super::exec::Step::Fire {
+                schedule,
+                at,
+                promise,
+            },
+        ) => config.fire(schedule, *at, promise, server, now),
+        Work::Later(super::exec::Step::Advance {
+            schedule,
+            at,
+            promise,
+        })
+        | Work::Timer(
+            _,
+            super::exec::Step::Advance {
+                schedule,
+                at,
+                promise,
+            },
+        ) => config.advance(schedule, *at, promise, server, now),
+    }
+}
+
+pub open spec fn remove_at<T>(values: Seq<T>, i: int) -> Seq<T> {
+    values.take(i) + values.skip(i + 1)
+}
+
+pub open spec fn spec_internal_result(
+    before: StateV,
+    i: int,
+    outcome: InOutV,
+) -> StepResultV<StateV, Pid, Message> {
+    StepResultV {
+        state: StateV {
+            server: outcome.next,
+            pending: remove_at(before.pending, i) + outcome.work,
+        },
+        send: outcome.send.map_values(|dispatch: DispatchV| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(
+                super::spec::lift_dispatch(dispatch),
+            )),
+        )),
+    }
+}
+
+fn internal_result(
+    before: &State,
+    i: usize,
+    outcome: InOut,
+) -> (result: StepResult<Model>)
+    requires
+        i < before.pending.len(),
+    ensures
+        (StepResultV {
+            state: result.state@,
+            send: result.send@,
+        }) == spec_internal_result(before@, i as int, outcome@),
+{
+    let ghost outv = outcome@;
+    let InOut {
+        next,
+        mut work,
+        send: mut dispatches,
+        marks: _,
+        pending: _,
+    } = outcome;
+    let mut pending = copy(&before.pending);
+    pending.remove(i);
+    pending.append(&mut work);
+    let ghost all = dispatches@;
+    let mut send = Vec::new();
+    while !dispatches.is_empty()
+        invariant
+            send@.len() + dispatches@.len() == all.len(),
+            dispatches@ == all.skip(send@.len() as int),
+            send@ == all.take(send@.len() as int).map_values(|dispatch: Dispatch| (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(dispatch)),
+            )),
+        decreases dispatches.len(),
+    {
+        let ghost j = send@.len() as int;
+        let dispatch = dispatches.remove(0);
+        assert(dispatch == all[j]);
+        assert(all.skip(j).remove(0) =~= all.skip(j + 1));
+        assert(all.take(j + 1) =~= all.take(j).push(all[j]));
+        send.push((
+            Pid::Outside,
+            Message::Output(Output::Dispatch(dispatch)),
+        ));
+    }
+    proof {
+        assert(pending@.map_values(|item: Work| item@)
+            =~= remove_at(before@.pending, i as int) + outv.work);
+        assert(all.take(all.len() as int) =~= all);
+        assert forall|j: int| 0 <= j < outv.send.len() implies
+            super::spec::lift_dispatch(outv.send[j]) == all[j] by {
+            lemma_lift_dispatch(all[j]);
+        }
+        assert(send@ =~= outv.send.map_values(|dispatch: DispatchV| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(
+                super::spec::lift_dispatch(dispatch),
+            )),
+        )));
+    }
+    StepResult {
+        state: State {
+            server: next,
+            pending,
+        },
+        send,
+    }
+}
+
+pub open spec fn spec_internal_results(
+    config: Resonate,
+    state: StateV,
+    now: Time,
+    i: int,
+) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases state.pending.len() - i,
+{
+    if i < 0 || i >= state.pending.len() {
+        Seq::empty()
+    } else {
+        let work = state.pending[i];
+        let outcome = int(config, spec_work_req(work), state.server, now);
+        let here = if spec_ready(work, now) && !outcome.pending {
+            seq![spec_internal_result(state, i, outcome)]
+        } else {
+            Seq::empty()
+        };
+        here + spec_internal_results(config, state, now, i + 1)
+    }
+}
+
+fn internal_results_from(
+    config: &Resonate,
+    state: &State,
+    now: Time,
+    i: usize,
+) -> (results: Vec<StepResult<Model>>)
+    requires
+        i <= state.pending.len(),
+    ensures
+        results@.map_values(|result: StepResult<Model>| StepResultV {
+            state: result.state@,
+            send: result.send@,
+        }) == spec_internal_results(*config, state@, now, i as int),
+    decreases state.pending.len() - i,
+{
+    if i == state.pending.len() {
+        return Vec::new();
+    }
+    let work = &state.pending[i];
+    let outcome = run_internal(config, &state.server, work, now);
+    let is_ready = ready(work, now);
+    let mut tail = internal_results_from(config, state, now, i + 1);
+    if is_ready && !outcome.pending {
+        let result = internal_result(state, i, outcome);
+        let mut results = Vec::new();
+        results.push(result);
+        results.append(&mut tail);
+        results
+    } else {
+        tail
+    }
+}
+
+fn internal_results(
+    config: &Resonate,
+    state: &State,
+    now: Time,
+) -> (results: Vec<StepResult<Model>>)
+    ensures
+        results@.map_values(|result: StepResult<Model>| StepResultV {
+            state: result.state@,
+            send: result.send@,
+        }) == spec_internal_results(*config, state@, now, 0),
+{
+    internal_results_from(config, state, now, 0)
+}
+
+pub open spec fn spec_idle(state: StateV) -> Seq<StepResultV<StateV, Pid, Message>> {
     seq![StepResultV {
         state,
         send: Seq::empty(),
     }]
 }
 
-pub fn messages(
-    call: Call,
-    handled: &Handled,
-    status: u16,
-) -> (messages: Vec<(Pid, Message)>)
-    ensures
-        messages@ == spec_messages(
-            call,
-            HandledV {
-                state: handled.state,
-                response: handled.response,
-                outputs: handled.outputs@,
-            },
-            status,
-        ),
-{
-    let ghost all = handled.outputs@;
-    let mut outputs = copy(&handled.outputs);
-    let mut messages = Vec::new();
-    while !outputs.is_empty()
-        invariant
-            messages@.len() + outputs@.len() == all.len(),
-            outputs@ == all.skip(messages@.len() as int),
-            messages@ == all.take(messages@.len() as int).map_values(|output: Output| (
-                Pid::Outside,
-                Message::Output(output),
-            )),
-        decreases outputs.len(),
-    {
-        let ghost i = messages@.len() as int;
-        assert(0 <= i < all.len());
-        let output = outputs.remove(0);
-        assert(output == all[i]);
-        assert(all.skip(i).remove(0) =~= all.skip(i + 1));
-        assert(all.take(i + 1) =~= all.take(i).push(all[i]));
-        messages.push((Pid::Outside, Message::Output(output)));
-    }
-    proof {
-        assert(all.take(all.len() as int) =~= all);
-        assert(messages@ =~= all.map_values(|output: Output| (
-            Pid::Outside,
-            Message::Output(output),
-        )));
-    }
-    messages.push((
-        Pid::Outside,
-        Message::Output(Output::Response {
-            client: call.client,
-            id: call.id,
-            response: Response {
-                status,
-                promise: if status == handled.response.status {
-                    handled.response.promise
-                } else {
-                    None
-                },
-            },
-        }),
-    ));
-    proof {
-        assert(messages@ =~= spec_messages(
-            call,
-            HandledV {
-                state: handled.state,
-                response: handled.response,
-                outputs: handled.outputs@,
-            },
-            status,
-        ));
-    }
-    messages
-}
-
-pub fn request_results(
-    config: Config,
-    state: &State,
-    call: Call,
-) -> (results: Vec<StepResult<Model>>)
+fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
     ensures
         results@.map_values(|result: StepResult<Model>| StepResultV {
             state: result.state@,
             send: result.send@,
-        }) == spec_request_results(config, *state, call),
-{
-    let handled = handle(config, state, call.request, call.requested_at);
-    let served = StepResult {
-        state: copy(&handled.state),
-        send: messages(call, &handled, handled.response.status),
-    };
-    if config.unreliable {
-        let shed = Handled {
-            state: copy(state),
-            response: Response {
-                status: 503,
-                promise: None,
-            },
-            outputs: Vec::new(),
-        };
-        let lost_send = messages(call, &handled, 503);
-        vec![
-            served,
-            StepResult {
-                state: copy(state),
-                send: messages(call, &shed, 503),
-            },
-            StepResult {
-                state: handled.state,
-                send: lost_send,
-            },
-        ]
-    } else {
-        vec![served]
-    }
-}
-
-pub struct Ticked {
-    pub promises: Promises,
-    pub outputs: Vec<Output>,
-}
-
-pub struct TickedV {
-    pub promises: Promises,
-    pub outputs: Seq<Output>,
-}
-
-pub open spec fn spec_tick(promises: Promises, now: Time) -> TickedV
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => TickedV {
-            promises: Promises::Nil,
-            outputs: Seq::empty(),
-        },
-        Promises::Cons(promise, rest) => {
-            let tail = spec_tick(*rest, now);
-            if promise.state == PromiseState::Pending && promise.timeout_at <= now {
-                let settled = Promise {
-                    state: PromiseState::TimedOut,
-                    value: 0,
-                    listener: None,
-                    ..promise
-                };
-                TickedV {
-                    promises: Promises::Cons(settled, Box::new(tail.promises)),
-                    outputs: spec_notification(promise.listener, settled) + tail.outputs,
-                }
-            } else {
-                TickedV {
-                    promises: Promises::Cons(promise, Box::new(tail.promises)),
-                    outputs: tail.outputs,
-                }
-            }
-        }
-    }
-}
-
-pub fn tick(promises: &Promises, now: Time) -> (result: Ticked)
-    ensures
-        result.promises == spec_tick(*promises, now).promises,
-        result.outputs@ == spec_tick(*promises, now).outputs,
-    decreases promises,
-{
-    match promises {
-        Promises::Nil => Ticked {
-            promises: Promises::Nil,
-            outputs: Vec::new(),
-        },
-        Promises::Cons(promise, rest) => {
-            let mut tail = tick(rest, now);
-            if promise.state == PromiseState::Pending && promise.timeout_at <= now {
-                let settled = Promise {
-                    state: PromiseState::TimedOut,
-                    value: 0,
-                    listener: None,
-                    ..*promise
-                };
-                let mut outputs = notification(promise.listener, &settled);
-                outputs.append(&mut tail.outputs);
-                Ticked {
-                    promises: Promises::Cons(settled, Box::new(tail.promises)),
-                    outputs,
-                }
-            } else {
-                Ticked {
-                    promises: Promises::Cons(*promise, Box::new(tail.promises)),
-                    outputs: tail.outputs,
-                }
-            }
-        }
-    }
-}
-
-pub open spec fn spec_tick_results(
-    state: State,
-    now: Time,
-) -> Seq<StepResultV<State, Pid, Message>> {
-    let ticked = spec_tick(state.promises, now);
-    seq![StepResultV {
-        state: State {
-            promises: ticked.promises,
-        },
-        send: ticked.outputs.map_values(|output: Output| (
-            Pid::Outside,
-            Message::Output(output),
-        )),
-    }]
-}
-
-pub fn tick_results(state: &State, now: Time) -> (results: Vec<StepResult<Model>>)
-    ensures
-        results@.map_values(|result: StepResult<Model>| StepResultV {
-            state: result.state@,
-            send: result.send@,
-        }) == spec_tick_results(*state, now),
-{
-    let ticked = tick(&state.promises, now);
-    let ghost all = ticked.outputs@;
-    let mut outputs = ticked.outputs;
-    let mut send = Vec::new();
-    while !outputs.is_empty()
-        invariant
-            send@.len() + outputs@.len() == all.len(),
-            outputs@ == all.skip(send@.len() as int),
-            send@ == all.take(send@.len() as int).map_values(|output: Output| (
-                Pid::Outside,
-                Message::Output(output),
-            )),
-        decreases outputs.len(),
-    {
-        let ghost i = send@.len() as int;
-        assert(0 <= i < all.len());
-        let output = outputs.remove(0);
-        assert(output == all[i]);
-        assert(all.skip(i).remove(0) =~= all.skip(i + 1));
-        assert(all.take(i + 1) =~= all.take(i).push(all[i]));
-        send.push((Pid::Outside, Message::Output(output)));
-    }
-    proof {
-        assert(all.take(all.len() as int) =~= all);
-        assert(send@ =~= all.map_values(|output: Output| (
-            Pid::Outside,
-            Message::Output(output),
-        )));
-    }
-    vec![StepResult {
-        state: State {
-            promises: ticked.promises,
-        },
-        send,
-    }]
-}
-
-pub fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
-    ensures
-        results@.map_values(|result: StepResult<Model>| StepResultV {
-            state: result.state@,
-            send: result.send@,
-        }) == spec_idle(*state),
+        }) == spec_idle(state@),
 {
     vec![StepResult {
         state: copy(state),
@@ -880,9 +584,9 @@ pub fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
 }
 
 impl RoverModel for Model {
-    type Config = Config;
+    type Config = Resonate;
     type Pid = Pid;
-    type StateV = State;
+    type StateV = StateV;
     type State = State;
     type Message = Message;
 
@@ -890,16 +594,37 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
-    fn initial(&self, _config: &Config) -> (states: Vec<(Pid, State)>) {
-        vec![(
-            Pid::Service,
-            State {
-                promises: Promises::Nil,
-            },
-        )]
+    fn initial(&self, _config: &Resonate) -> (states: Vec<(Pid, State)>) {
+        let server = initial_server();
+        let pending: Vec<Work> = Vec::new();
+        let state = State {
+            server,
+            pending,
+        };
+        proof {
+            assert(server@ == empty_server());
+            assert(pending@.map_values(|work: Work| work@) =~= Seq::empty());
+            assert(state@ == StateV {
+                server: empty_server(),
+                pending: Seq::empty(),
+            });
+        }
+        let mut states = Vec::new();
+        states.push((Pid::Service, state));
+        proof {
+            assert(states@.map_values(|entry: (Pid, State)| (entry.0, entry.1@))
+                =~= seq![(
+                    Pid::Service,
+                    StateV {
+                        server: empty_server(),
+                        pending: Seq::empty(),
+                    },
+                )]);
+        }
+        states
     }
 
-    fn injectable(&self, _config: &Config, message: &Message) -> (injectable: bool) {
+    fn injectable(&self, _config: &Resonate, message: &Message) -> (injectable: bool) {
         match message {
             Message::Request(_) => true,
             Message::Output(_) => false,
@@ -908,10 +633,10 @@ impl RoverModel for Model {
 
     fn on_event(
         &self,
-        config: &Config,
+        config: &Resonate,
         pid: &Pid,
         state: &State,
-        _now: Time,
+        now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> (results: Vec<StepResult<Self>>) {
         match (pid, event) {
@@ -921,8 +646,15 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => request_results(*config, state, *call),
-            (Pid::Service, ProcessEvent::Timeout) => tick_results(state, _now),
+            ) => request_results(config, state, call),
+            (Pid::Service, ProcessEvent::Timeout) => {
+                let results = internal_results(config, state, now);
+                if results.is_empty() {
+                    idle(state)
+                } else {
+                    results
+                }
+            }
             _ => idle(state),
         }
     }
@@ -931,13 +663,17 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
-    open spec fn spec_initial(&self, _config: Config) -> Seq<(Pid, State)> {
-        seq![(Pid::Service, State {
-            promises: Promises::Nil,
-        })]
+    open spec fn spec_initial(&self, _config: Resonate) -> Seq<(Pid, StateV)> {
+        seq![(
+            Pid::Service,
+            StateV {
+                server: empty_server(),
+                pending: Seq::empty(),
+            },
+        )]
     }
 
-    open spec fn spec_injectable(&self, _config: Config, message: Message) -> bool {
+    open spec fn spec_injectable(&self, _config: Resonate, message: Message) -> bool {
         match message {
             Message::Request(_) => true,
             Message::Output(_) => false,
@@ -946,12 +682,12 @@ impl RoverModel for Model {
 
     open spec fn spec_on_event(
         &self,
-        config: Config,
+        config: Resonate,
         pid: Pid,
-        state: State,
-        _now: Time,
+        state: StateV,
+        now: Time,
         event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<State, Pid, Message>> {
+    ) -> Seq<StepResultV<StateV, Pid, Message>> {
         match (pid, event) {
             (
                 Pid::Service,
@@ -959,8 +695,16 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => spec_request_results(config, state, call),
-            (Pid::Service, ProcessEvent::Timeout) => spec_tick_results(state, _now),
+            ) => ext(config, call.request@, state.server, call.requested_at)
+                .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome)),
+            (Pid::Service, ProcessEvent::Timeout) => {
+                let results = spec_internal_results(config, state, now, 0);
+                if results.len() == 0 {
+                    spec_idle(state)
+                } else {
+                    results
+                }
+            }
             _ => spec_idle(state),
         }
     }

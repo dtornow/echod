@@ -669,3 +669,9 @@ impl<M: RoverModel> Clone for World<'_, M> {
         }
     }
 }
+
+impl<M: RoverModel> World<'_, M> {
+    pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
+        self.process == other.process && self.network == other.network && self.now == other.now
+    }
+}

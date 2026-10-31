@@ -34,10 +34,11 @@ The model's interface (`Model`, with `spec` twins of `external` and
 - `tests/rover.rs` is an executable counter protocol demonstrating delayed,
   reordered, and duplicate message delivery as well as rejected traces.
 - `src/rover/resonate/` mirrors Lean's `Resonate` folder:
-  `mod.rs` owns a standalone promise protocol and
-  `abstract_model.rs` owns the one-process reference model. It does not depend
-  on the older Accordant Resonate implementation. Its executable `on_event`
-  and mathematical `spec_on_event` are deliberately parallel.
+  it owns the complete standalone protocol (promises, callbacks, listeners,
+  tasks, leases, schedules, dispatches and internal work), and
+  `abstract_model.rs` owns the one-process reference model. Its executable
+  `on_event` and mathematical `spec_on_event` are deliberately parallel.
+  `examples/resonate` is now only a compatibility re-export for existing tests.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants
@@ -51,7 +52,5 @@ github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `
 
 ```
 cargo verus verify -p accordant
-# verification results:: 97 verified, 0 errors
-cargo verus verify -p resonate
-# verification results:: 132 verified, 0 errors
+# verification results:: 216 verified, 0 errors
 ```
