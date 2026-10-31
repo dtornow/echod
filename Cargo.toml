@@ -15,7 +15,7 @@ vstd = "=0.0.0-2026-10-11-0230"
 verify = true
 
 [workspace]
-members = [".", "examples/resonate", "examples/tigerbeetle"]
+members = [".", "examples/tigerbeetle"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

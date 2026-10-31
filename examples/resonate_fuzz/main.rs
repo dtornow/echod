@@ -4,7 +4,7 @@
 //! each accepted trace.
 //!
 //! ```text
-//! cargo run --release -p resonate --example fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever]
+//! cargo run --release --example resonate_fuzz -- [runs] [--requests N] [--bug stale-fence|lease-forever]
 //! CROSS=1 ...   # also check every trace with the partitioned and depth-first checkers
 //! ```
 
@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use accordant::{drive, Choices, Drive, Tried};
 use driver::{check, show, Bug, Outcome, Server};
-use resonate::*;
+use accordant::rover::resonate::{self, *};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

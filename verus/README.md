@@ -38,7 +38,7 @@ The model's interface (`Model`, with `spec` twins of `external` and
   tasks, leases, schedules, dispatches and internal work), and
   `abstract_model.rs` owns the one-process reference model. Its executable
   `on_event` and mathematical `spec_on_event` are deliberately parallel.
-  `examples/resonate` is now only a compatibility re-export for existing tests.
+  Its tests, benchmark and fuzz driver live in the root package alongside it.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants

@@ -8,7 +8,7 @@ mod certified;
 
 use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
 use certified::Certified;
-use resonate::*;
+use accordant::rover::resonate::*;
 
 /// Checked twice: with partitions, and in one factor with certificates, which
 /// must back everything it accepts.

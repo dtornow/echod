@@ -9,7 +9,7 @@
 //! * a clock move broadcast to partitions that no factor held yet.
 
 use accordant::{certify, drive, Checker, Choices, Config, Drive, Event};
-use resonate::*;
+use accordant::rover::resonate::*;
 
 /// A run of the spec, driven at random and recorded.
 fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> {

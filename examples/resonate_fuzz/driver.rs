@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use accordant::{marks, Action, Checker, Config, Event, Explore, ExternalOutcome, InternalOutcome, Keyed, Model, Time, Verdict, Violation};
-use resonate::*;
+use accordant::rover::resonate::{self, *};
 
 /// The spec with a bug planted, or not.
 pub struct Server {
