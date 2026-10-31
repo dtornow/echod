@@ -76,7 +76,9 @@ fn hidden_actions<M: RoverModel>(world: &World<'_, M>, at: Time) -> Vec<ActionOf
         );
         let state = &world.process[slot].1;
         for event in events {
-            let outcomes = world.model.step(world.config, &process, state, at, &event);
+            let outcomes = world
+                .model
+                .on_event(world.config, &process, state, at, &event);
             actions.extend((0..outcomes.len()).map(|outcome| Action::Process {
                 slot,
                 process: process.clone(),

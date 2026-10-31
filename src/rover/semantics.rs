@@ -137,7 +137,7 @@ pub open spec fn step<M: RoverModel>(
                 && is_process(m, world, process)
                 && event_valid(world, process, event)
                 && exists|i: int, j: int|
-                    #![trigger m.spec_step(
+                    #![trigger m.spec_on_event(
                         config,
                         process,
                         world.process[i].1,
@@ -148,7 +148,7 @@ pub open spec fn step<M: RoverModel>(
                     &&& 0 <= i < world.process.len()
                     &&& world.process[i].0 == process
                     &&& {
-                    let outcomes = m.spec_step(config, process, world.process[i].1, at, event);
+                    let outcomes = m.spec_on_event(config, process, world.process[i].1, at, event);
                     &&& 0 <= j < outcomes.len()
                     &&& outcomes[j].send == send
                     &&& next == land(world, i, process, at, outcomes[j])

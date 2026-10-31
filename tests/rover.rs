@@ -37,7 +37,7 @@ impl RoverModel for Counter {
         matches!(message, Message::Add(_))
     }
 
-    fn step(
+    fn on_event(
         &self,
         _: &(),
         pid: &Pid,

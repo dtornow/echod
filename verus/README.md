@@ -21,8 +21,8 @@ The model's interface (`Model`, with `spec` twins of `external` and
 `src/rover/` is the Rust + Verus counterpart of the Lean Rover world:
 
 - `RoverModel` is the pluggable executable protocol interface. `initial`,
-  `injectable`, and `step` have `spec_*` twins, so a model can verify that its
-  running transition code computes the relation used by proofs.
+  `injectable`, and `on_event` have `spec_*` twins, so a model must verify that
+  its running transition code computes the relation used by proofs.
 - `semantics.rs` defines the append-only message network, process steps,
   explicit outside observations, legal executions, boundary projection, and
   `valid_trace`.
@@ -33,6 +33,10 @@ The model's interface (`Model`, with `spec` twins of `external` and
   outside the trusted argument.
 - `tests/rover.rs` is an executable counter protocol demonstrating delayed,
   reordered, and duplicate message delivery as well as rejected traces.
+- `examples/resonate/src/rover/` mirrors Lean's `Resonate` folder:
+  `mod.rs` holds the shared boundary protocol and `abstract_model.rs` holds the
+  one-process abstract reference model. Its executable `on_event` and
+  mathematical `spec_on_event` are deliberately parallel.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants
@@ -46,5 +50,7 @@ github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `
 
 ```
 cargo verus verify -p accordant
-# verification results:: 30 verified, 0 errors
+# verification results:: 59 verified, 0 errors
+cargo verus verify -p resonate
+# verification results:: 149 verified, 0 errors
 ```

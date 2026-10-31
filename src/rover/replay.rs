@@ -52,7 +52,7 @@ pub(crate) open spec fn action_label<M: RoverModel>(
         Action::Inject { recipient, at, message } =>
             Label::Input { recipient, at, message },
         Action::Process { slot, process, at, event, outcome } => {
-            let result = m.spec_step(
+            let result = m.spec_on_event(
                 config,
                 process,
                 world.process[slot as int].1,
@@ -369,7 +369,7 @@ impl<'a, M: RoverModel> World<'a, M> {
                     }
                     assert(semantics::event_valid(self@, *process, *event));
                 }
-                let ghost spec_outcomes = self.model.spec_step(
+                let ghost spec_outcomes = self.model.spec_on_event(
                     *self.config,
                     *process,
                     state,
@@ -377,7 +377,7 @@ impl<'a, M: RoverModel> World<'a, M> {
                     *event,
                 );
                 let mut outcomes =
-                    self.model.step(self.config, process, &state, *at, event);
+                    self.model.on_event(self.config, process, &state, *at, event);
                 if *outcome >= outcomes.len() {
                     return Err(());
                 }

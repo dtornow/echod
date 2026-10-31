@@ -97,7 +97,7 @@ pub trait RoverModel {
     /// Every possible result of one local process event. Unlike Lean's
     /// `Outcomes`, an empty result is admitted here and means the event is
     /// disabled; models that need input-enabledness prove non-emptiness.
-    fn step(
+    fn on_event(
         &self,
         config: &Self::Config,
         pid: &Self::Pid,
@@ -106,13 +106,13 @@ pub trait RoverModel {
         event: &ProcessEvent<Self::Pid, Self::Message>,
     ) -> (r: Vec<StepResult<Self>>)
         ensures
-            r@.len() == self.spec_step(*config, *pid, *state, now, *event).len(),
+            r@.len() == self.spec_on_event(*config, *pid, *state, now, *event).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let result = #[trigger] r@[i];
                 semantics::StepResultV {
                     state: result.state,
                     send: result.send@,
-                } == self.spec_step(*config, *pid, *state, now, *event)[i]
+                } == self.spec_on_event(*config, *pid, *state, now, *event)[i]
             };
 
     open spec fn spec_outside(&self) -> Self::Pid {
@@ -127,7 +127,7 @@ pub trait RoverModel {
         arbitrary()
     }
 
-    open spec fn spec_step(
+    open spec fn spec_on_event(
         &self,
         config: Self::Config,
         pid: Self::Pid,
