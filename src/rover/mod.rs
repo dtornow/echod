@@ -15,6 +15,7 @@ use vstd::prelude::*;
 use crate::{Data, Time};
 
 mod checker;
+pub mod refinement;
 mod replay;
 pub mod resonate;
 pub mod semantics;

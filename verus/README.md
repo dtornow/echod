@@ -31,6 +31,11 @@ The model's interface (`Model`, with `spec` twins of `external` and
 - `replay.rs` independently executes a certificate. Verus proves
   `replay(...).is_ok() ==> valid_trace(model, config, trace)`, so search is
   outside the trusted argument.
+- `refinement.rs` proves the generic Rover refinement theorem: related initial
+  worlds plus a model-specific forward simulation imply inclusion of every
+  concrete boundary trace in the abstract model. Concrete and abstract models
+  may have different PID/message types through projections to one boundary
+  type.
 - `tests/rover.rs` is an executable counter protocol demonstrating delayed,
   reordered, and duplicate message delivery as well as rejected traces.
 - `src/rover/resonate/` mirrors Lean's `Resonate` folder:
@@ -63,5 +68,5 @@ github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `
 
 ```
 cargo verus verify -p accordant
-# verification results:: 223 verified, 0 errors
+# verification results:: 229 verified, 0 errors
 ```
