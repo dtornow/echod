@@ -43,8 +43,11 @@ The model's interface (`Model`, with `spec` twins of `external` and
   state and transition predicates are stated over `StateV`, initialization and
   representation-level properties are proved, and the complete
   `on_event_preserves_catalogue` formula is the explicit preservation
-  obligation. Outbox persistence is translated to Rover's generic proved
-  `step_preserves_network` theorem.
+  obligation. Of upstream's 93 entries, 82 map to Rover state/transitions and
+  11 mention its different outbox model. Outbox persistence is translated to
+  Rover's generic proved `step_preserves_network` theorem; send-time,
+  provenance, response, liveness and algebraic claims are classified
+  separately where a state-pair predicate would lose information.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants

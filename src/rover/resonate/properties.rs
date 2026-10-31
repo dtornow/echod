@@ -1,8 +1,25 @@
 //! Resonate conformance properties over Rover's abstract state.
 //!
-//! Properties are split by the information they need: one state, one
-//! transition, or the complete `on_event` step (cause and emitted messages).
-//! Names follow `resonatehq/resonate/spec/spec/02-abstract/properties.lean`.
+//! Upstream's catalogue has 93 entries. 82 are directly expressible against
+//! Rover's server state (38 state and 44 transition properties). The remaining
+//! 11 mention the coalesced model's outbox:
+//!
+//! - new-message claims translate to the selected `StepResultV.send`;
+//! - persistence translates to Rover's generic proved append-only-network
+//!   theorem, `semantics::step_preserves_network`;
+//! - outbox-key uniqueness is structural there but deliberately false of
+//!   Rover's duplicate-delivery network;
+//! - execute-address/target-tag equality is not recoverable because Rover
+//!   compresses the target tag and its `Execute` dispatch carries no address.
+//!
+//! Two additional internal-provenance checks need the timeout event plus the
+//! selected pending work; response properties need the request and emitted
+//! response. True liveness needs a future infinite-execution/fairness layer,
+//! while algebraic properties are equations between `on_event` compositions.
+//!
+//! The predicates below retain upstream names wherever their meaning survives.
+//! `on_event_preserves_catalogue` is the explicit, unassumed preservation
+//! obligation while handler proofs are ported.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -304,6 +321,10 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
         well_formed_promise_timedout_is_server_owned_at(
             state.server.promises[id],
         )
+    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+        well_formed_promise_callbacks_unique_at(state.server.promises[id])
+    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+        well_formed_promise_listeners_unique_at(state.server.promises[id])
     &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
         well_formed_promise_obligations_require_external_at(
             state.server.promises[id],
