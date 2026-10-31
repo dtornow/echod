@@ -240,6 +240,121 @@ pub open spec fn valid_trace<M: RoverModel>(
             && trace::<M>(execution) == events
 }
 
+/// Rover's translation of the catalogue's monotone-outbox property: once a
+/// message is emitted into the world network, no later step removes it.
+pub open spec fn network_extends<M: RoverModel>(
+    before: World<M>,
+    after: World<M>,
+) -> bool {
+    exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
+        after.network == before.network + suffix
+}
+
+pub proof fn step_preserves_network<M: RoverModel>(
+    model: M,
+    config: M::Config,
+    before: World<M>,
+    label: Lab<M>,
+    after: World<M>,
+)
+    requires
+        step(model, config, before, label, after),
+    ensures
+        network_extends::<M>(before, after),
+{
+    reveal(step);
+    reveal(network_extends);
+    match label {
+        Label::Input {
+            recipient,
+            at: _,
+            message,
+        } => {
+            let suffix = seq![Envelope {
+                sender: model.spec_outside(),
+                recipient,
+                message,
+            }];
+            assert(after.network == before.network + suffix);
+            assert(exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
+                after.network == before.network + suffix);
+        }
+        Label::Process {
+            process,
+            at,
+            event,
+            send: _,
+        } => {
+            let i = choose|i: int|
+                #![trigger before.process[i]]
+                exists|j: int|
+                #![trigger model.spec_on_event(
+                    config,
+                    process,
+                    before.process[i].1,
+                    at,
+                    event,
+                )[j]]
+            {
+                &&& 0 <= i < before.process.len()
+                &&& before.process[i].0 == process
+                &&& {
+                    let outcomes = model.spec_on_event(
+                        config,
+                        process,
+                        before.process[i].1,
+                        at,
+                        event,
+                    );
+                    &&& 0 <= j < outcomes.len()
+                    &&& after == land(before, i, process, at, outcomes[j])
+                }
+            };
+            let j = choose|j: int|
+                #![trigger model.spec_on_event(
+                    config,
+                    process,
+                    before.process[i].1,
+                    at,
+                    event,
+                )[j]]
+            {
+                &&& 0 <= i < before.process.len()
+                &&& before.process[i].0 == process
+                &&& {
+                    let outcomes = model.spec_on_event(
+                        config,
+                        process,
+                        before.process[i].1,
+                        at,
+                        event,
+                    );
+                    &&& 0 <= j < outcomes.len()
+                    &&& after == land(before, i, process, at, outcomes[j])
+                }
+            };
+            let outcome = model.spec_on_event(
+                config,
+                process,
+                before.process[i].1,
+                at,
+                event,
+            )[j];
+            let suffix = envelopes(process, outcome.send);
+            assert(after.network == before.network + suffix);
+            assert(exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
+                after.network == before.network + suffix);
+        }
+        Label::Outside { .. } => {
+            assert(after.network == before.network);
+            let suffix = Seq::<Envelope<M::Pid, M::Message>>::empty();
+            assert(after.network == before.network + suffix);
+            assert(exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
+                after.network == before.network + suffix);
+        }
+    }
+}
+
 /// Every model admits the empty trace.
 pub proof fn empty_trace_valid<M: RoverModel>(m: M, config: M::Config)
     ensures

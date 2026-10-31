@@ -39,6 +39,12 @@ The model's interface (`Model`, with `spec` twins of `external` and
   `abstract_model.rs` owns the one-process reference model. Its executable
   `on_event` and mathematical `spec_on_event` are deliberately parallel.
   Its tests, benchmark and fuzz driver live in the root package alongside it.
+- `src/rover/resonate/properties.rs` begins the named conformance catalogue:
+  state and transition predicates are stated over `StateV`, initialization and
+  representation-level properties are proved, and the complete
+  `on_event_preserves_catalogue` formula is the explicit preservation
+  obligation. Outbox persistence is translated to Rover's generic proved
+  `step_preserves_network` theorem.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants
@@ -52,5 +58,5 @@ github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `
 
 ```
 cargo verus verify -p accordant
-# verification results:: 216 verified, 0 errors
+# verification results:: 220 verified, 0 errors
 ```

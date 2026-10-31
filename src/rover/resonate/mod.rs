@@ -20,6 +20,7 @@ pub mod exec;
 mod explore;
 mod model;
 pub mod protocol;
+pub mod properties;
 pub mod spec;
 
 pub use collections::{PMap, PSet};
