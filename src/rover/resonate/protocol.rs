@@ -2,6 +2,8 @@
 
 use vstd::prelude::*;
 
+use crate::Time;
+
 use super::{Dispatch, Request, Response};
 
 verus! {
@@ -30,6 +32,20 @@ pub enum Output {
 pub enum Message {
     Request(Call),
     Output(Output),
+}
+
+/// Clean PID-0 traffic. Internal process ids and messages are absent.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum BoundaryEvent {
+    Input {
+        at: Time,
+        call: Call,
+    },
+    Output {
+        at: Time,
+        output: Output,
+    },
 }
 
 } // verus!

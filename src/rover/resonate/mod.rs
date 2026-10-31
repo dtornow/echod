@@ -27,4 +27,4 @@ pub use collections::{PMap, PSet};
 pub use exec::*;
 pub use explore::{IDS, MARKS, PLAIN, SCHEDULES};
 pub use model::{on, Key};
-pub use protocol::{Call, Message, Output};
+pub use protocol::{BoundaryEvent, Call, Message, Output};

@@ -30,58 +30,57 @@ pub open spec fn end<M: RoverModel>(
 }
 
 /// Project an execution through a model-specific boundary observer.
-pub open spec fn project_with<M: RoverModel, B>(
-    observe: spec_fn(Lab<M>) -> Seq<B>,
+pub open spec fn project<M: RoverModel>(
+    model: M,
     execution: Execution<M>,
-) -> Seq<B>
+) -> Seq<M::Boundary>
     decreases execution.len(),
 {
     if execution.len() == 0 {
         Seq::empty()
     } else {
-        project_with::<M, B>(observe, execution.drop_last())
-            + observe(execution.last().0)
+        project::<M>(model, execution.drop_last())
+            + model.spec_observe(execution.last().0)
     }
 }
 
 /// A boundary trace admitted by one Rover model.
-pub open spec fn valid_boundary_trace<M: RoverModel, B>(
+pub open spec fn valid_boundary_trace<M: RoverModel>(
     model: M,
     config: M::Config,
-    observe: spec_fn(Lab<M>) -> Seq<B>,
-    events: Seq<B>,
+    events: Seq<M::Boundary>,
 ) -> bool {
     exists|execution: Execution<M>|
         #![trigger legal(model, config, initial(model, config), execution)]
         legal(model, config, initial(model, config), execution)
-            && project_with::<M, B>(observe, execution) == events
+            && project::<M>(model, execution) == events
 }
 
 /// Abstract steps matching one concrete label's visible boundary contribution.
-pub open spec fn matches<A: RoverModel, B>(
+pub open spec fn matches<A: RoverModel>(
     abstract_model: A,
     abstract_config: A::Config,
-    abstract_observe: spec_fn(Lab<A>) -> Seq<B>,
     start: World<A>,
-    visible: Seq<B>,
+    visible: Seq<A::Boundary>,
     finish: World<A>,
 ) -> bool {
     exists|execution: Execution<A>|
         #![trigger legal(abstract_model, abstract_config, start, execution)]
         legal(abstract_model, abstract_config, start, execution)
-            && project_with::<A, B>(abstract_observe, execution) == visible
+            && project::<A>(abstract_model, execution) == visible
             && end::<A>(start, execution) == finish
 }
 
 /// Every concrete step from related worlds has a matching finite abstract run
 /// and leaves the worlds related again.
-pub open spec fn simulation<C: RoverModel, A: RoverModel, B>(
+pub open spec fn simulation<
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
+>(
     concrete_model: C,
     concrete_config: C::Config,
-    concrete_observe: spec_fn(Lab<C>) -> Seq<B>,
     abstract_model: A,
     abstract_config: A::Config,
-    abstract_observe: spec_fn(Lab<A>) -> Seq<B>,
     relation: spec_fn(World<C>, World<A>) -> bool,
 ) -> bool {
     forall|
@@ -112,40 +111,37 @@ pub open spec fn simulation<C: RoverModel, A: RoverModel, B>(
             #[trigger] matches(
                 abstract_model,
                 abstract_config,
-                abstract_observe,
                 abstract_before,
-                concrete_observe(concrete_label),
+                concrete_model.spec_observe(concrete_label),
                 abstract_after,
             )
             && relation(concrete_after, abstract_after)
 }
 
 /// Trace inclusion at the shared boundary.
-pub open spec fn refines<C: RoverModel, A: RoverModel, B>(
+pub open spec fn refines<
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
+>(
     concrete_model: C,
     concrete_config: C::Config,
-    concrete_observe: spec_fn(Lab<C>) -> Seq<B>,
     abstract_model: A,
     abstract_config: A::Config,
-    abstract_observe: spec_fn(Lab<A>) -> Seq<B>,
 ) -> bool {
-    forall|events: Seq<B>|
+    forall|events: Seq<C::Boundary>|
         #![trigger valid_boundary_trace(
             concrete_model,
             concrete_config,
-            concrete_observe,
             events,
         )]
         valid_boundary_trace(
             concrete_model,
             concrete_config,
-            concrete_observe,
             events,
         )
         ==> valid_boundary_trace(
             abstract_model,
             abstract_config,
-            abstract_observe,
             events,
         )
 }
@@ -154,26 +150,26 @@ pub open spec fn refines<C: RoverModel, A: RoverModel, B>(
 // Execution algebra
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_project_add<M: RoverModel, B>(
-    observe: spec_fn(Lab<M>) -> Seq<B>,
+pub proof fn lemma_project_add<M: RoverModel>(
+    model: M,
     first: Execution<M>,
     second: Execution<M>,
 )
     ensures
-        project_with::<M, B>(observe, first + second)
-            == project_with::<M, B>(observe, first)
-                + project_with::<M, B>(observe, second),
+        project::<M>(model, first + second)
+            == project::<M>(model, first)
+                + project::<M>(model, second),
     decreases second.len(),
 {
     if second.len() == 0 {
         assert(first + second =~= first);
     } else {
-        lemma_project_add::<M, B>(observe, first, second.drop_last());
+        lemma_project_add::<M>(model, first, second.drop_last());
         assert((first + second).drop_last() =~= first + second.drop_last());
         assert((first + second).last() == second.last());
-        assert(project_with::<M, B>(observe, first + second)
-            =~= project_with::<M, B>(observe, first)
-                + project_with::<M, B>(observe, second));
+        assert(project::<M>(model, first + second)
+            =~= project::<M>(model, first)
+                + project::<M>(model, second));
     }
 }
 
@@ -232,13 +228,14 @@ pub proof fn lemma_legal_add<M: RoverModel>(
 // Lift one-step simulation to arbitrary executions
 // ---------------------------------------------------------------------------
 
-proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
+proof fn lemma_simulate_prefix<
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
+>(
     concrete_model: C,
     concrete_config: C::Config,
-    concrete_observe: spec_fn(Lab<C>) -> Seq<B>,
     abstract_model: A,
     abstract_config: A::Config,
-    abstract_observe: spec_fn(Lab<A>) -> Seq<B>,
     relation: spec_fn(World<C>, World<A>) -> bool,
     concrete_execution: Execution<C>,
     k: int,
@@ -251,10 +248,8 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
         simulation(
             concrete_model,
             concrete_config,
-            concrete_observe,
             abstract_model,
             abstract_config,
-            abstract_observe,
             relation,
         ),
         legal(
@@ -278,13 +273,11 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
                 initial(abstract_model, abstract_config),
                 abstract_execution,
             )
-            && project_with::<A, B>(
-                abstract_observe,
-                abstract_execution,
-            ) == project_with::<C, B>(
-                concrete_observe,
-                concrete_execution.take(k),
-            )
+            && project::<A>(abstract_model, abstract_execution)
+                == project::<C>(
+                    concrete_model,
+                    concrete_execution.take(k),
+                )
             && relation(
                 before::<C>(
                     initial(concrete_model, concrete_config),
@@ -304,12 +297,12 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
         let abstract_execution = Execution::<A>::empty();
         assert(concrete_execution.take(0)
             =~= Execution::<C>::empty());
-        assert(project_with::<A, B>(abstract_observe, abstract_execution)
-            =~= Seq::<B>::empty());
-        assert(project_with::<C, B>(
-            concrete_observe,
+        assert(project::<A>(abstract_model, abstract_execution)
+            =~= Seq::<C::Boundary>::empty());
+        assert(project::<C>(
+            concrete_model,
             concrete_execution.take(0),
-        ) =~= Seq::<B>::empty());
+        ) =~= Seq::<C::Boundary>::empty());
         assert(before::<C>(
             concrete_initial,
             concrete_execution,
@@ -331,9 +324,9 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
                 abstract_initial,
                 execution,
             )
-            && project_with::<A, B>(abstract_observe, execution)
-                == project_with::<C, B>(
-                    concrete_observe,
+            && project::<A>(abstract_model, execution)
+                == project::<C>(
+                    concrete_model,
                     concrete_execution.take(0),
                 )
             && relation(
@@ -348,10 +341,8 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
         lemma_simulate_prefix(
             concrete_model,
             concrete_config,
-            concrete_observe,
             abstract_model,
             abstract_config,
-            abstract_observe,
             relation,
             concrete_execution,
             k - 1,
@@ -369,11 +360,11 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
                 abstract_initial,
                 execution,
             )
-            && project_with::<A, B>(
-                abstract_observe,
+            && project::<A>(
+                abstract_model,
                 execution,
-            ) == project_with::<C, B>(
-                concrete_observe,
+            ) == project::<C>(
+                concrete_model,
                 concrete_execution.take(k - 1),
             )
             && relation(
@@ -400,9 +391,8 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
             #[trigger] matches(
                 abstract_model,
                 abstract_config,
-                abstract_observe,
                 abstract_before,
-                concrete_observe(concrete_label),
+                concrete_model.spec_observe(concrete_label),
                 world,
             )
             && relation(concrete_after, world);
@@ -419,10 +409,10 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
                 abstract_before,
                 execution,
             )
-            && project_with::<A, B>(
-                abstract_observe,
+            && project::<A>(
+                abstract_model,
                 execution,
-            ) == concrete_observe(concrete_label)
+            ) == concrete_model.spec_observe(concrete_label)
             && end::<A>(abstract_before, execution) == abstract_after;
         let abstract_execution = abstract_prefix + abstract_suffix;
         lemma_legal_add(
@@ -432,8 +422,8 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
             abstract_prefix,
             abstract_suffix,
         );
-        lemma_project_add::<A, B>(
-            abstract_observe,
+        lemma_project_add::<A>(
+            abstract_model,
             abstract_prefix,
             abstract_suffix,
         );
@@ -446,13 +436,13 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
             =~= concrete_execution.take(k - 1));
         assert(concrete_execution.take(k).last()
             == concrete_execution[k - 1]);
-        assert(project_with::<C, B>(
-            concrete_observe,
+        assert(project::<C>(
+            concrete_model,
             concrete_execution.take(k),
-        ) =~= project_with::<C, B>(
-            concrete_observe,
+        ) =~= project::<C>(
+            concrete_model,
             concrete_execution.take(k - 1),
-        ) + concrete_observe(concrete_label));
+        ) + concrete_model.spec_observe(concrete_label));
         assert(before::<C>(
             concrete_initial,
             concrete_execution,
@@ -466,11 +456,11 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
             abstract_initial,
             abstract_execution,
         ));
-        assert(project_with::<A, B>(
-            abstract_observe,
+        assert(project::<A>(
+            abstract_model,
             abstract_execution,
-        ) == project_with::<C, B>(
-            concrete_observe,
+        ) == project::<C>(
+            concrete_model,
             concrete_execution.take(k),
         ));
         assert(relation(
@@ -488,9 +478,9 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
                 abstract_initial,
                 execution,
             )
-            && project_with::<A, B>(abstract_observe, execution)
-                == project_with::<C, B>(
-                    concrete_observe,
+            && project::<A>(abstract_model, execution)
+                == project::<C>(
+                    concrete_model,
                     concrete_execution.take(k),
                 )
             && relation(
@@ -506,13 +496,14 @@ proof fn lemma_simulate_prefix<C: RoverModel, A: RoverModel, B>(
 
 /// The generic theorem: a related initial world and a proved forward
 /// simulation imply concrete boundary traces are included in abstract traces.
-pub proof fn concrete_refines_abstract<C: RoverModel, A: RoverModel, B>(
+pub proof fn concrete_refines_abstract<
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
+>(
     concrete_model: C,
     concrete_config: C::Config,
-    concrete_observe: spec_fn(Lab<C>) -> Seq<B>,
     abstract_model: A,
     abstract_config: A::Config,
-    abstract_observe: spec_fn(Lab<A>) -> Seq<B>,
     relation: spec_fn(World<C>, World<A>) -> bool,
 )
     requires
@@ -523,39 +514,32 @@ pub proof fn concrete_refines_abstract<C: RoverModel, A: RoverModel, B>(
         simulation(
             concrete_model,
             concrete_config,
-            concrete_observe,
             abstract_model,
             abstract_config,
-            abstract_observe,
             relation,
         ),
     ensures
         refines(
             concrete_model,
             concrete_config,
-            concrete_observe,
             abstract_model,
             abstract_config,
-            abstract_observe,
         ),
 {
-    assert forall|events: Seq<B>|
+    assert forall|events: Seq<C::Boundary>|
         #![trigger valid_boundary_trace(
             concrete_model,
             concrete_config,
-            concrete_observe,
             events,
         )]
         valid_boundary_trace(
             concrete_model,
             concrete_config,
-            concrete_observe,
             events,
         )
         implies valid_boundary_trace(
             abstract_model,
             abstract_config,
-            abstract_observe,
             events,
         ) by {
         let concrete_initial = initial(concrete_model, concrete_config);
@@ -572,17 +556,12 @@ pub proof fn concrete_refines_abstract<C: RoverModel, A: RoverModel, B>(
                 concrete_initial,
                 execution,
             )
-            && project_with::<C, B>(
-                concrete_observe,
-                execution,
-            ) == events;
+            && project::<C>(concrete_model, execution) == events;
         lemma_simulate_prefix(
             concrete_model,
             concrete_config,
-            concrete_observe,
             abstract_model,
             abstract_config,
-            abstract_observe,
             relation,
             concrete_execution,
             concrete_execution.len() as int,
@@ -602,11 +581,11 @@ pub proof fn concrete_refines_abstract<C: RoverModel, A: RoverModel, B>(
                 initial(abstract_model, abstract_config),
                 execution,
             )
-            && project_with::<A, B>(
-                abstract_observe,
+            && project::<A>(
+                abstract_model,
                 execution,
-            ) == project_with::<C, B>(
-                concrete_observe,
+            ) == project::<C>(
+                concrete_model,
                 concrete_execution,
             )
             && relation(
@@ -616,8 +595,8 @@ pub proof fn concrete_refines_abstract<C: RoverModel, A: RoverModel, B>(
                     execution,
                 ),
             );
-        assert(project_with::<A, B>(
-            abstract_observe,
+        assert(project::<A>(
+            abstract_model,
             abstract_execution,
         ) == events);
     }

@@ -77,6 +77,9 @@ pub trait RoverModel {
     type StateV;
     type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
     type Message: Data;
+    /// The only values refinement and clients observe. Internal process ids
+    /// and messages do not appear here.
+    type Boundary;
 
     /// The stateless endpoint representing everything outside the model.
     fn outside(&self) -> (r: Self::Pid)
@@ -139,6 +142,14 @@ pub trait RoverModel {
         now: Time,
         event: ProcessEvent<Self::Pid, Self::Message>,
     ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
+        arbitrary()
+    }
+
+    /// Project one world label to zero or more clean boundary observations.
+    open spec fn spec_observe(
+        &self,
+        label: semantics::Lab<Self>,
+    ) -> Seq<Self::Boundary> {
         arbitrary()
     }
 }

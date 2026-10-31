@@ -9,12 +9,12 @@ use vstd::prelude::*;
 
 use crate::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
-use crate::rover::semantics::StepResultV;
+use crate::rover::semantics::{Label, StepResultV};
 use crate::rover::{ProcessEvent, RoverModel, StepResult};
 use crate::{Sched, Time};
 
 use super::exec::{Dispatch, InOut, Out, Resonate, Response, Server, Work};
-use super::protocol::{Call, Message, Output};
+use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 use super::spec::{
     ext, group_views, int, lemma_lift_dispatch, lemma_lift_response, DispatchV, InOutV, OutV,
@@ -589,6 +589,7 @@ impl RoverModel for Model {
     type StateV = StateV;
     type State = State;
     type Message = Message;
+    type Boundary = BoundaryEvent;
 
     fn outside(&self) -> (outside: Pid) {
         Pid::Outside
@@ -706,6 +707,25 @@ impl RoverModel for Model {
                 }
             }
             _ => spec_idle(state),
+        }
+    }
+
+    open spec fn spec_observe(
+        &self,
+        label: Label<Pid, Message>,
+    ) -> Seq<BoundaryEvent> {
+        match label {
+            Label::Input {
+                at,
+                message: Message::Request(call),
+                ..
+            } => seq![BoundaryEvent::Input { at, call }],
+            Label::Outside {
+                at,
+                message: Message::Output(output),
+                ..
+            } => seq![BoundaryEvent::Output { at, output }],
+            _ => Seq::empty(),
         }
     }
 }

@@ -25,6 +25,7 @@ impl RoverModel for Counter {
     type StateV = u64;
     type State = u64;
     type Message = Message;
+    type Boundary = Event;
 
     fn outside(&self) -> Pid {
         Pid::Outside

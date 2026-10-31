@@ -34,8 +34,8 @@ The model's interface (`Model`, with `spec` twins of `external` and
 - `refinement.rs` proves the generic Rover refinement theorem: related initial
   worlds plus a model-specific forward simulation imply inclusion of every
   concrete boundary trace in the abstract model. Concrete and abstract models
-  may have different PID/message types through projections to one boundary
-  type.
+  may have different PID/message types; each model owns `spec_observe` and both
+  share only the associated clean `Boundary` type.
 - `tests/rover.rs` is an executable counter protocol demonstrating delayed,
   reordered, and duplicate message delivery as well as rejected traces.
 - `src/rover/resonate/` mirrors Lean's `Resonate` folder:
