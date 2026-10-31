@@ -22,6 +22,7 @@ struct Counter;
 impl RoverModel for Counter {
     type Config = ();
     type Pid = Pid;
+    type StateV = u64;
     type State = u64;
     type Message = Message;
 

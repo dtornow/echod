@@ -92,7 +92,7 @@ impl<M: RoverModel> View for World<'_, M> {
 
     open(crate) spec fn view(&self) -> semantics::World<M> {
         WorldV {
-            process: self.process@,
+            process: semantics::process_view::<M>(self.process@),
             network: self.network@,
             now: self.now,
         }
@@ -372,7 +372,7 @@ impl<'a, M: RoverModel> World<'a, M> {
                 let ghost spec_outcomes = self.model.spec_on_event(
                     *self.config,
                     *process,
-                    state,
+                    state@,
                     *at,
                     *event,
                 );
@@ -382,7 +382,7 @@ impl<'a, M: RoverModel> World<'a, M> {
                     return Err(());
                 }
                 let selected = outcomes.swap_remove(*outcome);
-                let ghost next_state = selected.state;
+                let ghost next_state = selected.state@;
                 let ghost selected_v = StepResultV {
                     state: next_state,
                     send: selected.send@,
@@ -392,7 +392,7 @@ impl<'a, M: RoverModel> World<'a, M> {
                     assert(selected_v == spec_outcomes[*outcome as int]);
                     assert(!(*process == outside));
                     assert(before.process[*slot as int].0 == *process);
-                    assert(state == before.process[*slot as int].1);
+                    assert(state@ == before.process[*slot as int].1);
                 }
                 self.process.set(
                     *slot,

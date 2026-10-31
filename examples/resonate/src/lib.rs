@@ -32,7 +32,6 @@ pub mod collections;
 mod explore;
 mod model;
 pub mod exec;
-pub mod rover;
 pub mod spec;
 
 pub use collections::{PMap, PSet};

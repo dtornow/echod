@@ -26,7 +26,7 @@ pub struct WorldV<P, S, M> {
 
 pub type World<M> = WorldV<
     <M as RoverModel>::Pid,
-    <M as RoverModel>::State,
+    <M as RoverModel>::StateV,
     <M as RoverModel>::Message,
 >;
 
@@ -52,6 +52,13 @@ pub enum Label<P, M> {
 
 pub type Lab<M> = Label<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
 pub type Ev<M> = BoundaryEvent<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
+
+/// Executable process slots as the mathematical world sees their state views.
+pub open spec fn process_view<M: RoverModel>(
+    process: Seq<(M::Pid, M::State)>,
+) -> Seq<(M::Pid, M::StateV)> {
+    process.map_values(|entry: (M::Pid, M::State)| (entry.0, entry.1@))
+}
 
 /// Process `pid` exists and is not the distinguished outside endpoint.
 pub open spec fn is_process<M: RoverModel>(m: M, world: World<M>, pid: M::Pid) -> bool {

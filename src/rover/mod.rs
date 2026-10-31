@@ -16,6 +16,7 @@ use crate::{Data, Time};
 
 mod checker;
 mod replay;
+pub mod resonate;
 pub mod semantics;
 
 pub use checker::{check, search, CheckConfig};
@@ -72,7 +73,8 @@ impl<P, M> BoundaryEvent<P, M> {
 pub trait RoverModel {
     type Config;
     type Pid: Data;
-    type State: Clone + Eq + std::fmt::Debug;
+    type StateV;
+    type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
     type Message: Data;
 
     /// The stateless endpoint representing everything outside the model.
@@ -85,7 +87,8 @@ pub trait RoverModel {
     /// even if a malformed model includes it in this list.
     fn initial(&self, config: &Self::Config) -> (r: Vec<(Self::Pid, Self::State)>)
         ensures
-            r@ == self.spec_initial(*config),
+            r@.map_values(|entry: (Self::Pid, Self::State)| (entry.0, entry.1@))
+                == self.spec_initial(*config),
             r@.map_values(|entry: (Self::Pid, Self::State)| entry.0).no_duplicates(),
             forall|i: int| 0 <= i < r@.len() ==> #[trigger] r@[i].0 != self.spec_outside();
 
@@ -106,20 +109,20 @@ pub trait RoverModel {
         event: &ProcessEvent<Self::Pid, Self::Message>,
     ) -> (r: Vec<StepResult<Self>>)
         ensures
-            r@.len() == self.spec_on_event(*config, *pid, *state, now, *event).len(),
+            r@.len() == self.spec_on_event(*config, *pid, state@, now, *event).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let result = #[trigger] r@[i];
                 semantics::StepResultV {
-                    state: result.state,
+                    state: result.state@,
                     send: result.send@,
-                } == self.spec_on_event(*config, *pid, *state, now, *event)[i]
+                } == self.spec_on_event(*config, *pid, state@, now, *event)[i]
             };
 
     open spec fn spec_outside(&self) -> Self::Pid {
         arbitrary()
     }
 
-    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::State)> {
+    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)> {
         arbitrary()
     }
 
@@ -131,10 +134,10 @@ pub trait RoverModel {
         &self,
         config: Self::Config,
         pid: Self::Pid,
-        state: Self::State,
+        state: Self::StateV,
         now: Time,
         event: ProcessEvent<Self::Pid, Self::Message>,
-    ) -> Seq<semantics::StepResultV<Self::State, Self::Pid, Self::Message>> {
+    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
         arbitrary()
     }
 }
