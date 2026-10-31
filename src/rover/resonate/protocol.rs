@@ -2,8 +2,6 @@
 
 use vstd::prelude::*;
 
-use crate::Time;
-
 use super::{Dispatch, Request, Response};
 
 verus! {
@@ -13,7 +11,6 @@ verus! {
 pub struct Call {
     pub client: String,
     pub id: u64,
-    pub requested_at: Time,
     pub request: Request,
 }
 

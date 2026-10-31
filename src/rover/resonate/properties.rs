@@ -670,10 +670,6 @@ pub proof fn get_promise_preserves_catalogue(
         ),
 {
     reveal(RoverModel::spec_on_event);
-    if call.requested_at > now {
-        noop_satisfies_transition_catalogue(now, before);
-        return;
-    }
     reveal(super::spec::ext);
     reveal(super::spec::echo_v);
     reveal(super::spec::status_v);
@@ -725,10 +721,6 @@ pub proof fn get_task_preserves_catalogue(
         ),
 {
     reveal(RoverModel::spec_on_event);
-    if call.requested_at > now {
-        noop_satisfies_transition_catalogue(now, before);
-        return;
-    }
     reveal(super::spec::ext);
     reveal(super::spec::echo_v);
     reveal(super::spec::status_v);
@@ -780,10 +772,6 @@ pub proof fn get_schedule_preserves_catalogue(
         ),
 {
     reveal(RoverModel::spec_on_event);
-    if call.requested_at > now {
-        noop_satisfies_transition_catalogue(now, before);
-        return;
-    }
     reveal(super::spec::ext);
     reveal(super::spec::echo_v);
     reveal(super::spec::status_v);

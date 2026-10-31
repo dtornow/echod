@@ -26,7 +26,6 @@ fn trace_for(requests: Vec<Request>) -> Vec<Event> {
         let call = Call {
             client: "client".into(),
             id: i as u64,
-            requested_at: 0,
             request: request.clone(),
         };
         let mut outcomes = logic.request(&request, &server, 0);
@@ -172,7 +171,6 @@ fn timeout_runs_the_internal_work_started_by_a_request() {
     let call = Call {
         client: "client".into(),
         id: 1,
-        requested_at: 0,
         request: Request::CreatePromise(Create {
             id: "o:deadline".into(),
             timeout_at: 10,

@@ -271,16 +271,16 @@ fn request_results(
     config: &Resonate,
     state: &State,
     call: &Call,
+    now: Time,
 ) -> (results: Vec<StepResult<Model>>)
     ensures
         results@.map_values(|result: StepResult<Model>| StepResultV {
             state: result.state@,
             send: result.send@,
-        }) == ext(*config, call.request@, state.server@, call.requested_at)
+        }) == ext(*config, call.request@, state.server@, now)
             .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)),
 {
-    let mut outcomes =
-        config.request(&call.request, &state.server, call.requested_at);
+    let mut outcomes = config.request(&call.request, &state.server, now);
     let ghost all = outcomes@;
     let mut results = Vec::new();
     while !outcomes.is_empty()
@@ -329,7 +329,7 @@ fn request_results(
     proof {
         assert(all.take(all.len() as int) =~= all);
         assert(all.map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@))
-            =~= ext(*config, call.request@, state.server@, call.requested_at)
+            =~= ext(*config, call.request@, state.server@, now)
                 .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)));
     }
     results
@@ -646,13 +646,7 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => {
-                if call.requested_at <= now {
-                    request_results(config, state, call)
-                } else {
-                    idle(state)
-                }
-            }
+            ) => request_results(config, state, call, now),
             (Pid::Service, ProcessEvent::Timeout) => {
                 let results = internal_results(config, state, now);
                 if results.is_empty() {
@@ -701,14 +695,8 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => {
-                if call.requested_at <= now {
-                    ext(config, call.request@, state.server, call.requested_at)
-                        .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome))
-                } else {
-                    spec_idle(state)
-                }
-            }
+            ) => ext(config, call.request@, state.server, now)
+                .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome)),
             (Pid::Service, ProcessEvent::Timeout) => {
                 let results = spec_internal_results(config, state, now, 0);
                 if results.len() == 0 {
