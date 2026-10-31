@@ -646,7 +646,13 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => request_results(config, state, call),
+            ) => {
+                if call.requested_at <= now {
+                    request_results(config, state, call)
+                } else {
+                    idle(state)
+                }
+            }
             (Pid::Service, ProcessEvent::Timeout) => {
                 let results = internal_results(config, state, now);
                 if results.is_empty() {
@@ -695,8 +701,14 @@ impl RoverModel for Model {
                     sender: Pid::Outside,
                     message: Message::Request(call),
                 },
-            ) => ext(config, call.request@, state.server, call.requested_at)
-                .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome)),
+            ) => {
+                if call.requested_at <= now {
+                    ext(config, call.request@, state.server, call.requested_at)
+                        .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome))
+                } else {
+                    spec_idle(state)
+                }
+            }
             (Pid::Service, ProcessEvent::Timeout) => {
                 let results = spec_internal_results(config, state, now, 0);
                 if results.len() == 0 {

@@ -30,10 +30,13 @@ use crate::rover::{ProcessEvent, RoverModel};
 use crate::Time;
 
 use super::abstract_model::{Pid, StateV};
+#[cfg(verus_keep_ghost)]
 use super::collections::origin;
 use super::exec::{PState, Resonate, TState};
 use super::protocol::Message;
-use super::spec::{distinct, external_v, Chars, PromiseV, ScheduleV, TaskV};
+#[cfg(verus_keep_ghost)]
+use super::spec::{distinct, external_v};
+use super::spec::{Chars, PromiseV, ScheduleV, TaskV};
 
 verus! {
 
