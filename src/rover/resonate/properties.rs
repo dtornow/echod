@@ -625,4 +625,171 @@ pub open spec fn on_event_preserves_catalogue(config: Resonate) -> bool {
         )
 }
 
+/// Read-only promise lookup is the first nontrivial handler preservation
+/// theorem: both the 200 and 404 branches leave model state unchanged.
+pub proof fn get_promise_preserves_catalogue(
+    config: Resonate,
+    before: StateV,
+    now: Time,
+    call: super::protocol::Call,
+    id: Chars,
+    i: int,
+)
+    requires
+        call.request@ == super::spec::RequestV::GetPromise(id),
+        state_catalogue(now, before),
+        0 <= i,
+        i < super::abstract_model::Model.spec_on_event(
+            config,
+            Pid::Service,
+            before,
+            now,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        ).len(),
+    ensures
+        step_catalogue(
+            now,
+            before,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+            super::abstract_model::Model.spec_on_event(
+                config,
+                Pid::Service,
+                before,
+                now,
+                ProcessEvent::Receive {
+                    sender: Pid::Outside,
+                    message: Message::Request(call),
+                },
+            )[i],
+        ),
+{
+    reveal(RoverModel::spec_on_event);
+    if call.requested_at > now {
+        noop_satisfies_transition_catalogue(now, before);
+        return;
+    }
+    reveal(super::spec::ext);
+    reveal(super::spec::echo_v);
+    reveal(super::spec::status_v);
+    reveal(super::spec::one_v);
+    reveal(super::abstract_model::spec_request_outcome);
+    noop_satisfies_transition_catalogue(now, before);
+}
+
+pub proof fn get_task_preserves_catalogue(
+    config: Resonate,
+    before: StateV,
+    now: Time,
+    call: super::protocol::Call,
+    id: Chars,
+    i: int,
+)
+    requires
+        call.request@ == super::spec::RequestV::GetTask(id),
+        state_catalogue(now, before),
+        0 <= i,
+        i < super::abstract_model::Model.spec_on_event(
+            config,
+            Pid::Service,
+            before,
+            now,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        ).len(),
+    ensures
+        step_catalogue(
+            now,
+            before,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+            super::abstract_model::Model.spec_on_event(
+                config,
+                Pid::Service,
+                before,
+                now,
+                ProcessEvent::Receive {
+                    sender: Pid::Outside,
+                    message: Message::Request(call),
+                },
+            )[i],
+        ),
+{
+    reveal(RoverModel::spec_on_event);
+    if call.requested_at > now {
+        noop_satisfies_transition_catalogue(now, before);
+        return;
+    }
+    reveal(super::spec::ext);
+    reveal(super::spec::echo_v);
+    reveal(super::spec::status_v);
+    reveal(super::spec::one_v);
+    reveal(super::abstract_model::spec_request_outcome);
+    noop_satisfies_transition_catalogue(now, before);
+}
+
+pub proof fn get_schedule_preserves_catalogue(
+    config: Resonate,
+    before: StateV,
+    now: Time,
+    call: super::protocol::Call,
+    id: Chars,
+    i: int,
+)
+    requires
+        call.request@ == super::spec::RequestV::GetSchedule(id),
+        state_catalogue(now, before),
+        0 <= i,
+        i < super::abstract_model::Model.spec_on_event(
+            config,
+            Pid::Service,
+            before,
+            now,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        ).len(),
+    ensures
+        step_catalogue(
+            now,
+            before,
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+            super::abstract_model::Model.spec_on_event(
+                config,
+                Pid::Service,
+                before,
+                now,
+                ProcessEvent::Receive {
+                    sender: Pid::Outside,
+                    message: Message::Request(call),
+                },
+            )[i],
+        ),
+{
+    reveal(RoverModel::spec_on_event);
+    if call.requested_at > now {
+        noop_satisfies_transition_catalogue(now, before);
+        return;
+    }
+    reveal(super::spec::ext);
+    reveal(super::spec::echo_v);
+    reveal(super::spec::status_v);
+    reveal(super::spec::one_v);
+    reveal(super::abstract_model::spec_request_outcome);
+    noop_satisfies_transition_catalogue(now, before);
+}
+
 } // verus!

@@ -47,7 +47,9 @@ The model's interface (`Model`, with `spec` twins of `external` and
   11 mention its different outbox model. Outbox persistence is translated to
   Rover's generic proved `step_preserves_network` theorem; send-time,
   provenance, response, liveness and algebraic claims are classified
-  separately where a state-pair predicate would lose information.
+  separately where a state-pair predicate would lose information. Preservation
+  is proved for no-op steps and all three read-only handlers (`promise.get`,
+  `task.get`, `schedule.get`); mutating handlers remain explicit obligations.
 
 Use `rover::check` for bounded trace checking, or `rover::replay` to validate a
 stored or externally generated certificate exactly. Model-specific invariants
@@ -61,5 +63,5 @@ github.com/verus-lang/verus), which needs a recent Rust toolchain (1.99 here); `
 
 ```
 cargo verus verify -p accordant
-# verification results:: 220 verified, 0 errors
+# verification results:: 223 verified, 0 errors
 ```
