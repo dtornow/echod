@@ -1115,15 +1115,19 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       | _ => Outcomes.one { state := .node next, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .conflict }) =>
+      -- A conflict is ambiguous once a duplicate conditional put can be
+      -- refused after the first copy landed. Retrying would decide again
+      -- against a workflow that may already have advanced. Restoring the
+      -- flight keeps that workflow in place; a later written or failed
+      -- reply for the same operation still matches it.
       let (flight, next) := node.takeFlight op
       match flight with
       | some flight =>
-          match flight.phase with
-          | .writing =>
-              Outcomes.one
-                (retry config (next.cacheInvalidate flight.key) flight)
-          | .loading | .arming | .deleting =>
-              Outcomes.one { state := .node next, send := [] }
+          Outcomes.one {
+            state := .node {
+              next with flights := (op, flight) :: next.flights }
+            send := []
+          }
       | none =>
           let (control, next) := node.takeControl op
           match control with
