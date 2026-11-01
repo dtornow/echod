@@ -10,6 +10,9 @@
 //! The handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`,
 //! `spec_completed`, `spec_tick`, `spec_stop`) are uninterpreted. The control
 //! around them is the control in `State::on_event`.
+//!
+//! The theorem this model is for is `accordant::rover::refinement::refines`
+//! of this instantiation against the abstract Rover model. See `refine`.
 
 use vstd::prelude::*;
 

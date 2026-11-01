@@ -263,12 +263,20 @@ insufficient. Acceptance is sound only after verified certificate replay.
 ```text
 impl/process::State::on_event
     implements
-spec/concrete::Model::spec_on_event
-    simulates
-spec/abstract::Model::spec_on_event
-    therefore
-Concrete Boundary traces are a subset of Abstract Boundary traces
+spec/concrete::spec_logic_on_event
+    which is the node step of
+Rover instantiated with the concrete model
+    refines
+Rover instantiated with the abstract model
 ```
+
+The statement is `accordant::rover::refinement::refines` of
+`echod_concrete::Model` against `resonate::abstract_model::Model`: every
+boundary trace of the concrete world is a boundary trace of the abstract
+world. `concrete_refines_abstract` proves it from a relation on the two
+initial worlds and a forward simulation, at one boundary,
+`resonate::BoundaryEvent`. The relation and the simulation are the open
+proof.
 
 The actual process contract should look like:
 

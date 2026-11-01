@@ -55,6 +55,6 @@ mod rover_model;
 pub mod refine;
 
 #[cfg(not(verus_keep_ghost))]
-pub use refine::abstract_server;
+pub use refine::abstract_model;
 
 pub use types::*;
