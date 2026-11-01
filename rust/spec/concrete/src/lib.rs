@@ -19,6 +19,7 @@
 //! steps_spec.rs       sweep, drain, deadlines, and the lemmas about them
 //! node_spec.rs        membership, cache, armed keys
 //! commit_spec.rs      which key a commit arms, removes, and remembers
+//! timeouts.rs         an origin's nearest deadline, filed in its time bucket
 //! on_event.rs         the document step inside a loaded request
 //! model.rs            the Rover model: nodes, one store, the initial world
 //! refine.rs           the abstract model this step refines
@@ -46,6 +47,7 @@ pub mod state;
 pub mod steps_spec;
 pub mod tags;
 pub mod tags_proof;
+pub mod timeouts;
 pub mod types;
 
 #[cfg(not(verus_keep_ghost))]

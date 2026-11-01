@@ -4,8 +4,12 @@
 //! assembles that from [`Model::initial`]; [`spec_world`] is the same world
 //! as a specification. Each node is a shell around [`spec_logic_on_event`],
 //! the specification of `State::on_event`. A `Wake` stays in the shell until
-//! a Rover `Timeout` at or after that instant is delivered as `Tick`. The
-//! store applies the `Store` effect the node already produced.
+//! a Rover `Timeout` at or after that instant is delivered as `Tick`: that
+//! is when the node next looks at its wheel. An origin's timeout is a
+//! deadline key in the store's time bucket, `timeouts::commit_origin`, and
+//! `timeouts::origins_reflected` says every origin that owes a deadline has
+//! that key in the bucket the deadline falls in. The store applies the
+//! `Store` effect the node already produced.
 //!
 //! The handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`,
 //! `spec_completed`, `spec_tick`, `spec_stop`) are uninterpreted. The control
