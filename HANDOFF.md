@@ -162,11 +162,15 @@ It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
 
 ### `spec/concrete`
 
-Proof code about the actual process, not another implementation:
+The specification the kernel is proved against, not another implementation
+and not a dependent of the process:
 
-- mathematical views of implementation state, events, and effects
-- concrete `Model::spec_on_event`
-- proof that real `State::on_event` implements that transition
+- the document catalogue and the `spec_*` handler functions
+- the one step, `on_event`, which cites those functions
+- the abstract model, which that step refines
+
+Still open, and the reason concrete depends on the abstract model:
+
 - concrete/abstract world relation
 - per-step forward simulation
 - final `concrete_refines_abstract` theorem
@@ -189,18 +193,16 @@ The production and test runtimes must drive the exact same
 ## Dependency direction
 
 ```text
-impl/process ----------------> impl/runtime ----> impl/cli
-     |
-     +-----------------------> spec/concrete
-
-spec/rover ---> spec/abstract ---> spec/concrete
+spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process/kernel ---> impl/process ---> impl/runtime ---> impl/cli
 
 impl + spec -----------------> test/*
 ```
 
-Production code must never depend on test code. If the executable process
-needs proof-only concrete definitions to state Verus contracts, document that
-dependency and ensure it erases from runtime behavior.
+Concrete depends on the abstract model. The kernel depends on concrete,
+because a handler's `ensures` names `spec_promise_create`. The process
+depends on the kernel. Concrete depends on neither. Production code must
+never depend on test code. The ghost half of the concrete crate erases
+under `cargo build`.
 
 ## Semantic decisions already made
 

@@ -1,6 +1,6 @@
 [package]
 name = "echod-kernel"
-description = "The Resonate state machine over one document store, verified with Verus."
+description = "The Resonate state machine over one document store, proved equal to the concrete specification."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 # spec, proof, requires and ensures under plain rustc. Verification is
 # `./verify.sh`.
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+echod-concrete = { path = "../../../spec/concrete" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"

@@ -613,6 +613,24 @@ impl Task {
     }
 }
 
+impl Schedule {
+    pub fn dup(&self) -> (r: Schedule)
+        ensures r@ == self@,
+    {
+        Schedule {
+            id: self.id.clone(),
+            cron: self.cron.clone(),
+            promise_id: self.promise_id.clone(),
+            promise_timeout: self.promise_timeout,
+            promise_param: self.promise_param.dup(),
+            promise_tags: clone_tags(&self.promise_tags),
+            next_run_at: self.next_run_at,
+            last_run_at: self.last_run_at,
+            created_at: self.created_at,
+        }
+    }
+}
+
 pub fn clone_tags(t: &Tags) -> (r: Tags)
     ensures r.deep_view() == t.deep_view(),
 {

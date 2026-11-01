@@ -1132,7 +1132,10 @@ name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
  "echod-abstract",
- "echod-process",
+ "serde",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
 ]
 
 [[package]]
@@ -1153,7 +1156,7 @@ dependencies = [
 name = "echod-kernel"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "echod-concrete",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",

@@ -100,9 +100,10 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Rover concrete refinement, open.** `rust/spec/concrete` names the two
-  ends (`echod_logic::State::on_event` and the Rover abstract model) and
-  holds no proof yet. The classic `concrete_refines_abstract` against
+- **Rover concrete refinement, open.** `rust/spec/concrete` holds the
+  catalogue and the handler specifications, and the kernel is proved equal
+  to them. It depends on the abstract model and not on the process. The
+  simulation that `on_event` refines that model is not written yet. The classic `concrete_refines_abstract` against
   `accordant::Model` left with `refine/`. What it established, and what
   the Rover proof has to establish again: every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a

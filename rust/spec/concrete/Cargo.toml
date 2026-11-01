@@ -1,6 +1,6 @@
 [package]
 name = "echod-concrete"
-description = "The proof that the process refines the Rover abstract model. The simulation is not written yet."
+description = "The concrete specification: the document catalogue, the handler specifications, and the one step on_event is proved against."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,5 +10,14 @@ name = "echod_concrete"
 path = "src/lib.rs"
 
 [dependencies]
-echod-process = { path = "../../impl/process" }
 resonate = { package = "echod-abstract", path = "../abstract" }
+serde = { version = "1", features = ["derive"] }
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

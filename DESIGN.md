@@ -13,12 +13,12 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover` (library `accordant`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
 | `rust/spec/abstract` | `echod-abstract` (library `resonate`): the Resonate protocol as a Rover model |
-| `rust/spec/concrete` | `echod-concrete`: the proof that `on_event` refines that model. The proof is not written yet |
+| `rust/spec/concrete` | `echod-concrete`: the catalogue and the handler specifications. The kernel depends on this crate. The refinement of `on_event` to the abstract model is not written yet |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-accordant`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
-The kernel is proved. The process around it is the shim the proof stops at,
+The kernel is proved equal to the concrete specification. The process around it is the shim the proof stops at,
 with nothing in it but the order of calls. The runtime performs what the
 process asks. The simulator is the evidence. The core and the node depend
 on `resonate-core` for the traits and protocol types. Origin:
@@ -27,7 +27,9 @@ on `resonate-core` for the traits and protocol types. Origin:
 The Anvil cluster model and the classic Accordant refinement
 (`concrete_refines_abstract` against `accordant::Model`) are not in this
 tree. Catalogue, deadline keys, cache revalidation, and fired occurrences
-are to be restated as Rover concrete theorems in `rust/spec/concrete`.
+are to be restated as Rover concrete theorems. The catalogue and the
+handler specifications already live in `rust/spec/concrete`; the kernel is
+proved equal to them.
 The sections below that name `echod-system` or `refine/` describe that
 earlier proof.
 

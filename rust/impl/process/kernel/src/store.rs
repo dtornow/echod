@@ -1,9 +1,10 @@
 //! The store: rows in a vector, a map in the specification.
 //!
 //! The object at `wf/<origin>` is a log of rows; the document is the fold of
-//! the rows by id, last row winning. Here the fold is `fold_by`, generic in
-//! the key, and the kernel's state is three row vectors whose abstract view is
-//! three maps. The lemmas tie a vector operation to a map operation:
+//! the rows by id, last row winning. The fold is `echod_concrete::state::fold_by`,
+//! generic in the key, and the kernel's state is three row vectors whose
+//! abstract view is three maps. The lemmas tie a vector operation to a map
+//! operation:
 //!
 //! - a row found at index `i` is the map's entry at its key;
 //! - replacing the row at `i` is `insert` at its key;
@@ -15,75 +16,18 @@ use crate::store_proof::*;
 
 use crate::types::*;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete::state::{
+    distinct_by, fold_by, mentions, obj_key, obj_val, out_key, out_val, sched_key, sched_val, AState,
+};
+
 verus! {
 
-// ---------------------------------------------------------------------------
-// The fold
-// ---------------------------------------------------------------------------
-
-/// Replay rows: each row replaces the entry at its key.
-pub open spec fn fold_by<T, K, V>(s: Seq<T>, key: spec_fn(T) -> K, val: spec_fn(T) -> V) -> Map<K, V>
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        Map::empty()
-    } else {
-        fold_by(s.drop_last(), key, val).insert(key(s.last()), val(s.last()))
-    }
-}
-
-/// Some row carries key `k`.
-pub open spec fn mentions<T, K>(s: Seq<T>, key: spec_fn(T) -> K, k: K) -> bool {
-    exists|i: int| 0 <= i < s.len() && #[trigger] key(s[i]) == k
-}
-
-/// No two rows share a key.
-pub open spec fn distinct_by<T, K>(s: Seq<T>, key: spec_fn(T) -> K) -> bool {
-    forall|i: int, j: int|
-        0 <= i < s.len() && 0 <= j < s.len() && #[trigger] key(s[i]) == #[trigger] key(s[j]) ==> i == j
-}
-
-// ---------------------------------------------------------------------------
-// The state
-// ---------------------------------------------------------------------------
-
-/// Everything the machine reads and writes: objects, schedules, outbox.
+/// The rows of one document. Their view is `echod_concrete::state::AState`.
 pub struct State {
     pub objects: Vec<Promise>,
     pub schedules: Vec<Schedule>,
     pub outbox: Vec<OutboxEntry>,
-}
-
-/// The state as the specification sees it.
-#[cfg(verus_keep_ghost)]
-pub struct AState {
-    pub objects: Map<Seq<char>, APromise>,
-    pub schedules: Map<Seq<char>, ASchedule>,
-    pub outbox: Map<OutboxKey, AOutboxEntry>,
-}
-
-pub open spec fn obj_key() -> spec_fn(Promise) -> Seq<char> {
-    |p: Promise| p.id@
-}
-
-pub open spec fn obj_val() -> spec_fn(Promise) -> APromise {
-    |p: Promise| p@
-}
-
-pub open spec fn sched_key() -> spec_fn(Schedule) -> Seq<char> {
-    |c: Schedule| c.id@
-}
-
-pub open spec fn sched_val() -> spec_fn(Schedule) -> ASchedule {
-    |c: Schedule| c@
-}
-
-pub open spec fn out_key() -> spec_fn(OutboxEntry) -> OutboxKey {
-    |e: OutboxEntry| e@.key()
-}
-
-pub open spec fn out_val() -> spec_fn(OutboxEntry) -> AOutboxEntry {
-    |e: OutboxEntry| e@
 }
 
 #[cfg(verus_keep_ghost)]

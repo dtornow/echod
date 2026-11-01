@@ -22,7 +22,7 @@ rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
 rust/spec/rover       the Rover world, replay, and refinement theorem
 rust/spec/abstract    the Resonate protocol as a Rover model
-rust/spec/concrete    the proof that on_event refines that model
+rust/spec/concrete    the catalogue and the specifications on_event is proved against
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/rover            the Rover world, for experiment
@@ -32,9 +32,10 @@ examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
 ```
 
-`rust/impl/process/kernel` is proved. The process around it is the shim the
-proof stops at: nothing in it but the order of calls, and its tests feed it
-events by hand. The runtime performs what it asks. The simulator is the
+`rust/impl/process/kernel` is proved equal to `rust/spec/concrete`. Concrete
+depends on the abstract model; it does not depend on the process. The process
+around the kernel is the shim the proof stops at: nothing in it but the order
+of calls, and its tests feed it events by hand. The runtime performs what it asks. The simulator is the
 evidence. [DESIGN.md](DESIGN.md) is the design; [BACKLOG.md](BACKLOG.md) is
 what is next. Each crate's `lib.rs` opens with a map of its files.
 

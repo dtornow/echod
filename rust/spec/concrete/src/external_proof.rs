@@ -1,15 +1,15 @@
 //! The proofs of the request handlers: one `lemma_*_legal` per handler, the
 //! projection lemmas they share, and the frame lemmas for the handlers that
 //! touch several objects. Each lemma takes the abstract states before and
-//! after and concludes `post`. Nothing here is executed.
+//! after and concludes `spec_post`. Nothing here is executed.
 
 use vstd::prelude::*;
 
-use crate::external::*;
 use crate::object::*;
 use crate::properties::*;
 use crate::properties_proof::*;
-use crate::store::*;
+use crate::spec::*;
+use crate::state::*;
 use crate::tags::OType;
 use crate::types::*;
 

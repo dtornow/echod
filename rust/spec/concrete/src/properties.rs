@@ -18,7 +18,7 @@
 
 use vstd::prelude::*;
 
-use crate::store::*;
+use crate::state::*;
 use crate::tags::OType;
 use crate::types::*;
 
@@ -374,16 +374,16 @@ pub open spec fn well_formed_schedule_last_run_at_lt_next_run_at(now: nat, s: AS
 
 // --- the three uniqueness entries, stated on the rows, where ids can collide ---
 
-pub open spec fn well_formed_store_object_ids_unique(_now: nat, s: crate::store::State) -> bool {
-    crate::store::distinct_by(s.objects@, crate::store::obj_key())
+pub open spec fn well_formed_store_object_ids_unique(_now: nat, rows: Seq<Promise>) -> bool {
+    distinct_by(rows, obj_key())
 }
 
-pub open spec fn well_formed_store_schedule_ids_unique(_now: nat, s: crate::store::State) -> bool {
-    crate::store::distinct_by(s.schedules@, crate::store::sched_key())
+pub open spec fn well_formed_store_schedule_ids_unique(_now: nat, rows: Seq<Schedule>) -> bool {
+    distinct_by(rows, sched_key())
 }
 
-pub open spec fn well_formed_store_outbox_keys_unique(_now: nat, s: crate::store::State) -> bool {
-    crate::store::distinct_by(s.outbox@, crate::store::out_key())
+pub open spec fn well_formed_store_outbox_keys_unique(_now: nat, rows: Seq<OutboxEntry>) -> bool {
+    distinct_by(rows, out_key())
 }
 
 // ===========================================================================
@@ -602,8 +602,8 @@ pub open spec fn preserved_promise_value_until_settlement(now: nat, a: AState, b
         preserved_promise_value_until_settlement_at(now, b, id, a.objects[id])
 }
 
-pub open spec fn preserved_promise_no_duplicate_ids(_now: nat, _a: crate::store::State, b: crate::store::State) -> bool {
-    crate::store::distinct_by(b.objects@, crate::store::obj_key())
+pub open spec fn preserved_promise_no_duplicate_ids(_now: nat, rows: Seq<Promise>) -> bool {
+    distinct_by(rows, obj_key())
 }
 
 pub open spec fn consistent_promise_state_edge_admissible_at(_now: nat, b: AState, id: Seq<char>, p: APromise) -> bool {
@@ -1260,10 +1260,10 @@ pub open spec fn inv(now: nat, s: AState) -> bool {
 }
 
 /// The three `.state` entries stated on the rows.
-pub open spec fn inv_rows(now: nat, s: crate::store::State) -> bool {
-    &&& well_formed_store_object_ids_unique(now, s)
-    &&& well_formed_store_schedule_ids_unique(now, s)
-    &&& well_formed_store_outbox_keys_unique(now, s)
+pub open spec fn inv_rows(now: nat, objects: Seq<Promise>, schedules: Seq<Schedule>, outbox: Seq<OutboxEntry>) -> bool {
+    &&& well_formed_store_object_ids_unique(now, objects)
+    &&& well_formed_store_schedule_ids_unique(now, schedules)
+    &&& well_formed_store_outbox_keys_unique(now, outbox)
 }
 
 /// Every `.trans` entry stated on the abstract states.
@@ -1321,8 +1321,8 @@ pub open spec fn legal(now: nat, a: AState, b: AState) -> bool {
 }
 
 /// The `.trans` entry stated on the rows.
-pub open spec fn legal_rows(now: nat, a: crate::store::State, b: crate::store::State) -> bool {
-    preserved_promise_no_duplicate_ids(now, a, b)
+pub open spec fn legal_rows(now: nat, rows: Seq<Promise>) -> bool {
+    preserved_promise_no_duplicate_ids(now, rows)
 }
 
 /// The two sweeper entries.

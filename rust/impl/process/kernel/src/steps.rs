@@ -14,11 +14,15 @@ use vstd::prelude::*;
 use crate::commit::*;
 use crate::external::*;
 use crate::internal::*;
-use crate::properties::*;
 use crate::store::*;
 use crate::store_proof::*;
 use crate::tags::OType;
 use crate::types::*;
+
+#[cfg(verus_keep_ghost)]
+use crate::internal_spec::*;
+#[cfg(verus_keep_ghost)]
+use crate::properties::*;
 
 verus! {
 
