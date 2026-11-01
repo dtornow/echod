@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::verified::{self as rows, Promise, Schedule};
 
 use crate::doc;
-use crate::flight::Work;
+use crate::handler_docs::Work;
 use crate::target::Target;
 use crate::types::*;
 use crate::{Owner, State};
@@ -223,12 +223,12 @@ impl State {
         // nothing of the documents is held any more: not the cache, not the
         // core's versions and keys, not the wheel
         self.cache = crate::cache::MemoryCache::new(self.cfg.cache_entries, self.cfg.cache_bytes);
-        let (epoch, members, last_read, read_any) = (self.core.epoch, self.core.members.clone(), self.core.last_read, self.core.read_any);
-        self.core = rows::node::NodeCore::new(self.cfg.node_id.clone(), self.cfg.node_ttl_ms);
+        let (epoch, members, last_read, read_any) = (self.node.core.epoch, self.node.core.members.clone(), self.node.core.last_read, self.node.core.read_any);
+        self.node.core = rows::node::NodeCore::new(self.cfg.node_id.clone(), self.cfg.node_ttl_ms);
         if read_any {
-            self.core.read_config(last_read, epoch, members);
+            self.node.core.read_config(last_read, epoch, members);
         }
-        self.timers.wheel = crate::timers::TimerWheel::new();
+        self.timers.wheel = crate::state_timers::TimerWheel::new();
         self.debug_reply(id, kind, corr, 200, DebugBody::Object);
     }
 

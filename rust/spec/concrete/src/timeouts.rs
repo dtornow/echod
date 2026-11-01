@@ -1,6 +1,6 @@
 //! An origin's timeout is a deadline key in a time bucket.
 //!
-//! The implementation (`keys.rs`, `flight.rs`) puts one empty object per
+//! The implementation (`keys.rs`, `handler_docs`) puts one empty object per
 //! origin before the document write: the document's nearest deadline, named
 //! by that instant, the origin, a token, and the node that armed it. The
 //! key is filed under the bucket the instant falls in,

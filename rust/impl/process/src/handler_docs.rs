@@ -1,44 +1,24 @@
-//! One step on one document, from load to commit, one store call at a
-//! time.
+//! One origin: its promises, the task inside each, and a sweep of it.
 //!
-//! Per document, one flight at a time: the rest queue behind it. A flight
-//! loads the document, runs the handler, drains what the step left owed,
-//! then commits by `verified::commit`, each store
-//! call between its decisions: the key for the document's nearest deadline
-//! is put before the document, the document is written conditionally on
-//! the version loaded, the key replaced is removed after, the key kept is
-//! remembered with the version written, and the key that fired is deleted:
-//! the write fences every commit still in flight that armed it. A fire that
-//! found nothing due rewrites the document at a new version first, for the
-//! same reason, and only then deletes the key. A lost race re-reads and
-//! re-decides.
+//! One step runs on a document at a time; the rest queue behind it. The step
+//! loads the document, sweeps it, runs the proved handler, drains what it
+//! left owed, and commits by `verified::commit`: the deadline key, then the
+//! document, then the key that key replaced. A lost race re-reads and
+//! decides again. A schedule's run uses the same commit; the decision itself
+//! is `handler_sched`.
 //!
-//! A schedule's key fires on two documents: the schedule's row decides the
-//! occurrence's promise, `process_schedule` runs on the row
-//! beside the promise's origin, and the origin is committed first, then
-//! the schedule with the key fired: the system model's `Fire`, with its
-//! pending half. The fire holds the schedule's slot throughout and takes
-//! the origin's for the first commit; no flight on an origin ever waits
-//! for a schedule's slot, so none of this waits in a circle.
-//!
-//! The cache holds the last document this node read or wrote for an
-//! origin. It is never used without asking the store: every load
-//! revalidates with `If-None-Match`, and the body is used only when the
-//! store says the version held is current (the system's revalidation
-//! theorem). Every version read or written, and every entry dropped, is
-//! reported to the core, so what it decides on is what the cache holds. A
-//! schedule's document is not cached.
+//! The cache holds the last document this process read or wrote for an
+//! origin, and is never used without asking the store.
 
 use std::collections::{HashMap, VecDeque};
 
 use crate::verified::commit::Commit as Plan;
 use crate::verified::node::Key;
 use crate::verified::steps;
-use crate::verified::{Occurrence, OutboxEntry, Promise, Request, Response, Schedule, ScheduleTimeoutReq, State as Rows, TaskFenceInnerRes, TaskFenceRes};
+use crate::verified::{OutboxEntry, Promise, Request, Response, Schedule, TaskFenceInnerRes, TaskFenceRes};
 
 use crate::cache::{Cache, Cached};
 use crate::doc::{self, Header, Loaded, Row};
-use crate::keys::origin_of;
 use crate::target::Target;
 use crate::types::*;
 use crate::{Owner, State};
@@ -125,14 +105,14 @@ impl Step {
     }
 }
 
-enum Progress {
+pub(crate) enum Progress {
     Issued,
     Done(Fired),
     Failed(StoreError),
 }
 
 /// What a committed step answers with.
-struct Done {
+pub(crate) struct Done {
     response: Option<Response>,
     /// Why the request was refused, in the protocol's words, if it was.
     why: Option<String>,
@@ -142,17 +122,17 @@ struct Done {
 
 /// A fire past its decision: the schedule as loaded, the occurrence, and
 /// what the handler is asked.
-struct FireCtx {
-    ws: Working<Schedule>,
-    row: Schedule,
-    t1: u64,
-    at: u64,
-    promise_id: String,
-    origin: String,
-    next: u64,
+pub(crate) struct FireCtx {
+    pub(crate) ws: Working<Schedule>,
+    pub(crate) row: Schedule,
+    pub(crate) t1: u64,
+    pub(crate) at: u64,
+    pub(crate) promise_id: String,
+    pub(crate) origin: String,
+    pub(crate) next: u64,
 }
 
-enum Phase {
+pub(crate) enum Phase {
     Idle,
     Loading { op: OpId, revalidating: Option<Cached> },
     Origin { commit: Committing<Promise>, done: Done },
@@ -177,34 +157,34 @@ impl Phase {
     }
 }
 
-struct Flight {
-    id: FlightId,
-    target: Target,
-    work: Work,
-    attempt: u32,
-    phase: Phase,
-    firing: Option<Firing>,
+pub(crate) struct Flight {
+    pub(crate) id: FlightId,
+    pub(crate) target: Target,
+    pub(crate) work: Work,
+    pub(crate) attempt: u32,
+    pub(crate) phase: Phase,
+    pub(crate) firing: Option<Firing>,
     /// Started by `debug.tick`, which hears how it ended.
-    debug: bool,
+    pub(crate) debug: bool,
     /// A sweep that fired nothing, or a fire that found nothing due.
-    idle: bool,
+    pub(crate) idle: bool,
 }
 
-enum Queued {
+pub(crate) enum Queued {
     Work(Box<(Target, Work, Option<Firing>, bool)>),
     Waiter(FlightId),
 }
 
 #[derive(Default)]
-struct Slot {
-    busy: Option<FlightId>,
-    queue: VecDeque<Queued>,
+pub(crate) struct Slot {
+    pub(crate) busy: Option<FlightId>,
+    pub(crate) queue: VecDeque<Queued>,
 }
 
 pub(crate) struct Flights {
-    slots: HashMap<String, Slot>,
-    inflight: HashMap<FlightId, Flight>,
-    max_retries: u32,
+    pub(crate) slots: HashMap<String, Slot>,
+    pub(crate) inflight: HashMap<FlightId, Flight>,
+    pub(crate) max_retries: u32,
 }
 
 impl Flights {
@@ -214,7 +194,7 @@ impl Flights {
 
 }
 
-fn unexpected() -> StoreError {
+pub(crate) fn unexpected() -> StoreError {
     StoreError::Unavailable("the store answered something else".into())
 }
 
@@ -247,7 +227,7 @@ impl State {
     }
 
     /// The slot of `name` is free: whatever waits on it goes next.
-    fn release(&mut self, name: &str) {
+    pub(crate) fn release(&mut self, name: &str) {
         let Some(slot) = self.flights.slots.get_mut(name) else { return };
         slot.busy = None;
         match slot.queue.pop_front() {
@@ -417,7 +397,7 @@ impl State {
 
     /// Ask for an origin's document: revalidated against the store when
     /// the cache holds a version, read in full otherwise.
-    fn load_origin(&mut self, fid: FlightId, origin: &str) -> (OpId, Option<Cached>) {
+    pub(crate) fn load_origin(&mut self, fid: FlightId, origin: &str) -> (OpId, Option<Cached>) {
         let key = self.keys.doc_key(origin);
         match self.cache.get(origin) {
             Some(c) => {
@@ -465,21 +445,6 @@ impl State {
         }
     }
 
-    /// The store answered a load of schedule `id`, read in full: not cached.
-    fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> Result<Working<Schedule>, String> {
-        let key = self.keys.sched_key(id);
-        let target = Target::Schedule(id.to_string()).name();
-        match outcome {
-            StoreOutcome::Got(None) => Ok(Working { target, key, loaded: Loaded::empty(), etag: None }),
-            StoreOutcome::Got(Some((bytes, etag))) => {
-                let loaded = doc::decode(&bytes)?;
-                Ok(Working { target, key, loaded, etag: Some(etag) })
-            }
-            StoreOutcome::Failed(e) => Err(e.to_string()),
-            _ => Err(unexpected().to_string()),
-        }
-    }
-
     // -----------------------------------------------------------------------
     // The step
     // -----------------------------------------------------------------------
@@ -498,24 +463,11 @@ impl State {
         }
     }
 
-    fn run_schedule(&mut self, mut f: Flight, w: Working<Schedule>) {
-        let (commit, done) = self.decide(&f.work, w);
-        let mut commit = commit;
-        match self.commit_advance(f.id, &mut commit, None) {
-            Progress::Issued => {
-                f.phase = Phase::Schedule { commit, done };
-                self.flights.inflight.insert(f.id, f);
-            }
-            Progress::Done(fired) => self.committed(f, done, fired),
-            Progress::Failed(e) => self.commit_failed(f, e),
-        }
-    }
-
     /// The step: decided no earlier than the last step on the document,
     /// the kernel being proved for an instant at or after it; then the
     /// drain. A lost race runs this again on what it re-read, so the step
     /// decides from the state it is given, which every kernel handler does.
-    fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
+    pub(crate) fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
         let mut state = R::state_of(&w.loaded.rows);
         let now = steps::clamp_now(w.loaded.stamp, work.now());
         let (response, why, did) = match work {
@@ -549,7 +501,7 @@ impl State {
     }
 
     /// A committed step: the messages out, the answer back.
-    fn committed(&mut self, f: Flight, done: Done, fired: Fired) {
+    pub(crate) fn committed(&mut self, f: Flight, done: Done, fired: Fired) {
         self.note(Note::Commit(CommitOutcome::Committed));
         let Done { response, why, outbox, did } = done;
         for e in &outbox {
@@ -599,7 +551,7 @@ impl State {
 
     /// The commit's store call failed: a lost race re-decides, anything
     /// else ends the flight with nothing cached.
-    fn commit_failed(&mut self, f: Flight, e: StoreError) {
+    pub(crate) fn commit_failed(&mut self, f: Flight, e: StoreError) {
         if let Target::Origin(o) = &f.target {
             // A write that may or may not have landed: trust nothing cached.
             self.forget(&o.clone());
@@ -618,7 +570,7 @@ impl State {
     }
 
     /// The flight ends without a commit.
-    fn fail(&mut self, f: Flight, e: String) {
+    pub(crate) fn fail(&mut self, f: Flight, e: String) {
         match &f.work {
             Work::Request { id, .. } => self.emit(Effect::Reply { id: *id, response: Err(e.clone()) }),
             Work::Sweep { .. } => {
@@ -632,7 +584,7 @@ impl State {
 
     /// The flight is over: its slot goes to the next, and the key that
     /// fired it hears how it went.
-    fn finish(&mut self, f: Flight, r: Result<Fired, String>) {
+    pub(crate) fn finish(&mut self, f: Flight, r: Result<Fired, String>) {
         let name = f.target.name();
         self.release(&name);
         if let Some(firing) = f.firing {
@@ -653,149 +605,25 @@ impl State {
     }
 
     // -----------------------------------------------------------------------
-    // The fire: two documents
-    // -----------------------------------------------------------------------
-
-    /// The promise id an occurrence expands to.
-    pub fn expand(template: &str, id: &str, at: u64) -> String {
-        template.replace("{{.id}}", id).replace("{{.timestamp}}", &at.to_string())
-    }
-
-    /// The schedule is loaded: its due occurrence, if any, as a promise in
-    /// the occurrence's origin, then the schedule advanced, each its own
-    /// commit, in that order. A schedule not due, or gone, is rewritten
-    /// unchanged so the key can be collected behind the write.
-    fn fire_decide(&mut self, mut f: Flight, ws: Working<Schedule>) {
-        let Work::Fire { schedule, fired, now } = &f.work else { return self.fail(f, "not a fire".to_string()) };
-        let (id, fired, now) = (schedule.clone(), fired.clone(), *now);
-        let t1 = steps::clamp_now(ws.loaded.stamp, now);
-        // the decision is the step module's: a row due at the instant, or none
-        let due = steps::schedule_due(&Schedule::state_of(&ws.loaded.rows), t1).map(|i| ws.loaded.rows[i].clone());
-        let Some(c) = due else {
-            // a sweep of the schedule's document that finds nothing due
-            f.idle = true;
-            let rows = ws.loaded.rows.clone();
-            self.note(Note::SweepBegin { flight: f.id, target: ws.target.clone(), now: t1 });
-            let mut commit = self.commit_new(ws, rows, t1, false, fired);
-            match self.commit_advance(f.id, &mut commit, None) {
-                Progress::Issued => {
-                    f.phase = Phase::FireIdle { commit };
-                    self.flights.inflight.insert(f.id, f);
-                }
-                Progress::Done(fired) => {
-                    self.note(Note::SweepEnd { flight: f.id, committed: true });
-                    self.note(Note::Commit(CommitOutcome::Committed));
-                    self.finish(f, Ok(fired));
-                }
-                Progress::Failed(e) => {
-                    self.note(Note::SweepEnd { flight: f.id, committed: false });
-                    self.commit_failed(f, e);
-                }
-            }
-            return;
-        };
-        let at = c.next_run_at;
-        let promise_id = Self::expand(&c.promise_id, &id, at);
-        let origin = origin_of(&promise_id).to_string();
-        let next = crate::cron::next_after(&c.cron, at as i64).max(at as i64 + 1) as u64;
-        let ctx = FireCtx { ws, row: c, t1, at, promise_id, origin, next };
-        // the origin's slot, now or when it frees
-        let slot = self.flights.slots.entry(ctx.origin.clone()).or_default();
-        if slot.busy.is_some() {
-            slot.queue.push_back(Queued::Waiter(f.id));
-            f.phase = Phase::FireWaitingOrigin(ctx);
-            self.flights.inflight.insert(f.id, f);
-        } else {
-            slot.busy = Some(f.id);
-            self.fire_load_origin(f, ctx);
-        }
-    }
-
-    fn fire_load_origin(&mut self, mut f: Flight, ctx: FireCtx) {
-        let (op, revalidating) = self.load_origin(f.id, &ctx.origin);
-        f.phase = Phase::FireLoadingOrigin { op, revalidating, ctx };
-        self.flights.inflight.insert(f.id, f);
-    }
-
-    /// Both documents loaded: the kernel's `process_schedule` on the row
-    /// beside the origin's objects, then the origin committed first.
-    fn fire_run(&mut self, mut f: Flight, ctx: FireCtx, wo: Working<Promise>) {
-        let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, "not a fire".to_string()) };
-        let id = schedule.clone();
-        let t = steps::clamp_now(wo.loaded.stamp, ctx.t1);
-        let req = ScheduleTimeoutReq { schedule: id, occurrences: vec![Occurrence { at: ctx.at, promise_id: ctx.promise_id.clone() }], next_run_at: ctx.next };
-        let mut state = Rows { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
-        state.process_schedule(&req, t, &self.rows_cfg);
-        steps::drain(&mut state, t, &self.rows_cfg);
-        self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
-        let mut commit = self.commit_new(wo, state.objects, t, false, None);
-        match self.commit_advance(f.id, &mut commit, None) {
-            Progress::Issued => {
-                f.phase = Phase::FireOrigin { commit, ctx, schedules: state.schedules, outbox: state.outbox, t };
-                self.flights.inflight.insert(f.id, f);
-            }
-            Progress::Done(_) => {
-                self.note(Note::FireEnd { flight: f.id, committed: true });
-                self.note(Note::Commit(CommitOutcome::Committed));
-                for e in &state.outbox {
-                    self.send(e);
-                }
-                self.release(&ctx.origin);
-                self.fire_advance(f, ctx, state.schedules, t);
-            }
-            Progress::Failed(e) => {
-                self.note(Note::FireEnd { flight: f.id, committed: false });
-                self.forget(&ctx.origin);
-                self.release(&ctx.origin);
-                self.commit_failed(f, e);
-            }
-        }
-    }
-
-    /// Then the schedule, advanced, with the key fired.
-    fn fire_advance(&mut self, mut f: Flight, ctx: FireCtx, schedules: Vec<Schedule>, t: u64) {
-        let Work::Fire { schedule, fired, .. } = &f.work else { return self.fail(f, "not a fire".to_string()) };
-        let (id, fired) = (schedule.clone(), fired.clone());
-        self.note(Note::AdvanceBegin { flight: f.id, schedule: id, now: t, at: ctx.at, next: ctx.next });
-        let FireCtx { ws, .. } = ctx;
-        let mut commit = self.commit_new(ws, schedules, t, false, fired);
-        match self.commit_advance(f.id, &mut commit, None) {
-            Progress::Issued => {
-                f.phase = Phase::FireSchedule { commit };
-                self.flights.inflight.insert(f.id, f);
-            }
-            Progress::Done(fired) => {
-                self.note(Note::AdvanceEnd { flight: f.id, committed: true });
-                self.note(Note::Commit(CommitOutcome::Committed));
-                self.finish(f, Ok(fired));
-            }
-            Progress::Failed(e) => {
-                self.note(Note::AdvanceEnd { flight: f.id, committed: false });
-                self.commit_failed(f, e);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // The commit
     // -----------------------------------------------------------------------
 
     /// The decisions before the first store call: the rows that changed,
     /// the nearest deadline, and the verified `prepare`. `did` is whether a
     /// sweep fired anything; `fired` the key whose firing this is.
-    fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, now: u64, did: bool, fired: Option<FiredKey>) -> Committing<R> {
+    pub(crate) fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, now: u64, did: bool, fired: Option<FiredKey>) -> Committing<R> {
         let changed = doc::changed(&w.loaded.rows, &rows);
         let changed_any = did || !changed.is_empty() || rows.len() != w.loaded.rows.len();
         let deadline = steps::next_deadline(&R::state_of(&rows));
         let etag = w.etag.as_ref().map(|e| e.0.clone());
-        let plan = self.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
+        let plan = self.node.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
         Committing { w, rows, changed, changed_any, now, fired, plan, step: Step::Start }
     }
 
     /// Drive a commit: `answer` is the store's answer to the call the
     /// commit waits on, if it waits on one. Returns with the next call
     /// issued, or the commit over.
-    fn commit_advance<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, answer: Option<StoreOutcome>) -> Progress {
+    pub(crate) fn commit_advance<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, answer: Option<StoreOutcome>) -> Progress {
         let me = self.cfg.node_id.clone();
         match std::mem::replace(&mut c.step, Step::Over) {
             Step::Start => {
@@ -851,7 +679,7 @@ impl State {
                         return Progress::Issued;
                     }
                     // (4) the key kept, with the version written
-                    self.core.finish(&c.plan, &etag.0);
+                    self.node.core.finish(&c.plan, &etag.0);
                     self.delete_fired(fid, c)
                 }
                 Some(StoreOutcome::Failed(e)) => Progress::Failed(e),
@@ -865,7 +693,7 @@ impl State {
                     _ => {}
                 }
                 let etag = c.w.etag.clone().unwrap_or_else(|| Etag(String::new()));
-                self.core.finish(&c.plan, &etag.0);
+                self.node.core.finish(&c.plan, &etag.0);
                 self.delete_fired(fid, c)
             }
             Step::DeletingFired { key, name, .. } => match answer {
@@ -887,7 +715,7 @@ impl State {
     /// that armed it and has not written yet.
     fn delete_fired<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>) -> Progress {
         let Some(f) = c.fired.clone() else { return Progress::Done(Fired::Kept) };
-        self.core.collected(&c.w.target, &f.key);
+        self.node.core.collected(&c.w.target, &f.key);
         let name = self.key_name(&f.key, &f.by);
         let op = self.store(StoreCall::Delete { key: name.clone() }, Owner::Flight(fid));
         c.step = Step::DeletingFired { op, key: f.key, name };

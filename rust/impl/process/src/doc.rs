@@ -34,10 +34,10 @@ impl Row for Promise {
         &self.id
     }
     fn state_of(rows: &[Self]) -> State {
-        State { objects: rows.to_vec(), schedules: Vec::new(), outbox: Vec::new() }
+        crate::state_docs::Docs::proved(rows.to_vec())
     }
     fn rows_of(s: &State) -> Vec<Self> {
-        s.objects.clone()
+        crate::state_docs::Docs::rows_of(s)
     }
     fn promises(rows: &[Self]) -> Option<Vec<Promise>> {
         Some(rows.to_vec())
@@ -49,10 +49,10 @@ impl Row for Schedule {
         &self.id
     }
     fn state_of(rows: &[Self]) -> State {
-        State { objects: Vec::new(), schedules: rows.to_vec(), outbox: Vec::new() }
+        crate::state_sched::Sched::proved(rows.to_vec())
     }
     fn rows_of(s: &State) -> Vec<Self> {
-        s.schedules.clone()
+        crate::state_sched::Sched::rows_of(s)
     }
     fn promises(_rows: &[Self]) -> Option<Vec<Promise>> {
         None

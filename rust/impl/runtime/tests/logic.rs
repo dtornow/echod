@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Effect, Etag, Event, Note, Outgoing, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::types::{Armed, Effect, Etag, Event, Note, Outgoing, Read, StoreCall, StoreOutcome, SweepOutcome};
 use echod_logic::{Call, Config, DebugCall, State};
 use echod::admit::{self, Admission, DebugOp};
 use echod::codec;
@@ -84,6 +84,7 @@ struct Harness {
     sent: Vec<String>,
     notes: Vec<Note>,
     wake_after: Option<u64>,
+    wake_armed: Armed,
     next_request: u64,
 }
 
@@ -93,7 +94,7 @@ impl Harness {
         cfg.timer_bucket_ms = 1_000;
         cfg.heartbeat_ms = 100;
         cfg.node_ttl_ms = 1_000;
-        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, next_request: 1 }
+        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, wake_armed: Armed::Timers, next_request: 1 }
     }
 
     /// One event in, and every store call it leads to answered, until the
@@ -116,7 +117,10 @@ impl Harness {
                         };
                         self.sent.push(format!("{address} {body}"));
                     }
-                    Effect::Wake { after_ms } => self.wake_after = Some(after_ms),
+                    Effect::Wake { after_ms, armed } => {
+                        self.wake_after = Some(after_ms);
+                        self.wake_armed = armed;
+                    }
                     Effect::Note(n) => self.notes.push(n),
                 }
             }
@@ -165,7 +169,7 @@ impl Harness {
             let step = self.wake_after.unwrap_or(until - self.clock).min(until - self.clock).max(1);
             self.clock += step;
             self.wake_after = None;
-            self.apply(Event::Tick { clock: self.clock });
+            self.apply(Event::Due { clock: self.clock, armed: self.wake_armed.clone() });
         }
     }
 

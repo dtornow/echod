@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use echod_logic::members::Membership;
-use echod_logic::types::{Effect, Event, Note, RequestId};
+use echod_logic::Membership;
+use echod_logic::types::{Armed, Effect, Event, Note, RequestId};
 use echod_logic::{Call, DebugCall, State};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
@@ -44,8 +44,8 @@ pub struct Node {
     metrics: Arc<Metrics>,
     replies: Mutex<HashMap<RequestId, oneshot::Sender<Reply>>>,
     next_request: AtomicU64,
-    /// When the core next wants a tick, as the wake task reads it.
-    wake: watch::Sender<Option<tokio::time::Instant>>,
+    /// When the core next wants a wake, and what that wake is for.
+    wake: watch::Sender<Option<(tokio::time::Instant, Armed)>>,
     stopped: watch::Sender<bool>,
     crashed: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -212,8 +212,9 @@ impl Node {
                 let node = self.me();
                 tokio::spawn(async move { node.send(address, message).await });
             }
-            Effect::Wake { after_ms } => {
-                let _ = self.wake.send(Some(tokio::time::Instant::now() + Duration::from_millis(after_ms)));
+            Effect::Wake { after_ms, armed } => {
+                let at = tokio::time::Instant::now() + Duration::from_millis(after_ms);
+                let _ = self.wake.send(Some((at, armed)));
             }
             Effect::Note(n) => {
                 self.metrics.note(&n);
@@ -249,14 +250,14 @@ impl Node {
         let mut rx = self.wake.subscribe();
         tokio::spawn(async move {
             loop {
-                let at = *rx.borrow_and_update();
-                match at {
+                let due = rx.borrow_and_update().clone();
+                match due {
                     None => {
                         if rx.changed().await.is_err() {
                             return;
                         }
                     }
-                    Some(at) => {
+                    Some((at, armed)) => {
                         tokio::select! {
                             biased;
                             r = rx.changed() => {
@@ -267,7 +268,7 @@ impl Node {
                             _ = tokio::time::sleep_until(at) => {
                                 let _ = node.wake.send_replace(None);
                                 let clock = node.clock.now();
-                                node.apply(Event::Tick { clock });
+                                node.apply(Event::Due { clock, armed });
                             }
                         }
                     }

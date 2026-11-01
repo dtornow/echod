@@ -99,9 +99,11 @@ pub enum Event {
     Debug { clock: u64, call: DebugCall },
     /// A store call the core issued has an answer.
     Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
-    /// Time passed: the wake the core asked for, or any other moment the
-    /// executor chooses to let the core look at the clock.
-    Tick { clock: u64 },
+    /// The runtime slept until something this process armed, and that
+    /// instant has come. `armed` is what the wake was for. A late wake
+    /// still takes every deadline already due, and the heartbeat if its
+    /// interval has come.
+    Due { clock: u64, armed: Armed },
     /// The node stops: it withdraws its announcement and runs no loop.
     Stop { clock: u64 },
 }
@@ -181,6 +183,18 @@ pub enum Outgoing {
     Unblock(verified::PromiseRecord),
 }
 
+/// What a physical wake was armed for. The runtime sleeps, then hands this
+/// back as `Event::Due`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Armed {
+    /// The heartbeat interval.
+    Heartbeat,
+    /// The nearest deadline key the wheel holds.
+    Deadline { key: String },
+    /// A bucket listing, or a retry of one. No key yet.
+    Timers,
+}
+
 /// What the core asks the executor to do.
 pub enum Effect {
     /// Make this call on the store and answer with `Event::Completed { op }`.
@@ -190,9 +204,9 @@ pub enum Effect {
     Reply { id: RequestId, response: Result<Answer, String> },
     /// Push a message to a worker. At most once; nothing is reported back.
     Send { address: String, message: Outgoing },
-    /// Send `Event::Tick` once `after_ms` have passed, replacing any wake
-    /// asked for before.
-    Wake { after_ms: u64 },
+    /// Send `Event::Due` for `armed` once `after_ms` have passed, replacing
+    /// any wake asked for before.
+    Wake { after_ms: u64, armed: Armed },
     /// Something happened that an operator, a log or a simulation may want
     /// to know. Nothing depends on it.
     Note(Note),

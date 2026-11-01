@@ -122,19 +122,26 @@ that does no I/O, and an executor that does nothing else.
 
 ```text
 rust/impl/process/src/
-  types.rs      the vocabulary: events, store calls and outcomes, effects, notes
-  config.rs     the dials
-  keys.rs       where everything lives under the bucket
-  doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
-  target.rs     an origin's document, or a schedule's
-  reason.rs     the words a refusal carries
-  cron.rs       the next time a schedule is due
-  cache.rs      what a node remembers: documents by LRU under a byte budget
-  flight.rs     one step on one document, from load to commit, one store call at a time; the fire across two
-  members.rs    the nodes: announce, list, read the configuration, write the next epoch
-  timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
-  debug.rs      debug.reset, debug.snap, debug.tick, once the runtime has accepted them
-  verified/     the proved document machine
+  handler.rs         on_event. A network request above the line; below it a store answer, the heartbeat, or a deadline key
+  handler_node.rs    the announcement, the membership, who owns a target
+  handler_docs.rs    one origin: its promises, the task inside each, a sweep of it
+  handler_sched.rs   one schedule: create, read, delete, a run coming due
+  handler_timers.rs  which keys are due; an origin goes to docs, a schedule to sched
+  state.rs           the node, the timers, the cache, and the steps in progress
+  state_node.rs      the members and the epoch, the version last seen of each origin
+  state_docs.rs      the promise rows of one origin
+  state_sched.rs     one schedule's rows
+  state_timers.rs    deadline keys ordered by when they fall due
+  types.rs           events, store calls and outcomes, effects, notes
+  config.rs          the dials
+  keys.rs            where everything lives under the bucket
+  doc.rs             a document: rows in, rows out, the fold between
+  target.rs          an origin's document, or a schedule's
+  reason.rs          the words a refusal carries
+  cron.rs            the next time a schedule is due
+  cache.rs           documents this node remembers, by LRU under a byte budget
+  debug.rs           debug.reset, debug.snap, debug.tick, once the runtime has accepted them
+  verified/          the proved document machine
 rust/impl/runtime/src/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
@@ -149,32 +156,33 @@ rust/impl/runtime/src/
 
 ### The core
 
-`State` is everything a node holds: the verified `NodeCore` with its view
-of the membership, its cache's versions and its armed keys; the cache;
-the flights in progress on documents; the membership refresh; the timer
-wheel and the listings. `on_event` is the only step. It is told one thing
-at a time, `Event`: the node starts; a request came in; a store call it
-issued has its answer; time passed; the node stops. It answers with
-`Effect`s: make this call on the store and tell me under this op id;
-answer this request; push this message; wake me after this long; note
-this. Every event carries the node's clock as the executor read it; the
-core never reads one. Nothing in it waits, sleeps, locks or spawns, so
-the same events in the same order give the same effects, which is what
-`rust/impl/runtime/tests/logic.rs` checks with a bucket that is a map and a clock that
-is a number: a promise created, timed out by its sweep, its listener told,
-its key collected, and a schedule fired into its origin, with no runtime
-under it.
+`State` is everything a node holds: the node (`state_node`: the members,
+the epoch, the version last seen of each origin), the timers (`state_timers`:
+the wheel), the cache, and the steps in progress, one per document. `on_event`
+(`handler.rs`) is the only step. It is told one thing at a time, `Event`:
+the node starts; a request came in; a store call it issued has its answer;
+a wake it armed has come, named for the heartbeat or a deadline key; the
+node stops. It answers with `Effect`s: make this call on the store and tell
+me under this op id; answer this request; push this message; wake me after
+this long for this heartbeat or this key; note this. Every event carries the
+node's clock as the executor read it; the core never reads one. Nothing in
+it waits, sleeps, locks or spawns, so the same events in the same order give
+the same effects, which is what `rust/impl/runtime/tests/logic.rs` checks
+with a bucket that is a map and a clock that is a number: a promise created,
+timed out by its sweep, its listener told, its key collected, and a schedule
+fired into its origin, with no runtime under it.
 
 A store call leaves as a submission under an op id and comes back as a
 completion under the same id; the core keeps, per id, which machine waits
 for it, and an answer nobody waits for is dropped. Three machines wait:
-a *flight*, one step on one document (`flight.rs`); the membership
-refresh (`members.rs`); a timer listing (`timers.rs`). Each is an explicit
-phase with the data it carries, advanced by the answer it waited on until
-it issues the next call or ends. Per document one flight runs at a time
-and the rest queue behind it; a fire holds the schedule's slot and takes
-the origin's for its first commit, and since no flight on an origin ever
-waits for a schedule's slot, none of this waits in a circle.
+a step on one document (`handler_docs`, and `handler_sched` when the
+document is a schedule); the membership refresh (`handler_node`); a timer
+listing (`handler_timers`). Each is an explicit phase with the data it
+carries, advanced by the answer it waited on until it issues the next call
+or ends. Per document one step runs at a time and the rest queue behind it;
+a fire holds the schedule's slot and takes the origin's for its first
+commit, and since no step on an origin ever waits for a schedule's slot,
+none of this waits in a circle.
 
 The executor (`node.rs`) is one `State` behind one lock. `apply` takes
 the lock, runs the step, drops the lock, and performs what came out: a
@@ -216,7 +224,7 @@ the rows that changed. The Lean specification projects a promise past its
 deadline and a lease past its end on every read (`Object.project`): a
 client never sees either as still ahead. The kernel keeps the promise's
 projection in the document and leaves the lease to the sweep, and `decide`
-sweeps before it handles (`flight.rs`), so the handler sees what a
+sweeps before it handles (`handler_docs`), so the handler sees what a
 projecting read would. A task's offers run on a grid anchored where it came
 to be pending, `due + n·retryTimeout` (the kernel's `next_offer`, Lean's
 `nextOffer`): a retry the sweep gets to late is rearmed where an exact
@@ -239,7 +247,7 @@ handed to the router after the commit; delivery is at most once, and a lost
 A deadline is an empty object whose key says what is due, when, a token
 drawn per arm, and the node that armed it, filed under the time bucket (an
 hour by default) its deadline falls in. The commit is the protocol
-the kernel's `commit.rs` decides, run by `flight.rs`: the key for the
+the kernel's `commit.rs` decides, run by `handler_docs`: the key for the
 document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
@@ -294,11 +302,11 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`members.rs`: they are `verified::node::NodeCore`, executable Rust
+`handler_node`: they are `verified::node::NodeCore`, executable Rust
 verified to compute the system model's specification functions step for
-step. `members.rs` is the trusted shim around it: it announces, lists,
+step. `handler_node` is the trusted shim around it: it announces, lists,
 reads the configuration object and hands it to `read_config`; it asks
-`acts`; and `flight.rs` reports every version read or written with
+`acts`; and `handler_docs` reports every version read or written with
 `filled` and every entry dropped, evicted or forgotten with `forget`, so
 what the core decides on is what the cache holds. Membership is decided on the fleet's
 time, the later of a node's clock and the latest announcement it listed,
@@ -636,7 +644,7 @@ bucket once ahead of the clock and fires what it owns from its wheel, so a
 key another node arms into a bucket already listed, for a target this node
 owns, would wait for the next membership change; the node lists a bucket
 once more when the clock leaves it, which bounds the wait by a bucket or
-two (`timers.rs`, `Listing::Relist`). The simulator found the gap through
+two (`handler_timers`, `Listing::Relist`). The simulator found the gap through
 a schedule created on one node and owned by another, never fired. The
 Occurrences theorem is why a fire commits the origin before the schedule.
 
@@ -679,8 +687,9 @@ the step module's loops, and serves every request through the kernel's
 `handle`: the runtime turns the envelope into a `Request`, the core makes one
 call, and the runtime renders the `Response`, so the request the model's `Prepare`
 carries is the request the node runs. That is Anvil's shape of refinement: functional,
-per step, with a trusted shim. The shim here is `flight.rs`, `members.rs`
-and `timers.rs`, and it is now a pure function of its events: that the
+per step, with a trusted shim. The shim here is `handler_docs`,
+`handler_sched`, `handler_node` and `handler_timers`, and it is now a pure
+function of its events: that the
 configuration handed to `read_config` is the object read, that every
 version read or written is reported, that the store calls are issued in
 the protocol's order with the decisions the core made, that the document
