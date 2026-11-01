@@ -7,18 +7,29 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the sweep and drain, each proved to compute its specification function |
-| `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
-| `refine/` | `echod-refine`: the store machine (the bucket as state, the wire rules, a sweep, the kernel handler, a drain as the request step; a sweep as internal work) as an `accordant::Model`, and `concrete_refines_abstract`: every bounded trace of it is a trace of the Resonate model, by accordant's forward-simulation theorem; the model's handlers are themselves verified to compute the twins the theorem is stated over. Proof only, `cargo verus verify -p echod-refine`; 290 items, no admits. Bounded: the clock and every instant and duration a request carries at most `MAX_TIME`, requests the wire's validators pass, no targeted timer, no schedule (`request_bounded`) |
-| `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
-| `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
-| `sim/` | `echod-sim`: the node under deterministic simulation, one seed, no wall clock, no sockets; every run checked against the Resonate model of `dtornow/accordant` |
+| `rust/impl/process/kernel` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the sweep and drain, each proved to compute its specification function |
+| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
+| `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
+| `rust/impl/cli` | `echod`: the binary |
+| `rust/spec/rover` | `echod-rover` (library `accordant`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
+| `rust/spec/abstract` | `echod-abstract` (library `resonate`): the Resonate protocol as a Rover model |
+| `rust/spec/concrete` | `echod-concrete`: the proof that `on_event` refines that model. The proof is not written yet |
+| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
+| `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-accordant`), and the store tests |
+| `lean/` | the same three layers, for experiment |
 
-The first two are proved; the third is the shim the proof stops at, with
-nothing in it but the order of calls; the fourth performs what the third
-asks; the fifth is the evidence for both. The core and the node depend on
-`resonate-core` for the traits and protocol types. Origin:
+The kernel is proved. The process around it is the shim the proof stops at,
+with nothing in it but the order of calls. The runtime performs what the
+process asks. The simulator is the evidence. The core and the node depend
+on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
+
+The Anvil cluster model and the classic Accordant refinement
+(`concrete_refines_abstract` against `accordant::Model`) are not in this
+tree. Catalogue, deadline keys, cache revalidation, and fired occurrences
+are to be restated as Rover concrete theorems in `rust/spec/concrete`.
+The sections below that name `echod-system` or `refine/` describe that
+earlier proof.
 
 ## echod-kernel
 
@@ -105,7 +116,7 @@ The node is two crates, in the shape `celld` gives a node: a decision core
 that does no I/O, and an executor that does nothing else.
 
 ```text
-logic/
+rust/impl/process/src/
   types.rs      the vocabulary: events, store calls and outcomes, effects, notes
   config.rs     the dials
   keys.rs       where everything lives under the bucket
@@ -116,7 +127,7 @@ logic/
   flight.rs     one step on one document, from load to commit, one store call at a time; the fire across two
   members.rs    the nodes: announce, list, read the configuration, write the next epoch
   timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
-echod/
+rust/impl/runtime/src/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
   env.rs        the clock and the listener, as ports
@@ -139,7 +150,7 @@ answer this request; push this message; wake me after this long; note
 this. Every event carries the node's clock as the executor read it; the
 core never reads one. Nothing in it waits, sleeps, locks or spawns, so
 the same events in the same order give the same effects, which is what
-`logic/tests/core.rs` checks with a bucket that is a map and a clock that
+`rust/impl/process/tests/core.rs` checks with a bucket that is a map and a clock that
 is a number: a promise created, timed out by its sweep, its listener told,
 its key collected, and a schedule fired into its origin, with no runtime
 under it.
@@ -218,7 +229,7 @@ handed to the router after the commit; delivery is at most once, and a lost
 A deadline is an empty object whose key says what is due, when, a token
 drawn per arm, and the node that armed it, filed under the time bucket (an
 hour by default) its deadline falls in. The commit is the protocol
-the kernel's `commit.rs` decides and `echod-system` proves, run by `flight.rs`: the key for the
+the kernel's `commit.rs` decides, run by `flight.rs`: the key for the
 document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
@@ -427,7 +438,7 @@ own differential's (its `diff/port.rs`), the same operation mix over the
 same small pools of ids, steered towards the operations not yet covered.
 Time is `head.debug_time` and moves only through `debug.tick`, which both
 servers honour in debug mode; echod answers `debug.tick`, `debug.snap` and
-`debug.reset` from `logic/debug.rs`, as machines over store calls like
+`debug.reset` from `rust/impl/process/src/debug.rs`, as machines over store calls like
 everything else: a tick sweeps every origin at the instant and fires every
 schedule due, again and again until none is, as the timers would have had
 the clock passed through every instant on the way.
@@ -473,9 +484,9 @@ the detached create (two seeds, 63,200 steps), the same.
 
 ### The accordant model
 
-`diff/accordant` drives echod with the Resonate model of
-`dtornow/accordant`, an executable specification in Verus of the whole
-protocol as the Lean specification has it (promises, callbacks, listeners,
+`rust/test/cli/diff/accordant` drives echod with the Resonate model, an
+executable specification in Verus of the whole protocol as the Lean
+specification has it (promises, callbacks, listeners,
 tasks with leases, resumes and redispatch, halt and continue, schedules),
 and checks every recorded trace against it: an execution of the model must
 produce exactly the observations, with the model's internal work (a
@@ -512,6 +523,9 @@ create of a root id alone (an id with no `:`), and checks the fence first;
 echod allows any id, and creates first.
 
 ## echod-system
+
+This model is not in the tree. What follows is the proof it held, kept
+here so the concrete theorems have a statement to be restated from.
 
 The whole system as a state machine, in the shape Anvil gives a
 Kubernetes cluster: a state, a `Step` for every action, each action an

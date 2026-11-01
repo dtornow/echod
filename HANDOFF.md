@@ -1,0 +1,398 @@
+# echod + Rover consolidation handoff
+
+The consolidation this note describes has landed. The tree is the layout in
+[README.md](README.md). What follows is the brief that produced it.
+
+## Mission
+
+The echod and Accordant/Rover repositories will be placed together before any
+restructure. Explore the resulting checkout first, establish green baselines,
+and then consolidate the generic Rover framework, the independent abstract
+Resonate model, the concrete specification of the real process, and their
+refinement proof into echod.
+
+Do not begin moving directories merely because this document names a target
+layout.
+
+## Operating rules
+
+1. Do not restructure until discovery and baseline verification are complete.
+2. Preserve both repositories' Git history. Inspect branches, remotes, and
+   working-tree state before editing.
+3. Read every applicable `AGENTS.md`, `README`, Cargo workspace manifest, Lean
+   lakefile, toolchain pin, and verification script.
+4. Treat existing architectural and proof claims as hypotheses. Verify them
+   against the checkout.
+5. Do not introduce `assume`, `admit`, `sorry`, or a new `external_body` to
+   make a proof pass.
+6. Do not make the abstract model import implementation logic. It must remain
+   independently executable for trace checking.
+7. Commit the migration in reviewable stages. Delete old copies only after
+   behavior, test, and proof parity are established.
+
+## Phase 1: discovery
+
+Locate the two original repository roots rather than assuming their names.
+Produce an inventory containing exact paths for the following.
+
+### Rover / Accordant
+
+- Rust `RoverModel`, world semantics, checker, certificate replay, and generic
+  refinement theorem.
+- Standalone Resonate protocol, abstract model, property catalogue, tests,
+  benchmark, and fuzz driver.
+- Lean `Rover.World`, Resonate abstract/concrete models, trace checker, and
+  refinement proofs.
+- Current unproved property obligations.
+- Every trusted helper and axiom.
+
+### echod
+
+- The actual pure `State::on_event` implementation and Event/Effect
+  vocabulary.
+- The current kernel/domain helpers and which ones execute in production.
+- The production effect interpreter for S3, HTTP, clocks, Tokio, replies, and
+  crashes.
+- The deterministic simulator and differential runner.
+- The property catalogue and existing Verus proofs.
+
+### Required discovery output
+
+Before editing, return:
+
+- A table of crates and Lean projects with purposes, dependencies, toolchains,
+  and verification commands.
+- A dependency DAG including proof-only dependencies.
+- A duplicate/source-of-truth map.
+- An exact old-path to target-path migration proposal.
+- A blocker list: toolchain conflicts, dependency cycles, private APIs, stale
+  branches, and incomplete proofs.
+- A green baseline transcript for Rust tests, Verus verification, and Lean
+  builds where available.
+
+## Target repository structure
+
+```text
+echod/
+├── impl/
+│   ├── process/          # actual pure State::on_event(Event) -> Effects
+│   ├── runtime/          # production S3/HTTP/clock/Tokio effect interpreter
+│   └── cli/              # binary, configuration, startup
+│
+├── spec/
+│   ├── rover/
+│   │   ├── rust/         # generic world/checker/certificates/refinement
+│   │   └── lean/         # generic Rover world and theorems
+│   ├── abstract/
+│   │   ├── rust/         # independent Resonate model and properties
+│   │   └── lean/         # mirrored abstract model and catalogue
+│   └── concrete/
+│       ├── rust/         # process views/twins, relation, simulation proof
+│       └── lean/         # concrete model/refinement where still useful
+│
+├── test/
+│   ├── runtime/          # deterministic Effect interpreter
+│   ├── sim/              # seeded simulation and trace capture
+│   ├── diff/             # differential validation
+│   ├── integration/      # real S3/HTTP tests
+│   └── fixtures/
+│
+├── Cargo.toml
+├── README.md
+└── scripts/
+```
+
+Filesystem directories may be named `abstract` and `concrete`. Rust packages
+should avoid the reserved keyword:
+
+```text
+echod-abstract  -> echod_abstract
+echod-concrete  -> echod_concrete
+```
+
+## Layer responsibilities
+
+### `impl/process`
+
+The real pure implementation. It owns:
+
+- `State`
+- `Event`
+- `Effect`
+- executable `State::on_event(Event) -> Vec<Effect>`
+
+The former kernel belongs here as internal promise, task, schedule,
+membership, cache, and timer modules. It is not a separate conceptual
+implementation.
+
+The process contains no I/O, sleeping, locks, spawned tasks, or network
+clients.
+
+### `impl/runtime`
+
+The production interpreter for Effects:
+
+```text
+Store Effect -> real S3 operation -> Completed Event
+Send Effect  -> real HTTP operation
+Wake Effect  -> Tokio timer -> Tick Event
+Reply Effect -> complete client response
+```
+
+It contains no protocol decisions.
+
+### `spec/rover`
+
+Domain-independent formal machinery:
+
+- append-only network world
+- process slots and routing
+- clean boundary observation
+- certificates and verified replay
+- bounded trace search
+- generic forward-simulation-to-trace-refinement theorem
+
+### `spec/abstract`
+
+The independent, executable Resonate reference model and its mathematical
+twin. It owns the protocol conformance properties that remain meaningful under
+Rover's world semantics.
+
+It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
+
+### `spec/concrete`
+
+Proof code about the actual process, not another implementation:
+
+- mathematical views of implementation state, events, and effects
+- concrete `Model::spec_on_event`
+- proof that real `State::on_event` implements that transition
+- concrete/abstract world relation
+- per-step forward simulation
+- final `concrete_refines_abstract` theorem
+
+### `test/runtime`
+
+A deterministic interpreter for the same Effects:
+
+```text
+Store Effect -> simulated object store
+Send Effect  -> deterministic network queue
+Wake Effect  -> fake-clock scheduler
+Reply Effect -> recorded boundary trace
+faults       -> crash, loss, delay, reordering, failed acknowledgement
+```
+
+The production and test runtimes must drive the exact same
+`impl/process::State::on_event`.
+
+## Dependency direction
+
+```text
+impl/process ----------------> impl/runtime ----> impl/cli
+     |
+     +-----------------------> spec/concrete
+
+spec/rover ---> spec/abstract ---> spec/concrete
+
+impl + spec -----------------> test/*
+```
+
+Production code must never depend on test code. If the executable process
+needs proof-only concrete definitions to state Verus contracts, document that
+dependency and ensure it erases from runtime behavior.
+
+## Semantic decisions already made
+
+### Process transition has no PID parameter
+
+The pure transition is:
+
+```text
+on_event(state, event)
+```
+
+PID belongs only to Rover routing, network envelopes, world labels, and
+certificates. A process's identity belongs in its state or configuration.
+
+### Boundary hides all internal topology
+
+Every `RoverModel` owns:
+
+```rust
+type Boundary;
+spec fn spec_observe(label) -> Seq<Self::Boundary>;
+```
+
+Only traffic crossing `outside` (conceptually PID 0) is observable. Concrete
+and abstract refinement shares only `Boundary`; internal PIDs and message
+types may differ.
+
+### Server receipt time is the transition clock
+
+The `now` passed to process `on_event` is the server-observed request arrival
+time. Do not carry a caller-supplied `requested_at` field in the request.
+
+### Timers are runtime behavior, not timer processes
+
+The process emits:
+
+```text
+Effect::Wake { after_ms }
+```
+
+The runtime later supplies:
+
+```text
+Event::Tick { clock }
+```
+
+No `Pid::Timer` or `TimerState` is required.
+
+### Search and proof are separate
+
+Bounded abstract search may return "not found" because its bounds are
+insufficient. Acceptance is sound only after verified certificate replay.
+
+## Proof chain
+
+```text
+impl/process::State::on_event
+    implements
+spec/concrete::Model::spec_on_event
+    simulates
+spec/abstract::Model::spec_on_event
+    therefore
+Concrete Boundary traces are a subset of Abstract Boundary traces
+```
+
+The actual process contract should look like:
+
+```rust
+fn State::on_event(
+    &mut self,
+    event: Event,
+) -> (effects: Vec<Effect>)
+    ensures
+        final(self)@
+            == concrete_model.spec_on_event(old(self)@, event@).state,
+        effects@.map_values(|effect: Effect| effect@)
+            == concrete_model.spec_on_event(old(self)@, event@).effects;
+```
+
+The final public theorem should mention only clean boundary traces:
+
+```rust
+proof fn echod_refines_resonate()
+    ensures
+        forall|trace: Seq<Boundary>|
+            valid_boundary_trace(concrete_model, trace)
+            ==> valid_boundary_trace(abstract_model, trace);
+```
+
+The model-specific proof must establish:
+
+1. Initial concrete and abstract worlds are related.
+2. Every concrete step is matched by zero or more abstract steps.
+3. Matched steps emit exactly the same clean boundary events.
+4. Resulting worlds remain related.
+
+The generic Rover theorem performs the induction over arbitrary finite
+executions once.
+
+## Dynamic validation path
+
+```text
+deterministic test runtime
+    drives real process::on_event
+    records clean Boundary events
+              |
+              v
+abstract Rover checker
+    searches for an abstract execution
+              |
+              v
+verified certificate replay
+    proves accepted trace is abstract-valid
+```
+
+This complements, but does not replace, the static process-to-concrete and
+concrete-to-abstract proofs.
+
+## Property catalogue migration
+
+Start from the upstream named catalogue and preserve exact names for
+cross-language diagnostics.
+
+Classify every property as:
+
+- state
+- transition
+- event/provenance
+- response
+- liveness
+- algebraic
+
+Do not force all categories into state-pair predicates.
+
+Translate model differences explicitly:
+
+- Map-backed uniqueness is structural.
+- New-message consistency inspects emitted effects/messages.
+- Outbox persistence becomes Rover's append-only-network theorem.
+- True liveness requires infinite execution and fairness semantics.
+- Algebraic claims are equations between `spec_on_event` compositions.
+
+Do not count a predicate definition as a proof. Track initialization, every
+request family, every internal step, and the final reachable-state theorem
+separately.
+
+## Migration sequence
+
+1. **Baseline:** run and record all existing Rust, Verus, and Lean checks.
+2. **Create target shells:** add directories and manifests without deleting
+   source.
+3. **Move generic Rover:** move Rust and Lean framework code together; preserve
+   tests and proof counts.
+4. **Move abstract:** move the independent model and property catalogue;
+   verify trace-checker parity.
+5. **Consolidate process:** move current pure logic and former kernel/domain
+   helpers into `impl/process` without changing behavior.
+6. **Align concrete:** add `View` implementations and concrete spec twins to
+   the real process. Verify helpers before top-level `on_event`.
+7. **Prove simulation:** define the relation, stutters/linearization points,
+   per-step matching, and final theorem.
+8. **Unify runtimes:** production and deterministic runtimes consume the same
+   Effects and emit the same Events.
+9. **Delete duplicates last:** remove old roots/manifests only after import,
+   behavior, test, and proof parity.
+
+## Acceptance criteria
+
+- No production behavior depends on formal or test runtime code.
+- `impl/process` is pure.
+- Actual `on_event` is verified against concrete `spec_on_event`.
+- Concrete and abstract models share only `Boundary` at the public refinement
+  interface.
+- Generic refinement remains model-independent and verified.
+- Deterministic simulation records Boundary traces accepted by verified
+  abstract certificate replay.
+- Rust tests, Verus verification, and Lean builds pass from documented
+  commands.
+- No stale compatibility crate, duplicate model, or old path remains.
+- Final documentation accurately states dependencies and trust boundaries.
+
+## Initial prompt for the new agent
+
+> Explore the merged checkout before editing. Identify both original
+> repository roots, read all governing instructions and manifests, inspect Git
+> status/branches/remotes, and map every Rust crate and Lean project. Locate
+> the generic Rover world/checker/refinement code, standalone abstract
+> Resonate model and properties, echod's actual `State::on_event` process,
+> production runtime, simulator, property catalogue, and current proofs. Run
+> the existing baseline checks without restructuring. Return an
+> evidence-backed inventory, dependency DAG, duplicate/source-of-truth map,
+> exact old-to-target path migration, toolchain conflicts, and phased migration
+> plan using the target `impl/spec/test` structure in this handoff. Do not move
+> files or introduce adapters until the inventory and baselines are complete.
+
