@@ -11,7 +11,7 @@ members = [
   "rust/test/runtime",
   "rust/test/cli/sim",
   "rust/test/cli/diff",
-  "rust/test/cli/diff/accordant",
+  "rust/test/cli/model",
   "rust/test/cli/store",
 ]
 

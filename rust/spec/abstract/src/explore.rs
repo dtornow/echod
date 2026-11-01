@@ -3,7 +3,7 @@
 //! spec marks its own branches (`mk` in `exec.rs`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
-use accordant::{Action, Explore, Time};
+use echod_rover::{Action, Explore, Time};
 
 use super::model::origin;
 use super::exec::*;

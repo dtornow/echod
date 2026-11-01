@@ -53,7 +53,7 @@ cargo run --release -p echod-diff -- --resonate <path to a resonate binary> --se
 The differential wants the reference server built from `resonatehq/resonate`
 (`impl/server/core`, `cargo build --release --bin resonate`); it starts it
 and echod in debug mode and drives both over HTTP. The model driver is
-`cargo run --release -p echod-accordant`, in this same workspace.
+`cargo run --release -p echod-model`, in this same workspace.
 
 `verify.sh` wants a Verus source tree with a release build in `VERUS_DIR`
 (default `~/verus-lang/verus/source`) and z3 beside it. `cargo build` is

@@ -1,6 +1,6 @@
-//! The BankAccount sample from Accordant, with calls split into request and response.
+//! The BankAccount sample, with calls split into request and response.
 
-use accordant::{Checker, Config, Footprint, HashedMap, InternalOutcome, Keyed, Model, ExternalOutcome, Time, Touches};
+use echod_rover::{Checker, Config, Footprint, HashedMap, InternalOutcome, Keyed, Model, ExternalOutcome, Time, Touches};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct Bank {
@@ -119,9 +119,8 @@ fn real_time_order_is_respected() {
 
 #[test]
 fn unanswered_request_may_take_effect_late() {
-    // The client never learns what happened to call 2. Accordant would have to
-    // decide "before or never" at the timeout; here the deposit may land after a
-    // read that missed it.
+    // The client never learns what happened to call 2. The deposit may land
+    // after a read that missed it.
     let mut c = checker();
     c.invoke(2, Request::Deposit("alice", 50)).unwrap();
     c.call(3, Request::Balance("alice"), Response::Ok(100)).unwrap();
@@ -181,7 +180,7 @@ fn footprints_keep_the_cone_small() {
 
 // ------------------------------------------------------------ whole traces
 
-use accordant::Event;
+use echod_rover::Event;
 
 fn model() -> Checker<Keyed<BankModel>> {
     Checker::with_footprints(BankModel, Bank::default(), Config { certify: true, ..Config::default() })

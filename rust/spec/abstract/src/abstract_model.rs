@@ -7,11 +7,11 @@
 
 use vstd::prelude::*;
 
-use accordant::certificate::trusted::copy;
+use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
-use accordant::rover::semantics::{Label, StepResultV};
-use accordant::rover::{ProcessEvent, RoverModel, StepResult};
-use accordant::{Sched, Time};
+use echod_rover::rover::semantics::{Label, StepResultV};
+use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
+use echod_rover::{Sched, Time};
 
 use super::exec::{Dispatch, InOut, Out, Resonate, Response, Server, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};

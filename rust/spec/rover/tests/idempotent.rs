@@ -5,7 +5,7 @@
 //! placing the call; the call may still take effect later, after other work
 //! on its keys. Both must stay candidates.
 
-use accordant::{Checker, Config, ExternalOutcome, Footprint, InternalOutcome, Model, Time, Touches};
+use echod_rover::{Checker, Config, ExternalOutcome, Footprint, InternalOutcome, Model, Time, Touches};
 
 struct Flag;
 
@@ -56,7 +56,7 @@ impl Footprint for Flag {
 
 /// Raised; then a lower and a raise in flight together, both answered. The
 /// flag may be up (the raise came last) or down (the lower did).
-fn raise_and_lower_in_flight() -> Vec<Checker<accordant::Keyed<Flag>>> {
+fn raise_and_lower_in_flight() -> Vec<Checker<echod_rover::Keyed<Flag>>> {
     let mut out = Vec::new();
     for _ in 0..2 {
         let mut c = Checker::with_footprints(Flag, false, Config::default());

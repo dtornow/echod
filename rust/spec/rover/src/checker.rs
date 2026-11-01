@@ -412,7 +412,7 @@ impl<S: Engine> Checker<S> {
         out
     }
 
-    /// True if `pred` holds in every candidate state: Accordant's "all terminal" poll check.
+    /// True if `pred` holds in every candidate state.
     pub fn all(&self, pred: impl Fn(&St<S>) -> bool) -> bool {
         self.states().all(|s| pred(&s))
     }
@@ -914,8 +914,8 @@ impl<S: Engine> Checker<S> {
     }
 
     /// Every response `op` may get if it is called now and answered now. Does not
-    /// change what the checker accepts. This is Accordant's `Allows` used as a
-    /// query: the expected responses, without having to write them down.
+    /// change what the checker accepts. The expected responses, without having
+    /// to write them down.
     pub fn allowed(&mut self, op: &Ex<S>) -> Vec<Re<S>> {
         let saved = (self.factors.clone(), self.stats.clone());
         let scope = self.scope(self.engine.external_keys(op));

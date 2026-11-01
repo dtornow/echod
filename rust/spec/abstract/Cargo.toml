@@ -10,7 +10,7 @@ name = "resonate"
 path = "src/lib.rs"
 
 [dependencies]
-accordant = { package = "echod-rover", path = "../rover" }
+echod-rover = { path = "../rover" }
 chrono = "0.4.45"
 cron = "0.17.0"
 vstd = "=0.0.0-2026-10-11-0230"

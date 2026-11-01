@@ -73,21 +73,21 @@ shows the panels with data.
 - **Detached creates.** A fence creating a promise in another origin: the
   reference allows a root id alone and checks the fence first; echod allows
   any id and creates first, then checks (DESIGN, "The detached create").
-  `echod-diff` does not generate them; `echod-accordant` does.
+  `echod-diff` does not generate them; `echod-model` does.
 - **A targeted timer.** The reference runs it as a task; the Lean
-  specification and the accordant model refuse it; echod drops the target
-  (an SDK's sleep). `echod-accordant` does not send one.
+  specification and the Resonate model refuse it; echod drops the target
+  (an SDK's sleep). `echod-model` does not send one.
 - **A schedule fires when the node gets to it.** A schedule's occurrence
   is created and its run recorded (two commits, two documents) by the
   sweep that gets to the schedule's key, not at `nextRunAt`; a client
   reading in between sees the schedule not yet advanced and the
   occurrence absent. The Lean specification's step is enabled at the
-  instant and fired by a fair scheduler, which admits this; the accordant
+  instant and fired by a fair scheduler, which admits this; the Resonate
   model fires it anywhere within `fire_within` of the instant, and
   `echod-sim` gives it two timer buckets. A deadline and a lease's end,
   by contrast, are read as passed the moment they pass (DESIGN,
   "Writing"), and a retry rearms on a grid, so nothing else a client sees
-  depends on when a node sweeps. `echod-accordant` and `echod-diff` move
+  depends on when a node sweeps. `echod-model` and `echod-diff` move
   the clock with `debug.tick`, which lets every due step land before the
   next request.
 - **Stamps are decision instants.** A step's `created_at`, `settled_at`,
@@ -103,8 +103,8 @@ shows the panels with data.
 - **Rover concrete refinement, open.** `rust/spec/concrete` holds the
   catalogue and the handler specifications, and the kernel is proved equal
   to them. It depends on the abstract model and not on the process. The
-  simulation that `on_event` refines that model is not written yet. The classic `concrete_refines_abstract` against
-  `accordant::Model` left with `refine/`. What it established, and what
+  simulation that `on_event` refines that model is not written yet. The earlier `concrete_refines_abstract` against
+  the previous-generation `Model` left with `refine/`. What it established, and what
   the Rover proof has to establish again: every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a
   sweep as the request step, sweeps as internal work) is a trace of the
@@ -132,7 +132,7 @@ shows the panels with data.
   beyond the kernel's and the model's own: the model's `origin` is the
   kernel's (both read before the first `:`), and the simulator's worker
   address is a URL. The model's side is now checked code: every handler
-  in accordant's `exec.rs` is verified to compute its twin in `spec.rs`,
+  in the abstract model's `exec.rs` is verified to compute its twin in `spec.rs`,
   and the model's `Model` impl is verified, so the checker's verdicts and
   this theorem speak about the same functions, under the model's own
   axioms (a value is its view; a set's elements come out in one order,

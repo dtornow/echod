@@ -1,4 +1,4 @@
-//! Executable behavioral specifications, after Microsoft Accordant.
+//! Executable behavioral specifications.
 //!
 //! A [`Model`] says, for any state and time, what the system does: how it answers
 //! an **external** request from a client, and what **internal** work it does on
@@ -6,7 +6,7 @@
 //! replays an observed history against it and keeps every explanation of that
 //! history that is still possible.
 //!
-//! What differs from Accordant:
+//! How a trace is read:
 //!
 //! * **Request and response are separate events.** A call is `Invoke`, then a
 //!   point where it takes effect that the checker places, then `Return`. A call
@@ -54,7 +54,7 @@ use vstd::prelude::*;
 
 // What the proofs talk about is written in Verus: the model's interface and
 // what a client observes. `cargo build` compiles it as ordinary Rust, the
-// specifications erased; `cargo verus verify -p accordant` checks the proofs
+// specifications erased; `cargo verus verify -p echod-rover` checks the proofs
 // (`semantics`, `certificate`).
 verus! {
 

@@ -1,7 +1,7 @@
 //! Time is the system's clock, recorded in the trace (`Event::Clock`). The
 //! model reads it; deadlines are on it, and the checker enforces them.
 
-use accordant::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time};
+use echod_rover::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time};
 
 /// `Start` arms a timer at 5 (`A`); when it fires, `A` gives `B` 2 more time
 /// units. `B` records the time it ran; `Read` answers that. `Order` arms two

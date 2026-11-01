@@ -1,11 +1,11 @@
 //! The concrete world: the nodes and the store Rover starts from, the shell
 //! around a node, and the store's conditional write.
 
-use accordant::rover::{ProcessEvent, RoverModel};
 use echod_concrete::model::{
     route_effects, ClientRequest, Config, Effect, Incoming, Local, Message, Model, Pid, Store,
     StoreCall, StoreFail, StoreOutcome,
 };
+use echod_rover::rover::{ProcessEvent, RoverModel};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {

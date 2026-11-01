@@ -1,4 +1,4 @@
-//! The executable [`RoverModel`](accordant::rover::RoverModel).
+//! The executable [`RoverModel`](echod_rover::rover::RoverModel).
 //!
 //! Rover assembles the world from [`Model::initial`]: the nodes and the
 //! store, an empty network, time 0. [`crate::model::spec_world`] is that
@@ -7,8 +7,8 @@
 //! uninterpreted, so the executable logic is the control in `State::on_event`
 //! and not yet that whole specification.
 
-use accordant::rover::{ProcessEvent, RoverModel, StepResult};
-use accordant::Time;
+use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
+use echod_rover::Time;
 
 use crate::model::{Boundary, Config, Incoming, Local, LocalV, Message, Model, Pid};
 

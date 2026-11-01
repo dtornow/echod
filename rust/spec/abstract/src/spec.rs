@@ -1,7 +1,7 @@
 //! The functional specification of the model: what each request and each piece
 //! of internal work does, as spec functions over the state's view. These are
 //! the `spec_external` and `spec_internal` twins the trace semantics
-//! (`accordant::semantics`) is stated over, so `valid(Resonate, ..)` says
+//! (`echod_rover::semantics`) is stated over, so `valid(Resonate, ..)` says
 //! something definite, and a refinement theorem has a side to land on.
 //!
 //! The executable handlers (`exec.rs`) are the same protocol written to run,
@@ -21,8 +21,8 @@
 
 use vstd::prelude::*;
 
-use accordant::semantics::{ExternalOutcomeV, InternalOutcomeV};
-use accordant::{ExternalOutcome, InternalOutcome, Model, Sched};
+use echod_rover::semantics::{ExternalOutcomeV, InternalOutcomeV};
+use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
 
 use super::collections::*;
 use super::exec::*;

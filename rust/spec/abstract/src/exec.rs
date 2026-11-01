@@ -3,7 +3,7 @@
 //! of `resonatehq/resonate` (`spec/spec/02-abstract/{external,internal}.lean`),
 //! the whole of it: promises, callbacks, listeners, tasks with their leases,
 //! resumes and redispatch, halt and continue, and schedules. It began as a port
-//! of the C# spec (resonatehq/resonate-accordant), and keeps that spec's one
+//! of the C# specification, and keeps that spec's one
 //! liberty: a fence may create a promise in another origin (a detached
 //! workflow), which the Lean specification refuses.
 //!
@@ -67,7 +67,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use accordant::Sched;
+use echod_rover::Sched;
 
 use super::collections::*;
 use super::spec::MAX_VERSION;
@@ -443,7 +443,7 @@ pub enum Internal {
     Advance { schedule: Id, at: Time, promise: Id },
 }
 
-/// Internal work to start, and when it runs. As `accordant::Sched`.
+/// Internal work to start, and when it runs. As `echod_rover::Sched`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Work {
     Later(Step),
@@ -451,7 +451,7 @@ pub enum Work {
 }
 
 /// One possible effect of a request: the response, the next state, the work it
-/// starts, the dispatches it sends. As `accordant::ExternalOutcome`.
+/// starts, the dispatches it sends. As `echod_rover::ExternalOutcome`.
 pub struct Out {
     pub resp: Response,
     pub next: Server,
@@ -461,7 +461,7 @@ pub struct Out {
     pub marks: Vec<&'static str>,
 }
 
-/// The effect of internal work. As `accordant::InternalOutcome`; `pending`
+/// The effect of internal work. As `echod_rover::InternalOutcome`; `pending`
 /// says the work cannot run yet (a fire before its instant) and stays as it is.
 pub struct InOut {
     pub next: Server,

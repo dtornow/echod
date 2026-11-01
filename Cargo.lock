@@ -1114,20 +1114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-accordant"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "echod-abstract",
- "echod-rover",
- "reqwest 0.12.28",
- "resonate-core",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
@@ -1161,6 +1147,20 @@ dependencies = [
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
+]
+
+[[package]]
+name = "echod-model"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "echod-abstract",
+ "echod-rover",
+ "reqwest 0.12.28",
+ "resonate-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

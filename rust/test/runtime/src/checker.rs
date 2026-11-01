@@ -1,4 +1,4 @@
-//! A run as a trace of the Resonate model, checked by `accordant`.
+//! A run as a trace of the Resonate model, checked by `echod-rover`.
 //!
 //! The history becomes the checker's trace: every request a client made is
 //! an `Invoke` at the instant it was sent (its `head.debug_time`, the
@@ -19,7 +19,7 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use accordant::{Checker, Config, Event, Grouped, Violation};
+use echod_rover::{Checker, Config, Event, Grouped, Violation};
 use resonate::{Dispatch, Request, Resonate, Response, Server};
 
 use crate::bus::Sent;

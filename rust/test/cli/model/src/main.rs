@@ -1,4 +1,4 @@
-//! echod-accordant: echod driven by the Resonate model of `dtornow/accordant`,
+//! echod-model: echod driven by the Resonate model,
 //! over HTTP, and every trace checked against that model.
 //!
 //! The model (`resonate`, the Rover abstract model) is an executable
@@ -29,10 +29,10 @@
 //! timeout, so redispatches happen in both at the same instants.
 //!
 //! ```text
-//! echod-accordant --echod target/release/echod [--runs 200] [--requests 30] [--retry-timeout 5000]
+//! echod-model --echod target/release/echod [--runs 200] [--requests 30] [--retry-timeout 5000]
 //! ```
 
-#[path = "../../src/harness.rs"]
+#[path = "../../diff/src/harness.rs"]
 mod harness;
 mod wire;
 
@@ -41,8 +41,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use accordant::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
 use clap::Parser;
+use echod_rover::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
 use resonate::{Create, Dispatch, Fenced, Request, Resonate, Response, Server as Model, MARKS};
 use serde_json::{json, Value};
 
@@ -50,7 +50,7 @@ use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
 use crate::wire::{decode, encode, model_state, prec};
 
 #[derive(Parser, Debug)]
-#[command(name = "echod-accordant", about = "echod driven by accordant's Resonate model, over HTTP")]
+#[command(name = "echod-model", about = "echod driven by the Resonate model, over HTTP")]
 struct Cli {
     #[arg(long, default_value = "../../target/release/echod")]
     echod: PathBuf,
@@ -273,7 +273,7 @@ async fn main() {
     let echod = spawn_echod(&cli.echod, "http://localhost:8001", cli.retry_timeout, &cli.logs);
     let client = Client::new();
     client.wait_ready(&echod).await;
-    eprintln!("[accordant] echod at {}, worker at {worker}", echod.url);
+    eprintln!("[model] echod at {}, worker at {worker}", echod.url);
     // `debug.tick` lets every due step land before the next request: fires are exact.
     let model = Resonate { retry_timeout: cli.retry_timeout, fire_within: 0 };
     let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };

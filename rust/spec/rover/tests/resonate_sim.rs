@@ -8,7 +8,7 @@
 //!   work a step starts);
 //! * a clock move broadcast to partitions that no factor held yet.
 
-use accordant::{certify, drive, Checker, Choices, Config, Drive, Event};
+use echod_rover::{certify, drive, Checker, Choices, Config, Drive, Event};
 use resonate::*;
 
 /// A run of the spec, driven at random and recorded.
@@ -20,7 +20,7 @@ fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> 
 fn every_mode_accepts_what_the_simulator_does() {
     for seed in 1..=300 {
         let t = trace(seed, 40);
-        let ok = |r: Result<(), accordant::Violation>, mode: &str| {
+        let ok = |r: Result<(), echod_rover::Violation>, mode: &str| {
             if let Err(v) = r {
                 panic!("seed {seed}: {mode} rejects a valid trace: {v}");
             }

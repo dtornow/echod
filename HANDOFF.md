@@ -5,7 +5,7 @@ The consolidation this note describes has landed. The tree is the layout in
 
 ## Mission
 
-The echod and Accordant/Rover repositories will be placed together before any
+The echod and Rover repositories will be placed together before any
 restructure. Explore the resulting checkout first, establish green baselines,
 and then consolidate the generic Rover framework, the independent abstract
 Resonate model, the concrete specification of the real process, and their
@@ -35,7 +35,7 @@ layout.
 Locate the two original repository roots rather than assuming their names.
 Produce an inventory containing exact paths for the following.
 
-### Rover / Accordant
+### Rover
 
 - Rust `RoverModel`, world semantics, checker, certificate replay, and generic
   refinement theorem.
@@ -270,7 +270,7 @@ Rover instantiated with the concrete model
 Rover instantiated with the abstract model
 ```
 
-The statement is `accordant::rover::refinement::refines` of
+The statement is `echod_rover::rover::refinement::refines` of
 `echod_concrete::Model` against `resonate::abstract_model::Model`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two

@@ -1,4 +1,4 @@
-//! Traces ported from resonate-accordant `Tests/ExampleTraces.cs` and
+//! Traces ported from the C# specification tests `Tests/ExampleTraces.cs` and
 //! `Tests/LeaseAndTimeoutTests.cs`. There is no server here, so each step asks the
 //! spec which responses it allows, checks that the one the C# trace expects is
 //! among them, and feeds it back as the observation.
@@ -6,8 +6,8 @@
 #[path = "common/certified.rs"]
 mod certified;
 
-use accordant::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
 use certified::Certified;
+use echod_rover::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
 use resonate::*;
 
 /// Checked twice: with partitions, and in one factor with certificates, which
@@ -66,7 +66,7 @@ impl Trace {
         r
     }
 
-    /// The model must reject `resp` (Accordant's `ExpectRejected`).
+    /// The model must reject `resp`.
     #[track_caller]
     fn rejects(&mut self, label: &str, op: Request, resp: Response) {
         let id = self.id();
@@ -410,7 +410,7 @@ fn settles_cfg() -> Config {
 fn unanswered_settles<E: Engine<M = Resonate>>(
     mut c: Checker<E>,
     origins: u64,
-) -> Result<Checker<E>, accordant::Violation> {
+) -> Result<Checker<E>, echod_rover::Violation> {
     let now = 1_000_000;
     c.clock(now)?;
     for o in 0..origins {

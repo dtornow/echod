@@ -9,7 +9,7 @@
 mod certified;
 use certified::Certified;
 
-use accordant::{Checker, Config, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Keyed, Model, Time, Touches};
+use echod_rover::{Checker, Config, ExternalOutcome, Footprint, HashedMap, InternalOutcome, Keyed, Model, Time, Touches};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 enum Status {

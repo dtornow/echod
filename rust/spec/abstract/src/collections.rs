@@ -12,12 +12,12 @@
 
 use std::collections::BTreeSet;
 
-use accordant::HashedMap;
+use echod_rover::HashedMap;
 use vstd::prelude::*;
 
 verus! {
 
-/// A persistent map from ids to `V`: `accordant::HashedMap`, seen by Verus as a
+/// A persistent map from ids to `V`: `echod_rover::HashedMap`, seen by Verus as a
 /// `Map` from the ids' characters.
 #[verifier::external_body]
 #[verifier::reject_recursive_types(V)]

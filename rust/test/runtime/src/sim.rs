@@ -568,7 +568,7 @@ async fn check(world: &World) -> Report {
         report.failures.push("the history never overlapped: nothing concurrent was checked".into());
     }
 
-    // The run as a trace of the model, checked by accordant.
+    // The run as a trace of the model, checked by echod-rover.
     let trace = checker::trace(&entries, &world.history.marks(), &sent);
     report.events = trace.len();
     match checker::check(&trace, opts.retry_timeout_ms, opts.fire_within(), opts.budget) {

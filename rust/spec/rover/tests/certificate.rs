@@ -2,7 +2,7 @@
 //! certificate puts before each event, and fails at the first event whose steps
 //! the system can't make.
 
-use accordant::{certify, Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Silent, Time};
+use echod_rover::{certify, Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Silent, Time};
 
 /// `Incr` adds one and answers the new value; `Arm` sets a timer at 5 that
 /// resets the counter. The clock is the trace's (`Event::Clock`).

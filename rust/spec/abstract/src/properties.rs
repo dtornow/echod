@@ -25,9 +25,9 @@
 
 use vstd::prelude::*;
 
-use accordant::rover::semantics::StepResultV;
-use accordant::rover::{ProcessEvent, RoverModel};
-use accordant::Time;
+use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::{ProcessEvent, RoverModel};
+use echod_rover::Time;
 
 use super::abstract_model::{Pid, StateV};
 #[cfg(verus_keep_ghost)]

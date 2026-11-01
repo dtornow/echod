@@ -3,7 +3,7 @@
 //! to, and holds the cron engine the spec trusts. None of it decides what the
 //! server does: the `Model` impl itself is verified, in `spec.rs`.
 
-use accordant::{Footprint, Partitioned, Touches};
+use echod_rover::{Footprint, Partitioned, Touches};
 
 use super::exec::*;
 

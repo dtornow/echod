@@ -6,7 +6,7 @@
 //! abstract one:
 //!
 //! ```text
-//! accordant::rover::refinement::refines(
+//! echod_rover::rover::refinement::refines(
 //!     echod_concrete::Model,
 //!     concrete_config,
 //!     resonate::abstract_model::Model,
