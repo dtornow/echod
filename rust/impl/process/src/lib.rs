@@ -10,34 +10,33 @@
 //! or in a test that feeds them by hand.
 //!
 //! ```text
-//! types.rs      the vocabulary: events, store calls and outcomes, effects, notes
+//! verified/     one document, the handlers, the sweep and the drain;
+//!               membership, cache versions, armed keys, and the commit
+//! types.rs      events, store calls and outcomes, effects, notes
 //! config.rs     the dials
 //! keys.rs       where everything lives under the bucket
-//! doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
-//! wire.rs       the kernel's vocabulary to the protocol's and back
-//! cache.rs      what a node remembers: documents by LRU under a byte budget
-//! dispatch.rs   the envelope to the kernel's request, and the document it runs on
-//! flight.rs     one step on one document, from load to commit: the verified protocol, one store call at a time; the fire across two
+//! doc.rs        a document: rows in, rows out, the fold between
+//! wire.rs       a document's rows to the protocol, and back
+//! cache.rs      documents this node remembers, by LRU under a byte budget
+//! dispatch.rs   an envelope to the request, and the document it runs on
+//! flight.rs     one step on one document, from load to commit, one store call at a time
 //! members.rs    the nodes: announce, list, read the configuration, write the next epoch
 //! timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
-//! debug.rs      debug.reset, debug.snap, debug.tick: what a test that owns the clock asks for
+//! debug.rs      debug.reset, debug.snap, debug.tick
 //! ```
 //!
-//! What stays verified beneath, all of it the kernel's: `handle` runs every
-//! request, `NodeCore` and `Commit` take every decision about membership,
-//! cache and deadline keys, and `steps` runs the sweep and the drain.
-//! The core is the shim the proof stops at, now with nothing in it but
-//! the order of calls.
+//! `verified` decides. Everything else orders the store calls around those
+//! decisions. `./verify.sh` proves `verified`; it does not load the rest.
 
 use std::collections::HashMap;
 
-use echod_kernel::node::{Key, NodeCore};
-use echod_kernel::Config as KernelConfig;
 use resonate_core::types::RequestEnvelope;
 
 use crate::cache::{Cache, Cached, MemoryCache};
 use crate::keys::KeySpace;
 use crate::types::*;
+use crate::verified::node::{Key, NodeCore};
+use crate::verified::Config as RowsConfig;
 
 pub mod cache;
 pub mod config;
@@ -49,6 +48,7 @@ pub mod keys;
 pub mod members;
 pub mod timers;
 pub mod types;
+pub mod verified;
 pub mod wire;
 
 pub use config::Config;
@@ -72,9 +72,9 @@ pub(crate) enum Owner {
 pub struct State {
     pub(crate) cfg: Config,
     pub(crate) keys: KeySpace,
-    pub(crate) kcfg: KernelConfig,
-    /// The verified node: its view of the configuration, its cache's
-    /// versions, and the deadline key it last armed per target.
+    /// `retry_timeout` and `compact`, as the document handlers take them.
+    pub(crate) rows_cfg: RowsConfig,
+    /// Membership, cache versions, and the deadline key last armed per target.
     pub(crate) core: NodeCore,
     pub(crate) cache: MemoryCache,
     /// The latest instant any announcement carried.
@@ -113,14 +113,14 @@ pub struct Snapshot {
 impl State {
     pub fn new(cfg: Config) -> Self {
         let keys = KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
-        let kcfg = cfg.kernel();
+        let rows_cfg = RowsConfig { retry_timeout: cfg.retry_timeout, compact: cfg.compact };
         let core = NodeCore::new(cfg.node_id.clone(), cfg.node_ttl_ms);
         let cache = MemoryCache::new(cfg.cache_entries, cfg.cache_bytes);
         let seed = keys::fnv1a(&format!("{}/{}", cfg.url, cfg.node_id)) | 1;
         let members = members::Members::new(&cfg);
         Self {
             keys,
-            kcfg,
+            rows_cfg,
             core,
             cache,
             fleet_at: 0,

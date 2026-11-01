@@ -7,19 +7,17 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `rust/impl/process/kernel` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the sweep and drain, each proved to compute its specification function |
-| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
+| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. `src/verified` is the proved document machine: one transition per request, and what a node decides about membership, cache versions and deadline keys, the commit, and the sweep and drain. No I/O, no clock, no runtime |
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover` (library `echod_rover`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
 | `rust/spec/abstract` | `echod-abstract` (library `resonate`): the Resonate protocol as a Rover model |
-| `rust/spec/concrete` | `echod-concrete`: the catalogue, the handler specifications, and the Rover model (nodes, one store, the initial world). The kernel depends on this crate. The refinement of that world to the abstract model is not written yet |
+| `rust/spec/concrete` | `echod-concrete`: the catalogue, the handler specifications, and the Rover model (nodes, one store, the initial world). The process depends on this crate. The refinement of that world to the abstract model is not written yet |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
-The kernel is proved equal to the concrete specification. The process around it is the shim the proof stops at,
-with nothing in it but the order of calls. The runtime performs what the
+`src/verified` is proved equal to the concrete specification. The rest of the process is the order of calls around those decisions. The runtime performs what the
 process asks. The simulator is the evidence. The core and the node depend
 on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
@@ -28,21 +26,26 @@ The Anvil cluster model and the earlier refinement of the store machine
 against the previous-generation `Model` are not in this tree. Catalogue,
 deadline keys, cache revalidation, and fired occurrences
 are to be restated as Rover concrete theorems. The catalogue and the
-handler specifications already live in `rust/spec/concrete`; the kernel is
+handler specifications already live in `rust/spec/concrete`; `src/verified` is
 proved equal to them.
 The sections below that name `echod-system` or `refine/` describe that
 earlier proof.
 
-## echod-kernel
+## The document machine
+
+`echod_logic::verified` (`rust/impl/process/src/verified`). `./verify.sh` in
+that crate loads `src/verified/mod.rs` as its root; it does not load the
+store-call machines.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
 objects, schedules and an outbox; 18 request handlers and 6 internal steps
 (`debug.*` and `*.search` left out), plus one of this design's own, the
 fence's check with no action, for the detached create; a catalogue of 92
-properties. The kernel
-is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
+properties. `verified` is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
 on the state it leaves, `legal` on the pair, and for an internal step the two
 sweeper entries.
+
+The catalogue and the `spec_*` functions are `rust/spec/concrete`. The executable modules are `src/verified`: `store`, `external`, `internal`, `steps`, `node`, `commit`.
 
 ```text
 types.rs        rows, records, requests, responses, ids; the twins, derived; the trusted string primitives
@@ -286,7 +289,7 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`members.rs`: they are `echod_kernel::node::NodeCore`, executable Rust
+`members.rs`: they are `verified::node::NodeCore`, executable Rust
 verified to compute the system model's specification functions step for
 step. `members.rs` is the trusted shim around it: it announces, lists,
 reads the configuration object and hands it to `read_config`; it asks

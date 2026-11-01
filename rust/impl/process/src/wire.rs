@@ -1,11 +1,11 @@
-//! The kernel's vocabulary to the protocol's and back.
+//! A document's rows to the protocol, and back.
 //!
-//! The kernel keeps tags and headers as ordered pairs and durations as `u64`;
+//! The rows keep tags and headers as ordered pairs and durations as `u64`;
 //! the protocol carries maps and `i64`. Everything that crosses is here.
 
 use std::collections::HashMap;
 
-use echod_kernel as k;
+use crate::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};
 
@@ -33,15 +33,15 @@ pub fn map(v: &[(String, String)]) -> HashMap<String, String> {
     v.iter().cloned().collect()
 }
 
-pub fn value_in(v: &w::PromiseValue) -> k::Value {
-    k::Value { headers: v.headers.as_ref().map(pairs).unwrap_or_default(), data: v.data.clone() }
+pub fn value_in(v: &w::PromiseValue) -> rows::Value {
+    rows::Value { headers: v.headers.as_ref().map(pairs).unwrap_or_default(), data: v.data.clone() }
 }
 
-pub fn value_out(v: &k::Value) -> w::PromiseValue {
+pub fn value_out(v: &rows::Value) -> w::PromiseValue {
     w::PromiseValue { headers: if v.headers.is_empty() { None } else { Some(map(&v.headers)) }, data: v.data.clone() }
 }
 
-pub fn promise_out(r: &k::PromiseRecord) -> w::PromiseRecord {
+pub fn promise_out(r: &rows::PromiseRecord) -> w::PromiseRecord {
     w::PromiseRecord {
         id: r.id.clone(),
         state: state_out(r.state),
@@ -54,7 +54,7 @@ pub fn promise_out(r: &k::PromiseRecord) -> w::PromiseRecord {
     }
 }
 
-pub fn task_out(r: &k::TaskRecord) -> w::TaskRecord {
+pub fn task_out(r: &rows::TaskRecord) -> w::TaskRecord {
     w::TaskRecord {
         id: r.id.clone(),
         state: task_state_out(r.state),
@@ -65,7 +65,7 @@ pub fn task_out(r: &k::TaskRecord) -> w::TaskRecord {
     }
 }
 
-pub fn schedule_out(c: &k::Schedule) -> w::ScheduleRecord {
+pub fn schedule_out(c: &rows::Schedule) -> w::ScheduleRecord {
     w::ScheduleRecord {
         id: c.id.clone(),
         cron: c.cron.clone(),
@@ -79,31 +79,31 @@ pub fn schedule_out(c: &k::Schedule) -> w::ScheduleRecord {
     }
 }
 
-pub fn state_out(s: k::PromiseState) -> w::PromiseState {
+pub fn state_out(s: rows::PromiseState) -> w::PromiseState {
     match s {
-        k::PromiseState::Pending => w::PromiseState::Pending,
-        k::PromiseState::Resolved => w::PromiseState::Resolved,
-        k::PromiseState::Rejected => w::PromiseState::Rejected,
-        k::PromiseState::RejectedCanceled => w::PromiseState::RejectedCanceled,
-        k::PromiseState::RejectedTimedout => w::PromiseState::RejectedTimedout,
+        rows::PromiseState::Pending => w::PromiseState::Pending,
+        rows::PromiseState::Resolved => w::PromiseState::Resolved,
+        rows::PromiseState::Rejected => w::PromiseState::Rejected,
+        rows::PromiseState::RejectedCanceled => w::PromiseState::RejectedCanceled,
+        rows::PromiseState::RejectedTimedout => w::PromiseState::RejectedTimedout,
     }
 }
 
-pub fn settle_in(s: w::SettleState) -> k::PromiseState {
+pub fn settle_in(s: w::SettleState) -> rows::PromiseState {
     match s {
-        w::SettleState::Resolved => k::PromiseState::Resolved,
-        w::SettleState::Rejected => k::PromiseState::Rejected,
-        w::SettleState::RejectedCanceled => k::PromiseState::RejectedCanceled,
+        w::SettleState::Resolved => rows::PromiseState::Resolved,
+        w::SettleState::Rejected => rows::PromiseState::Rejected,
+        w::SettleState::RejectedCanceled => rows::PromiseState::RejectedCanceled,
     }
 }
 
-pub fn task_state_out(s: k::TaskState) -> w::TaskState {
+pub fn task_state_out(s: rows::TaskState) -> w::TaskState {
     match s {
-        k::TaskState::Pending => w::TaskState::Pending,
-        k::TaskState::Acquired => w::TaskState::Acquired,
-        k::TaskState::Suspended => w::TaskState::Suspended,
-        k::TaskState::Halted => w::TaskState::Halted,
-        k::TaskState::Fulfilled => w::TaskState::Fulfilled,
+        rows::TaskState::Pending => w::TaskState::Pending,
+        rows::TaskState::Acquired => w::TaskState::Acquired,
+        rows::TaskState::Suspended => w::TaskState::Suspended,
+        rows::TaskState::Halted => w::TaskState::Halted,
+        rows::TaskState::Fulfilled => w::TaskState::Fulfilled,
     }
 }
 
@@ -112,13 +112,13 @@ pub fn nat(v: i64, field: &str) -> Result<u64, String> {
     u64::try_from(v).map_err(|_| format!("{field} must be non-negative"))
 }
 
-pub fn create_in(d: &w::PromiseCreateData) -> Result<k::PromiseCreateReq, String> {
+pub fn create_in(d: &w::PromiseCreateData) -> Result<rows::PromiseCreateReq, String> {
     if let Some(addr) = d.tags.get("resonate:target") {
         if !resonate_core::is_valid_address(addr) {
             return Err("Invalid resonate:target address".to_string());
         }
     }
-    Ok(k::PromiseCreateReq {
+    Ok(rows::PromiseCreateReq {
         id: d.id.clone(),
         timeout_at: nat(d.timeout_at, "timeoutAt")?,
         param: value_in(&d.param),
@@ -126,13 +126,13 @@ pub fn create_in(d: &w::PromiseCreateData) -> Result<k::PromiseCreateReq, String
     })
 }
 
-pub fn settle_in_req(d: &w::PromiseSettleData) -> k::PromiseSettleReq {
-    k::PromiseSettleReq { id: d.id.clone(), state: settle_in(d.state), value: value_in(&d.value) }
+pub fn settle_in_req(d: &w::PromiseSettleData) -> rows::PromiseSettleReq {
+    rows::PromiseSettleReq { id: d.id.clone(), state: settle_in(d.state), value: value_in(&d.value) }
 }
 
 /// The record a kernel promise exposes, as the wire carries it.
-pub fn promise_record(p: &k::Promise) -> w::PromiseRecord {
-    promise_out(&k::PromiseRecord {
+pub fn promise_record(p: &rows::Promise) -> w::PromiseRecord {
+    promise_out(&rows::PromiseRecord {
         id: p.id.clone(),
         state: p.state,
         param: p.param.clone(),
@@ -145,14 +145,14 @@ pub fn promise_record(p: &k::Promise) -> w::PromiseRecord {
 }
 
 /// A kernel outbox entry as the message a worker receives.
-pub fn message_out(e: &k::OutboxEntry, server_url: &str) -> (String, w::Message) {
+pub fn message_out(e: &rows::OutboxEntry, server_url: &str) -> (String, w::Message) {
     let msg = match &e.message {
-        k::Message::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
+        rows::Message::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
             kind: "execute".to_string(),
             head: w::MessageHead { server_url: server_url.to_string() },
             data: w::ExecuteMsgData { task: w::ExecuteMsgTask { id: task_id.clone(), version: *version as i64 } },
         }),
-        k::Message::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
+        rows::Message::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
             kind: "unblock".to_string(),
             head: w::UnblockMsgHead {},
             data: w::UnblockMsgData { promise: promise_out(r) },
@@ -174,18 +174,18 @@ pub fn reason(status: u16) -> &'static str {
 }
 
 /// The status a kernel response carries.
-pub fn status_of(r: &k::Response) -> u16 {
+pub fn status_of(r: &rows::Response) -> u16 {
     match r {
-        k::Response::Promise(p) => p.status,
-        k::Response::Schedule(c) => c.status,
-        k::Response::Status(st) => st.status,
-        k::Response::TaskGet(g) => g.status,
-        k::Response::TaskClaim(c) => c.status,
-        k::Response::TaskFence(f) => f.status,
+        rows::Response::Promise(p) => p.status,
+        rows::Response::Schedule(c) => c.status,
+        rows::Response::Status(st) => st.status,
+        rows::Response::TaskGet(g) => g.status,
+        rows::Response::TaskClaim(c) => c.status,
+        rows::Response::TaskFence(f) => f.status,
     }
 }
 
-fn object<'a>(s: &'a k::State, id: &str) -> Option<&'a k::Promise> {
+fn object<'a>(s: &'a rows::State, id: &str) -> Option<&'a rows::Promise> {
     s.objects.iter().find(|p| p.id == id)
 }
 
@@ -193,14 +193,14 @@ fn object<'a>(s: &'a k::State, id: &str) -> Option<&'a k::Promise> {
 /// kind and status, and where one status has several causes, by the
 /// state the step left, which the refusing checks did not change. The
 /// kernel proves the status; the words are the protocol's courtesy.
-pub fn reason_for(kind: &str, req: &k::Request, status: u16, s: &k::State) -> String {
+pub fn reason_for(kind: &str, req: &rows::Request, status: u16, s: &rows::State) -> String {
     let text = match (kind, status) {
         ("promise.get" | "promise.settle", 404) => "Promise not found",
         ("promise.register_callback" | "promise.register_listener", 404) => "Awaited promise not found",
         ("promise.register_callback", 422) => match req {
-            k::Request::PromiseRegisterCallback(c) => match object(s, &c.awaiter) {
+            rows::Request::PromiseRegisterCallback(c) => match object(s, &c.awaiter) {
                 None => "Awaiter promise not found",
-                Some(w) if k::tags::exec_otype(&w.tags) != k::tags::OType::Runnable => "Awaiter promise has no resonate:target tag",
+                Some(w) if rows::tags::exec_otype(&w.tags) != rows::tags::OType::Runnable => "Awaiter promise has no resonate:target tag",
                 Some(_) => "Awaited promise is not awaitable",
             },
             _ => "Awaited promise is not awaitable",
@@ -210,8 +210,8 @@ pub fn reason_for(kind: &str, req: &k::Request, status: u16, s: &k::State) -> St
         ("task.create", 409) => "Already exists",
         ("task.create", 422) => "The promise does not have a resonate:target tag",
         ("task.acquire", 409) => match req {
-            k::Request::TaskAcquire(a) => match object(s, &a.id).and_then(|p| p.task.as_ref()) {
-                Some(t) if t.state == k::TaskState::Pending => "Version mismatch",
+            rows::Request::TaskAcquire(a) => match object(s, &a.id).and_then(|p| p.task.as_ref()) {
+                Some(t) if t.state == rows::TaskState::Pending => "Version mismatch",
                 _ => "Task is not pending",
             },
             _ => "Task is not pending",
@@ -219,7 +219,7 @@ pub fn reason_for(kind: &str, req: &k::Request, status: u16, s: &k::State) -> St
         ("task.release" | "task.fulfill", 409) => "Task version mismatch or invalid state",
         ("task.suspend", 409) => "Task is not acquired or version mismatch",
         ("task.suspend", 422) => match req {
-            k::Request::TaskSuspend(q) if q.actions.iter().any(|a| object(s, &a.awaited).is_none()) => "Awaited promise not found",
+            rows::Request::TaskSuspend(q) if q.actions.iter().any(|a| object(s, &a.awaited).is_none()) => "Awaited promise not found",
             _ => "Awaited promise is not awaitable",
         },
         ("task.fence", 409) => "Version mismatch",
@@ -242,22 +242,22 @@ fn reply_with(kind: &str, corr_id: &str, status: u16, data: Value, why: Option<&
     w::ResponseEnvelope::new(kind.to_string(), corr_id.to_string(), status as i32, data)
 }
 
-pub fn promise_res(kind: &str, corr_id: &str, r: &k::PromiseRes) -> w::ResponseEnvelope {
+pub fn promise_res(kind: &str, corr_id: &str, r: &rows::PromiseRes) -> w::ResponseEnvelope {
     promise_res_with(kind, corr_id, r, None)
 }
 
-fn promise_res_with(kind: &str, corr_id: &str, r: &k::PromiseRes, why: Option<&str>) -> w::ResponseEnvelope {
+fn promise_res_with(kind: &str, corr_id: &str, r: &rows::PromiseRes, why: Option<&str>) -> w::ResponseEnvelope {
     match &r.promise {
         Some(p) => reply_with(kind, corr_id, r.status, json!({ "promise": promise_out(p) }), why),
         None => reply_with(kind, corr_id, r.status, json!({}), why),
     }
 }
 
-pub fn claim_res(kind: &str, corr_id: &str, r: &k::TaskClaimRes) -> w::ResponseEnvelope {
+pub fn claim_res(kind: &str, corr_id: &str, r: &rows::TaskClaimRes) -> w::ResponseEnvelope {
     claim_res_with(kind, corr_id, r, None)
 }
 
-fn claim_res_with(kind: &str, corr_id: &str, r: &k::TaskClaimRes, why: Option<&str>) -> w::ResponseEnvelope {
+fn claim_res_with(kind: &str, corr_id: &str, r: &rows::TaskClaimRes, why: Option<&str>) -> w::ResponseEnvelope {
     match (&r.task, &r.promise) {
         (Some(t), Some(p)) => reply_with(kind, corr_id, r.status, json!({ "task": task_out(t), "promise": promise_out(p), "preload": Value::Array(vec![]) }), why),
         _ => reply_with(kind, corr_id, r.status, json!({}), why),
@@ -271,24 +271,24 @@ pub fn status_res(kind: &str, corr_id: &str, status: u16, data: Value) -> w::Res
 /// Any kernel response as the protocol's envelope. A fence's inner action is
 /// rendered under its own kind; a suspend carries an empty preload. `why`
 /// is the reason a refusal carries, when known.
-pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &k::Response, why: Option<&str>) -> w::ResponseEnvelope {
+pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &rows::Response, why: Option<&str>) -> w::ResponseEnvelope {
     match r {
-        k::Response::Promise(p) => promise_res_with(kind, corr, p, why),
-        k::Response::Schedule(c) => match &c.schedule {
+        rows::Response::Promise(p) => promise_res_with(kind, corr, p, why),
+        rows::Response::Schedule(c) => match &c.schedule {
             Some(sc) => reply_with(kind, corr, c.status, json!({ "schedule": schedule_out(sc) }), why),
             None => reply_with(kind, corr, c.status, json!({}), why),
         },
-        k::Response::Status(st) => {
+        rows::Response::Status(st) => {
             let data = if kind == "task.suspend" { json!({ "preload": [] }) } else { json!({}) };
             reply_with(kind, corr, st.status, data, why)
         }
-        k::Response::TaskGet(g) => match &g.task {
+        rows::Response::TaskGet(g) => match &g.task {
             Some(t) => reply_with(kind, corr, g.status, json!({ "task": task_out(t) }), why),
             None => reply_with(kind, corr, g.status, json!({}), why),
         },
-        k::Response::TaskClaim(c) => claim_res_with(kind, corr, c, why),
-        k::Response::TaskFence(f) => match &f.action {
-            Some(k::TaskFenceInnerRes::Create(p)) | Some(k::TaskFenceInnerRes::Settle(p)) => {
+        rows::Response::TaskClaim(c) => claim_res_with(kind, corr, c, why),
+        rows::Response::TaskFence(f) => match &f.action {
+            Some(rows::TaskFenceInnerRes::Create(p)) | Some(rows::TaskFenceInnerRes::Settle(p)) => {
                 let inner_kind = action_kind.unwrap_or("");
                 let inner_why = (p.status >= 400).then(|| match (inner_kind, p.status) {
                     ("promise.settle", 404) | ("promise.create", 404) => "Promise not found",
@@ -304,7 +304,7 @@ pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &k::Re
 
 /// A kernel response rendered with its reason: what the node answers, and
 /// what the simulator's model answers, so the two compare as equal.
-pub fn render(kind: &str, corr: &str, action_kind: Option<&str>, req: &k::Request, r: &k::Response, after: &k::State) -> w::ResponseEnvelope {
+pub fn render(kind: &str, corr: &str, action_kind: Option<&str>, req: &rows::Request, r: &rows::Response, after: &rows::State) -> w::ResponseEnvelope {
     let status = status_of(r);
     let why = (status >= 400).then(|| reason_for(kind, req, status, after));
     response_out(kind, corr, action_kind, r, why.as_deref())

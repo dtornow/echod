@@ -17,10 +17,8 @@
 //! its deadlines: two nodes acting on one origin at once waste work, and
 //! nothing more.
 //!
-//! The state behind the rules, and the decisions, are not here: they are
-//! `echod_kernel::node::NodeCore`, executable Rust verified to compute its
-//! specification functions step for step. This module is
-//! the shim around that core: it announces, lists, reads the configuration
+//! The decisions are `verified::node::NodeCore`. This module announces,
+//! lists, reads the configuration
 //! object and hands the result to `read_config`. Membership is decided on
 //! the fleet's time, the later of a node's clock and the latest
 //! announcement it listed, which absorbs a clock that steps back or runs
@@ -33,7 +31,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use echod_kernel::node::NodeCore;
+use crate::verified::node::NodeCore;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;

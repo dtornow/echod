@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use echod_kernel::{self as k, Promise, Schedule};
+use crate::verified::{self as rows, Promise, Schedule};
 use resonate_core::types::{RequestEnvelope, ResponseEnvelope};
 use serde_json::{json, Value};
 
@@ -231,7 +231,7 @@ impl State {
         // core's versions and keys, not the wheel
         self.cache = crate::cache::MemoryCache::new(self.cfg.cache_entries, self.cfg.cache_bytes);
         let (epoch, members, last_read, read_any) = (self.core.epoch, self.core.members.clone(), self.core.last_read, self.core.read_any);
-        self.core = echod_kernel::node::NodeCore::new(self.cfg.node_id.clone(), self.cfg.node_ttl_ms);
+        self.core = rows::node::NodeCore::new(self.cfg.node_id.clone(), self.cfg.node_ttl_ms);
         if read_any {
             self.core.read_config(last_read, epoch, members);
         }
@@ -311,11 +311,11 @@ fn snapshot(promises: &[Promise], schedules: &[Schedule]) -> Value {
         for address in &p.listeners {
             listeners.push(json!({ "id": p.id, "address": address }));
         }
-        if p.state == k::PromiseState::Pending && echod_kernel::tags::exec_otype(&p.tags) != echod_kernel::tags::OType::Internal {
+        if p.state == rows::PromiseState::Pending && rows::tags::exec_otype(&p.tags) != rows::tags::OType::Internal {
             promise_timeouts.push(json!({ "id": p.id, "timeout": p.timeout_at }));
         }
         if let Some(t) = &p.task {
-            let record = k::TaskRecord { id: p.id.clone(), state: t.state, version: t.version, resumes: t.resumes.len() as u64, ttl: t.ttl, pid: t.pid.clone() };
+            let record = rows::TaskRecord { id: p.id.clone(), state: t.state, version: t.version, resumes: t.resumes.len() as u64, ttl: t.ttl, pid: t.pid.clone() };
             tasks.push(serde_json::to_value(crate::wire::task_out(&record)).unwrap_or(Value::Null));
             if let Some(at) = t.lease_timeout_at {
                 task_timeouts.push(json!({ "id": p.id, "type": 1, "timeout": at }));

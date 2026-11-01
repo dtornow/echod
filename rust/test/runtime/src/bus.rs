@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use echod_kernel::PromiseState;
+use echod_logic::verified::PromiseState;
 use echod::env::Clock;
 use echod::store::{MemoryStore, Store};
 use echod_logic::keys::{origin_of, KeySpace};
@@ -50,7 +50,7 @@ impl RecordingBus {
         Self { store, keys, clock, sent: Mutex::new(Vec::new()), tally: Mutex::new(Tally::default()) }
     }
 
-    async fn rows(&self, origin: &str) -> Vec<echod_kernel::Promise> {
+    async fn rows(&self, origin: &str) -> Vec<echod_logic::verified::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
             Ok(Some((bytes, _))) => echod_logic::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
             _ => Vec::new(),

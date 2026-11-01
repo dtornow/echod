@@ -5,14 +5,14 @@
 //! Every function here is a pure step: it reads and updates this state and
 //! nothing else, and its `ensures` says it computes the specification in
 //! `echod_concrete::node_spec`. What stays outside, trusted: the control
-//! flow that calls these functions in the right order against the real
-//! bucket (`echod_logic`), and the bucket itself.
+//! flow in the rest of this crate, which calls these functions in order
+//! against the bucket, and the bucket itself.
 
 use vstd::hash_map::StringHashMap;
 use vstd::prelude::*;
 
-// `str == str` and `String::clone` are the kernel's trusted primitives.
-pub use crate::types::{clone_string, str_eq};
+// `str == str` and `String::clone` are trusted primitives.
+pub use super::types::{clone_string, str_eq};
 
 #[cfg(verus_keep_ghost)]
 pub use echod_concrete::node_spec::*;

@@ -10,7 +10,6 @@ name = "echod_sim"
 path = "src/lib.rs"
 
 [dependencies]
-echod-kernel = { path = "../../impl/process/kernel" }
 echod-process = { path = "../../impl/process" }
 echod = { package = "echod-runtime", path = "../../impl/runtime" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }

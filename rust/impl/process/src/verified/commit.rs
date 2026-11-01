@@ -1,7 +1,7 @@
 //! A commit, as the node decides it: which deadline key to arm before the
 //! document is written, which to remove after, and which to remember.
 //!
-//! The control flow (`echod_logic`) runs the store calls; this is the
+//! `flight` runs the store calls; this is the
 //! decision between them. Each function ensures it computes the specification
 //! in `echod_concrete::commit_spec`.
 //!
@@ -16,8 +16,8 @@
 
 use vstd::prelude::*;
 
-use crate::node::*;
-use crate::types::*;
+use super::node::*;
+use super::types::*;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete::commit_spec::*;

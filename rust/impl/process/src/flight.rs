@@ -2,8 +2,8 @@
 //! time.
 //!
 //! Per document, one flight at a time: the rest queue behind it. A flight
-//! loads the document, runs the kernel, drains what the step left owed,
-//! then commits by the verified protocol of `echod_kernel::commit`, each store
+//! loads the document, runs the handler, drains what the step left owed,
+//! then commits by `verified::commit`, each store
 //! call between its decisions: the key for the document's nearest deadline
 //! is put before the document, the document is written conditionally on
 //! the version loaded, the key replaced is removed after, the key kept is
@@ -14,7 +14,7 @@
 //! re-decides.
 //!
 //! A schedule's key fires on two documents: the schedule's row decides the
-//! occurrence's promise, the kernel's `process_schedule` runs on the row
+//! occurrence's promise, `process_schedule` runs on the row
 //! beside the promise's origin, and the origin is committed first, then
 //! the schedule with the key fired: the system model's `Fire`, with its
 //! pending half. The fire holds the schedule's slot throughout and takes
@@ -31,10 +31,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use echod_kernel::node::Key;
-use echod_kernel::steps;
-use echod_kernel::commit::Commit as Plan;
-use echod_kernel::{self as k, Occurrence, OutboxEntry, Promise, Schedule, ScheduleTimeoutReq, State as KState};
+use crate::verified::commit::Commit as Plan;
+use crate::verified::node::Key;
+use crate::verified::steps;
+use crate::verified::{Occurrence, OutboxEntry, Promise, Request, Response, Schedule, ScheduleTimeoutReq, State as Rows, TaskFenceInnerRes, TaskFenceRes};
 use resonate_core::{util, Unavailable};
 
 use crate::cache::{Cache, Cached};
@@ -46,7 +46,7 @@ use crate::{unavailable, Owner, State};
 
 /// What a flight does.
 pub(crate) enum Work {
-    Request { id: RequestId, kind: String, corr: String, req: k::Request, action_kind: Option<String>, now: u64, stage: Stage },
+    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64, stage: Stage },
     /// `fired` is the key whose firing this is; none for a sweep or a fire
     /// a test asked for.
     Sweep { fired: Option<FiredKey>, now: u64 },
@@ -61,10 +61,10 @@ pub(crate) enum Stage {
     Whole,
     /// The create, with the check to run on the task's document once it has
     /// committed (taken when it is submitted).
-    Detached { then: Target, check: Option<Box<k::Request>> },
+    Detached { then: Target, check: Option<Box<Request>> },
     /// The check, with the create's answer to fold into the fence's (taken
     /// when the answer goes out).
-    Check { inner: Option<k::PromiseRes> },
+    Check { inner: Option<crate::verified::PromiseRes> },
 }
 
 impl Work {
@@ -134,7 +134,7 @@ enum Progress {
 
 /// What a committed step answers with.
 struct Done {
-    response: Option<k::Response>,
+    response: Option<Response>,
     /// Why the request was refused, in the protocol's words, if it was.
     why: Option<String>,
     outbox: Vec<OutboxEntry>,
@@ -142,7 +142,7 @@ struct Done {
 }
 
 /// A fire past its decision: the schedule as loaded, the occurrence, and
-/// what the kernel is asked.
+/// what the handler is asked.
 struct FireCtx {
     ws: Working<Schedule>,
     row: Schedule,
@@ -527,19 +527,19 @@ impl State {
                 // sees a document on which nothing is due. A client never sees
                 // a lease held past its end. The sweep's changes ride the
                 // request's write; an idle sweep writes nothing.
-                let _ = steps::sweep(&mut state, now, &self.kcfg);
-                let r = state.handle(req, now, &self.kcfg);
+                let _ = steps::sweep(&mut state, now, &self.rows_cfg);
+                let r = state.handle(req, now, &self.rows_cfg);
                 let status = crate::wire::status_of(&r);
                 let why = (status >= 400).then(|| crate::wire::reason_for(kind, req, status, &state));
                 (Some(r), why, false)
             }
             Work::Sweep { .. } => {
-                let did = steps::sweep(&mut state, now, &self.kcfg);
+                let did = steps::sweep(&mut state, now, &self.rows_cfg);
                 (None, None, did)
             }
             Work::Fire { .. } => (None, None, false),
         };
-        steps::drain(&mut state, now, &self.kcfg);
+        steps::drain(&mut state, now, &self.rows_cfg);
         let rows = R::rows_of(&state);
         let fired = match work {
             Work::Sweep { fired, .. } => fired.clone(),
@@ -560,7 +560,7 @@ impl State {
             Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
                 // The create has landed; the fence's check follows on the task's document.
                 match (done.response, check.take()) {
-                    (Some(k::Response::Promise(inner)), Some(check)) => {
+                    (Some(Response::Promise(inner)), Some(check)) => {
                         let work = Work::Request { id: *id, kind: kind.clone(), corr: corr.clone(), req: *check, action_kind: action_kind.clone(), now: *now, stage: Stage::Check { inner: Some(inner) } };
                         let then = then.clone();
                         self.submit(then, work, None, f.debug);
@@ -571,9 +571,9 @@ impl State {
             Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
                 // The fence's answer: the check's status, with the create's record inside when it held.
                 let response = match (&done.response, inner.take()) {
-                    (Some(k::Response::Status(st)), Some(inner)) => {
-                        let action = (st.status == 200).then_some(k::TaskFenceInnerRes::Create(inner));
-                        let fence = k::Response::TaskFence(k::TaskFenceRes { status: st.status, action });
+                    (Some(Response::Status(st)), Some(inner)) => {
+                        let action = (st.status == 200).then_some(TaskFenceInnerRes::Create(inner));
+                        let fence = Response::TaskFence(TaskFenceRes { status: st.status, action });
                         Ok(crate::wire::response_out(kind, corr, action_kind.as_deref(), &fence, done.why.as_deref()))
                     }
                     _ => Err(Unavailable::new("no answer")),
@@ -719,9 +719,9 @@ impl State {
         let id = schedule.clone();
         let t = steps::clamp_now(wo.loaded.stamp, ctx.t1);
         let req = ScheduleTimeoutReq { schedule: id, occurrences: vec![Occurrence { at: ctx.at, promise_id: ctx.promise_id.clone() }], next_run_at: ctx.next };
-        let mut state = KState { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
-        state.process_schedule(&req, t, &self.kcfg);
-        steps::drain(&mut state, t, &self.kcfg);
+        let mut state = Rows { objects: wo.loaded.rows.clone(), schedules: ctx.ws.loaded.rows.clone(), outbox: Vec::new() };
+        state.process_schedule(&req, t, &self.rows_cfg);
+        steps::drain(&mut state, t, &self.rows_cfg);
         self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         let mut commit = self.commit_new(wo, state.objects, t, false, None);
         match self.commit_advance(f.id, &mut commit, None) {
@@ -905,7 +905,7 @@ impl State {
                 // document is rewritten without it
                 let removed = c.w.loaded.rows.iter().any(|q| !c.rows.iter().any(|p| p.id() == q.id()));
                 let stale_after = (c.w.loaded.row_count + changed.len()).saturating_sub(c.rows.len());
-                let append = !removed && self.cfg.appendable && self.kcfg.compact > 0 && stale_after < self.kcfg.compact as usize;
+                let append = !removed && self.cfg.appendable && self.rows_cfg.compact > 0 && stale_after < self.rows_cfg.compact as usize;
                 if append {
                     let body = doc::encode(&header, changed);
                     let (n, b) = (c.w.loaded.row_count + changed.len(), c.w.loaded.bytes + body.len() as u64);

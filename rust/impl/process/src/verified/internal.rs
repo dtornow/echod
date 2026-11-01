@@ -22,23 +22,23 @@
 
 use vstd::prelude::*;
 
-use crate::external::*;
-use crate::object::*;
-use crate::store::*;
-use crate::store_proof::*;
-use crate::tags::OType;
-use crate::types::*;
+use super::external::*;
+use super::object::*;
+use super::store::*;
+use super::store_proof::*;
+use super::tags::OType;
+use super::types::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::external_proof::*;
+use super::external_proof::*;
 #[cfg(verus_keep_ghost)]
-use crate::internal_proof::*;
+use super::internal_proof::*;
 #[cfg(verus_keep_ghost)]
-use crate::internal_spec::*;
+use super::internal_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::properties::*;
+use super::properties::*;
 #[cfg(verus_keep_ghost)]
-use crate::properties_proof::*;
+use super::properties_proof::*;
 
 verus! {
 
@@ -63,7 +63,7 @@ impl State {
         match self.read_object(&req.id, now) {
             None => {
                 proof {
-                    crate::properties_proof::lemma_noop(now as nat, a);
+                    super::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
             }
@@ -88,7 +88,7 @@ impl State {
     {
         let ghost a = self@;
         proof {
-            crate::properties_proof::lemma_noop(now as nat, a);
+            super::properties_proof::lemma_noop(now as nat, a);
             lemma_internal_noop(now as nat, a);
         }
         let i = match self.find_object(&req.id) {
@@ -110,7 +110,7 @@ impl State {
         self.objects[i].task_release(end);
         proof {
             let x = req.id@;
-            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            super::store_proof::lemma_fold_update(before, super::store::obj_key(), super::store::obj_val(), i as int, self.objects@[i as int]);
             assert(self@.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().release(end as nat))));
             lemma_release_legal(now as nat, a, self@, x, end as nat);
             lemma_internal_one(now as nat, a, self@, x);
@@ -129,7 +129,7 @@ impl State {
     {
         let ghost a = self@;
         proof {
-            crate::properties_proof::lemma_noop(now as nat, a);
+            super::properties_proof::lemma_noop(now as nat, a);
             lemma_internal_noop(now as nat, a);
         }
         let i = match self.find_object(&req.id) {
@@ -147,11 +147,11 @@ impl State {
         if !due || self.objects[i].state != PromiseState::Pending || self.objects[i].timeout_at <= now {
             return;
         }
-        let address = crate::tags::exec_target_of(&self.objects[i].tags);
+        let address = super::tags::exec_target_of(&self.objects[i].tags);
         let ghost before = self.objects@;
         self.objects[i].task_rearm(now, cfg.retry_timeout);
         proof {
-            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            super::store_proof::lemma_fold_update(before, super::store::obj_key(), super::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
         let e = OutboxEntry { address, message: Message::Execute { task_id: req.id.clone(), version } };
@@ -177,7 +177,7 @@ impl State {
         let i = match self.read_object(&req.awaited, now) {
             None => {
                 proof {
-                    crate::properties_proof::lemma_noop(now as nat, a);
+                    super::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -199,7 +199,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_listener(&req.address);
         proof {
-            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            super::store_proof::lemma_fold_update(before, super::store::obj_key(), super::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let rec = self.objects[i].to_record();
         let e = OutboxEntry { address: req.address.clone(), message: Message::Unblock(rec) };
@@ -229,7 +229,7 @@ impl State {
         let i = match self.read_object(&req.awaited, now) {
             None => {
                 proof {
-                    crate::properties_proof::lemma_noop(now as nat, a);
+                    super::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -257,7 +257,7 @@ impl State {
         let ghost before = self.objects@;
         self.objects[i].remove_callback(&req.awaiter);
         proof {
-            crate::store_proof::lemma_fold_update(before, crate::store::obj_key(), crate::store::obj_val(), i as int, self.objects@[i as int]);
+            super::store_proof::lemma_fold_update(before, super::store::obj_key(), super::store::obj_val(), i as int, self.objects@[i as int]);
         }
         let ghost a1 = self@;
         // resumeOne
@@ -288,7 +288,7 @@ impl State {
             self.objects[j].task_buffer(&req.awaited);
         }
         proof {
-            crate::store_proof::lemma_fold_update(before2, crate::store::obj_key(), crate::store::obj_val(), j as int, self.objects@[j as int]);
+            super::store_proof::lemma_fold_update(before2, super::store::obj_key(), super::store::obj_val(), j as int, self.objects@[j as int]);
             lemma_callback_legal(now as nat, a, self@, x, y, true);
         }
     }
@@ -314,7 +314,7 @@ impl State {
         let si = match self.find_schedule(&req.schedule) {
             None => {
                 proof {
-                    crate::properties_proof::lemma_noop(now as nat, a);
+                    super::properties_proof::lemma_noop(now as nat, a);
                     lemma_internal_noop(now as nat, a);
                 }
                 return;
@@ -324,7 +324,7 @@ impl State {
         proof { self.lemma_schedule_at(si as int); }
         if req.occurrences.len() == 0 {
             proof {
-                crate::properties_proof::lemma_noop(now as nat, a);
+                super::properties_proof::lemma_noop(now as nat, a);
                 lemma_internal_noop(now as nat, a);
             }
             return;
@@ -349,7 +349,7 @@ impl State {
                 sched == a.schedules[req.schedule@],
                 sched.id == req.schedule@,
                 sched.promise_timeout <= MAX_TIME as nat,
-                !crate::tags::timer_targeted(sched.promise_tags),
+                !super::tags::timer_targeted(sched.promise_tags),
                 forall|j: int| 0 <= j < n ==> #[trigger] occs[j].at <= now,
                 si < self.schedules@.len(),
                 self.schedules@[si as int]@ == sched,
@@ -365,7 +365,7 @@ impl State {
                 id: o.promise_id.clone(),
                 timeout_at: o.at + self.schedules[si].promise_timeout,
                 param: self.schedules[si].promise_param.dup(),
-                tags: crate::tags::stamp_tags(&self.schedules[si].promise_tags, &req.schedule, &o.promise_id),
+                tags: super::tags::stamp_tags(&self.schedules[si].promise_tags, &req.schedule, &o.promise_id),
             };
             assert(occs[k as int] == o@);
             assert(creq@ == occ_req(sched, occs[k as int]));

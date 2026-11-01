@@ -195,14 +195,13 @@ The production and test runtimes must drive the exact same
 ## Dependency direction
 
 ```text
-spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process/kernel ---> impl/process ---> impl/runtime ---> impl/cli
+spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process ---> impl/runtime ---> impl/cli
 
 impl + spec -----------------> test/*
 ```
 
-Concrete depends on the Rover world and on the abstract model. The kernel depends on concrete,
-because a handler's `ensures` names `spec_promise_create`. The process
-depends on the kernel. Concrete depends on neither. Production code must
+Concrete depends on the Rover world and on the abstract model. The process depends on concrete,
+because a handler's `ensures` names `spec_promise_create`. Concrete depends on neither the process nor the runtime. Production code must
 never depend on test code. The ghost half of the concrete crate erases
 under `cargo build`.
 

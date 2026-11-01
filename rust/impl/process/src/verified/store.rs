@@ -2,7 +2,7 @@
 //!
 //! The object at `wf/<origin>` is a log of rows; the document is the fold of
 //! the rows by id, last row winning. The fold is `echod_concrete::state::fold_by`,
-//! generic in the key, and the kernel's state is three row vectors whose
+//! generic in the key, and this state is three row vectors whose
 //! abstract view is three maps. The lemmas tie a vector operation to a map
 //! operation:
 //!
@@ -12,9 +12,9 @@
 
 use vstd::prelude::*;
 
-use crate::store_proof::*;
+use super::store_proof::*;
 
-use crate::types::*;
+use super::types::*;
 
 #[cfg(verus_keep_ghost)]
 pub use echod_concrete::state::{

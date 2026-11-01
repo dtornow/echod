@@ -1,10 +1,10 @@
-//! The envelope to the kernel's request: the protocol's checks, then the
+//! The envelope to a document request: the protocol's checks, then the
 //! one call the node makes, `handle`, on the document the request names.
 //!
-//! Pure: an envelope in, a target and a kernel request out, or the error
+//! Pure: an envelope in, a target and a request out, or the error
 //! envelope the protocol answers with. The step itself runs in `flight.rs`.
 
-use echod_kernel as k;
+use crate::verified as rows;
 use resonate_core::types::{self as w, RequestEnvelope, ResponseEnvelope};
 use resonate_core::util;
 use serde::de::DeserializeOwned;
@@ -43,11 +43,11 @@ impl Target {
 /// fence, the kind its inner action is rendered under.
 pub struct Decoded {
     pub target: Target,
-    pub request: k::Request,
+    pub request: rows::Request,
     pub action_kind: Option<String>,
     /// A second request, on another document, once the first has
     /// committed: a detached create's fence check on the task's origin.
-    pub then: Option<(Target, k::Request)>,
+    pub then: Option<(Target, rows::Request)>,
 }
 
 /// Parse and validate a request's `data`.
@@ -125,37 +125,37 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
     }
     // A fence whose create targets another origin: the create goes first,
     // on its own document, then the fence's check on the task's.
-    let mut detached: Option<(String, k::Request)> = None;
-    let (q, schedule, action_kind): (k::Request, Option<String>, Option<String>) = match kind.as_str() {
+    let mut detached: Option<(String, rows::Request)> = None;
+    let (q, schedule, action_kind): (rows::Request, Option<String>, Option<String>) = match kind.as_str() {
         "promise.get" => {
             let d = parsed!(w::PromiseGetData);
-            (k::Request::PromiseGet(k::PromiseGetReq { id: d.id }), None, None)
+            (rows::Request::PromiseGet(rows::PromiseGetReq { id: d.id }), None, None)
         }
         "promise.create" => {
             let d = parsed!(w::PromiseCreateData);
             match wire::create_in(&d) {
-                Ok(q) => (k::Request::PromiseCreate(q), None, None),
+                Ok(q) => (rows::Request::PromiseCreate(q), None, None),
                 Err(m) => return err(400, &m),
             }
         }
         "promise.settle" => {
             let d = parsed!(w::PromiseSettleData);
-            (k::Request::PromiseSettle(wire::settle_in_req(&d)), None, None)
+            (rows::Request::PromiseSettle(wire::settle_in_req(&d)), None, None)
         }
         "promise.register_callback" => {
             let d = parsed!(w::PromiseRegisterCallbackData);
-            (k::Request::PromiseRegisterCallback(k::PromiseRegisterCallbackReq { awaited: d.awaited, awaiter: d.awaiter }), None, None)
+            (rows::Request::PromiseRegisterCallback(rows::PromiseRegisterCallbackReq { awaited: d.awaited, awaiter: d.awaiter }), None, None)
         }
         "promise.register_listener" => {
             let d = parsed!(w::PromiseRegisterListenerData);
             if !resonate_core::is_valid_address(&d.address) {
                 return err(400, "Invalid listener address");
             }
-            (k::Request::PromiseRegisterListener(k::PromiseRegisterListenerReq { awaited: d.awaited, address: d.address }), None, None)
+            (rows::Request::PromiseRegisterListener(rows::PromiseRegisterListenerReq { awaited: d.awaited, address: d.address }), None, None)
         }
         "task.get" => {
             let d = parsed!(w::TaskGetData);
-            (k::Request::TaskGet(k::TaskGetReq { id: d.id }), None, None)
+            (rows::Request::TaskGet(rows::TaskGetReq { id: d.id }), None, None)
         }
         "task.create" => {
             let d = parsed!(w::TaskCreateData);
@@ -167,7 +167,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            (k::Request::TaskCreate(k::TaskCreateReq { pid: d.pid, ttl, action }), None, None)
+            (rows::Request::TaskCreate(rows::TaskCreateReq { pid: d.pid, ttl, action }), None, None)
         }
         "task.acquire" => {
             let d = parsed!(w::TaskAcquireData);
@@ -175,7 +175,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 (Ok(v), Ok(t)) => (v, t),
                 (Err(m), _) | (_, Err(m)) => return err(400, &m),
             };
-            (k::Request::TaskAcquire(k::TaskAcquireReq { id: d.id, version, pid: d.pid, ttl }), None, None)
+            (rows::Request::TaskAcquire(rows::TaskAcquireReq { id: d.id, version, pid: d.pid, ttl }), None, None)
         }
         "task.release" => {
             let d = parsed!(w::TaskReleaseData);
@@ -183,7 +183,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            (k::Request::TaskRelease(k::TaskReleaseReq { id: d.id, version }), None, None)
+            (rows::Request::TaskRelease(rows::TaskReleaseReq { id: d.id, version }), None, None)
         }
         "task.fulfill" => {
             let d = parsed!(w::TaskFulfillData);
@@ -191,12 +191,12 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            let q = k::TaskFulfillReq {
+            let q = rows::TaskFulfillReq {
                 id: d.id,
                 version,
-                action: k::PromiseSettleReq { id: d.action.data.id, state: wire::settle_in(d.action.data.state), value: wire::value_in(&d.action.data.value) },
+                action: rows::PromiseSettleReq { id: d.action.data.id, state: wire::settle_in(d.action.data.state), value: wire::value_in(&d.action.data.value) },
             };
-            (k::Request::TaskFulfill(q), None, None)
+            (rows::Request::TaskFulfill(q), None, None)
         }
         "task.suspend" => {
             let d = parsed!(w::TaskSuspendData);
@@ -204,8 +204,8 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            let actions = d.actions.into_iter().map(|a| k::PromiseRegisterCallbackReq { awaited: a.data.awaited, awaiter: a.data.awaiter }).collect();
-            (k::Request::TaskSuspend(k::TaskSuspendReq { id: d.id, version, actions }), None, None)
+            let actions = d.actions.into_iter().map(|a| rows::PromiseRegisterCallbackReq { awaited: a.data.awaited, awaiter: a.data.awaiter }).collect();
+            (rows::Request::TaskSuspend(rows::TaskSuspendReq { id: d.id, version, actions }), None, None)
         }
         "task.fence" => {
             let d = match parse_fence(&req.data) {
@@ -218,11 +218,11 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             };
             let action = match d.action.kind.as_str() {
                 "promise.create" => match parse_action::<w::PromiseCreateData>(&d.action.data).and_then(|c| wire::create_in(&c)) {
-                    Ok(c) => k::TaskFenceAction::Create(c),
+                    Ok(c) => rows::TaskFenceAction::Create(c),
                     Err(m) => return err(400, &m),
                 },
                 "promise.settle" => match parse_action::<w::PromiseSettleData>(&d.action.data) {
-                    Ok(c) => k::TaskFenceAction::Settle(wire::settle_in_req(&c)),
+                    Ok(c) => rows::TaskFenceAction::Settle(wire::settle_in_req(&c)),
                     Err(m) => return err(400, &m),
                 },
                 _ => return err(400, "Invalid fence action kind"),
@@ -232,14 +232,14 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             // origin is a detached workflow: it commits first, on its own
             // document, and the fence's check follows on the task's.
             match action {
-                k::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
-                    detached = Some((origin_of(&c.id).to_string(), k::Request::TaskFenceCheck(k::TaskFenceCheckReq { id: d.id.clone(), version })));
-                    (k::Request::PromiseCreate(c), None, Some(d.action.kind))
+                rows::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
+                    detached = Some((origin_of(&c.id).to_string(), rows::Request::TaskFenceCheck(rows::TaskFenceCheckReq { id: d.id.clone(), version })));
+                    (rows::Request::PromiseCreate(c), None, Some(d.action.kind))
                 }
-                k::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
+                rows::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
                     return err(400, "Action must belong to the task's origin");
                 }
-                action => (k::Request::TaskFence(k::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind)),
+                action => (rows::Request::TaskFence(rows::TaskFenceReq { id: d.id, version, action }), None, Some(d.action.kind)),
             }
         }
         "task.heartbeat" => {
@@ -247,23 +247,23 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             let mut tasks = Vec::with_capacity(d.tasks.len());
             for t in d.tasks {
                 match wire::nat(t.version, "version") {
-                    Ok(v) => tasks.push(k::TaskRef { id: t.id, version: v }),
+                    Ok(v) => tasks.push(rows::TaskRef { id: t.id, version: v }),
                     Err(m) => return err(400, &m),
                 }
             }
-            (k::Request::TaskHeartbeat(k::TaskHeartbeatReq { pid: d.pid, tasks }), None, None)
+            (rows::Request::TaskHeartbeat(rows::TaskHeartbeatReq { pid: d.pid, tasks }), None, None)
         }
         "task.halt" => {
             let d = parsed!(w::TaskHaltData);
-            (k::Request::TaskHalt(k::TaskHaltReq { id: d.id }), None, None)
+            (rows::Request::TaskHalt(rows::TaskHaltReq { id: d.id }), None, None)
         }
         "task.continue" => {
             let d = parsed!(w::TaskContinueData);
-            (k::Request::TaskContinue(k::TaskContinueReq { id: d.id }), None, None)
+            (rows::Request::TaskContinue(rows::TaskContinueReq { id: d.id }), None, None)
         }
         "schedule.get" => {
             let d = parsed!(w::ScheduleGetData);
-            (k::Request::ScheduleGet(k::ScheduleGetReq { id: d.id.clone() }), Some(d.id), None)
+            (rows::Request::ScheduleGet(rows::ScheduleGetReq { id: d.id.clone() }), Some(d.id), None)
         }
         "schedule.create" => {
             let d = parsed!(w::ScheduleCreateData);
@@ -281,7 +281,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             };
             let next = util::compute_next_cron(&d.cron, now as i64).max(now as i64 + 1) as u64;
             let id = d.id.clone();
-            let q = k::ScheduleCreateReq {
+            let q = rows::ScheduleCreateReq {
                 id: d.id,
                 cron: d.cron,
                 promise_id: d.promise_id,
@@ -290,11 +290,11 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 promise_tags: wire::create_tags(&d.promise_tags),
                 next_run_at: next,
             };
-            (k::Request::ScheduleCreate(q), Some(id), None)
+            (rows::Request::ScheduleCreate(q), Some(id), None)
         }
         "schedule.delete" => {
             let d = parsed!(w::ScheduleDeleteData);
-            (k::Request::ScheduleDelete(k::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
+            (rows::Request::ScheduleDelete(rows::ScheduleDeleteReq { id: d.id.clone() }), Some(d.id), None)
         }
         "promise.search" | "task.search" | "schedule.search" => return err(403, "Search operations are not supported"),
         "debug.reset" | "debug.snap" | "debug.tick" => return err(403, "Debug operations are disabled"),

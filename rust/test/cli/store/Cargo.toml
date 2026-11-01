@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 echod = { package = "echod-runtime", path = "../../../impl/runtime" }
-echod-kernel = { path = "../../../impl/process/kernel" }
 echod-process = { path = "../../../impl/process" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 axum = { version = "0.7", features = ["json"] }

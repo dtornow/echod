@@ -3,27 +3,26 @@
 //! An origin's document holds `Promise` rows; a schedule's holds its one
 //! `Schedule` row, or none. The object is JSON lines: a header, then one row
 //! per line, in commit order. Reading folds the rows by id, last row
-//! winning — `echod_concrete::state::fold_by`, which the kernel proves is what
-//! compaction preserves. Writing appends a header and the rows the step
-//! changed, or rewrites the whole object once enough rows are stale.
+//! winning — `echod_concrete::state::fold_by`, which `verified::store` proves
+//! is what compaction preserves. Writing appends a header and the rows the
+//! step changed, or rewrites the whole object once enough rows are stale.
 //!
 //! The header carries the instant the step that wrote it was decided at —
 //! the next step on the document is decided no earlier, which keeps every
-//! step within what the kernel is proved for — and a nonce, so that every
+//! step within what `verified` is proved for — and a nonce, so that every
 //! write, a rewrite of the same rows included, is a new version: the
 //! conditional writes of every commit in flight are fenced by it.
 
-use echod_kernel::{Promise, Schedule, State};
+use crate::verified::{Promise, Schedule, State};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-/// A row of a document: what it is keyed by, and the kernel state the rows
+/// A row of a document: what it is keyed by, and the row state the rows
 /// of a document make.
 pub trait Row: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
     fn id(&self) -> &str;
     fn state_of(rows: &[Self]) -> State;
-    /// The rows of a document from a kernel state: its objects, or its
-    /// schedules.
+    /// The rows of a document from that state: its objects, or its schedules.
     fn rows_of(s: &State) -> Vec<Self>;
     /// The rows as an origin's, which the node's cache holds; `None` for a
     /// schedule's, which it does not.

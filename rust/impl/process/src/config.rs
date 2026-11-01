@@ -50,8 +50,4 @@ impl Config {
             debug: false,
         }
     }
-
-    pub fn kernel(&self) -> echod_kernel::Config {
-        echod_kernel::Config { retry_timeout: self.retry_timeout, compact: self.compact }
-    }
 }

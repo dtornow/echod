@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use echod_kernel::node::Key;
+use crate::verified::node::Key;
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::Unavailable;
 
@@ -231,7 +231,7 @@ pub enum Note {
     /// A schedule fires on `origin` at `now`: the row as loaded, the
     /// occurrence, the promise it expands to, the run after. The first
     /// half of a fire.
-    FireBegin { flight: FlightId, origin: String, now: u64, row: Box<echod_kernel::Schedule>, at: u64, promise_id: String, next: u64 },
+    FireBegin { flight: FlightId, origin: String, now: u64, row: Box<crate::verified::Schedule>, at: u64, promise_id: String, next: u64 },
     FireEnd { flight: FlightId, committed: bool },
     /// The second half: the schedule advanced past the occurrence at `at`
     /// to `next`, on its own document.

@@ -1,10 +1,10 @@
 //! The concrete specification.
 //!
 //! The catalogue, the handler specifications, and the step `on_event` is
-//! proved against live here. The kernel depends on this crate: a handler's
+//! proved against live here. The process depends on this crate: a handler's
 //! `ensures` names `spec_promise_create` and the other `spec_*` functions.
-//! This crate depends on the Rover world and on the abstract model, and on
-//! neither the kernel nor the process.
+//! This crate depends on the Rover world and on the abstract model, and
+//! does not depend on the process.
 //!
 //! ```text
 //! types.rs            rows, records, requests; the twins, derived

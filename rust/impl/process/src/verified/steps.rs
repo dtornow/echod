@@ -10,19 +10,19 @@
 
 use vstd::prelude::*;
 
-use crate::external::*;
-use crate::internal::*;
-use crate::store::*;
-use crate::store_proof::*;
-use crate::tags::OType;
-use crate::types::*;
+use super::external::*;
+use super::internal::*;
+use super::store::*;
+use super::store_proof::*;
+use super::tags::OType;
+use super::types::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::internal_spec::*;
+use super::internal_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::properties::*;
+use super::properties::*;
 #[cfg(verus_keep_ghost)]
-use crate::steps_spec::*;
+use super::steps_spec::*;
 
 verus! {
 
@@ -80,7 +80,7 @@ fn objects_next(rows: &Vec<Promise>) -> (r: Option<u64>)
         let ghost before = min;
         let ghost ap = p@;
         let pending = match p.state { PromiseState::Pending => true, _ => false };
-        let internal = match crate::tags::exec_otype(&p.tags) { OType::Internal => true, _ => false };
+        let internal = match super::tags::exec_otype(&p.tags) { OType::Internal => true, _ => false };
         if pending && !internal {
             min = note(min, p.timeout_at);
         }

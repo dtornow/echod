@@ -4,8 +4,8 @@
 
 use vstd::prelude::*;
 
-use crate::store::*;
-use crate::types::*;
+use super::store::*;
+use super::types::*;
 
 #[cfg(verus_keep_ghost)]
 pub use echod_concrete::fold_proof::*;
