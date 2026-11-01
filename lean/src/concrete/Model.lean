@@ -1,4 +1,5 @@
 import Rover
+import «concrete».Timers
 import «concrete».Internal
 
 /-!
@@ -23,9 +24,11 @@ structure Config where
   conditional : Bool := true
   flaky : Bool := false
   retries : Nat := 3
-  /-- The one process that advances timeout workflows. External traffic may
-  still use every node in the duplicate-free deployment. -/
-  workflowNode : Addr := ""
+  bucketWidth : Time := 1000
+  loadAhead : Time := 2000
+  heartbeat : Time := 1000
+  nodeTtl : Time := 5000
+  fireConcurrency : Nat := 16
 
 inductive Pid where
   | outside
@@ -39,6 +42,14 @@ inductive StoreRequest where
   | get (key : DocumentKey)
   | put (key : DocumentKey) (document : Document key)
       (expectedVersion : Option Version)
+  | armTimer (key : TimerKey)
+  | deleteTimer (key : TimerKey)
+  | deleteTimers (keys : List TimerKey)
+  | listTimers (through : Time)
+  | announce (announcement : Announcement)
+  | listAnnouncements
+  | getMembership
+  | putMembership (expectedVersion : Version) (next : MembershipConfig)
 
 /-- Application payload of a store reply. The key on `got` is the dependent
 index needed to type the returned document; correlation remains external. -/
@@ -49,6 +60,10 @@ inductive StoreReply where
   | conflict
   /-- The write may have landed. -/
   | failed
+  | done
+  | timers (keys : List TimerKey)
+  | announcements (values : List Announcement)
+  | membership (configuration : MembershipConfig) (version : Version)
 
 structure RpcRequest where
   op : OpId
@@ -73,11 +88,22 @@ structure CacheEntry where
   key : DocumentKey
   value : Versioned key
 
+inductive Control where
+  | announced (now : Time)
+  | announcements (now : Time)
+  | membership (now : Time) (live : List Addr)
+  | membershipWrite (now : Time)
+  | timerList (now through : Time) (kind : ListingKind)
+  | cleanup (outputs : List Output)
+  deriving Repr
+
 /-- The physical store has one optional, independently versioned value for
 each dependent document key. `keys` is only the finite discovery index. -/
 structure Store where
   keys : List DocumentKey := []
   values : (key : DocumentKey) → Option (Versioned key) := fun _ => none
+  timers : TimerObjects := {}
+  membership : MembershipObjects := {}
 
 def Store.read (store : Store) (key : DocumentKey) :
     Option (Document key × Version) :=
@@ -94,7 +120,8 @@ theorem Store.version_eq_read (store : Store) (key : DocumentKey) :
 def Store.commit (store : Store) (key : DocumentKey)
     (document : Document key) : Store :=
   let version := (store.version key).getD 0 + 1
-  { keys :=
+  { store with
+    keys :=
       if store.keys.contains key then store.keys else store.keys ++ [key]
     values := fun other =>
       if h : other = key then
@@ -196,7 +223,7 @@ def pendingWorkflow (entries : List PendingEntry) :
 inductive Transaction where
   | external (call : Call)
   | work (item : WorkItem) (now : Time) (rest : List PendingEntry)
-  | scan (key : DocumentKey) (now : Time) (rest : List PendingEntry)
+  | sweep (timer : TimerKey) (now : Time) (rest : List PendingEntry)
 
 def Transaction.key? : Transaction → Option DocumentKey
   | .external call =>
@@ -243,11 +270,13 @@ def Transaction.key? : Transaction → Option DocumentKey
       | .taskContinue req => some (.origin req.id.origin)
       | .taskSearch _ => none
   | .work item _ _ => some item.key
-  | .scan key _ _ => some key
+  | .sweep timer _ _ => some timer.target.key
 
 inductive Phase where
   | loading
+  | arming
   | writing
+  | deleting
   deriving DecidableEq, Repr
 
 /-- A node-local continuation. `loaded`, `document`, selected boundary
@@ -261,30 +290,30 @@ structure Flight where
   continuations : List PendingEntry := []
   attempt : Nat := 0
   phase : Phase := .loading
+  address : Addr := ""
+  armed : Option TimerKey := none
+  fired : Option TimerKey := none
+  cleanup : List TimerKey := []
 
 structure Node where
   nextOp : OpId := 0
+  nextTimerToken : TimerToken := 0
   flights : List (OpId × Flight) := []
+  controls : List (OpId × Control) := []
   /-- A non-authoritative node-local read cache. Every decision is still
   validated by a raw conditional PUT. -/
   cache : List CacheEntry := []
-  /-- Keys whose document transaction received a definite written reply. -/
-  known : List DocumentKey := []
   /-- Process-local schedule occurrence and timeout workflow. -/
   pending : List PendingEntry := []
-  /-- An ambiguous internal PUT failure permanently stops this local workflow.
-  External requests remain available. This prevents guessing whether a
-  schedule/occurrence write landed. -/
-  workflowBlocked : Bool := false
+  membership : MembershipView := {}
+  wheel : TimerWheel := {}
+  armed : List ArmedEntry := []
+  nextHeartbeat : Option Time := some 0
 
 inductive Local where
   | outside
   | node (state : Node)
   | store (state : Store)
-
-def Node.remember (node : Node) (key : DocumentKey) : Node :=
-  if node.known.contains key then node
-  else { node with known := node.known ++ [key] }
 
 def CacheEntry.read (entry : CacheEntry) (key : DocumentKey) :
     Option (Versioned key) :=
@@ -301,9 +330,33 @@ def Node.cachePut (node : Node) (key : DocumentKey)
 def Node.cacheInvalidate (node : Node) (key : DocumentKey) : Node :=
   { node with cache := node.cache.filter (·.key != key) }
 
+def Node.previousArmed? (node : Node) (flight : Flight) : Option TimerKey :=
+  match flight.loaded.map (·.2) with
+  | none => none
+  | some version =>
+      (node.armed.find? fun entry =>
+        entry.target == flight.key && entry.version == version).map (·.timer)
+
+def Node.noteArmed (node : Node) (flight : Flight) : Node :=
+  let retained := node.armed.filter (·.target != flight.key)
+  match flight.armed with
+  | none => { node with armed := retained }
+  | some timer =>
+      { node with
+        armed := {
+          target := flight.key
+          timer
+          version :=
+            (flight.loaded.map fun loaded => loaded.2).getD 0 + 1
+        } :: retained }
+
 def Node.takeFlight (node : Node) (op : OpId) : Option Flight × Node :=
   let flight := (node.flights.find? (·.1 == op)).map (·.2)
   (flight, { node with flights := node.flights.filter (·.1 != op) })
+
+def Node.takeControl (node : Node) (op : OpId) : Option Control × Node :=
+  let control := (node.controls.find? (·.1 == op)).map (·.2)
+  (control, { node with controls := node.controls.filter (·.1 != op) })
 
 def Node.await (node : Node) (flight : Flight)
     (payload : StoreRequest) : Node × (Pid × Msg) :=
@@ -311,6 +364,14 @@ def Node.await (node : Node) (flight : Flight)
   ({ node with
       nextOp := op + 1
       flights := (op, flight) :: node.flights },
+    (.store, .storeRequest { op, payload }))
+
+def Node.awaitControl (node : Node) (control : Control)
+    (payload : StoreRequest) : Node × (Pid × Msg) :=
+  let op := node.nextOp
+  ({ node with
+      nextOp := op + 1
+      controls := (op, control) :: node.controls },
     (.store, .storeRequest { op, payload }))
 
 def sendOutputs (outputs : List Output) : List (Pid × Msg) :=
@@ -328,11 +389,16 @@ fabricating a response of the wrong constructor. Until that transition is
 selected, failed internal work is silent. -/
 def failureOutputs : Transaction → List Output
   | .external call => [Resonate.unavailable call]
-  | .work _ _ _ | .scan _ _ _ => []
+  | .work _ _ _ | .sweep _ _ _ => []
 
 def Transaction.isExternal : Transaction → Bool
   | .external _ => true
-  | .work _ _ _ | .scan _ _ _ => false
+  | .work _ _ _ | .sweep _ _ _ => false
+
+def Transaction.logicalTime : Transaction → Time
+  | .external call => call.requestedAt
+  | .work _ now _ => now
+  | .sweep _ now _ => now
 
 def Candidate.cast {left right : DocumentKey} (h : left = right)
     (candidate : Candidate left) : Candidate right :=
@@ -539,7 +605,7 @@ def selectedWork (appConfig : Resonate.Config) (item : WorkItem)
        candidate.outputs)
   | none => (singleState key document, [])
 
-def selectScan (appConfig : Resonate.Config) (key : DocumentKey)
+def selectScanWork (appConfig : Resonate.Config) (key : DocumentKey)
     (now : Time) (rest : List PendingEntry) (document : Document key) :
     Option (Candidate key) :=
   match key with
@@ -557,12 +623,23 @@ def selectScan (appConfig : Resonate.Config) (key : DocumentKey)
           else none
       | none => none
 
+def selectScan (appConfig : Resonate.Config) (key : DocumentKey)
+    (now : Time) (rest : List PendingEntry) (document : Document key) :
+    Option (Candidate key) :=
+  match selectScanWork appConfig key now rest document with
+  | some candidate => some candidate
+  | none =>
+      if (documentDeadline? key document now).isSome then
+        some { document, outputs := [], continuations := rest }
+      else
+        none
+
 theorem selectScan_origin_some
     (appConfig : Resonate.Config) (origin : String) (now : Time)
     (rest : List PendingEntry) (document : OriginDocument origin)
     (candidate : Candidate (.origin origin))
     (hselect :
-      selectScan appConfig (.origin origin) now rest document =
+      selectScanWork appConfig (.origin origin) now rest document =
         some candidate) :
     ∃ item,
       item ∈ Decision.originWork origin document now ∧
@@ -574,11 +651,11 @@ theorem selectScan_origin_some
         result.1.workflow.pending.map PendingEntry.fromWorkflow := by
   cases hhead : (Decision.originWork origin document now).head? with
   | none =>
-      simp only [selectScan] at hselect
+      simp only [selectScanWork] at hselect
       rw [hhead] at hselect
       contradiction
   | some item =>
-      simp only [selectScan] at hselect
+      simp only [selectScanWork] at hselect
       rw [hhead] at hselect
       refine ⟨item, ?_, ?_⟩
       obtain ⟨remaining, hitems⟩ := List.head?_eq_some_iff.mp hhead
@@ -591,7 +668,7 @@ theorem selectScan_schedule_some
     (rest : List PendingEntry) (document : ScheduleDocument id)
     (candidate : Candidate (.schedule id))
     (hselect :
-      selectScan appConfig (.schedule id) now rest document =
+      selectScanWork appConfig (.schedule id) now rest document =
         some candidate) :
     ∃ schedule,
       document = some schedule ∧ schedule.nextRunAt ≤ now ∧
@@ -603,12 +680,12 @@ theorem selectScan_schedule_some
         result.1.workflow.pending.map PendingEntry.fromWorkflow := by
   cases hdocument : document with
   | none =>
-      simp only [selectScan] at hselect
+      simp only [selectScanWork] at hselect
       rw [hdocument] at hselect
       contradiction
   | some schedule =>
       subst document
-      simp only [selectScan] at hselect
+      simp only [selectScanWork] at hselect
       by_cases hdue : schedule.nextRunAt ≤ now
       · simp only [if_pos hdue] at hselect
         refine ⟨schedule, rfl, hdue, ?_⟩
@@ -625,29 +702,96 @@ def select (appConfig : Resonate.Config) (flight : Flight)
       selectedExternalCandidate appConfig call flight.key document
   | .work item now rest =>
       selectedWorkCandidate appConfig item now rest flight.key document
-  | .scan key now rest =>
-      if h : key = flight.key then
-        h ▸ selectScan appConfig key now rest (h.symm ▸ document)
+  | .sweep timer now rest =>
+      if h : timer.target.key = flight.key then
+        h ▸ selectScan appConfig timer.target.key now rest
+          (h.symm ▸ document)
       else none
+
+def writeCandidate (node : Node) (flight : Flight)
+    (loaded : Option (Document flight.key × Version))
+    (candidate : Candidate flight.key) :
+    Result Pid Local Msg :=
+  let writing : Flight := {
+    flight with
+    loaded
+    document := some candidate.document
+    selected := candidate.outputs
+    continuations := candidate.continuations
+    phase := .writing
+  }
+  let (nextNode, request) :=
+    node.await writing
+      (.put flight.key candidate.document (loaded.map (·.2)))
+  { state := .node nextNode, send := [request] }
+
+def finishNode (node : Node) (flight : Flight) : Node :=
+  let wheel :=
+    match flight.fired with
+    | some _ => node.wheel.finishOne
+    | none => node.wheel
+  { node with
+    pending := flight.continuations ++ node.pending
+    wheel }
+
+def finishFlight (node : Node) (flight : Flight) :
+    Result Pid Local Msg :=
+  { state := .node (finishNode node flight)
+    send := sendOutputs flight.selected }
+
+def continueCleanup (node : Node) (flight : Flight) :
+    Result Pid Local Msg :=
+  let finished := finishNode node flight
+  match flight.cleanup with
+  | [] =>
+      { state := .node finished
+        send := sendOutputs flight.selected }
+  | keys =>
+      let (next, request) :=
+        finished.awaitControl (.cleanup flight.selected) (.deleteTimers keys)
+      { state := .node next, send := [request] }
+
+def cleanupFlight (flight : Flight) (fired : TimerKey) : Flight :=
+  match flight.transaction with
+  | .sweep _ _ rest =>
+      { flight with
+        continuations :=
+          if flight.attempt = 0 then rest else flight.continuations
+        cleanup := [fired] }
+  | .external _ | .work _ _ _ =>
+      { flight with cleanup := [fired] }
+
+@[simp] theorem cleanupFlight_cleanup (flight : Flight) (fired : TimerKey) :
+    (cleanupFlight flight fired).cleanup = [fired] := by
+  cases htransaction : flight.transaction <;>
+    simp [cleanupFlight, htransaction]
 
 def decide (appConfig : Resonate.Config) (node : Node) (flight : Flight)
     (loaded : Option (Document flight.key × Version)) :
     Result Pid Local Msg :=
   match select appConfig flight loaded with
-  | none => { state := .node node, send := [] }
+  | none =>
+      match flight.fired with
+      | none => { state := .node node, send := [] }
+      | some fired =>
+          continueCleanup node (cleanupFlight flight fired)
   | some candidate =>
-      let writing : Flight := {
-        flight with
-        loaded
-        document := some candidate.document
-        selected := candidate.outputs
-        continuations := candidate.continuations
-        phase := .writing
-      }
-      let (nextNode, request) :=
-        node.await writing
-          (.put flight.key candidate.document (loaded.map (·.2)))
-      { state := .node nextNode, send := [request] }
+      match timerForDocument flight.key candidate.document
+          flight.transaction.logicalTime node.nextTimerToken flight.address with
+      | none => writeCandidate node flight loaded candidate
+      | some timer =>
+          let arming : Flight := {
+            flight with
+            loaded
+            document := some candidate.document
+            selected := candidate.outputs
+            continuations := candidate.continuations
+            phase := .arming
+            armed := some timer
+          }
+          let node := { node with nextTimerToken := node.nextTimerToken + 1 }
+          let (nextNode, request) := node.await arming (.armTimer timer)
+          { state := .node nextNode, send := [request] }
 
 def retry (config : Config) (node : Node) (flight : Flight) :
     Result Pid Local Msg :=
@@ -657,7 +801,7 @@ def retry (config : Config) (node : Node) (flight : Flight) :
       loaded := none
       document := none
       selected := []
-      continuations := []
+      armed := none
       attempt := flight.attempt + 1
       phase := .loading
     }
@@ -694,8 +838,9 @@ def storePut (config : Config) (sender : Pid) (store : Store)
       }
 
 def start (appConfig : Resonate.Config) (node : Node) (transaction : Transaction)
-    (key : DocumentKey) : Result Pid Local Msg :=
-  let flight : Flight := { key, transaction }
+    (key : DocumentKey) (address : Addr := "")
+    (fired : Option TimerKey := none) : Result Pid Local Msg :=
+  let flight : Flight := { key, transaction, address, fired }
   match node.cacheRead key with
   | some value =>
       decide appConfig node flight (some (value.document, value.version))
@@ -723,20 +868,73 @@ def pureExternal (_appConfig : Resonate.Config) (node : Node) (call : Call) :
     send := sendOutputs
       [.response call.client call.id (pureResponse call.request)] }
 
+def cleanupKeys (node : Node) (flight : Flight) : List TimerKey :=
+  let predecessor :=
+    match node.previousArmed? flight with
+    | some key => if some key == flight.fired then [] else [key]
+    | none => []
+  predecessor ++ flight.fired.toList
+
+def committedFlight (node : Node) (flight : Flight) :
+    Result Pid Local Msg :=
+  let cleanup := cleanupKeys node flight
+  continueCleanup (node.noteArmed flight) { flight with cleanup }
+
+def latestAnnouncement (values : List Announcement) : Time :=
+  values.foldl (fun latest value => max latest value.announcedAt) 0
+
+def liveAnnouncementIds
+    (values : List Announcement) (now ttl : Time) : List Addr :=
+  let fleetAt := max now (latestAnnouncement values)
+  (values.filter fun value => fleetAt ≤ value.announcedAt + ttl).map (·.id)
+
+def beginMembershipRefresh (node : Node) (address : Addr) (now : Time) :
+    Result Pid Local Msg :=
+  let announcement : Announcement := {
+    id := address
+    url := address
+    announcedAt := now
+  }
+  let (next, request) :=
+    node.awaitControl (.announced now) (.announce announcement)
+  { state := .node next, send := [request] }
+
+def beginTimerList (node : Node) (config : Config)
+    (now : Time) (kind : ListingKind) : Result Pid Local Msg :=
+  let through := now + config.loadAhead
+  let (next, request) :=
+    node.awaitControl (.timerList now through kind) (.listTimers through)
+  { state := .node {
+      next with wheel := { next.wheel with listing := some kind } }
+    send := [request] }
+
+def refreshEnded (node : Node) (config : Config) (now : Time) :
+    Result Pid Local Msg :=
+  beginTimerList { node with nextHeartbeat := some (now + config.heartbeat) }
+    config now .initial
+
 def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
     (localState : Local) (now : Time) (event : Event Pid Msg) :
     Outcomes (Result Pid Local Msg) :=
   match pid, localState, event with
   | .node address, .node node, .receive .outside (.request call) =>
-      if address != config.workflowNode || !node.flights.isEmpty then
+      if !node.flights.isEmpty || !node.controls.isEmpty then
         Outcomes.one { state := .node node, send := [] }
       else
         match (Transaction.external call).key? with
-        | some key => Outcomes.one (start appConfig node (.external call) key)
+        | some key =>
+            let target := TimerTarget.ofDocumentKey key
+            if node.membership.owns address now config.nodeTtl target then
+              Outcomes.one
+                (start appConfig node (.external call) key address)
+            else
+              Outcomes.one {
+                state := .node node
+                send := sendOutputs [Resonate.unavailable call]
+              }
         | none => Outcomes.one (pureExternal appConfig node call)
   | .node address, .node node, .timeout =>
-      if address != config.workflowNode || node.workflowBlocked ||
-          !node.flights.isEmpty then
+      if !node.flights.isEmpty || !node.controls.isEmpty then
         Outcomes.one { state := .node node, send := [] }
       else
         match node.pending with
@@ -745,13 +943,39 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
               match entry with
               | .occurrence request instant =>
                   Transaction.work (.occurrence request instant) instant rest
-            Outcomes.one (start appConfig { node with pending := [] }
-              transaction entry.key)
+            Outcomes.one (start appConfig {
+              node with pending := [] }
+              transaction entry.key address)
         | [] =>
-            match node.known.head? with
-            | some key =>
-                Outcomes.one (start appConfig node (.scan key now []) key)
-            | none => Outcomes.one { state := .node node, send := [] }
+            if node.nextHeartbeat.all (· ≤ now) then
+              Outcomes.one (beginMembershipRefresh node address now)
+            else
+              let wheel := node.wheel.takeDue now config.fireConcurrency
+              match wheel.beginOne with
+              | some (timer, wheel) =>
+                  let node := { node with wheel }
+                  if node.membership.owns address now config.nodeTtl
+                      timer.target then
+                    Outcomes.one
+                      (start appConfig node (.sweep timer now [])
+                        timer.target.key address (some timer))
+                  else
+                    Outcomes.one {
+                      state := .node {
+                        node with wheel := node.wheel.finishOne }
+                      send := []
+                    }
+              | none =>
+                  let currentBucket := bucketOf config.bucketWidth now
+                  if node.wheel.closedThrough < currentBucket then
+                    Outcomes.one
+                      (beginTimerList { node with wheel } config now
+                        (.relist node.wheel.closedThrough))
+                  else if node.wheel.loadedThrough < now + config.loadAhead then
+                    Outcomes.one
+                      (beginTimerList { node with wheel } config now .extend)
+                  else
+                    Outcomes.one { state := .node { node with wheel }, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .got key loaded }) =>
       let (flight, next) := node.takeFlight op
@@ -767,10 +991,18 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
                       next.cachePut flight.key { document, version }
                   | none => next.cacheInvalidate flight.key
                 Outcomes.one (decide appConfig cached flight loaded')
-            | .writing =>
-                Outcomes.one { state := .node next, send := [] }
+            | .arming | .writing | .deleting =>
+                Outcomes.one {
+                  state := .node {
+                    next with flights := (op, flight) :: next.flights }
+                  send := []
+                }
           else
-            Outcomes.one { state := .node next, send := [] }
+            Outcomes.one {
+              state := .node {
+                next with flights := (op, flight) :: next.flights }
+              send := []
+            }
       | none => Outcomes.one { state := .node node, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .written }) =>
@@ -779,14 +1011,108 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       | some flight =>
           match flight.phase with
           | .writing =>
+              Outcomes.one (committedFlight next flight)
+          | .loading | .arming | .deleting =>
               Outcomes.one {
                 state := .node {
-                  next.remember flight.key with
-                    pending := flight.continuations ++ next.pending }
-                send := sendOutputs flight.selected
+                  next with flights := (op, flight) :: next.flights }
+                send := []
               }
-          | .loading => Outcomes.one { state := .node next, send := [] }
       | none => Outcomes.one { state := .node node, send := [] }
+  | .node _, .node node,
+      .receive .store (.storeReply { op, payload := .done }) =>
+      let (flight, next) := node.takeFlight op
+      match flight with
+      | some flight =>
+          match flight.phase with
+          | .arming =>
+              match flight.document with
+              | none => Outcomes.one { state := .node next, send := [] }
+              | some document =>
+                  let writing := { flight with phase := .writing }
+                  let (nextNode, request) :=
+                    next.await writing
+                      (.put flight.key document (flight.loaded.map (·.2)))
+                  Outcomes.one { state := .node nextNode, send := [request] }
+          | .deleting => Outcomes.one (continueCleanup next flight)
+          | .loading | .writing =>
+              Outcomes.one {
+                state := .node {
+                  next with flights := (op, flight) :: next.flights }
+                send := []
+              }
+      | none =>
+          let (control, next) := node.takeControl op
+          match control with
+          | some (.announced instant) =>
+              let (nextNode, request) :=
+                next.awaitControl (.announcements instant) .listAnnouncements
+              Outcomes.one { state := .node nextNode, send := [request] }
+          | some (.membershipWrite instant) =>
+              Outcomes.one (refreshEnded next config instant)
+          | some (.cleanup outputs) =>
+              Outcomes.one {
+                state := .node next
+                send := sendOutputs outputs
+              }
+          | some (.timerList _ _ _) | some (.announcements _)
+          | some (.membership _ _) | none =>
+              Outcomes.one { state := .node next, send := [] }
+  | .node _, .node node,
+      .receive .store
+        (.storeReply { op, payload := .announcements values }) =>
+      let (control, next) := node.takeControl op
+      match control with
+      | some (.announcements instant) =>
+          let live := liveAnnouncementIds values instant config.nodeTtl
+          let (nextNode, request) :=
+            next.awaitControl (.membership instant live) .getMembership
+          Outcomes.one { state := .node nextNode, send := [request] }
+      | _ => Outcomes.one { state := .node next, send := [] }
+  | .node address, .node node,
+      .receive .store
+        (.storeReply { op, payload := .membership membership version }) =>
+      let (control, next) := node.takeControl op
+      match control with
+      | some (.membership instant live) =>
+          let view : MembershipView := {
+            epoch := membership.epoch
+            members := membership.members
+            version
+            lastRead := instant
+            readAny := true
+          }
+          let next := { next with membership := view }
+          if live == membership.members then
+            Outcomes.one (refreshEnded next config instant)
+          else
+            let proposed : MembershipConfig := {
+              epoch := membership.epoch + 1
+              members := live
+            }
+            let (nextNode, request) :=
+              next.awaitControl (.membershipWrite instant)
+                (.putMembership version proposed)
+            Outcomes.one { state := .node nextNode, send := [request] }
+      | _ => Outcomes.one { state := .node next, send := [] }
+  | .node address, .node node,
+      .receive .store (.storeReply { op, payload := .timers keys }) =>
+      let (control, next) := node.takeControl op
+      match control with
+      | some (.timerList instant through kind) =>
+          let wheel :=
+            next.wheel.load next.membership address instant config.nodeTtl
+              through keys
+          let wheel :=
+            match kind with
+            | .relist closed =>
+                { wheel with
+                  closedThrough :=
+                    max wheel.closedThrough
+                      (bucketOf config.bucketWidth instant) }
+            | .initial | .extend => wheel
+          Outcomes.one { state := .node { next with wheel }, send := [] }
+      | _ => Outcomes.one { state := .node next, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .conflict }) =>
       let (flight, next) := node.takeFlight op
@@ -794,30 +1120,58 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       | some flight =>
           match flight.phase with
           | .writing =>
-              if flight.transaction.isExternal then
-                Outcomes.one
-                  (retry config (next.cacheInvalidate flight.key) flight)
-              else
-                Outcomes.one {
-                  state := .node {
-                    next.cacheInvalidate flight.key with
-                    workflowBlocked := true }
-                  send := []
-                }
-          | .loading => Outcomes.one { state := .node next, send := [] }
-      | none => Outcomes.one { state := .node node, send := [] }
+              Outcomes.one
+                (retry config (next.cacheInvalidate flight.key) flight)
+          | .loading | .arming | .deleting =>
+              Outcomes.one { state := .node next, send := [] }
+      | none =>
+          let (control, next) := node.takeControl op
+          match control with
+          | some (.membershipWrite instant) =>
+              Outcomes.one (refreshEnded next config instant)
+          | _ => Outcomes.one { state := .node next, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .failed }) =>
       let (flight, next) := node.takeFlight op
       match flight with
       | some flight =>
-          Outcomes.one {
-            state := .node {
-              next.cacheInvalidate flight.key with workflowBlocked :=
-                next.workflowBlocked || !flight.transaction.isExternal }
-            send := sendOutputs (failureOutputs flight.transaction)
-          }
-      | none => Outcomes.one { state := .node node, send := [] }
+          match flight.phase with
+          | .deleting => Outcomes.one (continueCleanup next flight)
+          | .loading | .arming | .writing =>
+              Outcomes.one {
+                state := .node (next.cacheInvalidate flight.key)
+                send := sendOutputs (failureOutputs flight.transaction)
+              }
+      | none =>
+          let (control, next) := node.takeControl op
+          match control with
+          | some (.announced instant) | some (.announcements instant)
+          | some (.membershipWrite instant) =>
+              Outcomes.one {
+                state := .node {
+                  next with
+                  nextHeartbeat := some (instant + config.heartbeat) }
+                send := []
+              }
+          | some (.membership instant _) =>
+              Outcomes.one {
+                state := .node {
+                  next with
+                  nextHeartbeat := some (instant + config.heartbeat) }
+                send := []
+              }
+          | some (.timerList _ _ _) =>
+              Outcomes.one {
+                state := .node {
+                  next with wheel := { next.wheel with listing := none } }
+                send := []
+              }
+          | some (.cleanup outputs) =>
+              Outcomes.one {
+                state := .node next
+                send := sendOutputs outputs
+              }
+          | none => Outcomes.one { state := .node next, send := [] }
   | .store, .store store,
       .receive sender (.storeRequest { op, payload := .get key }) =>
       Outcomes.one {
@@ -825,6 +1179,71 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
         send := [(sender, .storeReply {
           op, payload := .got key (store.read key) })]
       }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .armTimer timer }) =>
+      Outcomes.one {
+        state := .store { store with timers := store.timers.arm timer }
+        send := [(sender, .storeReply { op, payload := .done })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .deleteTimer timer }) =>
+      Outcomes.one {
+        state := .store { store with timers := store.timers.delete timer }
+        send := [(sender, .storeReply { op, payload := .done })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .deleteTimers timers }) =>
+      Outcomes.one {
+        state := .store {
+          store with
+          timers := timers.foldl TimerObjects.delete store.timers }
+        send := [(sender, .storeReply { op, payload := .done })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .listTimers through }) =>
+      Outcomes.one {
+        state := .store store
+        send := [(sender, .storeReply {
+          op, payload := .timers (store.timers.listThrough through) })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .announce announcement }) =>
+      Outcomes.one {
+        state := .store {
+          store with
+          membership := store.membership.announce announcement }
+        send := [(sender, .storeReply { op, payload := .done })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .listAnnouncements }) =>
+      Outcomes.one {
+        state := .store store
+        send := [(sender, .storeReply {
+          op, payload := .announcements store.membership.announcements })]
+      }
+  | .store, .store store,
+      .receive sender (.storeRequest { op, payload := .getMembership }) =>
+      Outcomes.one {
+        state := .store store
+        send := [(sender, .storeReply {
+          op
+          payload := .membership store.membership.configuration
+            store.membership.version })]
+      }
+  | .store, .store store,
+      .receive sender
+        (.storeRequest { op, payload := .putMembership expected next }) =>
+      match store.membership.putConfig expected next with
+      | some membership =>
+          Outcomes.one {
+            state := .store { store with membership }
+            send := [(sender, .storeReply { op, payload := .done })]
+          }
+      | none =>
+          Outcomes.one {
+            state := .store store
+            send := [(sender, .storeReply { op, payload := .conflict })]
+          }
   | .store, .store store,
       .receive sender
         (.storeRequest { op, payload := .put key document expected }) =>
