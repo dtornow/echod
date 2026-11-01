@@ -22,7 +22,7 @@ rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
 rust/spec/rover       the Rover world, replay, and refinement theorem
 rust/spec/abstract    the Resonate protocol as a Rover model
-rust/spec/concrete    the catalogue and the specifications on_event is proved against
+rust/spec/concrete    the catalogue, the specifications on_event is proved against, and the Rover model
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/rover            the Rover world, for experiment

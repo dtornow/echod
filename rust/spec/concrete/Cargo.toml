@@ -10,6 +10,7 @@ name = "echod_concrete"
 path = "src/lib.rs"
 
 [dependencies]
+accordant = { package = "echod-rover", path = "../rover" }
 resonate = { package = "echod-abstract", path = "../abstract" }
 serde = { version = "1", features = ["derive"] }
 vstd = "=0.0.0-2026-10-11-0230"

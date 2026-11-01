@@ -167,10 +167,12 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
+- the Rover model in `model.rs`: nodes and one store, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`
 - the abstract model, which that step refines
 
 Still open, and the reason concrete depends on the abstract model:
 
+- the handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`, `spec_completed`, `spec_tick`, `spec_stop`)
 - concrete/abstract world relation
 - per-step forward simulation
 - final `concrete_refines_abstract` theorem
@@ -198,7 +200,7 @@ spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process/kernel ---> i
 impl + spec -----------------> test/*
 ```
 
-Concrete depends on the abstract model. The kernel depends on concrete,
+Concrete depends on the Rover world and on the abstract model. The kernel depends on concrete,
 because a handler's `ensures` names `spec_promise_create`. The process
 depends on the kernel. Concrete depends on neither. Production code must
 never depend on test code. The ghost half of the concrete crate erases
