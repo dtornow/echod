@@ -21,14 +21,13 @@
 //! point, seen or not), [`step`] (how the system evolves, each step observed
 //! or silent), [`legal`] (steps the system can actually take), [`project`]
 //! (what an execution shows a client). It is specification only: nothing here
-//! runs. [`Model`] is the system, with its `spec` twins of `external`,
-//! `internal` and `now`.
+//! runs. [`Model`] is the system, with its `spec` twins of `external` and
+//! `internal`.
 //!
-//! Both lines are proved, and `check` is verified code. The search proposes
-//! and is not trusted: OK stands once `certify` (`certificate.rs`) replays the
-//! execution it found, KO once `refute` (`certificate/refute.rs`) has
-//! enumerated every execution and found none that shows the trace. Each is
-//! verified against the definitions below.
+//! The OK line is proved: `certify` (`certificate.rs`) ensures that a
+//! certificate it accepts makes the trace valid, and `Checker::check_certified`
+//! answers OK only after `certify` accepts. The KO line is not proved anywhere:
+//! it rests on the search being exhaustive.
 
 use vstd::prelude::*;
 
@@ -57,35 +56,26 @@ pub type Ev<M> = Event<<M as Model>::External, <M as Model>::Response, <M as Mod
 
 // ------------------------------------------------------------ configurations
 
-/// A call the client has sent and not yet seen answered.
-#[derive(PartialEq, Eq)]
-pub enum Call<X, R> {
-    /// Not yet taken effect.
-    InFlight(X),
-    /// Taken effect; the client will see this response.
-    Done(R),
+/// An external op a client sent, until it returns.
+pub struct ExternalOp<X, R> {
+    pub req: X,
+    /// `None` while pending; `Some` once settled: the client will see this.
+    pub res: Option<R>,
 }
 
-/// Internal work started and not yet run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct Work<I> {
-    pub req: I,
-    /// Can't run before this time.
-    pub after: Time,
-    /// Must have run by this time, if it can run then.
-    pub due: Option<Time>,
-    /// Must run at some point.
-    pub must: bool,
-}
-
-/// Everything about the system at one point, seen or not.
+/// Everything about the system at one point, seen or not: the model's state,
+/// and what the model doesn't know about.
 pub struct Config<S, X, R, I, D> {
     pub state: S,
-    pub calls: Map<CallId, Call<X, R>>,
-    pub work: Seq<Work<I>>,
+    /// The external ops outstanding, by call id. (Lean keeps a list of
+    /// `{id, req, res}` with distinct ids; the same thing.)
+    pub externals: Map<CallId, ExternalOp<X, R>>,
+    /// The internal ops scheduled, each with when it runs, on the clock.
+    pub internals: Seq<Sched<I>>,
     /// Dispatches sent and not yet received.
     pub sent: Seq<D>,
+    /// The system's clock. The model reads it; only [`tick`] moves it.
+    pub now: Time,
 }
 
 pub type Cfg<M> = Config<
@@ -108,29 +98,47 @@ pub open spec fn max(a: Time, b: Time) -> Time {
     if a >= b { a } else { b }
 }
 
-/// Work scheduled at `now`: a timer at `t` runs at `t`, or right away if `t`
-/// has passed.
-pub open spec fn schedule<I>(now: Time, s: Sched<I>) -> Work<I> {
+/// An internal op started at `now`: a timer in the past fires now.
+pub open spec fn schedule<I>(now: Time, s: Sched<I>) -> Sched<I> {
     match s {
-        Sched::Later(req) => Work { req, after: now, due: None, must: true },
-        Sched::Timer(t, req) => Work { req, after: max(t, now), due: Some(max(t, now)), must: true },
+        Sched::Later(req) => Sched::Later(req),
+        Sched::Timer(t, req) => Sched::Timer(max(t, now), req),
     }
 }
 
-pub open spec fn start_all<I>(work: Seq<Work<I>>, new: Seq<Sched<I>>, now: Time) -> Seq<Work<I>> {
-    work + new.map_values(|s: Sched<I>| schedule(now, s))
+pub open spec fn start_all<I>(internals: Seq<Sched<I>>, new: Seq<Sched<I>>, now: Time) -> Seq<Sched<I>> {
+    internals + new.map_values(|s: Sched<I>| schedule(now, s))
 }
 
-pub open spec fn clock<M: Model>(m: M, c: Cfg<M>) -> Time {
-    m.spec_now(c.state)
+pub open spec fn req_of<I>(s: Sched<I>) -> I {
+    match s {
+        Sched::Later(req) => req,
+        Sched::Timer(_, req) => req,
+    }
 }
 
-/// Work whose deadline has come on the model's clock, and that can run: it runs
-/// before anything else happens.
+/// The time a timer is due; a `Later` has none.
+pub open spec fn due<I>(s: Sched<I>) -> Option<Time> {
+    match s {
+        Sched::Later(_) => None,
+        Sched::Timer(t, _) => Some(t),
+    }
+}
+
+/// Whether the op may run at `now`.
+pub open spec fn ready<I>(now: Time, s: Sched<I>) -> bool {
+    match s {
+        Sched::Later(_) => true,
+        Sched::Timer(t, _) => t <= now,
+    }
+}
+
+/// A timer whose time has come and that can run: it runs before anything
+/// else happens.
 pub open spec fn is_overdue<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    0 <= i < c.work.len() && c.work[i].must && c.work[i].after <= clock(m, c) && match c.work[i].due {
-        Some(due) => due <= clock(m, c) && m.spec_internal(c.work[i].req, c.state).len() > 0,
-        None => false,
+    0 <= i < c.internals.len() && match c.internals[i] {
+        Sched::Timer(t, req) => t <= c.now && m.spec_internal(req, c.state, c.now).len() > 0,
+        Sched::Later(_) => false,
     }
 }
 
@@ -138,18 +146,18 @@ pub open spec fn overdue<M: Model>(m: M, c: Cfg<M>) -> bool {
     exists|i: int| #[trigger] is_overdue(m, c, i)
 }
 
-/// Both have a deadline, and `w`'s is no later.
-pub open spec fn due_le<I>(w: Work<I>, v: Work<I>) -> bool {
-    match (w.due, v.due) {
+/// Both are timers, and `w`'s is due no later.
+pub open spec fn due_le<I>(w: Sched<I>, v: Sched<I>) -> bool {
+    match (due(w), due(v)) {
         (Some(d), Some(e)) => d <= e,
         _ => false,
     }
 }
 
-/// Work `i` is overdue with the earliest deadline: when the clock jumped past
-/// several deadlines, their work runs in deadline order.
+/// Op `i` is overdue with the earliest deadline: when the clock jumped past
+/// several deadlines, their ops run in deadline order.
 pub open spec fn is_first<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    is_overdue(m, c, i) && forall|k: int| #[trigger] is_overdue(m, c, k) ==> due_le(c.work[i], c.work[k])
+    is_overdue(m, c, i) && forall|k: int| #[trigger] is_overdue(m, c, k) ==> due_le(c.internals[i], c.internals[k])
 }
 
 // -------------------------------------------- steps: how the system evolves
@@ -157,18 +165,19 @@ pub open spec fn is_first<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
 /// A client sends a request. Observed.
 pub open spec fn invoke<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
-        Label::Obs(Event::Invoke { call, req }) => !c.calls.contains_key(call)
-            && !overdue(m, c) && d == Config { calls: c.calls.insert(call, Call::InFlight(req)), ..c },
+        Label::Obs(Event::Invoke { call, req }) => !c.externals.contains_key(call)
+            && !overdue(m, c)
+            && d == Config { externals: c.externals.insert(call, ExternalOp { req, res: None }), ..c },
         _ => false,
     }
 }
 
-/// A client receives the response its call took effect with. Observed.
+/// A client receives the response its call settled with. Observed.
 pub open spec fn ret<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     match l {
-        Label::Obs(Event::Return { call, res }) => c.calls.contains_key(call)
-            && c.calls[call] is Done && c.calls[call]->Done_0 == res && !overdue(m, c)
-            && d == Config { calls: c.calls.remove(call), ..c },
+        Label::Obs(Event::Return { call, res }) => c.externals.contains_key(call)
+            && c.externals[call].res == Some(res) && !overdue(m, c)
+            && d == Config { externals: c.externals.remove(call), ..c },
         _ => false,
     }
 }
@@ -182,80 +191,52 @@ pub open spec fn receive<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> boo
     }
 }
 
-/// A call in flight takes effect with one of its allowed outcomes. Silent.
+/// The clock moves forward. Observed: the trace records it. Work due by the
+/// new time is then overdue, and runs before anything else is observed.
+pub open spec fn tick<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
+    match l {
+        Label::Obs(Event::Clock { at }) => c.now <= at && !overdue(m, c) && d == Config { now: at, ..c },
+        _ => false,
+    }
+}
+
+/// A pending external op settles with one of its allowed outcomes. Silent.
 pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && !overdue(m, c) && exists|call: CallId, j: int|
-        #![trigger c.calls[call], m.spec_external(c.calls[call]->InFlight_0, c.state)[j]]
-        c.calls.contains_key(call) && c.calls[call] is InFlight && {
-            let outs = m.spec_external(c.calls[call]->InFlight_0, c.state);
+        #![trigger c.externals[call], m.spec_external(c.externals[call].req, c.state, c.now)[j]]
+        c.externals.contains_key(call) && c.externals[call].res is None && {
+            let outs = m.spec_external(c.externals[call].req, c.state, c.now);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                calls: c.calls.insert(call, Call::Done(outs[j].resp)),
-                work: start_all(c.work, outs[j].work, m.spec_now(outs[j].next)),
+                externals: c.externals.insert(call, ExternalOp { req: c.externals[call].req, res: Some(outs[j].resp) }),
+                internals: start_all(c.internals, outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }
         }
 }
 
-/// Pending internal work runs with one of its outcomes; while some work is
-/// overdue, only the overdue work with the earliest deadline runs. Silent.
+/// An internal op whose time has come runs with one of its outcomes; while
+/// some op is overdue, only an overdue op with the earliest deadline runs.
+/// Silent.
 pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && exists|i: int, j: int|
-        #![trigger c.work[i], m.spec_internal(c.work[i].req, c.state)[j]]
-        0 <= i < c.work.len() && c.work[i].after <= clock(m, c) && (overdue(m, c) ==> is_first(m, c, i)) && {
-            let outs = m.spec_internal(c.work[i].req, c.state);
+        #![trigger c.internals[i], m.spec_internal(req_of(c.internals[i]), c.state, c.now)[j]]
+        0 <= i < c.internals.len() && ready(c.now, c.internals[i]) && (overdue(m, c) ==> is_first(m, c, i)) && {
+            let outs = m.spec_internal(req_of(c.internals[i]), c.state, c.now);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                work: start_all(c.work.remove(i), outs[j].work, m.spec_now(outs[j].next)),
+                internals: start_all(c.internals.remove(i), outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }
         }
-}
-
-// Names for the parts of `effect` and `run`, for the refutation: when a given
-// call (outcome `j`) or a given piece of work (`i`, outcome `j`) can take its
-// step, and the configuration that step leads to. `effect` and `run` above are
-// what is trusted; `refute`'s proof shows these say the same.
-
-/// Call `call` can take effect with its `j`-th outcome.
-pub open spec fn effect_ok<M: Model>(m: M, c: Cfg<M>, call: CallId, j: int) -> bool {
-    !overdue(m, c) && c.calls.contains_key(call) && c.calls[call] is InFlight
-        && 0 <= j < m.spec_external(c.calls[call]->InFlight_0, c.state).len()
-}
-
-/// Where call `call` taking effect with its `j`-th outcome leads.
-pub open spec fn effect_next<M: Model>(m: M, c: Cfg<M>, call: CallId, j: int) -> Cfg<M> {
-    let o = m.spec_external(c.calls[call]->InFlight_0, c.state)[j];
-    Config {
-        state: o.next,
-        calls: c.calls.insert(call, Call::Done(o.resp)),
-        work: start_all(c.work, o.work, m.spec_now(o.next)),
-        sent: c.sent + o.send,
-    }
-}
-
-/// Work `i` can run with its `j`-th outcome.
-pub open spec fn run_ok<M: Model>(m: M, c: Cfg<M>, i: int, j: int) -> bool {
-    0 <= i < c.work.len() && c.work[i].after <= clock(m, c) && (overdue(m, c) ==> is_first(m, c, i))
-        && 0 <= j < m.spec_internal(c.work[i].req, c.state).len()
-}
-
-/// Where work `i` running with its `j`-th outcome leads.
-pub open spec fn run_next<M: Model>(m: M, c: Cfg<M>, i: int, j: int) -> Cfg<M> {
-    let o = m.spec_internal(c.work[i].req, c.state)[j];
-    Config {
-        state: o.next,
-        calls: c.calls,
-        work: start_all(c.work.remove(i), o.work, m.spec_now(o.next)),
-        sent: c.sent + o.send,
-    }
 }
 
 /// The transition relation: from `c`, a step labeled `l` reaches `d`.
 pub open spec fn step<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
-    invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || effect(m, c, l, d) || run(m, c, l, d)
+    invoke(m, c, l, d) || ret(m, c, l, d) || receive(m, c, l, d) || tick(m, c, l, d)
+        || effect(m, c, l, d) || run(m, c, l, d)
 }
 
 // ------------------------------------- executions, and what they show a client
@@ -290,9 +271,9 @@ pub open spec fn project<M: Model>(steps: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-/// The system starts in `init`, with nothing in flight.
+/// The system starts in `init`, with nothing in flight, at time 0.
 pub open spec fn initial<M: Model>(init: M::State) -> Cfg<M> {
-    Config { state: init, calls: Map::empty(), work: Seq::empty(), sent: Seq::empty() }
+    Config { state: init, externals: Map::empty(), internals: Seq::empty(), sent: Seq::empty(), now: 0 }
 }
 
 /// The trace is valid: some execution of the system, from `initial(init)`,
@@ -316,56 +297,24 @@ pub enum Verdict {
     Unknown,
 }
 
-/// The trace checker, under the contract it is held to: OK only for valid
-/// traces, KO only for invalid ones, and UNKNOWN whenever it can't tell.
-///
-/// Verified, both lines. The search ([`search`]) is not trusted: it only
-/// proposes. An acceptance stands once [`crate::certify`] replays the
-/// execution the search found, a rejection once [`crate::refute`] has
-/// accounted for every execution; both are verified against this file. If
-/// either doesn't go through, the answer is UNKNOWN.
+/// The trace checker, with certificates, under the contract it is held to:
+/// OK only for valid traces, KO only for invalid ones, and UNKNOWN whenever it
+/// can't tell. Verus takes the contract on trust (`external_body`). OK is
+/// justified: `check_certified` answers OK only after [`crate::certify`]
+/// accepts a certificate, and `certify` is proved to accept only valid
+/// traces. KO rests on the search.
+#[verifier::external_body]
 pub fn check<M: Model + Clone>(m: &M, init: M::State, trace: &[Ev<M>]) -> (v: Verdict)
     ensures
         v is Ok ==> valid(*m, init, trace@),
         v is Ko ==> !valid(*m, init, trace@),
 {
-    match search(m, crate::certificate::trusted_copy(&init), trace) {
-        Found::Explained(cert) => match crate::certify(m, init, trace, &cert) {
-            Ok(()) => Verdict::Ok,
-            Err(_) => Verdict::Unknown,
-        },
-        Found::Rejected => match crate::refute(m, init, trace, REFUTE_LIMIT) {
-            Some(_) => Verdict::Ko,
-            None => Verdict::Unknown,
-        },
-        Found::GaveUp => Verdict::Unknown,
-    }
-}
-
-/// How many configurations [`crate::refute`] may hold for one event before
-/// [`check`] answers UNKNOWN instead.
-pub const REFUTE_LIMIT: usize = 1_000_000;
-
-/// What the search proposes.
-pub enum Found {
-    /// An execution showing the trace, as a certificate.
-    Explained(crate::Certificate),
-    /// That no execution shows it.
-    Rejected,
-    /// Nothing: it gave up.
-    GaveUp,
-}
-
-/// The checker's search, with certificates. Nothing about it is trusted: it
-/// has no `ensures`, and [`check`] confirms whatever it proposes.
-#[verifier::external_body]
-pub fn search<M: Model + Clone>(m: &M, init: M::State, trace: &[Ev<M>]) -> Found {
     let cfg = crate::Config { certify: true, ..crate::Config::default() };
     let mut checker = crate::Checker::new(m.clone(), init, cfg);
     match checker.check_certified(trace.iter().cloned()) {
-        Ok(cert) => Found::Explained(cert),
-        Err(v) if v.unknown => Found::GaveUp,
-        Err(_) => Found::Rejected,
+        Ok(_) => Verdict::Ok,
+        Err(v) if v.unknown => Verdict::Unknown,
+        Err(_) => Verdict::Ko,
     }
 }
 
