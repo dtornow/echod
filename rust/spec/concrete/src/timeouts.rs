@@ -1,16 +1,16 @@
-//! An origin's timeout is a deadline key in a time bucket.
+//! An origin's timeout is a deadline key the node puts outside.
 //!
-//! The implementation (`keys.rs`, `flight.rs`) puts one empty object per
-//! origin before the document write: the document's nearest deadline, named
-//! by that instant, the origin, a token, and the node that armed it. The
-//! key is filed under the bucket the instant falls in,
-//! `deadline / bucket_ms * bucket_ms`. The runtime's bucket width is one
-//! hour. A key already present for that same instant is kept.
+//! The node does not hold the bucket, and it shares no memory with another
+//! node. A commit remembers the nearest deadline in its own memory and sends
+//! the key out: one empty object per origin, named by that instant, the
+//! origin, a token, and the node that armed it, filed under the bucket the
+//! instant falls in, `deadline / bucket_ms * bucket_ms`. The runtime's
+//! bucket width is one hour. A key already sent for that same instant is
+//! not sent again.
 //!
 //! [`origins_reflected`] says every origin whose document has a least
 //! deadline has a key for that deadline in that bucket. [`commit_origin`]
-//! is the commit that establishes it. The shell's wake is when a node next
-//! looks at the wheel; it is not this key.
+//! is that commit. The shell's wake is when a node next looks at its wheel.
 
 use std::collections::BTreeMap;
 

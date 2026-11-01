@@ -13,7 +13,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover` (library `echod_rover`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
 | `rust/spec/abstract` | `echod-abstract` (library `resonate`): the Resonate protocol as a Rover model |
-| `rust/spec/concrete` | `echod-concrete`: the catalogue, the handler specifications, and the Rover model (nodes, one store, the initial world). The kernel depends on this crate. The refinement of that world to the abstract model is not written yet |
+| `rust/spec/concrete` | `echod-concrete`: the catalogue, the handler specifications, and the Rover model (the nodes, each with its own memory, the initial world). The bucket is outside. The kernel depends on this crate. The refinement of that world to the abstract model is not written yet |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |

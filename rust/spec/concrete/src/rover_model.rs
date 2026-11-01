@@ -1,7 +1,8 @@
 //! The executable [`RoverModel`](echod_rover::rover::RoverModel).
 //!
-//! Rover assembles the world from [`Model::initial`]: the nodes and the
-//! store, an empty network, time 0. [`crate::model::spec_world`] is that
+//! Rover assembles the world from [`Model::initial`]: the nodes, an empty
+//! network, time 0. Each node keeps its own memory. The bucket is outside.
+//! [`crate::model::spec_world`] is that
 //! world as a specification, and [`crate::model::spec_step`] is its step.
 //! This file stays out of the Verus run. The handler arms are still
 //! uninterpreted, so the executable logic is the control in `State::on_event`

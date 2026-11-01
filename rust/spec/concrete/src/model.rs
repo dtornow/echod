@@ -1,15 +1,16 @@
 //! The concrete Rover model.
 //!
-//! A world is the nodes, one store, an empty network, and time 0. Rover
-//! assembles that from [`Model::initial`]; [`spec_world`] is the same world
-//! as a specification. Each node is a shell around [`spec_logic_on_event`],
-//! the specification of `State::on_event`. A `Wake` stays in the shell until
-//! a Rover `Timeout` at or after that instant is delivered as `Tick`: that
-//! is when the node next looks at its wheel. An origin's timeout is a
-//! deadline key in the store's time bucket, `timeouts::commit_origin`, and
-//! `timeouts::origins_reflected` says every origin that owes a deadline has
-//! that key in the bucket the deadline falls in. The store applies the
-//! `Store` effect the node already produced.
+//! A world is the nodes, an empty network, and time 0. Rover assembles that
+//! from [`Model::initial`]; [`spec_world`] is the same world as a
+//! specification. Each node keeps its own memory and shares none of it. The
+//! bucket is outside: a `Store` effect is a message to [`Pid::Outside`], and
+//! the answer comes back as a completion from outside. Each node is a shell
+//! around [`spec_logic_on_event`], the specification of `State::on_event`.
+//! A `Wake` stays in the shell until a Rover `Timeout` at or after that
+//! instant is delivered as `Tick`: that is when the node next looks at its
+//! wheel. An origin's timeout is a deadline key the commit puts outside,
+//! `timeouts::commit_origin`. `timeouts::origins_reflected` says every origin
+//! that owes a deadline has that key in the bucket the deadline falls in.
 //!
 //! The handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`,
 //! `spec_completed`, `spec_tick`, `spec_stop`) are uninterpreted. The control
@@ -31,7 +32,6 @@ verus! {
 pub enum Pid {
     Outside,
     Node(u64),
-    Store,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,8 +40,6 @@ pub struct Config {
     pub nodes: u64,
     /// Whether each node keeps its heartbeat and timers after it starts.
     pub loops: bool,
-    /// Whether the store accepts an append.
-    pub appendable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,9 +91,8 @@ pub enum StoreOutcome {
     Failed(StoreFail),
 }
 
-/// A message on the concrete network. Store traffic is between a node and
-/// the store. `Request` and `Stop` are what outside may inject.
-/// What a trace of this world shows. Store traffic is absent.
+/// What a trace of this world shows. A call on the bucket is not one of these:
+/// the bucket is outside, and a client does not see that traffic.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Boundary {
@@ -168,17 +165,6 @@ pub struct LogicV {
     pub inner: nat,
 }
 
-pub struct EntryV {
-    pub key: Seq<char>,
-    pub body: Seq<u8>,
-    pub version: nat,
-}
-
-pub struct StoreV {
-    pub entries: Seq<EntryV>,
-    pub appendable: bool,
-}
-
 pub struct NodeV {
     pub logic: LogicV,
     pub wake: Option<nat>,
@@ -187,10 +173,9 @@ pub struct NodeV {
 
 pub enum LocalV {
     Node(NodeV),
-    Store(StoreV),
 }
 
-/// One envelope, as Rover stores it: sender, recipient, message.
+/// One envelope, as Rover keeps it: sender, recipient, message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub struct Envelope {
@@ -242,21 +227,6 @@ pub struct Logic {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub struct Entry {
-    pub key: String,
-    pub body: Vec<u8>,
-    pub version: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct Store {
-    pub entries: Vec<Entry>,
-    pub appendable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Node {
     pub logic: Logic,
     pub wake: Option<u64>,
@@ -267,7 +237,6 @@ pub struct Node {
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Local {
     Node(Node),
-    Store(Store),
 }
 
 impl View for Logic {
@@ -287,20 +256,6 @@ impl View for Logic {
     }
 }
 
-impl View for Entry {
-    type V = EntryV;
-    open spec fn view(&self) -> EntryV {
-        EntryV { key: self.key@, body: self.body@, version: self.version as nat }
-    }
-}
-
-impl View for Store {
-    type V = StoreV;
-    open spec fn view(&self) -> StoreV {
-        StoreV { entries: self.entries@.map_values(|e: Entry| e@), appendable: self.appendable }
-    }
-}
-
 impl View for Node {
     type V = NodeV;
     open spec fn view(&self) -> NodeV {
@@ -316,7 +271,6 @@ impl View for Local {
     open spec fn view(&self) -> LocalV {
         match self {
             Local::Node(node) => LocalV::Node(node@),
-            Local::Store(store) => LocalV::Store(store@),
         }
     }
 }
@@ -343,9 +297,6 @@ pub uninterp spec fn spec_due(logic: LogicV) -> Option<nat>;
 
 /// `at.saturating_sub(now).max(1)`, with the logic's own `now`.
 pub uninterp spec fn spec_wake_delay(logic: LogicV, at: nat) -> u64;
-
-/// Content hash the store quotes as an etag. The executable store computes it.
-pub uninterp spec fn spec_etag(body: Seq<u8>) -> Seq<char>;
 
 pub open spec fn fresh_logic(id: u64) -> LogicV {
     LogicV {
@@ -451,7 +402,7 @@ pub open spec fn spec_route(effects: Seq<Effect>, now: nat, wake: Option<nat>) -
         match effects.last() {
             Effect::Wake { after_ms } => (Some(now + after_ms as nat), send),
             Effect::Note => (next, send),
-            Effect::Store { op, call } => (next, send.push((Pid::Store, SpecMsg::StoreReq { op, call }))),
+            Effect::Store { op, call } => (next, send.push((Pid::Outside, SpecMsg::StoreReq { op, call }))),
             Effect::Reply { id, status } => (next, send.push((Pid::Outside, SpecMsg::Reply { id, status }))),
             Effect::Send { address, body } => (
                 next,
@@ -473,176 +424,6 @@ pub open spec fn no_wake(effects: Seq<Effect>) -> bool
     effects.len() == 0 || match effects.last() {
         Effect::Wake { .. } => false,
         _ => no_wake(effects.drop_last()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The store
-// ---------------------------------------------------------------------------
-
-pub open spec fn empty_store(appendable: bool) -> StoreV {
-    StoreV { entries: Seq::empty(), appendable }
-}
-
-pub open spec fn lookup(entries: Seq<EntryV>, key: Seq<char>) -> Option<EntryV>
-    decreases entries.len(),
-{
-    if entries.len() == 0 {
-        None
-    } else if entries.last().key == key {
-        Some(entries.last())
-    } else {
-        lookup(entries.drop_last(), key)
-    }
-}
-
-pub open spec fn without(entries: Seq<EntryV>, key: Seq<char>) -> Seq<EntryV>
-    decreases entries.len(),
-{
-    if entries.len() == 0 {
-        Seq::empty()
-    } else if entries.last().key == key {
-        without(entries.drop_last(), key)
-    } else {
-        without(entries.drop_last(), key).push(entries.last())
-    }
-}
-
-pub open spec fn has_prefix(key: Seq<char>, prefix: Seq<char>) -> bool {
-    prefix.len() <= key.len() && key.subrange(0, prefix.len() as int) == prefix
-}
-
-pub open spec fn filter_prefix(entries: Seq<EntryV>, prefix: Seq<char>) -> Seq<Seq<char>>
-    decreases entries.len(),
-{
-    if entries.len() == 0 {
-        Seq::empty()
-    } else {
-        let rest = filter_prefix(entries.drop_last(), prefix);
-        if has_prefix(entries.last().key, prefix) { rest.push(entries.last().key) } else { rest }
-    }
-}
-
-pub open spec fn take_n<T>(s: Seq<T>, n: nat) -> Seq<T>
-    decreases s.len(),
-{
-    if n == 0 || s.len() == 0 {
-        Seq::empty()
-    } else {
-        seq![s[0]] + take_n(s.subrange(1, s.len() as int), (n - 1) as nat)
-    }
-}
-
-pub open spec fn matched(entries: Seq<EntryV>, key: Seq<char>, etag: Seq<char>) -> bool {
-    match lookup(entries, key) {
-        Some(entry) => spec_etag(entry.body) == etag,
-        None => false,
-    }
-}
-
-pub open spec fn put_new(store: StoreV, key: Seq<char>, body: Seq<u8>) -> (StoreV, Stored) {
-    if lookup(store.entries, key).is_some() {
-        (store, Stored::Failed(StoreFail::Precondition))
-    } else {
-        let entry = EntryV { key, body, version: 1 };
-        (StoreV { entries: store.entries.push(entry), ..store }, Stored::Written(spec_etag(body)))
-    }
-}
-
-pub open spec fn put_match(store: StoreV, key: Seq<char>, body: Seq<u8>, etag: Seq<char>) -> (StoreV, Stored) {
-    if matched(store.entries, key, etag) {
-        let old = lookup(store.entries, key).unwrap();
-        let entry = EntryV { key, body, version: old.version + 1 };
-        (StoreV { entries: without(store.entries, key).push(entry), ..store }, Stored::Written(spec_etag(body)))
-    } else {
-        (store, Stored::Failed(StoreFail::Precondition))
-    }
-}
-
-pub open spec fn spec_store_call(store: StoreV, call: StoreCall) -> (StoreV, Stored) {
-    match call {
-        StoreCall::Get { key } => match lookup(store.entries, key@) {
-            Some(entry) => (store, Stored::Got(Some((entry.body, spec_etag(entry.body))))),
-            None => (store, Stored::Got(None)),
-        },
-        StoreCall::GetIfNoneMatch { key, etag } => match lookup(store.entries, key@) {
-            None => (store, Stored::Absent),
-            Some(entry) => if spec_etag(entry.body) == etag@ {
-                (store, Stored::NotModified)
-            } else {
-                (store, Stored::Body(entry.body, spec_etag(entry.body)))
-            },
-        },
-        StoreCall::PutIfNoneMatch { key, body } => put_new(store, key@, body@),
-        StoreCall::PutIfMatch { key, body, etag } => put_match(store, key@, body@, etag@),
-        StoreCall::AppendIfMatch { key, offset, body, etag } => {
-            if !store.appendable {
-                (store, Stored::Failed(StoreFail::Unavailable))
-            } else if matched(store.entries, key@, etag@) {
-                let old = lookup(store.entries, key@).unwrap();
-                if old.body.len() == offset as nat {
-                    let next = old.body + body@;
-                    let entry = EntryV { key: key@, body: next, version: old.version + 1 };
-                    (StoreV { entries: without(store.entries, key@).push(entry), ..store }, Stored::Written(spec_etag(next)))
-                } else {
-                    (store, Stored::Failed(StoreFail::Precondition))
-                }
-            } else {
-                (store, Stored::Failed(StoreFail::Precondition))
-            }
-        },
-        StoreCall::Put { key, body } => {
-            let version = match lookup(store.entries, key@) {
-                Some(entry) => entry.version + 1,
-                None => 1,
-            };
-            let entry = EntryV { key: key@, body: body@, version };
-            (StoreV { entries: without(store.entries, key@).push(entry), ..store }, Stored::Done)
-        },
-        StoreCall::Delete { key } => (StoreV { entries: without(store.entries, key@), ..store }, Stored::Done),
-        StoreCall::List { prefix, max_keys } => (
-            store,
-            Stored::Listed(take_n(filter_prefix(store.entries, prefix@), max_keys as nat)),
-        ),
-        StoreCall::ListPrefixes { prefix } => (store, Stored::Listed(list_prefixes(filter_prefix(store.entries, prefix@), prefix@))),
-    }
-}
-
-pub open spec fn list_prefixes(keys: Seq<Seq<char>>, prefix: Seq<char>) -> Seq<Seq<char>>
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        Seq::empty()
-    } else {
-        let rest = list_prefixes(keys.drop_last(), prefix);
-        match child_prefix(keys.last(), prefix) {
-            Some(child) => if rest.len() > 0 && rest.last() == child { rest } else { rest.push(child) },
-            None => rest,
-        }
-    }
-}
-
-pub open spec fn child_prefix(key: Seq<char>, prefix: Seq<char>) -> Option<Seq<char>> {
-    if prefix.len() > key.len() {
-        None
-    } else {
-        let tail = key.subrange(prefix.len() as int, key.len() as int);
-        match find_char(tail, 0) {
-            Some(i) => Some(key.subrange(0, prefix.len() as int + i + 1)),
-            None => None,
-        }
-    }
-}
-
-pub open spec fn find_char(s: Seq<char>, i: int) -> Option<int>
-    decreases s.len() - i,
-{
-    if i < 0 || i >= s.len() {
-        None
-    } else if s[i] == '/' {
-        Some(i)
-    } else {
-        find_char(s, i + 1)
     }
 }
 
@@ -673,7 +454,7 @@ pub open spec fn spec_step(pid: Pid, state: LocalV, now: u64, event: Incoming) -
                 send,
             }]
         },
-        (Pid::Node(_), LocalV::Node(node), Incoming::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } }) => {
+        (Pid::Node(_), LocalV::Node(node), Incoming::Receive { sender: Pid::Outside, message: Message::StoreReply { op, outcome } }) => {
             let (next, send) = apply_logic(
                 node,
                 LogicStep::Completed { op, stored: stored_of(outcome), clock: now },
@@ -685,13 +466,6 @@ pub open spec fn spec_step(pid: Pid, state: LocalV, now: u64, event: Incoming) -
         (Pid::Node(_), LocalV::Node(node), Incoming::Receive { sender: Pid::Outside, message: Message::Stop }) => {
             let (next, send) = apply_logic(node, LogicStep::Stop { clock: now }, now as nat, node.wake);
             seq![Outcome { state: LocalV::Node(next), send }]
-        },
-        (Pid::Store, LocalV::Store(store), Incoming::Receive { sender, message: Message::StoreReq { op, call } }) => {
-            let (next, stored) = spec_store_call(store, call);
-            seq![Outcome {
-                state: LocalV::Store(next),
-                send: seq![(sender, SpecMsg::StoreReply { op, stored })],
-            }]
         },
         _ => Seq::empty(),
     }
@@ -733,7 +507,7 @@ pub open spec fn spec_nodes(config: Config, i: nat) -> Seq<(Pid, LocalV)>
 }
 
 pub open spec fn spec_initial(config: Config) -> Seq<(Pid, LocalV)> {
-    spec_nodes(config, 0) + seq![(Pid::Store, LocalV::Store(empty_store(config.appendable)))]
+    spec_nodes(config, 0)
 }
 
 pub open spec fn spec_world(config: Config) -> SpecWorld {
@@ -830,29 +604,21 @@ pub proof fn lemma_started(id: u64, loops: bool)
     assert(spec_logic_on_event(fresh, event).0 == spec_schedule_wake(stepped).0);
 }
 
-/// The initial world is the nodes, then the store. Outside is not a process.
+/// The initial world is the nodes. Outside is not a process, and no node holds the bucket.
 pub proof fn lemma_world(config: Config)
     ensures
         spec_world(config).now == 0,
         spec_world(config).network.len() == 0,
-        spec_world(config).process.len() == config.nodes as int + 1,
-        spec_world(config).process[config.nodes as int].0 == Pid::Store,
+        spec_world(config).process.len() == config.nodes as int,
         forall|i: int|
             0 <= i < config.nodes as int
                 ==> #[trigger] spec_world(config).process[i].0 == Pid::Node(i as u64),
         forall|i: int| 0 <= i < spec_world(config).process.len() ==> spec_world(config).process[i].0 != Pid::Outside,
 {
     lemma_nodes_len(config, 0);
-    assert(spec_initial(config).len() == config.nodes as int + 1);
+    assert(spec_initial(config).len() == config.nodes as int);
     assert forall|i: int| 0 <= i < config.nodes as int implies spec_world(config).process[i].0 == Pid::Node(i as u64) by {
         lemma_nodes_at(config, 0, i as nat);
-    };
-    assert forall|i: int| 0 <= i < spec_world(config).process.len() implies spec_world(config).process[i].0 != Pid::Outside by {
-        if i < config.nodes as int {
-            lemma_nodes_at(config, 0, i as nat);
-        } else {
-            assert(i == config.nodes as int);
-        }
     };
 }
 
@@ -912,220 +678,18 @@ pub proof fn lemma_store_traffic_is_hidden(at: u64, op: u64, call: StoreCall)
 {
 }
 
-/// A missing key is created at version 1. A second create leaves the store.
-pub proof fn lemma_put_if_none(store: StoreV, key: Seq<char>, body: Seq<u8>)
-    requires
-        lookup(store.entries, key).is_none(),
-    ensures
-        put_new(store, key, body).1 == Stored::Written(spec_etag(body)),
-        lookup(put_new(store, key, body).0.entries, key) == Some(EntryV { key, body, version: 1 }),
-        lookup(put_new(put_new(store, key, body).0, key, body).0.entries, key)
-            == Some(EntryV { key, body, version: 1 }),
-        put_new(put_new(store, key, body).0, key, body).1 == Stored::Failed(StoreFail::Precondition),
-{
-    let created = put_new(store, key, body).0;
-    assert(created.entries.last().key == key);
-}
-
-/// A conditional put whose etag does not match writes nothing.
-pub proof fn lemma_put_if_match_rejects(store: StoreV, key: Seq<char>, body: Seq<u8>, etag: Seq<char>)
-    requires
-        !matched(store.entries, key, etag),
-    ensures
-        put_match(store, key, body, etag).0 == store,
-        put_match(store, key, body, etag).1 == Stored::Failed(StoreFail::Precondition),
-{
-}
-
 } // verus!
 
 // ---------------------------------------------------------------------------
-// Executable shell and store. The logic arms emit no handler effects: those
+// Executable shell. The logic arms emit no handler effects: those
 // effects are spec_start, spec_request, spec_completed, spec_tick, spec_stop.
 // The field updates are the ones State::on_event performs itself.
 // ---------------------------------------------------------------------------
 
 impl Config {
     pub fn new(nodes: u64, loops: bool) -> Self {
-        Self {
-            nodes,
-            loops,
-            appendable: false,
-        }
+        Self { nodes, loops }
     }
-}
-
-/// The content hash the in-memory store quotes, the same function as the
-/// runtime's memory store.
-pub fn etag(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}")
-}
-
-fn find_entry(entries: &[Entry], key: &str) -> Option<usize> {
-    entries.iter().position(|entry| entry.key == key)
-}
-
-fn put_entry(entries: &mut Vec<Entry>, entry: Entry) {
-    if let Some(i) = find_entry(entries, &entry.key) {
-        entries[i] = entry;
-    } else {
-        let i = entries
-            .iter()
-            .position(|old| old.key.as_str() > entry.key.as_str())
-            .unwrap_or(entries.len());
-        entries.insert(i, entry);
-    }
-}
-
-impl Store {
-    pub fn empty(appendable: bool) -> Self {
-        Self {
-            entries: Vec::new(),
-            appendable,
-        }
-    }
-
-    pub fn apply(&self, call: &StoreCall) -> (Store, StoreOutcome) {
-        let mut next = self.clone();
-        let outcome = match call {
-            StoreCall::Get { key } => StoreOutcome::Got(find_entry(&self.entries, key).map(|i| {
-                let entry = &self.entries[i];
-                (entry.body.clone(), etag(&entry.body))
-            })),
-            StoreCall::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Absent,
-                Some(i) => {
-                    let entry = &self.entries[i];
-                    let have = etag(&entry.body);
-                    if &have == want {
-                        StoreOutcome::NotModified
-                    } else {
-                        StoreOutcome::Body(entry.body.clone(), have)
-                    }
-                }
-            },
-            StoreCall::PutIfNoneMatch { key, body } => {
-                if find_entry(&self.entries, key).is_some() {
-                    StoreOutcome::Failed(StoreFail::Precondition)
-                } else {
-                    put_entry(
-                        &mut next.entries,
-                        Entry {
-                            key: key.clone(),
-                            body: body.clone(),
-                            version: 1,
-                        },
-                    );
-                    StoreOutcome::Written(etag(body))
-                }
-            }
-            StoreCall::PutIfMatch {
-                key,
-                body,
-                etag: want,
-            } => match find_entry(&self.entries, key) {
-                Some(i) if etag(&self.entries[i].body) == *want => {
-                    let version = self.entries[i].version + 1;
-                    put_entry(
-                        &mut next.entries,
-                        Entry {
-                            key: key.clone(),
-                            body: body.clone(),
-                            version,
-                        },
-                    );
-                    StoreOutcome::Written(etag(body))
-                }
-                _ => StoreOutcome::Failed(StoreFail::Precondition),
-            },
-            StoreCall::AppendIfMatch {
-                key,
-                offset,
-                body,
-                etag: want,
-            } => {
-                if !self.appendable {
-                    StoreOutcome::Failed(StoreFail::Unavailable)
-                } else {
-                    match find_entry(&self.entries, key) {
-                        Some(i)
-                            if etag(&self.entries[i].body) == *want
-                                && self.entries[i].body.len() as u64 == *offset =>
-                        {
-                            let mut joined = self.entries[i].body.clone();
-                            joined.extend_from_slice(body);
-                            let version = self.entries[i].version + 1;
-                            let tag = etag(&joined);
-                            put_entry(
-                                &mut next.entries,
-                                Entry {
-                                    key: key.clone(),
-                                    body: joined,
-                                    version,
-                                },
-                            );
-                            StoreOutcome::Written(tag)
-                        }
-                        _ => StoreOutcome::Failed(StoreFail::Precondition),
-                    }
-                }
-            }
-            StoreCall::Put { key, body } => {
-                let version = find_entry(&self.entries, key)
-                    .map(|i| self.entries[i].version + 1)
-                    .unwrap_or(1);
-                put_entry(
-                    &mut next.entries,
-                    Entry {
-                        key: key.clone(),
-                        body: body.clone(),
-                        version,
-                    },
-                );
-                StoreOutcome::Done
-            }
-            StoreCall::Delete { key } => {
-                if let Some(i) = find_entry(&next.entries, key) {
-                    next.entries.remove(i);
-                }
-                StoreOutcome::Done
-            }
-            StoreCall::List { prefix, max_keys } => {
-                let keys = self
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.key.starts_with(prefix))
-                    .take(*max_keys as usize)
-                    .map(|entry| entry.key.clone())
-                    .collect();
-                StoreOutcome::Listed(keys)
-            }
-            StoreCall::ListPrefixes { prefix } => {
-                StoreOutcome::Listed(prefix_children(&self.entries, prefix))
-            }
-        };
-        (next, outcome)
-    }
-}
-
-fn prefix_children(entries: &[Entry], prefix: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in entries.iter().filter(|entry| entry.key.starts_with(prefix)) {
-        let tail = &entry.key[prefix.len()..];
-        if let Some(i) = tail.find('/') {
-            let child = entry.key[..=prefix.len() + i].to_string();
-            if out.last() != Some(&child) {
-                out.push(child);
-            }
-        }
-    }
-    out
 }
 
 pub fn route_effects(
@@ -1139,7 +703,7 @@ pub fn route_effects(
             Effect::Wake { after_ms } => wake = Some(now.saturating_add(*after_ms)),
             Effect::Note => {}
             Effect::Store { op, call } => send.push((
-                Pid::Store,
+                Pid::Outside,
                 Message::StoreReq {
                     op: *op,
                     call: call.clone(),
@@ -1276,7 +840,6 @@ impl Model {
         for id in 0..config.nodes {
             process.push((Pid::Node(id), Local::Node(started_node(config.loops))));
         }
-        process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
         World {
             process,
             network: Vec::new(),
@@ -1327,7 +890,7 @@ impl Model {
                 Pid::Node(_),
                 Local::Node(node),
                 Incoming::Receive {
-                    sender: Pid::Store,
+                    sender: Pid::Outside,
                     message: Message::StoreReply { op, outcome },
                 },
             ) => {
@@ -1359,20 +922,6 @@ impl Model {
                 vec![Transition {
                     state: Local::Node(next),
                     send,
-                }]
-            }
-            (
-                Pid::Store,
-                Local::Store(store),
-                Incoming::Receive {
-                    sender,
-                    message: Message::StoreReq { op, call },
-                },
-            ) => {
-                let (next, outcome) = store.apply(call);
-                vec![Transition {
-                    state: Local::Store(next),
-                    send: vec![(*sender, Message::StoreReply { op: *op, outcome })],
                 }]
             }
             _ => Vec::new(),
