@@ -1,0 +1,23 @@
+[package]
+name = "echod-test-runtime"
+description = "Deterministic effect interpreter for echod: one seed, a virtual clock, an in-memory store, and a bus. No wall clock and no sockets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_sim"
+path = "src/lib.rs"
+
+[dependencies]
+echod-kernel = { path = "../../impl/process/kernel" }
+echod-process = { path = "../../impl/process" }
+echod = { package = "echod-runtime", path = "../../impl/runtime" }
+resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
+tracing = "0.1"
+accordant = { package = "echod-rover", path = "../../spec/rover" }
+resonate = { package = "echod-abstract", path = "../../spec/abstract" }

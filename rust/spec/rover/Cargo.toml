@@ -1,0 +1,23 @@
+[package]
+name = "echod-rover"
+description = "Rover: an append-only message-passing world, its checker, and its refinement theorem."
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[lib]
+name = "accordant"
+path = "src/lib.rs"
+
+[dependencies]
+imbl = "7.0.2"
+vstd = "=0.0.0-2026-10-11-0230"
+
+[dev-dependencies]
+resonate = { package = "echod-abstract", path = "../abstract" }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

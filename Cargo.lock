@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "accordant"
-version = "0.1.0"
-source = "git+https://github.com/dtornow/accordant?rev=bb48aff9a989b5b3f2b05ef6c1794910f2584bca#bb48aff9a989b5b3f2b05ef6c1794910f2584bca"
-dependencies = [
- "imbl",
- "vstd",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -936,6 +927,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cron"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5dcd6f69605c2956916ce24e8af637b754964c9a83f4662d3a2361654cdba09"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "phf",
+ "winnow",
+]
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1092,38 +1095,44 @@ dependencies = [
 name = "echod"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "axum",
  "clap",
- "echod-kernel",
- "echod-logic",
- "futures",
- "object_store",
- "prometheus-client",
- "reqwest 0.12.28",
+ "echod-runtime",
  "resonate-core",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
+]
+
+[[package]]
+name = "echod-abstract"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cron 0.17.0",
+ "echod-rover",
+ "vstd",
 ]
 
 [[package]]
 name = "echod-accordant"
 version = "0.1.0"
 dependencies = [
- "accordant",
  "axum",
  "clap",
+ "echod-abstract",
+ "echod-rover",
  "reqwest 0.12.28",
- "resonate",
  "resonate-core",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "echod-concrete"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract",
+ "echod-process",
 ]
 
 [[package]]
@@ -1132,7 +1141,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "echod-sim",
+ "echod-test-runtime",
  "reqwest 0.12.28",
  "resonate-core",
  "serde",
@@ -1151,7 +1160,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-logic"
+name = "echod-process"
 version = "0.1.0"
 dependencies = [
  "echod-kernel",
@@ -1162,44 +1171,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-refine"
+name = "echod-rover"
 version = "0.1.0"
 dependencies = [
- "accordant",
- "echod-kernel",
- "resonate",
- "verus_builtin",
- "verus_builtin_macros",
+ "echod-abstract",
+ "imbl",
  "vstd",
+]
+
+[[package]]
+name = "echod-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "clap",
+ "echod-kernel",
+ "echod-process",
+ "futures",
+ "object_store",
+ "prometheus-client",
+ "reqwest 0.12.28",
+ "resonate-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
 name = "echod-sim"
 version = "0.1.0"
 dependencies = [
- "accordant",
- "async-trait",
  "clap",
- "echod",
+ "echod-test-runtime",
+ "serde_json",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "echod-store-tests"
+version = "0.1.0"
+dependencies = [
+ "axum",
  "echod-kernel",
- "echod-logic",
- "resonate",
+ "echod-process",
+ "echod-runtime",
+ "object_store",
+ "reqwest 0.12.28",
+ "resonate-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "echod-test-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "echod-abstract",
+ "echod-kernel",
+ "echod-process",
+ "echod-rover",
+ "echod-runtime",
  "resonate-core",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "echod-system"
-version = "0.1.0"
-dependencies = [
- "echod-kernel",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
 ]
 
 [[package]]
@@ -2147,7 +2190,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand",
+ "rand 0.10.3",
  "reqwest 0.13.5",
  "rustls-pki-types",
  "serde",
@@ -2236,6 +2279,48 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phf"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
+dependencies = [
+ "phf_macros",
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
+dependencies = [
+ "phf_shared",
+ "rand 0.8.8",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -2385,7 +2470,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand",
+ "rand 0.10.3",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -2426,6 +2511,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rand"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
+dependencies = [
+ "rand_core 0.6.4",
+]
 
 [[package]]
 name = "rand"
@@ -2599,17 +2693,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "resonate"
-version = "0.1.0"
-source = "git+https://github.com/dtornow/accordant?rev=bb48aff9a989b5b3f2b05ef6c1794910f2584bca#bb48aff9a989b5b3f2b05ef6c1794910f2584bca"
-dependencies = [
- "accordant",
- "chrono",
- "cron",
- "vstd",
-]
-
-[[package]]
 name = "resonate-core"
 version = "0.10.1"
 source = "git+https://github.com/resonatehq/resonate?rev=28dfd016aa970332dc283e2431c406845e2ccc8f#28dfd016aa970332dc283e2431c406845e2ccc8f"
@@ -2617,7 +2700,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "cron",
+ "cron 0.12.1",
  "serde",
  "serde_json",
  "tracing",
@@ -3020,6 +3103,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"
@@ -3878,6 +3967,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "writeable"

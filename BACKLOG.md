@@ -100,11 +100,14 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **`concrete_refines_abstract`, proved.** Every bounded trace of the store
+- **Rover concrete refinement, open.** `rust/spec/concrete` names the two
+  ends (`echod_logic::State::on_event` and the Rover abstract model) and
+  holds no proof yet. The classic `concrete_refines_abstract` against
+  `accordant::Model` left with `refine/`. What it established, and what
+  the Rover proof has to establish again: every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a
   sweep as the request step, sweeps as internal work) is a trace of the
-  Resonate model: `refine/`, `cargo verus verify -p echod-refine`, no
-  admits. The relation (`theorem.rs`): the abstract state is the sweep of
+  Resonate model. The relation the old proof used (`theorem.rs`): the abstract state is the sweep of
   the concrete one at the clock, translated; the calls the same; the
   abstract has sent what the concrete has plus what the sweep sends; a
   timer on `id` at `t` for every deadline `t` the swept state owes, none

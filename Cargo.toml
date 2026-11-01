@@ -1,6 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "system", "logic", "echod", "sim", "diff", "diff/accordant", "refine"]
+members = [
+  "rust/impl/process/kernel",
+  "rust/impl/process",
+  "rust/impl/runtime",
+  "rust/impl/cli",
+  "rust/spec/rover",
+  "rust/spec/abstract",
+  "rust/spec/concrete",
+  "rust/test/runtime",
+  "rust/test/cli/sim",
+  "rust/test/cli/diff",
+  "rust/test/cli/diff/accordant",
+  "rust/test/cli/store",
+]
 
 [workspace.package]
 version = "0.1.0"

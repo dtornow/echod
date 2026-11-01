@@ -1,8 +1,0 @@
-[package]
-name = "tigerbeetle"
-version = "0.1.0"
-edition = "2021"
-description = "TigerBeetle's state machine (accounts and transfers) as a lean accordant model"
-
-[dependencies]
-accordant = { path = "../.." }
