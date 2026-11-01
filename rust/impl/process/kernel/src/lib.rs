@@ -7,18 +7,16 @@
 //!
 //! ```text
 //! store.rs           State: three row vectors whose view is the concrete AState
-//! store_proof.rs     the fold lemmas and the row readers
-//! external.rs        the 18 request handlers; `handle` over `Request`
-//! internal.rs        the 6 internal steps
-//! internal_proof.rs  their lemmas
+//! store_proof.rs     a row at an index is the entry at its key
+//! external.rs        the 18 request handlers; each ensures it computes its spec_*
+//! internal.rs        the 6 internal steps; each ensures it computes its spec
 //! steps.rs           sweep, drain, next_deadline, clamp_now, schedule_due
 //! node.rs            membership, cache versions, armed keys
 //! commit.rs          which key to arm, which to remove, which to remember
 //! ```
 //!
-//! The vocabulary, the catalogue and the `spec_*` functions are
-//! `echod_concrete`. This crate depends on that one. The process calls these
-//! functions; it does not reimplement them.
+//! Every executable function ensures it computes its specification in
+//! `echod_concrete`. Theorems about those specifications live there too.
 //!
 //! `./verify.sh` verifies the concrete specification and then this crate.
 //! `cargo build` compiles the same sources with the ghost code erased.
@@ -28,7 +26,6 @@
 pub mod commit;
 pub mod external;
 pub mod internal;
-pub mod internal_proof;
 pub mod node;
 pub mod store;
 pub mod steps;
@@ -86,4 +83,24 @@ pub mod spec {
 #[cfg(verus_keep_ghost)]
 pub mod internal_spec {
     pub use echod_concrete::internal_spec::*;
+}
+
+#[cfg(verus_keep_ghost)]
+pub mod internal_proof {
+    pub use echod_concrete::internal_proof::*;
+}
+
+#[cfg(verus_keep_ghost)]
+pub mod steps_spec {
+    pub use echod_concrete::steps_spec::*;
+}
+
+#[cfg(verus_keep_ghost)]
+pub mod node_spec {
+    pub use echod_concrete::node_spec::*;
+}
+
+#[cfg(verus_keep_ghost)]
+pub mod commit_spec {
+    pub use echod_concrete::commit_spec::*;
 }

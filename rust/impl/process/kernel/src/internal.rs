@@ -23,7 +23,6 @@
 use vstd::prelude::*;
 
 use crate::external::*;
-use crate::internal_proof::*;
 use crate::object::*;
 use crate::store::*;
 use crate::store_proof::*;
@@ -32,6 +31,8 @@ use crate::types::*;
 
 #[cfg(verus_keep_ghost)]
 use crate::external_proof::*;
+#[cfg(verus_keep_ghost)]
+use crate::internal_proof::*;
 #[cfg(verus_keep_ghost)]
 use crate::internal_spec::*;
 #[cfg(verus_keep_ghost)]

@@ -3,22 +3,17 @@
 
 use vstd::prelude::*;
 
-use crate::external::*;
-use crate::internal::*;
 use crate::object::*;
-use crate::store::*;
+use crate::spec::*;
+use crate::state::*;
 use crate::tags::OType;
+use crate::tags_proof::*;
 use crate::types::*;
 
-#[cfg(verus_keep_ghost)]
 use crate::external_proof::*;
-#[cfg(verus_keep_ghost)]
 use crate::internal_spec::*;
-#[cfg(verus_keep_ghost)]
 use crate::object_proof::*;
-#[cfg(verus_keep_ghost)]
 use crate::properties::*;
-#[cfg(verus_keep_ghost)]
 use crate::properties_proof::*;
 
 verus! {
