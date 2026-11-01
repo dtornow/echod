@@ -1,6 +1,6 @@
 //! The statement this crate is for.
 //!
-//! Instantiate Rover with this crate's model — the nodes, each with its own memory,
+//! Instantiate Rover with this crate's model — the nodes and the store,
 //! `spec_world` at the start, `spec_step` at every process — and with the
 //! abstract model, the one service. The concrete instantiation refines the
 //! abstract one:

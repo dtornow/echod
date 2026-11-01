@@ -167,7 +167,7 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Rover model in `model.rs`: the nodes, each with its own memory, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`. The bucket is outside |
+- the Rover model in `model.rs`: nodes and one store, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`
 - the abstract model, which that step refines
 
 Still open, and the reason concrete depends on the abstract model:

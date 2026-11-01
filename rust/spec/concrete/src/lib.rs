@@ -21,7 +21,7 @@
 //! commit_spec.rs      which key a commit arms, removes, and remembers
 //! timeouts.rs         an origin's nearest deadline, filed in its time bucket
 //! on_event.rs         the document step inside a loaded request
-//! model.rs            the Rover model: the nodes and the initial world
+//! model.rs            the Rover model: nodes, one store, the initial world
 //! refine.rs           the abstract model this step refines
 //! ```
 
