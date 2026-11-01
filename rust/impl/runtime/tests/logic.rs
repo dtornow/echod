@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
-use echod_logic::{Config, State};
-use resonate_core::types::{RequestEnvelope, RequestHead, ResponseEnvelope, PROTOCOL_VERSION};
+use echod_logic::types::{Effect, Etag, Event, Note, Outgoing, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::{Call, Config, DebugCall, State};
+use echod::admit::{self, Admission, DebugOp};
+use echod::codec;
+use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 
 /// The bucket as a map: every call answered at once, in order.
@@ -78,7 +80,7 @@ struct Harness {
     state: State,
     bucket: Bucket,
     clock: u64,
-    replies: Vec<(u64, Result<ResponseEnvelope, resonate_core::Unavailable>)>,
+    replies: Vec<(u64, Result<echod_logic::Answer, String>)>,
     sent: Vec<String>,
     notes: Vec<Note>,
     wake_after: Option<u64>,
@@ -107,7 +109,13 @@ impl Harness {
                         next.extend(self.state.on_event(Event::Completed { op, outcome, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
-                    Effect::Send { address, message } => self.sent.push(format!("{address} {}", serde_json::to_string(&message).unwrap())),
+                    Effect::Send { address, message } => {
+                        let body = match &message {
+                            Outgoing::Execute { task_id, .. } => format!("execute {task_id}"),
+                            Outgoing::Unblock(r) => format!("unblock {}", r.id),
+                        };
+                        self.sent.push(format!("{address} {body}"));
+                    }
                     Effect::Wake { after_ms } => self.wake_after = Some(after_ms),
                     Effect::Note(n) => self.notes.push(n),
                 }
@@ -120,10 +128,32 @@ impl Harness {
         let id = self.next_request;
         self.next_request += 1;
         let envelope = RequestEnvelope { kind: kind.to_string(), head: RequestHead { corr_id: format!("c{id}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: None }, data };
-        self.apply(Event::Request { id, envelope, clock: self.clock });
+        match admit::admit(&envelope, self.clock, self.state.config().debug) {
+            Admission::Rejected(resp) => (resp.head.status as u16, resp.data),
+            Admission::Request(d) => {
+                self.apply(Event::Request {
+                    clock: self.clock,
+                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
+                });
+                self.take(id)
+            }
+            Admission::Debug { kind, corr, op } => {
+                let call = match op {
+                    DebugOp::Reset => DebugCall::Reset { id, kind, corr },
+                    DebugOp::Snap => DebugCall::Snap { id, kind, corr },
+                    DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
+                };
+                self.apply(Event::Debug { clock: self.clock, call });
+                self.take(id)
+            }
+        }
+    }
+
+    fn take(&mut self, id: u64) -> (u16, Value) {
         let (rid, r) = self.replies.pop().expect("an answer");
         assert_eq!(rid, id);
-        let r = r.expect("served");
+        let answer = r.expect("served");
+        let r = codec::envelope(&answer);
         (r.head.status as u16, r.data)
     }
 

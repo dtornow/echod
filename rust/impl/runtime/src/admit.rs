@@ -1,53 +1,84 @@
 //! The envelope to a document request: the protocol's checks, then the
 //! one call the node makes, `handle`, on the document the request names.
 //!
-//! Pure: an envelope in, a target and a request out, or the error
-//! envelope the protocol answers with. The step itself runs in `flight.rs`.
+//! An envelope in, a call the decision core already accepts, or the error
+//! envelope the protocol answers with. The step itself runs in the core.
 
-use crate::verified as rows;
+use echod_logic::keys::origin_of;
+use echod_logic::verified as rows;
+use echod_logic::Target;
 use resonate_core::types::{self as w, RequestEnvelope, ResponseEnvelope};
 use resonate_core::util;
 use serde::de::DeserializeOwned;
 use validator::Validate;
 
-use crate::keys::origin_of;
-use crate::wire;
+use crate::codec;
 
-/// What a step is run on.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Target {
-    Origin(String),
-    Schedule(String),
+/// What the runtime hands the core, or the envelope that refuses the request
+/// before the core sees it.
+pub enum Admission {
+    Request(Decoded),
+    Debug { kind: String, corr: String, op: DebugOp },
+    Rejected(ResponseEnvelope),
 }
 
-impl Target {
-    /// The name the keys and the node's decisions go by: the origin, or
-    /// `sched:<id>`.
-    pub fn name(&self) -> String {
-        match self {
-            Target::Origin(o) => o.clone(),
-            Target::Schedule(id) => format!("sched:{id}"),
-        }
-    }
-
-    /// The target a timer key's name (`origin` or `sched:<id>`) says.
-    pub fn of_name(name: &str) -> Target {
-        match name.strip_prefix("sched:") {
-            Some(id) => Target::Schedule(id.to_string()),
-            None => Target::Origin(name.to_string()),
-        }
-    }
+/// A debug operation the core runs as given.
+pub enum DebugOp {
+    Reset,
+    Snap,
+    Tick { time: u64 },
 }
 
-/// A request decoded: where it runs, what the kernel is asked, and, for a
+/// A request decoded: where it runs, what the core is asked, and, for a
 /// fence, the kind its inner action is rendered under.
 pub struct Decoded {
+    pub kind: String,
+    pub corr: String,
     pub target: Target,
     pub request: rows::Request,
     pub action_kind: Option<String>,
+    /// The instant offered to the step. `pinned` says the request named it.
+    pub now: u64,
+    pub pinned: bool,
     /// A second request, on another document, once the first has
     /// committed: a detached create's fence check on the task's origin.
     pub then: Option<(Target, rows::Request)>,
+}
+
+/// Admit `req` at `now`. Debug operations are accepted only in debug mode;
+/// a request in that mode may name its own instant.
+pub fn admit(req: &RequestEnvelope, now: u64, debug: bool) -> Admission {
+    if debug && req.kind.starts_with("debug.") {
+        return admit_debug(req);
+    }
+    let (now, pinned) = match (debug, req.head.debug_time) {
+        (true, Some(t)) => (t.max(0) as u64, true),
+        _ => (now, false),
+    };
+    match decode(req, now, pinned) {
+        Ok(decoded) => Admission::Request(decoded),
+        Err(resp) => Admission::Rejected(resp),
+    }
+}
+
+fn admit_debug(req: &RequestEnvelope) -> Admission {
+    let kind = req.kind.clone();
+    let corr = req.head.corr_id.clone();
+    let reject = |status: i32, msg: &str| Admission::Rejected(ResponseEnvelope::error(kind.clone(), corr.clone(), status, msg));
+    match kind.as_str() {
+        "debug.reset" => Admission::Debug { kind, corr, op: DebugOp::Reset },
+        "debug.snap" => Admission::Debug { kind, corr, op: DebugOp::Snap },
+        "debug.tick" => {
+            let Some(time) = req.data.get("time").and_then(|v| v.as_i64()) else {
+                return reject(400, "Missing or invalid 'time' field");
+            };
+            if req.head.debug_time.is_some_and(|t| t != time) {
+                return reject(400, "resonate:debug_time must equal data.time");
+            }
+            Admission::Debug { kind, corr, op: DebugOp::Tick { time: time.max(0) as u64 } }
+        }
+        _ => reject(400, "Unknown debug operation"),
+    }
 }
 
 /// Parse and validate a request's `data`.
@@ -107,7 +138,7 @@ pub fn origin_of_request(req: &RequestEnvelope) -> Result<Option<String>, String
 
 /// Decode `req`, decided at `now`: the kernel's request on its document,
 /// or the envelope that refuses it.
-pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelope> {
+pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, ResponseEnvelope> {
     let kind = req.kind.clone();
     let corr = req.head.corr_id.clone();
     let err = |status: u16, msg: &str| Err(ResponseEnvelope::error(kind.clone(), corr.clone(), status as i32, msg));
@@ -133,14 +164,14 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "promise.create" => {
             let d = parsed!(w::PromiseCreateData);
-            match wire::create_in(&d) {
+            match codec::create_in(&d) {
                 Ok(q) => (rows::Request::PromiseCreate(q), None, None),
                 Err(m) => return err(400, &m),
             }
         }
         "promise.settle" => {
             let d = parsed!(w::PromiseSettleData);
-            (rows::Request::PromiseSettle(wire::settle_in_req(&d)), None, None)
+            (rows::Request::PromiseSettle(codec::settle_in_req(&d)), None, None)
         }
         "promise.register_callback" => {
             let d = parsed!(w::PromiseRegisterCallbackData);
@@ -159,11 +190,11 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "task.create" => {
             let d = parsed!(w::TaskCreateData);
-            let action = match wire::create_in(&d.action.data) {
+            let action = match codec::create_in(&d.action.data) {
                 Ok(q) => q,
                 Err(m) => return err(400, &m),
             };
-            let ttl = match wire::nat(d.ttl, "ttl") {
+            let ttl = match codec::nat(d.ttl, "ttl") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
@@ -171,7 +202,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "task.acquire" => {
             let d = parsed!(w::TaskAcquireData);
-            let (version, ttl) = match (wire::nat(d.version, "version"), wire::nat(d.ttl, "ttl")) {
+            let (version, ttl) = match (codec::nat(d.version, "version"), codec::nat(d.ttl, "ttl")) {
                 (Ok(v), Ok(t)) => (v, t),
                 (Err(m), _) | (_, Err(m)) => return err(400, &m),
             };
@@ -179,7 +210,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "task.release" => {
             let d = parsed!(w::TaskReleaseData);
-            let version = match wire::nat(d.version, "version") {
+            let version = match codec::nat(d.version, "version") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
@@ -187,20 +218,20 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         }
         "task.fulfill" => {
             let d = parsed!(w::TaskFulfillData);
-            let version = match wire::nat(d.version, "version") {
+            let version = match codec::nat(d.version, "version") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
             let q = rows::TaskFulfillReq {
                 id: d.id,
                 version,
-                action: rows::PromiseSettleReq { id: d.action.data.id, state: wire::settle_in(d.action.data.state), value: wire::value_in(&d.action.data.value) },
+                action: rows::PromiseSettleReq { id: d.action.data.id, state: codec::settle_in(d.action.data.state), value: codec::value_in(&d.action.data.value) },
             };
             (rows::Request::TaskFulfill(q), None, None)
         }
         "task.suspend" => {
             let d = parsed!(w::TaskSuspendData);
-            let version = match wire::nat(d.version, "version") {
+            let version = match codec::nat(d.version, "version") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
@@ -212,17 +243,17 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 Ok(d) => d,
                 Err(m) => return err(400, &m),
             };
-            let version = match wire::nat(d.version, "version") {
+            let version = match codec::nat(d.version, "version") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
             let action = match d.action.kind.as_str() {
-                "promise.create" => match parse_action::<w::PromiseCreateData>(&d.action.data).and_then(|c| wire::create_in(&c)) {
+                "promise.create" => match parse_action::<w::PromiseCreateData>(&d.action.data).and_then(|c| codec::create_in(&c)) {
                     Ok(c) => rows::TaskFenceAction::Create(c),
                     Err(m) => return err(400, &m),
                 },
                 "promise.settle" => match parse_action::<w::PromiseSettleData>(&d.action.data) {
-                    Ok(c) => rows::TaskFenceAction::Settle(wire::settle_in_req(&c)),
+                    Ok(c) => rows::TaskFenceAction::Settle(codec::settle_in_req(&c)),
                     Err(m) => return err(400, &m),
                 },
                 _ => return err(400, "Invalid fence action kind"),
@@ -246,7 +277,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             let d = parsed!(w::TaskHeartbeatData);
             let mut tasks = Vec::with_capacity(d.tasks.len());
             for t in d.tasks {
-                match wire::nat(t.version, "version") {
+                match codec::nat(t.version, "version") {
                     Ok(v) => tasks.push(rows::TaskRef { id: t.id, version: v }),
                     Err(m) => return err(400, &m),
                 }
@@ -275,7 +306,7 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
             if !util::is_valid_cron(&d.cron) {
                 return err(400, "Invalid cron expression");
             }
-            let promise_timeout = match wire::nat(d.promise_timeout, "promiseTimeout") {
+            let promise_timeout = match codec::nat(d.promise_timeout, "promiseTimeout") {
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
@@ -286,8 +317,8 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
                 cron: d.cron,
                 promise_id: d.promise_id,
                 promise_timeout,
-                promise_param: wire::value_in(&d.promise_param),
-                promise_tags: wire::create_tags(&d.promise_tags),
+                promise_param: codec::value_in(&d.promise_param),
+                promise_tags: codec::create_tags(&d.promise_tags),
                 next_run_at: next,
             };
             (rows::Request::ScheduleCreate(q), Some(id), None)
@@ -308,5 +339,5 @@ pub fn decode(req: &RequestEnvelope, now: u64) -> Result<Decoded, ResponseEnvelo
         (None, Some(o), None) => (Target::Origin(o), None),
         (None, None, _) => return err(400, "Request data does not name an id"),
     };
-    Ok(Decoded { target, request: q, action_kind, then })
+    Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned, then })
 }

@@ -1,25 +1,23 @@
 //! The debug operations: what a test that owns the clock asks of a node.
 //!
-//! Answered only when the node runs in debug mode, and one at a time.
-//! `debug.reset` empties the bucket of documents and keys and forgets
-//! everything the node held of them. `debug.snap` reads every document and
-//! renders the protocol's `Snapshot`: promises, tasks, callbacks,
-//! listeners, and the deadlines they owe. `debug.tick` moves the clock to
-//! `time`: every origin is swept at that instant and every schedule due
-//! fires, again and again until none is due, as the timers would have
-//! done had the clock passed through every instant on the way. Each is a
-//! machine over store calls like everything else here; the sweeps and
-//! fires are ordinary flights that report back when they end.
+//! Answered one at a time, and only when the runtime has already accepted
+//! the operation. `debug.reset` empties the bucket of documents and keys
+//! and forgets everything the node held of them. `debug.snap` reads every
+//! document. `debug.tick` moves the work to `time`: every origin is swept
+//! at that instant and every schedule due fires, again and again until
+//! none is due, as the timers would have done had the clock passed through
+//! every instant on the way. Each is a machine over store calls like
+//! everything else here; the sweeps and fires are ordinary flights that
+//! report back when they end. The runtime turns the answer into the
+//! protocol's snapshot.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::verified::{self as rows, Promise, Schedule};
-use resonate_core::types::{RequestEnvelope, ResponseEnvelope};
-use serde_json::{json, Value};
 
-use crate::dispatch::Target;
 use crate::doc;
 use crate::flight::Work;
+use crate::target::Target;
 use crate::types::*;
 use crate::{Owner, State};
 
@@ -52,42 +50,37 @@ enum Tick {
 #[derive(Default)]
 pub(crate) struct Debug {
     current: Option<Op>,
-    queue: VecDeque<(RequestId, RequestEnvelope)>,
+    queue: VecDeque<DebugCall>,
 }
 
 impl State {
-    /// A `debug.*` request, in debug mode.
-    pub(crate) fn debug_request(&mut self, id: RequestId, envelope: RequestEnvelope) {
+    /// A debug operation the runtime has already accepted.
+    pub(crate) fn debug_begin(&mut self, call: DebugCall) {
         if self.debug.current.is_some() {
-            self.debug.queue.push_back((id, envelope));
+            self.debug.queue.push_back(call);
             return;
         }
-        let (kind, corr) = (envelope.kind.clone(), envelope.head.corr_id.clone());
-        match kind.as_str() {
-            "debug.reset" => {
+        self.debug_start(call);
+    }
+
+    fn debug_start(&mut self, call: DebugCall) {
+        match call {
+            DebugCall::Reset { id, kind, corr } => {
                 let op = self.store(StoreCall::List { prefix: self.cfg.prefix.clone(), max_keys: usize::MAX }, Owner::Debug);
                 self.debug.current = Some(Op::Reset { id, kind, corr, phase: Reset::Listing { op } });
             }
-            "debug.snap" => {
+            DebugCall::Snap { id, kind, corr } => {
                 let mut ops = HashSet::new();
                 ops.insert(self.store(StoreCall::List { prefix: format!("{}wf/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
                 ops.insert(self.store(StoreCall::List { prefix: format!("{}sched/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
                 self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Gathering { ops, pending: HashMap::new(), promises: Vec::new(), schedules: Vec::new() } });
             }
-            "debug.tick" => {
-                let Some(time) = envelope.data.get("time").and_then(|v| v.as_i64()) else {
-                    return self.debug_reply(id, ResponseEnvelope::error(kind, corr, 400, "Missing or invalid 'time' field"));
-                };
-                if envelope.head.debug_time.is_some_and(|t| t != time) {
-                    return self.debug_reply(id, ResponseEnvelope::error(kind, corr, 400, "resonate:debug_time must equal data.time"));
-                }
-                let time = time.max(0) as u64;
+            DebugCall::Tick { id, kind, corr, time } => {
                 let mut ops = HashSet::new();
                 ops.insert(self.store(StoreCall::List { prefix: format!("{}wf/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
                 ops.insert(self.store(StoreCall::List { prefix: format!("{}sched/", self.keys_prefix()), max_keys: usize::MAX }, Owner::Debug));
                 self.debug.current = Some(Op::Tick { id, kind, corr, time, phase: Tick::Listing { ops, origins: Vec::new(), schedules: Vec::new() } });
             }
-            _ => self.debug_reply(id, ResponseEnvelope::error(kind, corr, 400, "Unknown debug operation")),
         }
     }
 
@@ -100,17 +93,17 @@ impl State {
         }
     }
 
-    /// Answer, and start the next debug request waiting.
-    fn debug_reply(&mut self, id: RequestId, response: ResponseEnvelope) {
-        self.emit(Effect::Reply { id, response: Ok(response) });
-        if let Some((id, envelope)) = self.debug.queue.pop_front() {
-            self.debug_request(id, envelope);
+    /// Answer, and start the next debug operation waiting.
+    fn debug_reply(&mut self, id: RequestId, kind: String, corr: String, status: u16, body: DebugBody) {
+        self.emit(Effect::Reply { id, response: Ok(Answer::Debug { kind, corr, status, body }) });
+        if let Some(call) = self.debug.queue.pop_front() {
+            self.debug_start(call);
         }
     }
 
     fn debug_fail(&mut self, id: RequestId, kind: String, corr: String, e: StoreError) {
         self.debug.current = None;
-        self.debug_reply(id, ResponseEnvelope::error(kind, corr, 503, &e.to_string()));
+        self.debug_reply(id, kind, corr, 503, DebugBody::Message(e.to_string()));
     }
 
     pub(crate) fn debug_completed(&mut self, op: OpId, outcome: StoreOutcome) {
@@ -182,7 +175,7 @@ impl State {
                         _ => return self.debug_fail(id, kind, corr, unexpected()),
                     }
                     if ops.is_empty() && pending.is_empty() {
-                        self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, snapshot(&promises, &schedules)));
+                        self.debug_reply(id, kind, corr, 200, DebugBody::Snap { promises, schedules });
                     } else {
                         self.debug.current = Some(Op::Snap { id, kind, corr, phase: Snap::Gathering { ops, pending, promises, schedules } });
                     }
@@ -236,7 +229,7 @@ impl State {
             self.core.read_config(last_read, epoch, members);
         }
         self.timers.wheel = crate::timers::TimerWheel::new();
-        self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, json!({})));
+        self.debug_reply(id, kind, corr, 200, DebugBody::Object);
     }
 
     /// A flight the tick started has ended: a sweep, or a fire that fired
@@ -280,61 +273,13 @@ impl State {
                     self.debug.current = Some(Op::Tick { id, kind, corr, time, phase: Tick::Firing { outstanding } });
                     return;
                 }
-                self.debug_reply(id, ResponseEnvelope::new(kind, corr, 200, Value::Array(Vec::new())));
+                self.debug_reply(id, kind, corr, 200, DebugBody::List);
             }
             Tick::Listing { .. } => {
                 self.debug.current = Some(Op::Tick { id, kind, corr, time, phase });
             }
         }
     }
-}
-
-/// The protocol's `Snapshot` of a set of promise rows: the records, the
-/// callbacks and listeners they hold, their tasks, and the deadlines they
-/// owe. Messages are never queued here: they are routed as they arise.
-fn snapshot(promises: &[Promise], schedules: &[Schedule]) -> Value {
-    let mut schedules: Vec<&Schedule> = schedules.iter().collect();
-    schedules.sort_by(|a, b| a.id.cmp(&b.id));
-    let schedules: Vec<Value> = schedules.iter().map(|c| serde_json::to_value(crate::wire::schedule_out(c)).unwrap_or(Value::Null)).collect();
-    let mut promises: Vec<&Promise> = promises.iter().collect();
-    promises.sort_by(|a, b| a.id.cmp(&b.id));
-    let records: Vec<Value> = promises.iter().map(|p| serde_json::to_value(crate::wire::promise_record(p)).unwrap_or(Value::Null)).collect();
-    let mut callbacks: Vec<Value> = Vec::new();
-    let mut listeners: Vec<Value> = Vec::new();
-    let mut tasks: Vec<Value> = Vec::new();
-    let mut promise_timeouts: Vec<Value> = Vec::new();
-    let mut task_timeouts: Vec<Value> = Vec::new();
-    for p in &promises {
-        for awaiter in &p.callbacks {
-            callbacks.push(json!({ "awaiter": awaiter, "awaited": p.id }));
-        }
-        for address in &p.listeners {
-            listeners.push(json!({ "id": p.id, "address": address }));
-        }
-        if p.state == rows::PromiseState::Pending && rows::tags::exec_otype(&p.tags) != rows::tags::OType::Internal {
-            promise_timeouts.push(json!({ "id": p.id, "timeout": p.timeout_at }));
-        }
-        if let Some(t) = &p.task {
-            let record = rows::TaskRecord { id: p.id.clone(), state: t.state, version: t.version, resumes: t.resumes.len() as u64, ttl: t.ttl, pid: t.pid.clone() };
-            tasks.push(serde_json::to_value(crate::wire::task_out(&record)).unwrap_or(Value::Null));
-            if let Some(at) = t.lease_timeout_at {
-                task_timeouts.push(json!({ "id": p.id, "type": 1, "timeout": at }));
-            }
-            if let Some(at) = t.retry_timeout_at {
-                task_timeouts.push(json!({ "id": p.id, "type": 0, "timeout": at }));
-            }
-        }
-    }
-    json!({
-        "promises": records,
-        "promiseTimeouts": promise_timeouts,
-        "callbacks": callbacks,
-        "listeners": listeners,
-        "tasks": tasks,
-        "taskTimeouts": task_timeouts,
-        "schedules": schedules,
-        "messages": [],
-    })
 }
 
 fn unexpected() -> StoreError {

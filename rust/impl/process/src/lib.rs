@@ -16,9 +16,10 @@
 //! config.rs     the dials
 //! keys.rs       where everything lives under the bucket
 //! doc.rs        a document: rows in, rows out, the fold between
-//! wire.rs       a document's rows to the protocol, and back
+//! target.rs     an origin's document, or a schedule's
+//! reason.rs     the words a refusal carries
+//! cron.rs       the next time a schedule is due
 //! cache.rs      documents this node remembers, by LRU under a byte budget
-//! dispatch.rs   an envelope to the request, and the document it runs on
 //! flight.rs     one step on one document, from load to commit, one store call at a time
 //! members.rs    the nodes: announce, list, read the configuration, write the next epoch
 //! timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
@@ -26,11 +27,10 @@
 //! ```
 //!
 //! `verified` decides. Everything else orders the store calls around those
-//! decisions. `./verify.sh` proves `verified`; it does not load the rest.
+//! decisions. The runtime admits a protocol envelope and performs what comes
+//! out. `./verify.sh` proves `verified`; it does not load the rest.
 
 use std::collections::HashMap;
-
-use resonate_core::types::RequestEnvelope;
 
 use crate::cache::{Cache, Cached, MemoryCache};
 use crate::keys::KeySpace;
@@ -40,20 +40,21 @@ use crate::verified::Config as RowsConfig;
 
 pub mod cache;
 pub mod config;
+pub mod cron;
 pub mod debug;
-pub mod dispatch;
 pub mod doc;
 pub mod flight;
 pub mod keys;
 pub mod members;
+pub mod reason;
+pub mod target;
 pub mod timers;
 pub mod types;
 pub mod verified;
-pub mod wire;
 
 pub use config::Config;
-pub use dispatch::Target;
-pub use types::{Effect, Event, Note};
+pub use target::Target;
+pub use types::{Answer, Call, DebugBody, DebugCall, Effect, Event, Note, Outgoing};
 
 /// Who waits for a store call's answer.
 pub(crate) enum Owner {
@@ -151,9 +152,13 @@ impl State {
                 let now = self.now();
                 self.members_refresh(now);
             }
-            Event::Request { id, envelope, clock } => {
+            Event::Request { clock, call } => {
                 self.clock = clock;
-                self.request(id, envelope);
+                self.request(call);
+            }
+            Event::Debug { clock, call } => {
+                self.clock = clock;
+                self.debug_begin(call);
             }
             Event::Completed { op, outcome, clock } => {
                 self.clock = clock;
@@ -254,25 +259,22 @@ impl State {
     // Requests
     // -----------------------------------------------------------------------
 
-    fn request(&mut self, id: RequestId, envelope: RequestEnvelope) {
-        if self.cfg.debug && envelope.kind.starts_with("debug.") {
-            return self.debug_request(id, envelope);
+    fn request(&mut self, mut call: Call) {
+        // The fleet's time, unless the request named its own instant.
+        if !call.pinned {
+            call.now = call.now.max(self.fleet_at);
         }
-        let now = match (self.cfg.debug, envelope.head.debug_time) {
-            (true, Some(t)) => t.max(0) as u64,
-            _ => self.now(),
+        // A schedule's next run is that instant, the same one the step uses.
+        if let crate::verified::Request::ScheduleCreate(q) = &mut call.request {
+            q.next_run_at = crate::cron::next_after(&q.cron, call.now as i64).max(call.now as i64 + 1) as u64;
+        }
+        let Call { id, kind, corr, target, request, action_kind, now, pinned: _, then } = call;
+        let stage = match then {
+            Some((then, check)) => flight::Stage::Detached { then, check: Some(Box::new(check)) },
+            None => flight::Stage::Whole,
         };
-        match dispatch::decode(&envelope, now) {
-            Err(resp) => self.emit(Effect::Reply { id, response: Ok(resp) }),
-            Ok(d) => {
-                let stage = match d.then {
-                    Some((then, check)) => flight::Stage::Detached { then, check: Some(Box::new(check)) },
-                    None => flight::Stage::Whole,
-                };
-                let work = flight::Work::Request { id, kind: envelope.kind, corr: envelope.head.corr_id, req: d.request, action_kind: d.action_kind, now, stage };
-                self.submit(d.target, work, None, false);
-            }
-        }
+        let work = flight::Work::Request { id, kind, corr, req: request, action_kind, now, stage };
+        self.submit(target, work, None, false);
     }
 
     fn stop(&mut self) {
@@ -361,6 +363,3 @@ impl State {
     }
 }
 
-pub fn unavailable(e: StoreError) -> resonate_core::Unavailable {
-    resonate_core::Unavailable::new(e.to_string())
-}

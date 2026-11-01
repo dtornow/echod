@@ -27,8 +27,8 @@ pub struct Config {
     pub cache_entries: usize,
     /// Bytes of documents held in the read cache, at most.
     pub cache_bytes: u64,
-    /// The clock a request is decided at is the request's
-    /// `resonate:debug_time` when it carries one.
+    /// Debug mode, as the runtime reads it: it admits debug operations,
+    /// and a request may name the instant it is decided at.
     pub debug: bool,
 }
 

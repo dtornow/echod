@@ -10,9 +10,9 @@
 
 use std::fmt;
 
+use crate::target::Target;
+use crate::verified;
 use crate::verified::node::Key;
-use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
-use resonate_core::Unavailable;
 
 /// Names a store call the executor was asked to make.
 pub type OpId = u64;
@@ -57,6 +57,32 @@ pub enum Read {
 // In
 // ---------------------------------------------------------------------------
 
+/// A request the runtime has already accepted. The core never sees an
+/// envelope, a header, or a parse error.
+pub struct Call {
+    pub id: RequestId,
+    pub kind: String,
+    pub corr: String,
+    pub target: Target,
+    pub request: verified::Request,
+    pub action_kind: Option<String>,
+    /// The instant the runtime offers. When `pinned`, the step is decided
+    /// at this instant as given: a debug request named it. Otherwise the
+    /// step is decided at this instant or the latest announcement,
+    /// whichever is later.
+    pub now: u64,
+    pub pinned: bool,
+    /// A second request, on another document, once the first has committed.
+    pub then: Option<(Target, verified::Request)>,
+}
+
+/// A debug operation the runtime has already accepted.
+pub enum DebugCall {
+    Reset { id: RequestId, kind: String, corr: String },
+    Snap { id: RequestId, kind: String, corr: String },
+    Tick { id: RequestId, kind: String, corr: String, time: u64 },
+}
+
 /// What the core is told. Every event carries the node's clock as the
 /// executor read it when the event happened; the core never reads a clock.
 pub enum Event {
@@ -65,7 +91,12 @@ pub enum Event {
     /// nothing on its own.
     Start { clock: u64, loops: bool },
     /// A request came in; the answer goes out as `Effect::Reply` under `id`.
-    Request { id: RequestId, envelope: RequestEnvelope, clock: u64 },
+    /// `clock` is the node's clock. `call.now` is the instant the step is
+    /// decided at, which a debug request may set ahead of that clock.
+    Request { clock: u64, call: Call },
+    /// A debug operation, already checked. Answered only in debug mode,
+    /// which the runtime decides before it asks.
+    Debug { clock: u64, call: DebugCall },
     /// A store call the core issued has an answer.
     Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
     /// Time passed: the wake the core asked for, or any other moment the
@@ -124,15 +155,41 @@ pub enum StoreOutcome {
 // Out
 // ---------------------------------------------------------------------------
 
+/// What a client is told. The runtime turns it into the protocol's envelope.
+pub enum Answer {
+    /// A document step.
+    Step { kind: String, corr: String, action_kind: Option<String>, response: verified::Response, why: Option<String> },
+    /// A debug operation.
+    Debug { kind: String, corr: String, status: u16, body: DebugBody },
+}
+
+/// The body of a debug answer, before it is an envelope.
+pub enum DebugBody {
+    /// `{}`.
+    Object,
+    /// `[]`.
+    List,
+    /// A short refusal.
+    Message(String),
+    /// The documents a `debug.snap` read.
+    Snap { promises: Vec<verified::Promise>, schedules: Vec<verified::Schedule> },
+}
+
+/// A message for a worker, before the runtime stamps the server's URL on it.
+pub enum Outgoing {
+    Execute { task_id: String, version: u64 },
+    Unblock(verified::PromiseRecord),
+}
+
 /// What the core asks the executor to do.
 pub enum Effect {
     /// Make this call on the store and answer with `Event::Completed { op }`.
     Store { op: OpId, call: StoreCall },
     /// Answer the request handed in under `id`. `Err` is a 503: the node
     /// could not serve it.
-    Reply { id: RequestId, response: Result<ResponseEnvelope, Unavailable> },
+    Reply { id: RequestId, response: Result<Answer, String> },
     /// Push a message to a worker. At most once; nothing is reported back.
-    Send { address: String, message: Message },
+    Send { address: String, message: Outgoing },
     /// Send `Event::Tick` once `after_ms` have passed, replacing any wake
     /// asked for before.
     Wake { after_ms: u64 },

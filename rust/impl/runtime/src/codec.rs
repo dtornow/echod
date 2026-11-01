@@ -2,10 +2,12 @@
 //!
 //! The rows keep tags and headers as ordered pairs and durations as `u64`;
 //! the protocol carries maps and `i64`. Everything that crosses is here.
+//! The decision core never sees an envelope: it answers with an `Answer`
+//! and sends an `Outgoing`, and this file renders both.
 
 use std::collections::HashMap;
 
-use crate::verified as rows;
+use echod_logic::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};
 
@@ -144,91 +146,25 @@ pub fn promise_record(p: &rows::Promise) -> w::PromiseRecord {
     })
 }
 
-/// A kernel outbox entry as the message a worker receives.
-pub fn message_out(e: &rows::OutboxEntry, server_url: &str) -> (String, w::Message) {
-    let msg = match &e.message {
-        rows::Message::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
+pub fn message(address: &str, outgoing: &echod_logic::Outgoing, server_url: &str) -> (String, w::Message) {
+    let msg = match outgoing {
+        echod_logic::Outgoing::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
             kind: "execute".to_string(),
             head: w::MessageHead { server_url: server_url.to_string() },
             data: w::ExecuteMsgData { task: w::ExecuteMsgTask { id: task_id.clone(), version: *version as i64 } },
         }),
-        rows::Message::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
+        echod_logic::Outgoing::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
             kind: "unblock".to_string(),
             head: w::UnblockMsgHead {},
             data: w::UnblockMsgData { promise: promise_out(r) },
         }),
     };
-    (e.address.clone(), msg)
+    (address.to_string(), msg)
 }
 
 /// What a status says when nothing more is known of why.
-pub fn reason(status: u16) -> &'static str {
-    match status {
-        400 => "Bad request",
-        403 => "Forbidden",
-        404 => "Not found",
-        409 => "Conflict",
-        422 => "Unprocessable",
-        _ => "Error",
-    }
-}
-
-/// The status a kernel response carries.
-pub fn status_of(r: &rows::Response) -> u16 {
-    match r {
-        rows::Response::Promise(p) => p.status,
-        rows::Response::Schedule(c) => c.status,
-        rows::Response::Status(st) => st.status,
-        rows::Response::TaskGet(g) => g.status,
-        rows::Response::TaskClaim(c) => c.status,
-        rows::Response::TaskFence(f) => f.status,
-    }
-}
-
-fn object<'a>(s: &'a rows::State, id: &str) -> Option<&'a rows::Promise> {
-    s.objects.iter().find(|p| p.id == id)
-}
-
-/// Why a request was refused, in the words the reference server uses: by
-/// kind and status, and where one status has several causes, by the
-/// state the step left, which the refusing checks did not change. The
-/// kernel proves the status; the words are the protocol's courtesy.
-pub fn reason_for(kind: &str, req: &rows::Request, status: u16, s: &rows::State) -> String {
-    let text = match (kind, status) {
-        ("promise.get" | "promise.settle", 404) => "Promise not found",
-        ("promise.register_callback" | "promise.register_listener", 404) => "Awaited promise not found",
-        ("promise.register_callback", 422) => match req {
-            rows::Request::PromiseRegisterCallback(c) => match object(s, &c.awaiter) {
-                None => "Awaiter promise not found",
-                Some(w) if rows::tags::exec_otype(&w.tags) != rows::tags::OType::Runnable => "Awaiter promise has no resonate:target tag",
-                Some(_) => "Awaited promise is not awaitable",
-            },
-            _ => "Awaited promise is not awaitable",
-        },
-        ("promise.register_listener", 422) => "Awaited promise is not awaitable",
-        ("task.get" | "task.acquire" | "task.release" | "task.fulfill" | "task.suspend" | "task.fence" | "task.halt" | "task.continue", 404) => "Task not found",
-        ("task.create", 409) => "Already exists",
-        ("task.create", 422) => "The promise does not have a resonate:target tag",
-        ("task.acquire", 409) => match req {
-            rows::Request::TaskAcquire(a) => match object(s, &a.id).and_then(|p| p.task.as_ref()) {
-                Some(t) if t.state == rows::TaskState::Pending => "Version mismatch",
-                _ => "Task is not pending",
-            },
-            _ => "Task is not pending",
-        },
-        ("task.release" | "task.fulfill", 409) => "Task version mismatch or invalid state",
-        ("task.suspend", 409) => "Task is not acquired or version mismatch",
-        ("task.suspend", 422) => match req {
-            rows::Request::TaskSuspend(q) if q.actions.iter().any(|a| object(s, &a.awaited).is_none()) => "Awaited promise not found",
-            _ => "Awaited promise is not awaitable",
-        },
-        ("task.fence", 409) => "Version mismatch",
-        ("task.halt", 409) => "Task is fulfilled",
-        ("task.continue", 409) => "Task is not halted",
-        ("schedule.get" | "schedule.delete", 404) => "Schedule not found",
-        _ => reason(status),
-    };
-    text.to_string()
+fn reason(status: u16) -> &'static str {
+    echod_logic::reason::reason(status)
 }
 
 /// An envelope: `data` for a successful status, the reason otherwise,
@@ -305,7 +241,78 @@ pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &rows:
 /// A kernel response rendered with its reason: what the node answers, and
 /// what the simulator's model answers, so the two compare as equal.
 pub fn render(kind: &str, corr: &str, action_kind: Option<&str>, req: &rows::Request, r: &rows::Response, after: &rows::State) -> w::ResponseEnvelope {
-    let status = status_of(r);
-    let why = (status >= 400).then(|| reason_for(kind, req, status, after));
+    let status = echod_logic::reason::status_of(r);
+    let why = (status >= 400).then(|| echod_logic::reason::reason_for(kind, req, status, after));
     response_out(kind, corr, action_kind, r, why.as_deref())
+}
+
+/// An answer from the core as the protocol's envelope.
+pub fn envelope(answer: &echod_logic::Answer) -> w::ResponseEnvelope {
+    match answer {
+        echod_logic::Answer::Step { kind, corr, action_kind, response, why } => response_out(kind, corr, action_kind.as_deref(), response, why.as_deref()),
+        echod_logic::Answer::Debug { kind, corr, status, body } => {
+            if *status >= 400 {
+                let msg = match body {
+                    echod_logic::DebugBody::Message(s) => s.clone(),
+                    _ => reason(*status).to_string(),
+                };
+                return w::ResponseEnvelope::error(kind.clone(), corr.clone(), *status as i32, &msg);
+            }
+            let data = match body {
+                echod_logic::DebugBody::Object => json!({}),
+                echod_logic::DebugBody::List => json!([]),
+                echod_logic::DebugBody::Message(s) => Value::String(s.clone()),
+                echod_logic::DebugBody::Snap { promises, schedules } => snapshot(promises, schedules),
+            };
+            w::ResponseEnvelope::new(kind.clone(), corr.clone(), *status as i32, data)
+        }
+    }
+}
+
+/// The protocol's `Snapshot` of a set of promise rows: the records, the
+/// callbacks and listeners they hold, their tasks, and the deadlines they
+/// owe. Messages are never queued here: they are routed as they arise.
+fn snapshot(promises: &[rows::Promise], schedules: &[rows::Schedule]) -> Value {
+    let mut schedules: Vec<&rows::Schedule> = schedules.iter().collect();
+    schedules.sort_by(|a, b| a.id.cmp(&b.id));
+    let schedules: Vec<Value> = schedules.iter().map(|c| serde_json::to_value(schedule_out(c)).unwrap_or(Value::Null)).collect();
+    let mut promises: Vec<&rows::Promise> = promises.iter().collect();
+    promises.sort_by(|a, b| a.id.cmp(&b.id));
+    let records: Vec<Value> = promises.iter().map(|p| serde_json::to_value(promise_record(p)).unwrap_or(Value::Null)).collect();
+    let mut callbacks: Vec<Value> = Vec::new();
+    let mut listeners: Vec<Value> = Vec::new();
+    let mut tasks: Vec<Value> = Vec::new();
+    let mut promise_timeouts: Vec<Value> = Vec::new();
+    let mut task_timeouts: Vec<Value> = Vec::new();
+    for p in &promises {
+        for awaiter in &p.callbacks {
+            callbacks.push(json!({ "awaiter": awaiter, "awaited": p.id }));
+        }
+        for address in &p.listeners {
+            listeners.push(json!({ "id": p.id, "address": address }));
+        }
+        if p.state == rows::PromiseState::Pending && rows::tags::exec_otype(&p.tags) != rows::tags::OType::Internal {
+            promise_timeouts.push(json!({ "id": p.id, "timeout": p.timeout_at }));
+        }
+        if let Some(t) = &p.task {
+            let record = rows::TaskRecord { id: p.id.clone(), state: t.state, version: t.version, resumes: t.resumes.len() as u64, ttl: t.ttl, pid: t.pid.clone() };
+            tasks.push(serde_json::to_value(task_out(&record)).unwrap_or(Value::Null));
+            if let Some(at) = t.lease_timeout_at {
+                task_timeouts.push(json!({ "id": p.id, "type": 1, "timeout": at }));
+            }
+            if let Some(at) = t.retry_timeout_at {
+                task_timeouts.push(json!({ "id": p.id, "type": 0, "timeout": at }));
+            }
+        }
+    }
+    json!({
+        "promises": records,
+        "promiseTimeouts": promise_timeouts,
+        "callbacks": callbacks,
+        "listeners": listeners,
+        "tasks": tasks,
+        "taskTimeouts": task_timeouts,
+        "schedules": schedules,
+        "messages": [],
+    })
 }

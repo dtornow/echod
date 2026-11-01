@@ -35,14 +35,13 @@ use crate::verified::commit::Commit as Plan;
 use crate::verified::node::Key;
 use crate::verified::steps;
 use crate::verified::{Occurrence, OutboxEntry, Promise, Request, Response, Schedule, ScheduleTimeoutReq, State as Rows, TaskFenceInnerRes, TaskFenceRes};
-use resonate_core::{util, Unavailable};
 
 use crate::cache::{Cache, Cached};
-use crate::dispatch::Target;
 use crate::doc::{self, Header, Loaded, Row};
 use crate::keys::origin_of;
+use crate::target::Target;
 use crate::types::*;
-use crate::{unavailable, Owner, State};
+use crate::{Owner, State};
 
 /// What a flight does.
 pub(crate) enum Work {
@@ -264,7 +263,7 @@ impl State {
                 if let Some(mut f) = self.flights.inflight.remove(&fid) {
                     match std::mem::replace(&mut f.phase, Phase::Idle) {
                         Phase::FireWaitingOrigin(ctx) => self.fire_load_origin(f, ctx),
-                        _ => self.fail(f, Unavailable::new("a flight waited for a slot it did not need")),
+                        _ => self.fail(f, "a flight waited for a slot it did not need".to_string()),
                     }
                 }
             }
@@ -302,7 +301,7 @@ impl State {
                 Target::Origin(_) => "document",
                 Target::Schedule(_) => "schedule",
             };
-            self.fail(f, Unavailable::new(format!("too many races on the {what}")));
+            self.fail(f, format!("too many races on the {what}"));
         } else {
             self.begin(f);
         }
@@ -344,7 +343,7 @@ impl State {
                 Progress::Failed(e) => self.commit_failed(f, e),
             },
             Phase::FireLoadingSchedule { .. } => {
-                let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
+                let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, "not a fire".to_string()) };
                 match self.loaded_schedule(&schedule.clone(), outcome) {
                     Ok(ws) => self.fire_decide(f, ws),
                     Err(e) => self.fail(f, e),
@@ -408,7 +407,7 @@ impl State {
                     self.commit_failed(f, e);
                 }
             },
-            _ => self.fail(f, Unavailable::new("an answer the flight did not wait for")),
+            _ => self.fail(f, "an answer the flight did not wait for".to_string()),
         }
     }
 
@@ -434,7 +433,7 @@ impl State {
 
     /// The store answered a load of `origin`. Cache bookkeeping is on the
     /// fleet's time.
-    fn loaded_origin(&mut self, origin: &str, revalidating: Option<Cached>, outcome: StoreOutcome) -> Result<Working<Promise>, Unavailable> {
+    fn loaded_origin(&mut self, origin: &str, revalidating: Option<Cached>, outcome: StoreOutcome) -> Result<Working<Promise>, String> {
         let now = self.now();
         let key = self.keys.doc_key(origin);
         let w = |loaded: Loaded<Promise>, etag: Option<Etag>| Working { target: origin.to_string(), key: key.clone(), loaded, etag };
@@ -451,33 +450,33 @@ impl State {
             }
             (Some(_), StoreOutcome::Read(Read::Body(bytes, etag))) => {
                 self.note(Note::Cache(CacheResult::Refreshed));
-                let loaded: Loaded<Promise> = doc::decode(&bytes).map_err(Unavailable::new)?;
+                let loaded: Loaded<Promise> = doc::decode(&bytes)?;
                 self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                 Ok(w(loaded, Some(etag)))
             }
             (None, StoreOutcome::Got(None)) => Ok(w(Loaded::empty(), None)),
             (None, StoreOutcome::Got(Some((bytes, etag)))) => {
-                let loaded: Loaded<Promise> = doc::decode(&bytes).map_err(Unavailable::new)?;
+                let loaded: Loaded<Promise> = doc::decode(&bytes)?;
                 self.remember(origin, Cached { loaded: loaded.clone(), etag: etag.clone(), filled_at: now });
                 Ok(w(loaded, Some(etag)))
             }
-            (_, StoreOutcome::Failed(e)) => Err(unavailable(e)),
-            _ => Err(unavailable(unexpected())),
+            (_, StoreOutcome::Failed(e)) => Err(e.to_string()),
+            _ => Err(unexpected().to_string()),
         }
     }
 
     /// The store answered a load of schedule `id`, read in full: not cached.
-    fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> Result<Working<Schedule>, Unavailable> {
+    fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> Result<Working<Schedule>, String> {
         let key = self.keys.sched_key(id);
         let target = Target::Schedule(id.to_string()).name();
         match outcome {
             StoreOutcome::Got(None) => Ok(Working { target, key, loaded: Loaded::empty(), etag: None }),
             StoreOutcome::Got(Some((bytes, etag))) => {
-                let loaded = doc::decode(&bytes).map_err(Unavailable::new)?;
+                let loaded = doc::decode(&bytes)?;
                 Ok(Working { target, key, loaded, etag: Some(etag) })
             }
-            StoreOutcome::Failed(e) => Err(unavailable(e)),
-            _ => Err(unavailable(unexpected())),
+            StoreOutcome::Failed(e) => Err(e.to_string()),
+            _ => Err(unexpected().to_string()),
         }
     }
 
@@ -529,8 +528,8 @@ impl State {
                 // request's write; an idle sweep writes nothing.
                 let _ = steps::sweep(&mut state, now, &self.rows_cfg);
                 let r = state.handle(req, now, &self.rows_cfg);
-                let status = crate::wire::status_of(&r);
-                let why = (status >= 400).then(|| crate::wire::reason_for(kind, req, status, &state));
+                let status = crate::reason::status_of(&r);
+                let why = (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &state));
                 (Some(r), why, false)
             }
             Work::Sweep { .. } => {
@@ -552,46 +551,49 @@ impl State {
     /// A committed step: the messages out, the answer back.
     fn committed(&mut self, f: Flight, done: Done, fired: Fired) {
         self.note(Note::Commit(CommitOutcome::Committed));
-        for e in &done.outbox {
+        let Done { response, why, outbox, did } = done;
+        for e in &outbox {
             self.send(e);
         }
         let mut f = f;
         match &mut f.work {
             Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
                 // The create has landed; the fence's check follows on the task's document.
-                match (done.response, check.take()) {
+                match (response, check.take()) {
                     (Some(Response::Promise(inner)), Some(check)) => {
                         let work = Work::Request { id: *id, kind: kind.clone(), corr: corr.clone(), req: *check, action_kind: action_kind.clone(), now: *now, stage: Stage::Check { inner: Some(inner) } };
                         let then = then.clone();
                         self.submit(then, work, None, f.debug);
                     }
-                    _ => self.emit(Effect::Reply { id: *id, response: Err(Unavailable::new("no answer")) }),
+                    _ => self.emit(Effect::Reply { id: *id, response: Err("no answer".to_string()) }),
                 }
             }
             Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
                 // The fence's answer: the check's status, with the create's record inside when it held.
-                let response = match (&done.response, inner.take()) {
+                let response = match (response, inner.take()) {
                     (Some(Response::Status(st)), Some(inner)) => {
                         let action = (st.status == 200).then_some(TaskFenceInnerRes::Create(inner));
-                        let fence = Response::TaskFence(TaskFenceRes { status: st.status, action });
-                        Ok(crate::wire::response_out(kind, corr, action_kind.as_deref(), &fence, done.why.as_deref()))
+                        let response = Response::TaskFence(TaskFenceRes { status: st.status, action });
+                        Ok(Answer::Step { kind: kind.clone(), corr: corr.clone(), action_kind: action_kind.clone(), response, why })
                     }
-                    _ => Err(Unavailable::new("no answer")),
+                    _ => Err("no answer".to_string()),
                 };
                 self.emit(Effect::Reply { id: *id, response });
             }
             Work::Request { id, kind, corr, action_kind, stage: Stage::Whole, .. } => {
-                let resp = done.response.as_ref().map(|r| crate::wire::response_out(kind, corr, action_kind.as_deref(), r, done.why.as_deref()));
-                let response = resp.ok_or_else(|| Unavailable::new("no answer"));
+                let response = match response {
+                    Some(response) => Ok(Answer::Step { kind: kind.clone(), corr: corr.clone(), action_kind: action_kind.clone(), response, why }),
+                    None => Err("no answer".to_string()),
+                };
                 self.emit(Effect::Reply { id: *id, response });
             }
             Work::Sweep { .. } => {
-                self.note(Note::Sweep(if done.did { SweepOutcome::Fired } else { SweepOutcome::Idle }));
+                self.note(Note::Sweep(if did { SweepOutcome::Fired } else { SweepOutcome::Idle }));
                 self.note(Note::SweepEnd { flight: f.id, committed: true });
             }
             Work::Fire { .. } => {}
         }
-        f.idle = !done.did;
+        f.idle = !did;
         self.finish(f, Ok(fired));
     }
 
@@ -610,13 +612,13 @@ impl State {
             }
             e => {
                 self.note(Note::Commit(CommitOutcome::Failed));
-                self.fail(f, unavailable(e));
+                self.fail(f, e.to_string());
             }
         }
     }
 
     /// The flight ends without a commit.
-    fn fail(&mut self, f: Flight, e: Unavailable) {
+    fn fail(&mut self, f: Flight, e: String) {
         match &f.work {
             Work::Request { id, .. } => self.emit(Effect::Reply { id: *id, response: Err(e.clone()) }),
             Work::Sweep { .. } => {
@@ -630,7 +632,7 @@ impl State {
 
     /// The flight is over: its slot goes to the next, and the key that
     /// fired it hears how it went.
-    fn finish(&mut self, f: Flight, r: Result<Fired, Unavailable>) {
+    fn finish(&mut self, f: Flight, r: Result<Fired, String>) {
         let name = f.target.name();
         self.release(&name);
         if let Some(firing) = f.firing {
@@ -643,8 +645,11 @@ impl State {
     }
 
     pub(crate) fn send(&mut self, e: &OutboxEntry) {
-        let (address, message) = crate::wire::message_out(e, &self.cfg.url);
-        self.emit(Effect::Send { address, message });
+        let message = match &e.message {
+            crate::verified::Message::Execute { task_id, version } => Outgoing::Execute { task_id: task_id.clone(), version: *version },
+            crate::verified::Message::Unblock(r) => Outgoing::Unblock(r.clone()),
+        };
+        self.emit(Effect::Send { address: e.address.clone(), message });
     }
 
     // -----------------------------------------------------------------------
@@ -661,7 +666,7 @@ impl State {
     /// commit, in that order. A schedule not due, or gone, is rewritten
     /// unchanged so the key can be collected behind the write.
     fn fire_decide(&mut self, mut f: Flight, ws: Working<Schedule>) {
-        let Work::Fire { schedule, fired, now } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
+        let Work::Fire { schedule, fired, now } = &f.work else { return self.fail(f, "not a fire".to_string()) };
         let (id, fired, now) = (schedule.clone(), fired.clone(), *now);
         let t1 = steps::clamp_now(ws.loaded.stamp, now);
         // the decision is the step module's: a row due at the instant, or none
@@ -692,7 +697,7 @@ impl State {
         let at = c.next_run_at;
         let promise_id = Self::expand(&c.promise_id, &id, at);
         let origin = origin_of(&promise_id).to_string();
-        let next = util::compute_next_cron(&c.cron, at as i64).max(at as i64 + 1) as u64;
+        let next = crate::cron::next_after(&c.cron, at as i64).max(at as i64 + 1) as u64;
         let ctx = FireCtx { ws, row: c, t1, at, promise_id, origin, next };
         // the origin's slot, now or when it frees
         let slot = self.flights.slots.entry(ctx.origin.clone()).or_default();
@@ -715,7 +720,7 @@ impl State {
     /// Both documents loaded: the kernel's `process_schedule` on the row
     /// beside the origin's objects, then the origin committed first.
     fn fire_run(&mut self, mut f: Flight, ctx: FireCtx, wo: Working<Promise>) {
-        let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
+        let Work::Fire { schedule, .. } = &f.work else { return self.fail(f, "not a fire".to_string()) };
         let id = schedule.clone();
         let t = steps::clamp_now(wo.loaded.stamp, ctx.t1);
         let req = ScheduleTimeoutReq { schedule: id, occurrences: vec![Occurrence { at: ctx.at, promise_id: ctx.promise_id.clone() }], next_run_at: ctx.next };
@@ -749,7 +754,7 @@ impl State {
 
     /// Then the schedule, advanced, with the key fired.
     fn fire_advance(&mut self, mut f: Flight, ctx: FireCtx, schedules: Vec<Schedule>, t: u64) {
-        let Work::Fire { schedule, fired, .. } = &f.work else { return self.fail(f, Unavailable::new("not a fire")) };
+        let Work::Fire { schedule, fired, .. } = &f.work else { return self.fail(f, "not a fire".to_string()) };
         let (id, fired) = (schedule.clone(), fired.clone());
         self.note(Note::AdvanceBegin { flight: f.id, schedule: id, now: t, at: ctx.at, next: ctx.next });
         let FireCtx { ws, .. } = ctx;

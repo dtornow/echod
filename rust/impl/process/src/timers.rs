@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::verified::node::Key;
 
-use crate::dispatch::Target;
+use crate::target::Target;
 use crate::flight::{Firing, Work};
 use crate::keys::TimerEntry;
 use crate::types::*;
@@ -382,7 +382,7 @@ impl State {
     }
 
     /// The flight a key fired is over.
-    pub(crate) fn timer_fired(&mut self, firing: Firing, now: u64, r: Result<Fired, resonate_core::Unavailable>) {
+    pub(crate) fn timer_fired(&mut self, firing: Firing, now: u64, r: Result<Fired, String>) {
         self.timers.inflight = self.timers.inflight.saturating_sub(1);
         let outcome = match r {
             Ok(Fired::Deleted) => FireOutcome::Deleted,
@@ -392,7 +392,7 @@ impl State {
                 FireOutcome::Kept
             }
             Err(e) => {
-                self.note(Note::FireFailed { key: firing.key.clone(), error: e.message });
+                self.note(Note::FireFailed { key: firing.key.clone(), error: e });
                 self.timers.wheel.arm(now.max(firing.at) + RETRY_AFTER_MS, firing.key);
                 FireOutcome::Failed
             }

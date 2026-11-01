@@ -126,16 +126,21 @@ rust/impl/process/src/
   config.rs     the dials
   keys.rs       where everything lives under the bucket
   doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
-  wire.rs       the kernel's vocabulary to the protocol's and back
+  target.rs     an origin's document, or a schedule's
+  reason.rs     the words a refusal carries
+  cron.rs       the next time a schedule is due
   cache.rs      what a node remembers: documents by LRU under a byte budget
-  dispatch.rs   the envelope to the kernel's request, and the document it runs on
   flight.rs     one step on one document, from load to commit, one store call at a time; the fire across two
   members.rs    the nodes: announce, list, read the configuration, write the next epoch
   timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
+  debug.rs      debug.reset, debug.snap, debug.tick, once the runtime has accepted them
+  verified/     the proved document machine
 rust/impl/runtime/src/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
   env.rs        the clock and the listener, as ports
+  admit.rs      a protocol envelope to a call the core already accepts, or the refusal
+  codec.rs      an answer or a message back to the protocol's bytes
   node.rs       the executor: the core's effects, performed; the ResonateServer
   push.rs       messages out: HTTP push, and the router in front of it
   gateway.rs    POST /, GET /ready and GET /metrics
@@ -155,7 +160,7 @@ answer this request; push this message; wake me after this long; note
 this. Every event carries the node's clock as the executor read it; the
 core never reads one. Nothing in it waits, sleeps, locks or spawns, so
 the same events in the same order give the same effects, which is what
-`rust/impl/process/tests/core.rs` checks with a bucket that is a map and a clock that
+`rust/impl/runtime/tests/logic.rs` checks with a bucket that is a map and a clock that
 is a number: a promise created, timed out by its sweep, its listener told,
 its key collected, and a schedule fired into its origin, with no runtime
 under it.
@@ -671,8 +676,8 @@ specification functions; their executable functions are verified
 to compute those functions; `echod-logic` keeps its membership, cache and
 deadline-key state in the core and takes its decisions from it, runs
 the step module's loops, and serves every request through the kernel's
-`handle`: the dispatch turns the envelope into a `Request`, makes one
-call, and renders the `Response`, so the request the model's `Prepare`
+`handle`: the runtime turns the envelope into a `Request`, the core makes one
+call, and the runtime renders the `Response`, so the request the model's `Prepare`
 carries is the request the node runs. That is Anvil's shape of refinement: functional,
 per step, with a trusted shim. The shim here is `flight.rs`, `members.rs`
 and `timers.rs`, and it is now a pure function of its events: that the
@@ -689,6 +694,6 @@ version per content. The S3 model's fidelity and liveness are not proved.
 `examples/ts` runs the TypeScript SDK against the node. The SDK's default
 message source long-polls; `examples/ts/push.ts` is the push side, an HTTP
 listener plugged into the SDK's `HttpNetwork` as its adapter, so the worker's
-address is a URL. One concession in `wire.rs`: the SDK creates a sleep as a
+address is a URL. One concession in the runtime's codec: the SDK creates a sleep as a
 timer with a target, which the specification refuses; the node drops the
 target, and the timer is armed on its own as the specification arms it.

@@ -1157,11 +1157,11 @@ dependencies = [
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "cron 0.12.1",
  "echod-concrete",
- "resonate-core",
  "serde",
  "serde_json",
- "validator",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
@@ -1196,6 +1196,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "validator",
 ]
 
 [[package]]
