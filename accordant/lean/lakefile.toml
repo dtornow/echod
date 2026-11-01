@@ -1,0 +1,34 @@
+name = "rover"
+defaultTargets = ["Rover", "Resonate"]
+
+[[require]]
+name = "resonate-spec"
+git = "https://github.com/resonatehq/resonate"
+rev = "9c72d818721b1776edd6b1b2939a83b3c0b248a6"
+subDir = "spec"
+
+[[lean_lib]]
+name = "Rover"
+srcDir = "lib"
+
+[[lean_lib]]
+name = "Resonate"
+srcDir = "src"
+roots = [
+  "Resonate",
+  "Protocol",
+  "abstract.Machine",
+  "abstract.External",
+  "abstract.Internal",
+  "abstract.System",
+  "abstract.Model",
+  "concrete.Timers",
+  "concrete.Machine",
+  "concrete.External",
+  "concrete.Internal",
+  "concrete.Model",
+  "concrete.Tests",
+  "concrete.Refinement",
+  "Check",
+  "Examples",
+]
