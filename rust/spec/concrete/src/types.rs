@@ -1,6 +1,7 @@
 //! The document vocabulary: rows, the outbox, configuration, identifiers.
 //!
 //! Records, requests, and responses are `echod_types`, re-exported below.
+//! Their views are `echod_types::spec`, re-exported with them.
 //!
 //! Every exec type with a string or a list in it has an abstract twin,
 //! `make_spec_type`'s `…Spec`, named `A…` here, reached through `View`:

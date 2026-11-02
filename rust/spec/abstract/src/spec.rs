@@ -10,7 +10,8 @@
 //! about the code, speak about these twins, with nothing in between.
 //!
 //! Views: ids and strings as `Seq<char>`, the persistent maps as `Map`, the
-//! sets as `Set`. A value of the model's own types with a given view is
+//! sets as `Set`. A request, a response, and a record view as `echod_types::spec`.
+//! A value of the model's own types with a given view is
 //! obtained by `choose`; that every view is realised by some value is the one
 //! axiom this module adds (`axiom_realised`), true of the types as built; that
 //! a value is its view (`collections.rs`) makes the choice the value itself.

@@ -6,7 +6,9 @@ use vstd::string::StringExecFns;
 use crate::tags_proof::*;
 
 use crate::types::str_eq;
-use crate::types::{ATags, Tags};
+use crate::types::Tags;
+#[cfg(verus_keep_ghost)]
+use crate::types::ATags;
 
 verus! {
 

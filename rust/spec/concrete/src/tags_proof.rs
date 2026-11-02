@@ -5,7 +5,9 @@ use vstd::prelude::*;
 
 use crate::types::str_eq;
 use crate::tags::*;
-use crate::types::{ATags, Tags};
+use crate::types::Tags;
+#[cfg(verus_keep_ghost)]
+use crate::types::ATags;
 
 verus! {
 
