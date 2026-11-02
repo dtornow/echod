@@ -9,11 +9,11 @@ subDir = "spec"
 
 [[lean_lib]]
 name = "Rover"
-srcDir = "rover"
+srcDir = "src"
 
 [[lean_lib]]
 name = "Resonate"
-srcDir = "."
+srcDir = "src"
 roots = [
   "Protocol",
   "abstract.Resonate",

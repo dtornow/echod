@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-model="$(dirname "$0")/../concrete/Model.lean"
+model="$(dirname "$0")/../src/concrete/Model.lean"
 
 if rg -n \
   'import .*abstract|Resonate\.(run|runWork|handleExternal)|Direct\.' \
