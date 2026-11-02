@@ -481,10 +481,8 @@ fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
             s.promises.insert(id.clone(), q);
             assert(s.promises@ == s0.promises@.insert(id@, q));
             assert(s.promises@.map_values(|p: Promise| p@) == s0.promises@.map_values(|p: Promise| p@).insert(id@, q@));
-
         },
-        None => {
-        },
+        None => {},
     }
 
     assert(s@.tasks == s0@.tasks);
@@ -1635,11 +1633,9 @@ impl Resonate {
                         assert(n.tasks@ == nt.insert(id@, u));
 
                         marks.push(mk("lease expired"));
-                    } else {
                     }
                 },
-                None => {
-                },
+                None => {},
             }
             // A settled promise's listeners are told, once.
             let found = match n.promises.get(id) {
@@ -1694,14 +1690,10 @@ impl Resonate {
 
                             assert(n.promises@.map_values(|p: Promise| p@) == np.map_values(|p: Promise| p@).insert(id@, q@));
                             marks.push(mk("listeners told"));
-
-                        } else {
                         }
-                    } else {
                     }
                 },
-                None => {
-                },
+                None => {},
             }
             // A pending task whose retry is due is offered to a worker, and
             // the next offer armed. Not once its promise is settled: the task

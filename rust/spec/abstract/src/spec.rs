@@ -5,10 +5,10 @@
 //! protocol.
 //!
 //! Ids and strings view as `Seq<char>`, the persistent maps as `Map`, the
-//! sets as `Set`. A value of the model's own types with a given view is
-//! obtained by `choose`; that every view is realised by some value is the one
-//! axiom this module adds (`axiom_realised`), true of the types as built; that
-//! a value is its view (`collections.rs`) makes the choice the value itself.
+//! sets as `Set`. A dispatch with a given view is obtained by `choose`; that
+//! every dispatch view is realised by some value is the axiom this module
+//! adds (`axiom_realised`), true of the type as built; that a value is its
+//! view (`collections.rs`) makes the choice the value itself.
 
 // Outside Verus (`cargo build`) the spec functions and proofs are erased, and
 // the imports they use with them.
@@ -16,7 +16,6 @@
 
 use vstd::prelude::*;
 
-use echod_rover::semantics::{ExternalOutcomeV, InternalOutcomeV};
 use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
 
 use echod_types::{PromiseRecord, PromiseState, Request, Response, Tags, TaskRecord, TaskState, Value};
@@ -360,10 +359,6 @@ pub open spec fn sat_add(a: Time, b: Time) -> Time {
     if a + b > u64::MAX { u64::MAX } else { (a + b) as Time }
 }
 
-pub open spec fn sat_mul(a: Time, b: Time) -> Time {
-    if a * b > u64::MAX { u64::MAX } else { (a * b) as Time }
-}
-
 /// The last version a task can take: an acquire at it is refused (409), as
 /// the servers refuse one at their own door.
 pub const MAX_VERSION: u32 = u32::MAX;
@@ -378,192 +373,20 @@ pub open spec fn all_in_origin(ids: Seq<Chars>, id: Chars) -> bool {
 
 // ----------------------------------------------- a value for a view
 
-/// The value of the model's type with this view. That one exists is
-/// `axiom_realised`: the types are built to hold any finite view.
-pub open spec fn lift_server(v: ServerV) -> Server {
-    choose|x: Server| x@ == v
-}
-
-pub open spec fn lift_internal(v: InternalV) -> Internal {
-    choose|x: Internal| x@ == v
-}
-
 pub open spec fn lift_dispatch(v: DispatchV) -> Dispatch {
     choose|x: Dispatch| x@ == v
 }
 
-pub open spec fn lift_sched(s: Sched<InternalV>) -> Sched<Internal> {
-    match s {
-        Sched::Later(r) => Sched::Later(lift_internal(r)),
-        Sched::Timer(t, r) => Sched::Timer(t, lift_internal(r)),
-    }
-}
-
-pub open spec fn lift_out(o: OutV) -> ExternalOutcomeV<Server, Response, Internal, Dispatch> {
-    ExternalOutcomeV {
-        next: lift_server(o.next),
-        resp: o.resp,
-        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
-        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
-    }
-}
-
-pub open spec fn lift_inout(o: InOutV) -> InternalOutcomeV<Server, Internal, Dispatch> {
-    InternalOutcomeV {
-        next: lift_server(o.next),
-        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
-        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
-    }
-}
-
-/// Every view the handlers produce is some value's view. Trusted: the maps and
-/// sets hold any finite contents, strings any characters. Stated for the
-/// views the handlers reach (finite, since they come from values).
+/// Every dispatch view is some dispatch's view. Trusted: a string is any
+/// characters, and a record is its fields.
 #[verifier::external_body]
-pub proof fn axiom_realised(v: ServerV, i: InternalV, d: DispatchV)
+pub proof fn axiom_realised(d: DispatchV)
     ensures
-        lift_server(v)@ == v,
-        lift_internal(i)@ == i,
         lift_dispatch(d)@ == d,
 {
 }
 
 // --------------------------------------------------- a value is its view
-
-pub proof fn lemma_ostr_ext(a: Option<String>, b: Option<String>)
-    requires
-        ostr(a) == ostr(b),
-    ensures
-        a == b,
-{
-    match (a, b) {
-        (Some(x), Some(y)) => axiom_string_ext(x, y),
-        _ => {},
-    }
-}
-
-pub proof fn lemma_strs_ext(a: Vec<String>, b: Vec<String>)
-    requires
-        strs(a@) == strs(b@),
-    ensures
-        a == b,
-{
-    broadcast use group_views;
-    assert(strs(a@).len() == a@.len());
-    assert(strs(b@).len() == b@.len());
-    assert forall|i: int| 0 <= i < a@.len() implies a@[i] == b@[i] by {
-        assert(strs(a@)[i] == a@[i]@);
-        assert(strs(b@)[i] == b@[i]@);
-        axiom_string_ext(a@[i], b@[i]);
-    }
-    assert(a@ =~= b@);
-    axiom_vec_ext(a, b);
-}
-
-pub proof fn lemma_promise_ext(a: Promise, b: Promise)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    lemma_ostr_ext(a.value, b.value);
-    lemma_ostr_ext(a.param, b.param);
-    axiom_pset_ext(a.callbacks, b.callbacks);
-    axiom_pset_ext(a.listeners, b.listeners);
-}
-
-pub proof fn lemma_task_ext(a: Task, b: Task)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    lemma_ostr_ext(a.pid, b.pid);
-    lemma_strs_ext(a.resumes, b.resumes);
-}
-
-pub proof fn lemma_schedule_ext(a: Schedule, b: Schedule)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    axiom_string_ext(a.id, b.id);
-    axiom_string_ext(a.cron, b.cron);
-    axiom_string_ext(a.promise_id, b.promise_id);
-    lemma_ostr_ext(a.promise_param, b.promise_param);
-}
-
-pub proof fn lemma_promises_ext(a: PMap<Promise>, b: PMap<Promise>)
-    requires
-        a@.map_values(|p: Promise| p@) == b@.map_values(|p: Promise| p@),
-    ensures
-        a == b,
-{
-    let f = |p: Promise| p@;
-    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
-        assert(a@.map_values(f).contains_key(k));
-        assert(b@.map_values(f).contains_key(k));
-        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
-        lemma_promise_ext(a@[k], b@[k]);
-    }
-    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
-        assert(b@.map_values(f).contains_key(k));
-    }
-    assert(a@ =~= b@);
-    axiom_pmap_ext(a, b);
-}
-
-pub proof fn lemma_tasks_ext(a: PMap<Task>, b: PMap<Task>)
-    requires
-        a@.map_values(|t: Task| t@) == b@.map_values(|t: Task| t@),
-    ensures
-        a == b,
-{
-    let f = |t: Task| t@;
-    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
-        assert(a@.map_values(f).contains_key(k));
-        assert(b@.map_values(f).contains_key(k));
-        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
-        lemma_task_ext(a@[k], b@[k]);
-    }
-    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
-        assert(b@.map_values(f).contains_key(k));
-    }
-    assert(a@ =~= b@);
-    axiom_pmap_ext(a, b);
-}
-
-pub proof fn lemma_schedules_ext(a: PMap<Schedule>, b: PMap<Schedule>)
-    requires
-        a@.map_values(|c: Schedule| c@) == b@.map_values(|c: Schedule| c@),
-    ensures
-        a == b,
-{
-    let f = |c: Schedule| c@;
-    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
-        assert(a@.map_values(f).contains_key(k));
-        assert(b@.map_values(f).contains_key(k));
-        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
-        lemma_schedule_ext(a@[k], b@[k]);
-    }
-    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
-        assert(b@.map_values(f).contains_key(k));
-    }
-    assert(a@ =~= b@);
-    axiom_pmap_ext(a, b);
-}
-
-pub proof fn lemma_server_ext(a: Server, b: Server)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    lemma_promises_ext(a.promises, b.promises);
-    lemma_tasks_ext(a.tasks, b.tasks);
-    lemma_schedules_ext(a.schedules, b.schedules);
-}
 
 pub proof fn lemma_prec_ext(a: PromiseRecord, b: PromiseRecord)
     requires
@@ -572,74 +395,6 @@ pub proof fn lemma_prec_ext(a: PromiseRecord, b: PromiseRecord)
         a == b,
 {
     axiom_string_ext(a.id, b.id);
-}
-
-pub proof fn lemma_trec_ext(a: TaskRecord, b: TaskRecord)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    axiom_string_ext(a.id, b.id);
-    match (a.pid, b.pid) {
-        (Some(x), Some(y)) => axiom_string_ext(x, y),
-        _ => {},
-    }
-}
-
-pub proof fn lemma_response_ext(a: Response, b: Response)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    match (a, b) {
-        (Response::Status(_), Response::Status(_)) => {},
-        (Response::Promise(p), Response::Promise(q)) => match (p.promise, q.promise) {
-            (Some(x), Some(y)) => lemma_prec_ext(x, y),
-            _ => {},
-        },
-        (Response::TaskGet(t), Response::TaskGet(u)) => match (t.task, u.task) {
-            (Some(x), Some(y)) => lemma_trec_ext(x, y),
-            _ => {},
-        },
-        (Response::TaskClaim(t), Response::TaskClaim(u)) => {
-            match (t.promise, u.promise) {
-                (Some(x), Some(y)) => lemma_prec_ext(x, y),
-                _ => {},
-            }
-            match (t.task, u.task) {
-                (Some(x), Some(y)) => lemma_trec_ext(x, y),
-                _ => {},
-            }
-        },
-        (Response::TaskFence(_), Response::TaskFence(_)) => {},
-        (Response::Schedule(c), Response::Schedule(d)) => match (c.schedule, d.schedule) {
-            (Some(x), Some(y)) => lemma_schedule_ext(x, y),
-            _ => {},
-        },
-        _ => {},
-    }
-}
-
-pub proof fn lemma_internal_ext(a: Internal, b: Internal)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    match (a, b) {
-        (Internal::On(x), Internal::On(y)) => lemma_strs_ext(x, y),
-        (Internal::Fire { schedule: s1, promise: p1, .. }, Internal::Fire { schedule: s2, promise: p2, .. }) => {
-            axiom_string_ext(s1, s2);
-            axiom_string_ext(p1, p2);
-        },
-        (Internal::Advance { schedule: s1, promise: p1, .. }, Internal::Advance { schedule: s2, promise: p2, .. }) => {
-            axiom_string_ext(s1, s2);
-            axiom_string_ext(p1, p2);
-        },
-        _ => {},
-    }
 }
 
 pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)
@@ -660,78 +415,12 @@ pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)
 
 // ----------------------------------------------- the lift of a value's view
 
-pub proof fn lemma_lift_server(s: Server)
-    ensures
-        lift_server(s@) == s,
-{
-    axiom_realised(s@, InternalV::On(Seq::empty()), DispatchV::Execute { id: Seq::empty(), version: 0 });
-    lemma_server_ext(lift_server(s@), s);
-}
-
-pub proof fn lemma_lift_internal(i: Internal)
-    ensures
-        lift_internal(i@) == i,
-{
-    axiom_realised(ServerV { promises: Map::empty(), tasks: Map::empty(), schedules: Map::empty() }, i@, DispatchV::Execute { id: Seq::empty(), version: 0 });
-    lemma_internal_ext(lift_internal(i@), i);
-}
-
 pub proof fn lemma_lift_dispatch(d: Dispatch)
     ensures
         lift_dispatch(d@) == d,
 {
-    axiom_realised(ServerV { promises: Map::empty(), tasks: Map::empty(), schedules: Map::empty() }, InternalV::On(Seq::empty()), d@);
+    axiom_realised(d@);
     lemma_dispatch_ext(lift_dispatch(d@), d);
-}
-
-pub proof fn lemma_lift_sched(w: Sched<Internal>)
-    ensures
-        lift_sched(sched_v(w)) == w,
-{
-    match w {
-        Sched::Later(r) => lemma_lift_internal(r),
-        Sched::Timer(_, r) => lemma_lift_internal(r),
-    }
-}
-
-/// The checker's outcome built from an `Out` is the lift of the `Out`'s view.
-pub proof fn lemma_lift_out(o: ExternalOutcomeV<Server, Response, Internal, Dispatch>, v: OutV)
-    requires
-        o.next@ == v.next,
-        o.resp == v.resp,
-        o.work.map_values(|w: Sched<Internal>| sched_v(w)) == v.work,
-        o.send.map_values(|d: Dispatch| d@) == v.send,
-    ensures
-        lift_out(v) == o,
-{
-    lemma_lift_server(o.next);
-    assert forall|j: int| 0 <= j < o.work.len() implies #[trigger] lift_sched(v.work[j]) == o.work[j] by {
-        lemma_lift_sched(o.work[j]);
-    }
-    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
-    assert forall|j: int| 0 <= j < o.send.len() implies #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
-        lemma_lift_dispatch(o.send[j]);
-    }
-    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
-}
-
-pub proof fn lemma_lift_inout(o: InternalOutcomeV<Server, Internal, Dispatch>, v: InOutV)
-    requires
-        o.next@ == v.next,
-        o.work.map_values(|w: Sched<Internal>| sched_v(w)) == v.work,
-        o.send.map_values(|d: Dispatch| d@) == v.send,
-    ensures
-        lift_inout(v) == o,
-{
-    lemma_lift_server(o.next);
-    assert forall|j: int| 0 <= j < o.work.len() implies #[trigger] lift_sched(v.work[j]) == o.work[j] by {
-        lemma_lift_sched(o.work[j]);
-    }
-    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
-    assert forall|j: int| 0 <= j < o.send.len() implies #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
-        lemma_lift_dispatch(o.send[j]);
-    }
-    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
 }
 
 // ------------------------------------------------------------- the model

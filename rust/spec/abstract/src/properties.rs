@@ -515,38 +515,8 @@ pub open spec fn step_catalogue(
 }
 
 // ---------------------------------------------------------------------------
-// Proof obligations and proved base cases
+// Preservation obligation
 // ---------------------------------------------------------------------------
-
-pub proof fn initial_state_satisfies_catalogue(config: Resonate)
-    ensures
-        state_catalogue(
-            0,
-            super::abstract_model::Model.spec_initial(config)[0].1,
-        ),
-{
-}
-
-pub proof fn structural_properties_hold(state: StateV)
-    ensures
-        well_formed_store_object_ids_unique(state),
-        well_formed_store_schedule_ids_unique(state),
-        forall|id: Chars| state.server.promises.contains_key(id) ==>
-            well_formed_promise_callbacks_unique_at(
-                state.server.promises[id],
-            ),
-        forall|id: Chars| state.server.promises.contains_key(id) ==>
-            well_formed_promise_listeners_unique_at(
-                state.server.promises[id],
-            ),
-{
-}
-
-pub proof fn noop_satisfies_transition_catalogue(now: Time, state: StateV)
-    ensures
-        transition_catalogue(now, state, state),
-{
-}
 
 /// The exact obligation every allowed `on_event` outcome must discharge.
 pub open spec fn on_event_preserves_catalogue(config: Resonate) -> bool {

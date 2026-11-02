@@ -1,9 +1,8 @@
 //! Complete one-process abstract Resonate model.
 //!
-//! The executable `on_event` and mathematical `spec_on_event` have parallel
-//! match trees. Requests atomically run the complete Resonate handler. Timeout
-//! events run any enabled internal item: promise deadlines, task leases,
-//! callbacks, retries, listener notification, and schedule fire/advance work.
+//! Requests atomically run the complete Resonate handler. Timeout events run
+//! any enabled internal item: promise deadlines, task leases, callbacks,
+//! retries, listener notification, and schedule fire/advance work.
 
 use vstd::prelude::*;
 
@@ -625,17 +624,6 @@ impl RoverModel for Model {
             Message::Request(_) => true,
             Message::Output(_) => false,
         }
-    }
-
-    open spec fn spec_on_event(
-        &self,
-        config: Resonate,
-        pid: Pid,
-        state: StateV,
-        now: Time,
-        event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<StateV, Pid, Message>> {
-        arbitrary()
     }
 
     open spec fn spec_observe(
