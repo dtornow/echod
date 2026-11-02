@@ -16964,16 +16964,23 @@ theorem initial_related
     cases this
     simp at hmem
 
+/-- Client-visible traces of a concrete fleet are client-visible traces of the
+unreliable abstract service. -/
+def Refines (nodes : List Addr) (appConfig : Resonate.Config)
+    (config : Concrete.Config) : Prop :=
+  ∀ events,
+    Concrete.ValidBoundaryTrace nodes appConfig config events →
+    Abstract.ValidBoundaryTrace
+      { appConfig with unreliable := true } events
+
 /-- End-to-end trace inclusion from a protocol-specific reachable one-step
 simulation, including all execution and delayed-observation plumbing. -/
 theorem boundary_refinement_of_stepSimulation
-    (nodes : List Addr) (appConfig : Resonate.Config)
-    (config : Concrete.Config)
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
     (hsim : StepSimulation nodes appConfig config) :
-    ∀ events,
-      Concrete.ValidBoundaryTrace nodes appConfig config events →
-      Abstract.ValidBoundaryTrace
-        { appConfig with unreliable := true } events := by
+    Refines nodes appConfig config := by
+  unfold Refines
   intro events hvalid
   obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
   obtain ⟨abstractExecution, abstractLegal, _, abstractTrace⟩ :=
@@ -16987,14 +16994,10 @@ theorem boundary_refinement_of_stepSimulation
     abstractTrace.trans htrace⟩
 
 theorem boundary_refinement
-    (nodes : List Addr) (appConfig : Resonate.Config)
-    (config : Concrete.Config)
+    {nodes : List Addr} {appConfig : Resonate.Config}
+    {config : Concrete.Config}
     (hconditional : config.conditional = true) :
-    ∀ events,
-      Concrete.ValidBoundaryTrace nodes appConfig config events →
-      Abstract.ValidBoundaryTrace
-        { appConfig with unreliable := true } events :=
-  boundary_refinement_of_stepSimulation nodes appConfig config
-    (stepSimulation hconditional)
+    Refines nodes appConfig config :=
+  boundary_refinement_of_stepSimulation (stepSimulation hconditional)
 
 end Resonate.Refinement
