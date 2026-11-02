@@ -115,7 +115,6 @@ structure Call where
 /-- Runtime settings shared by the two implementations.  This is protocol
 configuration, not an abstract transition. -/
 structure Config extends ServerConfig where
-  unreliable : Bool := false
   deriving Repr
 
 /-- A document transaction key. -/

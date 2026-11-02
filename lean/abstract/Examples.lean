@@ -427,7 +427,7 @@ def unavailableCreateTrace : List BoundaryEvent := [
 ]
 
 -- The full checker explores serve, landed-but-lost, and shed branches.
-#guard (Check.check { unreliable := true }
+#guard (Check.check {}
   unavailableCreateTrace).isValid
 
 /-- Store application payloads contain only the dependent key, document, and

@@ -29,16 +29,13 @@ def step (config : Config) (pid : Pid) (state : State) (now : Time)
   match pid, event with
   | .service, .receive .outside (.request call) =>
       let served := Resonate.run config call state
-      if config.unreliable then
-        let lost := Resonate.runLose config call state
-        let shed := Resonate.runShed call state
-        ⟨[
-          { state := served.1, send := sends served.2 },
-          { state := lost.1, send := sends lost.2 },
-          { state := shed.1, send := sends shed.2 }
-        ], by simp⟩
-      else
-        Outcomes.one { state := served.1, send := sends served.2 }
+      let lost := Resonate.runLose config call state
+      let shed := Resonate.runShed call state
+      ⟨[
+        { state := served.1, send := sends served.2 },
+        { state := lost.1, send := sends lost.2 },
+        { state := shed.1, send := sends shed.2 }
+      ], by simp⟩
   | .service, .timeout =>
       let choices := Resonate.runTimeoutChoices config now state
       ⟨choices.val.map fun (next, outputs) =>

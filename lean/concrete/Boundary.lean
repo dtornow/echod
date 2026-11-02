@@ -16,8 +16,7 @@ theorem concrete_refines_abstract
     (concreteConfig : Concrete.Config)
     (events : List ExternalTrace) :
     Concrete.ValidExternalTrace nodes abstractConfig concreteConfig events →
-    Abstract.ValidExternalTrace
-      { abstractConfig with unreliable := true } events :=
+    Abstract.ValidExternalTrace abstractConfig events :=
   Refinement.refinement_proof events
 
 end Resonate

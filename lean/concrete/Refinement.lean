@@ -281,7 +281,7 @@ theorem selectedExternal_correspondence
     (key : DocumentKey) (before : Document key)
     (hkey : (Concrete.Transaction.external call).key? = some key) :
     Concrete.selectedExternal appConfig call key before =
-      Resonate.run { appConfig with unreliable := true } call
+      Resonate.run appConfig call
         (Concrete.singleState key before) := by
   cases request : call.request <;>
     simp only [Concrete.Transaction.key?, request] at hkey
@@ -393,7 +393,7 @@ theorem selectedWork_correspondence
     (appConfig : Resonate.Config) (item : WorkItem) (now : Time)
     (rest : List Concrete.PendingEntry) (before : Document item.key) :
     Concrete.selectedWork appConfig item now rest item.key before =
-      Resonate.runWork { appConfig with unreliable := true } item now
+      Resonate.runWork appConfig item now
         (Concrete.pendingWorkflow rest)
         (Concrete.singleState item.key before) := by
   cases item <;>
@@ -416,7 +416,7 @@ theorem selectedWork_correspondence_key
     (rest : List Concrete.PendingEntry) (key : DocumentKey)
     (before : Document key) (hkey : item.key = key) :
     Concrete.selectedWork appConfig item now rest key before =
-      Resonate.runWork { appConfig with unreliable := true } item now
+      Resonate.runWork appConfig item now
         (Concrete.pendingWorkflow rest)
         (Concrete.singleState key before) := by
   subst key
@@ -436,14 +436,14 @@ inductive Selected (appConfig : Resonate.Config) :
       List Concrete.PendingEntry → Prop
   | external {key call before after outputs} :
       (Concrete.Transaction.external call).key? = some key →
-      Resonate.run { appConfig with unreliable := true } call
+      Resonate.run appConfig call
           (Concrete.singleState key before) =
         (after, outputs) →
       Selected appConfig key (.external call) before
         (after.store.read key) outputs
           (after.workflow.pending.map Concrete.PendingEntry.fromWorkflow)
   | work {item now rest before after outputs} :
-      Resonate.runWork { appConfig with unreliable := true } item now
+      Resonate.runWork appConfig item now
           (Concrete.pendingWorkflow rest)
           (Concrete.singleState item.key before) =
         (after, outputs) →
@@ -610,7 +610,7 @@ theorem select_valid {appConfig : Resonate.Config}
       have hcorrespondence :=
         selectedExternal_correspondence appConfig call flightKey before hkey
       have habstract :
-          Resonate.run { appConfig with unreliable := true } call
+          Resonate.run appConfig call
               (Concrete.singleState flightKey before) =
             (after, candidate.outputs) := by
         rw [← hcorrespondence]
@@ -634,7 +634,7 @@ theorem select_valid {appConfig : Resonate.Config}
       have hcorrespondence :=
         selectedWork_correspondence appConfig item now rest before
       have habstract :
-          Resonate.runWork { appConfig with unreliable := true } item now
+          Resonate.runWork appConfig item now
               (Concrete.pendingWorkflow rest)
               (Concrete.singleState item.key before) =
             (after, candidate.outputs) := by
@@ -822,7 +822,7 @@ theorem external_locality
   cases hselected with
   | external hkey hrun =>
       have hlocal :=
-        external_locality { appConfig with unreliable := true } call key
+        external_locality appConfig call key
           before (Concrete.singleState key before) hkey (by
             exact Resonate.Store.read_write_same _ _ _)
       rw [hrun] at hlocal
@@ -1241,7 +1241,7 @@ theorem external_cas_transport
     (htransaction : provenance.transaction = .external call)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted :=
-      Resonate.run { appConfig with unreliable := true } call abstract
+      Resonate.run appConfig call abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
       lifted.1.workflow = abstract.workflow := by
@@ -1258,7 +1258,7 @@ theorem external_cas_transport
               (emptyDocument key) := by
         rw [← hrep key, hbefore]
       have hlocal := external_locality
-        { appConfig with unreliable := true } call key
+        appConfig call key
         ((loaded.map (·.1)).getD (emptyDocument key))
         abstract hkey habstract
       rw [hselected] at hlocal
@@ -1270,15 +1270,15 @@ theorem external_cas_transport
           simp [hlocal.1]
         · rw [Concrete.Store.toAbstract_commit]
           simp [hother, external_frame
-            { appConfig with unreliable := true } call key other
+            appConfig call key other
             abstract hkey hother, hrep other]
       · intro other hrelevant
         by_cases hother : other = key
         · subst other
           exact external_key_mem
-            { appConfig with unreliable := true } call abstract key hkey
+            appConfig call abstract key hkey
         · exact external_keys_mono
-            { appConfig with unreliable := true } call abstract other
+            appConfig call abstract other
               (hrep.relevantKeys other (by
                 rw [Concrete.Store.toAbstract_commit] at hrelevant
                 simpa [hother] using hrelevant))
@@ -1299,7 +1299,7 @@ theorem external_cas_transport_lose
     (htransaction : provenance.transaction = .external call)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted :=
-      Resonate.runLose { appConfig with unreliable := true } call abstract
+      Resonate.runLose appConfig call abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 =
         Resonate.unavailable call :: provenance.outputs.drop 1 ∧
@@ -1321,7 +1321,7 @@ theorem work_cas_transport
     (htransaction : provenance.transaction = .work item now rest)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted := Resonate.runWork
-      { appConfig with unreliable := true } item now
+      appConfig item now
         (Concrete.pendingWorkflow rest) abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
@@ -1340,7 +1340,7 @@ theorem work_cas_transport
               (emptyDocument item.key) := by
         rw [← hrep item.key, hbefore]
       have hlocal := work_locality
-        { appConfig with unreliable := true } item now
+        appConfig item now
         (Concrete.pendingWorkflow rest) item.key
         ((loaded.map (·.1)).getD
           (emptyDocument item.key))
@@ -1354,16 +1354,16 @@ theorem work_cas_transport
             simp [hlocal.1]
           · rw [Concrete.Store.toAbstract_commit]
             simp [hother, Resonate.runWork_frame
-              { appConfig with unreliable := true } item now
+              appConfig item now
               (Concrete.pendingWorkflow rest)
               abstract other hother, hrep other]
         · intro other hrelevant
           by_cases hother : other = item.key
           · subst other
-            exact work_key_mem { appConfig with unreliable := true } item now
+            exact work_key_mem appConfig item now
               (Concrete.pendingWorkflow rest) abstract
           · exact work_keys_mono
-              { appConfig with unreliable := true } item now
+              appConfig item now
               (Concrete.pendingWorkflow rest) abstract other
               (hrep.relevantKeys other (by
                 rw [Concrete.Store.toAbstract_commit] at hrelevant
@@ -1405,14 +1405,14 @@ theorem work_cas_transport_rest
     (hcurrent : physical.read key = provenance.loaded)
     (abstractRest : List WorkflowEntry) :
     let lifted := Resonate.runWork
-      { appConfig with unreliable := true } item now abstractRest abstract
+      appConfig item now abstractRest abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs := by
   have hold :=
     work_cas_transport hrep provenance htransaction hcurrent
   let concreteRest := Concrete.pendingWorkflow rest
   have hsame := runWork_rest_store_outputs
-    { appConfig with unreliable := true } item now concreteRest
+    appConfig item now concreteRest
       abstractRest abstract
   dsimp only
   constructor
@@ -1444,7 +1444,7 @@ theorem sweep_cas_transport
       item.key = key ∧
       item ∈ Resonate.eligibleWorkAt abstract now ∧
       let lifted := Resonate.runWork
-        { appConfig with unreliable := true } item now
+        appConfig item now
           (Concrete.pendingWorkflow rest) abstract
       StoreRep (physical.commit key document) lifted.1 ∧
         lifted.2 = provenance.outputs ∧
@@ -1508,7 +1508,7 @@ theorem sweep_cas_transport
             (emptyDocument (.origin origin))) hitemKey
         have hdocument' :
             candidate.document =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 item now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.origin origin)
                   ((loaded.map (·.1)).getD
@@ -1518,7 +1518,7 @@ theorem sweep_cas_transport
           exact hdocument
         have houtputs' :
             candidate.outputs =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 item now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.origin origin)
                   ((loaded.map (·.1)).getD
@@ -1527,7 +1527,7 @@ theorem sweep_cas_transport
           exact houtputs
         have hcontinuations' :
             candidate.continuations =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 item now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.origin origin)
                   ((loaded.map (·.1)).getD
@@ -1536,7 +1536,7 @@ theorem sweep_cas_transport
           rw [← hdecision]
           exact hcontinuations
         have hlocal := work_locality
-          { appConfig with unreliable := true } item now
+          appConfig item now
           (Concrete.pendingWorkflow rest) (.origin origin)
           ((loaded.map (·.1)).getD
             (emptyDocument (.origin origin)))
@@ -1558,7 +1558,7 @@ theorem sweep_cas_transport
               exact hdocument'.trans hlocal.1.symm
             · rw [Concrete.Store.toAbstract_commit]
               simp [hother, Resonate.runWork_frame
-                { appConfig with unreliable := true } item now
+                appConfig item now
                 (Concrete.pendingWorkflow rest) abstract other
                 (by
                   intro heq
@@ -1569,10 +1569,10 @@ theorem sweep_cas_transport
             by_cases hother : other = .origin origin
             · subst other
               simpa [hitemKey] using
-                (work_key_mem { appConfig with unreliable := true } item now
+                (work_key_mem appConfig item now
                   (Concrete.pendingWorkflow rest) abstract)
             · exact work_keys_mono
-                { appConfig with unreliable := true } item now
+                appConfig item now
                 (Concrete.pendingWorkflow rest) abstract other
                 (hrep.relevantKeys other (by
                   rw [Concrete.Store.toAbstract_commit] at hrelevant
@@ -1604,7 +1604,7 @@ theorem sweep_cas_transport
             (emptyDocument (.schedule id))) rfl
         have hdocument' :
             candidate.document =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.schedule id)
                   ((loaded.map (·.1)).getD
@@ -1614,7 +1614,7 @@ theorem sweep_cas_transport
           exact hdocument
         have houtputs' :
             candidate.outputs =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.schedule id)
                   ((loaded.map (·.1)).getD
@@ -1623,7 +1623,7 @@ theorem sweep_cas_transport
           exact houtputs
         have hcontinuations' :
             candidate.continuations =
-              (Resonate.runWork { appConfig with unreliable := true }
+              (Resonate.runWork appConfig
                 (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
                 (Concrete.singleState (.schedule id)
                   ((loaded.map (·.1)).getD
@@ -1632,7 +1632,7 @@ theorem sweep_cas_transport
           rw [← hdecision]
           exact hcontinuations
         have hlocal := work_locality
-          { appConfig with unreliable := true }
+          appConfig
           (.scheduleTimeout id) now
           (Concrete.pendingWorkflow rest) (.schedule id)
           ((loaded.map (·.1)).getD
@@ -1655,18 +1655,18 @@ theorem sweep_cas_transport
               exact hdocument'.trans hlocal.1.symm
             · rw [Concrete.Store.toAbstract_commit]
               simp [hother, Resonate.runWork_frame
-                { appConfig with unreliable := true }
+                appConfig
                 (.scheduleTimeout id) now
                 (Concrete.pendingWorkflow rest) abstract other
                 hother, hrep other]
           · intro other hrelevant
             by_cases hother : other = .schedule id
             · subst other
-              exact work_key_mem { appConfig with unreliable := true }
+              exact work_key_mem appConfig
                 (.scheduleTimeout id) now
                 (Concrete.pendingWorkflow rest) abstract
             · exact work_keys_mono
-                { appConfig with unreliable := true } (.scheduleTimeout id)
+                appConfig (.scheduleTimeout id)
                 now (Concrete.pendingWorkflow rest) abstract other
                 (hrep.relevantKeys other (by
                   rw [Concrete.Store.toAbstract_commit] at hrelevant
@@ -1699,10 +1699,10 @@ theorem sweep_cas_transport_rest
       item.key = key ∧
       item ∈ Resonate.eligibleWorkAt abstract now ∧
       let lifted := Resonate.runWork
-        { appConfig with unreliable := true } item now abstractRest abstract
+        appConfig item now abstractRest abstract
       StoreRep (physical.commit key document) lifted.1 ∧
         lifted.2 = provenance.outputs ∧
-        (Resonate.runWork { appConfig with unreliable := true } item now
+        (Resonate.runWork appConfig item now
           (Concrete.pendingWorkflow rest) abstract).1.workflow.pending =
             Concrete.pendingWorkflow provenance.continuations := by
   obtain ⟨item, hitemKey, hitem, hold⟩ :=
@@ -1710,7 +1710,7 @@ theorem sweep_cas_transport_rest
       hkeymem
   refine ⟨item, hitemKey, hitem, ?_⟩
   have hsame := runWork_rest_store_outputs
-    { appConfig with unreliable := true } item now
+    appConfig item now
       (Concrete.pendingWorkflow rest) abstractRest abstract
   refine ⟨?_, ?_, hold.2.2⟩
   · exact hold.1.of_store_eq hsame.1
@@ -1792,7 +1792,7 @@ theorem sweep_timeout_transport
     ∃ lifted added,
       lifted ∈
           (Resonate.runTimeoutChoices
-            { appConfig with unreliable := true } now abstract).val ∧
+            appConfig now abstract).val ∧
       StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
       Concrete.pendingWorkflow provenance.continuations =
@@ -1820,10 +1820,10 @@ theorem sweep_timeout_transport
         sweep_cas_transport_rest hrep provenance htransaction htarget hcurrent
           hwork hkeyMem abstract.workflow.pending
       let lifted :=
-        Resonate.runWork { appConfig with unreliable := true }
+        Resonate.runWork appConfig
           item instant abstract.workflow.pending abstract
       obtain ⟨added, hlocalPending, habstractPending⟩ :=
-        runWork_rest_pending { appConfig with unreliable := true }
+        runWork_rest_pending appConfig
           item instant (Concrete.pendingWorkflow rest)
           abstract.workflow.pending abstract
       refine ⟨lifted, added, ?_, htransport.1, htransport.2.1, ?_,
@@ -1838,10 +1838,10 @@ theorem sweep_timeout_transport
           item, hitem, by simp [lifted]⟩
       · rw [← htransport.2.2, hlocalPending]
       · simpa [lifted] using habstractPending
-      · exact work_keys_mono { appConfig with unreliable := true }
+      · exact work_keys_mono appConfig
           item instant abstract.workflow.pending abstract
       · have hitemKeyMem :=
-          work_key_mem { appConfig with unreliable := true }
+          work_key_mem appConfig
             item instant abstract.workflow.pending abstract
         rw [hitemKey] at hitemKeyMem
         simpa [lifted] using hitemKeyMem
@@ -12850,7 +12850,7 @@ theorem simulate_inject
     let concreteNext :=
       concrete.inject (.node address) (.request call) now
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config concreteNext
         (endOf abstract execution) ∧
@@ -12878,7 +12878,7 @@ theorem simulate_outside
     (htime : concrete.now ≤ now)
     (hmessage : (sender, .outside, message) ∈ concrete.network) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config (concrete.observeOutside now)
         (endOf abstract execution) ∧
@@ -13063,7 +13063,7 @@ theorem simulate_external_written_store
     (houtputs : provenance.outputs = flight.selected)
     {now : Time} (htime : concrete.now ≤ now) :
     let served :=
-      Resonate.run { appConfig with unreliable := true } call
+      Resonate.run appConfig call
         (abstract.process .service)
     let abstractResult : Result Abstract.Pid State Message := {
       state := served.1
@@ -13076,7 +13076,7 @@ theorem simulate_external_written_store
         .storeReply { op, payload := .written })]
     }
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
@@ -13084,7 +13084,7 @@ theorem simulate_external_written_store
       Abstract.boundaryTrace execution = [] := by
   dsimp
   let served :=
-    Resonate.run { appConfig with unreliable := true } call
+    Resonate.run appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := served.1
@@ -13104,12 +13104,12 @@ theorem simulate_external_written_store
     exact related.requests address call horigin
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now
           (.receive .outside (.request call))).val := by
     simp [Abstract.step, abstractResult, served]
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now
           (.receive .outside (.request call)) abstractResult.send)
         abstractNext :=
@@ -13164,7 +13164,7 @@ theorem simulate_external_written_store
     exact List.mem_append_left _ hmessage
   · intro knownKey hknownKey
     simpa [abstractNext, World.land, abstractResult, served] using
-      external_keys_mono { appConfig with unreliable := true } call
+      external_keys_mono appConfig call
         (abstract.process .service) knownKey hknownKey
   · exact ⟨physical.commit key document,
       by simp [World.land, concreteResult],
@@ -13198,7 +13198,7 @@ theorem simulate_external_written_store
     refine ⟨key, document, expectedVersion, provenance,
       List.mem_append_left _ hrequest, ?_, ?_⟩
     · simpa [abstractNext, World.land, abstractResult, served] using
-        external_key_mem { appConfig with unreliable := true } call
+        external_key_mem appConfig call
           (abstract.process .service) key hselectedKey
     · have hcovered :=
         covered_sent abstract now served.1 served.2
@@ -13221,7 +13221,7 @@ theorem simulate_external_written_store
       · obtain ⟨hknown, hcovered, hworkflow⟩ := holdWritten hold
         exact ⟨by
           simpa [abstractNext, World.land, abstractResult, served] using
-            external_keys_mono { appConfig with unreliable := true } call
+            external_keys_mono appConfig call
               (abstract.process .service) activeFlight.key hknown,
           hcovered.land abstractResult,
           by
@@ -13245,7 +13245,7 @@ theorem simulate_external_written_store
         refine ⟨?_, ?_, ?_⟩
         · subst key
           simpa [abstractNext, World.land, abstractResult, served] using
-            external_key_mem { appConfig with unreliable := true } call
+            external_key_mem appConfig call
               (abstract.process .service) flight.key hselectedKey
         · have hcovered :=
             covered_sent abstract now served.1 served.2
@@ -13293,7 +13293,7 @@ theorem simulate_external_landed_failed_store
     (hflightTransaction : provenance.transaction = flight.transaction)
     {now : Time} (htime : concrete.now ≤ now) :
     let lost :=
-      Resonate.runLose { appConfig with unreliable := true } call
+      Resonate.runLose appConfig call
         (abstract.process .service)
     let abstractResult : Result Abstract.Pid State Message := {
       state := lost.1
@@ -13306,7 +13306,7 @@ theorem simulate_external_landed_failed_store
         .storeReply { op, payload := .failed })]
     }
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
@@ -13314,7 +13314,7 @@ theorem simulate_external_landed_failed_store
       Abstract.boundaryTrace execution = [] := by
   dsimp
   let lost :=
-    Resonate.runLose { appConfig with unreliable := true } call
+    Resonate.runLose appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := lost.1
@@ -13334,12 +13334,12 @@ theorem simulate_external_landed_failed_store
     exact related.requests address call horigin
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now
           (.receive .outside (.request call))).val := by
     simp [Abstract.step, abstractResult, lost]
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now
           (.receive .outside (.request call)) abstractResult.send)
         abstractNext :=
@@ -13386,7 +13386,7 @@ theorem simulate_external_landed_failed_store
   · intro knownKey hknownKey
     simpa [abstractNext, World.land, abstractResult, lost,
       Resonate.runLose] using
-      external_keys_mono { appConfig with unreliable := true } call
+      external_keys_mono appConfig call
         (abstract.process .service) knownKey hknownKey
   · exact ⟨physical.commit key document,
       by simp [World.land, concreteResult],
@@ -13433,7 +13433,7 @@ theorem simulate_external_landed_failed_store
         exact ⟨by
           simpa [abstractNext, World.land, abstractResult, lost,
             Resonate.runLose] using
-            external_keys_mono { appConfig with unreliable := true } call
+            external_keys_mono appConfig call
               (abstract.process .service) activeFlight.key hknown,
           hcovered.land abstractResult,
           by
@@ -13509,7 +13509,7 @@ theorem simulate_external_not_landed_failed_store
         .storeReply { op, payload := .failed })]
     }
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
@@ -13535,12 +13535,12 @@ theorem simulate_external_not_landed_failed_store
     exact related.requests address call horigin
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now
           (.receive .outside (.request call))).val := by
     simp [Abstract.step, abstractResult, shed]
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now
           (.receive .outside (.request call)) abstractResult.send)
         abstractNext :=
@@ -13701,7 +13701,7 @@ theorem simulate_internal_committed_store
     (hchoice :
       lifted ∈
         (Resonate.runTimeoutChoices
-          { appConfig with unreliable := true } now
+          appConfig now
           (abstract.process .service)).val)
     (htransport :
       StoreRep (physical.commit key document) lifted.1 ∧
@@ -13739,7 +13739,7 @@ theorem simulate_internal_committed_store
               payload := .put key document expectedVersion
             }))).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now {
@@ -13761,13 +13761,13 @@ theorem simulate_internal_committed_store
   }
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now .timeout).val := by
     simp only [Abstract.step]
     exact List.mem_map.mpr ⟨lifted, hchoice, by
       simp [abstractResult]⟩
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now .timeout abstractResult.send)
         abstractNext :=
     Step.process (Nat.le_trans related.time htime) rfl trivial
@@ -13937,7 +13937,7 @@ theorem simulate_internal_not_landed_failed_store
               payload := .put key document expectedVersion
             }))).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now {
@@ -14063,7 +14063,7 @@ theorem simulate_matching_put_store
               payload := .put key document expectedVersion
             }))).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now result) (endOf abstract execution) ∧
@@ -14105,7 +14105,7 @@ theorem simulate_matching_put_store
                 payload := .put key document expectedVersion
               }))).val) :
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land .store now {
@@ -14148,15 +14148,15 @@ theorem simulate_matching_put_store
       hpending.subset (by simp)
     obtain ⟨abstractRest, hchoiceRaw, hpendingPerm⟩ :=
       pending_work_choice_of_mem
-        { appConfig with unreliable := true }
+        appConfig
         (abstract.process .service) now entry hentryMem
     let lifted :=
-      Resonate.runWork { appConfig with unreliable := true }
+      Resonate.runWork appConfig
         item semanticTime abstractRest (abstract.process .service)
     have hchoice :
         lifted ∈
           (Resonate.runTimeoutChoices
-            { appConfig with unreliable := true } now
+            appConfig now
             (abstract.process .service)).val := by
       simpa [lifted, item, entry, WorkflowEntry.item] using hchoiceRaw
     have htransport :=
@@ -14207,7 +14207,7 @@ theorem simulate_matching_put_store
           exact ⟨hsend.1, hsend.2.1⟩) hpendingPerm
       simp [World.land, lifted, item, entry, Resonate.runWork]
     have hitemMem :=
-      work_key_mem { appConfig with unreliable := true }
+      work_key_mem appConfig
         item semanticTime abstractRest
           (abstract.process .service)
     rw [hitemKey] at hitemMem
@@ -14218,7 +14218,7 @@ theorem simulate_matching_put_store
       haddress hnode hflight hphase hkey hloaded hflightTransaction
       houtputs hcontinuations lifted hchoice htransport
       hcontinuationsEmbedded hworkflowNext
-      (work_keys_mono { appConfig with unreliable := true }
+      (work_keys_mono appConfig
         item semanticTime abstractRest
           (abstract.process .service))
       (by simpa [lifted] using hitemMem)
@@ -14242,7 +14242,7 @@ theorem simulate_matching_put_store
                 payload := .put key document expectedVersion
               }))).val) :
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land .store now {
@@ -14359,7 +14359,7 @@ theorem simulate_matching_put_store
                 payload := .put key document expectedVersion
               }))).val) :
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land .store now {
@@ -14469,7 +14469,7 @@ theorem simulate_store_process
         (Concrete.step appConfig config .store (.store physical)
           now event).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land .store now result) (endOf abstract execution) ∧
@@ -14497,7 +14497,7 @@ theorem simulate_store_process
             Concrete.Msg.storeReply { op, payload := .failed }) ∉
               inert.send) :
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land .store now inert) (endOf abstract execution) ∧
@@ -16072,7 +16072,7 @@ theorem simulate_rejected_external_node
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land (.node address) now {
@@ -16089,12 +16089,12 @@ theorem simulate_rejected_external_node
   let abstractNext := abstract.land .service now abstractResult
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now
           (.receive .outside (.request call))).val := by
     simp [Abstract.step, abstractResult, shed]
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now
           (.receive .outside (.request call)) abstractResult.send)
         abstractNext :=
@@ -16141,7 +16141,7 @@ theorem simulate_pure_external_node
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land (.node address) now
@@ -16149,7 +16149,7 @@ theorem simulate_pure_external_node
         (endOf abstract execution) ∧
       Abstract.boundaryTrace execution = [] := by
   let served :=
-    Resonate.run { appConfig with unreliable := true } call
+    Resonate.run appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := served.1
@@ -16162,12 +16162,12 @@ theorem simulate_pure_external_node
     related.requests address call hrequest
   have habstractResult :
       abstractResult ∈
-        (Abstract.step { appConfig with unreliable := true }
+        (Abstract.step appConfig
           .service (abstract.process .service) now
           (.receive .outside (.request call))).val := by
     simp [Abstract.step, abstractResult, served]
   have habstractStep :
-      Step AModel { appConfig with unreliable := true } abstract
+      Step AModel appConfig abstract
         (.process .service now
           (.receive .outside (.request call)) abstractResult.send)
         abstractNext :=
@@ -16177,7 +16177,7 @@ theorem simulate_pure_external_node
       (.receive .outside (.request call)) abstractResult.send),
       abstractNext)], ⟨habstractStep, trivial⟩, ?_, rfl⟩
   have hpure :=
-    external_key_none { appConfig with unreliable := true } call
+    external_key_none appConfig call
       (abstract.process .service) hkey
   have hworkflowEq :
       (abstractNext.process .service).workflow =
@@ -16203,7 +16203,7 @@ theorem simulate_pure_external_node
     exact List.mem_append_left _ hmessage
   · intro knownKey hknownKey
     simpa [abstractNext, World.land, abstractResult, served] using
-      external_keys_mono { appConfig with unreliable := true } call
+      external_keys_mono appConfig call
         (abstract.process .service) knownKey hknownKey
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     refine ⟨physical, hphysical, ?_⟩
@@ -16214,7 +16214,7 @@ theorem simulate_pure_external_node
         (hpure.1 other).symm
     · intro other hrelevant
       simpa [abstractNext, World.land, abstractResult, served] using
-        external_keys_mono { appConfig with unreliable := true } call
+        external_keys_mono appConfig call
           (abstract.process .service) other
           (hrep.relevantKeys other hrelevant)
   · have hold :
@@ -16240,9 +16240,9 @@ theorem simulate_pure_external_node
   · intro output hsend
     have houtput :
         output ∈
-          (Resonate.run { appConfig with unreliable := true } call {}).2 := by
+          (Resonate.run appConfig call {}).2 := by
       rw [pureResponse_correspondence
-        { appConfig with unreliable := true } call hkey]
+        appConfig call hkey]
       simpa [Concrete.pureExternal, Concrete.sendOutputs] using hsend
     have hcovered := covered_sent abstract now served.1 served.2
     exact hcovered output (by
@@ -16259,7 +16259,7 @@ theorem simulate_pure_external_node
         hwritten (by simpa [World.land] using hreply)
       exact ⟨by
         simpa [abstractNext, World.land, abstractResult, served] using
-          external_keys_mono { appConfig with unreliable := true } call
+          external_keys_mono appConfig call
             (abstract.process .service) flight.key hknown,
         hcovered.land abstractResult,
         by
@@ -16294,7 +16294,7 @@ theorem simulate_node_process
         (Concrete.step appConfig config (.node address) (.node node)
           now event).val) :
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config
         (concrete.land (.node address) now result)
@@ -16317,7 +16317,7 @@ theorem simulate_node_process
           (Abstract.Pid.service, .outside, Message.output output) ∈
             abstract.network) :
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land (.node address) now result)
@@ -16669,7 +16669,7 @@ def StepSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     Related nodes appConfig config concrete abstract →
     Step (CModel nodes appConfig) config concrete label next →
     ∃ execution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract execution ∧
       Related nodes appConfig config next (endOf abstract execution) ∧
       Abstract.boundaryTrace execution = concreteObservation label
@@ -16688,7 +16688,7 @@ def ProcessSimulation (nodes : List Addr) (appConfig : Resonate.Config)
         ((CModel nodes appConfig).step config pid
           (concrete.process pid) now event).val →
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.land pid now result) (endOf abstract execution) ∧
@@ -16705,7 +16705,7 @@ def InjectSimulation (nodes : List Addr) (appConfig : Resonate.Config)
       (CModel nodes appConfig).isProcess to →
       (CModel nodes appConfig).injectable config message →
       ∃ execution,
-        Legal AModel { appConfig with unreliable := true }
+        Legal AModel appConfig
           abstract execution ∧
         Related nodes appConfig config
           (concrete.inject to message now) (endOf abstract execution) ∧
@@ -16837,7 +16837,7 @@ theorem simulate_execution
     (related : Related nodes appConfig config concrete abstract)
     (legal : Legal (CModel nodes appConfig) config concrete execution) :
     ∃ abstractExecution,
-      Legal AModel { appConfig with unreliable := true }
+      Legal AModel appConfig
         abstract abstractExecution ∧
       Related nodes appConfig config (endOf concrete execution)
         (endOf abstract abstractExecution) ∧
@@ -16941,13 +16941,13 @@ theorem initial_related
     simp at hmem
 
 /-- Client-visible traces of a concrete fleet are client-visible traces of the
-unreliable abstract service. -/
+abstract service. -/
 def Refines (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
   ∀ events,
     Concrete.ValidBoundaryTrace nodes appConfig config events →
     Abstract.ValidBoundaryTrace
-      { appConfig with unreliable := true } events
+      appConfig events
 
 /-- End-to-end trace inclusion from a protocol-specific reachable one-step
 simulation, including all execution and delayed-observation plumbing. -/
@@ -16965,7 +16965,7 @@ theorem boundary_refinement_of_stepSimulation
   exact ⟨abstractExecution,
     ⟨Abstract.initialProcess,
       Abstract.initialProcess_valid
-        { appConfig with unreliable := true },
+        appConfig,
       abstractLegal⟩,
     abstractTrace.trans htrace⟩
 
@@ -16974,7 +16974,7 @@ theorem refinement_proof
     {config : Concrete.Config} (events : List Resonate.BoundaryEvent) :
     Concrete.ValidBoundaryTrace nodes appConfig config events →
     Abstract.ValidBoundaryTrace
-      { appConfig with unreliable := true } events := by
+      appConfig events := by
   exact boundary_refinement_of_stepSimulation stepSimulation events
 
 end Resonate.Refinement

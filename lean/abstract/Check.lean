@@ -56,22 +56,17 @@ theorem step_send_outputs {config : Config} {pid : Abstract.Pid}
       | outside =>
           cases message with
           | request call =>
-              simp only [Abstract.step] at hresult
-              split at hresult
-              · simp only [List.mem_cons] at hresult
-                rcases hresult with hresult | hresult
+              simp only [Abstract.step, List.mem_cons] at hresult
+              rcases hresult with hresult | hresult
+              · subst result
+                exact ⟨(Resonate.run config call state).2, rfl⟩
+              · rcases hresult with hresult | hresult
                 · subst result
-                  exact ⟨(Resonate.run config call state).2, rfl⟩
+                  exact ⟨(Resonate.runLose config call state).2, rfl⟩
                 · rcases hresult with hresult | hresult
                   · subst result
-                    exact ⟨(Resonate.runLose config call state).2, rfl⟩
-                  · rcases hresult with hresult | hresult
-                    · subst result
-                      exact ⟨(Resonate.runShed call state).2, rfl⟩
-                    · contradiction
-              · simp only [Outcomes.one, List.mem_singleton] at hresult
-                subst result
-                exact ⟨(Resonate.run config call state).2, rfl⟩
+                    exact ⟨(Resonate.runShed call state).2, rfl⟩
+                  · contradiction
           | output output =>
               simp only [Abstract.step, Outcomes.one,
                 List.mem_singleton] at hresult
