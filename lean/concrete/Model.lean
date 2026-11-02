@@ -847,25 +847,29 @@ def start (appConfig : Resonate.Config) (node : Node) (transaction : Transaction
       let (next, request) := node.await flight (.get key)
       { state := .node next, send := [request] }
 
-def pureResponse : Request → Response
+def pureResponse (now : Time) : Request → Response
   | .promiseRegisterCallback _ =>
       .promiseRegisterCallback { status := 400 }
-  | .promiseSearch _ => .promiseSearch { status := 501 }
-  | .scheduleSearch _ => .scheduleSearch { status := 501 }
+  | .promiseSearch req =>
+      .promiseSearch (Decision.promiseSearch req now)
+  | .scheduleSearch req =>
+      .scheduleSearch (Decision.scheduleSearch req now)
   | .taskFence _ => .taskFence { status := 400 }
   | .taskHeartbeat req =>
       if req.tasks.isEmpty then .taskHeartbeat { status := 200 }
       else .taskHeartbeat { status := 400 }
   | .taskSuspend _ => .taskSuspend { status := 400 }
   | .taskFulfill _ => .taskFulfill { status := 400 }
-  | .taskSearch _ => .taskSearch { status := 501 }
+  | .taskSearch req =>
+      .taskSearch (Decision.taskSearch req now)
   | request => unavailableResponse request
 
 def pureExternal (_appConfig : Resonate.Config) (node : Node) (call : Call) :
     Result Pid Local Msg :=
   { state := .node node
     send := sendOutputs
-      [.response call.client call.id (pureResponse call.request)] }
+      [.response call.client call.id
+        (pureResponse call.requestedAt call.request)] }
 
 def cleanupKeys (node : Node) (flight : Flight) : List TimerKey :=
   let predecessor :=

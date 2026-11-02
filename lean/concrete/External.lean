@@ -74,6 +74,10 @@ def promiseRegisterListener (req : PromiseRegisterListenerReq) (now : Nat) :
         setPromise awaited.suffix (awaited.promise.addListener req.address)
       return { status := 200, promise := some (awaited.promise.toRecord awaited.id) }
 
+def promiseSearch (_req : PromiseSearchReq) (_now : Nat) :
+    PromiseSearchRes :=
+  { status := 501 }
+
 def taskGet (req : TaskGetReq) (now : Nat) :
     Handler (.origin req.id.origin) TaskGetRes := do
   match ← readTaskObject req.id.suffix now with
@@ -341,6 +345,9 @@ def taskContinue (req : TaskContinueReq) (now : Nat) :
               retryTimeoutAt := some now }
           return { status := 200 }
 
+def taskSearch (_req : TaskSearchReq) (_now : Nat) : TaskSearchRes :=
+  { status := 501 }
+
 def scheduleGet (req : ScheduleGetReq) (_now : Nat) :
     Handler (.schedule req.id) ScheduleGetRes := do
   match ← getSchedule with
@@ -375,5 +382,9 @@ def scheduleDelete (req : ScheduleDeleteReq) (_now : Nat) :
   | some _ =>
       delSchedule
       return { status := 200 }
+
+def scheduleSearch (_req : ScheduleSearchReq) (_now : Nat) :
+    ScheduleSearchRes :=
+  { status := 501 }
 
 end Resonate.Concrete.Decision

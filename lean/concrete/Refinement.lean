@@ -56,6 +56,11 @@ theorem promiseRegisterListener_handler_correspondence
       Direct.promiseRegisterListener req now := by
   rfl
 
+theorem promiseSearch_handler_correspondence
+    (req : ServerModel.PromiseSearchReq) (now : Time) :
+    Concrete.Decision.promiseSearch req now = Direct.promiseSearch req now := by
+  rfl
+
 theorem taskGet_handler_correspondence
     (req : ServerModel.TaskGetReq) (now : Time) :
     Concrete.Decision.taskGet req now = Direct.taskGet req now := by
@@ -174,6 +179,11 @@ theorem taskContinue_handler_correspondence
     Concrete.Decision.taskContinue req now = Direct.taskContinue req now := by
   rfl
 
+theorem taskSearch_handler_correspondence
+    (req : ServerModel.TaskSearchReq) (now : Time) :
+    Concrete.Decision.taskSearch req now = Direct.taskSearch req now := by
+  rfl
+
 theorem scheduleGet_handler_correspondence
     (req : ServerModel.ScheduleGetReq) (now : Time) :
     Concrete.Decision.scheduleGet req now = Direct.scheduleGet req now := by
@@ -189,6 +199,12 @@ theorem scheduleDelete_handler_correspondence
     (req : ServerModel.ScheduleDeleteReq) (now : Time) :
     Concrete.Decision.scheduleDelete req now =
       Direct.scheduleDelete req now := by
+  rfl
+
+theorem scheduleSearch_handler_correspondence
+    (req : ServerModel.ScheduleSearchReq) (now : Time) :
+    Concrete.Decision.scheduleSearch req now =
+      Direct.scheduleSearch req now := by
   rfl
 
 theorem promiseTimeout_work_correspondence
@@ -1047,7 +1063,7 @@ theorem pureResponse_correspondence
     (hkey : (Concrete.Transaction.external call).key? = none) :
     (Resonate.run config call {}).2 =
       [.response call.client call.id
-        (Concrete.pureResponse call.request)] := by
+        (Concrete.pureResponse call.requestedAt call.request)] := by
   cases request : call.request <;>
     simp only [Concrete.Transaction.key?, request] at hkey
   case promiseRegisterCallback req =>
@@ -1098,13 +1114,16 @@ theorem pureResponse_correspondence
     · contradiction
   case promiseSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.promiseSearch, Concrete.pureResponse, request]
+      Direct.promiseSearch, Concrete.Decision.promiseSearch,
+      Concrete.pureResponse, request]
   case scheduleSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.scheduleSearch, Concrete.pureResponse, request]
+      Direct.scheduleSearch, Concrete.Decision.scheduleSearch,
+      Concrete.pureResponse, request]
   case taskSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.taskSearch, Concrete.pureResponse, request]
+      Direct.taskSearch, Concrete.Decision.taskSearch,
+      Concrete.pureResponse, request]
   all_goals
     rename_i req
     first
