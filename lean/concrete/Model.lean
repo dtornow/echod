@@ -21,7 +21,6 @@ abbrev Version := Nat
 abbrev OpId := Nat
 
 structure Config where
-  conditional : Bool := true
   flaky : Bool := false
   retries : Nat := 3
   bucketWidth : Time := 1000
@@ -815,7 +814,7 @@ def storePut (config : Config) (sender : Pid) (store : Store)
     (op : OpId) (key : DocumentKey) (document : Document key)
     (expectedVersion : Option Version) :
     Outcomes (Result Pid Local Msg) :=
-  if config.conditional && expectedVersion != store.version key then
+  if expectedVersion != store.version key then
     Outcomes.one {
       state := .store store
       send := [(sender, .storeReply { op, payload := .conflict })]

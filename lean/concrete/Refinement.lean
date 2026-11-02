@@ -250,7 +250,7 @@ the conflict branch. This is the store-level duplicate-PUT safety fact. -/
 theorem duplicate_absent_put_conflicts
     (sender : Concrete.Pid) (op : Concrete.OpId)
     (key : DocumentKey) (document : Document key) :
-    (Concrete.storePut { conditional := true }
+    (Concrete.storePut {}
       sender (({} : Concrete.Store).commit key document)
       op key document none).val =
       [({
@@ -259,22 +259,6 @@ theorem duplicate_absent_put_conflicts
       } : Result Concrete.Pid Concrete.Local Concrete.Msg)] := by
   simp [Concrete.storePut, Concrete.Store.commit,
     Concrete.Store.version, Rover.Outcomes.one]
-
-/-- Without conditional writes, replaying the same raw PUT commits again.
-This is the protocol counterexample that makes `conditional = true` necessary
-for boundary refinement under append-only duplicate delivery. -/
-theorem unconditional_duplicate_put_relands
-    (sender : Concrete.Pid) (op : Concrete.OpId)
-    (key : DocumentKey) (document : Document key) :
-    (Concrete.storePut { conditional := false, flaky := false }
-      sender (({} : Concrete.Store).commit key document)
-      op key document none).val =
-      [({
-        state := .store
-          ((({} : Concrete.Store).commit key document).commit key document)
-        send := [(sender, .storeReply { op, payload := .written })]
-      } : Result Concrete.Pid Concrete.Local Concrete.Msg)] := by
-  simp [Concrete.storePut, Rover.Outcomes.one]
 
 theorem originWork_correspondence
     (origin : String) (document : OriginDocument origin) (now : Time) :
@@ -9761,8 +9745,8 @@ theorem stageablePuts_step
                   simpa [World.land] using hnextStore
                 subst nextStore
                 rename_i hmismatch
-                simp only [Bool.and_eq_true, bne_iff_ne] at hmismatch
-                exact hmismatch.2 hmatch
+                simp only [bne_iff_ne] at hmismatch
+                exact hmismatch hmatch
               · split at hresult'
                 · simp at hresult'
                   rcases hresult' with hresult' | hresult' | hresult'
@@ -13058,7 +13042,6 @@ theorem simulate_external_written_store
     {key : DocumentKey} {document : Document key}
     {expectedVersion : Option Concrete.Version}
     (hphysical : concrete.process .store = .store physical)
-    (hconditional : config.conditional = true)
     (hrequest :
       (Concrete.Pid.node address, .store,
         .storeRequest {
@@ -13141,7 +13124,7 @@ theorem simulate_external_written_store
               payload := .put key document expectedVersion
             }))).val := by
     simp [Concrete.step, Concrete.storePut, concreteResult]
-    simp [hconditional, hmatch]
+    simp [hmatch]
     cases config.flaky <;> simp [Outcomes.one]
   have hconcreteStep :
       Step (CModel nodes appConfig) config concrete
@@ -13291,7 +13274,6 @@ theorem simulate_external_landed_failed_store
     {key : DocumentKey} {document : Document key}
     {expectedVersion : Option Concrete.Version}
     (hphysical : concrete.process .store = .store physical)
-    (hconditional : config.conditional = true)
     (hflaky : config.flaky = true)
     (hrequest :
       (Concrete.Pid.node address, .store,
@@ -13372,7 +13354,7 @@ theorem simulate_external_landed_failed_store
               payload := .put key document expectedVersion
             }))).val := by
     simp [Concrete.step, Concrete.storePut, concreteResult,
-      hconditional, hmatch, hflaky]
+      hmatch, hflaky]
   have hconcreteStep :
       Step (CModel nodes appConfig) config concrete
         (.process .store now
@@ -13498,7 +13480,6 @@ theorem simulate_external_not_landed_failed_store
     {key : DocumentKey} {document : Document key}
     {expectedVersion : Option Concrete.Version}
     (hphysical : concrete.process .store = .store physical)
-    (hconditional : config.conditional = true)
     (hflaky : config.flaky = true)
     (hrequest :
       (Concrete.Pid.node address, .store,
@@ -13574,7 +13555,7 @@ theorem simulate_external_not_landed_failed_store
               payload := .put key document expectedVersion
             }))).val := by
     simp [Concrete.step, Concrete.storePut, concreteResult,
-      hconditional, hmatch, hflaky]
+      hmatch, hflaky]
   have hconcreteStep :
       Step (CModel nodes appConfig) config concrete
         (.process .store now
@@ -14059,7 +14040,6 @@ theorem simulate_matching_put_store
     {abstract : World AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
-    (hconditional : config.conditional = true)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
     {key : DocumentKey} {document : Document key}
     {expectedVersion : Option Concrete.Version}
@@ -14395,28 +14375,28 @@ theorem simulate_matching_put_store
   cases htransaction : provenance.transaction with
   | external call =>
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+      · simp [Concrete.step, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact simulate_external_written_store hreachable related hphysical
-            hconditional hrequest provenance hmatch htransaction hcurrent
+            hrequest provenance hmatch htransaction hcurrent
             horigin haddress hnode hflight hphase hkey hflightTransaction
             houtputs htime
         · exact simulate_external_landed_failed_store hreachable related
-            hphysical hconditional hflaky hrequest provenance hmatch
+            hphysical hflaky hrequest provenance hmatch
             htransaction hcurrent horigin haddress hnode hflight
             hflightTransaction htime
         · exact simulate_external_not_landed_failed_store hreachable related
-            hphysical hconditional hflaky hrequest provenance hmatch
+            hphysical hflaky hrequest provenance hmatch
             htransaction horigin haddress hnode hflight hflightTransaction
             htime
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+        simp [Concrete.step, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact simulate_external_written_store hreachable related hphysical
-          hconditional hrequest provenance hmatch htransaction hcurrent
+          hrequest provenance hmatch htransaction hcurrent
           horigin haddress hnode hflight hphase hkey hflightTransaction
           houtputs htime
   | work item instant rest =>
@@ -14427,49 +14407,49 @@ theorem simulate_matching_put_store
       obtain ⟨request, hitem⟩ := hshape
       subst item
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+      · simp [Concrete.step, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact hwork htransaction rfl (.inl rfl) (by
-            simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+            simp [Concrete.step, Concrete.storePut, hmatch,
               hflaky])
         · exact hwork htransaction rfl (.inr rfl) (by
-            simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+            simp [Concrete.step, Concrete.storePut, hmatch,
               hflaky])
         · exact hinternalFence
             (by simp [htransaction, Concrete.failureOutputs]) (by
-              simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+              simp [Concrete.step, Concrete.storePut, hmatch,
                 hflaky])
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+        simp [Concrete.step, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact hwork htransaction rfl (.inl rfl) (by
-          simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+          simp [Concrete.step, Concrete.storePut, hmatch,
             hflakyFalse, Outcomes.one])
   | sweep timer instant rest =>
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+      · simp [Concrete.step, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact hsweep htransaction (.inl rfl) (by
-            simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+            simp [Concrete.step, Concrete.storePut, hmatch,
               hflaky])
         · exact hsweep htransaction (.inr rfl) (by
-            simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+            simp [Concrete.step, Concrete.storePut, hmatch,
               hflaky])
         · exact hinternalFence
             (by simp [htransaction, Concrete.failureOutputs]) (by
-              simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+              simp [Concrete.step, Concrete.storePut, hmatch,
                 hflaky])
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+        simp [Concrete.step, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact hsweep htransaction (.inl rfl) (by
-          simp [Concrete.step, Concrete.storePut, hconditional, hmatch,
+          simp [Concrete.step, Concrete.storePut, hmatch,
             hflakyFalse, Outcomes.one])
 theorem simulate_store_process
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -14478,7 +14458,6 @@ theorem simulate_store_process
     {abstract : World AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
-    (hconditional : config.conditional = true)
     {physical : Concrete.Store}
     (hphysical : concrete.process .store = .store physical)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
@@ -14564,13 +14543,13 @@ theorem simulate_store_process
               by_cases hmatch :
                   expectedVersion = physical.version key
               · exact simulate_matching_put_store hreachable related
-                  hconditional hphysical hvalid hmatch htime hresult
-              · simp [Concrete.step, Concrete.storePut, hconditional,
-                  hmatch, Outcomes.one] at hresult
+                  hphysical hvalid hmatch htime hresult
+              · simp [Concrete.step, Concrete.storePut, hmatch,
+                  Outcomes.one] at hresult
                 subst result
                 exact hinert (by
-                  simp [Concrete.step, Concrete.storePut, hconditional,
-                    hmatch, Outcomes.one]) rfl rfl
+                  simp [Concrete.step, Concrete.storePut, hmatch,
+                    Outcomes.one]) rfl rfl
                   (by simp) (by simp) (by simp)
           | armTimer timer =>
               simp [Concrete.step, Outcomes.one] at hresult
@@ -16759,8 +16738,7 @@ theorem injectSimulation
 
 theorem processSimulation
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    (hconditional : config.conditional = true) :
+    {config : Concrete.Config} :
     ProcessSimulation nodes appConfig config := by
   intro concrete abstract hreachable related pid now event result htime
     hprocess hvalid hresult
@@ -16776,7 +16754,7 @@ theorem processSimulation
   | store =>
       obtain ⟨physical, hphysical, _⟩ := related.store
       rw [hphysical] at hresult
-      exact simulate_store_process hreachable related hconditional hphysical
+      exact simulate_store_process hreachable related hphysical
         htime hvalid hresult
 
 theorem stepSimulation_of_processSimulation
@@ -16801,11 +16779,9 @@ theorem stepSimulation_of_processSimulation
 
 theorem stepSimulation
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    (hconditional : config.conditional = true) :
+    {config : Concrete.Config} :
     StepSimulation nodes appConfig config :=
-  stepSimulation_of_processSimulation injectSimulation
-    (processSimulation hconditional)
+  stepSimulation_of_processSimulation injectSimulation processSimulation
 
 theorem legal_append {model : Model} {config : model.Config}
     {world : World model} {first second : Execution model}
@@ -16995,9 +16971,8 @@ theorem boundary_refinement_of_stepSimulation
 
 theorem boundary_refinement
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    (hconditional : config.conditional = true) :
+    {config : Concrete.Config} :
     Refines nodes appConfig config :=
-  boundary_refinement_of_stepSimulation (stepSimulation hconditional)
+  boundary_refinement_of_stepSimulation stepSimulation
 
 end Resonate.Refinement

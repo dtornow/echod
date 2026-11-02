@@ -49,12 +49,13 @@ def conflictResult : Result Pid Local Msg :=
     (.receive .store (.storeReply { op := 3, payload := .conflict }))).val
       |>.headD { state := .node {}, send := [] }
 
--- A stale hit conflict invalidates the cache and retries from GET.
+-- A conflict restores the in-flight write and does not decide again.
 #guard match conflictResult with
-  | { state := .node node
-      send := [(.store, .storeRequest {
-        payload := .get (.origin "test"), .. })] } =>
-      (node.cacheRead key).isNone
+  | { state := .node node, send := [] } =>
+      match node.flights with
+      | [(3, flight)] =>
+          flight.phase == .writing && (node.cacheRead key).isSome
+      | _ => false
   | _ => false
 
 -- Invalidation is key-local.
@@ -66,7 +67,7 @@ def conflictResult : Result Pid Local Msg :=
 -- A duplicate conditional absent-version PUT cannot land twice.
 def once : Store := ({} : Store).commit key []
 
-#guard match (storePut { conditional := true } (.node "test") once
+#guard match (storePut {} (.node "test") once
     10 key [] none).val with
   | [{ state := .store store
        send := [(.node "test", .storeReply { payload := .conflict, .. })] }] =>
