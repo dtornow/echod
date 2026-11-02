@@ -16969,14 +16969,12 @@ theorem boundary_refinement_of_stepSimulation
       abstractLegal⟩,
     abstractTrace.trans htrace⟩
 
-/-- Every boundary trace of a concrete fleet is a boundary trace of the
-unreliable abstract service. -/
-theorem boundary_refinement
+theorem boundary_refinement_proof
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config} {events : List Resonate.BoundaryEvent}
-    (htrace : Concrete.ValidBoundaryTrace nodes appConfig config events) :
+    {config : Concrete.Config} (events : List Resonate.BoundaryEvent) :
+    Concrete.ValidBoundaryTrace nodes appConfig config events →
     Abstract.ValidBoundaryTrace
-      { appConfig with unreliable := true } events :=
-  boundary_refinement_of_stepSimulation stepSimulation events htrace
+      { appConfig with unreliable := true } events := by
+  exact boundary_refinement_of_stepSimulation stepSimulation events
 
 end Resonate.Refinement

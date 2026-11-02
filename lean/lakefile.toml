@@ -31,4 +31,5 @@ roots = [
   "concrete.Model",
   "concrete.Tests",
   "concrete.Refinement",
+  "concrete.Boundary",
 ]
