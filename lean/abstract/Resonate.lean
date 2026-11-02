@@ -6,6 +6,6 @@ import «abstract».Internal
 import «abstract».System
 import «abstract».Model
 import «concrete».Model
-import «concrete».Refinement
+import «concrete».refinement_claim
 import «abstract».Check
 import «abstract».Examples
