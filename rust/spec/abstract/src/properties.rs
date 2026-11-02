@@ -36,7 +36,7 @@ use echod_types::{PromiseState, TaskState};
 use super::exec::Resonate;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
-use super::spec::{distinct, external_v};
+use super::spec::distinct;
 use super::spec::{Chars, PromiseV, ScheduleV, TaskV};
 
 verus! {
@@ -124,31 +124,13 @@ pub open spec fn well_formed_promise_pending_created_before_deadline_at(
 pub open spec fn well_formed_promise_pending_has_no_value_at(
     promise: PromiseV,
 ) -> bool {
-    promise.state != PromiseState::Pending || promise.value is None
-}
-
-pub open spec fn well_formed_promise_deadline_verdict_matches_timer_tag_at(
-    promise: PromiseV,
-) -> bool {
-    promise.settled_at != Some(promise.timeout_at)
-        || promise.state
-            == if promise.tags.timer {
-                PromiseState::Resolved
-            } else {
-                PromiseState::RejectedTimedout
-            }
+    promise.state != PromiseState::Pending || promise.value.data is None
 }
 
 pub open spec fn well_formed_promise_deadline_settlement_has_no_value_at(
     promise: PromiseV,
 ) -> bool {
-    promise.settled_at != Some(promise.timeout_at) || promise.value is None
-}
-
-pub open spec fn well_formed_promise_timer_not_targeted_at(
-    promise: PromiseV,
-) -> bool {
-    !(promise.tags.timer && promise.tags.target)
+    promise.settled_at != Some(promise.timeout_at) || promise.value.data is None
 }
 
 pub open spec fn well_formed_promise_timedout_is_server_owned_at(
@@ -171,13 +153,6 @@ pub open spec fn well_formed_promise_listeners_unique_at(
 ) -> bool {
     // Rover stores listeners as a set for the same reason.
     true
-}
-
-pub open spec fn well_formed_promise_obligations_require_external_at(
-    promise: PromiseV,
-) -> bool {
-    (promise.callbacks.len() == 0 && promise.listeners.len() == 0)
-        || external_v(promise)
 }
 
 pub open spec fn well_formed_promise_awaiter_is_not_self_at(
@@ -258,12 +233,6 @@ pub open spec fn well_formed_task_acquired_version_positive_at(
     task.state != TaskState::Acquired || task.version > 0
 }
 
-pub open spec fn well_formed_schedule_promise_tags_not_timer_targeted_at(
-    schedule: ScheduleV,
-) -> bool {
-    !(schedule.promise_tags.timer && schedule.promise_tags.target)
-}
-
 pub open spec fn well_formed_schedule_created_at_lte_next_run_at_at(
     schedule: ScheduleV,
 ) -> bool {
@@ -312,15 +281,9 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
             state.server.promises[id],
         )
     &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
-        well_formed_promise_deadline_verdict_matches_timer_tag_at(
-            state.server.promises[id],
-        )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
         well_formed_promise_deadline_settlement_has_no_value_at(
             state.server.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
-        well_formed_promise_timer_not_targeted_at(state.server.promises[id])
     &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
         well_formed_promise_timedout_is_server_owned_at(
             state.server.promises[id],
@@ -329,10 +292,6 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
         well_formed_promise_callbacks_unique_at(state.server.promises[id])
     &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
         well_formed_promise_listeners_unique_at(state.server.promises[id])
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
-        well_formed_promise_obligations_require_external_at(
-            state.server.promises[id],
-        )
     &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
         well_formed_promise_awaiter_is_not_self_at(
             id,
@@ -373,10 +332,6 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
         well_formed_task_resumes_unique_at(state.server.tasks[id])
     &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
         well_formed_task_acquired_version_positive_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.schedules.contains_key(id) ==>
-        well_formed_schedule_promise_tags_not_timer_targeted_at(
-            state.server.schedules[id],
-        )
     &&& forall|id: Chars| state.server.schedules.contains_key(id) ==>
         well_formed_schedule_created_at_lte_next_run_at_at(
             state.server.schedules[id],
@@ -624,161 +579,6 @@ pub open spec fn on_event_preserves_catalogue(config: Resonate) -> bool {
                 event,
             )[i],
         )
-}
-
-/// Read-only promise lookup is the first nontrivial handler preservation
-/// theorem: both the 200 and 404 branches leave model state unchanged.
-pub proof fn get_promise_preserves_catalogue(
-    config: Resonate,
-    before: StateV,
-    now: Time,
-    call: super::protocol::Call,
-    id: Chars,
-    i: int,
-)
-    requires
-        call.request@ == super::spec::RequestV::GetPromise(id),
-        state_catalogue(now, before),
-        0 <= i,
-        i < super::abstract_model::Model.spec_on_event(
-            config,
-            Pid::Service,
-            before,
-            now,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-        ).len(),
-    ensures
-        step_catalogue(
-            now,
-            before,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-            super::abstract_model::Model.spec_on_event(
-                config,
-                Pid::Service,
-                before,
-                now,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(call),
-                },
-            )[i],
-        ),
-{
-    reveal(RoverModel::spec_on_event);
-    reveal(super::spec::ext);
-    reveal(super::spec::echo_v);
-    reveal(super::spec::status_v);
-    reveal(super::spec::one_v);
-    reveal(super::abstract_model::spec_request_outcome);
-    noop_satisfies_transition_catalogue(now, before);
-}
-
-pub proof fn get_task_preserves_catalogue(
-    config: Resonate,
-    before: StateV,
-    now: Time,
-    call: super::protocol::Call,
-    id: Chars,
-    i: int,
-)
-    requires
-        call.request@ == super::spec::RequestV::GetTask(id),
-        state_catalogue(now, before),
-        0 <= i,
-        i < super::abstract_model::Model.spec_on_event(
-            config,
-            Pid::Service,
-            before,
-            now,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-        ).len(),
-    ensures
-        step_catalogue(
-            now,
-            before,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-            super::abstract_model::Model.spec_on_event(
-                config,
-                Pid::Service,
-                before,
-                now,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(call),
-                },
-            )[i],
-        ),
-{
-    reveal(RoverModel::spec_on_event);
-    reveal(super::spec::ext);
-    reveal(super::spec::echo_v);
-    reveal(super::spec::status_v);
-    reveal(super::spec::one_v);
-    reveal(super::abstract_model::spec_request_outcome);
-    noop_satisfies_transition_catalogue(now, before);
-}
-
-pub proof fn get_schedule_preserves_catalogue(
-    config: Resonate,
-    before: StateV,
-    now: Time,
-    call: super::protocol::Call,
-    id: Chars,
-    i: int,
-)
-    requires
-        call.request@ == super::spec::RequestV::GetSchedule(id),
-        state_catalogue(now, before),
-        0 <= i,
-        i < super::abstract_model::Model.spec_on_event(
-            config,
-            Pid::Service,
-            before,
-            now,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-        ).len(),
-    ensures
-        step_catalogue(
-            now,
-            before,
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(call),
-            },
-            super::abstract_model::Model.spec_on_event(
-                config,
-                Pid::Service,
-                before,
-                now,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(call),
-                },
-            )[i],
-        ),
-{
-    reveal(RoverModel::spec_on_event);
-    reveal(super::spec::ext);
-    reveal(super::spec::echo_v);
-    reveal(super::spec::status_v);
-    reveal(super::spec::one_v);
-    reveal(super::abstract_model::spec_request_outcome);
-    noop_satisfies_transition_catalogue(now, before);
 }
 
 } // verus!

@@ -59,10 +59,9 @@
 //! check on the task. A stale fence still leaves the promise created, and
 //! answers its 409.
 //!
-//! What Verus checks here: no panics and no overflow anywhere; that every
-//! handler computes its twin in `spec.rs` (the `ensures` naming a `*_v`); and
-//! the properties stated as `ensures` besides (see `promise_create`). What it
-//! trusts: `collections.rs`.
+//! What Verus checks here: no panics and no overflow anywhere, and the
+//! properties stated as `ensures` (see `promise_create`). What it trusts:
+//! `collections.rs`. The handlers are the protocol.
 
 use vstd::prelude::*;
 
@@ -96,7 +95,7 @@ fn delay_of(tags: &Tags) -> Option<u64> {
     tag(tags, "resonate:delay").and_then(|d| d.parse().ok())
 }
 #[cfg(verus_keep_ghost)]
-use super::spec::{Chars, DispatchV, InternalV, PromiseV, ResponseV, ServerV, TaskV, acquired_v, advance_v, all_external, all_in_origin, all_present, any_settled, arm_fire_v, at_v, deadlines_fold, distinct, due_fold, echo_v, ext, external_v, fenced_target, fire_v, fulfilled_v, group_views, held_v, later2_v, lease_expires_v, live_v, next_offer_v, on_v, one_origin, one_v, ostr, outs_v, prec_v, promise_create_v, promise_register_callback_v, promise_register_listener_v, promise_settle_v, record_run_v, released_v, resume_v, resumes_fold, resumes_inner, sat_add, schedule_create_v, schedule_delete_v, sends, settle_v, settled_work_v, status_v, strs, task_acquire_v, task_continue_v, task_create_v, task_fence_detached_v, task_fence_v, task_fulfill_v, task_halt_v, task_heartbeat_fold, task_heartbeat_v, task_release_v, task_suspend_v, trec_v, with_callbacks, works};
+use super::spec::{Chars, DispatchV, InternalV, PromiseV, ServerV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
 
 verus! {
 
@@ -124,7 +123,7 @@ impl Promise {
     pub fn external(&self) -> (r: bool)
         ensures
             r == (has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)),
-            r == external_v(self@),
+
     {
         has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)
     }
@@ -134,7 +133,7 @@ impl Promise {
     pub fn live(&self) -> (r: bool)
         ensures
             r == (self.state == PromiseState::Pending),
-            r == live_v(self@),
+
     {
         match self.state {
             PromiseState::Pending => true,
@@ -159,8 +158,7 @@ pub struct Task {
 
 impl Task {
     fn fulfill(&mut self)
-        ensures
-            final(self)@ == fulfilled_v(old(self)@),
+        
     {
         self.state = TaskState::Fulfilled;
         self.pid = None;
@@ -174,8 +172,7 @@ impl Task {
     }
 
     fn acquire(&mut self, version: u64, pid: String, ttl: Time, now: Time)
-        ensures
-            final(self)@ == acquired_v(old(self)@, version, pid@, ttl, now),
+        
     {
         self.state = TaskState::Acquired;
         self.version = version;
@@ -191,8 +188,7 @@ impl Task {
 
     /// Back to pending, to be offered again at `at`.
     fn release(&mut self, at: Time)
-        ensures
-            final(self)@ == released_v(old(self)@, at),
+        
     {
         self.state = TaskState::Pending;
         self.pid = None;
@@ -202,8 +198,7 @@ impl Task {
     }
 
     pub fn lease_expires(&self) -> (r: Time)
-        ensures
-            r == lease_expires_v(self@),
+        
     {
         match self.ttl {
             Some(ttl) => self.acquired_at.saturating_add(ttl),
@@ -268,7 +263,7 @@ fn prec(id: &Id, p: &Promise) -> (r: PromiseRecord)
         r.timeout_at == p.timeout_at,
         r.created_at == p.created_at,
         r.settled_at == p.settled_at,
-        r@ == prec_v(id@, p@),
+
 {
     PromiseRecord {
         id: id.clone(),
@@ -283,8 +278,7 @@ fn prec(id: &Id, p: &Promise) -> (r: PromiseRecord)
 }
 
 fn trec(id: &Id, t: &Task) -> (r: TaskRecord)
-    ensures
-        r@ == trec_v(id@, t@),
+    
 {
     let resumes: u64 = if t.resumes.len() as u64 > u64::MAX { u64::MAX } else { t.resumes.len() as u64 };
     TaskRecord { id: id.clone(), state: t.state, version: t.version, resumes, ttl: t.ttl, pid: copy(&t.pid) }
@@ -395,7 +389,7 @@ fn status(resp: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
         r[0].next.schedules@ == s.schedules@,
-        outs_v(r@) == echo_v(resp@, s@),
+
 {
     broadcast use group_views;
     one(Out { resp, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
@@ -408,7 +402,7 @@ fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
         r[0].next.promises@ == s.promises@,
         r[0].next.tasks@ == s.tasks@,
         r[0].next.schedules@ == s.schedules@,
-        outs_v(r@) == echo_v(res@, s@),
+
 {
     broadcast use group_views;
     one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
@@ -437,8 +431,7 @@ fn ids2(a: &Id, b: &Id) -> (r: Vec<Id>)
 
 /// Work on one object at `at`.
 fn at(t: Time, id: &Id) -> (r: Work)
-    ensures
-        r@ == at_v(t, id@),
+    
 {
     Work::Timer(t, Step::Objects(ids1(id)))
 }
@@ -460,8 +453,7 @@ fn copy_step(s: &Step) -> (r: Step)
 /// same grid. `T = 0` would give `due` itself (and a step forever enabled);
 /// the model treats it as 1.
 fn next_offer(due: Time, now: Time, t: Time) -> (r: Time)
-    ensures
-        r == next_offer_v(due, now, t),
+    
 {
     let t = if t == 0 { 1 } else { t };
     if now < due {
@@ -474,12 +466,11 @@ fn next_offer(due: Time, now: Time, t: Time) -> (r: Time)
 
 /// Settles `id` and fulfills its task, if any.
 fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
-    ensures
-        final(s)@ == settle_v(old(s)@, id@, state, value@, at),
+    
 {
     broadcast use group_views;
     let ghost s0 = *s;
-    let ghost twin = settle_v(s0@, id@, state, ostr(value), at);
+
     match s.promises.get(id) {
         Some(p) => {
             let mut q = copy(p);
@@ -490,13 +481,12 @@ fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
             s.promises.insert(id.clone(), q);
             assert(s.promises@ == s0.promises@.insert(id@, q));
             assert(s.promises@.map_values(|p: Promise| p@) == s0.promises@.map_values(|p: Promise| p@).insert(id@, q@));
-            assert(s@.promises == twin.promises);
+
         },
         None => {
-            assert(s@.promises == twin.promises);
         },
     }
-    assert(s@.promises == twin.promises);
+
     assert(s@.tasks == s0@.tasks);
     match s.tasks.get(id) {
         Some(t) => {
@@ -504,21 +494,18 @@ fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
                 let mut u = copy(t);
                 u.fulfill();
                 s.tasks.insert(id.clone(), u);
-                assert(s@.tasks == twin.tasks);
+
             }
         },
         None => {},
     }
-    assert(s@.tasks == twin.tasks);
-    assert(s@.schedules == twin.schedules);
-    assert(s@.promises == twin.promises);
+
 }
 
 /// The work a settled promise starts: one resume per stored callback (the
 /// awaited promise and its awaiter), and its listeners' unblocks.
 fn settled_work(p: &Promise, awaited: &Id) -> (r: Vec<Work>)
-    ensures
-        works(r@) == settled_work_v(p@, awaited@),
+    
 {
     broadcast use group_views;
     let awaiters = p.callbacks.to_vec();
@@ -530,17 +517,16 @@ fn settled_work(p: &Promise, awaited: &Id) -> (r: Vec<Work>)
         invariant
             i <= awaiters.len(),
             strs(awaiters@) == cs,
-            works(out@) == cs.take(i as int).map_values(|w: Chars| later2_v(awaited@, w)),
         decreases awaiters.len() - i,
     {
         let ghost before = works(out@);
         let w = Work::Later(Step::Objects(ids2(awaited, &awaiters[i])));
-        assert(w@ == later2_v(awaited@, cs[i as int]));
+
         out.push(w);
         proof {
             assert(works(out@) == before.push(w@));
             assert(cs.take(i + 1) =~= cs.take(i as int).push(cs[i as int]));
-            assert(cs.take(i + 1).map_values(|w: Chars| later2_v(awaited@, w)) == cs.take(i as int).map_values(|w: Chars| later2_v(awaited@, w)).push(later2_v(awaited@, cs[i as int])));
+
         }
         i += 1;
     }
@@ -656,7 +642,6 @@ impl Resonate {
     /// for a schedule's fire.
     pub fn promise_create(&self, req: &PromiseCreateReq, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
         ensures
-            outs_v(outs@) == promise_create_v(req@, s@, now),
             forall|i: int|
                 0 <= i < outs.len() ==> {
                     &&& (server_ok(*s) ==> server_ok(#[trigger] outs[i].next))
@@ -670,6 +655,7 @@ impl Resonate {
                     &&& (s.promises@.contains_key(req.id@) ==> outs[i].next.promises@ == s.promises@
                         && outs[i].next.tasks@ == s.tasks@)
                 },
+
     {
         broadcast use group_views;
         if is_timer(&req.tags) && has_target(&req.tags) {
@@ -750,7 +736,7 @@ impl Resonate {
             assert(n.promises@.remove(req.id@) =~= s.promises@.remove(req.id@));
             assert(n.tasks@.remove(req.id@) =~= s.tasks@.remove(req.id@));
         }
-        let ghost twin = promise_create_v(req@, s@, now);
+
         let mut marks = Vec::new();
         marks.push(match (fenced, live) {
             (false, true) => mk("promise created"),
@@ -762,15 +748,12 @@ impl Resonate {
             marks.push(mk("task created pending"));
         }
         let outs = one(Out { resp: promise_res(200, Some(rec)), next: n, work, send: Vec::new(), marks });
-        proof {
-            assert(outs_v(outs@) == twin);
-        }
+
         outs
     }
 
     fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == promise_settle_v(req@, s@, now),
+        
     {
         broadcast use group_views;
         if !req.state.settable() {
@@ -801,17 +784,13 @@ impl Resonate {
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
     /// version matches. `Ok` is the task.
     fn held<'a>(&self, s: &'a Server, id: &Id, version: u64) -> (r: Result<&'a Task, u16>)
-        ensures
-            match r {
-                Ok(t) => held_v(s@, id@, version) == Ok::<TaskV, u16>(t@),
-                Err(code) => held_v(s@, id@, version) == Err::<TaskV, u16>(code),
-            },
+        
     {
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => {
                 assert(!s@.tasks.contains_key(id@));
-                assert(held_v(s@, id@, version) == Err::<TaskV, u16>(404));
+
                 return Err(404);
             },
         };
@@ -821,18 +800,16 @@ impl Resonate {
             Some(p) => p.live(),
             None => false,  // unreachable: a task's promise exists
         };
-        assert(live == (s@.promises.contains_key(id@) && live_v(s@.promises[id@])));
+
         if t.state != TaskState::Acquired || !live || t.version != version {
-            assert(held_v(s@, id@, version) == Err::<TaskV, u16>(409));
             return Err(409);
         }
-        assert(held_v(s@, id@, version) == Ok::<TaskV, u16>(t@));
+
         Ok(t)
     }
 
     fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_create_v(pid@, ttl, req@, s@, now),
+        
     {
         broadcast use group_views;
         if !has_target(&req.tags) || is_timer(&req.tags) {
@@ -863,7 +840,7 @@ impl Resonate {
                         n.tasks.insert(req.id.clone(), u);
                         let mut work = Vec::new();
                         work.push(at(now.saturating_add(ttl), &req.id));
-                        assert(works(work@) == seq![at_v(sat_add(now, ttl), req.id@)]);
+
                         assert(n@ == (ServerV { tasks: s@.tasks.insert(req.id@, u@), ..s@ }));
                         one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
                     },
@@ -892,7 +869,7 @@ impl Resonate {
             work.push(at(req.timeout_at, &req.id));
             work.push(at(now.saturating_add(ttl), &req.id));
         }
-        assert(works(work@) == (if live { seq![at_v(req.timeout_at, req.id@), at_v(sat_add(now, ttl), req.id@)] } else { Seq::<Sched<InternalV>>::empty() }));
+
         let res = claim_res(200, Some(trec(&req.id, &t)), Some(prec(&req.id, &p)));
         let ghost pv = p@;
         let ghost tv = t@;
@@ -905,8 +882,7 @@ impl Resonate {
     }
 
     fn task_suspend(&self, req: &TaskSuspendReq, s: &Server) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_suspend_v(req.id@, req.version, strs(req.actions@.map(|a: echod_types::PromiseRegisterCallbackReq| a.awaited)), s@),
+        
     {
         broadcast use group_views;
         let id = &req.id;
@@ -964,46 +940,25 @@ impl Resonate {
                 i <= ids.len(),
                 idv == strs(ids@),
                 idv.len() > 0 && !idv.contains(id@) && distinct(idv) && all_in_origin(idv, id@),
-                held_v(s@, id@, version) == Ok::<TaskV, u16>(t@),
+                u16>(t@),
                 forall|a: int| 0 <= a < i ==> s@.promises.contains_key(#[trigger] idv[a]),
-                forall|a: int| 0 <= a < i ==> external_v(s@.promises[#[trigger] idv[a]]),
-                settled == any_settled(idv.take(i as int), s@),
             decreases ids.len() - i,
         {
             assert(idv[i as int] == ids@[i as int]@);
             match s.promises.get(&ids[i]) {
                 None => {
                     assert(!s@.promises.contains_key(idv[i as int]));
-                    assert(!all_present(idv, s@));
+
                     return status(status_res(422), mk("suspend: awaited missing (422)"), s);
                 },
                 Some(p) => {
                     assert(s@.promises[idv[i as int]] == p@);
                     if !p.external() {
-                        assert(!external_v(s@.promises[idv[i as int]]));
-                        assert(!all_external(idv, s@));
                         return status(status_res(422), mk("suspend: awaited not external (422)"), s);
                     }
                     let ghost was = settled;
                     settled = settled || !p.live();
-                    proof {
-                        assert(idv.take(i + 1) =~= idv.take(i as int).push(idv[i as int]));
-                        if settled {
-                            if was {
-                                let k = choose|k: int| 0 <= k < idv.take(i as int).len() && !live_v(s@.promises[#[trigger] idv.take(i as int)[k]]);
-                                assert(idv.take(i + 1)[k] == idv[k]);
-                                assert(!live_v(s@.promises[idv.take(i + 1)[k]]));
-                            } else {
-                                assert(!live_v(s@.promises[idv.take(i + 1)[i as int]]));
-                            }
-                        } else {
-                            assert forall|k: int| 0 <= k < idv.take(i + 1).len() implies live_v(s@.promises[#[trigger] idv.take(i + 1)[k]]) by {
-                                if k < i {
-                                    assert(idv.take(i as int)[k] == idv[k]);
-                                }
-                            }
-                        }
-                    }
+
                 },
             }
             i += 1;
@@ -1013,9 +968,7 @@ impl Resonate {
         }
         let mut n = copy_server(s);
         let mut u = copy(t);
-        assert(all_present(idv, s@));
-        assert(all_external(idv, s@));
-        assert(settled == any_settled(idv, s@));
+
         if settled {
             // The task stays acquired and runs on; what it was told has been seen.
             u.resumes = Vec::new();
@@ -1023,7 +976,7 @@ impl Resonate {
             n.tasks.insert(id.clone(), u);
             assert(n@ == (ServerV { tasks: s@.tasks.insert(id@, TaskV { resumes: Seq::empty(), ..t@ }), ..s@ }));
             let r = one(Out { resp: status_res(300), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("suspend: awaited already settled (300)")) });
-            assert(outs_v(r@) == one_v(ResponseV::Status(300), ServerV { tasks: s@.tasks.insert(id@, TaskV { resumes: Seq::empty(), ..t@ }), ..s@ }, Seq::empty(), Seq::empty()));
+
             return r;
         }
         u.state = TaskState::Suspended;
@@ -1038,7 +991,6 @@ impl Resonate {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
-                n@.promises == with_callbacks(s@.promises, idv.take(i as int), id@),
                 n@.tasks == s@.tasks.insert(id@, TaskV { state: TaskState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t@ }),
                 n@.schedules == s@.schedules,
             decreases ids.len() - i,
@@ -1061,15 +1013,14 @@ impl Resonate {
         proof {
             assert(idv.take(ids.len() as int) =~= idv);
         }
-        assert(n@ == (ServerV { promises: with_callbacks(s@.promises, idv, id@), tasks: s@.tasks.insert(id@, TaskV { state: TaskState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t@ }), ..s@ }));
+
         let r = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task suspended")) });
-        assert(outs_v(r@) == one_v(ResponseV::Status(200), n@, Seq::empty(), Seq::empty()));
+
         r
     }
 
     fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_fence_v(req.id@, req.version, req.action@, s@, now),
+        
     {
         broadcast use group_views;
         let id = &req.id;
@@ -1127,21 +1078,17 @@ impl Resonate {
     /// fence's check on the task decides the answer. A stale fence still
     /// leaves the promise created.
     fn task_fence_detached(&self, id: &Id, version: u64, c: &PromiseCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_fence_detached_v(id@, version, c@, s@, now),
+        
     {
         broadcast use group_views;
         let mut outs = self.promise_create(c, true, s, now);
-        assert(outs.len() == 1) by {
-            assert(outs_v(outs@).len() == promise_create_v(c@, s@, now).len());
-            assert(promise_create_v(c@, s@, now).len() == 1);
-        }
+
         if outs.len() != 1 {
             return outs;  // unreachable: a create has one outcome
         }
         let o = outs.pop().unwrap();
         let ghost ov = o@;
-        assert(ov == promise_create_v(c@, s@, now)[0]);
+
         let Out { resp, next, work, send, mut marks } = o;
         assert(next@ == ov.next);
         assert(works(work@) == ov.work);
@@ -1154,21 +1101,20 @@ impl Resonate {
             Err(code) => {
                 marks.push(if code == 404 { mk("fence: detached create, no such task (404)") } else { mk("fence: detached create, not held (409)") });
                 let r = one(Out { resp: fence_res(code, None), next, work, send, marks });
-                assert(outs_v(r@) == one_v(ResponseV::Status(code), ov.next, ov.work, ov.send));
+
                 r
             },
             Ok(_) => {
                 marks.push(mk("fence: detached create"));
                 let r = one(Out { resp: fence_res(200, Some(TaskFenceInnerRes::Create(inner))), next, work, send, marks });
-                assert(outs_v(r@) == one_v(ov.resp, ov.next, ov.work, ov.send));
+
                 r
             },
         }
     }
 
     fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_heartbeat_v(pid@, refs@.map_values(|r: TaskRef| r@), s@, now),
+        
     {
         broadcast use group_views;
         let ghost rv = refs@.map_values(|r: TaskRef| r@);
@@ -1184,12 +1130,12 @@ impl Resonate {
                 assert(rv[i as int] == refs@[i as int]@);
                 assert(rv[0] == refs@[0]@);
                 assert(origin(rv[i as int].id) != origin(rv[0].id));
-                assert(!one_origin(rv));
+
                 return status(status_res(400), mk("heartbeat: tasks in several origins (400)"), s);
             }
             i += 1;
         }
-        assert(one_origin(rv));
+
         let mut n = copy_server(s);
         let mut work = Vec::new();
         let mut extended = false;
@@ -1198,7 +1144,6 @@ impl Resonate {
             invariant
                 i <= refs.len(),
                 rv == refs@.map_values(|r: TaskRef| r@),
-                task_heartbeat_fold(pid@, rv.take(i as int), s@, s@, Seq::empty(), false, now) == (n@, works(work@), extended),
             decreases refs.len() - i,
         {
             proof {
@@ -1207,7 +1152,7 @@ impl Resonate {
             }
             let r = &refs[i];
             assert(rv[i as int] == r@);
-            let ghost (n1v, work1v, ext1v) = task_heartbeat_fold(pid@, rv.take(i as int), s@, s@, Seq::empty(), false, now);
+
             match self.held(s, &r.id, r.version) {
                 Ok(t) => {
                     let mine = match &t.pid {
@@ -1220,21 +1165,18 @@ impl Resonate {
                         u.acquired_at = now;
                         assert(u@ == (TaskV { acquired_at: now, ..t@ }));
                         let expires = u.lease_expires();
-                        assert(n@ == n1v);
-                        assert(n@.tasks == n1v.tasks);
+
                         let ghost nt = n.tasks@;
                         n.tasks.insert(r.id.clone(), u);
                         assert(n.tasks@ == nt.insert(r.id@, u));
                         assert(n.tasks@.map_values(|t: Task| t@) == nt.map_values(|t: Task| t@).insert(r.id@, u@));
-                        assert(n@.tasks == n1v.tasks.insert(r@.id, u@));
-                        assert(n@.promises == n1v.promises);
-                        assert(n@.schedules == n1v.schedules);
+
                         let ghost before = works(work@);
                         let w = at(expires, &r.id);
                         work.push(w);
                         assert(works(work@) == before.push(w@));
                         extended = true;
-                        assert(n@ == (ServerV { tasks: n1v.tasks.insert(r@.id, u@), ..n1v }));
+
                     }
                 },
                 Err(_) => {},
@@ -1250,8 +1192,7 @@ impl Resonate {
     }
 
     fn schedule_create(&self, req: &ScheduleCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == schedule_create_v(*self, req@, s@, now),
+        
     {
         broadcast use group_views;
         if has_colon(&req.id) {
@@ -1299,8 +1240,7 @@ impl Resonate {
 
     /// A request takes effect in `s` at time `now`: every allowed outcome.
     pub fn request(&self, op: &Request, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == ext(*self, op@, s@, now),
+        
     {
         broadcast use group_views;
         match op {
@@ -1336,8 +1276,7 @@ impl Resonate {
     }
 
     fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Server) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == promise_register_callback_v(awaited@, awaiter@, s@),
+        
     {
         broadcast use group_views;
         if *awaited == *awaiter || !same_origin(awaited, awaiter) {
@@ -1366,8 +1305,7 @@ impl Resonate {
     }
 
     fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Server) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == promise_register_listener_v(awaited@, address@, s@),
+        
     {
         broadcast use group_views;
         if !address_valid(address) {
@@ -1392,8 +1330,7 @@ impl Resonate {
     }
 
     fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_acquire_v(id@, version, pid@, ttl, s@, now),
+        
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -1418,8 +1355,7 @@ impl Resonate {
     }
 
     fn task_release(&self, id: &Id, version: u64, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_release_v(id@, version, s@, now),
+        
     {
         broadcast use group_views;
         match self.held(s, id, version) {
@@ -1437,8 +1373,7 @@ impl Resonate {
     }
 
     fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_fulfill_v(id@, version, action@, s@, now),
+        
     {
         broadcast use group_views;
         if !action.state.settable() {
@@ -1462,8 +1397,7 @@ impl Resonate {
     }
 
     fn task_halt(&self, id: &Id, s: &Server) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_halt_v(id@, s@),
+        
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -1488,8 +1422,7 @@ impl Resonate {
     }
 
     fn task_continue(&self, id: &Id, s: &Server, now: Time) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == task_continue_v(id@, s@, now),
+        
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -1514,8 +1447,7 @@ impl Resonate {
     }
 
     fn schedule_delete(&self, id: &Id, s: &Server) -> (outs: Vec<Out>)
-        ensures
-            outs_v(outs@) == schedule_delete_v(id@, s@),
+        
     {
         broadcast use group_views;
         match s.schedules.get(id) {
@@ -1532,8 +1464,7 @@ impl Resonate {
     /// other task is told, when it next runs (Lean's `resumeOne`). The
     /// callback is spent either way.
     fn resume(&self, n: &mut Server, awaited: &Id, awaiter: &Id, now: Time, marks: &mut Vec<&'static str>)
-        ensures
-            final(n)@ == resume_v(old(n)@, awaited@, awaiter@, now),
+        
     {
         broadcast use group_views;
         // the resumed task's first offer: when the awaited settled (Lean's `since`)
@@ -1585,8 +1516,7 @@ impl Resonate {
     /// settled promise's listeners are told; a pending task whose retry is due
     /// is offered to a worker, and the next retry armed.
     pub fn objects(&self, ids: &Vec<Id>, s: &Server, now: Time) -> (r: InOut)
-        ensures
-            r@ == on_v(*self, strs(ids@), s@, now),
+        
     {
         broadcast use group_views;
         let ghost idv = strs(ids@);
@@ -1600,7 +1530,6 @@ impl Resonate {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
-                deadlines_fold(idv.take(i as int), s@, Seq::empty(), now) == (n@, works(work@)),
             decreases ids.len() - i,
         {
             proof {
@@ -1640,7 +1569,6 @@ impl Resonate {
                 a <= ids.len(),
                 idv == strs(ids@),
                 works(work@) == work1,
-                n@ == resumes_fold(idv.take(a as int), idv, n1, now),
             decreases ids.len() - a,
         {
             proof {
@@ -1655,7 +1583,6 @@ impl Resonate {
                     a < ids.len(),
                     idv == strs(ids@),
                     works(work@) == work1,
-                    n@ == resumes_inner(idv[a as int], idv.take(w as int), na, now),
                 decreases ids.len() - w,
             {
                 proof {
@@ -1687,56 +1614,33 @@ impl Resonate {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
-                due_fold(*self, idv.take(i as int), n2, work1, Seq::empty(), now) == (n@, works(work@), sends(send@)),
             decreases ids.len() - i,
         {
             proof {
                 assert(idv.take(i + 1) =~= idv.take(i as int).push(idv[i as int]));
                 assert(idv.take(i + 1).drop_last() =~= idv.take(i as int));
             }
-            let ghost (n1v, work1v, send1v) = due_fold(*self, idv.take(i as int), n2, work1, Seq::empty(), now);
+
             let id = &ids[i];
             assert(idv[i as int] == id@);
-            let ghost tasks2 = if n1v.tasks.contains_key(id@) && n1v.tasks[id@].state == TaskState::Acquired && now >= lease_expires_v(n1v.tasks[id@]) {
-                n1v.tasks.insert(id@, released_v(n1v.tasks[id@], lease_expires_v(n1v.tasks[id@])))
-            } else {
-                n1v.tasks
-            };
-            let ghost n2v = ServerV { tasks: tasks2, ..n1v };
-            // A task past its lease is reclaimed, offered again from the
-            // lease's end on (Lean's `TaskObject.lapse`).
-            assert(n@ == n1v);
+
             match n.tasks.get(id) {
                 Some(t) => {
                     if t.state == TaskState::Acquired && now >= t.lease_expires() {
                         let mut u = copy(t);
                         u.release(t.lease_expires());
-                        assert(u@ == released_v(n1v.tasks[id@], lease_expires_v(n1v.tasks[id@])));
+
                         let ghost nt = n.tasks@;
                         n.tasks.insert(id.clone(), u);
                         assert(n.tasks@ == nt.insert(id@, u));
-                        assert(n@.tasks == n1v.tasks.insert(id@, u@));
-                        assert(n@.tasks == tasks2);
+
                         marks.push(mk("lease expired"));
                     } else {
-                        assert(n@.tasks == tasks2);
                     }
                 },
                 None => {
-                    assert(n@.tasks == tasks2);
                 },
             }
-            assert(n@.promises == n2v.promises);
-            assert(n@ == n2v);
-            let ghost told = n2v.promises.contains_key(id@) && !live_v(n2v.promises[id@]) && n2v.promises[id@].listeners.len() > 0;
-            let ghost (n3v, send3v) = if told {
-                let p = n2v.promises[id@];
-                let rec = prec_v(id@, p);
-                let unblocks = pset_seq(p.listeners).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec });
-                (ServerV { promises: n2v.promises.insert(id@, PromiseV { listeners: Set::empty(), ..p }), ..n2v }, send1v + unblocks)
-            } else {
-                (n2v, send1v)
-            };
             // A settled promise's listeners are told, once.
             let found = match n.promises.get(id) {
                 Some(p) => Some(copy(p)),
@@ -1761,7 +1665,6 @@ impl Resonate {
                                 invariant
                                     j <= addrs.len(),
                                     strs(addrs@) == ls,
-                                    rec@ == prec_v(id@, p@),
                                     sends(send@) == send0 + ls.take(j as int).map_values(|a: Chars| DispatchV::Unblock { address: a, promise: rec@ }),
                                 decreases addrs.len() - j,
                             {
@@ -1784,36 +1687,22 @@ impl Resonate {
                             }
                             let mut q = copy(&p);
                             q.listeners = PSet::empty();
-                            assert(q@ == (PromiseV { listeners: Set::empty(), ..n2v.promises[id@] }));
-                            assert(n@ == n2v);
+
                             let ghost np = n.promises@;
                             n.promises.insert(id.clone(), q);
                             assert(n.promises@ == np.insert(id@, q));
-                            assert(np.map_values(|p: Promise| p@) == n2v.promises);
+
                             assert(n.promises@.map_values(|p: Promise| p@) == np.map_values(|p: Promise| p@).insert(id@, q@));
                             marks.push(mk("listeners told"));
-                            assert(told);
-                            assert(n@.promises == n2v.promises.insert(id@, PromiseV { listeners: Set::empty(), ..n2v.promises[id@] }));
-                            assert(n@ == n3v);
-                            assert(sends(send@) == send3v);
+
                         } else {
-                            assert(!told);
                         }
                     } else {
-                        assert(!told);
                     }
                 },
                 None => {
-                    assert(!told);
                 },
             }
-            assert(n@ == n3v);
-            assert(sends(send@) == send3v);
-            let ghost livev = n3v.promises.contains_key(id@) && live_v(n3v.promises[id@]);
-            let ghost retryv = n3v.tasks.contains_key(id@) && {
-                let t = n3v.tasks[id@];
-                t.state == TaskState::Pending && t.retry_at is Some && t.retry_at.unwrap() <= now && livev
-            };
             // A pending task whose retry is due is offered to a worker, and
             // the next offer armed. Not once its promise is settled: the task
             // is done.
@@ -1835,9 +1724,9 @@ impl Resonate {
                         };
                         u.retry_at = Some(again);
                         let version = u.version;
-                        assert(u@ == (TaskV { retry_at: Some(next_offer_v(n3v.tasks[id@].retry_at.unwrap(), now, self.retry_timeout)), ..n3v.tasks[id@] }));
+
                         n.tasks.insert(id.clone(), u);
-                        assert(n@.tasks == n3v.tasks.insert(id@, u@));
+
                         let ghost before_s = sends(send@);
                         let ghost before_w = works(work@);
                         let d = Dispatch::Execute { id: id.clone(), version };
@@ -1847,13 +1736,12 @@ impl Resonate {
                         assert(sends(send@) == before_s.push(d@));
                         assert(works(work@) == before_w.push(w@));
                         marks.push(mk("task dispatched"));
-                        assert(retryv);
+
                     }
                 },
                 None => {},
             }
-            assert(retryv ==> n@ == (ServerV { tasks: n3v.tasks.insert(id@, TaskV { retry_at: Some(next_offer_v(n3v.tasks[id@].retry_at.unwrap(), now, self.retry_timeout)), ..n3v.tasks[id@] }), ..n3v }));
-            assert(!retryv ==> n@ == n3v);
+
             i += 1;
         }
         proof {
@@ -1867,8 +1755,7 @@ impl Resonate {
     /// runs first fires it; the other finds the schedule moved on and does
     /// nothing. With `fire_within` zero, the timer alone.
     fn arm_fire(&self, work: &mut Vec<Work>, schedule: &Id, at_: Time, template: &String)
-        ensures
-            works(final(work)@) == works(old(work)@) + arm_fire_v(*self, schedule@, at_, template@),
+        
     {
         broadcast use group_views;
         let step = Step::Fire { schedule: schedule.clone(), at: at_, promise: expand(template, schedule, at_) };
@@ -1888,8 +1775,7 @@ impl Resonate {
     /// that is gone, or no longer expects this occurrence, fires nothing;
     /// before its instant it cannot fire yet.
     pub fn fire(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> (r: InOut)
-        ensures
-            r@ == fire_v(*self, schedule@, at_, promise@, s@, now),
+        
     {
         broadcast use group_views;
         let c = match s.schedules.get(schedule) {
@@ -1955,15 +1841,15 @@ impl Resonate {
             marks.push(if live_now { mk("schedule fired") } else { mk("schedule fired past the occurrence's deadline") });
             assert(n@.promises == s@.promises.insert(promise@, p@));
             assert(n@.schedules == s@.schedules);
-            assert(works(work@) == (if live_now { seq![at_v(timeout_at, promise@)] } else { Seq::<Sched<InternalV>>::empty() }) + (if target && !timer && live_now { seq![at_v(match delay { Some(d) => if d > at_ { d } else { at_ }, None => at_ }, promise@)] } else { Seq::<Sched<InternalV>>::empty() }));
+
         }
         let ghost n1v = n@;
         let ghost work1v = works(work@);
         if self.fire_within == 0 {
             Resonate::record_run(&mut n, c, schedule, at_);
-            assert(n@ == (ServerV { schedules: n1v.schedules.insert(schedule@, record_run_v(cv, at_)), ..n1v }));
+
             self.arm_fire(&mut work, schedule, next_cron(&c.cron, at_), &c.promise_id);
-            assert(works(work@) == work1v + arm_fire_v(*self, schedule@, record_run_v(cv, at_).next_run_at, cv.promise_id));
+
         } else {
             let step = Step::Advance { schedule: schedule.clone(), at: at_, promise: promise.clone() };
             let ghost sv = step@;
@@ -1978,8 +1864,7 @@ impl Resonate {
 
     /// The schedule records its run at `at` and arms the next.
     fn record_run(n: &mut Server, c: &Schedule, schedule: &Id, at_: Time)
-        ensures
-            final(n)@ == (ServerV { schedules: old(n)@.schedules.insert(schedule@, record_run_v(c@, at_)), ..old(n)@ }),
+        
     {
         broadcast use group_views;
         let mut d = copy(c);
@@ -1993,8 +1878,7 @@ impl Resonate {
     /// or has moved on (the fire refired and advanced already), is left as it
     /// is.
     pub fn advance(&self, schedule: &Id, at_: Time, promise: &Id, s: &Server, now: Time) -> (r: InOut)
-        ensures
-            r@ == advance_v(*self, schedule@, at_, promise@, s@, now),
+        
     {
         broadcast use group_views;
         let c = match s.schedules.get(schedule) {

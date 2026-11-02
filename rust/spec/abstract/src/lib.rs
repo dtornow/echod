@@ -1,7 +1,7 @@
 //! The complete standalone Resonate model interpreted by Rover.
 //!
-//! The protocol, executable handlers, mathematical twins, exploration hints,
-//! and abstract process all live here.
+//! The protocol, the executable handlers, exploration hints, and the abstract
+//! process all live here.
 
 #![allow(
     clippy::ptr_arg,

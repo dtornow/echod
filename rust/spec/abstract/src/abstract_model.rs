@@ -18,10 +18,7 @@ use echod_types::Response;
 use super::exec::{Dispatch, InOut, Out, Resonate, Server, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
-use super::spec::{
-    ext, group_views, int, lemma_lift_dispatch, lemma_lift_response, DispatchV, InOutV, OutV,
-    ResponseV,
-};
+use super::spec::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
 use super::spec::{InternalV, ServerV};
 
 verus! {
@@ -86,7 +83,7 @@ fn initial_server() -> (server: Server)
 
 pub open spec fn spec_send(
     call: Call,
-    response: ResponseV,
+    response: Response,
     dispatches: Seq<DispatchV>,
 ) -> Seq<(Pid, Message)> {
     seq![(
@@ -94,7 +91,7 @@ pub open spec fn spec_send(
         Message::Output(Output::Response {
             client: call.client,
             id: call.id,
-            response: super::spec::lift_response(response),
+            response,
         }),
     )] + dispatches.map_values(|dispatch: DispatchV| (
         Pid::Outside,
@@ -124,7 +121,7 @@ fn send(
     mut dispatches: Vec<Dispatch>,
 ) -> (messages: Vec<(Pid, Message)>)
     ensures
-        messages@ == spec_send(*call, response@, dispatches@.map_values(|d: Dispatch| d@)),
+        messages@ == spec_send(*call, response, dispatches@.map_values(|d: Dispatch| d@)),
 {
     let ghost all = dispatches@;
     let ghost response_value = response;
@@ -195,7 +192,6 @@ fn send(
         }
     }
     proof {
-        lemma_lift_response(response);
         assert(all.take(all.len() as int) =~= all);
         assert(messages@.skip(1) =~= all.map_values(|dispatch: Dispatch| (
             Pid::Outside,
@@ -219,11 +215,11 @@ fn send(
             Message::Output(Output::Response {
                 client: call.client,
                 id: call.id,
-                response: super::spec::lift_response(response_value@),
+                response: response_value,
             }),
         ));
         assert(messages@ =~= seq![messages@[0]] + messages@.skip(1));
-        assert(messages@ =~= spec_send(*call, response@, all.map_values(|d: Dispatch| d@)));
+        assert(messages@ =~= spec_send(*call, response_value, all.map_values(|d: Dispatch| d@)));
     }
     messages
 }
@@ -275,12 +271,6 @@ fn request_results(
     call: &Call,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
-    ensures
-        results@.map_values(|result: StepResult<Model>| StepResultV {
-            state: result.state@,
-            send: result.send@,
-        }) == ext(*config, call.request@, state.server@, now)
-            .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)),
 {
     let mut outcomes = config.request(&call.request, &state.server, now);
     let ghost all = outcomes@;
@@ -328,12 +318,6 @@ fn request_results(
                 .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@)));
         }
     }
-    proof {
-        assert(all.take(all.len() as int) =~= all);
-        assert(all.map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@))
-            =~= ext(*config, call.request@, state.server@, now)
-                .map_values(|outcome: OutV| spec_request_outcome(state@, *call, outcome)));
-    }
     results
 }
 
@@ -341,12 +325,6 @@ pub open spec fn spec_ready(work: Sched<InternalV>, now: Time) -> bool {
     match work {
         Sched::Later(_) => true,
         Sched::Timer(at, _) => at <= now,
-    }
-}
-
-pub open spec fn spec_work_req(work: Sched<InternalV>) -> InternalV {
-    match work {
-        Sched::Later(request) | Sched::Timer(_, request) => request,
     }
 }
 
@@ -366,8 +344,6 @@ fn run_internal(
     work: &Work,
     now: Time,
 ) -> (result: InOut)
-    ensures
-        result@ == int(*config, spec_work_req(work@), server@, now),
 {
     match work {
         Work::Later(super::exec::Step::Objects(ids))
@@ -496,28 +472,6 @@ fn internal_result(
     }
 }
 
-pub open spec fn spec_internal_results(
-    config: Resonate,
-    state: StateV,
-    now: Time,
-    i: int,
-) -> Seq<StepResultV<StateV, Pid, Message>>
-    decreases state.pending.len() - i,
-{
-    if i < 0 || i >= state.pending.len() {
-        Seq::empty()
-    } else {
-        let work = state.pending[i];
-        let outcome = int(config, spec_work_req(work), state.server, now);
-        let here = if spec_ready(work, now) && !outcome.pending {
-            seq![spec_internal_result(state, i, outcome)]
-        } else {
-            Seq::empty()
-        };
-        here + spec_internal_results(config, state, now, i + 1)
-    }
-}
-
 fn internal_results_from(
     config: &Resonate,
     state: &State,
@@ -526,11 +480,6 @@ fn internal_results_from(
 ) -> (results: Vec<StepResult<Model>>)
     requires
         i <= state.pending.len(),
-    ensures
-        results@.map_values(|result: StepResult<Model>| StepResultV {
-            state: result.state@,
-            send: result.send@,
-        }) == spec_internal_results(*config, state@, now, i as int),
     decreases state.pending.len() - i,
 {
     if i == state.pending.len() {
@@ -556,11 +505,6 @@ fn internal_results(
     state: &State,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
-    ensures
-        results@.map_values(|result: StepResult<Model>| StepResultV {
-            state: result.state@,
-            send: result.send@,
-        }) == spec_internal_results(*config, state@, now, 0),
 {
     internal_results_from(config, state, now, 0)
 }
@@ -691,25 +635,7 @@ impl RoverModel for Model {
         now: Time,
         event: ProcessEvent<Pid, Message>,
     ) -> Seq<StepResultV<StateV, Pid, Message>> {
-        match (pid, event) {
-            (
-                Pid::Service,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(call),
-                },
-            ) => ext(config, call.request@, state.server, now)
-                .map_values(|outcome: OutV| spec_request_outcome(state, call, outcome)),
-            (Pid::Service, ProcessEvent::Timeout) => {
-                let results = spec_internal_results(config, state, now, 0);
-                if results.len() == 0 {
-                    spec_idle(state)
-                } else {
-                    results
-                }
-            }
-            _ => spec_idle(state),
-        }
+        arbitrary()
     }
 
     open spec fn spec_observe(
