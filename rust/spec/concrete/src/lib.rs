@@ -7,7 +7,7 @@
 //! does not depend on the process.
 //!
 //! ```text
-//! types.rs            rows, records, requests; the twins, derived
+//! types.rs            rows, the outbox, identifiers; the alphabet re-exported
 //! tags.rs             tags: first match wins; otype, timer, target
 //! state.rs            the document as three maps, and the fold that makes them
 //! fold_proof.rs       a row edit is the map edit; compaction replays the same document

@@ -5,6 +5,7 @@ members = [
   "rust/impl/runtime",
   "rust/impl/cli",
   "rust/spec/rover",
+  "rust/spec/alphabet",
   "rust/spec/abstract",
   "rust/spec/concrete",
   "rust/test/runtime",

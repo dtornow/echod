@@ -613,61 +613,7 @@ impl Task {
     }
 }
 
-impl Schedule {
-    pub fn dup(&self) -> (r: Schedule)
-        ensures r@ == self@,
-    {
-        Schedule {
-            id: self.id.clone(),
-            cron: self.cron.clone(),
-            promise_id: self.promise_id.clone(),
-            promise_timeout: self.promise_timeout,
-            promise_param: self.promise_param.dup(),
-            promise_tags: clone_tags(&self.promise_tags),
-            next_run_at: self.next_run_at,
-            last_run_at: self.last_run_at,
-            created_at: self.created_at,
-        }
-    }
-}
-
-pub fn clone_tags(t: &Tags) -> (r: Tags)
-    ensures r.deep_view() == t.deep_view(),
-{
-    let ghost s = t.deep_view();
-    let mut r: Tags = Vec::new();
-    let mut i: usize = 0;
-    assert(r.deep_view() =~= s.take(0));
-    while i < t.len()
-        invariant
-            i <= t@.len(),
-            s == t.deep_view(),
-            r.deep_view() == s.take(i as int),
-        decreases t@.len() - i,
-    {
-        let ghost before = r.deep_view();
-        r.push((t[i].0.clone(), t[i].1.clone()));
-        assert(r.deep_view() =~= before.push(s[i as int]));
-        assert(s.take(i as int + 1) =~= s.take(i as int).push(s[i as int]));
-        i += 1;
-    }
-    assert(s.take(t@.len() as int) =~= s);
-    r
-}
-
-impl Value {
-    pub fn dup(&self) -> (r: Value)
-        ensures r@ == self@,
-    {
-        Value {
-            headers: clone_tags(&self.headers),
-            data: match &self.data {
-                Some(d) => Some(d.clone()),
-                None => None,
-            },
-        }
-    }
-}
+pub use echod_alphabet::clone_tags;
 
 // ---------------------------------------------------------------------------
 // Birth

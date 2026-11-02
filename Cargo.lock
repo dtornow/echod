@@ -1109,7 +1109,18 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "cron 0.17.0",
+ "echod-alphabet",
  "echod-rover",
+ "vstd",
+]
+
+[[package]]
+name = "echod-alphabet"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "verus_builtin",
+ "verus_builtin_macros",
  "vstd",
 ]
 
@@ -1118,6 +1129,7 @@ name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
  "echod-abstract",
+ "echod-alphabet",
  "echod-rover",
  "serde",
  "verus_builtin",

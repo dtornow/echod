@@ -10,6 +10,7 @@ name = "resonate"
 path = "src/lib.rs"
 
 [dependencies]
+echod-alphabet = { path = "../alphabet" }
 echod-rover = { path = "../rover" }
 chrono = "0.4.45"
 cron = "0.17.0"
