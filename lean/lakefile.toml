@@ -15,8 +15,8 @@ srcDir = "rover"
 name = "Resonate"
 srcDir = "."
 roots = [
+  "Protocol",
   "abstract.Resonate",
-  "abstract.Protocol",
   "abstract.Check",
   "abstract.Machine",
   "abstract.External",

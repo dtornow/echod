@@ -1,5 +1,5 @@
 import Rover
-import «abstract».Protocol
+import Protocol
 import «abstract».Machine
 import «abstract».External
 import «abstract».Internal

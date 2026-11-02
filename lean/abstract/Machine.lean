@@ -1,4 +1,4 @@
-import «abstract».Protocol
+import Protocol
 
 /-!
 # Document-scoped Resonate abstract machine

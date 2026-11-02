@@ -1,4 +1,4 @@
-import «abstract».Protocol
+import Protocol
 
 /-!
 # Concrete document decision machine

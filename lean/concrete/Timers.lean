@@ -1,4 +1,4 @@
-import «abstract».Protocol
+import Protocol
 
 /-!
 # Echod-style durable timers and membership
