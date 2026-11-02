@@ -613,7 +613,7 @@ impl Task {
     }
 }
 
-pub use echod_alphabet::clone_tags;
+pub use echod_types::clone_tags;
 
 // ---------------------------------------------------------------------------
 // Birth

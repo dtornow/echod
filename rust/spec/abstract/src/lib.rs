@@ -23,7 +23,7 @@ pub mod properties;
 pub mod spec;
 
 pub use collections::{PMap, PSet};
-pub use echod_alphabet as alphabet;
+pub use echod_types as types;
 pub use exec::*;
 pub use explore::{IDS, MARKS, PLAIN, SCHEDULES};
 pub use model::{on, Key};

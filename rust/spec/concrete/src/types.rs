@@ -1,6 +1,6 @@
 //! The document vocabulary: rows, the outbox, configuration, identifiers.
 //!
-//! Records, requests, and responses are `echod_alphabet`, re-exported below.
+//! Records, requests, and responses are `echod_types`, re-exported below.
 //!
 //! Every exec type with a string or a list in it has an abstract twin,
 //! `make_spec_type`'s `…Spec`, named `A…` here, reached through `View`:
@@ -29,9 +29,9 @@ pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
 /// version as a `u32`; the kernel's `u64` never exceeds it.
 pub const MAX_VERSION: u64 = u32::MAX as u64;
 
-// The records, requests, and responses live in `echod_alphabet`.
+// The records, requests, and responses live in `echod_types`.
 // Re-exported so the catalogue still names them as `crate::types::…`.
-pub use echod_alphabet::*;
+pub use echod_types::*;
 
 
 // ---------------------------------------------------------------------------

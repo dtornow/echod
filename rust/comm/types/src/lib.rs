@@ -1,4 +1,5 @@
-//! The alphabet both specifications share: records, requests, and responses.
+//! The types the specifications and the implementation share: records,
+//! requests, and responses.
 //!
 //! A record is what a response shows. A request is what `handle` takes and
 //! what a trace names. The document row, with its callbacks, listeners, and

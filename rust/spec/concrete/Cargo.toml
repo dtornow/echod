@@ -10,7 +10,7 @@ name = "echod_concrete"
 path = "src/lib.rs"
 
 [dependencies]
-echod-alphabet = { path = "../alphabet" }
+echod-types = { path = "../../comm/types" }
 echod-rover = { path = "../rover" }
 resonate = { package = "echod-abstract", path = "../abstract" }
 serde = { version = "1", features = ["derive"] }

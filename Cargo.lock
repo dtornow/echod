@@ -1109,18 +1109,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "cron 0.17.0",
- "echod-alphabet",
  "echod-rover",
- "vstd",
-]
-
-[[package]]
-name = "echod-alphabet"
-version = "0.1.0"
-dependencies = [
- "serde",
- "verus_builtin",
- "verus_builtin_macros",
+ "echod-types",
  "vstd",
 ]
 
@@ -1129,8 +1119,8 @@ name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
  "echod-abstract",
- "echod-alphabet",
  "echod-rover",
+ "echod-types",
  "serde",
  "verus_builtin",
  "verus_builtin_macros",
@@ -1250,6 +1240,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "echod-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
 ]
 
 [[package]]
