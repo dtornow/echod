@@ -5,7 +5,7 @@ import Protocol
 
 This is the concrete kernel's private Reader/State/Writer machine.  It is
 intentionally independent of `Resonate.Direct`: correspondence is proved only
-in `concrete.refinement_proof`.
+in `refinement_proof`.
 -/
 
 namespace Resonate.Concrete.Decision

@@ -1,4 +1,4 @@
-import «concrete».refinement_proof
+import refinement_proof
 
 namespace Resonate
 
