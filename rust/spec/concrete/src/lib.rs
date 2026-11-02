@@ -1,12 +1,17 @@
-//! The concrete specification.
+//! The concrete Rover model.
 //!
-//! The catalogue, the handler specifications, and the step `on_event` is
-//! proved against live here. The process depends on this crate: a handler's
-//! `ensures` names `spec_promise_create` and the other `spec_*` functions.
-//! This crate depends on Rover and on the abstract model, and does not
-//! depend on the process. The nodes and the store are `echod-world`.
+//! Rover steps this crate's `Model`: the nodes and one store. The handler
+//! specifications live here too, and the process depends on this crate so a
+//! handler's `ensures` can name `spec_promise_create` and the other `spec_*`
+//! functions. This crate depends on Rover and on the abstract model, and
+//! does not depend on the process. The refinement of this model to the
+//! abstract one is stated in `refine` and is not proved yet.
 //!
 //! ```text
+//! model.rs            the Rover model: nodes, one store, the initial world
+//! rover_model.rs      RoverModel for that world
+//! refine.rs           the statement against the abstract Rover model
+//! store.rs            store calls and their answers
 //! types.rs            rows, the outbox, identifiers; echod_types re-exported
 //! tags.rs             tags: first match wins; otype, timer, target
 //! state.rs            the document as three maps, and the fold that makes them
@@ -33,6 +38,7 @@ pub mod external_proof;
 pub mod fold_proof;
 pub mod internal_proof;
 pub mod internal_spec;
+pub mod model;
 pub mod node_spec;
 pub mod object;
 pub mod object_proof;
@@ -42,9 +48,21 @@ pub mod properties_proof;
 pub mod spec;
 pub mod state;
 pub mod steps_spec;
+pub mod store;
 pub mod tags;
 pub mod tags_proof;
 pub mod timeouts;
 pub mod types;
 
+#[cfg(not(verus_keep_ghost))]
+mod rover_model;
+
+#[cfg(not(verus_keep_ghost))]
+pub mod refine;
+
+#[cfg(not(verus_keep_ghost))]
+pub use refine::abstract_model;
+
+pub use model::Model;
+pub use store::{content_etag, fnv1a, Etag, Read, StoreCall, StoreError, StoreOutcome};
 pub use types::*;

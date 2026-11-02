@@ -1249,18 +1249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-world"
-version = "0.1.0"
-dependencies = [
- "echod-abstract",
- "echod-process",
- "echod-rover",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

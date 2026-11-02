@@ -19,17 +19,13 @@ pub use echod_concrete::node_spec::*;
 
 verus! {
 
-/// FNV-1a over the bytes. Trusted to be a function of the string.
+/// FNV-1a over the bytes. The body is `echod_concrete::fnv1a`. Trusted to
+/// be a function of the string.
 #[verifier::external_body]
 pub fn fnv1a(s: &str) -> (r: u64)
     ensures r as nat == hash(s@),
 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    echod_concrete::fnv1a(s)
 }
 
 // ---------------------------------------------------------------------------

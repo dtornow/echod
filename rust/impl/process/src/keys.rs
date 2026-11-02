@@ -83,7 +83,7 @@ pub fn fnv1a(s: &str) -> u64 {
 
 /// The version a body quotes, as an S3 ETag: the same bytes are the same version.
 pub fn content_etag(body: &[u8]) -> crate::types::Etag {
-    crate::types::Etag(format!("{:016x}", fnv1a(&String::from_utf8_lossy(body))))
+    echod_concrete::content_etag(body)
 }
 
 /// The origin of an id: everything before the first `:`.

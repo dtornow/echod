@@ -1,13 +1,13 @@
 //! The concrete world: the nodes and the store Rover starts from, the shell
 //! around a node, and the store's conditional write.
 
-use echod_logic::types::{Etag, StoreCall, StoreError, StoreOutcome};
-use echod_world::model::{
+use echod_concrete::model::{
     route_effects, ClientRequest, Effect, Fleet, Incoming, Local, Message, Model, Pid, Store,
 };
+use echod_concrete::{Etag, StoreCall, StoreError, StoreOutcome};
 use echod_rover::rover::{ProcessEvent, RoverModel};
 
-fn node(local: &Local) -> &echod_world::model::Node {
+fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {
         Local::Node(node) => node,
         Local::Store(_) => panic!("expected a node"),

@@ -8,8 +8,6 @@
 //! in this file: that is `State` in the crate root and the machines beside
 //! it.
 
-use std::fmt;
-
 use crate::target::Target;
 use crate::verified;
 use crate::verified::node::Key;
@@ -21,37 +19,7 @@ pub type RequestId = u64;
 /// Names one step on one document, from its start to its answer.
 pub type FlightId = u64;
 
-/// A version of an object in the store, as the store names it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Etag(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum StoreError {
-    /// A conditional write found the object at another version.
-    PreconditionFailed,
-    /// The store did not answer, or answered with an error: the effect of
-    /// a write is unknown.
-    Unavailable(String),
-}
-
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StoreError::PreconditionFailed => f.write_str("precondition failed"),
-            StoreError::Unavailable(m) => write!(f, "store unavailable: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-/// What a conditional read answered.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Read {
-    Body(Vec<u8>, Etag),
-    NotModified,
-    Absent,
-}
+pub use echod_concrete::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 // ---------------------------------------------------------------------------
 // In
@@ -105,51 +73,6 @@ pub enum Event {
     Due { clock: u64, armed: Armed },
     /// The node stops: it withdraws its announcement and runs no loop.
     Stop { clock: u64 },
-}
-
-/// A call on the store, as the executor makes it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum StoreCall {
-    Get { key: String },
-    GetIfNoneMatch { key: String, etag: Etag },
-    PutIfMatch { key: String, body: Vec<u8>, etag: Etag },
-    PutIfNoneMatch { key: String, body: Vec<u8> },
-    AppendIfMatch { key: String, offset: u64, body: Vec<u8>, etag: Etag },
-    Put { key: String, body: Vec<u8> },
-    Delete { key: String },
-    List { prefix: String, max_keys: usize },
-    ListPrefixes { prefix: String },
-}
-
-impl StoreCall {
-    pub fn key(&self) -> &str {
-        match self {
-            StoreCall::Get { key }
-            | StoreCall::GetIfNoneMatch { key, .. }
-            | StoreCall::PutIfMatch { key, .. }
-            | StoreCall::PutIfNoneMatch { key, .. }
-            | StoreCall::AppendIfMatch { key, .. }
-            | StoreCall::Put { key, .. }
-            | StoreCall::Delete { key } => key,
-            StoreCall::List { prefix, .. } | StoreCall::ListPrefixes { prefix } => prefix,
-        }
-    }
-}
-
-/// What a store call answered.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum StoreOutcome {
-    /// `Get`: the object and its version, or nothing.
-    Got(Option<(Vec<u8>, Etag)>),
-    /// `GetIfNoneMatch`.
-    Read(Read),
-    /// A conditional write landed at this version.
-    Written(Etag),
-    /// `Put` or `Delete` landed.
-    Done,
-    /// `List` or `ListPrefixes`.
-    Listed(Vec<String>),
-    Failed(StoreError),
 }
 
 // ---------------------------------------------------------------------------

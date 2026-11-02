@@ -1,6 +1,6 @@
 [package]
 name = "echod-concrete"
-description = "The concrete specification: the document catalogue, the handler specifications, and the one step on_event is proved against."
+description = "The concrete Rover model: the nodes and one store, and the handler specifications the process is proved against."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

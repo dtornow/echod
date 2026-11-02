@@ -9,7 +9,6 @@ members = [
   "rust/comm/cron",
   "rust/spec/abstract",
   "rust/spec/concrete",
-  "rust/spec/world",
   "rust/test/runtime",
   "rust/test/cli/sim",
   "rust/test/cli/diff",

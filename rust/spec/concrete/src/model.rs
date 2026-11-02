@@ -22,7 +22,7 @@
 
 use vstd::prelude::*;
 
-pub use echod_logic::types::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 verus! {
 
@@ -928,7 +928,7 @@ impl Fleet {
 /// The content hash the in-memory store quotes, the same function as the
 /// runtime's memory store.
 pub fn etag(body: &[u8]) -> Etag {
-    echod_logic::keys::content_etag(body)
+    crate::store::content_etag(body)
 }
 
 fn find_entry(entries: &[Entry], key: &str) -> Option<usize> {
