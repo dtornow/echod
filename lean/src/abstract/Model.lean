@@ -3,13 +3,13 @@ import «abstract».System
 /-!
 # Abstract Resonate
 
-There is exactly one real process. Its state contains a dependent global
-document store plus local continuation state. Every external receive executes
-at most one origin or schedule document handler. Every timeout stutters or
-executes at most one eligible document handler at a bounded logical firing
-instant. Schedule occurrences are queued continuations and therefore run in
-later timeout steps. Writer emissions go directly to Rover's network and are
-not durable state.
+There is exactly one real process. Its state is a list of promise/task rows,
+a list of schedules, and the local workflow queue. A receive or a timeout
+rewrites the rows of one origin, or one schedule: a callback has to see every
+promise of its origin, and that batch is what the concrete store commits.
+Schedule occurrences are queued continuations and therefore run in a later
+timeout step. Writer emissions go directly to Rover's network and are not
+durable state.
 -/
 
 namespace Resonate.Abstract

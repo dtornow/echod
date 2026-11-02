@@ -143,24 +143,127 @@ def Store.commit (store : Store) (key : DocumentKey)
     (store.commit key document).read other = store.read other := by
   simp [Store.commit, Store.read, h]
 
-def Store.toAbstract (store : Store) : Resonate.Store where
-  keys := store.keys
-  documents := fun key =>
-    match store.values key with
-    | some value => value.document
-    | none => emptyDocument key
+/-- A value outside `keys` is not part of the finite store. Reachable stores
+satisfy this because every commit records the key it writes. -/
+def Store.indexed (store : Store) : Prop :=
+  ∀ key, store.values key ≠ none → key ∈ store.keys
 
-@[simp] theorem Store.toAbstract_commit (store : Store)
+theorem Store.indexed_empty : Store.indexed {} := by
+  intro key hvalue
+  simp at hvalue
+
+theorem Store.indexed_commit (store : Store) (key : DocumentKey)
+    (document : Document key) (hindexed : store.indexed) :
+    (store.commit key document).indexed := by
+  intro query hvalue
+  by_cases hquery : query = key
+  · subst hquery
+    by_cases hk : query ∈ store.keys <;>
+      simp [Store.commit, hk, List.mem_append]
+  · have hprevious : store.values query ≠ none := by
+      simpa [Store.commit, hquery] using hvalue
+    have hmem := hindexed query hprevious
+    by_cases hk : key ∈ store.keys <;>
+      simp [Store.commit, hk, hquery, hmem, List.mem_append]
+
+theorem Store.indexed_congr {left right : Store}
+    (hvalues : left.values = right.values) (hkeys : left.keys = right.keys)
+    (hindexed : right.indexed) : left.indexed := by
+  intro key hvalue
+  have hright : right.values key ≠ none := by
+    simpa [hvalues] using hvalue
+  simpa [hkeys] using hindexed key hright
+
+def Store.documentAt (store : Store) (key : DocumentKey) : Document key :=
+  match store.values key with
+  | some value => value.document
+  | none => emptyDocument key
+
+/-- Rows and schedules carried by `keys`. A value sitting outside `keys` is
+not part of the finite store the abstract list can see. -/
+def Store.toAbstract (store : Store) : Resonate.Store :=
+  let written :=
+    store.keys.foldl (fun (acc : Resonate.Store) key =>
+      acc.write key (store.documentAt key)) {}
+  { written with keys := store.keys }
+
+theorem foldl_write_read (acc : Resonate.Store) (done keys : List DocumentKey)
+    (doc : (key : DocumentKey) → Document key) (query : DocumentKey)
+    (hacc : acc.read query =
+      if query ∈ done then doc query else emptyDocument query) :
+    (keys.foldl (fun (acc : Resonate.Store) key => acc.write key (doc key)) acc).read
+        query =
+      if query ∈ done ++ keys then doc query else emptyDocument query := by
+  induction keys generalizing acc done with
+  | nil =>
+      rw [List.foldl_nil, List.append_nil]
+      exact hacc
+  | cons key rest ih =>
+      rw [List.foldl_cons]
+      have hmem : (done ++ [key]) ++ rest = done ++ key :: rest := by
+        rw [List.append_assoc, List.singleton_append]
+      rw [← hmem]
+      exact ih (acc.write key (doc key)) (done ++ [key]) (by
+        by_cases hquery : query = key
+        · subst hquery
+          rw [Resonate.Store.read_write_same]
+          have hmem : query ∈ done ++ [query] := by
+            simp [List.mem_append]
+          simp [hmem]
+        · rw [Resonate.Store.read_write_other _ _ _ _ hquery, hacc]
+          have hmem : query ∈ done ++ [key] ↔ query ∈ done := by
+            simp [List.mem_append, hquery]
+          by_cases hdone : query ∈ done <;> simp [hdone, hmem])
+
+theorem read_replace_keys (store : Resonate.Store) (keys : List DocumentKey)
+    (query : DocumentKey) :
+    ({ store with keys := keys }).read query = store.read query := by
+  cases query <;> rfl
+
+theorem Store.toAbstract_read (store : Store) (key : DocumentKey) :
+    store.toAbstract.read key =
+      if key ∈ store.keys then store.documentAt key else emptyDocument key := by
+  have hfold :=
+    foldl_write_read {} [] store.keys store.documentAt key (by
+      cases key <;> rfl)
+  simp only [Store.toAbstract, List.nil_append] at hfold ⊢
+  rw [read_replace_keys]
+  exact hfold
+
+@[simp] theorem Store.toAbstract_commit_read (store : Store)
+    (key other : DocumentKey) (document : Document key) :
+    (store.commit key document).toAbstract.read other =
+      (store.toAbstract.write key document).read other := by
+  rw [Store.toAbstract_read]
+  by_cases hother : other = key
+  · subst hother
+    rw [Resonate.Store.read_write_same]
+    by_cases hk : other ∈ store.keys
+    · simp [Store.commit, hk, Store.documentAt]
+    · simp [Store.commit, hk, List.mem_append, Store.documentAt]
+  · have hkeys :
+        other ∈ (store.commit key document).keys ↔ other ∈ store.keys := by
+      by_cases hk : key ∈ store.keys <;>
+        simp [Store.commit, hk, hother, List.mem_append]
+    have hdoc :
+        (store.commit key document).documentAt other =
+          store.documentAt other := by
+      simp [Store.documentAt, Store.commit, hother]
+    by_cases hmem : other ∈ store.keys
+    · have hmem' : other ∈ (store.commit key document).keys := hkeys.mpr hmem
+      simp [hother, hmem, hmem', hdoc, Resonate.Store.read_write_other,
+        Store.toAbstract_read]
+    · have hmem' : other ∉ (store.commit key document).keys := by
+        intro h
+        exact hmem (hkeys.mp h)
+      simp [hother, hmem, hmem', Resonate.Store.read_write_other,
+        Store.toAbstract_read]
+
+@[simp] theorem Store.toAbstract_commit_keys (store : Store)
     (key : DocumentKey) (document : Document key) :
-    (store.commit key document).toAbstract =
-      store.toAbstract.write key document := by
-  unfold Store.commit Store.toAbstract Resonate.Store.write
-  congr 1
-  funext other
-  by_cases h : other = key
-  · subst other
-    simp
-  · simp [h]
+    (store.commit key document).toAbstract.keys =
+      (store.toAbstract.write key document).keys := by
+  simp [Store.toAbstract, Store.commit, Resonate.Store.write, Resonate.Store.addKey]
 
 /-- Consume a successful conditional attempt without installing its candidate
 payload. This is the not-landed failure fence: the logical document is
@@ -173,7 +276,7 @@ def Store.fence (store : Store) (key : DocumentKey) : Store :=
     (key other : DocumentKey) :
     (store.fence key).toAbstract.read other =
       store.toAbstract.read other := by
-  rw [Store.fence, Store.toAbstract_commit]
+  rw [Store.fence, Store.toAbstract_commit_read]
   by_cases h : other = key
   · subst other
     simp

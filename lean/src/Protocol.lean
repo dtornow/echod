@@ -218,35 +218,284 @@ def documentEmit {key : DocumentKey} (entry : OutboxEntry) :
     DocumentHandler key Unit :=
   fun _ document => ((), document, [entry])
 
-/-- Pure finite dependent document map shared by the specifications. -/
-structure Store where
-  keys : List DocumentKey := []
-  documents : (key : DocumentKey) → Document key := emptyDocument
+/-- One promise and the task that executes it, addressed by its id. -/
+structure Object where
+  id : Ident
+  promise : PromiseObject
+  task : Option TaskObject := none
+  deriving Repr
 
-def Store.read (store : Store) (key : DocumentKey) : Document key :=
-  store.documents key
+def Object.ofOrigin {origin : String} (row : OriginObject origin) : Object where
+  id := { origin, suffix := row.suffix }
+  promise := row.promise
+  task := row.task
+
+def Object.toOriginRow? (origin : String) (object : Object) :
+    Option (OriginObject origin) :=
+  if object.id.origin == origin then
+    some { suffix := object.id.suffix, promise := object.promise,
+           task := object.task }
+  else
+    none
+
+/-- The abstract world is a list of promise/task rows and a list of schedules.
+`keys` records every origin and schedule a step has written, including an
+origin whose rows were cleared. `read` and `write` are the one-origin view a
+single step uses: a callback has to see every row of its origin, and the
+concrete store commits that origin as one object. -/
+structure Store where
+  objects : List Object := []
+  schedules : List Schedule := []
+  keys : List DocumentKey := []
+
+def Store.originRows (store : Store) (origin : String) : OriginDocument origin :=
+  store.objects.filterMap (Object.toOriginRow? origin)
+
+def Store.scheduleAt (store : Store) (id : Ident) : ScheduleDocument id :=
+  go store.schedules
+where
+  go : List Schedule → ScheduleDocument id
+  | [] => none
+  | schedule :: rest =>
+      if h : schedule.id = id then
+        some (h ▸ ScheduleData.ofSchedule schedule)
+      else
+        go rest
+
+def Store.read (store : Store) : (key : DocumentKey) → Document key
+  | .origin origin => store.originRows origin
+  | .schedule id => store.scheduleAt id
+
+def Store.addKey (keys : List DocumentKey) (key : DocumentKey) :
+    List DocumentKey :=
+  if key ∈ keys then keys else keys ++ [key]
 
 def Store.write (store : Store) (key : DocumentKey) (document : Document key) :
     Store :=
-  { keys :=
-      if store.keys.contains key then store.keys else store.keys ++ [key]
-    documents := fun other =>
-      if h : other = key then h.symm ▸ document else store.documents other }
+  { keys := Store.addKey store.keys key
+    objects :=
+      match key with
+      | .origin origin =>
+          store.objects.filter (·.id.origin != origin) ++
+            document.map Object.ofOrigin
+      | .schedule _ => store.objects
+    schedules :=
+      match key with
+      | .origin _ => store.schedules
+      | .schedule id =>
+          store.schedules.filter (·.id != id) ++
+            match document with
+            | none => []
+            | some data => [data.toSchedule] }
+
+@[simp] theorem Object.toOriginRow?_ofOrigin {origin : String}
+    (row : OriginObject origin) :
+    Object.toOriginRow? origin (Object.ofOrigin row) = some row := by
+  simp [Object.toOriginRow?, Object.ofOrigin]
+
+theorem filterMap_ofOrigin {origin : String} (rows : List (OriginObject origin)) :
+    rows.filterMap (Object.toOriginRow? origin ∘ Object.ofOrigin) = rows := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      simp [ih, Object.toOriginRow?_ofOrigin]
+
+theorem filterMap_origin_removed {origin : String} (objects : List Object) :
+    (objects.filter (·.id.origin != origin)).filterMap
+        (Object.toOriginRow? origin) = [] := by
+  induction objects with
+  | nil => rfl
+  | cons object rest ih =>
+      simp only [List.filter_cons]
+      by_cases horigin : object.id.origin = origin
+      · simp [horigin, ih]
+      · have hkeep : (object.id.origin != origin) = true := by
+          simpa [bne_iff_ne] using horigin
+        simp [hkeep, Object.toOriginRow?, horigin, ih]
+
+theorem filterMap_origin_preserves_other {origin other : String}
+    (h : other ≠ origin) (objects : List Object) :
+    (objects.filter (·.id.origin != origin)).filterMap
+        (Object.toOriginRow? other) =
+      objects.filterMap (Object.toOriginRow? other) := by
+  induction objects with
+  | nil => rfl
+  | cons object rest ih =>
+      simp only [List.filter_cons, List.filterMap_cons]
+      by_cases horigin : object.id.origin = origin
+      · simp [horigin, Object.toOriginRow?, h.symm, ih]
+      · have hkeep : (object.id.origin != origin) = true := by
+          simpa [bne_iff_ne] using horigin
+        simp only [hkeep, ite_true, List.filterMap_cons, Object.toOriginRow?]
+        by_cases hother : object.id.origin = other
+        · simp [hother, ih]
+        · simp [hother, ih]
+
+theorem filterMap_append_same_origin {origin : String}
+    (objects : List Object) (rows : List (OriginObject origin)) :
+    (objects.filter (·.id.origin != origin) ++ rows.map Object.ofOrigin).filterMap
+        (Object.toOriginRow? origin) = rows := by
+  rw [List.filterMap_append, filterMap_origin_removed, List.nil_append,
+    List.filterMap_map]
+  exact filterMap_ofOrigin rows
+
+theorem filterMap_mapped_other_origin {origin other : String}
+    (h : other ≠ origin) (rows : List (OriginObject origin)) :
+    (rows.map Object.ofOrigin).filterMap (Object.toOriginRow? other) = [] := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      simp [Object.toOriginRow?, Object.ofOrigin, h.symm, ih]
+
+theorem filterMap_append_other_origin {origin other : String}
+    (h : other ≠ origin) (objects : List Object)
+    (rows : List (OriginObject origin)) :
+    (objects.filter (·.id.origin != origin) ++ rows.map Object.ofOrigin).filterMap
+        (Object.toOriginRow? other) =
+      objects.filterMap (Object.toOriginRow? other) := by
+  rw [List.filterMap_append, filterMap_origin_preserves_other h,
+    filterMap_mapped_other_origin h, List.append_nil]
+
+theorem ScheduleData.ofSchedule_toSchedule {id : Ident}
+    (data : ScheduleData id) :
+    ScheduleData.ofSchedule data.toSchedule = data := by
+  rfl
+
+theorem scheduleAt_go_removed (id : Ident) (schedules : List Schedule) :
+    Store.scheduleAt.go id (schedules.filter (·.id != id)) = none := by
+  induction schedules with
+  | nil => rfl
+  | cons schedule rest ih =>
+      simp only [List.filter_cons]
+      by_cases hschedule : schedule.id = id
+      · simp [hschedule, ih]
+      · have hkeep : (schedule.id != id) = true := by
+          simpa [bne_iff_ne] using hschedule
+        simp [hkeep, Store.scheduleAt.go, hschedule, ih]
+
+theorem scheduleAt_go_append_same (id : Ident) (schedules : List Schedule)
+    (data : ScheduleData id) :
+    Store.scheduleAt.go id
+        (schedules.filter (·.id != id) ++ [data.toSchedule]) =
+      some data := by
+  induction schedules with
+  | nil =>
+      simp [Store.scheduleAt.go, ScheduleData.toSchedule, ScheduleData.ofSchedule]
+  | cons schedule rest ih =>
+      simp only [List.filter_cons]
+      by_cases hschedule : schedule.id = id
+      · simp [hschedule, ih]
+      · have hkeep : (schedule.id != id) = true := by
+          simpa [bne_iff_ne] using hschedule
+        simp [hkeep, List.cons_append, Store.scheduleAt.go, hschedule, ih]
+
+theorem scheduleAt_go_filter_other (id other : Ident) (h : other ≠ id)
+    (schedules : List Schedule) :
+    Store.scheduleAt.go other (schedules.filter (·.id != id)) =
+      Store.scheduleAt.go other schedules := by
+  induction schedules with
+  | nil => rfl
+  | cons schedule rest ih =>
+      simp only [List.filter_cons]
+      by_cases hschedule : schedule.id = id
+      · simp [hschedule, Store.scheduleAt.go, h.symm, ih]
+      · have hkeep : (schedule.id != id) = true := by
+          simpa [bne_iff_ne] using hschedule
+        simp only [hkeep, ite_true, Store.scheduleAt.go]
+        by_cases hother : schedule.id = other
+        · simp [hother]
+        · simp [hother, ih]
+
+theorem scheduleAt_go_append_other (id other : Ident) (h : other ≠ id)
+    (schedules : List Schedule) (extra : List Schedule)
+    (hextra : Store.scheduleAt.go other extra = none) :
+    Store.scheduleAt.go other (schedules.filter (·.id != id) ++ extra) =
+      Store.scheduleAt.go other schedules := by
+  induction schedules with
+  | nil =>
+      simpa [Store.scheduleAt.go] using hextra
+  | cons schedule rest ih =>
+      simp only [List.filter_cons]
+      by_cases hschedule : schedule.id = id
+      · simp [hschedule, Store.scheduleAt.go, h.symm, ih]
+      · have hkeep : (schedule.id != id) = true := by
+          simpa [bne_iff_ne] using hschedule
+        simp only [hkeep, ite_true, List.cons_append, Store.scheduleAt.go]
+        by_cases hother : schedule.id = other
+        · simp [hother]
+        · simp [hother, ih]
 
 @[simp] theorem Store.read_write_same (store : Store) (key : DocumentKey)
     (document : Document key) :
     (store.write key document).read key = document := by
-  simp [Store.write, Store.read]
+  cases key with
+  | origin origin =>
+      simp only [Store.write, Store.read, Store.originRows]
+      exact filterMap_append_same_origin store.objects document
+  | schedule id =>
+      cases document with
+      | none =>
+          simp [Store.write, Store.read, Store.scheduleAt, scheduleAt_go_removed]
+      | some data =>
+          simp [Store.write, Store.read, Store.scheduleAt, scheduleAt_go_append_same]
 
 @[simp] theorem Store.read_write_other (store : Store) (key other : DocumentKey)
     (document : Document key) (h : other ≠ key) :
     (store.write key document).read other = store.read other := by
-  simp [Store.write, Store.read, h]
+  cases key with
+  | origin origin =>
+      cases other with
+      | origin otherOrigin =>
+          have horigin : otherOrigin ≠ origin := by
+            intro heq
+            apply h
+            simp [heq]
+          simp [Store.write, Store.read, Store.originRows,
+            filterMap_append_other_origin horigin]
+      | schedule id =>
+          rfl
+  | schedule id =>
+      cases other with
+      | origin origin =>
+          rfl
+      | schedule otherId =>
+          have hother : otherId ≠ id := by
+            intro heq
+            apply h
+            simp [heq]
+          cases document with
+          | none =>
+              simp only [Store.write, Store.read, Store.scheduleAt]
+              exact scheduleAt_go_append_other id otherId hother
+                store.schedules [] rfl
+          | some data =>
+              simp only [Store.write, Store.read, Store.scheduleAt]
+              apply scheduleAt_go_append_other id otherId hother store.schedules
+                [data.toSchedule]
+              simp [Store.scheduleAt.go, ScheduleData.toSchedule, hother.symm]
 
 @[simp] theorem Store.key_mem_write (store : Store) (key : DocumentKey)
     (document : Document key) :
     key ∈ (store.write key document).keys := by
-  by_cases h : key ∈ store.keys <;> simp [Store.write, h]
+  simp only [Store.write, Store.addKey]
+  split <;> simp [*]
+
+theorem filter_ofOrigin {origin : String} (rows : List (OriginObject origin)) :
+    (rows.map Object.ofOrigin).filter (·.id.origin != origin) = [] := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      simp [Object.ofOrigin, ih]
+
+theorem Store.write_twice (key : DocumentKey) (before after : Document key) :
+    ((({} : Store).write key before).write key after) =
+      ({} : Store).write key after := by
+  cases key with
+  | origin origin =>
+      simp [Store.write, Store.addKey, filter_ofOrigin]
+  | schedule id =>
+      cases before <;> cases after <;>
+        simp [Store.write, Store.addKey, ScheduleData.toSchedule]
 
 def Store.originKeys (store : Store) : List String :=
   store.keys.filterMap fun
@@ -297,10 +546,17 @@ structure WorkflowState where
   pending : List WorkflowEntry := []
   deriving Repr
 
-/-- Logical document state used to state cross-implementation correspondence. -/
+/-- The abstract service state: one list of promise/task rows, one list of
+schedules, and the local workflow queue. -/
 structure State where
   store : Store := {}
   workflow : WorkflowState := {}
+
+def State.objects (state : State) : List Object :=
+  state.store.objects
+
+def State.schedules (state : State) : List Schedule :=
+  state.store.schedules
 
 def State.init : State := {}
 

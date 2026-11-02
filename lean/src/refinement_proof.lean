@@ -285,12 +285,8 @@ theorem originWork_correspondence
 @[simp] theorem singleton_rewrite
     (key : DocumentKey) (before after : Document key) :
     (({} : Resonate.Store).write key before).write key after =
-      ({} : Resonate.Store).write key after := by
-  unfold Resonate.Store.write
-  congr 1
-  · simp
-  · funext other
-    by_cases h : other = key <;> simp [h]
+      ({} : Resonate.Store).write key after :=
+  Resonate.Store.write_twice key before after
 
 theorem selectedExternal_correspondence
     (appConfig : Resonate.Config) (call : Call)
@@ -1150,7 +1146,8 @@ theorem work_key_mem
     (document : Document writtenKey) (hmem : other ∈ store.keys) :
     other ∈ (store.write writtenKey document).keys := by
   by_cases hcontains : writtenKey ∈ store.keys <;>
-    simp [Resonate.Store.write, hcontains, hmem]
+    simp [Resonate.Store.write, Resonate.Store.addKey, hcontains, hmem,
+      List.mem_append]
 
 theorem external_keys_mono
     (config : Resonate.Config) (call : Call) (state : State) :
@@ -1178,6 +1175,7 @@ structure StoreRep (physical : Concrete.Store) (abstract : State) : Prop where
   relevantKeys :
     ∀ key, RelevantDocument key (physical.toAbstract.read key) →
       key ∈ abstract.store.keys
+  indexed : physical.indexed
 
 instance {physical : Concrete.Store} {abstract : State} :
     CoeFun (StoreRep physical abstract) (fun _ =>
@@ -1196,18 +1194,19 @@ theorem StoreRep.commit {physical : Concrete.Store} {abstract : State}
       { abstract with store := abstract.store.write key document } := by
   constructor
   · intro other
-    rw [Concrete.Store.toAbstract_commit]
+    rw [Concrete.Store.toAbstract_commit_read]
     by_cases h : other = key
     · subst other
       simp
     · simp [h, hrep other]
   · intro other hrelevant
-    rw [Concrete.Store.toAbstract_commit] at hrelevant
+    rw [Concrete.Store.toAbstract_commit_read] at hrelevant
     by_cases h : other = key
     · subst other
       exact Resonate.Store.key_mem_write _ _ _
     · exact Store.key_mem_write_of_mem _ _ _ _
         (hrep.relevantKeys other (by simpa [h] using hrelevant))
+  · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
 
 theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
     (hrep : StoreRep physical abstract) (key : DocumentKey) :
@@ -1219,6 +1218,7 @@ theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
   · intro other hrelevant
     rw [Concrete.Store.toAbstract_read_fence] at hrelevant
     exact hrep.relevantKeys other hrelevant
+  · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
 
 theorem StoreRep.of_store_eq
     {physical : Concrete.Store} {left right : State}
@@ -1231,22 +1231,32 @@ theorem StoreRep.of_store_eq
   · intro key hrelevant
     rw [← hstore]
     exact hrep.relevantKeys key hrelevant
+  · exact hrep.indexed
 
 theorem toAbstract_read_eq_loaded
     {physical : Concrete.Store} {key : DocumentKey}
     {loaded : Option (Document key × Concrete.Version)}
+    (hindexed : physical.indexed)
     (hread : physical.read key = loaded) :
     physical.toAbstract.read key =
       (loaded.map (·.1)).getD (emptyDocument key) := by
-  cases hvalue : physical.values key with
-  | none =>
-      simp [Concrete.Store.read, hvalue] at hread
-      cases hread
-      simp [Concrete.Store.toAbstract, Resonate.Store.read, hvalue]
-  | some value =>
-      simp [Concrete.Store.read, hvalue] at hread
-      cases hread
-      simp [Concrete.Store.toAbstract, Resonate.Store.read, hvalue]
+  by_cases hmem : key ∈ physical.keys
+  · cases hvalue : physical.values key with
+    | none =>
+        simp [Concrete.Store.read, hvalue] at hread
+        cases hread
+        simp [Concrete.Store.toAbstract_read, Concrete.Store.documentAt, hmem, hvalue]
+    | some value =>
+        simp [Concrete.Store.read, hvalue] at hread
+        cases hread
+        simp [Concrete.Store.toAbstract_read, Concrete.Store.documentAt, hmem, hvalue]
+  · cases hvalue : physical.values key with
+    | none =>
+        simp [Concrete.Store.read, hvalue] at hread
+        cases hread
+        simp [Concrete.Store.toAbstract_read, hmem]
+    | some value =>
+        exact (hmem (hindexed key (by simp [hvalue]))).elim
 
 theorem external_cas_transport
     {appConfig : Resonate.Config}
@@ -1270,7 +1280,7 @@ theorem external_cas_transport
     subst transaction
     cases selected with
     | external hkey hselected =>
-      have hbefore := toAbstract_read_eq_loaded hcurrent
+      have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
       have habstract :
           abstract.store.read key =
             (loaded.map (·.1)).getD
@@ -1287,7 +1297,7 @@ theorem external_cas_transport
         by_cases hother : other = key
         · subst other
           simp [hlocal.1]
-        · rw [Concrete.Store.toAbstract_commit]
+        · rw [Concrete.Store.toAbstract_commit_read]
           simp [hother, external_frame
             appConfig call key other
             abstract hkey hother, hrep other]
@@ -1299,8 +1309,9 @@ theorem external_cas_transport
         · exact external_keys_mono
             appConfig call abstract other
               (hrep.relevantKeys other (by
-                rw [Concrete.Store.toAbstract_commit] at hrelevant
+                rw [Concrete.Store.toAbstract_commit_read] at hrelevant
                 simpa [hother] using hrelevant))
+      · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
     | sweep hselectedTransaction _ _ =>
       contradiction
 
@@ -1352,7 +1363,7 @@ theorem work_cas_transport
     subst transaction
     cases selected with
     | work hselected =>
-      have hbefore := toAbstract_read_eq_loaded hcurrent
+      have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
       have habstract :
           abstract.store.read item.key =
             (loaded.map (·.1)).getD
@@ -1371,7 +1382,7 @@ theorem work_cas_transport
           by_cases hother : other = item.key
           · subst other
             simp [hlocal.1]
-          · rw [Concrete.Store.toAbstract_commit]
+          · rw [Concrete.Store.toAbstract_commit_read]
             simp [hother, Resonate.runWork_frame
               appConfig item now
               (Concrete.pendingWorkflow rest)
@@ -1385,8 +1396,9 @@ theorem work_cas_transport
               appConfig item now
               (Concrete.pendingWorkflow rest) abstract other
               (hrep.relevantKeys other (by
-                rw [Concrete.Store.toAbstract_commit] at hrelevant
+                rw [Concrete.Store.toAbstract_commit_read] at hrelevant
                 simpa [hother] using hrelevant))
+        · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
       · rw [← hlocal.2.1]
         exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm
     | sweep hselectedTransaction _ _ =>
@@ -1502,7 +1514,7 @@ theorem sweep_cas_transport
         change Concrete.selectScanWork appConfig (.origin origin) now rest
           ((loaded.map (·.1)).getD (emptyDocument (.origin origin))) =
             some candidate at hselectedWork
-        have hbefore := toAbstract_read_eq_loaded hcurrent
+        have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
         have habstract :
             abstract.store.read (.origin origin) =
               (loaded.map (·.1)).getD
@@ -1572,10 +1584,10 @@ theorem sweep_cas_transport
           · intro other
             by_cases hother : other = .origin origin
             · subst other
-              simp only [Concrete.Store.toAbstract_commit,
+              simp only [Concrete.Store.toAbstract_commit_read,
                 Resonate.Store.read_write_same]
               exact hdocument'.trans hlocal.1.symm
-            · rw [Concrete.Store.toAbstract_commit]
+            · rw [Concrete.Store.toAbstract_commit_read]
               simp [hother, Resonate.runWork_frame
                 appConfig item now
                 (Concrete.pendingWorkflow rest) abstract other
@@ -1594,8 +1606,9 @@ theorem sweep_cas_transport
                 appConfig item now
                 (Concrete.pendingWorkflow rest) abstract other
                 (hrep.relevantKeys other (by
-                  rw [Concrete.Store.toAbstract_commit] at hrelevant
+                  rw [Concrete.Store.toAbstract_commit_read] at hrelevant
                   simpa [hother] using hrelevant))
+          · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
         · rw [hlocal.2.1]
           exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
             (congrArg Concrete.pendingWorkflow hcontinuations'.symm)
@@ -1605,7 +1618,7 @@ theorem sweep_cas_transport
         change Concrete.selectScanWork appConfig (.schedule id) now rest
           ((loaded.map (·.1)).getD (emptyDocument (.schedule id))) =
             some candidate at hselectedWork
-        have hbefore := toAbstract_read_eq_loaded hcurrent
+        have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
         have habstract :
             abstract.store.read (.schedule id) =
               (loaded.map (·.1)).getD
@@ -1669,10 +1682,10 @@ theorem sweep_cas_transport
           · intro other
             by_cases hother : other = .schedule id
             · subst other
-              simp only [Concrete.Store.toAbstract_commit,
+              simp only [Concrete.Store.toAbstract_commit_read,
                 Resonate.Store.read_write_same]
               exact hdocument'.trans hlocal.1.symm
-            · rw [Concrete.Store.toAbstract_commit]
+            · rw [Concrete.Store.toAbstract_commit_read]
               simp [hother, Resonate.runWork_frame
                 appConfig
                 (.scheduleTimeout id) now
@@ -1688,8 +1701,9 @@ theorem sweep_cas_transport
                 appConfig (.scheduleTimeout id)
                 now (Concrete.pendingWorkflow rest) abstract other
                 (hrep.relevantKeys other (by
-                  rw [Concrete.Store.toAbstract_commit] at hrelevant
+                  rw [Concrete.Store.toAbstract_commit_read] at hrelevant
                   simpa [hother] using hrelevant))
+          · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
         · rw [hlocal.2.1]
           exact
             (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
@@ -1787,7 +1801,7 @@ theorem sweep_idle_cas_transport
               (loaded.map (·.1)).getD (emptyDocument timer.target.key) =
                 physical.toAbstract.read timer.target.key := by
             symm
-            exact toAbstract_read_eq_loaded hcurrent
+            exact toAbstract_read_eq_loaded hrep.indexed hcurrent
           rw [hdocument]
           exact StoreRep.fence hrep timer.target.key
         · rw [Concrete.selectScan, hworkNone, if_neg hdeadline] at hselected
@@ -12946,6 +12960,7 @@ theorem related_after_inert_store
           now event).val)
     {nextPhysical : Concrete.Store}
     (hstate : result.state = .store nextPhysical)
+    (hkeys : nextPhysical.keys = physical.keys)
     (hvalues : nextPhysical.values = physical.values)
     (hreplies :
       ∀ target message, (target, message) ∈ result.send →
@@ -12972,14 +12987,18 @@ theorem related_after_inert_store
     rw [hphysical] at hrelatedPhysical
     cases Concrete.Local.store.inj hrelatedPhysical
     refine ⟨nextPhysical, by simp [World.land, hstate], ?_⟩
+    have hread :
+        ∀ key, nextPhysical.toAbstract.read key = physical.toAbstract.read key := by
+      intro key
+      rw [Concrete.Store.toAbstract_read, Concrete.Store.toAbstract_read, hkeys]
+      simp [Concrete.Store.documentAt, hvalues]
     constructor
     · intro key
-      simpa [Concrete.Store.toAbstract, Resonate.Store.read, hvalues] using
-        hrep key
+      simpa [hread key] using hrep key
     · intro key hrelevant
       apply hrep.relevantKeys key
-      simpa [Concrete.Store.toAbstract, Resonate.Store.read, hvalues] using
-        hrelevant
+      simpa [hread key] using hrelevant
+    · exact Concrete.Store.indexed_congr hvalues hkeys hrep.indexed
   · obtain ⟨workflowStore, parts, slack, hworkflowStore, hpending,
         hparts, hcommitted⟩ := related.workflow
     rw [hphysical] at hworkflowStore
@@ -14306,7 +14325,7 @@ theorem simulate_matching_put_store
     have hkeyMem :
         key ∈ (abstract.process .service).store.keys := by
       apply hrep.relevantKeys
-      rw [toAbstract_read_eq_loaded hcurrent]
+      rw [toAbstract_read_eq_loaded hrep.indexed hcurrent]
       apply Selected.sweep_relevant
       simpa [htransaction] using provenance.selected
     have hinstant :
@@ -14501,6 +14520,7 @@ theorem simulate_store_process
           (Concrete.step appConfig config .store (.store physical)
             now event).val)
       (hstate : inert.state = .store nextPhysical)
+      (hkeys : nextPhysical.keys = physical.keys)
       (hvalues : nextPhysical.values = physical.values)
       (hreplies :
         ∀ target message, (target, message) ∈ inert.send →
@@ -14523,30 +14543,30 @@ theorem simulate_store_process
         Abstract.boundaryTrace execution = [] :=
     ⟨[], trivial,
       related_after_inert_store hreachable related hphysical htime hvalid
-        hmember hstate hvalues hreplies hnoWritten hnoFailed,
+        hmember hstate hkeys hvalues hreplies hnoWritten hnoFailed,
       rfl⟩
   cases event with
   | timeout =>
       simp [Concrete.step, Outcomes.one] at hresult
       subst result
-      exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+      exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
         (by simp) (by simp) (by simp)
   | receive sender message =>
       cases message with
       | request call =>
           simp [Concrete.step, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | output output =>
           simp [Concrete.step, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | storeReply reply =>
           simp [Concrete.step, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | storeRequest rpc =>
           obtain ⟨op, payload⟩ := rpc
@@ -14554,7 +14574,7 @@ theorem simulate_store_process
           | get key =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | put key document expectedVersion =>
               obtain ⟨address, rfl⟩ :=
@@ -14568,42 +14588,42 @@ theorem simulate_store_process
                 subst result
                 exact hinert (by
                   simp [Concrete.step, Concrete.storePut, hmatch,
-                    Outcomes.one]) rfl rfl
+                    Outcomes.one]) rfl rfl rfl
                   (by simp) (by simp) (by simp)
           | armTimer timer =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | deleteTimer timer =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | deleteTimers timers =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | listTimers through =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | announce announcement =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | listAnnouncements =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | getMembership =>
               simp [Concrete.step, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl
+              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | putMembership expected next =>
               simp only [Concrete.step] at hresult
@@ -14611,7 +14631,7 @@ theorem simulate_store_process
               all_goals subst result
               all_goals
                 exact hinert (by simp_all [Concrete.step, Outcomes.one])
-                  rfl rfl (by simp) (by simp) (by simp)
+                  rfl rfl rfl (by simp) (by simp) (by simp)
 
 theorem related_after_node_land
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -16236,6 +16256,7 @@ theorem simulate_pure_external_node
         external_keys_mono appConfig call
           (abstract.process .service) other
           (hrep.relevantKeys other hrelevant)
+    · exact hrep.indexed
   · have hold :
         WorkflowAligned config
           (concrete.land (.node address) now
@@ -16887,10 +16908,13 @@ theorem initial_related
     store := ⟨{}, hinit.2.1, by
       constructor
       · intro key
-        rfl
+        cases key <;> rfl
       · intro key hrelevant
-        cases key <;> simp [RelevantDocument, Concrete.Store.toAbstract,
-          Resonate.Store.read, emptyDocument] at hrelevant⟩
+        have hread := Concrete.Store.toAbstract_read ({} : Concrete.Store) key
+        have hempty : key ∉ ({} : Concrete.Store).keys := by simp
+        simp [hempty, emptyDocument] at hread
+        cases key <;> simp [RelevantDocument, hread] at hrelevant
+      · exact Concrete.Store.indexed_empty⟩
     requests := ?_
     outputs := ?_
     puts := ?_
