@@ -1,17 +1,50 @@
 import Protocol
 
 /-!
-# Document-scoped Resonate abstract machine
+# Abstract Resonate machine
 
-The global store is a dependent map. Promise/task rows are grouped by origin;
-each schedule has a distinct document key and document type. A `Handler key`
-receives only `Document key`, so neither bind nor any primitive can cross a
-document boundary or inspect the global store.
+The store is a list of objects (a promise and its task, by id) and a list of
+schedules. A handler reads the objects it names by id and writes back the
+ones it changes.
 -/
 
 namespace Resonate
 
 open ServerModel
+
+def Object.project (object : Object) (now : Nat) : Object :=
+  let promise := object.promise.project now
+  { object with promise, task := object.task.map (·.view promise) }
+
+def Store.getObject (store : Store) (id : Ident) : Option Object :=
+  store.objects.find? (·.id == id)
+
+/-- Write the promise of `id`, creating the object if it is new. -/
+def Store.setPromise (store : Store) (id : Ident) (promise : PromiseObject) :
+    Store :=
+  let object : Object :=
+    match store.getObject id with
+    | some existing => { existing with promise }
+    | none => { id, promise }
+  { store with objects := object :: store.objects.filter (·.id != id) }
+
+def Store.setTask (store : Store) (id : Ident) (task : TaskObject) : Store :=
+  { store with
+    objects := store.objects.map fun object =>
+      if object.id == id then { object with task := some task } else object }
+
+def Store.setObject (store : Store) (object : Object) : Store :=
+  { store with objects := object :: store.objects.filter (·.id != object.id) }
+
+def Store.getSchedule (store : Store) (id : Ident) : Option Schedule :=
+  store.schedules.find? (·.id == id)
+
+def Store.setSchedule (store : Store) (schedule : Schedule) : Store :=
+  { store with
+    schedules := store.schedules.filter (·.id != schedule.id) ++ [schedule] }
+
+def Store.deleteSchedule (store : Store) (id : Ident) : Store :=
+  { store with schedules := store.schedules.filter (·.id != id) }
 
 namespace Direct
 
@@ -19,120 +52,68 @@ abbrev ServerConfig := AbstractModel.ServerConfig
 
 abbrev Env := Resonate.HandlerEnv
 
-/-- Fixed-key Reader+State+Writer. The state is exactly one document. -/
-abbrev Handler := Resonate.DocumentHandler
-abbrev ask := @Resonate.documentAsk
-abbrev get := @Resonate.documentGet
-abbrev set := @Resonate.documentSet
-abbrev modify := @Resonate.documentModify
-abbrev emit := @Resonate.documentEmit
+/-- Read the configuration, read and write the store, emit messages. -/
+abbrev Handler (α : Type) :=
+  HandlerEnv → Store → α × Store × List OutboxEntry
 
-/-- The only bridge between a handler and the global store. It supplies and
-commits precisely the indexed document. -/
-def runWith (config : ServerConfig) (key : DocumentKey)
-    (action : Handler key α) (store : Store) :
-    α × Store × List OutboxEntry :=
-  let (value, document, emitted) := action { config } (store.read key)
-  (value, store.write key document, emitted)
+instance : Monad Handler where
+  pure value := fun _ store => (value, store, [])
+  bind action next := fun env store =>
+    let (value, store', emitted₁) := action env store
+    let (result, store'', emitted₂) := next value env store'
+    (result, store'', emitted₁ ++ emitted₂)
 
-def run (key : DocumentKey) (action : Handler key α) (store : Store) :
-    α × Store × List OutboxEntry :=
-  runWith {} key action store
+def ask : Handler Env := fun env store => (env, store, [])
 
-/-- Running a handler frames every other document. -/
-theorem runWith_frame (config : ServerConfig) (key other : DocumentKey)
-    (action : Handler key α) (store : Store) (h : other ≠ key) :
-    (runWith config key action store).2.1.read other = store.read other := by
-  exact Store.read_write_other store key other
-    (action { config } (store.read key)).2.1 h
+def getObject (id : Ident) : Handler (Option Object) := fun _ store =>
+  (store.getObject id, store, [])
 
-def Store.ChangedOnly (key : DocumentKey) (before after : Store) : Prop :=
-  ∀ other, other ≠ key → after.read other = before.read other
+def setPromise (id : Ident) (promise : PromiseObject) : Handler Unit :=
+  fun _ store => ((), store.setPromise id promise, [])
 
-def Store.AtMostOneDocument (before after : Store) : Prop :=
-  (∀ key, after.read key = before.read key) ∨
-    ∃ key, Store.ChangedOnly key before after
+def setTask (id : Ident) (task : TaskObject) : Handler Unit :=
+  fun _ store => ((), store.setTask id task, [])
 
-theorem runWith_changedOnly (config : ServerConfig) (key : DocumentKey)
-    (action : Handler key α) (store : Store) :
-    Store.ChangedOnly key store (runWith config key action store).2.1 := by
-  intro other h
-  exact runWith_frame config key other action store h
+def setObject (object : Object) : Handler Unit :=
+  fun _ store => ((), store.setObject object, [])
 
-theorem origin_schedule_ne (origin : String) (id : Ident) :
-    DocumentKey.origin origin ≠ DocumentKey.schedule id := by
-  intro h
-  cases h
+def getSchedule (id : Ident) : Handler (Option Schedule) := fun _ store =>
+  (store.getSchedule id, store, [])
 
-def getObject {origin : String} (suffix : String) :
-    Handler (.origin origin) (Option (OriginObject origin)) := do
-  return (← get).find? (·.suffix == suffix)
+def setSchedule (schedule : Schedule) : Handler Unit :=
+  fun _ store => ((), store.setSchedule schedule, [])
 
-def setPromise {origin : String} (suffix : String) (promise : PromiseObject) :
-    Handler (.origin origin) Unit :=
-  modify fun document =>
-    let object :=
-      match document.find? (·.suffix == suffix) with
-      | some existing => { existing with promise }
-      | none => { suffix, promise }
-    object :: document.filter (·.suffix != suffix)
+def deleteSchedule (id : Ident) : Handler Unit :=
+  fun _ store => ((), store.deleteSchedule id, [])
 
-def setTask {origin : String} (suffix : String) (task : TaskObject) :
-    Handler (.origin origin) Unit :=
-  modify fun document =>
-    document.map fun object =>
-      if object.suffix == suffix then { object with task := some task }
-      else object
+def setMessage (address : String) (message : ServerModel.Message) : Handler Unit :=
+  fun _ store => ((), store, [{ address, message }])
 
-def setObject {origin : String} (object : OriginObject origin) :
-    Handler (.origin origin) Unit :=
-  modify fun document =>
-    object :: document.filter (·.suffix != object.suffix)
+/-- Read one object as seen at `now`. -/
+def readObject (id : Ident) (now : Nat) : Handler (Option Object) := do
+  return (← getObject id).map (·.project now)
 
-def getSchedule {id : Ident} : Handler (.schedule id) (Option Schedule) := do
-  return (← get).map (·.toSchedule)
+/-- Read one object that has a task. -/
+def readTaskObject (id : Ident) (now : Nat) : Handler (Option Object) := do
+  match ← readObject id now with
+  | some object => if object.task.isSome then return some object else return none
+  | none => return none
 
-def setSchedule {id : Ident} (data : ScheduleData id) :
-    Handler (.schedule id) Unit :=
-  set (some data)
-
-def setScheduleValue {id : Ident} (schedule : Schedule) :
-    Handler (.schedule id) Unit :=
-  setSchedule {
-    cron := schedule.cron
-    promiseId := schedule.promiseId
-    promiseTimeout := schedule.promiseTimeout
-    promiseParam := schedule.promiseParam
-    promiseTags := schedule.promiseTags
-    nextRunAt := schedule.nextRunAt
-    lastRunAt := schedule.lastRunAt
-    createdAt := schedule.createdAt
-  }
-
-def delSchedule {id : Ident} : Handler (.schedule id) Unit :=
-  set none
-
-def setMessage {key : DocumentKey} (address : String)
-    (message : ServerModel.Message) :
-    Handler key Unit :=
-  emit { address, message }
-
-def setSettled {origin : String} (object : OriginObject origin)
-    (promise : PromiseObject) : Handler (.origin origin) Unit := do
-  setPromise object.suffix promise
+/-- Settle a promise; a settled promise also finishes its task. -/
+def setSettled (id : Ident) (object : Object) (promise : PromiseObject) :
+    Handler Unit := do
+  setPromise id promise
   if promise.state != .pending then
     match object.task with
-    | some task =>
-        if task.state != .fulfilled then setTask object.suffix task.fulfill
+    | some task => if task.state != .fulfilled then setTask id task.fulfill
     | none => pure ()
 
-def createPromiseAt {origin : String} (suffix : String) (timeoutAt now : Nat)
-    (param : Value) (tags : Tags) :
-    Handler (.origin origin) (OriginObject origin) := do
+def createPromiseAt (id : Ident) (timeoutAt now : Nat) (param : Value)
+    (tags : Tags) : Handler Object := do
   if timeoutAt > now then
     let promise : PromiseObject :=
       { state := .pending, param, tags, timeoutAt, createdAt := now }
-    setPromise suffix promise
+    setPromise id promise
     if promise.otype == .runnable then
       let due :=
         match promise.tags.get? "resonate:delay" with
@@ -140,51 +121,25 @@ def createPromiseAt {origin : String} (suffix : String) (timeoutAt now : Nat)
         | none => now
       let task : TaskObject :=
         { state := .pending, version := 0, retryTimeoutAt := some due }
-      setTask suffix task
-      return { suffix, promise, task := some task }
-    return { suffix, promise }
+      setTask id task
+      return { id, promise, task := some task }
+    return { id, promise }
   else
-    let promiseState :=
-      if tags.isTimer then PromiseState.resolved
-      else PromiseState.rejectedTimedout
+    let state :=
+      if tags.isTimer then PromiseState.resolved else PromiseState.rejectedTimedout
     let promise : PromiseObject :=
-      { state := promiseState, param, tags, timeoutAt,
+      { state, param, tags, timeoutAt,
         createdAt := timeoutAt, settledAt := some timeoutAt }
-    setPromise suffix promise
+    setPromise id promise
     if promise.otype == .runnable then
       let task : TaskObject := { state := .fulfilled, version := 0 }
-      setTask suffix task
-      return { suffix, promise, task := some task }
-    return { suffix, promise }
+      setTask id task
+      return { id, promise, task := some task }
+    return { id, promise }
 
-def createPromise (req : PromiseCreateReq) (now : Nat) :
-    Handler (.origin req.id.origin) (OriginObject req.id.origin) :=
-  createPromiseAt req.id.suffix req.timeoutAt now req.param req.tags
-
-/-- External reads project a view but do not persist it. -/
-def readObject {origin : String} (suffix : String) (now : Nat) :
-    Handler (.origin origin) (Option (OriginObject origin)) := do
-  match ← getObject suffix with
-  | none => return none
-  | some object => return some (object.project now)
-
-def readTaskObject {origin : String} (suffix : String) (now : Nat) :
-    Handler (.origin origin) (Option (OriginObject origin)) := do
-  match ← getObject suffix with
-  | some object =>
-      if object.task.isSome then readObject suffix now else return none
-  | none => return none
-
-def createIfAbsentAt {origin : String} (suffix : String) (timeoutAt now : Nat)
-    (param : Value) (tags : Tags) : Handler (.origin origin) Unit := do
-  match ← readObject suffix now with
-  | some _ => pure ()
-  | none =>
-      let _ ← createPromiseAt suffix timeoutAt now param tags
-
-def createIfAbsent (req : PromiseCreateReq) (now : Nat) :
-    Handler (.origin req.id.origin) Unit :=
-  createIfAbsentAt req.id.suffix req.timeoutAt now req.param req.tags
+def createIfAbsent (req : PromiseCreateReq) (now : Nat) : Handler Unit := do
+  if (← readObject req.id now).isNone then
+    let _ ← createPromiseAt req.id req.timeoutAt now req.param req.tags
 
 end Direct
 end Resonate

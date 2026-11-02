@@ -1,20 +1,20 @@
 import «abstract».External
 
+/-! Timeout steps and the due work they fire. -/
+
 namespace Resonate.Direct
 
 open ServerModel
 
-/-- Promise timeout materialisation changes only the promise's origin
-document. -/
-def processPromiseTimeout (id : Ident) (now : Nat) :
-    Handler (.origin id.origin) Unit := do
-  match ← getObject id.suffix with
+/-- Write the timed-out promise back. -/
+def processPromiseTimeout (id : Ident) (now : Nat) : Handler Unit := do
+  match ← getObject id with
   | none => pure ()
   | some object => setObject (object.project now)
 
-def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
-    Handler (.origin origin) Unit := do
-  match ← readTaskObject awaiter.suffix now with
+/-- Wake the awaiter's task because `awaited` settled. -/
+def resumeOne (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
+  match ← readTaskObject awaiter now with
   | none => pure ()
   | some object =>
       match object.task with
@@ -22,47 +22,45 @@ def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
       | some task =>
           match task.state with
           | .suspended =>
-              setTask object.suffix
+              setTask awaiter
                 { task with
                   state := .pending
                   resumes := [awaited]
                   retryTimeoutAt := some now }
           | .pending | .acquired | .halted =>
               if !(task.resumes.contains awaited) then
-                setTask object.suffix
+                setTask awaiter
                   { task with resumes := task.resumes ++ [awaited] }
           | .fulfilled => pure ()
 
+/-- Read the awaited promise, drop the callback, and resume the awaiter. -/
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
-    Handler (.origin req.awaited.origin) Unit := do
-  -- Malformed pre-states cannot turn callback delivery into a cross-origin
-  -- access; suffix lookup is used only after this guard.
+    Handler Unit := do
   if !req.awaited.sameOrigin req.awaiter then return ()
-  match ← readObject req.awaited.suffix now with
+  match ← readObject req.awaited now with
   | none => pure ()
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.callbacks.contains req.awaiter then
-        setPromise awaited.suffix
+        setPromise req.awaited
           { awaited.promise with
             callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
-        resumeOne awaited.id req.awaiter now
+        resumeOne req.awaited req.awaiter now
 
 def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
-    Handler (.origin req.awaited.origin) Unit := do
-  match ← readObject req.awaited.suffix now with
+    Handler Unit := do
+  match ← readObject req.awaited now with
   | none => pure ()
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.listeners.contains req.address then
-        setPromise awaited.suffix
+        setPromise req.awaited
           { awaited.promise with
             listeners := awaited.promise.listeners.filter (· != req.address) }
-        setMessage req.address (.unblock (awaited.promise.toRecord awaited.id))
+        setMessage req.address (.unblock (awaited.promise.toRecord req.awaited))
 
-def processLeaseTimeout (id : Ident) (now : Nat) :
-    Handler (.origin id.origin) Unit := do
-  match ← readTaskObject id.suffix now with
+def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
+  match ← readTaskObject id now with
   | none => pure ()
   | some object =>
       match object.task with
@@ -73,7 +71,7 @@ def processLeaseTimeout (id : Ident) (now : Nat) :
           | some deadline =>
               if task.state == .acquired ∧ deadline ≤ now ∧
                   object.promise.state == .pending then
-                setTask object.suffix
+                setTask id
                   { task with
                     state := .pending
                     pid := none
@@ -81,9 +79,8 @@ def processLeaseTimeout (id : Ident) (now : Nat) :
                     leaseTimeoutAt := none
                     retryTimeoutAt := some now }
 
-def processRetryTimeout (id : Ident) (now : Nat) :
-    Handler (.origin id.origin) Unit := do
-  match ← readTaskObject id.suffix now with
+def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
+  match ← readTaskObject id now with
   | none => pure ()
   | some object =>
       match object.task with
@@ -95,116 +92,70 @@ def processRetryTimeout (id : Ident) (now : Nat) :
               if task.state == .pending ∧ due ≤ now ∧
                   object.promise.state == .pending then
                 let env ← ask
-                setTask object.suffix
+                setTask id
                   { task with
-                    retryTimeoutAt :=
-                      some (now + env.config.retryTimeout) }
+                    retryTimeoutAt := some (now + env.config.retryTimeout) }
                 setMessage
                   ((object.promise.tags.get? "resonate:target").getD "")
-                  (.execute object.id task.version)
+                  (.execute id task.version)
 
-/-- A schedule-document step updates the schedule and returns origin work. It
-does not execute any occurrence. -/
-def processSchedule (id : Ident) (now : Nat) :
-    Handler (.schedule id) (List WorkItem) := do
-  match ← getSchedule with
+/-- Advance the schedule and return the occurrences it fired. Each occurrence
+creates its promise in a later step. -/
+def processSchedule (id : Ident) (now : Nat) : Handler (List WorkflowEntry) := do
+  match ← getSchedule id with
   | none => return []
   | some schedule =>
       let times :=
         (occurrences schedule.cron schedule.nextRunAt now).filter (· ≤ now)
-      match times.getLast? with
-      | some last =>
-          let next : Schedule :=
-            { schedule with
-              lastRunAt := some last
-              nextRunAt := nextCron schedule.cron last }
-          setScheduleValue next
-      | none => pure ()
+      if let some last := times.getLast? then
+        setSchedule
+          { schedule with
+            lastRunAt := some last
+            nextRunAt := nextCron schedule.cron last }
       return times.map fun time =>
-        .occurrence
-          { id := expand schedule.promiseId schedule.id time
-            timeoutAt := time + schedule.promiseTimeout
-            param := schedule.promiseParam
-            tags := schedule.promiseTags }
-          time
+        { request :=
+            { id := expand schedule.promiseId id time
+              timeoutAt := time + schedule.promiseTimeout
+              param := schedule.promiseParam
+              tags := schedule.promiseTags }
+          instant := time }
 
-/-- Each occurrence is a separate origin-document transaction. -/
-def processOccurrence (req : PromiseCreateReq) (time : Nat) :
-    Handler (.origin req.id.origin) Unit :=
-  createIfAbsent req time
-
-/-- Execute one item selected from an origin document without permitting
-cross-document access. The equality checks are redundant for items produced by
-`originWork`, but make the fixed-key restriction explicit in the type. -/
-def processOriginWorkItem (origin : String) (item : WorkItem) (now : Nat) :
-    Handler (.origin origin) Unit :=
+/-- Run one piece of due work. Only a schedule returns continuations. -/
+def processWork (item : WorkItem) (now : Nat) : Handler (List WorkflowEntry) := do
   match item with
-  | .promiseTimeout id =>
-      if h : id.origin = origin then h ▸ processPromiseTimeout id now
-      else pure ()
-  | .callback req =>
-      if h : req.awaited.origin = origin then h ▸ processCallback req now
-      else pure ()
-  | .listener req =>
-      if h : req.awaited.origin = origin then h ▸ processListener req now
-      else pure ()
-  | .taskLeaseTimeout id =>
-      if h : id.origin = origin then h ▸ processLeaseTimeout id now
-      else pure ()
-  | .taskRetryTimeout id =>
-      if h : id.origin = origin then h ▸ processRetryTimeout id now
-      else pure ()
-  | .scheduleTimeout _ | .occurrence _ _ => pure ()
+  | .promiseTimeout id => processPromiseTimeout id now
+  | .callback req => processCallback req now
+  | .listener req => processListener req now
+  | .taskLeaseTimeout id => processLeaseTimeout id now
+  | .taskRetryTimeout id => processRetryTimeout id now
+  | .scheduleTimeout id => return ← processSchedule id now
+  | .occurrence req time => createIfAbsent req time
+  return []
 
-def processOriginWorkItems (origin : String) (items : List WorkItem)
-    (now : Nat) : Handler (.origin origin) Unit := do
-  match items with
-  | [] => pure ()
-  | item :: rest =>
-      processOriginWorkItem origin item now
-      processOriginWorkItems origin rest now
+/-- Work an object makes due at `now`. -/
+def objectWork (object : Object) (now : Nat) : List WorkItem :=
+  let promise := object.promise
+  let pending := promise.state == .pending
+  (if pending ∧ promise.timeoutAt ≤ now then [.promiseTimeout object.id] else []) ++
+  (if pending then [] else
+    promise.callbacks.map (fun awaiter => .callback { awaited := object.id, awaiter }) ++
+    promise.listeners.map (fun address => .listener { awaited := object.id, address })) ++
+  (match object.task with
+   | none => []
+   | some task =>
+       (match task.leaseTimeoutAt with
+        | some due =>
+            if task.state == .acquired ∧ due ≤ now ∧ pending then
+              [.taskLeaseTimeout object.id] else []
+        | none => []) ++
+       (match task.retryTimeoutAt with
+        | some due =>
+            if task.state == .pending ∧ due ≤ now ∧ pending then
+              [.taskRetryTimeout object.id] else []
+        | none => []))
 
-/-- Task work discoverable from one fused origin row. -/
-def originTaskWork {origin : String} (object : OriginObject origin)
-    (now : Nat) : List WorkItem :=
-  match object.task with
-     | none => []
-     | some task =>
-         (match task.leaseTimeoutAt with
-          | some due =>
-              if task.state == .acquired ∧ due ≤ now ∧
-                  object.promise.state == .pending then
-                [.taskLeaseTimeout object.id]
-              else []
-          | none => []) ++
-         (match task.retryTimeoutAt with
-          | some due =>
-              if task.state == .pending ∧ due ≤ now ∧
-                  object.promise.state == .pending then
-                [.taskRetryTimeout object.id]
-              else []
-          | none => [])
-
-def originSettledWork {origin : String} (object : OriginObject origin) :
-    List WorkItem :=
-  if object.promise.state == .pending then [] else
-    (object.promise.callbacks.map fun awaiter =>
-      .callback { awaited := object.id, awaiter }) ++
-    (object.promise.listeners.map fun address =>
-      .listener { awaited := object.id, address })
-
-/-- Work discoverable from one fused origin row. -/
-def originObjectWork {origin : String} (object : OriginObject origin)
-    (now : Nat) : List WorkItem :=
-  (if object.promise.state == .pending ∧ object.promise.timeoutAt ≤ now then
-    [.promiseTimeout object.id]
-  else []) ++
-  originSettledWork object ++ originTaskWork object now
-
-/-- Work discoverable in one origin document. The list order is stable and
-newly enabled work is discovered only on a later Rover timeout. -/
-def originWork (origin : String) (document : OriginDocument origin) (now : Nat) :
-    List WorkItem :=
-  document.flatMap fun object => originObjectWork object now
+/-- Work a schedule makes due at `now`. -/
+def scheduleWork (schedule : Schedule) (now : Nat) : List WorkItem :=
+  if schedule.nextRunAt ≤ now then [.scheduleTimeout schedule.id] else []
 
 end Resonate.Direct

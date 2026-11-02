@@ -179,13 +179,10 @@ def Store.documentAt (store : Store) (key : DocumentKey) : Document key :=
   | some value => value.document
   | none => emptyDocument key
 
-/-- Rows and schedules carried by `keys`. A value sitting outside `keys` is
-not part of the finite store the abstract list can see. -/
+/-- The abstract objects and schedules held by the documents in `keys`. -/
 def Store.toAbstract (store : Store) : Resonate.Store :=
-  let written :=
-    store.keys.foldl (fun (acc : Resonate.Store) key =>
-      acc.write key (store.documentAt key)) {}
-  { written with keys := store.keys }
+  store.keys.foldl (fun (acc : Resonate.Store) key =>
+    acc.write key (store.documentAt key)) {}
 
 theorem foldl_write_read (acc : Resonate.Store) (done keys : List DocumentKey)
     (doc : (key : DocumentKey) → Document key) (query : DocumentKey)
@@ -215,11 +212,6 @@ theorem foldl_write_read (acc : Resonate.Store) (done keys : List DocumentKey)
             simp [List.mem_append, hquery]
           by_cases hdone : query ∈ done <;> simp [hdone, hmem])
 
-theorem read_replace_keys (store : Resonate.Store) (keys : List DocumentKey)
-    (query : DocumentKey) :
-    ({ store with keys := keys }).read query = store.read query := by
-  cases query <;> rfl
-
 theorem Store.toAbstract_read (store : Store) (key : DocumentKey) :
     store.toAbstract.read key =
       if key ∈ store.keys then store.documentAt key else emptyDocument key := by
@@ -227,7 +219,6 @@ theorem Store.toAbstract_read (store : Store) (key : DocumentKey) :
     foldl_write_read {} [] store.keys store.documentAt key (by
       cases key <;> rfl)
   simp only [Store.toAbstract, List.nil_append] at hfold ⊢
-  rw [read_replace_keys]
   exact hfold
 
 @[simp] theorem Store.toAbstract_commit_read (store : Store)
@@ -258,12 +249,6 @@ theorem Store.toAbstract_read (store : Store) (key : DocumentKey) :
         exact hmem (hkeys.mp h)
       simp [hother, hmem, hmem', Resonate.Store.read_write_other,
         Store.toAbstract_read]
-
-@[simp] theorem Store.toAbstract_commit_keys (store : Store)
-    (key : DocumentKey) (document : Document key) :
-    (store.commit key document).toAbstract.keys =
-      (store.toAbstract.write key document).keys := by
-  simp [Store.toAbstract, Store.commit, Resonate.Store.write, Resonate.Store.addKey]
 
 /-- Consume a successful conditional attempt without installing its candidate
 payload. This is the not-landed failure fence: the logical document is

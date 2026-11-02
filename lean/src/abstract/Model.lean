@@ -3,13 +3,10 @@ import «abstract».System
 /-!
 # Abstract Resonate
 
-There is exactly one real process. Its state is a list of promise/task rows,
-a list of schedules, and the local workflow queue. A receive or a timeout
-rewrites the rows of one origin, or one schedule: a callback has to see every
-promise of its origin, and that batch is what the concrete store commits.
-Schedule occurrences are queued continuations and therefore run in a later
-timeout step. Writer emissions go directly to Rover's network and are not
-durable state.
+There is exactly one real process. Its state is a list of objects (a promise
+and its task), a list of schedules, and a queue of schedule occurrences. A
+request or a timeout reads the objects it names and writes back the ones it
+changes. Emitted messages go directly to Rover's network.
 -/
 
 namespace Resonate.Abstract
@@ -46,19 +43,6 @@ def step (config : Config) (pid : Pid) (state : State) (now : Time)
           rw [h]
           simp⟩
   | _, _ => Outcomes.one { state := state, send := [] }
-
-/-- The two real service-step branches satisfy the global one-document frame. -/
-theorem externalProcessStep_atMostOneDocument (config : Config) (call : Call)
-    (state : State) :
-    Direct.Store.AtMostOneDocument state.store
-      (Resonate.run config call state).1.store :=
-  Resonate.run_atMostOneDocument config call state
-
-theorem timeoutProcessStep_atMostOneDocument (config : Config) (now : Time)
-    (state : State) :
-    Direct.Store.AtMostOneDocument state.store
-      (Resonate.runTimeout config now state).1.store :=
-  Resonate.runTimeout_atMostOneDocument config now state
 
 abbrev model : Model where
   Config := Config

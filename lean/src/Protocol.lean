@@ -238,15 +238,12 @@ def Object.toOriginRow? (origin : String) (object : Object) :
   else
     none
 
-/-- The abstract world is a list of promise/task rows and a list of schedules.
-`keys` records every origin and schedule a step has written, including an
-origin whose rows were cleared. `read` and `write` are the one-origin view a
-single step uses: a callback has to see every row of its origin, and the
-concrete store commits that origin as one object. -/
+/-- The abstract world: a list of promise/task objects and a list of
+schedules. `read` and `write` view the objects of one origin; the concrete
+store keeps each origin as one document. -/
 structure Store where
   objects : List Object := []
   schedules : List Schedule := []
-  keys : List DocumentKey := []
 
 def Store.originRows (store : Store) (origin : String) : OriginDocument origin :=
   store.objects.filterMap (Object.toOriginRow? origin)
@@ -266,14 +263,9 @@ def Store.read (store : Store) : (key : DocumentKey) → Document key
   | .origin origin => store.originRows origin
   | .schedule id => store.scheduleAt id
 
-def Store.addKey (keys : List DocumentKey) (key : DocumentKey) :
-    List DocumentKey :=
-  if key ∈ keys then keys else keys ++ [key]
-
 def Store.write (store : Store) (key : DocumentKey) (document : Document key) :
     Store :=
-  { keys := Store.addKey store.keys key
-    objects :=
+  { objects :=
       match key with
       | .origin origin =>
           store.objects.filter (·.id.origin != origin) ++
@@ -474,12 +466,6 @@ theorem scheduleAt_go_append_other (id other : Ident) (h : other ≠ id)
                 [data.toSchedule]
               simp [Store.scheduleAt.go, ScheduleData.toSchedule, hother.symm]
 
-@[simp] theorem Store.key_mem_write (store : Store) (key : DocumentKey)
-    (document : Document key) :
-    key ∈ (store.write key document).keys := by
-  simp only [Store.write, Store.addKey]
-  split <;> simp [*]
-
 theorem filter_ofOrigin {origin : String} (rows : List (OriginObject origin)) :
     (rows.map Object.ofOrigin).filter (·.id.origin != origin) = [] := by
   induction rows with
@@ -492,20 +478,10 @@ theorem Store.write_twice (key : DocumentKey) (before after : Document key) :
       ({} : Store).write key after := by
   cases key with
   | origin origin =>
-      simp [Store.write, Store.addKey, filter_ofOrigin]
+      simp [Store.write, filter_ofOrigin]
   | schedule id =>
       cases before <;> cases after <;>
-        simp [Store.write, Store.addKey, ScheduleData.toSchedule]
-
-def Store.originKeys (store : Store) : List String :=
-  store.keys.filterMap fun
-    | .origin origin => some origin
-    | .schedule _ => none
-
-def Store.scheduleKeys (store : Store) : List ServerModel.Ident :=
-  store.keys.filterMap fun
-    | .origin _ => none
-    | .schedule id => some id
+        simp [Store.write, ScheduleData.toSchedule]
 
 /-- Internal work values are shared data.  Their execution is implementation
 specific. -/
