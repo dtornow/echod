@@ -22,7 +22,6 @@ roots = [
   "abstract.Machine",
   "abstract.External",
   "abstract.Internal",
-  "abstract.System",
   "abstract.Model",
   "concrete.Timers",
   "concrete.Machine",
