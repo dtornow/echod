@@ -9,12 +9,14 @@ subDir = "spec"
 
 [[lean_lib]]
 name = "Rover"
-srcDir = "src"
+srcDir = "src/Rover"
 
 [[lean_lib]]
 name = "Resonate"
 srcDir = "src"
 roots = [
+  # Check.lean stays Rover.Check, whose path is relative to src.
+  "Rover.Check",
   "Protocol",
   "abstract.Resonate",
   "abstract.Check",

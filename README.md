@@ -25,7 +25,7 @@ rust/spec/abstract    the Resonate protocol as a Rover model
 rust/spec/concrete    the proof that on_event refines that model
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
-lean/src/Rover.lean   the Rover world, for experiment
+lean/src/Rover        the Rover world, for experiment
 lean/src/abstract     the Resonate model, for experiment
 lean/src/concrete     nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
