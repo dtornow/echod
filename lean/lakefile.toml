@@ -18,7 +18,6 @@ roots = [
   # Check.lean stays Rover.Check, whose path is relative to src.
   "Rover.Check",
   "Protocol",
-  "abstract.Resonate",
   "abstract.Check",
   "abstract.Machine",
   "abstract.External",
