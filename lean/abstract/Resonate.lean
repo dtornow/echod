@@ -8,4 +8,3 @@ import «abstract».Model
 import «concrete».Model
 import «concrete».refinement_claim
 import «abstract».Check
-import «abstract».Examples

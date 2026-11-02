@@ -18,7 +18,6 @@ roots = [
   "abstract.Resonate",
   "abstract.Protocol",
   "abstract.Check",
-  "abstract.Examples",
   "abstract.Machine",
   "abstract.External",
   "abstract.Internal",
