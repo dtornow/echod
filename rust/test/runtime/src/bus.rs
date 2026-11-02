@@ -63,7 +63,7 @@ impl ResonateRouter for RecordingBus {
     async fn route(&self, address: &str, msg: &Message) -> Result<(), Unavailable> {
         let now = self.clock.now();
         let (kind, id, dispatch) = match msg {
-            Message::Execute(m) => ("execute", m.data.task.id.clone(), Dispatch::Execute { id: m.data.task.id.clone(), version: m.data.task.version as u32 }),
+            Message::Execute(m) => ("execute", m.data.task.id.clone(), Dispatch::Execute { id: m.data.task.id.clone(), version: m.data.task.version as u64 }),
             Message::Unblock(m) => {
                 let promise = serde_json::to_value(&m.data.promise).ok().and_then(|v| prec(&v)).unwrap_or_else(|| panic!("an unblock with a promise record: {msg:?}"));
                 ("unblock", m.data.promise.id.clone(), Dispatch::Unblock { address: address.to_string(), promise })

@@ -185,34 +185,6 @@ pub fn address_valid(addr: &String) -> (r: bool)
     super::model::address_valid(addr)
 }
 
-/// The state a client may settle a promise to, by name; never `Pending`.
-pub open spec fn spec_settable(s: Seq<char>) -> Option<super::exec::PState> {
-    if s == "resolved"@ {
-        Some(super::exec::PState::Resolved)
-    } else if s == "rejected"@ {
-        Some(super::exec::PState::Rejected)
-    } else if s == "rejected_canceled"@ {
-        Some(super::exec::PState::Canceled)
-    } else {
-        None
-    }
-}
-
-/// The state a client may settle a promise to, by name; never `Pending`.
-#[verifier::external_body]
-pub fn settable(s: &String) -> (r: Option<super::exec::PState>)
-    ensures
-        r == spec_settable(s@),
-        r != Some(super::exec::PState::Pending),
-{
-    match s.as_str() {
-        "resolved" => Some(super::exec::PState::Resolved),
-        "rejected" => Some(super::exec::PState::Rejected),
-        "rejected_canceled" => Some(super::exec::PState::Canceled),
-        _ => None,
-    }
-}
-
 /// Whether an id holds a `:`: the reference server keeps it as the separator
 /// between an origin and the rest, so a schedule's id may not have one.
 #[verifier::external_body]

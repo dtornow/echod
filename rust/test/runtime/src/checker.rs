@@ -20,7 +20,8 @@
 //! see a deadline fire early or late.
 
 use echod_rover::{Checker, Config, Event, Grouped, Violation};
-use resonate::{Dispatch, Request, Resonate, Response, Server};
+use resonate::types::{Request, Response};
+use resonate::{Dispatch, Resonate, Server};
 
 use crate::bus::Sent;
 use crate::history::Entry;

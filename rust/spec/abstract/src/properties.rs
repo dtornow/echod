@@ -32,7 +32,8 @@ use echod_rover::Time;
 use super::abstract_model::{Pid, StateV};
 #[cfg(verus_keep_ghost)]
 use super::collections::origin;
-use super::exec::{PState, Resonate, TState};
+use echod_types::{PromiseState, TaskState};
+use super::exec::Resonate;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
 use super::spec::{distinct, external_v};
@@ -101,7 +102,7 @@ pub open spec fn well_formed_promise_created_at_lte_settled_at(
 pub open spec fn well_formed_promise_settled_at_iff_not_pending_at(
     promise: PromiseV,
 ) -> bool {
-    (promise.state != PState::Pending) == (promise.settled_at is Some)
+    (promise.state != PromiseState::Pending) == (promise.settled_at is Some)
 }
 
 pub open spec fn well_formed_promise_settled_at_iff_not_pending(
@@ -117,13 +118,13 @@ pub open spec fn well_formed_promise_settled_at_iff_not_pending(
 pub open spec fn well_formed_promise_pending_created_before_deadline_at(
     promise: PromiseV,
 ) -> bool {
-    promise.state != PState::Pending || promise.created_at < promise.timeout_at
+    promise.state != PromiseState::Pending || promise.created_at < promise.timeout_at
 }
 
 pub open spec fn well_formed_promise_pending_has_no_value_at(
     promise: PromiseV,
 ) -> bool {
-    promise.state != PState::Pending || promise.value is None
+    promise.state != PromiseState::Pending || promise.value is None
 }
 
 pub open spec fn well_formed_promise_deadline_verdict_matches_timer_tag_at(
@@ -132,9 +133,9 @@ pub open spec fn well_formed_promise_deadline_verdict_matches_timer_tag_at(
     promise.settled_at != Some(promise.timeout_at)
         || promise.state
             == if promise.tags.timer {
-                PState::Resolved
+                PromiseState::Resolved
             } else {
-                PState::TimedOut
+                PromiseState::RejectedTimedout
             }
 }
 
@@ -153,7 +154,7 @@ pub open spec fn well_formed_promise_timer_not_targeted_at(
 pub open spec fn well_formed_promise_timedout_is_server_owned_at(
     promise: PromiseV,
 ) -> bool {
-    promise.state != PState::TimedOut
+    promise.state != PromiseState::RejectedTimedout
         || promise.settled_at == Some(promise.timeout_at)
 }
 
@@ -212,17 +213,17 @@ pub open spec fn well_formed_promise_settled_at_lte_now_at(
 }
 
 pub open spec fn well_formed_task_acquired_iff_has_pid_at(task: TaskV) -> bool {
-    (task.state == TState::Acquired) == (task.pid is Some)
+    (task.state == TaskState::Acquired) == (task.pid is Some)
 }
 
 pub open spec fn well_formed_task_acquired_iff_has_ttl_at(task: TaskV) -> bool {
-    (task.state == TState::Acquired) == (task.ttl is Some)
+    (task.state == TaskState::Acquired) == (task.ttl is Some)
 }
 
 pub open spec fn well_formed_task_pending_iff_has_retry_timeout_at_at(
     task: TaskV,
 ) -> bool {
-    (task.state == TState::Pending) == (task.retry_at is Some)
+    (task.state == TaskState::Pending) == (task.retry_at is Some)
 }
 
 pub open spec fn task_cleared(task: TaskV) -> bool {
@@ -230,21 +231,21 @@ pub open spec fn task_cleared(task: TaskV) -> bool {
 }
 
 pub open spec fn well_formed_task_fulfilled_is_cleared_at(task: TaskV) -> bool {
-    task.state != TState::Fulfilled || task_cleared(task)
+    task.state != TaskState::Fulfilled || task_cleared(task)
 }
 
 pub open spec fn well_formed_task_suspended_is_cleared_at(task: TaskV) -> bool {
-    task.state != TState::Suspended || task_cleared(task)
+    task.state != TaskState::Suspended || task_cleared(task)
 }
 
 pub open spec fn well_formed_task_halted_is_cleared_at(task: TaskV) -> bool {
-    task.state != TState::Halted || task_cleared(task)
+    task.state != TaskState::Halted || task_cleared(task)
 }
 
 pub open spec fn well_formed_task_suspended_has_no_resumes_at(
     task: TaskV,
 ) -> bool {
-    task.state != TState::Suspended || task.resumes.len() == 0
+    task.state != TaskState::Suspended || task.resumes.len() == 0
 }
 
 pub open spec fn well_formed_task_resumes_unique_at(task: TaskV) -> bool {
@@ -254,7 +255,7 @@ pub open spec fn well_formed_task_resumes_unique_at(task: TaskV) -> bool {
 pub open spec fn well_formed_task_acquired_version_positive_at(
     task: TaskV,
 ) -> bool {
-    task.state != TState::Acquired || task.version > 0
+    task.state != TaskState::Acquired || task.version > 0
 }
 
 pub open spec fn well_formed_schedule_promise_tags_not_timer_targeted_at(
@@ -473,7 +474,7 @@ pub open spec fn preserved_promise_state_frozen_once_settled(
     forall|id: Chars|
         before.server.promises.contains_key(id)
         && after.server.promises.contains_key(id)
-        && before.server.promises[id].state != PState::Pending
+        && before.server.promises[id].state != PromiseState::Pending
         ==> after.server.promises[id].state
             == before.server.promises[id].state
 }
@@ -486,8 +487,8 @@ pub open spec fn preserved_promise_value_until_settlement(
     forall|id: Chars|
         before.server.promises.contains_key(id)
         && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PState::Pending
-        && after.server.promises[id].state == PState::Pending
+        && before.server.promises[id].state == PromiseState::Pending
+        && after.server.promises[id].state == PromiseState::Pending
         ==> after.server.promises[id].value
             == before.server.promises[id].value
 }
@@ -511,8 +512,8 @@ pub open spec fn monotone_promise_callbacks_while_pending(
     forall|id: Chars, callback: Chars|
         before.server.promises.contains_key(id)
         && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PState::Pending
-        && after.server.promises[id].state == PState::Pending
+        && before.server.promises[id].state == PromiseState::Pending
+        && after.server.promises[id].state == PromiseState::Pending
         && before.server.promises[id].callbacks.contains(callback)
         ==> after.server.promises[id].callbacks.contains(callback)
 }
@@ -525,8 +526,8 @@ pub open spec fn monotone_promise_listeners_while_pending(
     forall|id: Chars, listener: Chars|
         before.server.promises.contains_key(id)
         && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PState::Pending
-        && after.server.promises[id].state == PState::Pending
+        && before.server.promises[id].state == PromiseState::Pending
+        && after.server.promises[id].state == PromiseState::Pending
         && before.server.promises[id].listeners.contains(listener)
         ==> after.server.promises[id].listeners.contains(listener)
 }

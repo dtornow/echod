@@ -4,7 +4,9 @@ use vstd::prelude::*;
 
 use echod_rover::Time;
 
-use super::{Dispatch, Request, Response};
+use echod_types::{Request, Response};
+
+use super::Dispatch;
 
 verus! {
 

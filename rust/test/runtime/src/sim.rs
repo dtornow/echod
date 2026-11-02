@@ -14,7 +14,7 @@ use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use resonate_core::ResonateServer;
 use serde::Serialize;
 
-use resonate::Request;
+use resonate::types::{PromiseGetReq, Request, ScheduleGetReq, TaskGetReq};
 
 use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};
@@ -414,12 +414,12 @@ impl World {
         let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
         let mut reads = Vec::new();
         for id in gen.ids() {
-            reads.push(Request::GetPromise(id.clone()));
-            reads.push(Request::GetTask(id));
+            reads.push(Request::PromiseGet(PromiseGetReq { id: id.clone() }));
+            reads.push(Request::TaskGet(TaskGetReq { id }));
         }
         if self.opts.schedules {
             for id in SCHEDULES {
-                reads.push(Request::GetSchedule(id.to_string()));
+                reads.push(Request::ScheduleGet(ScheduleGetReq { id: id.to_string() }));
             }
         }
         for req in reads {

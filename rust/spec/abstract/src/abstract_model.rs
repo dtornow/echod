@@ -13,7 +13,9 @@ use echod_rover::rover::semantics::{Label, StepResultV};
 use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
 use echod_rover::{Sched, Time};
 
-use super::exec::{Dispatch, InOut, Out, Resonate, Response, Server, Work};
+use echod_types::Response;
+
+use super::exec::{Dispatch, InOut, Out, Resonate, Server, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 use super::spec::{

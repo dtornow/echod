@@ -1,138 +1,154 @@
-//! The model's vocabulary on the wire: a `resonate::Request` as the protocol
-//! carries it, and an answer as the model types it. Shared by the driver and
-//! the simulator (`#[path]`).
+//! The model's vocabulary on the wire: a request as the protocol carries it,
+//! and an answer as the model types it. Shared by the driver and the simulator
+//! (`#[path]`).
 
 use std::collections::BTreeMap;
 
-use resonate::{Create, Fenced, PMap, PSet, PState, Promise, PromiseRec, Request, Response, Schedule, Server as Model, TState, Tags, Task, TaskRec};
+use resonate::types as rows;
+use resonate::{PMap, PSet, Promise, Server as Model, Task};
 use serde_json::{json, Value};
 
-pub fn tags(t: &Tags, worker: &str) -> Value {
+fn tags_out(t: &rows::Tags) -> Value {
     let mut m = serde_json::Map::new();
-    if t.target {
-        m.insert("resonate:target".into(), json!(worker));
-    }
-    if t.external {
-        m.insert("resonate:external".into(), json!("true"));
-    }
-    if t.timer {
-        m.insert("resonate:timer".into(), json!("true"));
-    }
-    if let Some(d) = t.delay {
-        m.insert("resonate:delay".into(), json!(d.to_string()));
+    for (k, v) in t {
+        m.insert(k.clone(), json!(v));
     }
     Value::Object(m)
 }
 
-pub fn value(data: &Option<String>) -> Value {
-    match data {
-        Some(d) => json!({ "data": d }),
-        None => json!({}),
+fn value_out(v: &rows::Value) -> Value {
+    let mut m = serde_json::Map::new();
+    if let Some(d) = &v.data {
+        m.insert("data".into(), json!(d));
+    }
+    if !v.headers.is_empty() {
+        m.insert("headers".into(), tags_out(&v.headers));
+    }
+    Value::Object(m)
+}
+
+fn state_name(s: rows::PromiseState) -> &'static str {
+    match s {
+        rows::PromiseState::Pending => "pending",
+        rows::PromiseState::Resolved => "resolved",
+        rows::PromiseState::Rejected => "rejected",
+        rows::PromiseState::RejectedCanceled => "rejected_canceled",
+        rows::PromiseState::RejectedTimedout => "rejected_timedout",
     }
 }
 
-pub fn create_data(c: &Create, worker: &str) -> Value {
-    json!({ "id": c.id, "timeoutAt": c.timeout_at, "param": value(&c.data), "tags": tags(&c.tags, worker) })
+fn create_data(c: &rows::PromiseCreateReq) -> Value {
+    json!({ "id": c.id, "timeoutAt": c.timeout_at, "param": value_out(&c.param), "tags": tags_out(&c.tags) })
+}
+
+fn settle_data(s: &rows::PromiseSettleReq) -> Value {
+    json!({ "id": s.id, "state": state_name(s.state), "value": value_out(&s.value) })
+}
+
+fn action(kind: &str, data: Value) -> Value {
+    json!({ "kind": kind, "head": {}, "data": data })
 }
 
 /// The request as the protocol carries it: kind and data.
-pub fn encode(req: &Request, worker: &str) -> (&'static str, Value) {
+pub fn encode(req: &rows::Request, _worker: &str) -> (&'static str, Value) {
     match req {
-        Request::CreatePromise(c) => ("promise.create", create_data(c, worker)),
-        Request::GetPromise(id) => ("promise.get", json!({ "id": id })),
-        Request::SettlePromise(s) => ("promise.settle", json!({ "id": s.id, "state": s.state, "value": value(&s.data) })),
-        Request::RegisterCallback { awaited, awaiter } => ("promise.register_callback", json!({ "awaited": awaited, "awaiter": awaiter })),
-        Request::RegisterListener { awaited, address } => ("promise.register_listener", json!({ "awaited": awaited, "address": address })),
-        Request::GetTask(id) => ("task.get", json!({ "id": id })),
-        Request::CreateTask { pid, ttl, action } => ("task.create", json!({ "pid": pid, "ttl": ttl, "action": { "kind": "promise.create", "head": {}, "data": create_data(action, worker) } })),
-        Request::AcquireTask { id, version, pid, ttl } => ("task.acquire", json!({ "id": id, "version": version, "pid": pid, "ttl": ttl })),
-        Request::ReleaseTask { id, version } => ("task.release", json!({ "id": id, "version": version })),
-        Request::FulfillTask { id, version, state, data } => ("task.fulfill", json!({ "id": id, "version": version, "action": { "kind": "promise.settle", "head": {}, "data": { "id": id, "state": state, "value": value(data) } } })),
-        Request::HeartbeatTask { pid, tasks } => ("task.heartbeat", json!({ "pid": pid, "tasks": tasks.iter().map(|t| json!({ "id": t.id, "version": t.version })).collect::<Vec<_>>() })),
-        Request::SuspendTask { id, version, awaited } => (
+        rows::Request::PromiseCreate(c) => ("promise.create", create_data(c)),
+        rows::Request::PromiseGet(q) => ("promise.get", json!({ "id": q.id })),
+        rows::Request::PromiseSettle(s) => ("promise.settle", settle_data(s)),
+        rows::Request::PromiseRegisterCallback(c) => ("promise.register_callback", json!({ "awaited": c.awaited, "awaiter": c.awaiter })),
+        rows::Request::PromiseRegisterListener(c) => ("promise.register_listener", json!({ "awaited": c.awaited, "address": c.address })),
+        rows::Request::TaskGet(q) => ("task.get", json!({ "id": q.id })),
+        rows::Request::TaskCreate(t) => ("task.create", json!({ "pid": t.pid, "ttl": t.ttl, "action": action("promise.create", create_data(&t.action)) })),
+        rows::Request::TaskAcquire(t) => ("task.acquire", json!({ "id": t.id, "version": t.version, "pid": t.pid, "ttl": t.ttl })),
+        rows::Request::TaskRelease(t) => ("task.release", json!({ "id": t.id, "version": t.version })),
+        rows::Request::TaskFulfill(t) => ("task.fulfill", json!({ "id": t.id, "version": t.version, "action": action("promise.settle", settle_data(&t.action)) })),
+        rows::Request::TaskHeartbeat(h) => ("task.heartbeat", json!({ "pid": h.pid, "tasks": h.tasks.iter().map(|t| json!({ "id": t.id, "version": t.version })).collect::<Vec<_>>() })),
+        rows::Request::TaskSuspend(s) => (
             "task.suspend",
-            json!({ "id": id, "version": version, "actions": awaited.iter().map(|a| json!({ "kind": "promise.register_callback", "head": {}, "data": { "awaited": a, "awaiter": id } })).collect::<Vec<_>>() }),
+            json!({ "id": s.id, "version": s.version, "actions": s.actions.iter().map(|a| action("promise.register_callback", json!({ "awaited": a.awaited, "awaiter": a.awaiter }))).collect::<Vec<_>>() }),
         ),
-        Request::FenceTask { id, version, action } => {
-            let action = match action {
-                Fenced::Create(c) => json!({ "kind": "promise.create", "head": {}, "data": create_data(c, worker) }),
-                Fenced::Settle(s) => json!({ "kind": "promise.settle", "head": {}, "data": { "id": s.id, "state": s.state, "value": value(&s.data) } }),
+        rows::Request::TaskFence(f) => {
+            let action = match &f.action {
+                rows::TaskFenceAction::Create(c) => action("promise.create", create_data(c)),
+                rows::TaskFenceAction::Settle(s) => action("promise.settle", settle_data(s)),
             };
-            ("task.fence", json!({ "id": id, "version": version, "action": action }))
+            ("task.fence", json!({ "id": f.id, "version": f.version, "action": action }))
         }
-        Request::HaltTask(id) => ("task.halt", json!({ "id": id })),
-        Request::ContinueTask(id) => ("task.continue", json!({ "id": id })),
-        Request::CreateSchedule(c) => (
+        rows::Request::TaskFenceCheck(_) => ("task.fence", json!({})),
+        rows::Request::TaskHalt(t) => ("task.halt", json!({ "id": t.id })),
+        rows::Request::TaskContinue(t) => ("task.continue", json!({ "id": t.id })),
+        rows::Request::ScheduleCreate(c) => (
             "schedule.create",
-            json!({ "id": c.id, "cron": c.cron, "promiseId": c.promise_id, "promiseTimeout": c.promise_timeout, "promiseParam": value(&c.promise_param), "promiseTags": tags(&c.promise_tags, worker) }),
+            json!({ "id": c.id, "cron": c.cron, "promiseId": c.promise_id, "promiseTimeout": c.promise_timeout, "promiseParam": value_out(&c.promise_param), "promiseTags": tags_out(&c.promise_tags) }),
         ),
-        Request::GetSchedule(id) => ("schedule.get", json!({ "id": id })),
-        Request::DeleteSchedule(id) => ("schedule.delete", json!({ "id": id })),
+        rows::Request::ScheduleGet(q) => ("schedule.get", json!({ "id": q.id })),
+        rows::Request::ScheduleDelete(q) => ("schedule.delete", json!({ "id": q.id })),
     }
 }
 
-pub fn pstate(s: &str) -> Option<PState> {
+fn pstate(s: &str) -> Option<rows::PromiseState> {
     Some(match s {
-        "pending" => PState::Pending,
-        "resolved" => PState::Resolved,
-        "rejected" => PState::Rejected,
-        "rejected_canceled" => PState::Canceled,
-        "rejected_timedout" => PState::TimedOut,
+        "pending" => rows::PromiseState::Pending,
+        "resolved" => rows::PromiseState::Resolved,
+        "rejected" => rows::PromiseState::Rejected,
+        "rejected_canceled" => rows::PromiseState::RejectedCanceled,
+        "rejected_timedout" => rows::PromiseState::RejectedTimedout,
         _ => return None,
     })
 }
 
-pub fn tstate(s: &str) -> Option<TState> {
+fn tstate(s: &str) -> Option<rows::TaskState> {
     Some(match s {
-        "pending" => TState::Pending,
-        "acquired" => TState::Acquired,
-        "suspended" => TState::Suspended,
-        "halted" => TState::Halted,
-        "fulfilled" => TState::Fulfilled,
+        "pending" => rows::TaskState::Pending,
+        "acquired" => rows::TaskState::Acquired,
+        "suspended" => rows::TaskState::Suspended,
+        "halted" => rows::TaskState::Halted,
+        "fulfilled" => rows::TaskState::Fulfilled,
         _ => return None,
     })
 }
 
-pub fn tags_in(t: &Value) -> Tags {
-    Tags {
-        target: !t["resonate:target"].is_null(),
-        external: t["resonate:external"].as_str() == Some("true"),
-        timer: t["resonate:timer"].as_str() == Some("true"),
-        delay: t["resonate:delay"].as_str().and_then(|d| d.parse().ok()),
-    }
+fn tags_in(t: &Value) -> rows::Tags {
+    let mut v: rows::Tags = t.as_object().into_iter().flatten().filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string()))).collect();
+    v.sort();
+    v
 }
 
-pub fn prec(p: &Value) -> Option<PromiseRec> {
-    Some(PromiseRec {
+fn value_in(v: &Value) -> rows::Value {
+    rows::Value { headers: if v["headers"].is_object() { tags_in(&v["headers"]) } else { Vec::new() }, data: v["data"].as_str().map(str::to_string) }
+}
+
+pub fn prec(p: &Value) -> Option<rows::PromiseRecord> {
+    Some(rows::PromiseRecord {
         id: p["id"].as_str()?.to_string(),
         state: pstate(p["state"].as_str()?)?,
-        param: p["param"]["data"].as_str().map(str::to_string),
-        value: p["value"]["data"].as_str().map(str::to_string),
+        param: value_in(&p["param"]),
+        value: value_in(&p["value"]),
+        tags: tags_in(&p["tags"]),
         timeout_at: p["timeoutAt"].as_u64()?,
         created_at: p["createdAt"].as_u64()?,
         settled_at: p["settledAt"].as_u64(),
-        tags: tags_in(&p["tags"]),
     })
 }
 
-pub fn trec(t: &Value) -> Option<TaskRec> {
-    Some(TaskRec {
+pub fn trec(t: &Value) -> Option<rows::TaskRecord> {
+    Some(rows::TaskRecord {
         id: t["id"].as_str()?.to_string(),
         state: tstate(t["state"].as_str()?)?,
-        version: t["version"].as_u64()? as u32,
+        version: t["version"].as_u64()?,
+        resumes: t["resumes"].as_u64().unwrap_or(0),
         pid: t["pid"].as_str().map(str::to_string),
         ttl: t["ttl"].as_u64(),
-        resumes: t["resumes"].as_u64().unwrap_or(0) as u32,
     })
 }
 
-pub fn srec(c: &Value) -> Option<Schedule> {
-    Some(Schedule {
+pub fn srec(c: &Value) -> Option<rows::Schedule> {
+    Some(rows::Schedule {
         id: c["id"].as_str()?.to_string(),
         cron: c["cron"].as_str()?.to_string(),
         promise_id: c["promiseId"].as_str()?.to_string(),
         promise_timeout: c["promiseTimeout"].as_u64()?,
-        promise_param: c["promiseParam"]["data"].as_str().map(str::to_string),
+        promise_param: value_in(&c["promiseParam"]),
         promise_tags: tags_in(&c["promiseTags"]),
         created_at: c["createdAt"].as_u64()?,
         next_run_at: c["nextRunAt"].as_u64()?,
@@ -140,32 +156,36 @@ pub fn srec(c: &Value) -> Option<Schedule> {
     })
 }
 
-/// The answer as the model types it.
-pub fn decode(kind: &str, status: u16, data: &Value) -> Response {
-    if status != 200 {
-        return Response::Status(status);
-    }
-    // a fence answers 200 with its action's own envelope inside; the model
-    // types the fence as that action's status
-    if kind == "task.fence" {
-        if let Some(inner) = data["action"]["head"]["status"].as_u64() {
-            if inner != 200 {
-                return Response::Status(inner as u16);
-            }
+/// The answer as the model types it. `kind` is the request's kind: each kind
+/// answers in one shape, and a refusal carries only its status.
+pub fn decode(kind: &str, status: u16, data: &Value) -> rows::Response {
+    let promise = (status < 400).then(|| prec(&data["promise"])).flatten();
+    let task = (status < 400).then(|| trec(&data["task"])).flatten();
+    let schedule = (status < 400).then(|| srec(&data["schedule"])).flatten();
+    match kind {
+        "promise.get" | "promise.create" | "promise.settle" | "promise.register_callback" | "promise.register_listener" | "task.fulfill" => {
+            rows::Response::Promise(rows::PromiseRes { status, promise })
         }
-    }
-    let body = if kind == "task.fence" { &data["action"]["data"] } else { data };
-    if kind.starts_with("schedule.") {
-        return match srec(&body["schedule"]) {
-            Some(c) => Response::Schedule(c),
-            None => Response::Status(status),
-        };
-    }
-    match (prec(&body["promise"]), trec(&body["task"])) {
-        (Some(p), Some(t)) => Response::Both(p, t),
-        (None, Some(t)) => Response::Task(t),
-        (Some(p), None) => Response::Promise(p),
-        (None, None) => Response::Status(status),
+        "schedule.get" | "schedule.create" => rows::Response::Schedule(rows::ScheduleRes { status, schedule }),
+        "schedule.delete" | "task.release" | "task.halt" | "task.continue" | "task.heartbeat" | "task.suspend" => rows::Response::Status(rows::StatusRes { status }),
+        "task.get" => rows::Response::TaskGet(rows::TaskGetRes { status, task }),
+        "task.create" | "task.acquire" => rows::Response::TaskClaim(rows::TaskClaimRes { status, task, promise }),
+        "task.fence" => {
+            let action = if status == 200 {
+                let inner = &data["action"];
+                let inner_status = inner["head"]["status"].as_u64().unwrap_or(200) as u16;
+                let body = rows::PromiseRes { status: inner_status, promise: prec(&inner["data"]["promise"]) };
+                match inner["kind"].as_str() {
+                    Some("promise.settle") => Some(rows::TaskFenceInnerRes::Settle(body)),
+                    Some("promise.create") => Some(rows::TaskFenceInnerRes::Create(body)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            rows::Response::TaskFence(rows::TaskFenceRes { status, action })
+        }
+        _ => rows::Response::Status(rows::StatusRes { status }),
     }
 }
 
@@ -204,10 +224,14 @@ pub fn model_state(snap: &Value) -> Model {
     for t in snap["taskTimeouts"].as_array().into_iter().flatten() {
         if let (Some(id), Some(at)) = (t["id"].as_str(), t["timeout"].as_u64()) {
             match t["type"].as_u64() {
-                Some(1) => leases.insert(id.to_string(), at),
-                Some(0) => retries.insert(id.to_string(), at),
-                _ => None,
-            };
+                Some(1) => {
+                    leases.insert(id.to_string(), at);
+                }
+                Some(0) => {
+                    retries.insert(id.to_string(), at);
+                }
+                _ => {}
+            }
         }
     }
     let mut tasks: PMap<Task> = PMap::empty();
@@ -217,11 +241,10 @@ pub fn model_state(snap: &Value) -> Model {
             (Some(at), Some(ttl)) => at.saturating_sub(ttl),
             _ => 0,
         };
-        // the count is what the record carries; the ids are not
         let resumes = (0..r.resumes).map(|i| format!("resume-{i}")).collect();
         tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at, retry_at: retries.get(&r.id).copied(), resumes });
     }
-    let mut schedules: PMap<Schedule> = PMap::empty();
+    let mut schedules: PMap<rows::Schedule> = PMap::empty();
     for c in snap["schedules"].as_array().into_iter().flatten() {
         if let Some(c) = srec(c) {
             schedules.insert(c.id.clone(), c);
@@ -229,4 +252,3 @@ pub fn model_state(snap: &Value) -> Model {
     }
     Model { promises, tasks, schedules }
 }
-

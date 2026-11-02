@@ -43,7 +43,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use echod_rover::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
-use resonate::{Create, Dispatch, Fenced, Request, Resonate, Response, Server as Model, MARKS};
+use resonate::types::{PromiseRegisterListenerReq, Request, Response, TaskFenceAction};
+use resonate::{Dispatch, Resonate, Server as Model, MARKS};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
@@ -118,7 +119,7 @@ impl Driver {
             .await
             .into_iter()
             .filter_map(|(address, m)| match m["kind"].as_str()? {
-                "execute" => Some(Dispatch::Execute { id: m["data"]["task"]["id"].as_str()?.to_string(), version: m["data"]["task"]["version"].as_u64()? as u32 }),
+                "execute" => Some(Dispatch::Execute { id: m["data"]["task"]["id"].as_str()?.to_string(), version: m["data"]["task"]["version"].as_u64()? }),
                 "unblock" => Some(Dispatch::Unblock { address, promise: prec(&m["data"]["promise"])? }),
                 _ => None,
             })
@@ -141,11 +142,15 @@ impl Driver {
     /// target (a sleep) is accepted with its target dropped, where the Lean
     /// specification and the model refuse it. Such creates are not sent.
     fn conceded(a: &Action<Request>) -> bool {
-        let timer_with_target = |c: &Create| c.tags.timer && c.tags.target;
+        let timer_with_target = |tags: &[(String, String)]| {
+            let timer = tags.iter().any(|(k, v)| k == "resonate:timer" && v == "true");
+            let target = tags.iter().any(|(k, _)| k == "resonate:target");
+            timer && target
+        };
         match a {
-            Action::Request(Request::CreatePromise(c)) => timer_with_target(c),
-            Action::Request(Request::FenceTask { action: Fenced::Create(c), .. }) => timer_with_target(c),
-            Action::Request(Request::CreateSchedule(c)) => c.promise_tags.timer && c.promise_tags.target,
+            Action::Request(Request::PromiseCreate(c)) => timer_with_target(&c.tags),
+            Action::Request(Request::TaskFence(f)) => matches!(&f.action, TaskFenceAction::Create(c) if timer_with_target(&c.tags)),
+            Action::Request(Request::ScheduleCreate(c)) => timer_with_target(&c.promise_tags),
             _ => false,
         }
     }
@@ -156,9 +161,9 @@ impl Driver {
     /// nothing receives them, which the model allows.
     fn addressed(&self, a: Action<Request>) -> Action<Request> {
         match a {
-            Action::Request(Request::RegisterListener { awaited, address }) if address.starts_with("http://listener/") => {
+            Action::Request(Request::PromiseRegisterListener(PromiseRegisterListenerReq { awaited, address })) if address.starts_with("http://listener/") => {
                 let address = format!("{}{}", self.worker, address.trim_start_matches("http://"));
-                Action::Request(Request::RegisterListener { awaited, address })
+                Action::Request(Request::PromiseRegisterListener(PromiseRegisterListenerReq { awaited, address }))
             }
             a => a,
         }

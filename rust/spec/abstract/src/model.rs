@@ -4,6 +4,7 @@
 //! server does: the `Model` impl itself is verified, in `spec.rs`.
 
 use echod_rover::{Footprint, Partitioned, Touches};
+use echod_types::{Request, TaskFenceAction};
 
 use super::exec::*;
 
@@ -81,7 +82,7 @@ pub(crate) fn cron_valid(cron: &str) -> bool {
     cron::Schedule::from_str(&normalize_cron(cron)).is_ok()
 }
 
-pub(crate) fn next_cron(cron: &str, after_ms: u64) -> u64 {
+pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
     use chrono::{Datelike, Timelike};
     use std::str::FromStr;
     let fallback = after_ms.saturating_add(60_000).max(after_ms + 1);
@@ -139,40 +140,44 @@ impl Footprint for Resonate {
     fn external_touches(&self, op: &Request) -> Touches<Key> {
         let ks = |v: &[&Id]| Touches::Only(v.iter().map(|k| Key::Object((*k).clone())).collect());
         match op {
-            Request::CreatePromise(c) => ks(&[&c.id]),
-            Request::SettlePromise(st) => ks(&[&st.id]),
-            Request::CreateTask { action, .. } => ks(&[&action.id]),
-            Request::GetPromise(id)
-            | Request::GetTask(id)
-            | Request::AcquireTask { id, .. }
-            | Request::ReleaseTask { id, .. }
-            | Request::FulfillTask { id, .. }
-            | Request::HaltTask(id)
-            | Request::ContinueTask(id) => ks(&[id]),
-            Request::HeartbeatTask { tasks, .. } => {
-                let v: Vec<&Id> = tasks.iter().map(|t| &t.id).collect();
+            Request::PromiseCreate(c) => ks(&[&c.id]),
+            Request::PromiseSettle(st) => ks(&[&st.id]),
+            Request::TaskCreate(t) => ks(&[&t.action.id]),
+            Request::PromiseGet(q) => ks(&[&q.id]),
+            Request::TaskGet(q) => ks(&[&q.id]),
+            Request::TaskAcquire(q) => ks(&[&q.id]),
+            Request::TaskRelease(q) => ks(&[&q.id]),
+            Request::TaskFulfill(q) => ks(&[&q.id]),
+            Request::TaskHalt(q) => ks(&[&q.id]),
+            Request::TaskContinue(q) => ks(&[&q.id]),
+            Request::TaskFenceCheck(q) => ks(&[&q.id]),
+            Request::TaskHeartbeat(h) => {
+                let v: Vec<&Id> = h.tasks.iter().map(|t| &t.id).collect();
                 ks(&v)
             }
             // A request refused for crossing origins is refused on the ids alone and
             // reads nothing, so its footprint stays in one origin.
-            Request::RegisterCallback { awaited, awaiter } if origin(awaited) != origin(awaiter) => ks(&[awaited]),
-            Request::RegisterCallback { awaited, awaiter } => ks(&[awaited, awaiter]),
-            Request::RegisterListener { awaited, .. } => ks(&[awaited]),
-            Request::SuspendTask { id, awaited, .. } if awaited.iter().any(|a| origin(a) != origin(id)) => ks(&[id]),
-            Request::SuspendTask { id, awaited, .. } => {
-                let mut v: Vec<&Id> = awaited.iter().collect();
-                v.push(id);
+            Request::PromiseRegisterCallback(c) if origin(&c.awaited) != origin(&c.awaiter) => ks(&[&c.awaited]),
+            Request::PromiseRegisterCallback(c) => ks(&[&c.awaited, &c.awaiter]),
+            Request::PromiseRegisterListener(c) => ks(&[&c.awaited]),
+            Request::TaskSuspend(s) if s.actions.iter().any(|a| origin(&a.awaited) != origin(&s.id)) => ks(&[&s.id]),
+            Request::TaskSuspend(s) => {
+                let mut v: Vec<&Id> = s.actions.iter().map(|a| &a.awaited).collect();
+                v.push(&s.id);
                 ks(&v)
             }
-            Request::FenceTask { id, action: Fenced::Settle(st), .. } if origin(&st.id) != origin(id) => ks(&[id]),
-            // A detached create: the one request that spans two origins.
-            Request::FenceTask { id, action, .. } => ks(&[id, action.target()]),
+            Request::TaskFence(f) => match &f.action {
+                TaskFenceAction::Settle(st) if origin(&st.id) != origin(&f.id) => ks(&[&f.id]),
+                TaskFenceAction::Settle(st) => ks(&[&f.id, &st.id]),
+                TaskFenceAction::Create(c) => ks(&[&f.id, &c.id]),
+            },
             // A schedule's occurrences will touch the origin its template names.
-            Request::CreateSchedule(c) => match template_origin(&c.promise_id, &c.id) {
+            Request::ScheduleCreate(c) => match template_origin(&c.promise_id, &c.id) {
                 Some(o) => Touches::Only(vec![Key::Schedule(c.id.clone()), Key::Origin(o)]),
                 None => Touches::Everything,
             },
-            Request::GetSchedule(id) | Request::DeleteSchedule(id) => Touches::one(Key::Schedule(id.clone())),
+            Request::ScheduleGet(q) => Touches::one(Key::Schedule(q.id.clone())),
+            Request::ScheduleDelete(q) => Touches::one(Key::Schedule(q.id.clone())),
         }
     }
 

@@ -21,7 +21,7 @@ verus! {
 #[self_view]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(verus_keep_ghost), serde(rename_all = "snake_case"))]
-#[derive(Clone, Copy, PartialEq, Eq, Structural, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Structural, Debug)]
 pub enum PromiseState {
     Pending,
     Resolved,
@@ -33,7 +33,7 @@ pub enum PromiseState {
 #[self_view]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(verus_keep_ghost), serde(rename_all = "snake_case"))]
-#[derive(Clone, Copy, PartialEq, Eq, Structural, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Structural, Debug)]
 pub enum TaskState {
     Pending,
     Acquired,
@@ -67,8 +67,8 @@ pub type ATags = Seq<(Seq<char>, Seq<char>)>;
 
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-#[derive(Default)]
-#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Value {
     #[cfg_attr(not(verus_keep_ghost), serde(default, skip_serializing_if = "Vec::is_empty"))]
     pub headers: Tags,
@@ -104,7 +104,8 @@ impl Value {
 
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Schedule {
     pub id: String,
     pub cron: String,
@@ -129,7 +130,8 @@ pub type ASchedule = ScheduleSpec;
 
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseRecord {
     pub id: String,
     pub state: PromiseState,
@@ -145,7 +147,8 @@ pub struct PromiseRecord {
 pub type APromiseRecord = PromiseRecordSpec;
 #[make_spec_type]
 #[cfg_attr(not(verus_keep_ghost), derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(not(verus_keep_ghost), derive(Clone))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskRecord {
     pub id: String,
     pub state: TaskState,
@@ -162,12 +165,16 @@ pub type ATaskRecord = TaskRecordSpec;
 // ---------------------------------------------------------------------------
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseGetReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type APromiseGetReq = PromiseGetReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseCreateReq {
     pub id: String,
     pub timeout_at: u64,
@@ -180,6 +187,8 @@ pub type APromiseCreateReq = PromiseCreateReqSpec;
 
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseSettleReq {
     pub id: String,
     pub state: PromiseState,
@@ -190,24 +199,32 @@ pub struct PromiseSettleReq {
 pub type APromiseSettleReq = PromiseSettleReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseRegisterCallbackReq { pub awaited: String, pub awaiter: String }
 
 #[cfg(verus_keep_ghost)]
 pub type APromiseRegisterCallbackReq = PromiseRegisterCallbackReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseRegisterListenerReq { pub awaited: String, pub address: String }
 
 #[cfg(verus_keep_ghost)]
 pub type APromiseRegisterListenerReq = PromiseRegisterListenerReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct ScheduleGetReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type AScheduleGetReq = ScheduleGetReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct ScheduleCreateReq {
     pub id: String,
     pub cron: String,
@@ -223,29 +240,38 @@ pub struct ScheduleCreateReq {
 pub type AScheduleCreateReq = ScheduleCreateReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct ScheduleDeleteReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type AScheduleDeleteReq = ScheduleDeleteReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskGetReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskGetReq = TaskGetReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskCreateReq { pub pid: String, pub ttl: u64, pub action: PromiseCreateReq }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskCreateReq = TaskCreateReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskAcquireReq { pub id: String, pub version: u64, pub pid: String, pub ttl: u64 }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskAcquireReq = TaskAcquireReqSpec;
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum TaskFenceAction {
     Create(PromiseCreateReq),
     Settle(PromiseSettleReq),
@@ -275,6 +301,8 @@ impl View for TaskFenceAction {
 }
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskFenceReq { pub id: String, pub version: u64, pub action: TaskFenceAction }
 
 #[cfg(verus_keep_ghost)]
@@ -282,24 +310,32 @@ pub type ATaskFenceReq = TaskFenceReqSpec;
 
 /// `task.fence` with no action: the check alone (`task_fence_check`).
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskFenceCheckReq { pub id: String, pub version: u64 }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskFenceCheckReq = TaskFenceCheckReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskRef { pub id: String, pub version: u64 }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskRef = TaskRefSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskHeartbeatReq { pub pid: String, pub tasks: Vec<TaskRef> }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskHeartbeatReq = TaskHeartbeatReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskSuspendReq {
     pub id: String,
     pub version: u64,
@@ -310,30 +346,39 @@ pub struct TaskSuspendReq {
 pub type ATaskSuspendReq = TaskSuspendReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskFulfillReq { pub id: String, pub version: u64, pub action: PromiseSettleReq }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskFulfillReq = TaskFulfillReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskReleaseReq { pub id: String, pub version: u64 }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskReleaseReq = TaskReleaseReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskHaltReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskHaltReq = TaskHaltReqSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskContinueReq { pub id: String }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskContinueReq = TaskContinueReqSpec;
 /// Any request: what the system model carries into a step, and what `handle`
 /// dispatches on.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Request {
     PromiseGet(PromiseGetReq),
     PromiseCreate(PromiseCreateReq),
@@ -412,30 +457,40 @@ impl View for Request {
 // ---------------------------------------------------------------------------
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct PromiseRes { pub status: u16, pub promise: Option<PromiseRecord> }
 
 #[cfg(verus_keep_ghost)]
 pub type APromiseRes = PromiseResSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct ScheduleRes { pub status: u16, pub schedule: Option<Schedule> }
 
 #[cfg(verus_keep_ghost)]
 pub type AScheduleRes = ScheduleResSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct StatusRes { pub status: u16 }
 
 #[cfg(verus_keep_ghost)]
 pub type AStatusRes = StatusResSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskGetRes { pub status: u16, pub task: Option<TaskRecord> }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskGetRes = TaskGetResSpec;
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskClaimRes {
     pub status: u16,
     pub task: Option<TaskRecord>,
@@ -445,6 +500,7 @@ pub struct TaskClaimRes {
 #[cfg(verus_keep_ghost)]
 pub type ATaskClaimRes = TaskClaimResSpec;
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum TaskFenceInnerRes {
     Create(PromiseRes),
     Settle(PromiseRes),
@@ -474,12 +530,15 @@ impl View for TaskFenceInnerRes {
 }
 
 #[make_spec_type]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TaskFenceRes { pub status: u16, pub action: Option<TaskFenceInnerRes> }
 
 #[cfg(verus_keep_ghost)]
 pub type ATaskFenceRes = TaskFenceResSpec;
 
 /// Any response: what `handle` answers, and what the system model records.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Response {
     Promise(PromiseRes),
     Schedule(ScheduleRes),
