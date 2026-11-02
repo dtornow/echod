@@ -74,12 +74,6 @@ impl TimerWheel {
         self.armed.keys().next().copied()
     }
 
-    /// The earliest key, and when it falls due.
-    pub fn nearest_key(&self) -> Option<(u64, String)> {
-        let (&at, set) = self.armed.iter().next()?;
-        Some((at, set.iter().next()?.clone()))
-    }
-
     pub fn len(&self) -> usize {
         self.armed.values().map(BTreeSet::len).sum()
     }
@@ -160,17 +154,10 @@ impl Timers {
         [self.wheel.nearest(), self.loaded_through.map(|t| t.max(now)), closing].into_iter().flatten().min()
     }
 
-    /// The next instant the wheel wants a physical wake, and what it is for:
-    /// the nearest deadline key when that instant is the key's, otherwise a
-    /// listing or a retry, which has no key yet.
+    /// The next instant the wheel wants a physical wake. The keys stay here;
+    /// the wake says only that the wheel is the loop to run.
     pub fn next_wake(&self, now: u64) -> Option<(u64, crate::types::Armed)> {
-        let at = self.wake_at(now)?;
-        if let Some((key_at, key)) = self.wheel.nearest_key() {
-            if key_at == at {
-                return Some((at, crate::types::Armed::Deadline { key }));
-            }
-        }
-        Some((at, crate::types::Armed::Timers))
+        self.wake_at(now).map(|at| (at, crate::types::Armed::Wheel))
     }
 }
 

@@ -99,10 +99,9 @@ pub enum Event {
     Debug { clock: u64, call: DebugCall },
     /// A store call the core issued has an answer.
     Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
-    /// The runtime slept until something this process armed, and that
-    /// instant has come. `armed` is what the wake was for. A late wake
-    /// still takes every deadline already due, and the heartbeat if its
-    /// interval has come.
+    /// The runtime slept until a loop this process armed, and that instant
+    /// has come. `armed` is the loop the sleep was for. A late wake still
+    /// runs the other loop when its time has come.
     Due { clock: u64, armed: Armed },
     /// The node stops: it withdraws its announcement and runs no loop.
     Stop { clock: u64 },
@@ -183,16 +182,15 @@ pub enum Outgoing {
     Unblock(verified::PromiseRecord),
 }
 
-/// What a physical wake was armed for. The runtime sleeps, then hands this
-/// back as `Event::Due`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Which loop a physical wake was armed for. The runtime sleeps, then hands
+/// this back as `Event::Due`. The keys themselves stay in the wheel: one
+/// wake can owe several of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Armed {
     /// The heartbeat interval.
     Heartbeat,
-    /// The nearest deadline key the wheel holds.
-    Deadline { key: String },
-    /// A bucket listing, or a retry of one. No key yet.
-    Timers,
+    /// The wheel: a deadline falling due, or a bucket listing.
+    Wheel,
 }
 
 /// What the core asks the executor to do.

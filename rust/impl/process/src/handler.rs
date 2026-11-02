@@ -1,5 +1,5 @@
 //! The one step. A request that came in from the network is above the line.
-//! Below it, the runtime: a store answer, the heartbeat, a deadline, the
+//! Below it, the runtime: a store answer, the heartbeat, the wheel, the
 //! process starting or stopping.
 
 use crate::handler_docs::{Stage, Work};
@@ -43,17 +43,22 @@ impl State {
                     Some(Owner::Ignored) | None => {}
                 }
             }
-            Event::Due { clock, armed: _ } => {
+            Event::Due { clock, armed } => {
                 self.set_clock(clock);
                 // A wake that came early asks again below.
                 self.clear_wake();
                 if self.loops && !self.stopping {
                     let now = self.now();
-                    // One physical wake. It was armed for the heartbeat or
-                    // for one key, and a late one covers every deadline
-                    // already due and the heartbeat if its interval has come.
-                    self.members_tick(now);
-                    self.timers_run(now);
+                    // The loop the sleep was for, then the other one: a late
+                    // wake may have overrun it. Each loop checks its own clock.
+                    match armed {
+                        Armed::Heartbeat => self.members_tick(now),
+                        Armed::Wheel => self.timers_run(now),
+                    }
+                    match armed {
+                        Armed::Heartbeat => self.timers_run(now),
+                        Armed::Wheel => self.members_tick(now),
+                    }
                 }
             }
             Event::Stop { clock } => {
@@ -100,8 +105,8 @@ impl State {
         self.store(StoreCall::Delete { key }, Owner::Leaving);
     }
 
-    /// Ask the runtime to sleep until the next heartbeat or the next key,
-    /// whichever comes first, and to say which one it was.
+    /// Ask the runtime to sleep until the next heartbeat or the next time
+    /// the wheel wants to look, whichever comes first, and to say which.
     fn schedule_wake(&mut self) {
         if !self.loops || self.stopping {
             return;

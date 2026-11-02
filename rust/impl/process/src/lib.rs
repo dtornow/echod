@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! handler.rs         on_event. A network request above the line; below it,
-//!                    a store answer, the heartbeat, or a deadline key
+//!                    a store answer, the heartbeat, or the wheel
 //! handler_node.rs    the announcement, the membership, who owns a target
 //! handler_docs.rs    one origin: its promises, the task inside each, a sweep
 //! handler_sched.rs   one schedule: create, read, delete, a run coming due

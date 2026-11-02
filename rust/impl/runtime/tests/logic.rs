@@ -94,7 +94,7 @@ impl Harness {
         cfg.timer_bucket_ms = 1_000;
         cfg.heartbeat_ms = 100;
         cfg.node_ttl_ms = 1_000;
-        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, wake_armed: Armed::Timers, next_request: 1 }
+        Self { state: State::new(cfg), bucket: Bucket::default(), clock: 1_000_000, replies: Vec::new(), sent: Vec::new(), notes: Vec::new(), wake_after: None, wake_armed: Armed::Wheel, next_request: 1 }
     }
 
     /// One event in, and every store call it leads to answered, until the

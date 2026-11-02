@@ -122,7 +122,7 @@ that does no I/O, and an executor that does nothing else.
 
 ```text
 rust/impl/process/src/
-  handler.rs         on_event. A network request above the line; below it a store answer, the heartbeat, or a deadline key
+  handler.rs         on_event. A network request above the line; below it a store answer, the heartbeat, or the wheel
   handler_node.rs    the announcement, the membership, who owns a target
   handler_docs.rs    one origin: its promises, the task inside each, a sweep of it
   handler_sched.rs   one schedule: create, read, delete, a run coming due
@@ -161,10 +161,10 @@ the epoch, the version last seen of each origin), the timers (`state_timers`:
 the wheel), the cache, and the steps in progress, one per document. `on_event`
 (`handler.rs`) is the only step. It is told one thing at a time, `Event`:
 the node starts; a request came in; a store call it issued has its answer;
-a wake it armed has come, named for the heartbeat or a deadline key; the
+a wake it armed has come, named for the heartbeat or the wheel; the
 node stops. It answers with `Effect`s: make this call on the store and tell
 me under this op id; answer this request; push this message; wake me after
-this long for this heartbeat or this key; note this. Every event carries the
+this long for the heartbeat or the wheel; note this. Every event carries the
 node's clock as the executor read it; the core never reads one. Nothing in
 it waits, sleeps, locks or spawns, so the same events in the same order give
 the same effects, which is what `rust/impl/runtime/tests/logic.rs` checks
