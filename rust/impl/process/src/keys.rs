@@ -76,19 +76,19 @@ pub fn decode_key(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// FNV-1a: one stable hash, the same on every node and every build.
+/// FNV-1a: the hash `verified::node` proves against `hash`.
 pub fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    crate::verified::node::fnv1a(s)
+}
+
+/// The version a body quotes, as an S3 ETag: the same bytes are the same version.
+pub fn content_etag(body: &[u8]) -> crate::types::Etag {
+    crate::types::Etag(format!("{:016x}", fnv1a(&String::from_utf8_lossy(body))))
 }
 
 /// The origin of an id: everything before the first `:`.
 pub fn origin_of(id: &str) -> &str {
-    id.split_once(':').map(|(o, _)| o).unwrap_or(id)
+    echod_types::origin_of(id)
 }
 
 impl KeySpace {
@@ -139,7 +139,7 @@ impl KeySpace {
 
     /// The start of the bucket an instant falls in.
     pub fn bucket_of(&self, at: u64) -> u64 {
-        at / self.bucket_ms * self.bucket_ms
+        echod_concrete::timeouts::bucket_of(at, self.bucket_ms)
     }
 
     /// Every timer key lives under this.

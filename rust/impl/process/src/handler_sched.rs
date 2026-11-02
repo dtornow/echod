@@ -92,7 +92,7 @@ impl State {
         let at = c.next_run_at;
         let promise_id = Self::expand(&c.promise_id, &id, at);
         let origin = origin_of(&promise_id).to_string();
-        let next = crate::cron::next_after(&c.cron, at as i64).max(at as i64 + 1) as u64;
+        let next = echod_cron::next_run_at(&c.cron, at);
         let ctx = FireCtx { ws, row: c, t1, at, promise_id, origin, next };
         // the origin's slot, now or when it frees
         let slot = self.flights.slots.entry(ctx.origin.clone()).or_default();
@@ -122,8 +122,8 @@ impl State {
         let docs = crate::state_docs::Docs { rows: wo.loaded.rows.clone() };
         let sched = crate::state_sched::Sched { rows: ctx.ws.loaded.rows.clone() };
         let mut state = Rows { objects: docs.rows, schedules: sched.rows, outbox: Vec::new() };
-        state.process_schedule(&req, t, &self.rows_cfg);
-        steps::drain(&mut state, t, &self.rows_cfg);
+        state.process_schedule(&req, t, self.cfg.retry_timeout);
+        steps::drain(&mut state, t, self.cfg.retry_timeout);
         self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.at, promise_id: ctx.promise_id.clone(), next: ctx.next });
         let mut commit = self.commit_new(wo, state.objects, t, false, None);
         match self.commit_advance(f.id, &mut commit, None) {

@@ -33,7 +33,7 @@ impl Key {
 }
 
 pub(crate) fn origin(id: &str) -> &str {
-    id.split_once(':').map_or(id, |(o, _)| o)
+    echod_types::origin_of(id)
 }
 
 /// The origin every occurrence of a schedule's promise template expands to,
@@ -61,64 +61,12 @@ pub(crate) fn address_valid(addr: &str) -> bool {
         && !rest.chars().any(char::is_whitespace)
 }
 
-// --------------------------------------------------------------- the cron engine
-//
-// What the reference server does (`resonate-core/src/util.rs`): five fields get
-// a leading `0` for the seconds; the next occurrence is the first strictly
-// after `after`, in whole seconds. The `cron` crate names no instant past the
-// year 2099; a later `after` is read at the latest year up to 2099 with the
-// same month, day and weekday, and the answer shifted back.
-
-fn normalize_cron(cron: &str) -> String {
-    if cron.split_whitespace().count() == 5 {
-        format!("0 {}", cron.trim())
-    } else {
-        cron.trim().to_string()
-    }
-}
-
 pub(crate) fn cron_valid(cron: &str) -> bool {
-    use std::str::FromStr;
-    cron::Schedule::from_str(&normalize_cron(cron)).is_ok()
+    echod_cron::valid(cron)
 }
 
 pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
-    use chrono::{Datelike, Timelike};
-    use std::str::FromStr;
-    let fallback = after_ms.saturating_add(60_000).max(after_ms + 1);
-    let Ok(schedule) = cron::Schedule::from_str(&normalize_cron(cron)) else { return fallback };
-    let after_secs = (after_ms / 1000) as i64;
-    let Some(after_dt) = chrono::DateTime::from_timestamp(after_secs, 0) else { return fallback };
-    const MAX_CRON_YEAR: i32 = 2099;
-    let (ref_dt, delta_secs) = if after_dt.year() <= MAX_CRON_YEAR {
-        (after_dt, 0i64)
-    } else {
-        let naive = after_dt.naive_utc();
-        let (month, day, hour, minute, second) = (naive.month(), naive.day(), naive.hour(), naive.minute(), naive.second());
-        let weekday = naive.weekday();
-        let leap_day = month == 2 && day == 29;
-        let equiv = (1970i32..=MAX_CRON_YEAR).rev().find_map(|y| {
-            if leap_day && chrono::NaiveDate::from_ymd_opt(y, 2, 29).is_none() {
-                return None;
-            }
-            chrono::NaiveDate::from_ymd_opt(y, month, day).filter(|d| d.weekday() == weekday).and_then(|d| d.and_hms_opt(hour, minute, second)).map(|dt| dt.and_utc().timestamp())
-        });
-        match equiv.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0).map(|dt| (dt, after_secs - secs))) {
-            Some(x) => x,
-            None => (after_dt, 0),
-        }
-    };
-    match schedule.after(&ref_dt).next() {
-        Some(next) => {
-            let ms = (next.timestamp() + delta_secs).saturating_mul(1000);
-            if ms < 0 {
-                fallback
-            } else {
-                (ms as u64).max(after_ms + 1)
-            }
-        }
-        None => fallback,
-    }
+    echod_cron::next_run_at(cron, after_ms)
 }
 
 pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {

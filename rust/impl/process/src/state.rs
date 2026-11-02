@@ -13,7 +13,6 @@ use crate::keys::KeySpace;
 use crate::state_node::Node;
 use crate::state_timers::Timers;
 use crate::types::*;
-use crate::verified::Config as RowsConfig;
 use crate::verified::node::Key;
 use crate::Config;
 
@@ -46,8 +45,6 @@ pub struct Snapshot {
 pub struct State {
     pub(crate) cfg: Config,
     pub(crate) keys: KeySpace,
-    /// `retry_timeout` and `compact`, as the document handlers take them.
-    pub(crate) rows_cfg: RowsConfig,
     /// Membership, the epoch, and the versions of origins this process has seen.
     pub(crate) node: Node,
     /// Deadline keys ordered by when they fall due, and a listing filling the wheel.
@@ -74,7 +71,6 @@ pub struct State {
 impl State {
     pub fn new(cfg: Config) -> Self {
         let keys = KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
-        let rows_cfg = RowsConfig { retry_timeout: cfg.retry_timeout, compact: cfg.compact };
         let cache = MemoryCache::new(cfg.cache_entries, cfg.cache_bytes);
         let seed = crate::keys::fnv1a(&format!("{}/{}", cfg.url, cfg.node_id)) | 1;
         Self {
@@ -94,7 +90,6 @@ impl State {
             out: Vec::new(),
             last_wake: None,
             keys,
-            rows_cfg,
             cfg,
         }
     }

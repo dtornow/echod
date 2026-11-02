@@ -10,10 +10,10 @@
 use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
-use crate::model::{Boundary, Config, Incoming, Local, LocalV, Message, Model, Pid};
+use crate::model::{Boundary, Fleet, Incoming, Local, LocalV, Message, Model, Pid};
 
 impl RoverModel for Model {
-    type Config = Config;
+    type Config = Fleet;
     type Pid = Pid;
     type StateV = LocalV;
     type State = Local;
@@ -24,17 +24,17 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
-    fn initial(&self, config: &Config) -> Vec<(Pid, Local)> {
+    fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
         self.world(config).process
     }
 
-    fn injectable(&self, _config: &Config, message: &Message) -> bool {
+    fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
         matches!(message, Message::Request(_) | Message::Stop)
     }
 
     fn on_event(
         &self,
-        _config: &Config,
+        _config: &Fleet,
         pid: &Pid,
         state: &Local,
         now: Time,

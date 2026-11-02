@@ -478,19 +478,19 @@ impl State {
                 // sees a document on which nothing is due. A client never sees
                 // a lease held past its end. The sweep's changes ride the
                 // request's write; an idle sweep writes nothing.
-                let _ = steps::sweep(&mut state, now, &self.rows_cfg);
-                let r = state.handle(req, now, &self.rows_cfg);
+                let _ = steps::sweep(&mut state, now, self.cfg.retry_timeout);
+                let r = state.handle(req, now, self.cfg.retry_timeout);
                 let status = crate::reason::status_of(&r);
                 let why = (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &state));
                 (Some(r), why, false)
             }
             Work::Sweep { .. } => {
-                let did = steps::sweep(&mut state, now, &self.rows_cfg);
+                let did = steps::sweep(&mut state, now, self.cfg.retry_timeout);
                 (None, None, did)
             }
             Work::Fire { .. } => (None, None, false),
         };
-        steps::drain(&mut state, now, &self.rows_cfg);
+        steps::drain(&mut state, now, self.cfg.retry_timeout);
         let rows = R::rows_of(&state);
         let fired = match work {
             Work::Sweep { fired, .. } => fired.clone(),
@@ -597,11 +597,7 @@ impl State {
     }
 
     pub(crate) fn send(&mut self, e: &OutboxEntry) {
-        let message = match &e.message {
-            crate::verified::Message::Execute { task_id, version } => Outgoing::Execute { task_id: task_id.clone(), version: *version },
-            crate::verified::Message::Unblock(r) => Outgoing::Unblock(r.clone()),
-        };
-        self.emit(Effect::Send { address: e.address.clone(), message });
+        self.emit(Effect::Send { address: e.address.clone(), message: e.message.clone() });
     }
 
     // -----------------------------------------------------------------------
@@ -738,7 +734,7 @@ impl State {
                 // document is rewritten without it
                 let removed = c.w.loaded.rows.iter().any(|q| !c.rows.iter().any(|p| p.id() == q.id()));
                 let stale_after = (c.w.loaded.row_count + changed.len()).saturating_sub(c.rows.len());
-                let append = !removed && self.cfg.appendable && self.rows_cfg.compact > 0 && stale_after < self.rows_cfg.compact as usize;
+                let append = !removed && self.cfg.appendable && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
                 if append {
                     let body = doc::encode(&header, changed);
                     let (n, b) = (c.w.loaded.row_count + changed.len(), c.w.loaded.bytes + body.len() as u64);

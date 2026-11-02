@@ -208,7 +208,7 @@ impl ATask {
 /// `now`. Anchored at `due`, the instant the task was last offered, so the
 /// value does not depend on when the retry step ran: a server late to it
 /// re-offers the task once and lands where an on-time one would have. With
-/// `t = 0` (which `Config::wf` rules out) it is `due` itself.
+/// `t = 0` (which a positive `retry_timeout` rules out) it is `due` itself.
 pub open spec fn next_offer(due: nat, now: nat, t: nat) -> nat {
     if t == 0 || now < due { due } else { (due + t * ((now - due) / (t as int) + 1)) as nat }
 }

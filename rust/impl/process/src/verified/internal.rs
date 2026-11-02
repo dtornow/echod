@@ -50,9 +50,9 @@ pub open spec fn ipost(a: State, b: State, now: u64) -> bool {
 
 impl State {
     /// `processPromiseTimeout`: touch the object.
-    pub fn process_promise_timeout(&mut self, req: &PromiseTimeoutReq, now: u64, cfg: &Config)
+    pub fn process_promise_timeout(&mut self, req: &PromiseTimeoutReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.objects == promise_timeout_objects(old(self)@, req.id@, now as nat),
@@ -77,9 +77,9 @@ impl State {
     }
 
     /// `processLeaseTimeout`: an expired lease returns the task to pending.
-    pub fn process_lease_timeout(&mut self, req: &TaskLeaseTimeoutReq, now: u64, cfg: &Config)
+    pub fn process_lease_timeout(&mut self, req: &TaskLeaseTimeoutReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.objects == lease_timeout_objects(old(self)@, req.id@, now as nat),
@@ -118,12 +118,12 @@ impl State {
     }
 
     /// `processRetryTimeout`: a due pending task is re-offered and re-armed.
-    pub fn process_retry_timeout(&mut self, req: &TaskRetryTimeoutReq, now: u64, cfg: &Config)
+    pub fn process_retry_timeout(&mut self, req: &TaskRetryTimeoutReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             ipost(*old(self), *final(self), now),
-            final(self)@.objects == retry_timeout_objects(old(self)@, req.id@, now as nat, cfg.retry_timeout as nat),
+            final(self)@.objects == retry_timeout_objects(old(self)@, req.id@, now as nat, retry_timeout as nat),
             final(self)@.schedules == old(self)@.schedules,
             !(old(self)@.objects.contains_key(req.id@) && retry_due(old(self)@.objects[req.id@], now as nat)) ==> final(self)@.outbox == old(self)@.outbox,
     {
@@ -149,7 +149,7 @@ impl State {
         }
         let address = super::tags::exec_target_of(&self.objects[i].tags);
         let ghost before = self.objects@;
-        self.objects[i].task_rearm(now, cfg.retry_timeout);
+        self.objects[i].task_rearm(now, retry_timeout);
         proof {
             super::store_proof::lemma_fold_update(before, super::store::obj_key(), super::store::obj_val(), i as int, self.objects@[i as int]);
         }
@@ -158,16 +158,16 @@ impl State {
         self.upsert_outbox(e);
         proof {
             let x = req.id@;
-            assert(a1.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().rearm(now as nat, cfg.retry_timeout as nat))));
-            lemma_retry_legal(now as nat, a, self@, x, cfg.retry_timeout as nat);
+            assert(a1.objects =~= a.objects.insert(x, a.objects[x].with_task(a.objects[x].task.unwrap().rearm(now as nat, retry_timeout as nat))));
+            lemma_retry_legal(now as nat, a, self@, x, retry_timeout as nat);
             lemma_internal_one(now as nat, a, self@, x);
         }
     }
 
     /// `processListener`: a settled promise's listener is told, once.
-    pub fn process_listener(&mut self, req: &PromiseRegisterListenerReq, now: u64, cfg: &Config)
+    pub fn process_listener(&mut self, req: &PromiseRegisterListenerReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
@@ -217,9 +217,9 @@ impl State {
     }
 
     /// `processCallback`: a settled promise's callback resumes its awaiter.
-    pub fn process_callback(&mut self, req: &PromiseRegisterCallbackReq, now: u64, cfg: &Config)
+    pub fn process_callback(&mut self, req: &PromiseRegisterCallbackReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             ipost(*old(self), *final(self), now),
             final(self)@.schedules == old(self)@.schedules,
@@ -298,9 +298,9 @@ impl State {
     /// The caller's cron engine supplies the occurrences, in increasing order,
     /// each at or after the schedule's `next_run_at` and at or before `now`,
     /// and the next run strictly after the last of them.
-    pub fn process_schedule(&mut self, req: &ScheduleTimeoutReq, now: u64, cfg: &Config)
+    pub fn process_schedule(&mut self, req: &ScheduleTimeoutReq, now: u64, retry_timeout: u64)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
             forall|j: int| 0 <= j < req.occurrences.deep_view().len() ==> #[trigger] req.occurrences.deep_view()[j].at <= now,
             forall|j: int, k: int| 0 <= j < k < req.occurrences.deep_view().len() ==> #[trigger] req.occurrences.deep_view()[j].at < #[trigger] req.occurrences.deep_view()[k].at,
             req.occurrences.deep_view().len() > 0 ==> req.next_run_at > req.occurrences.deep_view()[req.occurrences.deep_view().len() - 1].at,

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! echod_rover::rover::refinement::refines(
-//!     echod_concrete::Model,
+//!     echod_world::Model,
 //!     concrete_config,
 //!     resonate::abstract_model::Model,
 //!     abstract_config,

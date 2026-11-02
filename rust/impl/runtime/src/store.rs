@@ -130,7 +130,7 @@ impl MemoryStore {
     /// again yields the same version. A writer that must move the version
     /// changes the bytes.
     fn etag(body: &[u8]) -> Etag {
-        Etag(format!("{:016x}", echod_logic::keys::fnv1a(&String::from_utf8_lossy(body))))
+        echod_logic::keys::content_etag(body)
     }
 
     /// Every key, for tests.

@@ -22,6 +22,8 @@
 
 use vstd::prelude::*;
 
+pub use echod_logic::types::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+
 verus! {
 
 // ---------------------------------------------------------------------------
@@ -37,7 +39,7 @@ pub enum Pid {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Config {
+pub struct Fleet {
     /// Node ids are `0 .. nodes`.
     pub nodes: u64,
     /// Whether each node keeps its heartbeat and timers after it starts.
@@ -59,40 +61,6 @@ pub struct ClientRequest {
     pub client: String,
     pub id: u64,
     pub kind: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum StoreCall {
-    Get { key: String },
-    GetIfNoneMatch { key: String, etag: String },
-    PutIfMatch { key: String, body: Vec<u8>, etag: String },
-    PutIfNoneMatch { key: String, body: Vec<u8> },
-    AppendIfMatch { key: String, offset: u64, body: Vec<u8>, etag: String },
-    Put { key: String, body: Vec<u8> },
-    Delete { key: String },
-    List { prefix: String, max_keys: u64 },
-    ListPrefixes { prefix: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum StoreFail {
-    Precondition,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum StoreOutcome {
-    Got(Option<(Vec<u8>, String)>),
-    Absent,
-    NotModified,
-    Body(Vec<u8>, String),
-    Written(String),
-    Done,
-    Listed(Vec<String>),
-    Failed(StoreFail),
 }
 
 /// A message on the concrete network. Store traffic is between a node and
@@ -216,7 +184,7 @@ pub enum Stored {
     Written(Seq<char>),
     Done,
     Listed(Seq<Seq<char>>),
-    Failed(StoreFail),
+    Failed(StoreError),
 }
 
 pub enum SpecMsg {
@@ -544,7 +512,7 @@ pub open spec fn matched(entries: Seq<EntryV>, key: Seq<char>, etag: Seq<char>) 
 
 pub open spec fn put_new(store: StoreV, key: Seq<char>, body: Seq<u8>) -> (StoreV, Stored) {
     if lookup(store.entries, key).is_some() {
-        (store, Stored::Failed(StoreFail::Precondition))
+        (store, Stored::Failed(StoreError::PreconditionFailed))
     } else {
         let entry = EntryV { key, body, version: 1 };
         (StoreV { entries: store.entries.push(entry), ..store }, Stored::Written(spec_etag(body)))
@@ -557,7 +525,7 @@ pub open spec fn put_match(store: StoreV, key: Seq<char>, body: Seq<u8>, etag: S
         let entry = EntryV { key, body, version: old.version + 1 };
         (StoreV { entries: without(store.entries, key).push(entry), ..store }, Stored::Written(spec_etag(body)))
     } else {
-        (store, Stored::Failed(StoreFail::Precondition))
+        (store, Stored::Failed(StoreError::PreconditionFailed))
     }
 }
 
@@ -569,28 +537,28 @@ pub open spec fn spec_store_call(store: StoreV, call: StoreCall) -> (StoreV, Sto
         },
         StoreCall::GetIfNoneMatch { key, etag } => match lookup(store.entries, key@) {
             None => (store, Stored::Absent),
-            Some(entry) => if spec_etag(entry.body) == etag@ {
+            Some(entry) => if spec_etag(entry.body) == etag.0@ {
                 (store, Stored::NotModified)
             } else {
                 (store, Stored::Body(entry.body, spec_etag(entry.body)))
             },
         },
         StoreCall::PutIfNoneMatch { key, body } => put_new(store, key@, body@),
-        StoreCall::PutIfMatch { key, body, etag } => put_match(store, key@, body@, etag@),
+        StoreCall::PutIfMatch { key, body, etag } => put_match(store, key@, body@, etag.0@),
         StoreCall::AppendIfMatch { key, offset, body, etag } => {
             if !store.appendable {
-                (store, Stored::Failed(StoreFail::Unavailable))
-            } else if matched(store.entries, key@, etag@) {
+                (store, Stored::Failed(StoreError::Unavailable("this store does not append".into())))
+            } else if matched(store.entries, key@, etag.0@) {
                 let old = lookup(store.entries, key@).unwrap();
                 if old.body.len() == offset as nat {
                     let next = old.body + body@;
                     let entry = EntryV { key: key@, body: next, version: old.version + 1 };
                     (StoreV { entries: without(store.entries, key@).push(entry), ..store }, Stored::Written(spec_etag(next)))
                 } else {
-                    (store, Stored::Failed(StoreFail::Precondition))
+                    (store, Stored::Failed(StoreError::PreconditionFailed))
                 }
             } else {
-                (store, Stored::Failed(StoreFail::Precondition))
+                (store, Stored::Failed(StoreError::PreconditionFailed))
             }
         },
         StoreCall::Put { key, body } => {
@@ -702,11 +670,11 @@ pub open spec fn spec_step(pid: Pid, state: LocalV, now: u64, event: Incoming) -
 pub open spec fn stored_of(outcome: StoreOutcome) -> Stored {
     match outcome {
         StoreOutcome::Got(None) => Stored::Got(None),
-        StoreOutcome::Got(Some((body, etag))) => Stored::Got(Some((body@, etag@))),
-        StoreOutcome::Absent => Stored::Absent,
-        StoreOutcome::NotModified => Stored::NotModified,
-        StoreOutcome::Body(body, etag) => Stored::Body(body@, etag@),
-        StoreOutcome::Written(etag) => Stored::Written(etag@),
+        StoreOutcome::Got(Some((body, etag))) => Stored::Got(Some((body@, etag.0@))),
+        StoreOutcome::Read(Read::Absent) => Stored::Absent,
+        StoreOutcome::Read(Read::NotModified) => Stored::NotModified,
+        StoreOutcome::Read(Read::Body(body, etag)) => Stored::Body(body@, etag.0@),
+        StoreOutcome::Written(etag) => Stored::Written(etag.0@),
         StoreOutcome::Done => Stored::Done,
         StoreOutcome::Listed(keys) => Stored::Listed(keys@.map_values(|k: String| k@)),
         StoreOutcome::Failed(fail) => Stored::Failed(fail),
@@ -723,7 +691,7 @@ pub open spec fn started(id: u64, loops: bool) -> NodeV {
     node
 }
 
-pub open spec fn spec_nodes(config: Config, i: nat) -> Seq<(Pid, LocalV)>
+pub open spec fn spec_nodes(config: Fleet, i: nat) -> Seq<(Pid, LocalV)>
     decreases config.nodes as nat - i,
 {
     if i >= config.nodes as nat {
@@ -734,11 +702,11 @@ pub open spec fn spec_nodes(config: Config, i: nat) -> Seq<(Pid, LocalV)>
     }
 }
 
-pub open spec fn spec_initial(config: Config) -> Seq<(Pid, LocalV)> {
+pub open spec fn spec_initial(config: Fleet) -> Seq<(Pid, LocalV)> {
     spec_nodes(config, 0) + seq![(Pid::Store, LocalV::Store(empty_store(config.appendable)))]
 }
 
-pub open spec fn spec_world(config: Config) -> SpecWorld {
+pub open spec fn spec_world(config: Fleet) -> SpecWorld {
     SpecWorld { process: spec_initial(config), network: Seq::empty(), now: 0 }
 }
 
@@ -756,7 +724,7 @@ pub open spec fn spec_boundary(at: u64, from_outside: bool, message: Message) ->
 // What the world and the shell guarantee
 // ---------------------------------------------------------------------------
 
-proof fn lemma_nodes_len(config: Config, start: nat)
+proof fn lemma_nodes_len(config: Fleet, start: nat)
     requires
         start <= config.nodes as nat,
     ensures
@@ -769,7 +737,7 @@ proof fn lemma_nodes_len(config: Config, start: nat)
     }
 }
 
-proof fn lemma_nodes_at(config: Config, start: nat, i: nat)
+proof fn lemma_nodes_at(config: Fleet, start: nat, i: nat)
     requires
         start <= i,
         i < config.nodes as nat,
@@ -833,7 +801,7 @@ pub proof fn lemma_started(id: u64, loops: bool)
 }
 
 /// The initial world is the nodes, then the store. Outside is not a process.
-pub proof fn lemma_world(config: Config)
+pub proof fn lemma_world(config: Fleet)
     ensures
         spec_world(config).now == 0,
         spec_world(config).network.len() == 0,
@@ -923,7 +891,7 @@ pub proof fn lemma_put_if_none(store: StoreV, key: Seq<char>, body: Seq<u8>)
         lookup(put_new(store, key, body).0.entries, key) == Some(EntryV { key, body, version: 1 }),
         lookup(put_new(put_new(store, key, body).0, key, body).0.entries, key)
             == Some(EntryV { key, body, version: 1 }),
-        put_new(put_new(store, key, body).0, key, body).1 == Stored::Failed(StoreFail::Precondition),
+        put_new(put_new(store, key, body).0, key, body).1 == Stored::Failed(StoreError::PreconditionFailed),
 {
     let created = put_new(store, key, body).0;
     assert(created.entries.last().key == key);
@@ -935,7 +903,7 @@ pub proof fn lemma_put_if_match_rejects(store: StoreV, key: Seq<char>, body: Seq
         !matched(store.entries, key, etag),
     ensures
         put_match(store, key, body, etag).0 == store,
-        put_match(store, key, body, etag).1 == Stored::Failed(StoreFail::Precondition),
+        put_match(store, key, body, etag).1 == Stored::Failed(StoreError::PreconditionFailed),
 {
 }
 
@@ -947,7 +915,7 @@ pub proof fn lemma_put_if_match_rejects(store: StoreV, key: Seq<char>, body: Seq
 // The field updates are the ones State::on_event performs itself.
 // ---------------------------------------------------------------------------
 
-impl Config {
+impl Fleet {
     pub fn new(nodes: u64, loops: bool) -> Self {
         Self {
             nodes,
@@ -959,14 +927,8 @@ impl Config {
 
 /// The content hash the in-memory store quotes, the same function as the
 /// runtime's memory store.
-pub fn etag(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}")
+pub fn etag(body: &[u8]) -> Etag {
+    echod_logic::keys::content_etag(body)
 }
 
 fn find_entry(entries: &[Entry], key: &str) -> Option<usize> {
@@ -1001,20 +963,20 @@ impl Store {
                 (entry.body.clone(), etag(&entry.body))
             })),
             StoreCall::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Absent,
+                None => StoreOutcome::Read(Read::Absent),
                 Some(i) => {
                     let entry = &self.entries[i];
                     let have = etag(&entry.body);
                     if &have == want {
-                        StoreOutcome::NotModified
+                        StoreOutcome::Read(Read::NotModified)
                     } else {
-                        StoreOutcome::Body(entry.body.clone(), have)
+                        StoreOutcome::Read(Read::Body(entry.body.clone(), have))
                     }
                 }
             },
             StoreCall::PutIfNoneMatch { key, body } => {
                 if find_entry(&self.entries, key).is_some() {
-                    StoreOutcome::Failed(StoreFail::Precondition)
+                    StoreOutcome::Failed(StoreError::PreconditionFailed)
                 } else {
                     put_entry(
                         &mut next.entries,
@@ -1044,7 +1006,7 @@ impl Store {
                     );
                     StoreOutcome::Written(etag(body))
                 }
-                _ => StoreOutcome::Failed(StoreFail::Precondition),
+                _ => StoreOutcome::Failed(StoreError::PreconditionFailed),
             },
             StoreCall::AppendIfMatch {
                 key,
@@ -1053,7 +1015,7 @@ impl Store {
                 etag: want,
             } => {
                 if !self.appendable {
-                    StoreOutcome::Failed(StoreFail::Unavailable)
+                    StoreOutcome::Failed(StoreError::Unavailable("this store does not append".into()))
                 } else {
                     match find_entry(&self.entries, key) {
                         Some(i)
@@ -1074,7 +1036,7 @@ impl Store {
                             );
                             StoreOutcome::Written(tag)
                         }
-                        _ => StoreOutcome::Failed(StoreFail::Precondition),
+                        _ => StoreOutcome::Failed(StoreError::PreconditionFailed),
                     }
                 }
             }
@@ -1103,7 +1065,7 @@ impl Store {
                     .entries
                     .iter()
                     .filter(|entry| entry.key.starts_with(prefix))
-                    .take(*max_keys as usize)
+                    .take(*max_keys)
                     .map(|entry| entry.key.clone())
                     .collect();
                 StoreOutcome::Listed(keys)
@@ -1273,7 +1235,7 @@ pub struct World {
 }
 
 impl Model {
-    pub fn world(self, config: &Config) -> World {
+    pub fn world(self, config: &Fleet) -> World {
         let mut process = Vec::new();
         for id in 0..config.nodes {
             process.push((Pid::Node(id), Local::Node(started_node(config.loops))));

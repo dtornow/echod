@@ -3,7 +3,7 @@
 //! The rows keep tags and headers as ordered pairs and durations as `u64`;
 //! the protocol carries maps and `i64`. Everything that crosses is here.
 //! The decision core never sees an envelope: it answers with an `Answer`
-//! and sends an `Outgoing`, and this file renders both.
+//! and sends a `Message`, and this file renders both.
 
 use std::collections::HashMap;
 
@@ -146,14 +146,14 @@ pub fn promise_record(p: &rows::Promise) -> w::PromiseRecord {
     })
 }
 
-pub fn message(address: &str, outgoing: &echod_logic::Outgoing, server_url: &str) -> (String, w::Message) {
+pub fn message(address: &str, outgoing: &echod_logic::Message, server_url: &str) -> (String, w::Message) {
     let msg = match outgoing {
-        echod_logic::Outgoing::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
+        echod_logic::Message::Execute { task_id, version } => w::Message::Execute(w::ExecuteMsg {
             kind: "execute".to_string(),
             head: w::MessageHead { server_url: server_url.to_string() },
             data: w::ExecuteMsgData { task: w::ExecuteMsgTask { id: task_id.clone(), version: *version as i64 } },
         }),
-        echod_logic::Outgoing::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
+        echod_logic::Message::Unblock(r) => w::Message::Unblock(w::UnblockMsg {
             kind: "unblock".to_string(),
             head: w::UnblockMsgHead {},
             data: w::UnblockMsgData { promise: promise_out(r) },

@@ -15,6 +15,10 @@ use std::collections::BTreeSet;
 use echod_rover::HashedMap;
 use vstd::prelude::*;
 
+pub use echod_types::same_origin;
+#[cfg(verus_keep_ghost)]
+pub use echod_types::origin;
+
 verus! {
 
 /// A persistent map from ids to `V`: `echod_rover::HashedMap`, seen by Verus as a
@@ -160,17 +164,6 @@ pub fn copy<T: Clone>(t: &T) -> (r: T)
         r == *t,
 {
     t.clone()
-}
-
-/// The origin of an id: the part before its first `:`, or all of it.
-pub uninterp spec fn origin(id: Seq<char>) -> Seq<char>;
-
-#[verifier::external_body]
-pub fn same_origin(a: &String, b: &String) -> (r: bool)
-    ensures
-        r == (origin(a@) == origin(b@)),
-{
-    super::model::origin(a) == super::model::origin(b)
 }
 
 /// Any absolute URL, as the spec sees it: what `address_valid` decides.

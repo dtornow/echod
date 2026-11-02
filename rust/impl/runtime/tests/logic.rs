@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Armed, Effect, Etag, Event, Note, Outgoing, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::Message;
 use echod_logic::{Call, Config, DebugCall, State};
 use echod::admit::{self, Admission, DebugOp};
 use echod::codec;
@@ -112,8 +113,8 @@ impl Harness {
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => {
                         let body = match &message {
-                            Outgoing::Execute { task_id, .. } => format!("execute {task_id}"),
-                            Outgoing::Unblock(r) => format!("unblock {}", r.id),
+                            Message::Execute { task_id, .. } => format!("execute {task_id}"),
+                            Message::Unblock(r) => format!("unblock {}", r.id),
                         };
                         self.sent.push(format!("{address} {body}"));
                     }

@@ -33,11 +33,11 @@ use super::spec::*;
 verus! {
 
 /// What every handler requires of its inputs.
-pub open spec fn pre(s: State, now: u64, cfg: Config) -> bool {
+pub open spec fn pre(s: State, now: u64, retry_timeout: u64) -> bool {
     &&& s.wf()
     &&& inv(now as nat, s@)
     &&& now <= MAX_TIME
-    &&& cfg.wf()
+    &&& 0 < retry_timeout <= MAX_TIME
 }
 
 /// What every handler ensures of its outputs.
@@ -50,34 +50,34 @@ pub open spec fn post(a: State, b: State, now: u64) -> bool {
 
 impl State {
     /// Any request: the handler for its kind. Computes `spec_handle`.
-    pub fn handle(&mut self, req: &Request, now: u64, cfg: &Config) -> (r: Response)
+    pub fn handle(&mut self, req: &Request, now: u64, retry_timeout: u64) -> (r: Response)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_handle(old(self)@, req@, now as nat).0,
             r@ == spec_handle(old(self)@, req@, now as nat).1,
     {
         match req {
-            Request::PromiseGet(q) => Response::Promise(self.promise_get(q, now, cfg)),
-            Request::PromiseCreate(q) => Response::Promise(self.promise_create(q, now, cfg)),
-            Request::PromiseSettle(q) => Response::Promise(self.promise_settle(q, now, cfg)),
-            Request::PromiseRegisterCallback(q) => Response::Promise(self.promise_register_callback(q, now, cfg)),
-            Request::PromiseRegisterListener(q) => Response::Promise(self.promise_register_listener(q, now, cfg)),
-            Request::ScheduleGet(q) => Response::Schedule(self.schedule_get(q, now, cfg)),
-            Request::ScheduleCreate(q) => Response::Schedule(self.schedule_create(q, now, cfg)),
-            Request::ScheduleDelete(q) => Response::Status(self.schedule_delete(q, now, cfg)),
-            Request::TaskGet(q) => Response::TaskGet(self.task_get(q, now, cfg)),
-            Request::TaskCreate(q) => Response::TaskClaim(self.task_create(q, now, cfg)),
-            Request::TaskAcquire(q) => Response::TaskClaim(self.task_acquire(q, now, cfg)),
-            Request::TaskFulfill(q) => Response::Promise(self.task_fulfill(q, now, cfg)),
-            Request::TaskRelease(q) => Response::Status(self.task_release(q, now, cfg)),
-            Request::TaskHalt(q) => Response::Status(self.task_halt(q, now, cfg)),
-            Request::TaskContinue(q) => Response::Status(self.task_continue(q, now, cfg)),
-            Request::TaskFence(q) => Response::TaskFence(self.task_fence(q, now, cfg)),
-            Request::TaskFenceCheck(q) => Response::Status(self.task_fence_check(q, now, cfg)),
-            Request::TaskHeartbeat(q) => Response::Status(self.task_heartbeat(q, now, cfg)),
-            Request::TaskSuspend(q) => Response::Status(self.task_suspend(q, now, cfg)),
+            Request::PromiseGet(q) => Response::Promise(self.promise_get(q, now, retry_timeout)),
+            Request::PromiseCreate(q) => Response::Promise(self.promise_create(q, now, retry_timeout)),
+            Request::PromiseSettle(q) => Response::Promise(self.promise_settle(q, now, retry_timeout)),
+            Request::PromiseRegisterCallback(q) => Response::Promise(self.promise_register_callback(q, now, retry_timeout)),
+            Request::PromiseRegisterListener(q) => Response::Promise(self.promise_register_listener(q, now, retry_timeout)),
+            Request::ScheduleGet(q) => Response::Schedule(self.schedule_get(q, now, retry_timeout)),
+            Request::ScheduleCreate(q) => Response::Schedule(self.schedule_create(q, now, retry_timeout)),
+            Request::ScheduleDelete(q) => Response::Status(self.schedule_delete(q, now, retry_timeout)),
+            Request::TaskGet(q) => Response::TaskGet(self.task_get(q, now, retry_timeout)),
+            Request::TaskCreate(q) => Response::TaskClaim(self.task_create(q, now, retry_timeout)),
+            Request::TaskAcquire(q) => Response::TaskClaim(self.task_acquire(q, now, retry_timeout)),
+            Request::TaskFulfill(q) => Response::Promise(self.task_fulfill(q, now, retry_timeout)),
+            Request::TaskRelease(q) => Response::Status(self.task_release(q, now, retry_timeout)),
+            Request::TaskHalt(q) => Response::Status(self.task_halt(q, now, retry_timeout)),
+            Request::TaskContinue(q) => Response::Status(self.task_continue(q, now, retry_timeout)),
+            Request::TaskFence(q) => Response::TaskFence(self.task_fence(q, now, retry_timeout)),
+            Request::TaskFenceCheck(q) => Response::Status(self.task_fence_check(q, now, retry_timeout)),
+            Request::TaskHeartbeat(q) => Response::Status(self.task_heartbeat(q, now, retry_timeout)),
+            Request::TaskSuspend(q) => Response::Status(self.task_suspend(q, now, retry_timeout)),
         }
     }
 
@@ -126,9 +126,9 @@ impl State {
     }
 
     /// `promise.get`.
-    pub fn promise_get(&mut self, req: &PromiseGetReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn promise_get(&mut self, req: &PromiseGetReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_promise_get(old(self)@, req@, now as nat).0,
@@ -156,9 +156,9 @@ impl State {
     }
 
     /// `promise.create`.
-    pub fn promise_create(&mut self, req: &PromiseCreateReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn promise_create(&mut self, req: &PromiseCreateReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_promise_create(old(self)@, req@, now as nat).0,
@@ -188,9 +188,9 @@ impl State {
     }
 
     /// `promise.settle`.
-    pub fn promise_settle(&mut self, req: &PromiseSettleReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn promise_settle(&mut self, req: &PromiseSettleReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_promise_settle(old(self)@, req@, now as nat).0,
@@ -229,9 +229,9 @@ impl State {
     }
 
     /// `promise.callback`: register `awaiter` to be resumed when `awaited` settles.
-    pub fn promise_register_callback(&mut self, req: &PromiseRegisterCallbackReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn promise_register_callback(&mut self, req: &PromiseRegisterCallbackReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_promise_register_callback(old(self)@, req@, now as nat).0,
@@ -292,9 +292,9 @@ impl State {
     }
 
     /// `promise.listener`: register `address` to be told when `awaited` settles.
-    pub fn promise_register_listener(&mut self, req: &PromiseRegisterListenerReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn promise_register_listener(&mut self, req: &PromiseRegisterListenerReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_promise_register_listener(old(self)@, req@, now as nat).0,
@@ -335,9 +335,9 @@ impl State {
 
 impl State {
     /// `schedule.get`.
-    pub fn schedule_get(&mut self, req: &ScheduleGetReq, now: u64, cfg: &Config) -> (r: ScheduleRes)
+    pub fn schedule_get(&mut self, req: &ScheduleGetReq, now: u64, retry_timeout: u64) -> (r: ScheduleRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_schedule_get(old(self)@, req@, now as nat).0,
@@ -356,9 +356,9 @@ impl State {
 
     /// `schedule.create`. `req.next_run_at` is `nextCron cron now`, from the
     /// caller's cron engine; it must not precede `now`.
-    pub fn schedule_create(&mut self, req: &ScheduleCreateReq, now: u64, cfg: &Config) -> (r: ScheduleRes)
+    pub fn schedule_create(&mut self, req: &ScheduleCreateReq, now: u64, retry_timeout: u64) -> (r: ScheduleRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_schedule_create(old(self)@, req@, now as nat).0,
@@ -399,9 +399,9 @@ impl State {
     }
 
     /// `schedule.delete`.
-    pub fn schedule_delete(&mut self, req: &ScheduleDeleteReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn schedule_delete(&mut self, req: &ScheduleDeleteReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_schedule_delete(old(self)@, req@, now as nat).0,
@@ -474,9 +474,9 @@ impl State {
     }
 
     /// `task.get`.
-    pub fn task_get(&mut self, req: &TaskGetReq, now: u64, cfg: &Config) -> (r: TaskGetRes)
+    pub fn task_get(&mut self, req: &TaskGetReq, now: u64, retry_timeout: u64) -> (r: TaskGetRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_get(old(self)@, req@, now as nat).0,
@@ -503,9 +503,9 @@ impl State {
     }
 
     /// `task.create`.
-    pub fn task_create(&mut self, req: &TaskCreateReq, now: u64, cfg: &Config) -> (r: TaskClaimRes)
+    pub fn task_create(&mut self, req: &TaskCreateReq, now: u64, retry_timeout: u64) -> (r: TaskClaimRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_create(old(self)@, req@, now as nat).0,
@@ -576,9 +576,9 @@ impl State {
     }
 
     /// `task.acquire`.
-    pub fn task_acquire(&mut self, req: &TaskAcquireReq, now: u64, cfg: &Config) -> (r: TaskClaimRes)
+    pub fn task_acquire(&mut self, req: &TaskAcquireReq, now: u64, retry_timeout: u64) -> (r: TaskClaimRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_acquire(old(self)@, req@, now as nat).0,
@@ -626,9 +626,9 @@ impl State {
     }
 
     /// `task.fulfill`.
-    pub fn task_fulfill(&mut self, req: &TaskFulfillReq, now: u64, cfg: &Config) -> (r: PromiseRes)
+    pub fn task_fulfill(&mut self, req: &TaskFulfillReq, now: u64, retry_timeout: u64) -> (r: PromiseRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_fulfill(old(self)@, req@, now as nat).0,
@@ -673,9 +673,9 @@ impl State {
     }
 
     /// `task.release`.
-    pub fn task_release(&mut self, req: &TaskReleaseReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_release(&mut self, req: &TaskReleaseReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_release(old(self)@, req@, now as nat).0,
@@ -716,9 +716,9 @@ impl State {
     }
 
     /// `task.halt`.
-    pub fn task_halt(&mut self, req: &TaskHaltReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_halt(&mut self, req: &TaskHaltReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_halt(old(self)@, req@, now as nat).0,
@@ -762,9 +762,9 @@ impl State {
     }
 
     /// `task.continue`.
-    pub fn task_continue(&mut self, req: &TaskContinueReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_continue(&mut self, req: &TaskContinueReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_continue(old(self)@, req@, now as nat).0,
@@ -807,9 +807,9 @@ impl State {
 
 impl State {
     /// `task.fence`.
-    pub fn task_fence(&mut self, req: &TaskFenceReq, now: u64, cfg: &Config) -> (r: TaskFenceRes)
+    pub fn task_fence(&mut self, req: &TaskFenceReq, now: u64, retry_timeout: u64) -> (r: TaskFenceRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_fence(old(self)@, req@, now as nat).0,
@@ -846,8 +846,8 @@ impl State {
         }
         let ghost a1 = self@;
         let inner = match &req.action {
-            TaskFenceAction::Create(c) => TaskFenceInnerRes::Create(self.promise_create(c, now, cfg)),
-            TaskFenceAction::Settle(c) => TaskFenceInnerRes::Settle(self.promise_settle(c, now, cfg)),
+            TaskFenceAction::Create(c) => TaskFenceInnerRes::Create(self.promise_create(c, now, retry_timeout)),
+            TaskFenceAction::Settle(c) => TaskFenceInnerRes::Settle(self.promise_settle(c, now, retry_timeout)),
         };
         proof { lemma_fence_legal(now as nat, a, a1, self@, req.id@, target@); }
         TaskFenceRes { status: 200, action: Some(inner) }
@@ -855,9 +855,9 @@ impl State {
 
     /// `task.fence` with no action: the check alone, for a fence whose create
     /// ran first on another origin's document.
-    pub fn task_fence_check(&mut self, req: &TaskFenceCheckReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_fence_check(&mut self, req: &TaskFenceCheckReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_fence_check(old(self)@, req@, now as nat).0,
@@ -888,9 +888,9 @@ impl State {
     }
 
     /// `task.heartbeat`.
-    pub fn task_heartbeat(&mut self, req: &TaskHeartbeatReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_heartbeat(&mut self, req: &TaskHeartbeatReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_heartbeat(old(self)@, req@, now as nat).0,
@@ -963,9 +963,9 @@ impl State {
     }
 
     /// `task.suspend`.
-    pub fn task_suspend(&mut self, req: &TaskSuspendReq, now: u64, cfg: &Config) -> (r: StatusRes)
+    pub fn task_suspend(&mut self, req: &TaskSuspendReq, now: u64, retry_timeout: u64) -> (r: StatusRes)
         requires
-            pre(*old(self), now, *cfg),
+            pre(*old(self), now, retry_timeout),
         ensures
             post(*old(self), *final(self), now),
             final(self)@ == spec_task_suspend(old(self)@, req@, now as nat).0,

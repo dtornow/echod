@@ -201,7 +201,7 @@ impl Generator {
                 let cron = (*rng.pick(&["*/2 * * * * *", "*/3 * * * * *", "*/5 * * * * *"])).to_string();
                 let promise_id = format!("o{}:{id}-{{{{.timestamp}}}}", rng.below(self.origins));
                 let promise_timeout = rng.range(1, self.timeout_ms);
-                let next_run_at = resonate_core::util::compute_next_cron(&cron, now as i64).max(now as i64 + 1) as u64;
+                let next_run_at = echod_cron::next_run_at(&cron, now);
                 Request::ScheduleCreate(ScheduleCreateReq { id, cron, promise_id, promise_timeout, promise_param: value(None), promise_tags: self.tags(rng, true), next_run_at })
             }
             _ => Request::ScheduleDelete(ScheduleDeleteReq { id }),

@@ -310,7 +310,6 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            let next = util::compute_next_cron(&d.cron, now as i64).max(now as i64 + 1) as u64;
             let id = d.id.clone();
             let q = rows::ScheduleCreateReq {
                 id: d.id,
@@ -319,7 +318,7 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 promise_timeout,
                 promise_param: codec::value_in(&d.promise_param),
                 promise_tags: codec::create_tags(&d.promise_tags),
-                next_run_at: next,
+                next_run_at: 0,
             };
             (rows::Request::ScheduleCreate(q), Some(id), None)
         }

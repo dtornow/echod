@@ -3,8 +3,8 @@
 //! The catalogue, the handler specifications, and the step `on_event` is
 //! proved against live here. The process depends on this crate: a handler's
 //! `ensures` names `spec_promise_create` and the other `spec_*` functions.
-//! This crate depends on the Rover world and on the abstract model, and
-//! does not depend on the process.
+//! This crate depends on Rover and on the abstract model, and does not
+//! depend on the process. The nodes and the store are `echod-world`.
 //!
 //! ```text
 //! types.rs            rows, the outbox, identifiers; echod_types re-exported
@@ -21,8 +21,6 @@
 //! commit_spec.rs      which key a commit arms, removes, and remembers
 //! timeouts.rs         an origin's nearest deadline, filed in its time bucket
 //! on_event.rs         the document step inside a loaded request
-//! model.rs            the Rover model: nodes, one store, the initial world
-//! refine.rs           the abstract model this step refines
 //! ```
 
 #![cfg_attr(
@@ -35,7 +33,6 @@ pub mod external_proof;
 pub mod fold_proof;
 pub mod internal_proof;
 pub mod internal_spec;
-pub mod model;
 pub mod node_spec;
 pub mod object;
 pub mod object_proof;
@@ -49,14 +46,5 @@ pub mod tags;
 pub mod tags_proof;
 pub mod timeouts;
 pub mod types;
-
-#[cfg(not(verus_keep_ghost))]
-mod rover_model;
-
-#[cfg(not(verus_keep_ghost))]
-pub mod refine;
-
-#[cfg(not(verus_keep_ghost))]
-pub use refine::abstract_model;
 
 pub use types::*;

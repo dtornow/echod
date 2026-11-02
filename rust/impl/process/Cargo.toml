@@ -14,11 +14,11 @@ path = "src/lib.rs"
 # src/verified/mod.rs, not this crate's other modules.
 [dependencies]
 echod-concrete = { path = "../../spec/concrete" }
+echod-types = { path = "../../comm/types" }
+echod-cron = { path = "../../comm/cron" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"
-chrono = "0.4"
-cron = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

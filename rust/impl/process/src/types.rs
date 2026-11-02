@@ -25,7 +25,7 @@ pub type FlightId = u64;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Etag(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StoreError {
     /// A conditional write found the object at another version.
     PreconditionFailed,
@@ -46,7 +46,7 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 /// What a conditional read answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Read {
     Body(Vec<u8>, Etag),
     NotModified,
@@ -108,7 +108,7 @@ pub enum Event {
 }
 
 /// A call on the store, as the executor makes it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StoreCall {
     Get { key: String },
     GetIfNoneMatch { key: String, etag: Etag },
@@ -137,7 +137,7 @@ impl StoreCall {
 }
 
 /// What a store call answered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StoreOutcome {
     /// `Get`: the object and its version, or nothing.
     Got(Option<(Vec<u8>, Etag)>),
@@ -176,12 +176,6 @@ pub enum DebugBody {
     Snap { promises: Vec<verified::Promise>, schedules: Vec<verified::Schedule> },
 }
 
-/// A message for a worker, before the runtime stamps the server's URL on it.
-pub enum Outgoing {
-    Execute { task_id: String, version: u64 },
-    Unblock(verified::PromiseRecord),
-}
-
 /// Which loop a physical wake was armed for. The runtime sleeps, then hands
 /// this back as `Event::Due`. The keys themselves stay in the wheel: one
 /// wake can owe several of them.
@@ -201,7 +195,7 @@ pub enum Effect {
     /// could not serve it.
     Reply { id: RequestId, response: Result<Answer, String> },
     /// Push a message to a worker. At most once; nothing is reported back.
-    Send { address: String, message: Outgoing },
+    Send { address: String, message: verified::Message },
     /// Send `Event::Due` for `armed` once `after_ms` have passed, replacing
     /// any wake asked for before.
     Wake { after_ms: u64, armed: Armed },

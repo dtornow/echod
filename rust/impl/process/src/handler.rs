@@ -77,7 +77,7 @@ impl State {
         }
         // A schedule's next run is that instant, the same one the step uses.
         if let Request::ScheduleCreate(q) = &mut call.request {
-            q.next_run_at = crate::cron::next_after(&q.cron, call.now as i64).max(call.now as i64 + 1) as u64;
+            q.next_run_at = echod_cron::next_run_at(&q.cron, call.now);
         }
         let Call { id, kind, corr, target, request, action_kind, now, pinned: _, then } = call;
         let stage = match then {

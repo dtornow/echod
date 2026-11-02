@@ -261,8 +261,8 @@ pub fn next_deadline(s: &State) -> (r: Option<u64>)
 /// Fire what is due in a document at `now`: deadlines, leases, retries, one
 /// object at a time. Returns whether anything fired. After it, nothing in
 /// the document is due at `now`; if nothing fired, the document is as it was.
-pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
-    requires pre(*old(s), now, *cfg),
+pub fn sweep(s: &mut State, now: u64, retry_timeout: u64) -> (did: bool)
+    requires pre(*old(s), now, retry_timeout),
     ensures
         final(s).wf(),
         inv(now as nat, final(s)@),
@@ -301,7 +301,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             s@.schedules == a.schedules,
             s@.objects.dom() == a.objects.dom(),
             now <= MAX_TIME,
-            cfg.wf(),
+            0 < retry_timeout <= MAX_TIME,
             forall |j: int| 0 <= j < k && s@.objects.contains_key(#[trigger] ids@[j]@) ==> cleared(s@.objects[ids@[j]@], now as nat),
             !did ==> s@ == a,
             forall |id: Seq<char>| #[trigger] a.objects.contains_key(id) ==> exists |j: int| 0 <= j < ids@.len() && #[trigger] ids@[j]@ == id,
@@ -317,7 +317,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_promise_timeout(&PromiseTimeoutReq { id: clone_string(id) }, now, cfg);
+        s.process_promise_timeout(&PromiseTimeoutReq { id: clone_string(id) }, now, retry_timeout);
         let ghost s1 = s@;
         proof { lemma_reach_step(now as nat, a, s0, s1); }
         let due_l = match s.find_object(id) {
@@ -338,7 +338,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_lease_timeout(&TaskLeaseTimeoutReq { id: clone_string(id) }, now, cfg);
+        s.process_lease_timeout(&TaskLeaseTimeoutReq { id: clone_string(id) }, now, retry_timeout);
         let ghost s2 = s@;
         proof { lemma_reach_step(now as nat, a, s1, s2); }
         let due_r = match s.find_object(id) {
@@ -359,7 +359,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
             }
             None => false,
         };
-        s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(id) }, now, cfg);
+        s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(id) }, now, retry_timeout);
         let ghost s3 = s@;
         proof { lemma_reach_step(now as nat, a, s2, s3); }
         if due_p || due_l || due_r {
@@ -367,7 +367,7 @@ pub fn sweep(s: &mut State, now: u64, cfg: &Config) -> (did: bool)
         }
         proof {
             let x = id@;
-            lemma_swept_object(now as nat, s0, s1, s2, s3, x, cfg.retry_timeout as nat);
+            lemma_swept_object(now as nat, s0, s1, s2, s3, x, retry_timeout as nat);
             assert(s3.objects.dom() =~= a.objects.dom());
             if !(due_p || due_l || due_r) {
                 // nothing fired: each step left the object as it was
@@ -426,8 +426,8 @@ fn clone_strings(v: &Vec<String>) -> (r: Vec<String>)
 /// Discharge every settled promise's callbacks and listeners, then fire
 /// every retry that is due, until nothing is owed or the round limit is
 /// reached. Every step is a kernel step at `now`.
-pub fn drain(s: &mut State, now: u64, cfg: &Config)
-    requires pre(*old(s), now, *cfg),
+pub fn drain(s: &mut State, now: u64, retry_timeout: u64)
+    requires pre(*old(s), now, retry_timeout),
     ensures
         final(s).wf(),
         inv(now as nat, final(s)@),
@@ -443,7 +443,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
             s@.schedules == old(s)@.schedules,
             s@.objects.dom() == old(s)@.objects.dom(),
             now <= MAX_TIME,
-            cfg.wf(),
+            0 < retry_timeout <= MAX_TIME,
         decreases 65 - rounds,
     {
         rounds += 1;
@@ -465,7 +465,7 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
         while o < owed.len()
             invariant
                 o <= owed@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
+                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, 0 < retry_timeout <= MAX_TIME,
             decreases owed@.len() - o,
         {
             let mut c: usize = 0;
@@ -473,12 +473,12 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 invariant
                     o < owed@.len(),
                     c <= owed@[o as int].callbacks@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
+                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, 0 < retry_timeout <= MAX_TIME,
                 decreases owed@[o as int].callbacks@.len() - c,
             {
                 let ghost b = s@;
                 let req = PromiseRegisterCallbackReq { awaited: clone_string(&owed[o].awaited), awaiter: clone_string(&owed[o].callbacks[c]) };
-                s.process_callback(&req, now, cfg);
+                s.process_callback(&req, now, retry_timeout);
                 proof {
                     assert(inv(now as nat, s@));
                     assert(legal(now as nat, b, s@));
@@ -493,12 +493,12 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
                 invariant
                     o < owed@.len(),
                     l <= owed@[o as int].listeners@.len(),
-                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
+                    s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, 0 < retry_timeout <= MAX_TIME,
                 decreases owed@[o as int].listeners@.len() - l,
             {
                 let ghost b = s@;
                 let req = PromiseRegisterListenerReq { awaited: clone_string(&owed[o].awaited), address: clone_string(&owed[o].listeners[l]) };
-                s.process_listener(&req, now, cfg);
+                s.process_listener(&req, now, retry_timeout);
                 proof { lemma_reach_step(now as nat, old(s)@, b, s@); }
                 did = true;
                 l += 1;
@@ -529,11 +529,11 @@ pub fn drain(s: &mut State, now: u64, cfg: &Config)
         while d < due.len()
             invariant
                 d <= due@.len(),
-                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, cfg.wf(),
+                s.wf(), inv(now as nat, s@), reach(now as nat, old(s)@, s@), s@.schedules == old(s)@.schedules, s@.objects.dom() == old(s)@.objects.dom(), now <= MAX_TIME, 0 < retry_timeout <= MAX_TIME,
             decreases due@.len() - d,
         {
             let ghost b = s@;
-            s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(&due[d]) }, now, cfg);
+            s.process_retry_timeout(&TaskRetryTimeoutReq { id: clone_string(&due[d]) }, now, retry_timeout);
             proof {
                 lemma_reach_step(now as nat, old(s)@, b, s@);
                 assert(s@.objects.dom() =~= b.objects.dom());

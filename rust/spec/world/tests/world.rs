@@ -1,13 +1,13 @@
 //! The concrete world: the nodes and the store Rover starts from, the shell
 //! around a node, and the store's conditional write.
 
-use echod_concrete::model::{
-    route_effects, ClientRequest, Config, Effect, Incoming, Local, Message, Model, Pid, Store,
-    StoreCall, StoreFail, StoreOutcome,
+use echod_logic::types::{Etag, StoreCall, StoreError, StoreOutcome};
+use echod_world::model::{
+    route_effects, ClientRequest, Effect, Fleet, Incoming, Local, Message, Model, Pid, Store,
 };
 use echod_rover::rover::{ProcessEvent, RoverModel};
 
-fn node(local: &Local) -> &echod_concrete::model::Node {
+fn node(local: &Local) -> &echod_world::model::Node {
     match local {
         Local::Node(node) => node,
         Local::Store(_) => panic!("expected a node"),
@@ -23,7 +23,7 @@ fn store(local: &Local) -> &Store {
 
 #[test]
 fn the_world_is_the_nodes_then_the_store() {
-    let world = Model.world(&Config::new(2, true));
+    let world = Model.world(&Fleet::new(2, true));
     assert_eq!(world.now, 0);
     assert!(world.network.is_empty());
     assert_eq!(world.process.len(), 3);
@@ -41,13 +41,13 @@ fn the_world_is_the_nodes_then_the_store() {
     assert_eq!(first.wake, None);
     assert!(store(&world.process[2].1).entries.is_empty());
 
-    let quiet = Model.world(&Config::new(1, false));
+    let quiet = Model.world(&Fleet::new(1, false));
     assert!(!node(&quiet.process[0].1).logic.loops);
 }
 
 #[test]
 fn rover_assembles_the_same_processes() {
-    let config = Config::new(2, true);
+    let config = Fleet::new(2, true);
     assert_eq!(Model.initial(&config), Model.world(&config).process);
     assert_eq!(Model.outside(), Pid::Outside);
     assert!(Model.injectable(&config, &Message::Stop));
@@ -62,7 +62,7 @@ fn rover_assembles_the_same_processes() {
 
 #[test]
 fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
-    let world = Model.world(&Config::new(1, true));
+    let world = Model.world(&Fleet::new(1, true));
     let (pid, state) = &world.process[0];
     assert!(Model.step(pid, state, 5, &Incoming::Timeout).is_empty());
 
@@ -79,7 +79,7 @@ fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
     assert!(due[0].send.is_empty());
 
     let through = Model.on_event(
-        &Config::new(1, true),
+        &Fleet::new(1, true),
         pid,
         &due[0].state,
         10,
@@ -90,7 +90,7 @@ fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
 
 #[test]
 fn the_shell_forwards_a_request_and_keeps_its_wake() {
-    let world = Model.world(&Config::new(1, true));
+    let world = Model.world(&Fleet::new(1, true));
     let (pid, state) = world.process[0].clone();
     let mut armed = node(&state).clone();
     armed.wake = Some(40);
@@ -118,7 +118,7 @@ fn the_shell_forwards_a_request_and_keeps_its_wake() {
 
 #[test]
 fn stop_ends_the_loop_and_a_wake_replaces_only_the_shell() {
-    let world = Model.world(&Config::new(1, true));
+    let world = Model.world(&Fleet::new(1, true));
     let (pid, state) = world.process[0].clone();
     let stopped = Model.step(
         &pid,
@@ -166,7 +166,7 @@ fn stop_ends_the_loop_and_a_wake_replaces_only_the_shell() {
 
 #[test]
 fn the_store_commits_a_conditional_write_and_answers_the_node() {
-    let world = Model.world(&Config::new(1, false));
+    let world = Model.world(&Fleet::new(1, false));
     let store = world.process[1].1.clone();
     let call = StoreCall::PutIfNoneMatch {
         key: "doc".into(),
@@ -208,7 +208,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
     assert!(matches!(
         again[0].send[0].1,
         Message::StoreReply {
-            outcome: StoreOutcome::Failed(StoreFail::Precondition),
+            outcome: StoreOutcome::Failed(StoreError::PreconditionFailed),
             ..
         }
     ));
@@ -216,7 +216,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
     let wrong = StoreCall::PutIfMatch {
         key: "doc".into(),
         body: b"two".to_vec(),
-        etag: "nope".into(),
+        etag: Etag("nope".into()),
     };
     let rejected = Model.step(
         &Pid::Store,
@@ -233,7 +233,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
     assert!(matches!(
         rejected[0].send[0].1,
         Message::StoreReply {
-            outcome: StoreOutcome::Failed(StoreFail::Precondition),
+            outcome: StoreOutcome::Failed(StoreError::PreconditionFailed),
             ..
         }
     ));
@@ -276,7 +276,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
 
 #[test]
 fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
-    let world = Model.world(&Config::new(1, false));
+    let world = Model.world(&Fleet::new(1, false));
     let (node_pid, node_state) = &world.process[0];
     let ask = Incoming::Receive {
         sender: Pid::Node(0),

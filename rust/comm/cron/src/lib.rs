@@ -17,6 +17,11 @@ fn normalize(expr: &str) -> String {
     }
 }
 
+/// Whether the engine accepts the expression.
+pub fn valid(expr: &str) -> bool {
+    Schedule::from_str(&normalize(expr)).is_ok()
+}
+
 /// The next occurrence strictly after `after_ms`, in milliseconds.
 /// An expression that does not parse is retried a minute later.
 pub fn next_after(expr: &str, after_ms: i64) -> i64 {
@@ -53,4 +58,11 @@ pub fn next_after(expr: &str, after_ms: i64) -> i64 {
         }
     }
     after_ms + 60_000
+}
+
+/// `next_after`, as a `u64` instant strictly after `after_ms`.
+pub fn next_run_at(expr: &str, after_ms: u64) -> u64 {
+    let after = i64::try_from(after_ms).unwrap_or(i64::MAX);
+    let next = next_after(expr, after).max(after.saturating_add(1));
+    u64::try_from(next).unwrap_or_else(|_| after_ms.saturating_add(60_000).max(after_ms.saturating_add(1)))
 }

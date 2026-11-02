@@ -448,6 +448,39 @@ impl Value {
     }
 }
 
+/// Everything before the first `:`, or the whole string if there is none.
+pub open spec fn origin(s: Seq<char>) -> Seq<char>
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        Seq::empty()
+    } else if s[0] == ':' {
+        Seq::empty()
+    } else {
+        seq![s[0]] + origin(s.drop_first())
+    }
+}
+
+pub open spec fn same_origin_spec(a: Seq<char>, b: Seq<char>) -> bool {
+    origin(a) == origin(b)
+}
+
+/// The origin of an id: everything before the first `:`.
+#[verifier::external_body]
+pub fn origin_of<'a>(id: &'a str) -> (r: &'a str)
+    ensures r@ == origin(id@),
+{
+    id.split_once(':').map(|(o, _)| o).unwrap_or(id)
+}
+
+/// Do two ids share an origin?
+#[verifier::external_body]
+pub fn same_origin(a: &String, b: &String) -> (r: bool)
+    ensures r == same_origin_spec(a@, b@),
+{
+    origin_of(a) == origin_of(b)
+}
+
 } // verus!
 
 #[cfg(verus_keep_ghost)]

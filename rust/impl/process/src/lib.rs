@@ -27,7 +27,6 @@
 //! doc.rs             a document: rows in, rows out, the fold between
 //! target.rs          an origin's document, or a schedule's
 //! reason.rs          the words a refusal carries
-//! cron.rs            the next time a schedule is due
 //! cache.rs           documents this node remembers, by LRU under a byte budget
 //! debug.rs           debug.reset, debug.snap, debug.tick
 //! verified/          the proved document machine
@@ -39,7 +38,6 @@
 
 pub mod cache;
 pub mod config;
-pub mod cron;
 mod debug;
 pub mod doc;
 mod handler;
@@ -62,6 +60,7 @@ pub use config::Config;
 pub use state::{Snapshot, State};
 pub use state_node::{Announcement, Configuration, Membership};
 pub use target::Target;
-pub use types::{Answer, Armed, Call, DebugBody, DebugCall, Effect, Event, Note, Outgoing};
+pub use types::{Answer, Armed, Call, DebugBody, DebugCall, Effect, Event, Note};
+pub use verified::Message;
 
 pub(crate) use state::Owner;

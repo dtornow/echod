@@ -190,27 +190,6 @@ impl AOutboxEntry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-/// The operator's dials. Not state: no step writes it.
-#[derive(Clone, Copy)]
-pub struct Config {
-    /// How long the server waits before re-offering a task nobody has claimed.
-    pub retry_timeout: u64,
-    /// Rewrite an origin's object once it carries this many stale rows.
-    /// `0` rewrites on every write, which is what general-purpose S3 needs.
-    pub compact: u32,
-}
-
-impl Config {
-    pub open spec fn wf(self) -> bool {
-        0 < self.retry_timeout <= MAX_TIME
-    }
-}
-
-
 // Internal steps.
 
 pub struct PromiseTimeoutReq { pub id: String }
@@ -242,36 +221,10 @@ pub struct ScheduleTimeoutReq {
 // Identifiers, and the three string primitives the kernel trusts
 // ---------------------------------------------------------------------------
 //
-// An id is `origin:suffix`; the origin is everything before the first `:`.
-// `same_origin`, `str_eq` and `parse_nat` are `external_body`: their bodies
-// are ordinary Rust and their `ensures` are assumed, not proved. With
-// `clone_string` they are the whole of the kernel's trusted computing base
-// beyond vstd.
-
-/// Everything before the first `:`, or the whole string if there is none.
-pub open spec fn origin(s: Seq<char>) -> Seq<char>
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        Seq::empty()
-    } else if s[0] == ':' {
-        Seq::empty()
-    } else {
-        seq![s[0]] + origin(s.drop_first())
-    }
-}
-
-pub open spec fn same_origin_spec(a: Seq<char>, b: Seq<char>) -> bool {
-    origin(a) == origin(b)
-}
-
-/// Do two ids share an origin?
-#[verifier::external_body]
-pub fn same_origin(a: &String, b: &String) -> (r: bool)
-    ensures r == same_origin_spec(a@, b@),
-{
-    a.split(':').next() == b.split(':').next()
-}
+// An id is `origin:suffix`. `origin` and `same_origin` are `echod_types`.
+// `str_eq` and `parse_nat` are `external_body`: their bodies are ordinary
+// Rust and their `ensures` are assumed, not proved. With `clone_string`
+// they are the rest of the kernel's trusted computing base beyond vstd.
 
 /// `str == str`, with its meaning stated.
 /// `String::clone`, with its meaning stated.
