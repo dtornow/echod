@@ -1,7 +1,7 @@
 //! Views of the model state, and the lemmas that a value is its view.
 //!
 //! A request, a response, and a record are the shared types in `echod_types`.
-//! Their views live in `echod_types::spec`. The handlers in `exec.rs` are the
+//! Their views live in `echod_types::spec`. The handlers in `exec` are the
 //! protocol.
 //!
 //! Ids and strings view as `Seq<char>`, the persistent maps as `Map`, the
@@ -483,7 +483,7 @@ impl Model for Resonate {
     type Dispatch = Dispatch;
 
     fn external(&self, op: &Request, s: &Server, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        let mut outs = self.request(op, s, now);
+        let mut outs = self.run(op, s, now);
         let mut r: Vec<ExternalOutcome<Resonate>> = Vec::new();
         while outs.len() > 0
             decreases outs@.len(),
@@ -498,11 +498,7 @@ impl Model for Resonate {
     }
 
     fn internal(&self, step: &Internal, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
-        let o = match step {
-            Internal::On(ids) => self.objects(ids, s, now),
-            Internal::Fire { schedule, at, promise } => self.fire(schedule, *at, promise, s, now),
-            Internal::Advance { schedule, at, promise } => self.advance(schedule, *at, promise, s, now),
-        };
+        let o = self.run_internal(step, s, now);
         let mut r: Vec<InternalOutcome<Resonate>> = Vec::new();
         if o.pending {
             return r;

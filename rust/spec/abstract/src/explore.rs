@@ -1,6 +1,6 @@
 //! Testing glue, outside Verus: the list of the spec's marks, and requests
 //! worth trying next (suggestions). Neither decides what the server does: the
-//! spec marks its own branches (`mk` in `exec.rs`); suggestions are
+//! spec marks its own branches (`mk` in `exec`); suggestions are
 //! requests built from the state, and the spec decides what they do.
 
 use echod_rover::{Action, Explore, Time};
@@ -12,7 +12,7 @@ use super::exec::*;
 use super::model::{next_cron, origin};
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
-/// the ones no run reached. `tests/marks.rs` checks it against `exec.rs`.
+/// the ones no run reached. `tests/marks.rs` checks it against `exec`.
 pub const MARKS: &[&str] = &[
     "task.create: version at its cap (409)",
     "acquire: no such task (404)",

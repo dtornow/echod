@@ -264,14 +264,14 @@ fn request_outcome(
     }
 }
 
-fn request_results(
+fn run_results(
     config: &Resonate,
     state: &State,
     call: &Call,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
 {
-    let mut outcomes = config.request(&call.request, &state.server, now);
+    let mut outcomes = config.run(&call.request, &state.server, now);
     let ghost all = outcomes@;
     let mut results = Vec::new();
     while !outcomes.is_empty()
@@ -334,47 +334,6 @@ fn ready(work: &Work, now: Time) -> (is_ready: bool)
     match work {
         Work::Later(_) => true,
         Work::Timer(at, _) => *at <= now,
-    }
-}
-
-fn run_internal(
-    config: &Resonate,
-    server: &Server,
-    work: &Work,
-    now: Time,
-) -> (result: InOut)
-{
-    match work {
-        Work::Later(super::exec::Step::Objects(ids))
-        | Work::Timer(_, super::exec::Step::Objects(ids)) => {
-            config.objects(ids, server, now)
-        }
-        Work::Later(super::exec::Step::Fire {
-            schedule,
-            at,
-            promise,
-        })
-        | Work::Timer(
-            _,
-            super::exec::Step::Fire {
-                schedule,
-                at,
-                promise,
-            },
-        ) => config.fire(schedule, *at, promise, server, now),
-        Work::Later(super::exec::Step::Advance {
-            schedule,
-            at,
-            promise,
-        })
-        | Work::Timer(
-            _,
-            super::exec::Step::Advance {
-                schedule,
-                at,
-                promise,
-            },
-        ) => config.advance(schedule, *at, promise, server, now),
     }
 }
 
@@ -485,7 +444,9 @@ fn internal_results_from(
         return Vec::new();
     }
     let work = &state.pending[i];
-    let outcome = run_internal(config, &state.server, work, now);
+    let outcome = match work {
+        Work::Later(step) | Work::Timer(_, step) => config.run_timeout(step, &state.server, now),
+    };
     let is_ready = ready(work, now);
     let mut tail = internal_results_from(config, state, now, i + 1);
     if is_ready && !outcome.pending {
@@ -537,7 +498,7 @@ impl State {
     ) -> (results: Vec<StepResult<Model>>) {
         match event {
             ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-                request_results(config, self, call, now)
+                run_results(config, self, call, now)
             }
             ProcessEvent::Timeout => {
                 let results = internal_results(config, self, now);

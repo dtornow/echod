@@ -37,7 +37,7 @@ fn trace_for(requests: Vec<Request>) -> Vec<Event> {
             id: i as u64,
             request: request.clone(),
         };
-        let mut outcomes = logic.request(&request, &server, 0);
+        let mut outcomes = logic.run(&request, &server, 0);
         let outcome = outcomes.remove(0);
 
         trace.push(Event::Input {
