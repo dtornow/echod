@@ -9,7 +9,7 @@ use vstd::prelude::*;
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use echod_rover::rover::semantics::{Label, StepResultV};
-use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
+use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::{Sched, Time};
 
 use echod_types::Response;
@@ -528,6 +528,49 @@ fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
     }]
 }
 
+impl State {
+    fn step(
+        &self,
+        config: &Resonate,
+        now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> (results: Vec<StepResult<Model>>) {
+        match event {
+            ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
+                request_results(config, self, call, now)
+            }
+            ProcessEvent::Timeout => {
+                let results = internal_results(config, self, now);
+                if results.is_empty() { idle(self) } else { results }
+            }
+            _ => idle(self),
+        }
+    }
+}
+
+impl Process<Resonate, Pid, Message> for State {
+    fn on_event(
+        &self,
+        config: &Resonate,
+        now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> (pairs: Vec<(State, Vec<(Pid, Message)>)>) {
+        let mut results = self.step(config, now, event);
+        let ghost n = results@.len() as int;
+        let mut pairs: Vec<(State, Vec<(Pid, Message)>)> = Vec::new();
+        while !results.is_empty()
+            invariant
+                pairs@.len() + results@.len() == n,
+                results@.len() == n - pairs@.len(),
+            decreases results@.len(),
+        {
+            let result = results.remove(0);
+            pairs.push((result.state, result.send));
+        }
+        pairs
+    }
+}
+
 impl RoverModel for Model {
     type Config = Resonate;
     type Pid = Pid;
@@ -585,22 +628,8 @@ impl RoverModel for Model {
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> (results: Vec<StepResult<Self>>) {
-        match (pid, event) {
-            (
-                Pid::Service,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(call),
-                },
-            ) => request_results(config, state, call, now),
-            (Pid::Service, ProcessEvent::Timeout) => {
-                let results = internal_results(config, state, now);
-                if results.is_empty() {
-                    idle(state)
-                } else {
-                    results
-                }
-            }
+        match pid {
+            Pid::Service => state.step(config, now, event),
             _ => idle(state),
         }
     }

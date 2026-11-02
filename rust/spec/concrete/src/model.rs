@@ -22,6 +22,9 @@
 
 use vstd::prelude::*;
 
+use echod_rover::rover::{Process, ProcessEvent};
+use echod_rover::Time;
+
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 verus! {
@@ -1249,95 +1252,82 @@ impl Model {
     }
 
     pub fn step(self, pid: &Pid, state: &Local, now: u64, event: &Incoming) -> Vec<Transition> {
-        match (pid, state, event) {
-            (Pid::Node(_), Local::Node(node), Incoming::Timeout) => match node.wake {
+        let event = match event {
+            Incoming::Timeout => ProcessEvent::Timeout,
+            Incoming::Receive { sender, message } => ProcessEvent::Receive {
+                sender: *sender,
+                message: message.clone(),
+            },
+        };
+        match (pid, state) {
+            (Pid::Node(_), Local::Node(node)) => node
+                .on_event(&(), now, &event)
+                .into_iter()
+                .map(|(node, send)| Transition { state: Local::Node(node), send })
+                .collect(),
+            (Pid::Store, Local::Store(store)) => store
+                .on_event(&(), now, &event)
+                .into_iter()
+                .map(|(store, send)| Transition { state: Local::Store(store), send })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl Process<(), Pid, Message> for Node {
+    fn on_event(
+        &self,
+        _config: &(),
+        now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<(Self, Vec<(Pid, Message)>)> {
+        match event {
+            ProcessEvent::Timeout => match self.wake {
                 Some(at) if at <= now => {
-                    let (next, send) =
-                        apply_event(node, LogicEvent::Tick { clock: now }, now, None);
-                    vec![Transition {
-                        state: Local::Node(next),
-                        send,
-                    }]
+                    let (next, send) = apply_event(self, LogicEvent::Tick { clock: now }, now, None);
+                    vec![(next, send)]
                 }
                 _ => Vec::new(),
             },
-            (
-                Pid::Node(_),
-                Local::Node(node),
-                Incoming::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Request(request),
-                },
-            ) => {
+            ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(request) } => {
                 let (next, send) = apply_event(
-                    node,
-                    LogicEvent::Request {
-                        id: node.next_request,
-                        request: request.clone(),
-                        clock: now,
-                    },
+                    self,
+                    LogicEvent::Request { id: self.next_request, request: request.clone(), clock: now },
                     now,
-                    node.wake,
+                    self.wake,
                 );
-                vec![Transition {
-                    state: Local::Node(Node {
-                        next_request: node.next_request + 1,
-                        ..next
-                    }),
-                    send,
-                }]
+                vec![(Node { next_request: self.next_request + 1, ..next }, send)]
             }
-            (
-                Pid::Node(_),
-                Local::Node(node),
-                Incoming::Receive {
-                    sender: Pid::Store,
-                    message: Message::StoreReply { op, outcome },
-                },
-            ) => {
+            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
                 let (next, send) = apply_event(
-                    node,
-                    LogicEvent::Completed {
-                        op: *op,
-                        outcome: outcome.clone(),
-                        clock: now,
-                    },
+                    self,
+                    LogicEvent::Completed { op: *op, outcome: outcome.clone(), clock: now },
                     now,
-                    node.wake,
+                    self.wake,
                 );
-                vec![Transition {
-                    state: Local::Node(next),
-                    send,
-                }]
+                vec![(next, send)]
             }
-            (
-                Pid::Node(_),
-                Local::Node(node),
-                Incoming::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Stop,
-                },
-            ) => {
-                let (next, send) =
-                    apply_event(node, LogicEvent::Stop { clock: now }, now, node.wake);
-                vec![Transition {
-                    state: Local::Node(next),
-                    send,
-                }]
+            ProcessEvent::Receive { sender: Pid::Outside, message: Message::Stop } => {
+                let (next, send) = apply_event(self, LogicEvent::Stop { clock: now }, now, self.wake);
+                vec![(next, send)]
             }
-            (
-                Pid::Store,
-                Local::Store(store),
-                Incoming::Receive {
-                    sender,
-                    message: Message::StoreReq { op, call },
-                },
-            ) => {
-                let (next, outcome) = store.apply(call);
-                vec![Transition {
-                    state: Local::Store(next),
-                    send: vec![(*sender, Message::StoreReply { op: *op, outcome })],
-                }]
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl Process<(), Pid, Message> for Store {
+    fn on_event(
+        &self,
+        _config: &(),
+        _now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<(Self, Vec<(Pid, Message)>)> {
+        match event {
+            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+                let (next, outcome) = self.apply(call);
+                vec![(next, vec![(*sender, Message::StoreReply { op: *op, outcome })])]
             }
             _ => Vec::new(),
         }
