@@ -16969,7 +16969,7 @@ theorem boundary_refinement_of_stepSimulation
       abstractLegal⟩,
     abstractTrace.trans htrace⟩
 
-theorem boundary_refinement_proof
+theorem refinement_proof
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config} (events : List Resonate.BoundaryEvent) :
     Concrete.ValidBoundaryTrace nodes appConfig config events →
