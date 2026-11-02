@@ -31,20 +31,21 @@ pub type Trace = Vec<Event<Request, Response, Dispatch>>;
 
 /// The trace, from what the run recorded.
 pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
-    // (instant, rank, event): at one instant, returns and receives before
-    // invokes, so a call never returns before it is invoked in the trace
-    // order and a message is received where the clock had already reached.
-    // The clock moves to the instants the nodes stamp at: a request's
-    // `debug_time`, its invoke, and the nodes' own steps (`marks`). A return
+    // (instant, rank, event): at one instant, the invoke, then a receive,
+    // then the return. A step that does not sleep stamps the message it
+    // sends with the same instant as the invoke, and the model can only
+    // explain that message once the call is invoked. A return still comes
+    // last, so a call is never answered before it is invoked. The clock
+    // moves on the invoke (and on the nodes' own steps, `marks`). A return
     // or a receive moves it nowhere: nothing is stamped at those instants,
     // and every instant the clock visits while a call is open is one more
     // place the model may land its effect.
     let mut items: Vec<(u64, u8, u64, Event<Request, Response, Dispatch>)> = Vec::new();
     for e in entries {
-        items.push((e.now, 2, e.id, Event::Invoke { call: e.id, req: e.req.clone() }));
+        items.push((e.now, 0, e.id, Event::Invoke { call: e.id, req: e.req.clone() }));
         if let Some((status, data)) = &e.outcome {
             let (kind, _) = encode(&e.req, WORKER);
-            items.push((e.ret.max(e.now), 3, e.id, Event::Return { call: e.id, res: decode(kind, *status, data) }));
+            items.push((e.ret.max(e.now), 2, e.id, Event::Return { call: e.id, res: decode(kind, *status, data) }));
         }
     }
     for (i, s) in sent.iter().enumerate() {
@@ -65,7 +66,7 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
             }
             mi += 1;
         }
-        if rank == 2 && clock.is_none_or(|c| t > c) {
+        if rank == 0 && clock.is_none_or(|c| t > c) {
             out.push(Event::Clock { at: t });
             clock = Some(t);
         }
@@ -144,4 +145,44 @@ pub fn show(trace: &Trace, upto: usize) -> String {
         out.push_str(&format!("{i:>5}  {line}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trace;
+    use crate::bus::Sent;
+    use crate::history::Entry;
+    use accordant::Event;
+    use resonate::{Dispatch, Request};
+
+    fn call(id: u64, at: u64) -> Entry {
+        Entry {
+            id,
+            client: "client".into(),
+            req: Request::GetPromise("o2:3".into()),
+            now: at,
+            invoke: at,
+            ret: at,
+            outcome: Some((404, serde_json::Value::Null)),
+            attempts: 1,
+        }
+    }
+
+    #[test]
+    fn a_message_follows_the_invoke_that_shares_its_instant() {
+        let at = 1_700_000_004_918;
+        let sent = Sent {
+            at,
+            address: "sim://worker".into(),
+            kind: "execute".into(),
+            id: "o2:3".into(),
+            msg: Dispatch::Execute { id: "o2:3".into(), version: 0 },
+        };
+        let events = trace(&[call(214, at)], &[], &[sent]);
+        let clock = events.iter().position(|e| matches!(e, Event::Clock { at: t } if *t == at)).unwrap();
+        let invoke = events.iter().position(|e| matches!(e, Event::Invoke { call: 214, .. })).unwrap();
+        let recv = events.iter().position(|e| matches!(e, Event::Receive { .. })).unwrap();
+        let ret = events.iter().position(|e| matches!(e, Event::Return { call: 214, .. })).unwrap();
+        assert!(clock < invoke && invoke < recv && recv < ret);
+    }
 }
