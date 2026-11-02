@@ -14,7 +14,7 @@ use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use resonate_core::ResonateServer;
 use serde::Serialize;
 
-use resonate::types::{PromiseGetReq, Request, ScheduleGetReq, TaskGetReq};
+use echod_abstract::types::{PromiseGetReq, Request, ScheduleGetReq, TaskGetReq};
 
 use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};

@@ -14,7 +14,7 @@ use echod_logic::verified::PromiseState;
 use echod::env::Clock;
 use echod::store::{MemoryStore, Store};
 use echod_logic::keys::{origin_of, KeySpace};
-use resonate::Dispatch;
+use echod_abstract::Dispatch;
 use resonate_core::types::Message;
 use resonate_core::{ResonateRouter, Unavailable};
 

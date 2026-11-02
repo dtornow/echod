@@ -22,6 +22,7 @@ pub mod protocol;
 pub mod properties;
 pub mod spec;
 
+pub use abstract_model::Model;
 pub use collections::{PMap, PSet};
 pub use echod_types as types;
 pub use exec::*;

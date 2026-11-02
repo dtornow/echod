@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use resonate::types as rows;
-use resonate::{PMap, PSet, Promise, Server as Model, Task};
+use echod_abstract::types as rows;
+use echod_abstract::{PMap, PSet, Promise, Server as Model, Task};
 use serde_json::{json, Value};
 
 fn tags_out(t: &rows::Tags) -> Value {

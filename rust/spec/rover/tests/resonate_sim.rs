@@ -9,8 +9,8 @@
 //! * a clock move broadcast to partitions that no factor held yet.
 
 use echod_rover::{certify, drive, Checker, Choices, Config, Drive, Event};
-use resonate::types::{Request, Response};
-use resonate::*;
+use echod_abstract::types::{Request, Response};
+use echod_abstract::*;
 
 /// A run of the spec, driven at random and recorded.
 fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> {

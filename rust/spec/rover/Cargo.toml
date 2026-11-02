@@ -10,7 +10,7 @@ imbl = "7.0.2"
 vstd = "=0.0.0-2026-10-11-0230"
 
 [dev-dependencies]
-resonate = { package = "echod-abstract", path = "../abstract" }
+echod-abstract = { path = "../abstract" }
 
 [package.metadata.verus]
 verify = true

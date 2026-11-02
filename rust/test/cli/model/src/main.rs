@@ -1,7 +1,7 @@
 //! echod-model: echod driven by the Resonate model,
 //! over HTTP, and every trace checked against that model.
 //!
-//! The model (`resonate`, the Rover abstract model) is an executable
+//! The model (`echod_abstract`, the Rover abstract model) is an executable
 //! specification in Verus of the Resonate protocol as the Lean specification
 //! has it: what every request does, what runs on its own (a deadline, a lease,
 //! a resume, a redispatch, a schedule's occurrence), what the server sends.
@@ -43,8 +43,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use echod_rover::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
-use resonate::types::{PromiseRegisterListenerReq, Request, Response, TaskFenceAction};
-use resonate::{Dispatch, Resonate, Server as Model, MARKS};
+use echod_abstract::types::{PromiseRegisterListenerReq, Request, Response, TaskFenceAction};
+use echod_abstract::{Dispatch, Resonate, Server as Model, MARKS};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};

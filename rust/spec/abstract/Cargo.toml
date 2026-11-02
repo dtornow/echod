@@ -6,7 +6,7 @@ edition.workspace = true
 license = "MIT"
 
 [lib]
-name = "resonate"
+name = "echod_abstract"
 path = "src/lib.rs"
 
 [dependencies]

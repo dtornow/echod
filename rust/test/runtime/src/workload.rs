@@ -1,14 +1,14 @@
 //! The requests a run issues, and how they are generated.
 //!
 //! Every request kind the server serves, as the model types it
-//! (`resonate::Request`), over a small space of ids so that operations
+//! (`echod_abstract::Request`), over a small space of ids so that operations
 //! collide: a few origins, a few promises per origin, one child each.
 //! Versions and pids are drawn from what the client has seen, so that fenced
 //! operations sometimes carry the right version and sometimes not.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use resonate::types::{
+use echod_abstract::types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq, PromiseSettleReq, PromiseState, Request, ScheduleCreateReq, ScheduleDeleteReq, ScheduleGetReq, Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction, TaskFenceReq, TaskFulfillReq, TaskGetReq, TaskHaltReq, TaskHeartbeatReq, TaskRef, TaskReleaseReq, TaskSuspendReq, Value,
 };
 use serde_json::Value as Json;

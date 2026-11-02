@@ -8,8 +8,8 @@ mod certified;
 
 use certified::Certified;
 use echod_rover::{CallId, Checker, Config, Engine, Event, Grouped, Keyed, Time};
-use resonate::types::*;
-use resonate::*;
+use echod_abstract::types::*;
+use echod_abstract::*;
 
 /// Checked twice: with partitions, and in one factor with certificates, which
 /// must back everything it accepts.

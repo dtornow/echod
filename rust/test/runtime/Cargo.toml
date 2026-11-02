@@ -20,4 +20,4 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
 tracing = "0.1"
 echod-rover = { path = "../../spec/rover" }
-resonate = { package = "echod-abstract", path = "../../spec/abstract" }
+echod-abstract = { path = "../../spec/abstract" }

@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 echod-types = { path = "../../comm/types" }
 echod-rover = { path = "../rover" }
-resonate = { package = "echod-abstract", path = "../abstract" }
+echod-abstract = { path = "../abstract" }
 serde = { version = "1", features = ["derive"] }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
