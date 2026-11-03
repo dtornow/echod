@@ -7,20 +7,47 @@ import «abstract».Model
 
 The abstract handlers run on the whole store and address objects by id. The
 concrete decisions run on one document and address objects by suffix.
-`Sim key R abstract concrete` says that running `abstract` on any store gives
-what running `concrete` on that store's document `key` gives, with the result
-document written back: the results are related by `R`, every document view of
-the two stores agrees, and the emitted messages are equal.
+`Sim key R abstract concrete` says that running `abstract` on a store with
+unique ids gives what running `concrete` gives on any document with the same
+entries as that store's document `key`, with the result document written back:
+the results are related by `R`, every document view of the two stores has the
+same entries, the emitted messages are equal, and ids stay unique.
+
+Rows of an origin document are compared as a multiset: both sides look rows
+up by suffix, so their order carries no meaning.
 -/
 
 namespace Resonate.Refinement
 
 open ServerModel
 
-/-- Two stores whose document views all agree. -/
-def Same (a b : Store) : Prop := ∀ key, a.read key = b.read key
+/-- Two documents with the same entries. -/
+def DocEquiv : (key : DocumentKey) → Document key → Document key → Prop
+  | .origin _, a, b => List.Perm a b
+  | .schedule _, a, b => a = b
 
-theorem Same.refl (a : Store) : Same a a := fun _ => rfl
+theorem DocEquiv.refl : (key : DocumentKey) → (document : Document key) →
+    DocEquiv key document document
+  | .origin _, document => List.Perm.refl document
+  | .schedule _, _ => rfl
+
+theorem DocEquiv.of_eq {key : DocumentKey} {a b : Document key} (h : a = b) :
+    DocEquiv key a b := h ▸ DocEquiv.refl key a
+
+theorem DocEquiv.symm : {key : DocumentKey} → {a b : Document key} →
+    DocEquiv key a b → DocEquiv key b a
+  | .origin _, _, _, h => List.Perm.symm h
+  | .schedule _, _, _, h => Eq.symm h
+
+theorem DocEquiv.trans : {key : DocumentKey} → {a b c : Document key} →
+    DocEquiv key a b → DocEquiv key b c → DocEquiv key a c
+  | .origin _, _, _, _, h₁, h₂ => List.Perm.trans h₁ h₂
+  | .schedule _, _, _, _, h₁, h₂ => Eq.trans h₁ h₂
+
+/-- Two stores whose document views have the same entries. -/
+def Same (a b : Store) : Prop := ∀ key, DocEquiv key (a.read key) (b.read key)
+
+theorem Same.refl (a : Store) : Same a a := fun key => DocEquiv.refl key _
 
 theorem Same.symm {a b : Store} (h : Same a b) : Same b a :=
   fun key => (h key).symm
@@ -33,16 +60,35 @@ theorem Same.write {a b : Store} (h : Same a b) (key : DocumentKey)
   intro other
   by_cases hother : other = key
   · subst other
-    simp
-  · simp [Store.read_write_other _ _ _ _ hother, h other]
+    simp only [Store.read_write_same]
+    exact DocEquiv.refl _ _
+  · simp only [Store.read_write_other _ _ _ _ hother]
+    exact h other
+
+theorem Same.write_equiv (store : Store) {key : DocumentKey} {a b : Document key}
+    (h : DocEquiv key a b) : Same (store.write key a) (store.write key b) := by
+  intro other
+  by_cases hother : other = key
+  · subst other
+    simp only [Store.read_write_same]
+    exact h
+  · simp only [Store.read_write_other _ _ _ _ hother]
+    exact DocEquiv.refl _ _
 
 theorem Store.read_write_read (store : Store) (key : DocumentKey) :
     Same (store.write key (store.read key)) store := by
   intro other
   by_cases hother : other = key
   · subst other
-    simp
-  · simp [Store.read_write_other _ _ _ _ hother]
+    simp only [Store.read_write_same]
+    exact DocEquiv.refl _ _
+  · simp only [Store.read_write_other _ _ _ _ hother]
+    exact DocEquiv.refl _ _
+
+theorem Same.write_of {store : Store} {key : DocumentKey} {document : Document key}
+    (h : DocEquiv key (store.read key) document) :
+    Same store (store.write key document) :=
+  (Store.read_write_read store key).symm.trans (Same.write_equiv store h)
 
 theorem Store.write_write_same (store : Store) (key : DocumentKey)
     (first second : Document key) :
@@ -50,43 +96,65 @@ theorem Store.write_write_same (store : Store) (key : DocumentKey)
   intro other
   by_cases hother : other = key
   · subst other
-    simp
-  · simp [Store.read_write_other _ _ _ _ hother]
+    simp only [Store.read_write_same]
+    exact DocEquiv.refl _ _
+  · simp only [Store.read_write_other _ _ _ _ hother]
+    exact DocEquiv.refl _ _
+
+theorem Same.read_of_write {a store : Store} {key : DocumentKey}
+    {document : Document key} (h : Same a (store.write key document)) :
+    DocEquiv key (a.read key) document := by
+  have := h key
+  simp only [Store.read_write_same] at this
+  exact this
+
+/-- Every object of the store has its own id. -/
+def _root_.Resonate.Store.Unique (store : Store) : Prop := (store.objects.map (·.id)).Nodup
+
+theorem _root_.Resonate.Store.Unique.setObject {store : Store} (h : store.Unique) (object : Object) :
+    (store.setObject object).Unique := by
+  simp only [Store.Unique, Store.setObject, List.map_cons, List.nodup_cons]
+  refine ⟨?_, h.sublist (List.filter_sublist.map _)⟩
+  simp only [List.mem_map, List.mem_filter, not_exists, not_and]
+  intro other hmem hid
+  simp [hid] at hmem
+
+theorem _root_.Resonate.Store.Unique.schedules {a b : Store} (h : b.Unique)
+    (hobjects : a.objects = b.objects) : a.Unique := by
+  simp only [Store.Unique, hobjects]
+  exact h
 
 def Sim (key : DocumentKey) (R : α → β → Prop)
     (abstract : Abstract.Handler α) (concrete : DocumentHandler key β) : Prop :=
-  ∀ env store,
-    R (abstract env store).1 (concrete env (store.read key)).1 ∧
-    Same (abstract env store).2.1
-      (store.write key (concrete env (store.read key)).2.1) ∧
-    (abstract env store).2.2 = (concrete env (store.read key)).2.2
+  ∀ env store document, store.Unique → DocEquiv key (store.read key) document →
+    R (abstract env store).1 (concrete env document).1 ∧
+    Same (abstract env store).2.1 (store.write key (concrete env document).2.1) ∧
+    (abstract env store).2.2 = (concrete env document).2.2 ∧
+    (abstract env store).2.1.Unique
 
 theorem Sim.pure {key : DocumentKey} {R : α → β → Prop} {a : α} {b : β}
     (h : R a b) :
     Sim key R (Pure.pure a : Abstract.Handler α)
       (Pure.pure b : DocumentHandler key β) := by
-  intro env store
-  exact ⟨h, Same.symm (Store.read_write_read store key), rfl⟩
+  intro env store document hunique hdoc
+  exact ⟨h, Same.write_of hdoc, rfl, hunique⟩
 
 theorem Sim.bind {key : DocumentKey} {R : α → β → Prop} {S : γ → δ → Prop}
     {ma : Abstract.Handler α} {mc : DocumentHandler key β}
     {fa : α → Abstract.Handler γ} {fc : β → DocumentHandler key δ}
     (hm : Sim key R ma mc) (hf : ∀ a c, R a c → Sim key S (fa a) (fc c)) :
     Sim key S (ma >>= fa) (mc >>= fc) := by
-  intro env store
-  obtain ⟨hr, hsame, hemit⟩ := hm env store
-  have hread : (ma env store).2.1.read key = (mc env (store.read key)).2.1 := by
-    rw [hsame key]
-    simp
-  obtain ⟨hr', hsame', hemit'⟩ :=
-    hf _ _ hr env (ma env store).2.1
-  rw [hread] at hr' hsame' hemit'
-  refine ⟨hr', ?_, ?_⟩
+  intro env store document hunique hdoc
+  obtain ⟨hr, hsame, hemit, hunique'⟩ := hm env store document hunique hdoc
+  obtain ⟨hr', hsame', hemit', hunique''⟩ :=
+    hf _ _ hr env (ma env store).2.1 (mc env document).2.1 hunique'
+      (Same.read_of_write hsame)
+  refine ⟨hr', ?_, ?_, hunique''⟩
   · exact Same.trans hsame'
       ((Same.write hsame key _).trans (Store.write_write_same store key _ _))
   · show (ma env store).2.2 ++ (fa (ma env store).1 env (ma env store).2.1).2.2 =
-      (mc env (store.read key)).2.2 ++
-        (fc (mc env (store.read key)).1 env (mc env (store.read key)).2.1).2.2
+      (mc env document).2.2 ++
+        (fc (mc env document).1 env (mc env document).2.1).2.2
     rw [hemit, hemit']
 
 theorem Sim.map {key : DocumentKey} {R : α → β → Prop}
@@ -94,11 +162,12 @@ theorem Sim.map {key : DocumentKey} {R : α → β → Prop}
     {fa : α → γ} {fc : β → γ}
     (hm : Sim key R ma mc) (hf : ∀ a c, R a c → fa a = fc c) :
     Sim key Eq (fa <$> ma) (fc <$> mc) := by
-  intro env store
-  obtain ⟨hr, hsame, hemit⟩ := hm env store
-  refine ⟨hf _ _ hr, ?_, ?_⟩
+  intro env store document hunique hdoc
+  obtain ⟨hr, hsame, hemit, hunique'⟩ := hm env store document hunique hdoc
+  refine ⟨hf _ _ hr, ?_, ?_, ?_⟩
   · simpa [Functor.map] using hsame
   · simpa [Functor.map] using hemit
+  · simpa [Functor.map] using hunique'
 
 
 /-! ## Object lookups through an origin document -/
@@ -164,6 +233,127 @@ theorem getObject_eq_read (store : Store) (id : Ident) :
   simp only [Store.getObject, Store.read, Store.originRows]
   exact (find?_originRows store.objects id).symm
 
+/-- The rows of an origin document have distinct suffixes. -/
+abbrev RowsUnique {origin : String} (document : OriginDocument origin) : Prop :=
+  (document.map (·.suffix)).Nodup
+
+theorem rows_unique (origin : String) :
+    ∀ objects : List Object, (objects.map (·.id)).Nodup →
+      RowsUnique (objects.filterMap (Object.toOriginRow? origin))
+  | [], _ => List.nodup_nil
+  | object :: rest, h => by
+      rw [List.map_cons, List.nodup_cons] at h
+      obtain ⟨hnot, hrest⟩ := h
+      have ih := rows_unique origin rest hrest
+      by_cases horigin : object.id.origin = origin
+      · have hrow : Object.toOriginRow? origin object =
+            some { suffix := object.id.suffix, promise := object.promise,
+                   task := object.task } := by
+          simp [Object.toOriginRow?, horigin]
+        simp only [List.filterMap_cons, hrow, RowsUnique, List.map_cons, List.nodup_cons]
+        refine ⟨?_, ih⟩
+        intro hmem
+        apply hnot
+        simp only [List.mem_map, List.mem_filterMap] at hmem
+        obtain ⟨row, ⟨other, hother, hotherRow⟩, hsuffix⟩ := hmem
+        refine List.mem_map.mpr ⟨other, hother, ?_⟩
+        unfold Object.toOriginRow? at hotherRow
+        split at hotherRow
+        · rename_i hotherOrigin
+          cases hotherRow
+          cases hid : object.id
+          cases hotherId : other.id
+          simp_all
+        · contradiction
+      · rw [List.filterMap_cons, toOriginRow?_eq_none horigin]
+        exact ih
+
+theorem _root_.Resonate.Store.Unique.rows {store : Store} (h : store.Unique) (origin : String) :
+    RowsUnique (store.read (.origin origin)) :=
+  rows_unique origin store.objects h
+
+theorem find?_suffix_iff {origin : String} {document : OriginDocument origin}
+    (hunique : RowsUnique document) {suffix : String} {row : OriginObject origin} :
+    document.find? (·.suffix == suffix) = some row ↔
+      row ∈ document ∧ row.suffix = suffix := by
+  constructor
+  · intro h
+    exact ⟨List.mem_of_find?_eq_some h, by simpa using List.find?_some h⟩
+  · rintro ⟨hmem, hsuffix⟩
+    cases hfind : document.find? (·.suffix == suffix) with
+    | none =>
+        have := List.find?_eq_none.mp hfind row hmem
+        simp [hsuffix] at this
+    | some other =>
+        have hother := List.mem_of_find?_eq_some hfind
+        have hotherSuffix : other.suffix = suffix := by simpa using List.find?_some hfind
+        exact congrArg some
+          (inj_of_nodup_map hunique hother hmem (hotherSuffix.trans hsuffix.symm))
+where
+  inj_of_nodup_map {α β : Type} {f : α → β} :
+      ∀ {l : List α}, (l.map f).Nodup → ∀ {x y : α}, x ∈ l → y ∈ l → f x = f y → x = y
+    | [], _, _, _, hx, _, _ => by cases hx
+    | z :: rest, h, x, y, hx, hy, hxy => by
+        rw [List.map_cons, List.nodup_cons] at h
+        obtain ⟨hz, hrest⟩ := h
+        rcases List.mem_cons.mp hx with hxz | hx'
+        · rcases List.mem_cons.mp hy with hyz | hy'
+          · rw [hxz, hyz]
+          · subst hxz
+            exact (hz (by rw [hxy]; exact List.mem_map_of_mem hy')).elim
+        · rcases List.mem_cons.mp hy with hyz | hy'
+          · subst hyz
+            exact (hz (by rw [← hxy]; exact List.mem_map_of_mem hx')).elim
+          · exact inj_of_nodup_map hrest hx' hy' hxy
+
+/-- Looking up a suffix gives the same row in documents with the same
+entries. -/
+theorem find?_perm {origin : String} {a b : OriginDocument origin}
+    (hunique : RowsUnique a) (hperm : List.Perm a b) (suffix : String) :
+    a.find? (·.suffix == suffix) = b.find? (·.suffix == suffix) := by
+  have hunique' : RowsUnique b := ((hperm.map _).nodup_iff).mp hunique
+  cases ha : a.find? (·.suffix == suffix) with
+  | none =>
+      symm
+      rw [List.find?_eq_none] at ha ⊢
+      exact fun x hx => ha x (hperm.mem_iff.mpr hx)
+  | some row =>
+      symm
+      obtain ⟨hmem, hsuffix⟩ := (find?_suffix_iff hunique).mp ha
+      exact (find?_suffix_iff hunique').mpr ⟨hperm.mem_iff.mp hmem, hsuffix⟩
+
+/-- A document is its row with suffix `row.suffix` in front of the others. -/
+theorem perm_cons_filter {origin : String} :
+    ∀ {document : OriginDocument origin}, RowsUnique document →
+      ∀ {row : OriginObject origin}, row ∈ document →
+        List.Perm document (row :: document.filter (·.suffix != row.suffix))
+  | [], _, _, hrow => by cases hrow
+  | first :: rest, hunique, row, hrow => by
+      have hunique' := hunique
+      simp only [RowsUnique, List.map_cons, List.nodup_cons] at hunique'
+      obtain ⟨hfirst, hrest⟩ := hunique'
+      by_cases hsuffix : first.suffix = row.suffix
+      · have hrowFirst : row = first := by
+          rcases List.mem_cons.mp hrow with h | h
+          · exact h
+          · exact (hfirst (by rw [hsuffix]; exact List.mem_map_of_mem h)).elim
+        subst hrowFirst
+        have hkeep : rest.filter (·.suffix != row.suffix) = rest := by
+          rw [List.filter_eq_self]
+          intro other hother
+          have : other.suffix ≠ row.suffix :=
+            fun h => hfirst (by rw [← h]; exact List.mem_map_of_mem hother)
+          simpa using this
+        simp only [List.filter_cons, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, hkeep]
+        exact List.Perm.refl _
+      · have hrowRest : row ∈ rest := by
+          rcases List.mem_cons.mp hrow with h | h
+          · exact (hsuffix (by rw [h])).elim
+          · exact h
+        have hne : (first.suffix != row.suffix) = true := by simpa using hsuffix
+        simp only [List.filter_cons, hne, ↓reduceIte]
+        exact ((perm_cons_filter hrest hrowRest).cons first).trans (List.Perm.swap _ _ _)
+
 /-- An abstract object read corresponds to the concrete row read, and the
 row found has the requested suffix. -/
 def ObjRel (origin suffix : String) (a : Option Object)
@@ -189,20 +379,28 @@ theorem find?_suffix {origin suffix : String} {document : OriginDocument origin}
     (h : document.find? (·.suffix == suffix) = some row) : row.suffix = suffix := by
   simpa using List.find?_some h
 
+/-- The abstract lookup of `id` is the concrete lookup of its suffix in any
+document with the same entries. -/
+theorem getObject_eq_document {store : Store} {id : Ident}
+    {document : OriginDocument id.origin} (hunique : store.Unique)
+    (hdoc : DocEquiv (.origin id.origin) (store.read (.origin id.origin)) document) :
+    store.getObject id =
+      (document.find? (·.suffix == id.suffix)).map Object.ofOrigin := by
+  rw [getObject_eq_read, find?_perm (hunique.rows _) hdoc]
+
 theorem getObject_sim (id : Ident) :
     Sim (.origin id.origin) (ObjRel id.origin id.suffix) (Abstract.getObject id)
       (Concrete.Decision.getObject id.suffix) := by
-  intro env store
-  refine ⟨?_, Same.symm (Store.read_write_read store _), rfl⟩
+  intro env store document hunique hdoc
+  refine ⟨?_, Same.write_of hdoc, rfl, hunique⟩
   refine ⟨?_, fun row h => find?_suffix h⟩
-  simp [Abstract.getObject, Concrete.Decision.getObject,
-    getObject_eq_read, bind, Concrete.Decision.get, documentGet, pure]
-
+  simp only [Abstract.getObject, Concrete.Decision.getObject, bind, documentGet, pure]
+  exact getObject_eq_document hunique hdoc
 
 theorem same_write_origin {a store : Store} {origin : String}
     {document : OriginDocument origin}
     (hschedules : a.schedules = store.schedules)
-    (hsame : a.read (.origin origin) = document)
+    (hsame : List.Perm (a.read (.origin origin)) document)
     (hother : ∀ other, other ≠ origin →
       a.read (.origin other) = store.read (.origin other)) :
     Same a (store.write (.origin origin) document) := by
@@ -211,11 +409,13 @@ theorem same_write_origin {a store : Store} {origin : String}
   | origin other =>
       by_cases h : other = origin
       · subst other
-        rw [hsame]
-        simp
+        rw [Store.read_write_same]
+        exact hsame
       · rw [hother other h, Store.read_write_other]
-        simpa using h
+        · exact DocEquiv.refl _ _
+        · simpa using h
   | schedule id =>
+      apply DocEquiv.of_eq
       simp only [Store.read, Store.write, Store.scheduleAt, hschedules]
 
 theorem filterMap_filter_id_same (objects : List Object) (id : Ident) :
@@ -262,153 +462,114 @@ theorem read_origin (store : Store) (origin : String) :
     store.read (.origin origin) =
       store.objects.filterMap (Object.toOriginRow? origin) := rfl
 
-theorem toOriginRow?_mk (id : Ident) (promise : PromiseObject)
-    (task : Option TaskObject) :
-    Object.toOriginRow? id.origin { id, promise, task } =
-      some { suffix := id.suffix, promise, task } := by
-  simp [Object.toOriginRow?]
-
-theorem toOriginRow?_mk_other (id : Ident) (promise : PromiseObject)
-    (task : Option TaskObject) {other : String} (h : other ≠ id.origin) :
-    Object.toOriginRow? other { id, promise, task } = none :=
-  toOriginRow?_eq_none (Ne.symm h)
-
-/-- What the abstract store does to an origin document when it upserts
+/-- What the abstract store does to an origin document when it writes
 `object` at its id. -/
-theorem read_upsert_same (store : Store) (object : Object) (id : Ident)
-    (hid : object.id = id) :
-    Store.read { store with objects := object :: store.objects.filter (·.id != id) }
-        (.origin id.origin) =
-      (Object.toOriginRow? id.origin object).toList ++
-        (store.read (.origin id.origin)).filter (·.suffix != id.suffix) := by
-  rw [read_mk_origin, List.filterMap_cons, filterMap_filter_id_same, read_origin]
-  cases Object.toOriginRow? id.origin object <;> rfl
+theorem read_setObject_same (store : Store) (object : Object) :
+    (store.setObject object).read (.origin object.id.origin) =
+      { suffix := object.id.suffix, promise := object.promise, task := object.task } ::
+        (store.read (.origin object.id.origin)).filter (·.suffix != object.id.suffix) := by
+  rw [Store.setObject, read_mk_origin, List.filterMap_cons, filterMap_filter_id_same,
+    read_origin, toOriginRow?_eq_some]
 
-theorem read_upsert_other (store : Store) (object : Object) (id : Ident)
-    (hid : object.id = id) {other : String} (h : other ≠ id.origin) :
-    Store.read { store with objects := object :: store.objects.filter (·.id != id) }
-        (.origin other) = store.read (.origin other) := by
-  subst hid
-  rw [read_mk_origin, List.filterMap_cons, filterMap_filter_id_other _ _ h,
+theorem read_setObject_other (store : Store) (object : Object) {other : String}
+    (h : other ≠ object.id.origin) :
+    (store.setObject object).read (.origin other) = store.read (.origin other) := by
+  rw [Store.setObject, read_mk_origin, List.filterMap_cons, filterMap_filter_id_other _ _ h,
     toOriginRow?_eq_none (Ne.symm h), read_origin]
+
+/-- Writing `object` matches putting its row in front of the document rows
+with other suffixes. -/
+theorem setObject_same {store : Store} (object : Object)
+    {document : OriginDocument object.id.origin}
+    (hdoc : DocEquiv (.origin object.id.origin)
+      (store.read (.origin object.id.origin)) document) :
+    Same (store.setObject object)
+      (store.write (.origin object.id.origin)
+        ({ suffix := object.id.suffix, promise := object.promise, task := object.task } ::
+          document.filter (·.suffix != object.id.suffix))) := by
+  refine same_write_origin rfl ?_ (fun other h => read_setObject_other store object h)
+  rw [read_setObject_same]
+  exact (List.Perm.filter _ hdoc).cons _
 
 theorem setPromise_sim (id : Ident) (promise : PromiseObject) :
     Sim (.origin id.origin) Eq (Abstract.setPromise id promise)
       (Concrete.Decision.setPromise id.suffix promise) := by
-  intro env store
-  refine ⟨rfl, ?_, rfl⟩
+  intro env store document hunique hdoc
+  have hget := getObject_eq_document hunique hdoc
+  refine ⟨rfl, ?_, rfl, hunique.setObject _⟩
   simp only [Abstract.setPromise, Concrete.Decision.setPromise,
-    Concrete.Decision.modify, documentModify]
-  have hget := getObject_eq_read store id
-  cases hfind : (store.read (.origin id.origin)).find? (·.suffix == id.suffix) with
+    Concrete.Decision.modify, documentModify, Store.setPromise, hget]
+  cases hfind : document.find? (·.suffix == id.suffix) with
   | none =>
-      rw [hfind] at hget
-      simp only [Option.map_none] at hget
-      simp only [Store.setPromise, Store.setObject, hget]
-      refine same_write_origin rfl ?_ ?_
-      · rw [read_upsert_same _ _ _ rfl]
-        simp [toOriginRow?_mk]
-      · intro other hother
-        exact read_upsert_other store _ _ rfl hother
+      simp only [Option.map_none]
+      exact setObject_same { id, promise } hdoc
   | some existing =>
-      rw [hfind] at hget
-      simp only [Option.map_some] at hget
-      have hsuffix : existing.suffix = id.suffix := by
-        simpa using List.find?_some hfind
-      have hid : (Object.ofOrigin existing).id = id := by
-        cases id
-        simp [Object.ofOrigin, hsuffix]
-      simp only [Store.setPromise, Store.setObject, hget, hid]
-      refine same_write_origin rfl ?_ ?_
-      · exact (read_upsert_same store
-          { id, promise, task := existing.task } id rfl).trans
-          (by simp [Object.toOriginRow?, hsuffix])
-      · intro other hother
-        exact read_upsert_other store
-          { id, promise, task := (Object.ofOrigin existing).task } id rfl hother
+      have hsuffix := find?_suffix hfind
+      simp only [Option.map_some]
+      rw [← hsuffix]
+      exact setObject_same { Object.ofOrigin existing with promise } hdoc
 
 theorem setObject_sim {origin : String} (row : OriginObject origin) :
     Sim (.origin origin) Eq (Abstract.setObject (Object.ofOrigin row))
       (Concrete.Decision.setObject row) := by
-  intro env store
-  refine ⟨rfl, ?_, rfl⟩
+  intro env store document hunique hdoc
+  refine ⟨rfl, ?_, rfl, hunique.setObject _⟩
   simp only [Abstract.setObject, Concrete.Decision.setObject,
-    Concrete.Decision.modify, documentModify, Store.setObject]
-  have hid : (Object.ofOrigin row).id = { origin, suffix := row.suffix } := rfl
-  refine same_write_origin (origin := origin) rfl ?_ ?_
-  · exact (read_upsert_same store (Object.ofOrigin row) _ hid).trans
-      (by rw [Object.toOriginRow?_ofOrigin]; rfl)
-  · intro other hother
-    exact read_upsert_other store (Object.ofOrigin row) _ hid hother
-
-theorem filterMap_setTask_same (objects : List Object) (id : Ident)
-    (task : TaskObject) :
-    (objects.map fun object =>
-        if object.id == id then { object with task := some task } else object).filterMap
-        (Object.toOriginRow? id.origin) =
-      (objects.filterMap (Object.toOriginRow? id.origin)).map fun object =>
-        if object.suffix == id.suffix then { object with task := some task } else object := by
-  induction objects with
-  | nil => rfl
-  | cons object rest ih =>
-      simp only [List.map_cons, List.filterMap_cons]
-      by_cases horigin : object.id.origin = id.origin
-      · have hrow : Object.toOriginRow? id.origin object =
-            some { suffix := object.id.suffix, promise := object.promise,
-                   task := object.task } := by
-          simp [Object.toOriginRow?, horigin]
-        rw [hrow]
-        by_cases hsuffix : object.id.suffix = id.suffix
-        · have hid : object.id = id := by
-            cases hobj : object.id; cases id
-            simp_all
-          have hq : (object.id == id) = true := by simp [hid]
-          have hp : (object.id.suffix == id.suffix) = true := by simp [hsuffix]
-          simp only [hq, hp, ite_true, List.map_cons]
-          rw [ih]
-          simp [Object.toOriginRow?, horigin]
-        · have hid : ¬ object.id = id := fun h => hsuffix (by rw [h])
-          have hq : (object.id == id) = false := by simp [hid]
-          have hp : (object.id.suffix == id.suffix) = false := by simp [hsuffix]
-          simp only [hq, hp, hrow, Bool.false_eq_true, ↓reduceIte, List.map_cons]
-          rw [ih]
-      · have hid : ¬ object.id = id := fun h => horigin (by rw [h])
-        have hq : (object.id == id) = false := by simp [hid]
-        simp only [hq, Bool.false_eq_true, ↓reduceIte, toOriginRow?_eq_none horigin]
-        exact ih
-
-theorem filterMap_setTask_other (objects : List Object) (id : Ident)
-    (task : TaskObject) {other : String} (h : other ≠ id.origin) :
-    (objects.map fun object =>
-        if object.id == id then { object with task := some task } else object).filterMap
-        (Object.toOriginRow? other) =
-      objects.filterMap (Object.toOriginRow? other) := by
-  induction objects with
-  | nil => rfl
-  | cons object rest ih =>
-      simp only [List.map_cons, List.filterMap_cons]
-      by_cases hid : object.id = id
-      · have horigin : object.id.origin ≠ other := by rw [hid]; exact Ne.symm h
-        have hq : (object.id == id) = true := by simp [hid]
-        have hnone : Object.toOriginRow? other
-            { object with task := some task } = none := toOriginRow?_eq_none horigin
-        simp only [hq, ite_true, hnone, toOriginRow?_eq_none horigin]
-        exact ih
-      · have hq : (object.id == id) = false := by simp [hid]
-        simp only [hq, Bool.false_eq_true, ↓reduceIte]
-        rw [ih]
+    Concrete.Decision.modify, documentModify]
+  exact setObject_same (Object.ofOrigin row) hdoc
 
 theorem setTask_sim (id : Ident) (task : TaskObject) :
     Sim (.origin id.origin) Eq (Abstract.setTask id task)
       (Concrete.Decision.setTask id.suffix task) := by
-  intro env store
-  refine ⟨rfl, ?_, rfl⟩
-  simp only [Abstract.setTask, Concrete.Decision.setTask,
-    Concrete.Decision.modify, documentModify, Store.setTask]
-  refine same_write_origin rfl ?_ ?_
-  · exact filterMap_setTask_same store.objects id task
-  · intro other hother
-    exact filterMap_setTask_other store.objects id task hother
+  intro env store document hunique hdoc
+  have hget := getObject_eq_document hunique hdoc
+  refine ⟨rfl, ?_, rfl, ?_⟩
+  · simp only [Abstract.setTask, Concrete.Decision.setTask,
+      Concrete.Decision.modify, documentModify, Store.setTask, hget]
+    cases hfind : document.find? (·.suffix == id.suffix) with
+    | none =>
+        have hkeep : (document.map fun object =>
+            if object.suffix == id.suffix then { object with task := some task }
+            else object) = document := by
+          rw [List.map_congr_left (g := fun x => x), List.map_id']
+          intro object hobject
+          have := List.find?_eq_none.mp hfind object hobject
+          simp only [Bool.not_eq_true] at this
+          simp [this]
+        simp only [Option.map_none]
+        rw [hkeep]
+        exact Same.write_of hdoc
+    | some existing =>
+        have hsuffix := find?_suffix hfind
+        have hmem := List.mem_of_find?_eq_some hfind
+        have hunique' : RowsUnique document :=
+          ((List.Perm.map _ hdoc).nodup_iff).mp (hunique.rows _)
+        simp only [Option.map_some]
+        refine (Same.trans (setObject_same { Object.ofOrigin existing with task := some task }
+          hdoc) ?_)
+        apply Same.write_equiv
+        show List.Perm _ _
+        have hperm := (perm_cons_filter hunique' hmem).map (fun object =>
+          if object.suffix == id.suffix then { object with task := some task } else object)
+        rw [List.map_cons, hsuffix] at hperm
+        simp only [beq_self_eq_true, ↓reduceIte] at hperm
+        have hrest : ((document.filter (·.suffix != id.suffix)).map fun object =>
+            if object.suffix == id.suffix then { object with task := some task }
+            else object) = document.filter (·.suffix != id.suffix) := by
+          rw [List.map_congr_left (g := fun x => x), List.map_id']
+          intro object hobject
+          have := (List.mem_filter.mp hobject).2
+          simp only [bne_iff_ne, ne_eq] at this
+          simp [this]
+        rw [hrest] at hperm
+        refine List.Perm.trans ?_ hperm.symm
+        have e : (Object.ofOrigin existing).id.suffix = id.suffix := hsuffix
+        rw [e]
+        exact List.Perm.refl _
+  · simp only [Abstract.setTask, Store.setTask, hget]
+    cases document.find? (·.suffix == id.suffix) with
+    | none => exact hunique
+    | some _ => exact hunique.setObject _
 
 theorem scheduleAt_go_find (id : Ident) (schedules : List Schedule) :
     (Store.scheduleAt.go id schedules).map ScheduleData.toSchedule =
@@ -429,6 +590,7 @@ theorem Store.setSchedule_same (store : Store) (schedule : Schedule) :
     Same (store.setSchedule schedule)
       (store.write (.schedule schedule.id) (some (ScheduleData.ofSchedule schedule))) := by
   intro key
+  apply DocEquiv.of_eq
   by_cases hkey : key = .schedule schedule.id
   · subst hkey
     rw [Store.read_write_same]
@@ -447,17 +609,18 @@ theorem Store.setSchedule_same (store : Store) (schedule : Schedule) :
 theorem getSchedule_sim (id : Ident) :
     Sim (.schedule id) Eq (Abstract.getSchedule id)
       (Concrete.Decision.getSchedule (id := id)) := by
-  intro env store
-  refine ⟨?_, Same.symm (Store.read_write_read store _), rfl⟩
+  intro env store document hunique hdoc
+  obtain rfl : store.read (.schedule id) = document := hdoc
+  refine ⟨?_, Same.symm (Store.read_write_read store _), rfl, hunique⟩
   simp [Abstract.getSchedule, Concrete.Decision.getSchedule, getSchedule_eq_read,
-    bind, Concrete.Decision.get, documentGet, pure]
+    bind, documentGet, pure]
 
 theorem setSchedule_sim (id : Ident) (schedule : Schedule) (h : schedule.id = id) :
     Sim (.schedule id) Eq (Abstract.setSchedule schedule)
       (Concrete.Decision.setScheduleValue (id := id) schedule) := by
   subst h
-  intro env store
-  refine ⟨rfl, ?_, rfl⟩
+  intro env store document hunique _
+  refine ⟨rfl, ?_, rfl, hunique.schedules rfl⟩
   simp only [Abstract.setSchedule, Concrete.Decision.setScheduleValue,
     Concrete.Decision.setSchedule, Concrete.Decision.set, documentSet]
   exact Store.setSchedule_same store schedule
@@ -465,8 +628,8 @@ theorem setSchedule_sim (id : Ident) (schedule : Schedule) (h : schedule.id = id
 theorem deleteSchedule_sim (id : Ident) :
     Sim (.schedule id) Eq (Abstract.deleteSchedule id)
       (Concrete.Decision.delSchedule (id := id)) := by
-  intro env store
-  refine ⟨rfl, ?_, rfl⟩
+  intro env store document hunique _
+  refine ⟨rfl, ?_, rfl, hunique.schedules rfl⟩
   have : store.deleteSchedule id = store.write (.schedule id) none := by
     simp [Store.deleteSchedule, Store.write]
   simp only [Abstract.deleteSchedule, Concrete.Decision.delSchedule,
@@ -477,13 +640,13 @@ theorem setMessage_sim {key : DocumentKey} (address : String)
     (message : ServerModel.Message) :
     Sim key Eq (Abstract.setMessage address message)
       (Concrete.Decision.setMessage (key := key) address message) := by
-  intro env store
-  exact ⟨rfl, Same.symm (Store.read_write_read store _), rfl⟩
+  intro env store document hunique hdoc
+  exact ⟨rfl, Same.write_of hdoc, rfl, hunique⟩
 
 theorem ask_sim {key : DocumentKey} :
     Sim key Eq Abstract.ask (Concrete.Decision.ask (key := key)) := by
-  intro env store
-  exact ⟨rfl, Same.symm (Store.read_write_read store _), rfl⟩
+  intro env store document hunique hdoc
+  exact ⟨rfl, Same.write_of hdoc, rfl, hunique⟩
 
 theorem ofOrigin_project {origin : String} (row : OriginObject origin) (now : Nat) :
     (Object.ofOrigin row).project now = Object.ofOrigin (row.project now) := rfl
@@ -507,26 +670,25 @@ def TaskRel (origin suffix : String) (a : Option (Object × TaskObject))
 theorem readTask_sim (id : Ident) (now : Nat) :
     Sim (.origin id.origin) (TaskRel id.origin id.suffix) (Abstract.readTask id now)
       (Concrete.Decision.readTaskObject id.suffix now) := by
-  intro env store
+  intro env store document hunique hdoc
   have ha : Abstract.readTask id now env store =
       ((((store.getObject id).map (·.project now)).bind fun o => o.task.map (o, ·)),
         store, []) := by
     simp only [Abstract.readTask, Abstract.readObject, Abstract.getObject, bind, pure]
     cases store.getObject id <;> rfl
-  have hc : Concrete.Decision.readTaskObject id.suffix now env
-        (store.read (.origin id.origin)) =
-      ((match (store.read (.origin id.origin)).find? (·.suffix == id.suffix) with
+  have hc : Concrete.Decision.readTaskObject id.suffix now env document =
+      ((match document.find? (·.suffix == id.suffix) with
         | some row => if row.task.isSome then some (row.project now) else none
         | none => none),
-        store.read (.origin id.origin), []) := by
+        document, []) := by
     simp only [Concrete.Decision.readTaskObject, Concrete.Decision.readObject,
-      Concrete.Decision.getObject, Concrete.Decision.get, documentGet, bind, pure]
-    cases hfind : (store.read (.origin id.origin)).find? (·.suffix == id.suffix) with
+      Concrete.Decision.getObject, documentGet, bind, pure]
+    cases hfind : document.find? (·.suffix == id.suffix) with
     | none => rfl
     | some row => cases ht : row.task.isSome <;> simp [hfind, ht]
-  rw [ha, hc, getObject_eq_read]
-  refine ⟨?_, Same.symm (Store.read_write_read store _), rfl⟩
-  cases hfind : (store.read (.origin id.origin)).find? (·.suffix == id.suffix) with
+  rw [ha, hc, getObject_eq_document hunique hdoc]
+  refine ⟨?_, Same.write_of hdoc, rfl, hunique⟩
+  cases hfind : document.find? (·.suffix == id.suffix) with
   | none => exact ⟨rfl, by simp⟩
   | some row =>
       have hsuffix := find?_suffix hfind
@@ -857,28 +1019,29 @@ theorem Sim.bind_left {key : DocumentKey} {R : α → β → Prop} {S : γ → �
     {mc : DocumentHandler key δ}
     (hm : Sim key R ma (Pure.pure u)) (hf : ∀ a, R a u → Sim key S (fa a) mc) :
     Sim key S (ma >>= fa) mc := by
-  intro env store
-  obtain ⟨hr, hsame, hemit⟩ := hm env store
-  have hs : Same (ma env store).2.1 store :=
-    hsame.trans (Store.read_write_read store key)
-  have hread : (ma env store).2.1.read key = store.read key := hs key
-  obtain ⟨hr', hsame', hemit'⟩ := hf _ hr env (ma env store).2.1
-  rw [hread] at hr' hsame' hemit'
-  refine ⟨hr', hsame'.trans (Same.write hs key _), ?_⟩
-  show (ma env store).2.2 ++ (fa (ma env store).1 env (ma env store).2.1).2.2 = _
-  rw [hemit', hemit]
-  rfl
+  intro env store document hunique hdoc
+  obtain ⟨hr, hsame, hemit, hunique'⟩ := hm env store document hunique hdoc
+  obtain ⟨hr', hsame', hemit', hunique''⟩ :=
+    hf _ hr env (ma env store).2.1 document hunique' (Same.read_of_write hsame)
+  refine ⟨hr', ?_, ?_, hunique''⟩
+  · exact hsame'.trans
+      ((Same.write hsame key _).trans (Store.write_write_same store key _ _))
+  · show (ma env store).2.2 ++ (fa (ma env store).1 env (ma env store).2.1).2.2 = _
+    rw [hemit', hemit]
+    rfl
 
 /-- A handler that only reads simulates doing nothing. -/
 theorem Sim.readOnly {key : DocumentKey} {ma : Abstract.Handler α}
     (h : ∀ env store, (ma env store).2 = (store, [])) :
     Sim key (fun _ _ => True) ma (Pure.pure ()) := by
-  intro env store
-  refine ⟨trivial, ?_, ?_⟩
+  intro env store document hunique hdoc
+  refine ⟨trivial, ?_, ?_, ?_⟩
   · rw [h env store]
-    exact Same.symm (Store.read_write_read store key)
+    exact Same.write_of hdoc
   · rw [h env store]
     rfl
+  · rw [h env store]
+    exact hunique
 
 /-! ## Heartbeat -/
 
@@ -1062,9 +1225,11 @@ theorem createIfAbsent_sim (req : PromiseCreateReq) (now : Nat) :
 theorem getSchedule_sim_id (id : Ident) :
     Sim (.schedule id) (fun a c => a = c ∧ ∀ schedule, c = some schedule → schedule.id = id)
       (Abstract.getSchedule id) (Concrete.Decision.getSchedule (id := id)) := by
-  intro env store
-  obtain ⟨h₁, h₂, h₃⟩ := getSchedule_sim id env store
-  refine ⟨⟨h₁, ?_⟩, h₂, h₃⟩
+  intro env store document hunique hdoc
+  obtain rfl : store.read (.schedule id) = document := hdoc
+  obtain ⟨h₁, h₂, h₃, h₄⟩ :=
+    getSchedule_sim id env store _ hunique (DocEquiv.refl _ _)
+  refine ⟨⟨h₁, ?_⟩, h₂, h₃, h₄⟩
   intro schedule hschedule
   simp only [Concrete.Decision.getSchedule, bind, documentGet, pure] at hschedule
   revert hschedule
@@ -1101,120 +1266,128 @@ theorem Abstract.map_apply (f : α → β) (m : Abstract.Handler α) (env : Abst
   show (m >>= fun a => Pure.pure (f a)) env store = _
   simp only [bind, Pure.pure, List.append_nil]
 
+/-- What a request does to every abstract state whose document `key` has the
+entries of `before`: the concrete candidate written back. -/
+def ExternalSim (appConfig : Resonate.Config) (call : Call) (key : DocumentKey)
+    (before : Document key) : Prop :=
+  ∃ candidate,
+    Concrete.selectedExternalCandidate appConfig call key before = some candidate ∧
+    candidate.continuations = [] ∧
+    ∀ state : State, state.store.Unique → DocEquiv key (state.store.read key) before →
+      let lifted := Abstract.run appConfig call state
+      Same lifted.1.store (state.store.write key candidate.document) ∧
+        lifted.1.store.Unique ∧
+        lifted.1.workflow = state.workflow ∧
+        lifted.2 = candidate.outputs
+
+theorem externalCandidate_continuations {key : DocumentKey}
+    (appConfig : Resonate.Config) (call : Call) (document : Document key)
+    (action : Concrete.Decision.Handler key α) (wrap : α → Response) :
+    (Concrete.externalCandidate appConfig call document action wrap).continuations = [] := by
+  simp [Concrete.externalCandidate]
+
 /-- A request whose handler simulates a concrete decision runs as that
 decision's candidate written back into the store. -/
 theorem run_of_sim (appConfig : Resonate.Config) (call : Call) (state : State)
-    {key : DocumentKey} {ma : Abstract.Handler β}
+    {key : DocumentKey} {before : Document key} {ma : Abstract.Handler β}
     {action : Concrete.Decision.Handler key β} {wrap : β → Response}
     (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
-    (hsim : Sim key Eq ma action) :
-    let candidate :=
-      Concrete.externalCandidate appConfig call (state.store.read key) action wrap
+    (hsim : Sim key Eq ma action) (hunique : state.store.Unique)
+    (hdoc : DocEquiv key (state.store.read key) before) :
+    let candidate := Concrete.externalCandidate appConfig call before action wrap
     let lifted := Abstract.run appConfig call state
     Same lifted.1.store (state.store.write key candidate.document) ∧
+      lifted.1.store.Unique ∧
       lifted.1.workflow = state.workflow ∧
-      lifted.2 = candidate.outputs ∧
-      candidate.continuations = [] := by
-  obtain ⟨hresult, hsame, hemit⟩ := hsim { config := appConfig.toServerConfig } state.store
+      lifted.2 = candidate.outputs := by
+  obtain ⟨hresult, hsame, hemit, hunique'⟩ :=
+    hsim { config := appConfig.toServerConfig } state.store before hunique hdoc
   simp only [Abstract.run, Abstract.serve, hhandler, Abstract.map_apply,
     Concrete.externalCandidate, Concrete.Decision.run]
-  exact ⟨hsame, trivial, by rw [hresult, hemit], trivial⟩
+  exact ⟨hsame, hunique', trivial, by rw [hresult, hemit]⟩
 
-theorem external_sim_of (appConfig : Resonate.Config) (call : Call) (state : State)
-    {key : DocumentKey} {ma : Abstract.Handler β}
+theorem external_sim_of (appConfig : Resonate.Config) (call : Call)
+    {key : DocumentKey} (before : Document key) {ma : Abstract.Handler β}
     {action : Concrete.Decision.Handler key β} {wrap : β → Response}
     (hcandidate :
-      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
-        some (Concrete.externalCandidate appConfig call (state.store.read key) action wrap))
+      Concrete.selectedExternalCandidate appConfig call key before =
+        some (Concrete.externalCandidate appConfig call before action wrap))
     (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
     (hsim : Sim key Eq ma action) :
-    ∃ candidate,
-      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
-        some candidate ∧
-      let lifted := Abstract.run appConfig call state
-      Same lifted.1.store (state.store.write key candidate.document) ∧
-        lifted.1.workflow = state.workflow ∧
-        lifted.2 = candidate.outputs ∧
-        candidate.continuations = [] :=
-  ⟨_, hcandidate, run_of_sim appConfig call state hhandler hsim⟩
+    ExternalSim appConfig call key before :=
+  ⟨_, hcandidate, externalCandidate_continuations _ _ _ _ _,
+    fun state hunique hdoc => run_of_sim appConfig call state hhandler hsim hunique hdoc⟩
 
 /-- A request that names a document runs as the concrete candidate for that
 document written back into the store. -/
 theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : DocumentKey)
-    (hkey : (Concrete.Transaction.external call).key? = some key) (state : State) :
-    ∃ candidate,
-      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
-        some candidate ∧
-      let lifted := Abstract.run appConfig call state
-      Same lifted.1.store (state.store.write key candidate.document) ∧
-        lifted.1.workflow = state.workflow ∧
-        lifted.2 = candidate.outputs ∧
-        candidate.continuations = [] := by
+    (hkey : (Concrete.Transaction.external call).key? = some key)
+    (before : Document key) : ExternalSim appConfig call key before := by
   cases hrequest : call.request <;>
     simp only [Concrete.Transaction.key?, hrequest] at hkey
   case promiseGet req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .promiseGet)
+    exact external_sim_of appConfig call before (wrap := .promiseGet)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (promiseGet_sim req call.requestedAt)
   case promiseCreate req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .promiseCreate)
+    exact external_sim_of appConfig call before (wrap := .promiseCreate)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
         Concrete.Decision.promiseCreate])
       (by rw [hrequest]; rfl) (promiseCreate_sim req call.requestedAt rfl)
   case promiseSettle req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .promiseSettle)
+    exact external_sim_of appConfig call before (wrap := .promiseSettle)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
         Concrete.Decision.promiseSettle])
       (by rw [hrequest]; rfl) (promiseSettle_sim req call.requestedAt rfl)
   case promiseRegisterCallback req =>
     split at hkey
     · cases hkey
-      exact external_sim_of appConfig call state (wrap := .promiseRegisterCallback)
+      exact external_sim_of appConfig call before (wrap := .promiseRegisterCallback)
         (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
         (by rw [hrequest]; rfl) (promiseRegisterCallback_sim req call.requestedAt)
     · contradiction
   case promiseRegisterListener req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .promiseRegisterListener)
+    exact external_sim_of appConfig call before (wrap := .promiseRegisterListener)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (promiseRegisterListener_sim req call.requestedAt)
   case scheduleGet req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .scheduleGet)
+    exact external_sim_of appConfig call before (wrap := .scheduleGet)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (scheduleGet_sim req call.requestedAt)
   case scheduleCreate req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .scheduleCreate)
+    exact external_sim_of appConfig call before (wrap := .scheduleCreate)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (scheduleCreate_sim req call.requestedAt)
   case scheduleDelete req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .scheduleDelete)
+    exact external_sim_of appConfig call before (wrap := .scheduleDelete)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (scheduleDelete_sim req call.requestedAt)
   case taskGet req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskGet)
+    exact external_sim_of appConfig call before (wrap := .taskGet)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskGet_sim req call.requestedAt)
   case taskCreate req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskCreate)
+    exact external_sim_of appConfig call before (wrap := .taskCreate)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskCreate_sim req call.requestedAt)
   case taskAcquire req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskAcquire)
+    exact external_sim_of appConfig call before (wrap := .taskAcquire)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskAcquire_sim req call.requestedAt)
   case taskFence req =>
     split at hkey
     · cases hkey
-      exact external_sim_of appConfig call state (wrap := .taskFence)
+      exact external_sim_of appConfig call before (wrap := .taskFence)
         (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
         (by rw [hrequest]; rfl) (taskFence_sim req call.requestedAt)
     · contradiction
@@ -1225,7 +1398,7 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
       simp only [htasks] at hkey
       split at hkey
       · cases hkey
-        exact external_sim_of appConfig call state (wrap := .taskHeartbeat)
+        exact external_sim_of appConfig call before (wrap := .taskHeartbeat)
           (by simp [Concrete.selectedExternalCandidate, hrequest, htasks,
             Concrete.Candidate.cast])
           (by rw [hrequest]; rfl)
@@ -1235,29 +1408,29 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
     split at hkey
     · contradiction
     · cases hkey
-      exact external_sim_of appConfig call state (wrap := .taskSuspend)
+      exact external_sim_of appConfig call before (wrap := .taskSuspend)
         (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
         (by rw [hrequest]; rfl) (taskSuspend_sim req call.requestedAt)
   case taskFulfill req =>
     split at hkey
     · cases hkey
-      exact external_sim_of appConfig call state (wrap := .taskFulfill)
+      exact external_sim_of appConfig call before (wrap := .taskFulfill)
         (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
         (by rw [hrequest]; rfl) (taskFulfill_sim req call.requestedAt)
     · contradiction
   case taskRelease req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskRelease)
+    exact external_sim_of appConfig call before (wrap := .taskRelease)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskRelease_sim req call.requestedAt)
   case taskHalt req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskHalt)
+    exact external_sim_of appConfig call before (wrap := .taskHalt)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskHalt_sim req call.requestedAt)
   case taskContinue req =>
     cases hkey
-    exact external_sim_of appConfig call state (wrap := .taskContinue)
+    exact external_sim_of appConfig call before (wrap := .taskContinue)
       (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (taskContinue_sim req call.requestedAt)
   all_goals contradiction
@@ -1323,39 +1496,46 @@ def WorkLocal : WorkItem → Prop
 
 theorem work_sim_of (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
     (rest : List Concrete.PendingEntry) (abstractRest : List WorkflowEntry)
-    (state : State) {key : DocumentKey} {ma : Abstract.Handler Unit}
-    {action : Concrete.Decision.Handler key Unit}
+    (state : State) {key : DocumentKey} {before : Document key}
+    {ma : Abstract.Handler Unit} {action : Concrete.Decision.Handler key Unit}
     (hcandidate :
-      Concrete.selectedWorkCandidate appConfig item now rest key (state.store.read key) =
-        some (Concrete.workCandidate appConfig (state.store.read key) action rest))
+      Concrete.selectedWorkCandidate appConfig item now rest key before =
+        some (Concrete.workCandidate appConfig before action rest))
     (hwork : Abstract.processWork item now = (ma >>= fun _ => Pure.pure []))
-    (hsim : Sim key Eq ma action) :
+    (hsim : Sim key Eq ma action) (hunique : state.store.Unique)
+    (hdoc : DocEquiv key (state.store.read key) before) :
     ∃ candidate,
-      Concrete.selectedWorkCandidate appConfig item now rest key (state.store.read key) =
+      Concrete.selectedWorkCandidate appConfig item now rest key before =
         some candidate ∧
       let lifted := Abstract.runWork appConfig item now abstractRest state
       Same lifted.1.store (state.store.write key candidate.document) ∧
+        lifted.1.store.Unique ∧
         lifted.2 = candidate.outputs ∧
         ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
           Concrete.pendingWorkflow candidate.continuations =
             Concrete.pendingWorkflow rest ++ added := by
   refine ⟨_, hcandidate, ?_⟩
-  obtain ⟨_, hsame, hemit⟩ := hsim { config := appConfig.toServerConfig } state.store
+  obtain ⟨_, hsame, hemit, hunique'⟩ :=
+    hsim { config := appConfig.toServerConfig } state.store before hunique hdoc
   simp only [Abstract.runWork, hwork, Concrete.workCandidate, Concrete.Decision.run]
-  refine ⟨hsame, ?_, [], rfl, by simp⟩
-  show List.map Output.message ((ma _ state.store).2.2 ++ []) = _
-  rw [List.append_nil, hemit]
+  refine ⟨hsame, ?_, ?_, [], rfl, by simp⟩
+  · simpa [bind, Pure.pure] using hunique'
+  · show List.map Output.message ((ma _ state.store).2.2 ++ []) = _
+    rw [List.append_nil, hemit]
 
 /-- One piece of due work runs as the concrete work candidate for its
 document written back into the store. -/
 theorem work_sim (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
     (rest : List Concrete.PendingEntry) (abstractRest : List WorkflowEntry)
-    (state : State) (hlocal : WorkLocal item) :
+    (state : State) (hlocal : WorkLocal item) (before : Document item.key)
+    (hunique : state.store.Unique)
+    (hdoc : DocEquiv item.key (state.store.read item.key) before) :
     ∃ candidate,
-      Concrete.selectedWorkCandidate appConfig item now rest item.key
-          (state.store.read item.key) = some candidate ∧
+      Concrete.selectedWorkCandidate appConfig item now rest item.key before =
+        some candidate ∧
       let lifted := Abstract.runWork appConfig item now abstractRest state
       Same lifted.1.store (state.store.write item.key candidate.document) ∧
+        lifted.1.store.Unique ∧
         lifted.2 = candidate.outputs ∧
         ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
           Concrete.pendingWorkflow candidate.continuations =
@@ -1364,34 +1544,35 @@ theorem work_sim (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
   | promiseTimeout id =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (processPromiseTimeout_sim id now)
+      (processPromiseTimeout_sim id now) hunique hdoc
   | callback req =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (processCallback_sim req now hlocal)
+      (processCallback_sim req now hlocal) hunique hdoc
   | listener req =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (processListener_sim req now)
+      (processListener_sim req now) hunique hdoc
   | taskLeaseTimeout id =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (processLeaseTimeout_sim id now)
+      (processLeaseTimeout_sim id now) hunique hdoc
   | taskRetryTimeout id =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (processRetryTimeout_sim id now)
+      (processRetryTimeout_sim id now) hunique hdoc
   | occurrence req time =>
     exact work_sim_of appConfig _ now rest abstractRest state
       (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
-      (createIfAbsent_sim req time)
+      (createIfAbsent_sim req time) hunique hdoc
   | scheduleTimeout id =>
-    obtain ⟨hresult, hsame, hemit⟩ :=
-      processSchedule_sim id now { config := appConfig.toServerConfig } state.store
+    obtain ⟨hresult, hsame, hemit, hunique'⟩ :=
+      processSchedule_sim id now { config := appConfig.toServerConfig } state.store before
+        hunique hdoc
     simp only [Concrete.selectedWorkCandidate, WorkItem.key, dite_true,
       Concrete.Candidate.cast, Abstract.runWork, Abstract.processWork,
       Concrete.Decision.run]
-    refine ⟨_, rfl, hsame, by rw [hemit], _, rfl, ?_⟩
+    refine ⟨_, rfl, hsame, hunique', by rw [hemit], _, rfl, ?_⟩
     rw [hresult]
     simp only [Concrete.pendingWorkflow, List.filterMap_append, List.filterMap_map]
     congr 1
@@ -1409,11 +1590,16 @@ theorem originObjectWork_eq {origin : String} (row : OriginObject origin) (now :
 
 /-- Work the concrete sweep finds in an origin document is object work of the
 abstract store. -/
-theorem originWork_mem (store : Store) (origin : String) (now : Nat) {item : WorkItem}
-    (h : item ∈ Concrete.Decision.originWork origin (store.read (.origin origin)) now) :
+theorem originWork_mem (store : Store) (origin : String) (now : Nat)
+    {document : OriginDocument origin}
+    (hdoc : DocEquiv (.origin origin) (store.read (.origin origin)) document)
+    {item : WorkItem}
+    (h : item ∈ Concrete.Decision.originWork origin document now) :
     item ∈ store.objects.flatMap (Abstract.objectWork · now) := by
   simp only [Concrete.Decision.originWork, List.mem_flatMap] at h
   obtain ⟨row, hrow, hitem⟩ := h
+  have hrow : row ∈ store.objects.filterMap (Object.toOriginRow? origin) :=
+    (List.Perm.mem_iff hdoc).mpr hrow
   simp only [Store.read, Store.originRows, List.mem_filterMap] at hrow
   obtain ⟨object, hobject, hrow⟩ := hrow
   rw [List.mem_flatMap]

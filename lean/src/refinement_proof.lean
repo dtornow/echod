@@ -260,16 +260,16 @@ theorem external_step (appConfig : Resonate.Config) (call : Call)
     (hselect :
       Concrete.selectedExternalCandidate appConfig call key before =
         some candidate)
-    (state : State) (hread : state.store.read key = before) :
+    (state : State) (hunique : state.store.Unique)
+    (hread : DocEquiv key (state.store.read key) before) :
     let lifted := Abstract.run appConfig call state
     Same lifted.1.store (state.store.write key candidate.document) ∧
+      lifted.1.store.Unique ∧
       lifted.1.workflow = state.workflow ∧
-      lifted.2 = candidate.outputs ∧
-      candidate.continuations = [] := by
-  subst hread
-  obtain ⟨found, hfound, hstep⟩ := external_sim appConfig call key hkey state
+      lifted.2 = candidate.outputs := by
+  obtain ⟨found, hfound, _, hstep⟩ := external_sim appConfig call key hkey before
   obtain rfl := Option.some.inj (hselect.symm.trans hfound)
-  exact hstep
+  exact hstep state hunique hread
 
 /-- A selected work candidate is what the abstract work does to any state
 whose document for the item is the candidate's input. -/
@@ -280,16 +280,17 @@ theorem work_step (appConfig : Resonate.Config) (item : WorkItem)
       Concrete.selectedWorkCandidate appConfig item now rest item.key before =
         some candidate)
     (hlocal : WorkLocal item) (abstractRest : List WorkflowEntry)
-    (state : State) (hread : state.store.read item.key = before) :
+    (state : State) (hunique : state.store.Unique)
+    (hread : DocEquiv item.key (state.store.read item.key) before) :
     let lifted := Abstract.runWork appConfig item now abstractRest state
     Same lifted.1.store (state.store.write item.key candidate.document) ∧
+      lifted.1.store.Unique ∧
       lifted.2 = candidate.outputs ∧
       ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
         Concrete.pendingWorkflow candidate.continuations =
           Concrete.pendingWorkflow rest ++ added := by
-  subst hread
   obtain ⟨found, hfound, hstep⟩ :=
-    work_sim appConfig item now rest abstractRest state hlocal
+    work_sim appConfig item now rest abstractRest state hlocal before hunique hread
   obtain rfl := Option.some.inj (hselect.symm.trans hfound)
   exact hstep
 
@@ -308,9 +309,9 @@ theorem work_step (appConfig : Resonate.Config) (item : WorkItem)
     continuations = [] := by
   cases hselected with
   | external hkey hselect =>
-      exact (external_step appConfig call hkey hselect
-        { store := ({} : Resonate.Store).write key before }
-        (Resonate.Store.read_write_same _ _ _)).2.2.2
+      obtain ⟨found, hfound, hcontinuations, _⟩ := external_sim appConfig call key hkey before
+      obtain rfl := Option.some.inj (hselect.symm.trans hfound)
+      exact hcontinuations
   | sweep htransaction _ _ => contradiction
 
 @[grind] theorem select_external_continuations_nil
@@ -334,7 +335,7 @@ theorem external_key_none
     (hkey : (Concrete.Transaction.external call).key? = none) :
     let selected := Abstract.run config call {}
     let lifted := Abstract.run config call state
-    (∀ key, lifted.1.store.read key = state.store.read key) ∧
+    lifted.1.store = state.store ∧
       lifted.1.workflow = state.workflow ∧ lifted.2 = selected.2 := by
   simp [external_none config call _ hkey]
 
@@ -380,7 +381,7 @@ theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
     ∃ item,
       Concrete.selectedWorkCandidate appConfig item now rest key before =
         some candidate ∧
-      ∀ store : Resonate.Store, store.read key = before →
+      ∀ store : Resonate.Store, DocEquiv key (store.read key) before →
         item ∈ store.objects.flatMap (Abstract.objectWork · now) ++
           store.schedules.flatMap (Abstract.scheduleWork · now) := by
   cases key with
@@ -390,8 +391,7 @@ theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
     · contradiction
     · rename_i item hhead
       refine ⟨item, h, fun store hread => List.mem_append_left _ ?_⟩
-      apply originWork_mem store origin now
-      rw [hread]
+      apply originWork_mem store origin now hread
       obtain ⟨tail, htail⟩ := List.head?_eq_some_iff.mp hhead
       rw [htail]
       exact List.mem_cons_self
@@ -406,30 +406,24 @@ theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
       · contradiction
     · contradiction
 
+/-- The physical store holds the abstract documents, with the rows of each
+origin document in some order. -/
 structure StoreRep (physical : Concrete.Store) (abstract : State) : Prop where
-  documents :
-    ∀ key, physical.toAbstract.read key = abstract.store.read key
+  documents : Same abstract.store physical.toAbstract
+  unique : abstract.store.Unique
   indexed : physical.indexed
-
-instance {physical : Concrete.Store} {abstract : State} :
-    CoeFun (StoreRep physical abstract) (fun _ =>
-      ∀ key, physical.toAbstract.read key = abstract.store.read key) :=
-  ⟨StoreRep.documents⟩
-
-theorem StoreRep.read {physical : Concrete.Store} {abstract : State}
-    (hrep : StoreRep physical abstract) (key : DocumentKey) :
-    physical.toAbstract.read key = abstract.store.read key :=
-  hrep key
 
 theorem StoreRep.commit {physical : Concrete.Store} {abstract next : State}
     (hrep : StoreRep physical abstract) (key : DocumentKey)
     (document : Document key)
-    (hsame : Same next.store (abstract.store.write key document)) :
+    (hsame : Same next.store (abstract.store.write key document))
+    (hunique : next.store.Unique) :
     StoreRep (physical.commit key document) next := by
   constructor
   · intro other
-    rw [Concrete.Store.toAbstract_commit_read, hsame other]
-    exact Same.write (fun key => hrep.documents key) key document other
+    rw [Concrete.Store.toAbstract_commit_read]
+    exact (hsame other).trans (Same.write hrep.documents key document other)
+  · exact hunique
   · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
 
 theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
@@ -438,7 +432,8 @@ theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
   constructor
   · intro other
     rw [Concrete.Store.toAbstract_read_fence]
-    exact hrep other
+    exact hrep.documents other
+  · exact hrep.unique
   · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
 
 theorem toAbstract_read_eq_loaded
@@ -489,12 +484,13 @@ theorem external_cas_transport
     cases selected with
     | external hkey hselect =>
       have hread :
-          abstract.store.read key =
-            (loaded.map (·.1)).getD (emptyDocument key) := by
-        rw [← hrep key, toAbstract_read_eq_loaded hrep.indexed hcurrent]
-      obtain ⟨hsame, hworkflow, houtputs, _⟩ :=
-        external_step appConfig call hkey hselect abstract hread
-      exact ⟨hrep.commit key _ hsame, houtputs, hworkflow⟩
+          DocEquiv key (abstract.store.read key)
+            ((loaded.map (·.1)).getD (emptyDocument key)) := by
+        rw [← toAbstract_read_eq_loaded hrep.indexed hcurrent]
+        exact hrep.documents key
+      obtain ⟨hsame, hunique, hworkflow, houtputs⟩ :=
+        external_step appConfig call hkey hselect abstract hrep.unique hread
+      exact ⟨hrep.commit key _ hsame hunique, houtputs, hworkflow⟩
     | sweep hselectedTransaction _ _ =>
       contradiction
 
@@ -548,12 +544,13 @@ theorem work_cas_transport_any
     cases selected with
     | work hselect =>
       have hread :
-          abstract.store.read item.key =
-            (loaded.map (·.1)).getD (emptyDocument item.key) := by
-        rw [← hrep item.key, toAbstract_read_eq_loaded hrep.indexed hcurrent]
-      obtain ⟨hsame, houtputs, hadded⟩ :=
-        work_step appConfig item hselect hlocal abstractRest abstract hread
-      exact ⟨hrep.commit _ _ hsame, houtputs, hadded⟩
+          DocEquiv item.key (abstract.store.read item.key)
+            ((loaded.map (·.1)).getD (emptyDocument item.key)) := by
+        rw [← toAbstract_read_eq_loaded hrep.indexed hcurrent]
+        exact hrep.documents item.key
+      obtain ⟨hsame, hunique, houtputs, hadded⟩ :=
+        work_step appConfig item hselect hlocal abstractRest abstract hrep.unique hread
+      exact ⟨hrep.commit _ _ hsame hunique, houtputs, hadded⟩
     | sweep hselectedTransaction _ _ =>
       contradiction
 
@@ -623,8 +620,8 @@ theorem scan_transport
       Concrete.pendingWorkflow candidate.continuations =
         Concrete.pendingWorkflow rest ++ added ∧
       lifted.1.workflow.pending = abstract.workflow.pending ++ added := by
-  have hread : abstract.store.read key = physical.toAbstract.read key :=
-    (hrep key).symm
+  have hread : DocEquiv key (abstract.store.read key) (physical.toAbstract.read key) :=
+    hrep.documents key
   have hidle : ∃ lifted added,
       lifted ∈ (Abstract.runTimeout appConfig now abstract).val ∧
       StoreRep (physical.commit key (physical.toAbstract.read key)) lifted.1 ∧
@@ -650,12 +647,12 @@ theorem scan_transport
     have hkey := selectedWorkCandidate_key hcandidate
     subst hkey
     by_cases hlocal : WorkLocal item
-    · obtain ⟨hsame, houtputs, added, hpending, hcontinuations⟩ :=
+    · obtain ⟨hsame, hunique, houtputs, added, hpending, hcontinuations⟩ :=
         work_step appConfig item hcandidate hlocal abstract.workflow.pending
-          abstract hread
+          abstract hrep.unique hread
       exact ⟨_, added,
         runTimeout_mem_due appConfig abstract hinstant (hdue _ hread),
-        hrep.commit _ _ hsame, houtputs, hcontinuations, hpending⟩
+        hrep.commit _ _ hsame hunique, houtputs, hcontinuations, hpending⟩
     · rw [selectedWorkCandidate_nonlocal appConfig hlocal] at hcandidate
       cases hcandidate
       exact hidle
@@ -11789,7 +11786,9 @@ theorem related_after_inert_store
       simp [Concrete.Store.documentAt, hvalues]
     constructor
     · intro key
-      simpa [hread key] using hrep key
+      rw [hread key]
+      exact hrep.documents key
+    · exact hrep.unique
     · exact Concrete.Store.indexed_congr hvalues hkeys hrep.indexed
   · obtain ⟨workflowStore, parts, slack, hworkflowStore, hpending,
         hparts, hcommitted⟩ := related.workflow
@@ -14969,11 +14968,14 @@ theorem simulate_pure_external_node
     exact List.mem_append_left _ hmessage
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     refine ⟨physical, hphysical, ?_⟩
+    have hstoreEq :
+        (abstractNext.process .service).store = (abstract.process .service).store := by
+      simpa [abstractNext, World.land, abstractResult, served] using hpure.1
     constructor
-    · intro other
-      rw [hrep other]
-      simpa [abstractNext, World.land, abstractResult, served] using
-        (hpure.1 other).symm
+    · rw [hstoreEq]
+      exact hrep.documents
+    · rw [hstoreEq]
+      exact hrep.unique
     · exact hrep.indexed
   · have hold :
         WorkflowAligned config
@@ -15622,7 +15624,8 @@ theorem initial_related
     store := ⟨{}, hinit.2.1, by
       constructor
       · intro key
-        cases key <;> rfl
+        cases key <;> exact DocEquiv.of_eq rfl
+      · exact List.nodup_nil
       · exact Concrete.Store.indexed_empty⟩
     requests := ?_
     outputs := ?_

@@ -5,7 +5,8 @@ import Protocol
 
 The store is a list of objects (a promise and its task, by id) and a list of
 schedules. A handler reads the objects it names by id and writes back the
-ones it changes.
+ones it changes. Every read is by id, so the order of the lists carries no
+meaning.
 -/
 
 namespace Resonate
@@ -34,9 +35,9 @@ def Store.setPromise (store : Store) (id : Ident) (promise : PromiseObject) :
 /-- Write the task of `id`. A task belongs to a promise, so an id with no
 object is left alone. -/
 def Store.setTask (store : Store) (id : Ident) (task : TaskObject) : Store :=
-  { store with
-    objects := store.objects.map fun object =>
-      if object.id == id then { object with task := some task } else object }
+  match store.getObject id with
+  | some object => store.setObject { object with task := some task }
+  | none => store
 
 def Store.getSchedule (store : Store) (id : Ident) : Option Schedule :=
   store.schedules.find? (·.id == id)
