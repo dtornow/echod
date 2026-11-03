@@ -333,15 +333,26 @@ stale version are refused, a conditional read of the current version says
 so, listings page past a thousand keys and come back in order, keys with
 the characters ours use round-trip, and, on S3, a version is a function
 of the content — the same bytes are the same version, which is why every
-write of ours carries a nonce. The end-to-end tests run on the same store
-under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
-runs both against `s3s-fs`, a Rust S3 emulator, against RustFS, the other
-Rust S3 server, or against a bucket you name; the SDK examples run
-unchanged against a server on either. Both servers refuse conditional
-writes as S3 does. RustFS also honours conditional reads and makes
-versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
-on reads and sends the body where S3 sends 304, which the store treats as
-a revalidation that found the version current.
+write of ours carries a nonce; and, on a store that appends, an append
+lands only at the current size under the current version. The end-to-end
+tests run on the same store under a prefix of their own when `ECHOD_STORE`
+is set, and once more through `S3Store` when `ECHOD_EXPRESS_BUCKET` names
+a directory bucket.
+
+No emulator serves S3 Express appends (RustFS answers 501, MinIO's open
+build has none), so `rust/test/cli/fakes3` is one of our own: the S3
+surface echod uses and nothing else, in memory — conditional reads and
+writes, `ListObjectsV2`, `DeleteObjects`, and `PutObject` with
+`x-amz-write-offset-bytes`, refused with `InvalidWriteOffset` anywhere but
+the current size, as S3 Express refuses it. ETags are the MD5, conditions
+are decided atomically against the object as it is, keys round-trip byte
+for byte, and the SDK's `aws-chunked` bodies are unframed. `scripts/s3-tests.sh`
+runs both suites against it by default, with both clients; against RustFS
+or `s3s-fs`, a second implementation's reading of the conditional writes,
+without appends; or against a bucket you name. RustFS honours conditional
+reads and makes versions from content, as S3 does; `s3s-fs` 0.17 ignores
+`If-None-Match` on reads and sends the body where S3 sends 304, which the
+store treats as a revalidation that found the version current.
 
 ### Observability
 
