@@ -147,12 +147,10 @@ theorem TimerObjects.mem_delete_other
 
 structure Announcement where
   id : Addr
-  url : String
   announcedAt : Time
   deriving Repr, BEq, DecidableEq
 
 structure MembershipConfig where
-  epoch : Nat := 0
   members : List Addr := []
   deriving Repr, DecidableEq
 
@@ -171,17 +169,7 @@ def MembershipObjects.announce
       announcement ::
         objects.announcements.filter (·.id != announcement.id) }
 
-def MembershipObjects.live
-    (objects : MembershipObjects) (fleetAt ttl : Time) :
-    List Announcement :=
-  objects.announcements.filter fun announcement =>
-    fleetAt ≤ announcement.announcedAt + ttl
-
-def MembershipObjects.liveIds
-    (objects : MembershipObjects) (fleetAt ttl : Time) : List Addr :=
-  (objects.live fleetAt ttl).map (·.id)
-
-/-- Conditional write of the shared epoch object. -/
+/-- Conditional write of the shared membership object. -/
 def MembershipObjects.putConfig
     (objects : MembershipObjects) (expected : Nat)
     (next : MembershipConfig) : Option MembershipObjects :=
@@ -193,18 +181,6 @@ def MembershipObjects.putConfig
     }
   else
     none
-
-theorem MembershipObjects.putConfig_epoch
-    {objects nextObjects : MembershipObjects}
-    {expected : Nat} {next : MembershipConfig}
-    (hput : objects.putConfig expected next = some nextObjects) :
-    nextObjects.configuration = next ∧
-      nextObjects.version = objects.version + 1 := by
-  simp only [MembershipObjects.putConfig] at hput
-  split at hput
-  · cases hput
-    exact ⟨rfl, rfl⟩
-  · contradiction
 
 /-- FNV-1a over UTF-8, matching echod's stable ownership hash. -/
 def fnv1a (value : String) : UInt64 :=
@@ -219,7 +195,6 @@ def owner? (members : List Addr) (target : TimerTarget) : Option Addr :=
     members[(fnv1a target.partitionKey).toNat.mod members.length]?
 
 structure MembershipView where
-  epoch : Nat := 0
   members : List Addr := []
   version : Nat := 0
   lastRead : Time := 0
@@ -234,13 +209,6 @@ def MembershipView.owns
     (view : MembershipView) (me : Addr) (now ttl : Time)
     (target : TimerTarget) : Bool :=
   view.fresh now ttl && owner? view.members target == some me
-
-theorem MembershipView.owns_read
-    {view : MembershipView} {me : Addr} {now ttl : Time}
-    {target : TimerTarget} (howns : view.owns me now ttl target) :
-    view.readAny = true := by
-  simp [MembershipView.owns, MembershipView.fresh] at howns
-  exact howns.1.1
 
 /-- Which listing closes the gap that can occur while another node arms a
 key in a bucket already loaded by this node. -/

@@ -896,7 +896,6 @@ def beginMembershipRefresh (node : Node) (address : Addr) (now : Time) :
     Result Pid Local Msg :=
   let announcement : Announcement := {
     id := address
-    url := address
     announcedAt := now
   }
   let (next, request) :=
@@ -1080,7 +1079,6 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       match control with
       | some (.membership instant live) =>
           let view : MembershipView := {
-            epoch := membership.epoch
             members := membership.members
             version
             lastRead := instant
@@ -1090,10 +1088,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
           if live == membership.members then
             Outcomes.one (refreshEnded next config instant)
           else
-            let proposed : MembershipConfig := {
-              epoch := membership.epoch + 1
-              members := live
-            }
+            let proposed : MembershipConfig := { members := live }
             let (nextNode, request) :=
               next.awaitControl (.membershipWrite instant)
                 (.putMembership version proposed)
@@ -1154,14 +1149,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
           let (control, next) := node.takeControl op
           match control with
           | some (.announced instant) | some (.announcements instant)
-          | some (.membershipWrite instant) =>
-              Outcomes.one {
-                state := .node {
-                  next with
-                  nextHeartbeat := some (instant + config.heartbeat) }
-                send := []
-              }
-          | some (.membership instant _) =>
+          | some (.membershipWrite instant) | some (.membership instant _) =>
               Outcomes.one {
                 state := .node {
                   next with

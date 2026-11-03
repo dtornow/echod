@@ -14163,7 +14163,6 @@ theorem step_cleanup_source
                           at hresult
                         subst result
                         let view : Concrete.MembershipView := {
-                          epoch := configuration.epoch
                           members := configuration.members
                           version
                           lastRead := instant
