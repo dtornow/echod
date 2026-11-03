@@ -13,6 +13,7 @@ members = [
   "rust/test/cli/diff",
   "rust/test/cli/diff/accordant",
   "rust/test/cli/store",
+  "rust/test/cli/fakes3",
 ]
 
 [workspace.package]

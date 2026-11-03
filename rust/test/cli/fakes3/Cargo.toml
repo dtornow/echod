@@ -1,0 +1,17 @@
+[package]
+name = "fakes3"
+description = "The S3 surface echod uses, in memory: conditional reads and writes, listings, and S3 Express appends. For the tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "fakes3"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+md-5 = "0.11"
+tokio = { version = "1", features = ["full"] }
