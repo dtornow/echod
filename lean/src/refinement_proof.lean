@@ -1,5 +1,6 @@
 import «concrete».Model
 import «abstract».Model
+import refinement_handlers
 
 /-!
 # Concrete-to-abstract refinement infrastructure
@@ -14,240 +15,11 @@ special trace argument.
 namespace Resonate.Refinement
 
 open Rover
-open Concrete
+open Resonate.Concrete
 
 abbrev AModel := Abstract.model
 abbrev CModel (nodes : List Addr) (appConfig : Resonate.Config) :=
   Concrete.model nodes appConfig
-
-/-- The concrete handler is independently defined, but its promise-get
-decision computes the same indexed document result as the abstract handler. -/
-theorem promiseGet_handler_correspondence
-    (config : ServerConfig) (req : ServerModel.PromiseGetReq) (now : Time)
-    (document : Document (.origin req.id.origin)) :
-    Concrete.Decision.run config (Concrete.Decision.promiseGet req now) document =
-      Abstract.promiseGet req now { config } document := by
-  rfl
-
-theorem promiseGet_action_correspondence
-    (req : ServerModel.PromiseGetReq) (now : Time) :
-    Concrete.Decision.promiseGet req now = Abstract.promiseGet req now := by
-  rfl
-
-theorem promiseCreate_handler_correspondence
-    (req : ServerModel.PromiseCreateReq) (now : Time) :
-    Concrete.Decision.promiseCreate req now = Abstract.promiseCreate req now := by
-  rfl
-
-theorem promiseSettle_handler_correspondence
-    (req : ServerModel.PromiseSettleReq) (now : Time) :
-    Concrete.Decision.promiseSettle req now = Abstract.promiseSettle req now := by
-  rfl
-
-theorem promiseRegisterCallback_handler_correspondence
-    (req : ServerModel.PromiseRegisterCallbackReq) (now : Time) :
-    Concrete.Decision.promiseRegisterCallback req now =
-      Abstract.promiseRegisterCallback req now := by
-  rfl
-
-theorem promiseRegisterListener_handler_correspondence
-    (req : ServerModel.PromiseRegisterListenerReq) (now : Time) :
-    Concrete.Decision.promiseRegisterListener req now =
-      Abstract.promiseRegisterListener req now := by
-  rfl
-
-theorem promiseSearch_handler_correspondence
-    (req : ServerModel.PromiseSearchReq) (now : Time) :
-    Concrete.Decision.promiseSearch req now = Abstract.promiseSearch req now := by
-  rfl
-
-theorem taskGet_handler_correspondence
-    (req : ServerModel.TaskGetReq) (now : Time) :
-    Concrete.Decision.taskGet req now = Abstract.taskGet req now := by
-  rfl
-
-theorem taskCreate_handler_correspondence
-    (req : ServerModel.TaskCreateReq) (now : Time) :
-    Concrete.Decision.taskCreate req now = Abstract.taskCreate req now := by
-  rfl
-
-theorem taskAcquire_handler_correspondence
-    (req : ServerModel.TaskAcquireReq) (now : Time) :
-    Concrete.Decision.taskAcquire req now = Abstract.taskAcquire req now := by
-  rfl
-
-theorem taskFence_handler_correspondence
-    (req : ServerModel.TaskFenceReq) (now : Time) :
-    Concrete.Decision.taskFence req now = Abstract.taskFence req now := by
-  rfl
-
-theorem heartbeatOne_handler_correspondence
-    (origin pid : String) (ref : ServerModel.TaskRef) (now : Time) :
-    (Concrete.Decision.heartbeatOne (origin := origin) pid ref now) =
-      Abstract.heartbeatOne (origin := origin) pid ref now := by
-  rfl
-
-theorem heartbeatAll_handler_correspondence
-    (origin pid : String) (now : Time) (refs : List ServerModel.TaskRef) :
-    Concrete.Decision.heartbeatAll (origin := origin) pid now refs =
-      Abstract.heartbeatAll (origin := origin) pid now refs := by
-  induction refs with
-  | nil => rfl
-  | cons ref rest ih =>
-      simp only [Concrete.Decision.heartbeatAll, Abstract.heartbeatAll]
-      rw [heartbeatOne_handler_correspondence, ih]
-
-theorem taskHeartbeat_handler_correspondence
-    (origin : String) (req : ServerModel.TaskHeartbeatReq) (now : Time) :
-    Concrete.Decision.taskHeartbeat origin req now =
-      Abstract.taskHeartbeat origin req now := by
-  unfold Concrete.Decision.taskHeartbeat Abstract.taskHeartbeat
-  rw [heartbeatAll_handler_correspondence]
-
-theorem readObject_handler_correspondence
-    (origin suffix : String) (now : Time) :
-    Concrete.Decision.readObject (origin := origin) suffix now =
-      Abstract.readObject (origin := origin) suffix now := by
-  rfl
-
-theorem setPromise_handler_correspondence
-    (origin suffix : String) (promise : PromiseObject) :
-    Concrete.Decision.setPromise (origin := origin) suffix promise =
-      Abstract.setPromise (origin := origin) suffix promise := by
-  rfl
-
-theorem readTaskObject_handler_correspondence
-    (origin suffix : String) (now : Time) :
-    Concrete.Decision.readTaskObject (origin := origin) suffix now =
-      Abstract.readTaskObject (origin := origin) suffix now := by
-  rfl
-
-theorem checkAwaited_handler_correspondence
-    (origin : String) (now : Time)
-    (actions : List ServerModel.PromiseRegisterCallbackReq) :
-    Concrete.Decision.checkAwaited (origin := origin) now actions =
-      Abstract.checkAwaited (origin := origin) now actions := by
-  induction actions with
-  | nil => rfl
-  | cons action rest ih =>
-      simp only [Concrete.Decision.checkAwaited, Abstract.checkAwaited]
-      rw [readObject_handler_correspondence, ih]
-      rfl
-
-theorem registerAwaited_handler_correspondence
-    (origin : String) (awaiter : ServerModel.Ident) (now : Time)
-    (actions : List ServerModel.PromiseRegisterCallbackReq) :
-    Concrete.Decision.registerAwaited (origin := origin) awaiter now actions =
-      Abstract.registerAwaited (origin := origin) awaiter now actions := by
-  induction actions with
-  | nil => rfl
-  | cons action rest ih =>
-      simp only [Concrete.Decision.registerAwaited, Abstract.registerAwaited]
-      rw [readObject_handler_correspondence]
-      simp only [Concrete.Decision.setPromise, Abstract.setPromise]
-      rw [ih]
-      rfl
-
-theorem taskSuspend_handler_correspondence
-    (req : ServerModel.TaskSuspendReq) (now : Time) :
-    Concrete.Decision.taskSuspend req now = Abstract.taskSuspend req now := by
-  unfold Concrete.Decision.taskSuspend Abstract.taskSuspend
-  rw [readTaskObject_handler_correspondence,
-    checkAwaited_handler_correspondence,
-    registerAwaited_handler_correspondence]
-  simp only [Concrete.Decision.setTask, Abstract.setTask,
-    Concrete.Decision.modify, Abstract.modify]
-  rfl
-
-theorem taskFulfill_handler_correspondence
-    (req : ServerModel.TaskFulfillReq) (now : Time) :
-    Concrete.Decision.taskFulfill req now = Abstract.taskFulfill req now := by
-  rfl
-
-theorem taskRelease_handler_correspondence
-    (req : ServerModel.TaskReleaseReq) (now : Time) :
-    Concrete.Decision.taskRelease req now = Abstract.taskRelease req now := by
-  rfl
-
-theorem taskHalt_handler_correspondence
-    (req : ServerModel.TaskHaltReq) (now : Time) :
-    Concrete.Decision.taskHalt req now = Abstract.taskHalt req now := by
-  rfl
-
-theorem taskContinue_handler_correspondence
-    (req : ServerModel.TaskContinueReq) (now : Time) :
-    Concrete.Decision.taskContinue req now = Abstract.taskContinue req now := by
-  rfl
-
-theorem taskSearch_handler_correspondence
-    (req : ServerModel.TaskSearchReq) (now : Time) :
-    Concrete.Decision.taskSearch req now = Abstract.taskSearch req now := by
-  rfl
-
-theorem scheduleGet_handler_correspondence
-    (req : ServerModel.ScheduleGetReq) (now : Time) :
-    Concrete.Decision.scheduleGet req now = Abstract.scheduleGet req now := by
-  rfl
-
-theorem scheduleCreate_handler_correspondence
-    (req : ServerModel.ScheduleCreateReq) (now : Time) :
-    Concrete.Decision.scheduleCreate req now =
-      Abstract.scheduleCreate req now := by
-  rfl
-
-theorem scheduleDelete_handler_correspondence
-    (req : ServerModel.ScheduleDeleteReq) (now : Time) :
-    Concrete.Decision.scheduleDelete req now =
-      Abstract.scheduleDelete req now := by
-  rfl
-
-theorem scheduleSearch_handler_correspondence
-    (req : ServerModel.ScheduleSearchReq) (now : Time) :
-    Concrete.Decision.scheduleSearch req now =
-      Abstract.scheduleSearch req now := by
-  rfl
-
-theorem promiseTimeout_work_correspondence
-    (id : ServerModel.Ident) (now : Time) :
-    Concrete.Decision.processPromiseTimeout id now =
-      Abstract.processPromiseTimeout id now := by
-  rfl
-
-theorem callback_work_correspondence
-    (req : ServerModel.PromiseRegisterCallbackReq) (now : Time) :
-    Concrete.Decision.processCallback req now =
-      Abstract.processCallback req now := by
-  rfl
-
-theorem listener_work_correspondence
-    (req : ServerModel.PromiseRegisterListenerReq) (now : Time) :
-    Concrete.Decision.processListener req now =
-      Abstract.processListener req now := by
-  rfl
-
-theorem leaseTimeout_work_correspondence
-    (id : ServerModel.Ident) (now : Time) :
-    Concrete.Decision.processLeaseTimeout id now =
-      Abstract.processLeaseTimeout id now := by
-  rfl
-
-theorem retryTimeout_work_correspondence
-    (id : ServerModel.Ident) (now : Time) :
-    Concrete.Decision.processRetryTimeout id now =
-      Abstract.processRetryTimeout id now := by
-  rfl
-
-theorem scheduleTimeout_work_correspondence
-    (id : ServerModel.Ident) (now : Time) :
-    Concrete.Decision.processSchedule id now =
-      Abstract.processSchedule id now := by
-  rfl
-
-theorem occurrence_work_correspondence
-    (req : ServerModel.PromiseCreateReq) (instant : Time) :
-    Concrete.Decision.processOccurrence req instant =
-      Abstract.processOccurrence req instant := by
-  rfl
 
 theorem committed_version (store : Concrete.Store)
     (key : DocumentKey) (document : Document key) :
@@ -276,103 +48,10 @@ theorem duplicate_absent_put_conflicts
   simp [Concrete.storePut, Concrete.Store.commit,
     Concrete.Store.version, Rover.Outcomes.one]
 
-theorem originWork_correspondence
-    (origin : String) (document : OriginDocument origin) (now : Time) :
-    Concrete.Decision.originWork origin document now =
-      Abstract.originWork origin document now := by
-  rfl
 
-@[simp] theorem singleton_rewrite
-    (key : DocumentKey) (before after : Document key) :
-    (({} : Resonate.Store).write key before).write key after =
-      ({} : Resonate.Store).write key after :=
-  Resonate.Store.write_twice key before after
-
-theorem selectedExternal_correspondence
-    (appConfig : Resonate.Config) (call : Call)
-    (key : DocumentKey) (before : Document key)
-    (hkey : (Concrete.Transaction.external call).key? = some key) :
-    Concrete.selectedExternal appConfig call key before =
-      Resonate.run appConfig call
-        (Concrete.singleState key before) := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil => simp [tasks] at hkey
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        next hsame =>
-          simp only [Option.some.injEq] at hkey
-          subst key
-          simp [Concrete.selectedExternal,
-            Concrete.selectedExternalCandidate, Concrete.externalCandidate,
-            Concrete.Candidate.cast, Concrete.Decision.run,
-            Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Concrete.singleState, Abstract.runWith, request, tasks, hsame,
-            taskHeartbeat_handler_correspondence, singleton_rewrite,
-            Concrete.pendingWorkflow]
-        next _ => contradiction
-  all_goals
-    first
-    | contradiction
-    | rename_i req
-      first
-      | (split at hkey
-         all_goals try contradiction
-         all_goals simp only [Option.some.injEq] at hkey
-         all_goals subst key
-         all_goals
-           simp [Concrete.selectedExternal,
-             Concrete.selectedExternalCandidate, Concrete.externalCandidate,
-             Concrete.Candidate.cast, Concrete.Decision.run,
-             Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-             Concrete.singleState, Abstract.runWith, request,
-             taskSuspend_handler_correspondence, singleton_rewrite,
-             promiseGet_action_correspondence,
-             promiseCreate_handler_correspondence,
-             promiseSettle_handler_correspondence,
-             promiseRegisterCallback_handler_correspondence,
-             promiseRegisterListener_handler_correspondence,
-             taskGet_handler_correspondence,
-             taskCreate_handler_correspondence,
-             taskAcquire_handler_correspondence,
-             taskFence_handler_correspondence,
-             taskSuspend_handler_correspondence,
-             taskFulfill_handler_correspondence,
-             taskRelease_handler_correspondence,
-             taskHalt_handler_correspondence,
-             taskContinue_handler_correspondence,
-             scheduleGet_handler_correspondence,
-             scheduleCreate_handler_correspondence,
-             scheduleDelete_handler_correspondence,
-             Concrete.pendingWorkflow, *])
-      | (cases hkey
-         simp [Concrete.selectedExternal,
-           Concrete.selectedExternalCandidate, Concrete.externalCandidate,
-           Concrete.Candidate.cast, Concrete.Decision.run,
-           Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Concrete.singleState, Abstract.runWith, request,
-           taskSuspend_handler_correspondence, singleton_rewrite,
-           promiseGet_action_correspondence,
-           promiseCreate_handler_correspondence,
-           promiseSettle_handler_correspondence,
-           promiseRegisterCallback_handler_correspondence,
-           promiseRegisterListener_handler_correspondence,
-           taskGet_handler_correspondence,
-           taskCreate_handler_correspondence,
-           taskAcquire_handler_correspondence,
-           taskFence_handler_correspondence,
-           taskSuspend_handler_correspondence,
-           taskFulfill_handler_correspondence,
-           taskRelease_handler_correspondence,
-           taskHalt_handler_correspondence,
-           taskContinue_handler_correspondence,
-           scheduleGet_handler_correspondence,
-           scheduleCreate_handler_correspondence,
-           scheduleDelete_handler_correspondence,
-           Concrete.pendingWorkflow, *])
+def occurrenceEntry? : WorkItem → Option WorkflowEntry
+  | .occurrence request instant => some { request, instant }
+  | _ => none
 
 @[simp] theorem pendingWorkflow_cons
     (entry : Concrete.PendingEntry) (rest : List Concrete.PendingEntry) :
@@ -386,6 +65,7 @@ theorem selectedExternal_correspondence
       Concrete.pendingWorkflow left ++ Concrete.pendingWorkflow right := by
   simp [Concrete.pendingWorkflow, List.filterMap_append]
 
+
 @[simp] theorem pendingWorkflow_occurrences
     (items : List WorkItem) :
     Concrete.pendingWorkflow
@@ -393,52 +73,12 @@ theorem selectedExternal_correspondence
           | .occurrence request instant =>
               some (.occurrence request instant)
           | _ => none) =
-      items.filterMap Resonate.occurrenceEntry? := by
+      items.filterMap occurrenceEntry? := by
   induction items with
   | nil => rfl
   | cons item rest ih =>
       cases item <;>
-        simp [Concrete.PendingEntry.toWorkflow?,
-          Resonate.occurrenceEntry?, ih]
-
-theorem selectedWork_correspondence
-    (appConfig : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List Concrete.PendingEntry) (before : Document item.key) :
-    Concrete.selectedWork appConfig item now rest item.key before =
-      Resonate.runWork appConfig item now
-        (Concrete.pendingWorkflow rest)
-        (Concrete.singleState item.key before) := by
-  cases item <;>
-    simp [Concrete.selectedWork, Concrete.selectedWorkCandidate,
-      Concrete.workCandidate, Concrete.Candidate.cast,
-      Concrete.Decision.run, Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Abstract.runWith, WorkItem.key,
-      singleton_rewrite,
-      promiseTimeout_work_correspondence,
-      callback_work_correspondence, listener_work_correspondence,
-      leaseTimeout_work_correspondence,
-      retryTimeout_work_correspondence,
-      scheduleTimeout_work_correspondence,
-      occurrence_work_correspondence]
-  case scheduleTimeout =>
-    exact pendingWorkflow_occurrences _
-
-theorem selectedWork_correspondence_key
-    (appConfig : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List Concrete.PendingEntry) (key : DocumentKey)
-    (before : Document key) (hkey : item.key = key) :
-    Concrete.selectedWork appConfig item now rest key before =
-      Resonate.runWork appConfig item now
-        (Concrete.pendingWorkflow rest)
-        (Concrete.singleState key before) := by
-  subst key
-  exact selectedWork_correspondence appConfig item now rest before
-
-/-- A document is relevant to timeout discovery exactly when it can contain
-work. -/
-def RelevantDocument : (key : DocumentKey) → Document key → Prop
-  | .origin _, document => document ≠ []
-  | .schedule _, document => document.isSome
+        simp [Concrete.PendingEntry.toWorkflow?, occurrenceEntry?, ih]
 
 /-- Ghost meaning of a selected transaction. No field of this predicate is
 serialized in `StoreRequest.put`. -/
@@ -446,22 +86,17 @@ inductive Selected (appConfig : Resonate.Config) :
     (key : DocumentKey) → Concrete.Transaction →
     Document key → Document key → List Output →
       List Concrete.PendingEntry → Prop
-  | external {key call before after outputs} :
+  | external {key call before} {candidate : Concrete.Candidate key} :
       (Concrete.Transaction.external call).key? = some key →
-      Resonate.run appConfig call
-          (Concrete.singleState key before) =
-        (after, outputs) →
+      Concrete.selectedExternalCandidate appConfig call key before =
+        some candidate →
       Selected appConfig key (.external call) before
-        (after.store.read key) outputs
-          (after.workflow.pending.map Concrete.PendingEntry.fromWorkflow)
-  | work {item now rest before after outputs} :
-      Resonate.runWork appConfig item now
-          (Concrete.pendingWorkflow rest)
-          (Concrete.singleState item.key before) =
-        (after, outputs) →
+        candidate.document candidate.outputs candidate.continuations
+  | work {item now rest before} {candidate : Concrete.Candidate item.key} :
+      Concrete.selectedWorkCandidate appConfig item now rest item.key before =
+        some candidate →
       Selected appConfig item.key (.work item now rest) before
-        (after.store.read item.key) outputs
-          (after.workflow.pending.map Concrete.PendingEntry.fromWorkflow)
+        candidate.document candidate.outputs candidate.continuations
   | sweep {key transaction timer now rest before}
       {candidate : Concrete.Candidate key}
       (htransaction : transaction = .sweep timer now rest)
@@ -471,127 +106,6 @@ inductive Selected (appConfig : Resonate.Config) :
         some candidate →
       Selected appConfig key transaction before
         candidate.document candidate.outputs candidate.continuations
-
-theorem selectScanWork_relevant
-    {appConfig : Resonate.Config} {key : DocumentKey} {now : Time}
-    {rest : List Concrete.PendingEntry} {before : Document key}
-    {candidate : Concrete.Candidate key}
-    (hselect :
-      Concrete.selectScanWork appConfig key now rest before = some candidate) :
-    RelevantDocument key before := by
-  cases key with
-  | origin origin =>
-      change before ≠ []
-      intro hempty
-      subst before
-      simp [Concrete.selectScanWork, Concrete.Decision.originWork] at hselect
-  | schedule id =>
-      cases before with
-      | none => simp [Concrete.selectScanWork] at hselect
-      | some schedule => rfl
-
-theorem deadline_relevant
-    {key : DocumentKey} {before : Document key} {now : Time}
-    (hdeadline :
-      (Concrete.documentDeadline? key before now).isSome = true) :
-    RelevantDocument key before := by
-  cases key with
-  | origin origin =>
-      change before ≠ []
-      intro hempty
-      subst before
-      simp [Concrete.documentDeadline?, Concrete.minimumTime?] at hdeadline
-  | schedule id =>
-      cases before with
-      | none => simp [Concrete.documentDeadline?] at hdeadline
-      | some schedule => rfl
-
-theorem selectScan_relevant
-    {appConfig : Resonate.Config} {key : DocumentKey} {now : Time}
-    {rest : List Concrete.PendingEntry} {before : Document key}
-    {candidate : Concrete.Candidate key}
-    (hselect :
-      Concrete.selectScan appConfig key now rest before = some candidate) :
-    RelevantDocument key before := by
-  unfold Concrete.selectScan at hselect
-  cases hwork :
-      Concrete.selectScanWork appConfig key now rest before with
-  | some work =>
-      exact selectScanWork_relevant hwork
-  | none =>
-      have hdeadline :
-          (Concrete.documentDeadline? key before now).isSome = true := by
-        cases hvalue :
-            (Concrete.documentDeadline? key before now).isSome with
-        | false =>
-            simp [hwork, hvalue] at hselect
-        | true => rfl
-      exact deadline_relevant hdeadline
-
-theorem Selected.sweep_relevant
-    {appConfig : Resonate.Config} {key : DocumentKey}
-    {timer : Concrete.TimerKey} {now : Time}
-    {rest : List Concrete.PendingEntry}
-    {before after : Document key} {outputs continuations}
-    (hselected :
-      Selected appConfig key (.sweep timer now rest) before after
-        outputs continuations) :
-    RelevantDocument key before := by
-  cases hselected with
-  | sweep htransaction hkey hselect =>
-      cases htransaction
-      cases hkey
-      exact selectScan_relevant hselect
-
-theorem originSettledWork_key {origin : String}
-    {object : OriginObject origin} {item : WorkItem}
-    (h : item ∈ Abstract.originSettledWork object) :
-    item.key = .origin origin := by
-  simp only [Abstract.originSettledWork] at h
-  split at h
-  · contradiction
-  · simp only [List.mem_append, List.mem_map] at h
-    rcases h with ⟨awaiter, _, rfl⟩ | ⟨address, _, rfl⟩ <;>
-      rfl
-
-theorem originTaskWork_key {origin : String}
-    {object : OriginObject origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Abstract.originTaskWork object now) :
-    item.key = .origin origin := by
-  cases ht : object.task with
-  | none => simp [Abstract.originTaskWork, ht] at h
-  | some task =>
-      simp only [Abstract.originTaskWork, ht, List.mem_append] at h
-      rcases h with h | h
-      · cases hd : task.leaseTimeoutAt with
-        | none => simp [hd] at h
-        | some due =>
-            split at h <;>
-              simp_all [WorkItem.key, OriginObject.id]
-      · cases hd : task.retryTimeoutAt with
-        | none => simp [hd] at h
-        | some due =>
-            split at h <;>
-              simp_all [WorkItem.key, OriginObject.id]
-
-theorem originObjectWork_key {origin : String}
-    {object : OriginObject origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Abstract.originObjectWork object now) :
-    item.key = .origin origin := by
-  simp only [Abstract.originObjectWork, List.mem_append] at h
-  rcases h with h | h
-  · rcases h with h | h
-    · split at h <;> simp_all [WorkItem.key, OriginObject.id]
-    · exact originSettledWork_key h
-  · exact originTaskWork_key h
-
-theorem originWork_key {origin : String}
-    {document : OriginDocument origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Abstract.originWork origin document now) :
-    item.key = .origin origin := by
-  simp only [Abstract.originWork, List.mem_flatMap] at h
-  obtain ⟨object, _, hitem⟩ := h
-  exact originObjectWork_key hitem
 
 theorem select_valid {appConfig : Resonate.Config}
     {flight : Concrete.Flight}
@@ -609,50 +123,12 @@ theorem select_valid {appConfig : Resonate.Config}
     cases transaction
     case external call =>
       simp only [Concrete.select] at hselect
-      let before :=
-        (loaded.map (·.1)).getD (emptyDocument flightKey)
-      let after : State := {
-        store := ({} : Resonate.Store).write flightKey candidate.document
-        workflow := {
-          pending := Concrete.pendingWorkflow candidate.continuations }
-      }
-      change
-        Concrete.selectedExternalCandidate appConfig call flightKey before =
-          some candidate at hselect
-      have hcorrespondence :=
-        selectedExternal_correspondence appConfig call flightKey before hkey
-      have habstract :
-          Resonate.run appConfig call
-              (Concrete.singleState flightKey before) =
-            (after, candidate.outputs) := by
-        rw [← hcorrespondence]
-        simp [Concrete.selectedExternal, hselect, after]
-      simpa [after] using
-        (Selected.external hkey habstract)
+      exact .external hkey hselect
     case work item now rest =>
       simp only [Concrete.select] at hselect
       simp only [Concrete.Transaction.key?, Option.some.injEq] at hkey
       subst flightKey
-      let before :=
-        (loaded.map (·.1)).getD (emptyDocument item.key)
-      let after : State := {
-        store := ({} : Resonate.Store).write item.key candidate.document
-        workflow := {
-          pending := Concrete.pendingWorkflow candidate.continuations }
-      }
-      change
-        Concrete.selectedWorkCandidate appConfig item now rest item.key before =
-          some candidate at hselect
-      have hcorrespondence :=
-        selectedWork_correspondence appConfig item now rest before
-      have habstract :
-          Resonate.runWork appConfig item now
-              (Concrete.pendingWorkflow rest)
-              (Concrete.singleState item.key before) =
-            (after, candidate.outputs) := by
-        rw [← hcorrespondence]
-        simp [Concrete.selectedWork, hselect, after]
-      simpa [after] using (Selected.work habstract)
+      exact .work hselect
     case sweep timer now rest =>
       simp only [Concrete.select] at hselect
       split at hselect
@@ -775,53 +251,52 @@ theorem Snapshot.expected_ne_commit_version
       exact Nat.ne_of_lt (Nat.lt_succ_of_le hle)
         (Option.some.inj hversionEq)
 
-/-- A typed external transaction depends only on its selected document.
-Lifting it from a singleton store to a represented global store preserves the
-response/emissions and frames every other document. -/
-theorem external_locality
-    (config : Resonate.Config) (call : Call)
-    (key : DocumentKey) (before : Document key) (global : State)
+/-- A selected external candidate is what the abstract request does to any
+state whose document `key` is the candidate's input. -/
+theorem external_step (appConfig : Resonate.Config) (call : Call)
+    {key : DocumentKey} {before : Document key}
+    {candidate : Concrete.Candidate key}
     (hkey : (Concrete.Transaction.external call).key? = some key)
-    (hread : global.store.read key = before) :
-    let selected := Resonate.run config call
-      (Concrete.singleState key before)
-    let lifted := Resonate.run config call global
-    lifted.1.store.read key = selected.1.store.read key ∧
-    lifted.1.workflow = global.workflow ∧
-    lifted.2 = selected.2 := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil => simp [tasks] at hkey
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        next hsame =>
-          simp only [Option.some.injEq] at hkey
-          subst key
-          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Concrete.singleState, Abstract.runWith, hread, tasks, request,
-            hsame]
-        next _ => contradiction
-  all_goals
-    first
-    | contradiction
-    | rename_i req
-      first
-      | (split at hkey
-         all_goals try contradiction
-         all_goals simp only [Option.some.injEq] at hkey
-         all_goals subst key
-         all_goals
-           simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Concrete.singleState, Abstract.runWith,
-             hread, request] <;>
-           split <;> simp [Resonate.pureRequest, hread])
-      | (cases hkey
-         simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Concrete.singleState, Abstract.runWith, hread, request]
-         all_goals split <;> simp [Resonate.pureRequest, hread])
+    (hselect :
+      Concrete.selectedExternalCandidate appConfig call key before =
+        some candidate)
+    (state : State) (hread : state.store.read key = before) :
+    let lifted := Abstract.run appConfig call state
+    Same lifted.1.store (state.store.write key candidate.document) ∧
+      lifted.1.workflow = state.workflow ∧
+      lifted.2 = candidate.outputs ∧
+      candidate.continuations = [] := by
+  subst hread
+  obtain ⟨found, hfound, hstep⟩ := external_sim appConfig call key hkey state
+  obtain rfl := Option.some.inj (hselect.symm.trans hfound)
+  exact hstep
+
+/-- A selected work candidate is what the abstract work does to any state
+whose document for the item is the candidate's input. -/
+theorem work_step (appConfig : Resonate.Config) (item : WorkItem)
+    {now : Time} {rest : List Concrete.PendingEntry}
+    {before : Document item.key} {candidate : Concrete.Candidate item.key}
+    (hselect :
+      Concrete.selectedWorkCandidate appConfig item now rest item.key before =
+        some candidate)
+    (hlocal : WorkLocal item) (abstractRest : List WorkflowEntry)
+    (state : State) (hread : state.store.read item.key = before) :
+    let lifted := Abstract.runWork appConfig item now abstractRest state
+    Same lifted.1.store (state.store.write item.key candidate.document) ∧
+      lifted.2 = candidate.outputs ∧
+      ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
+        Concrete.pendingWorkflow candidate.continuations =
+          Concrete.pendingWorkflow rest ++ added := by
+  subst hread
+  obtain ⟨found, hfound, hstep⟩ :=
+    work_sim appConfig item now rest abstractRest state hlocal
+  obtain rfl := Option.some.inj (hselect.symm.trans hfound)
+  exact hstep
+
+@[simp] theorem processWork_occurrence_fired (request : ServerModel.PromiseCreateReq)
+    (time now : Time) (env : Abstract.Env) (store : Resonate.Store) :
+    (Abstract.processWork (.occurrence request time) now env store).1 = [] :=
+  rfl
 
 @[grind] theorem Selected.external_continuations_nil
     {appConfig : Resonate.Config} {key : DocumentKey} {call : Call}
@@ -832,15 +307,10 @@ theorem external_locality
         continuations) :
     continuations = [] := by
   cases hselected with
-  | external hkey hrun =>
-      have hlocal :=
-        external_locality appConfig call key
-          before (Concrete.singleState key before) hkey (by
-            exact Resonate.Store.read_write_same _ _ _)
-      rw [hrun] at hlocal
-      have hworkflow :=
-        congrArg WorkflowState.pending hlocal.2.1
-      simpa [Concrete.singleState] using hworkflow
+  | external hkey hselect =>
+      exact (external_step appConfig call hkey hselect
+        { store := ({} : Resonate.Store).write key before }
+        (Resonate.Store.read_write_same _ _ _)).2.2.2
   | sweep htransaction _ _ => contradiction
 
 @[grind] theorem select_external_continuations_nil
@@ -857,324 +327,88 @@ theorem external_locality
     candidate.continuations = [] :=
   Selected.external_continuations_nil (select_valid hkey hselect)
 
-theorem external_frame
-    (config : Resonate.Config) (call : Call)
-    (key other : DocumentKey) (global : State)
-    (hkey : (Concrete.Transaction.external call).key? = some key)
-    (hne : other ≠ key) :
-    (Resonate.run config call global).1.store.read other =
-      global.store.read other := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil => simp [tasks] at hkey
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        next hsame =>
-          simp only [Option.some.injEq] at hkey
-          subst key
-          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Abstract.runWith, tasks, request, hne, hsame]
-        next _ => contradiction
-  all_goals
-    first
-    | contradiction
-    | rename_i req
-      first
-      | (split at hkey
-         all_goals try contradiction
-         all_goals simp only [Option.some.injEq] at hkey
-         all_goals subst key
-         all_goals
-           simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Abstract.runWith, request, hne] <;>
-           split <;> simp [Resonate.pureRequest, hne])
-      | (cases hkey
-         simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Abstract.runWith, request, hne]
-         all_goals split <;> simp [Resonate.pureRequest, hne])
-
-/-- Internal work has the same document-local lifting property, including its
-process-local continuation result. -/
-theorem work_locality
-    (config : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List WorkflowEntry) (key : DocumentKey)
-    (before : Document key) (global : State)
-    (hkey : item.key = key)
-    (hread : global.store.read key = before) :
-    let selected := Resonate.runWork config item now rest
-      (Concrete.singleState key before)
-    let lifted := Resonate.runWork config item now rest global
-    lifted.1.store.read key = selected.1.store.read key ∧
-    lifted.1.workflow = selected.1.workflow ∧
-    lifted.2 = selected.2 := by
-  subst key
-  cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Abstract.runWith, WorkItem.key] at hread ⊢
-  all_goals rw [hread]
-  all_goals simp
-
-theorem work_store_locality
-    (config : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List WorkflowEntry) (key : DocumentKey)
-    (before : Document key) (global : State)
-    (hkey : item.key = key)
-    (hread : global.store.read key = before) :
-    let selected := Resonate.runWork config item now rest
-      (Concrete.singleState key before)
-    let lifted := Resonate.runWork config item now rest global
-    lifted.1 =
-      { global with
-        store := global.store.write key (selected.1.store.read key)
-        workflow := selected.1.workflow } ∧
-    lifted.2 = selected.2 := by
-  subst key
-  cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Abstract.runWith, WorkItem.key] at hread ⊢
-  all_goals rw [hread]
-  all_goals simp
-
-theorem external_key_mem
-    (config : Resonate.Config) (call : Call) (state : State)
-    (key : DocumentKey)
-    (hkey : (Concrete.Transaction.external call).key? = some key) :
-    key ∈ (Resonate.run config call state).1.store.keys := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil => simp [tasks] at hkey
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        next hsame =>
-          simp only [Option.some.injEq] at hkey
-          subst key
-          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Abstract.runWith, tasks, request, hsame]
-        next _ => contradiction
-  all_goals
-    first
-    | contradiction
-    | rename_i req
-      first
-      | (split at hkey
-         all_goals try contradiction
-         all_goals simp only [Option.some.injEq] at hkey
-         all_goals subst key
-         all_goals
-           simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Abstract.runWith, request] <;>
-           split <;> simp [Resonate.pureRequest])
-      | (cases hkey
-         simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Abstract.runWith, request]
-         all_goals split <;> simp [Resonate.pureRequest])
-  all_goals simp_all
-
+/-- A request that names no document changes nothing and replies with the
+pure response. -/
 theorem external_key_none
     (config : Resonate.Config) (call : Call) (state : State)
     (hkey : (Concrete.Transaction.external call).key? = none) :
-    let selected := Resonate.run config call {}
-    let lifted := Resonate.run config call state
+    let selected := Abstract.run config call {}
+    let lifted := Abstract.run config call state
     (∀ key, lifted.1.store.read key = state.store.read key) ∧
       lifted.1.workflow = state.workflow ∧ lifted.2 = selected.2 := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil =>
-        simp [Resonate.run, Resonate.handleExternal,
-          Resonate.pureRequest, request, tasks]
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        · contradiction
-        · simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, request, tasks, *]
-  case taskFence req =>
-    split at hkey
-    next _ => contradiction
-    next hcondition =>
-      cases hs : req.action.targetId.sameOrigin req.id with
-      | false =>
-          simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, request, hs]
-      | true =>
-          have hid : req.action.targetId = req.id := by
-            simpa [hs] using hcondition
-          have hself : req.id.sameOrigin req.id = true := by
-            simpa [hid] using hs
-          simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
-            Abstract.taskFence, Abstract.Handler, request, hs, hid, hself]
-          have hpure (document : Document (.origin req.id.origin)) :
-              (pure { status := 400 } :
-                Abstract.Handler (.origin req.id.origin)
-                  ServerModel.TaskFenceRes)
-                  { config := config.toServerConfig } document =
-                ({ status := 400 }, document, []) := rfl
-          rw [hpure, hpure]
-          simp only [Prod.fst, Prod.snd]
-          change
-            (∀ key,
-              (state.store.write (.origin req.id.origin)
-                (state.store.read (.origin req.id.origin))).read key =
-                  state.store.read key) ∧ True ∧ True
-          refine ⟨?_, trivial, trivial⟩
-          intro key
-          by_cases hsame : key = .origin req.id.origin
-          · subst key
-            simp
-          · simp [hsame]
-  case taskSuspend req =>
-    split at hkey
-    · simp [Resonate.run, Resonate.handleExternal,
-        Resonate.pureRequest, request, *]
-    · contradiction
-  case promiseSearch req =>
-    simp [Resonate.run, Resonate.handleExternal,
-      Resonate.pureRequest, request]
-  case scheduleSearch req =>
-    simp [Resonate.run, Resonate.handleExternal,
-      Resonate.pureRequest, request]
-  case taskSearch req =>
-    simp [Resonate.run, Resonate.handleExternal,
-      Resonate.pureRequest, request]
-  all_goals
-    rename_i req
-    first
-    | (split at hkey
-       · contradiction
-       · simp [Resonate.run, Resonate.handleExternal,
-           Resonate.pureRequest, request, *])
-    | simp at hkey
+  simp [external_none config call _ hkey]
 
 theorem pureResponse_correspondence
     (config : Resonate.Config) (call : Call)
     (hkey : (Concrete.Transaction.external call).key? = none) :
-    (Resonate.run config call {}).2 =
+    (Abstract.run config call {}).2 =
       [.response call.client call.id
         (Concrete.pureResponse call.requestedAt call.request)] := by
-  cases request : call.request <;>
-    simp only [Concrete.Transaction.key?, request] at hkey
-  case promiseRegisterCallback req =>
-    split at hkey
+  rw [external_none config call _ hkey]
+
+theorem selectedWorkCandidate_key {appConfig : Resonate.Config}
+    {item : WorkItem} {now : Time} {rest : List Concrete.PendingEntry}
+    {key : DocumentKey} {before : Document key}
+    {candidate : Concrete.Candidate key}
+    (h : Concrete.selectedWorkCandidate appConfig item now rest key before =
+      some candidate) :
+    item.key = key := by
+  cases item <;> simp only [Concrete.selectedWorkCandidate] at h <;>
+    split at h <;> first | contradiction | simp only [WorkItem.key]; assumption
+
+/-- A callback whose awaiter lives in another origin is a concrete no-op. -/
+theorem selectedWorkCandidate_nonlocal (appConfig : Resonate.Config)
+    {item : WorkItem} (hlocal : ¬ WorkLocal item) (now : Time)
+    (rest : List Concrete.PendingEntry) (before : Document item.key) :
+    Concrete.selectedWorkCandidate appConfig item now rest item.key before =
+      some { document := before, outputs := [], continuations := rest } := by
+  cases item <;> simp only [WorkLocal, not_true_eq_false] at hlocal
+  rename_i req
+  have hother : (req.awaited.sameOrigin req.awaiter) = false := by
+    simp only [ServerModel.Ident.sameOrigin, beq_eq_false_iff_ne]
+    exact fun h => hlocal h.symm
+  simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast,
+    Concrete.workCandidate, Concrete.Decision.processCallback,
+    Concrete.Decision.run, hother, Pure.pure, bind]
+
+/-- Work the concrete sweep selects is due work of any abstract store with
+the same document. -/
+theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
+    {now : Time} {rest : List Concrete.PendingEntry} {before : Document key}
+    {candidate : Concrete.Candidate key}
+    (h : Concrete.selectScanWork appConfig key now rest before = some candidate) :
+    ∃ item,
+      Concrete.selectedWorkCandidate appConfig item now rest key before =
+        some candidate ∧
+      ∀ store : Resonate.Store, store.read key = before →
+        item ∈ store.objects.flatMap (Abstract.objectWork · now) ++
+          store.schedules.flatMap (Abstract.scheduleWork · now) := by
+  cases key with
+  | origin origin =>
+    simp only [Concrete.selectScanWork] at h
+    split at h
     · contradiction
-    · simp [Resonate.run, Resonate.handleExternal,
-        Resonate.pureRequest, Concrete.pureResponse, request, *]
-  case taskHeartbeat req =>
-    cases tasks : req.tasks with
-    | nil =>
-        simp [Resonate.run, Resonate.handleExternal,
-          Resonate.pureRequest, Concrete.pureResponse, request, tasks]
-    | cons first rest =>
-        simp only [tasks] at hkey
-        split at hkey
-        · contradiction
-        · simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Concrete.pureResponse, request, tasks, *]
-  case taskFence req =>
-    split at hkey
+    · rename_i item hhead
+      refine ⟨item, h, fun store hread => List.mem_append_left _ ?_⟩
+      apply originWork_mem store origin now
+      rw [hread]
+      obtain ⟨tail, htail⟩ := List.head?_eq_some_iff.mp hhead
+      rw [htail]
+      exact List.mem_cons_self
+  | schedule id =>
+    simp only [Concrete.selectScanWork] at h
+    split at h
+    · split at h
+      · rename_i hdue
+        refine ⟨.scheduleTimeout id, h, fun store hread =>
+          List.mem_append_right _ ?_⟩
+        exact scheduleWork_mem store id now hread hdue
+      · contradiction
     · contradiction
-    · rename_i hcondition
-      cases hs : req.action.targetId.sameOrigin req.id with
-      | false =>
-          simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Concrete.pureResponse, request, hs]
-      | true =>
-          have hid : req.action.targetId = req.id := by
-            simpa [hs] using hcondition
-          have hself : req.id.sameOrigin req.id = true := by
-            simpa [hid] using hs
-          simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
-            Abstract.taskFence, Abstract.Handler, Concrete.pureResponse,
-            request, hs, hid, hself]
-          have hpure (document : Document (.origin req.id.origin)) :
-              (pure { status := 400 } :
-                Abstract.Handler (.origin req.id.origin)
-                  ServerModel.TaskFenceRes)
-                  { config := config.toServerConfig } document =
-                ({ status := 400 }, document, []) := rfl
-          rw [hpure]
-          simp
-  case taskSuspend req =>
-    split at hkey
-    · simp [Resonate.run, Resonate.handleExternal,
-        Resonate.pureRequest, Concrete.pureResponse, request, *]
-    · contradiction
-  case promiseSearch req =>
-    simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Abstract.promiseSearch, Concrete.Decision.promiseSearch,
-      Concrete.pureResponse, request]
-  case scheduleSearch req =>
-    simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Abstract.scheduleSearch, Concrete.Decision.scheduleSearch,
-      Concrete.pureResponse, request]
-  case taskSearch req =>
-    simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Abstract.taskSearch, Concrete.Decision.taskSearch,
-      Concrete.pureResponse, request]
-  all_goals
-    rename_i req
-    first
-    | contradiction
-    | (split at hkey
-       · contradiction
-       · simp [Resonate.run, Resonate.handleExternal,
-           Resonate.pureRequest, Concrete.pureResponse, request, *])
-    | simp [Resonate.run, Resonate.handleExternal,
-        Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
-        Abstract.taskFence, Abstract.Handler, Concrete.pureResponse,
-        request, *]
-
-theorem work_key_mem
-    (config : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List WorkflowEntry) (state : State) :
-    item.key ∈ (Resonate.runWork config item now rest state).1.store.keys := by
-  cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument, Abstract.runWith,
-      WorkItem.key]
-
-@[simp] theorem Store.key_mem_write_of_mem
-    (store : Resonate.Store) (writtenKey other : DocumentKey)
-    (document : Document writtenKey) (hmem : other ∈ store.keys) :
-    other ∈ (store.write writtenKey document).keys := by
-  by_cases hcontains : writtenKey ∈ store.keys <;>
-    simp [Resonate.Store.write, Resonate.Store.addKey, hcontains, hmem,
-      List.mem_append]
-
-theorem external_keys_mono
-    (config : Resonate.Config) (call : Call) (state : State) :
-    ∀ key ∈ state.store.keys,
-      key ∈ (Resonate.run config call state).1.store.keys := by
-  intro key hkey
-  cases request : call.request <;>
-    simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-      Abstract.runWith, Resonate.pureRequest, request, hkey] <;>
-    (try split) <;> (try split) <;> simp_all [hkey]
-
-theorem work_keys_mono
-    (config : Resonate.Config) (item : WorkItem) (now : Time)
-    (rest : List WorkflowEntry) (state : State) :
-    ∀ key ∈ state.store.keys,
-      key ∈ (Resonate.runWork config item now rest state).1.store.keys := by
-  intro key hkey
-  cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument, Abstract.runWith,
-      WorkItem.key, hkey]
 
 structure StoreRep (physical : Concrete.Store) (abstract : State) : Prop where
   documents :
     ∀ key, physical.toAbstract.read key = abstract.store.read key
-  relevantKeys :
-    ∀ key, RelevantDocument key (physical.toAbstract.read key) →
-      key ∈ abstract.store.keys
   indexed : physical.indexed
 
 instance {physical : Concrete.Store} {abstract : State} :
@@ -1187,25 +421,15 @@ theorem StoreRep.read {physical : Concrete.Store} {abstract : State}
     physical.toAbstract.read key = abstract.store.read key :=
   hrep key
 
-theorem StoreRep.commit {physical : Concrete.Store} {abstract : State}
+theorem StoreRep.commit {physical : Concrete.Store} {abstract next : State}
     (hrep : StoreRep physical abstract) (key : DocumentKey)
-    (document : Document key) :
-    StoreRep (physical.commit key document)
-      { abstract with store := abstract.store.write key document } := by
+    (document : Document key)
+    (hsame : Same next.store (abstract.store.write key document)) :
+    StoreRep (physical.commit key document) next := by
   constructor
   · intro other
-    rw [Concrete.Store.toAbstract_commit_read]
-    by_cases h : other = key
-    · subst other
-      simp
-    · simp [h, hrep other]
-  · intro other hrelevant
-    rw [Concrete.Store.toAbstract_commit_read] at hrelevant
-    by_cases h : other = key
-    · subst other
-      exact Resonate.Store.key_mem_write _ _ _
-    · exact Store.key_mem_write_of_mem _ _ _ _
-        (hrep.relevantKeys other (by simpa [h] using hrelevant))
+    rw [Concrete.Store.toAbstract_commit_read, hsame other]
+    exact Same.write (fun key => hrep.documents key) key document other
   · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
 
 theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
@@ -1215,23 +439,7 @@ theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
   · intro other
     rw [Concrete.Store.toAbstract_read_fence]
     exact hrep other
-  · intro other hrelevant
-    rw [Concrete.Store.toAbstract_read_fence] at hrelevant
-    exact hrep.relevantKeys other hrelevant
   · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
-
-theorem StoreRep.of_store_eq
-    {physical : Concrete.Store} {left right : State}
-    (hrep : StoreRep physical left) (hstore : left.store = right.store) :
-    StoreRep physical right := by
-  constructor
-  · intro key
-    rw [← hstore]
-    exact hrep key
-  · intro key hrelevant
-    rw [← hstore]
-    exact hrep.relevantKeys key hrelevant
-  · exact hrep.indexed
 
 theorem toAbstract_read_eq_loaded
     {physical : Concrete.Store} {key : DocumentKey}
@@ -1270,48 +478,23 @@ theorem external_cas_transport
     (htransaction : provenance.transaction = .external call)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted :=
-      Resonate.run appConfig call abstract
+      Abstract.run appConfig call abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
       lifted.1.workflow = abstract.workflow := by
   cases provenance with
   | mk transaction loaded outputs continuations expected_eq selected =>
-    simp only at htransaction ⊢
+    simp only at htransaction hcurrent ⊢
     subst transaction
     cases selected with
-    | external hkey hselected =>
-      have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
-      have habstract :
+    | external hkey hselect =>
+      have hread :
           abstract.store.read key =
-            (loaded.map (·.1)).getD
-              (emptyDocument key) := by
-        rw [← hrep key, hbefore]
-      have hlocal := external_locality
-        appConfig call key
-        ((loaded.map (·.1)).getD (emptyDocument key))
-        abstract hkey habstract
-      rw [hselected] at hlocal
-      refine ⟨?_, hlocal.2.2, hlocal.2.1⟩
-      constructor
-      · intro other
-        by_cases hother : other = key
-        · subst other
-          simp [hlocal.1]
-        · rw [Concrete.Store.toAbstract_commit_read]
-          simp [hother, external_frame
-            appConfig call key other
-            abstract hkey hother, hrep other]
-      · intro other hrelevant
-        by_cases hother : other = key
-        · subst other
-          exact external_key_mem
-            appConfig call abstract key hkey
-        · exact external_keys_mono
-            appConfig call abstract other
-              (hrep.relevantKeys other (by
-                rw [Concrete.Store.toAbstract_commit_read] at hrelevant
-                simpa [hother] using hrelevant))
-      · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
+            (loaded.map (·.1)).getD (emptyDocument key) := by
+        rw [← hrep key, toAbstract_read_eq_loaded hrep.indexed hcurrent]
+      obtain ⟨hsame, hworkflow, houtputs, _⟩ :=
+        external_step appConfig call hkey hselect abstract hread
+      exact ⟨hrep.commit key _ hsame, houtputs, hworkflow⟩
     | sweep hselectedTransaction _ _ =>
       contradiction
 
@@ -1329,15 +512,50 @@ theorem external_cas_transport_lose
     (htransaction : provenance.transaction = .external call)
     (hcurrent : physical.read key = provenance.loaded) :
     let lifted :=
-      Resonate.runLose appConfig call abstract
+      Abstract.runLose appConfig call abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 =
         Resonate.unavailable call :: provenance.outputs.drop 1 ∧
       lifted.1.workflow = abstract.workflow := by
   have hserved :=
     external_cas_transport hrep provenance htransaction hcurrent
-  simp only [Resonate.runLose]
-  exact ⟨hserved.1, by rw [hserved.2.1], hserved.2.2⟩
+  refine ⟨hserved.1, ?_, hserved.2.2⟩
+  rw [← hserved.2.1]
+  rfl
+
+theorem work_cas_transport_any
+    {appConfig : Resonate.Config}
+    {physical : Concrete.Store} {abstract : State}
+    (hrep : StoreRep physical abstract)
+    {key : DocumentKey} {document : Document key}
+    {expectedVersion : Option Concrete.Version}
+    (provenance :
+      PutProvenance appConfig key document expectedVersion)
+    {item : WorkItem} {now : Time} {rest : List Concrete.PendingEntry}
+    (htransaction : provenance.transaction = .work item now rest)
+    (hcurrent : physical.read key = provenance.loaded)
+    (hlocal : WorkLocal item) (abstractRest : List WorkflowEntry) :
+    let lifted := Abstract.runWork appConfig item now abstractRest abstract
+    StoreRep (physical.commit key document) lifted.1 ∧
+      lifted.2 = provenance.outputs ∧
+      ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
+        Concrete.pendingWorkflow provenance.continuations =
+          Concrete.pendingWorkflow rest ++ added := by
+  cases provenance with
+  | mk transaction loaded outputs continuations expected_eq selected =>
+    simp only at htransaction hcurrent ⊢
+    subst transaction
+    cases selected with
+    | work hselect =>
+      have hread :
+          abstract.store.read item.key =
+            (loaded.map (·.1)).getD (emptyDocument item.key) := by
+        rw [← hrep item.key, toAbstract_read_eq_loaded hrep.indexed hcurrent]
+      obtain ⟨hsame, houtputs, hadded⟩ :=
+        work_step appConfig item hselect hlocal abstractRest abstract hread
+      exact ⟨hrep.commit _ _ hsame, houtputs, hadded⟩
+    | sweep hselectedTransaction _ _ =>
+      contradiction
 
 theorem work_cas_transport
     {appConfig : Resonate.Config}
@@ -1349,79 +567,19 @@ theorem work_cas_transport
       PutProvenance appConfig key document expectedVersion)
     {item : WorkItem} {now : Time} {rest : List Concrete.PendingEntry}
     (htransaction : provenance.transaction = .work item now rest)
-    (hcurrent : physical.read key = provenance.loaded) :
-    let lifted := Resonate.runWork
+    (hcurrent : physical.read key = provenance.loaded)
+    (hlocal : WorkLocal item) :
+    let lifted := Abstract.runWork
       appConfig item now
         (Concrete.pendingWorkflow rest) abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
       lifted.1.workflow.pending =
         Concrete.pendingWorkflow provenance.continuations := by
-  cases provenance with
-  | mk transaction loaded outputs continuations expected_eq selected =>
-    simp only at htransaction ⊢
-    subst transaction
-    cases selected with
-    | work hselected =>
-      have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
-      have habstract :
-          abstract.store.read item.key =
-            (loaded.map (·.1)).getD
-              (emptyDocument item.key) := by
-        rw [← hrep item.key, hbefore]
-      have hlocal := work_locality
-        appConfig item now
-        (Concrete.pendingWorkflow rest) item.key
-        ((loaded.map (·.1)).getD
-          (emptyDocument item.key))
-        abstract rfl habstract
-      rw [hselected] at hlocal
-      refine ⟨?_, hlocal.2.2, ?_⟩
-      · constructor
-        · intro other
-          by_cases hother : other = item.key
-          · subst other
-            simp [hlocal.1]
-          · rw [Concrete.Store.toAbstract_commit_read]
-            simp [hother, Resonate.runWork_frame
-              appConfig item now
-              (Concrete.pendingWorkflow rest)
-              abstract other hother, hrep other]
-        · intro other hrelevant
-          by_cases hother : other = item.key
-          · subst other
-            exact work_key_mem appConfig item now
-              (Concrete.pendingWorkflow rest) abstract
-          · exact work_keys_mono
-              appConfig item now
-              (Concrete.pendingWorkflow rest) abstract other
-              (hrep.relevantKeys other (by
-                rw [Concrete.Store.toAbstract_commit_read] at hrelevant
-                simpa [hother] using hrelevant))
-        · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
-      · rw [← hlocal.2.1]
-        exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm
-    | sweep hselectedTransaction _ _ =>
-      contradiction
-
-theorem runWork_rest_store_outputs
-    (appConfig : Resonate.Config) (item : WorkItem) (now : Time)
-    (left right : List WorkflowEntry) (state : State) :
-    (Resonate.runWork appConfig item now left state).1.store =
-        (Resonate.runWork appConfig item now right state).1.store ∧
-      (Resonate.runWork appConfig item now left state).2 =
-        (Resonate.runWork appConfig item now right state).2 := by
-  cases item <;> simp [Resonate.runWork]
-
-theorem runWork_rest_pending
-    (appConfig : Resonate.Config) (item : WorkItem) (now : Time)
-    (left right : List WorkflowEntry) (state : State) :
-    ∃ added,
-      (Resonate.runWork appConfig item now left state).1.workflow.pending =
-          left ++ added ∧
-      (Resonate.runWork appConfig item now right state).1.workflow.pending =
-          right ++ added := by
-  cases item <;> simp [Resonate.runWork]
+  obtain ⟨hstore, houtputs, added, hpending, hcontinuations⟩ :=
+    work_cas_transport_any hrep provenance htransaction hcurrent hlocal
+      (Concrete.pendingWorkflow rest)
+  exact ⟨hstore, houtputs, hpending.trans hcontinuations.symm⟩
 
 theorem work_cas_transport_rest
     {appConfig : Resonate.Config}
@@ -1434,378 +592,73 @@ theorem work_cas_transport_rest
     {item : WorkItem} {now : Time} {rest : List Concrete.PendingEntry}
     (htransaction : provenance.transaction = .work item now rest)
     (hcurrent : physical.read key = provenance.loaded)
+    (hlocal : WorkLocal item)
     (abstractRest : List WorkflowEntry) :
-    let lifted := Resonate.runWork
+    let lifted := Abstract.runWork
       appConfig item now abstractRest abstract
     StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs := by
-  have hold :=
-    work_cas_transport hrep provenance htransaction hcurrent
-  let concreteRest := Concrete.pendingWorkflow rest
-  have hsame := runWork_rest_store_outputs
-    appConfig item now concreteRest
-      abstractRest abstract
-  dsimp only
-  constructor
-  · exact hold.1.of_store_eq hsame.1
-  · rw [← hsame.2]
-    exact hold.2.1
+  obtain ⟨hstore, houtputs, _⟩ :=
+    work_cas_transport_any hrep provenance htransaction hcurrent hlocal
+      abstractRest
+  exact ⟨hstore, houtputs⟩
 
-theorem sweep_cas_transport
+/-- A concrete sweep is either a timeout that runs due work or the timeout
+that does nothing. -/
+theorem scan_transport
     {appConfig : Resonate.Config}
     {physical : Concrete.Store} {abstract : State}
     (hrep : StoreRep physical abstract)
-    {key : DocumentKey}
-    {timer : Concrete.TimerKey}
-    {document : Document key}
-    {expectedVersion : Option Concrete.Version}
-    (provenance :
-      PutProvenance appConfig key document expectedVersion)
-    {now : Time}
+    {key : DocumentKey} {instant now : Time}
     {rest : List Concrete.PendingEntry}
-    (htransaction : provenance.transaction = .sweep timer now rest)
-    (htarget : timer.target.key = key)
-    (hcurrent : physical.read key = provenance.loaded)
-    (hwork :
-      (Concrete.selectScanWork appConfig key now rest
-        ((provenance.loaded.map (·.1)).getD
-          (emptyDocument key))).isSome = true)
-    (hkeymem : key ∈ abstract.store.keys) :
-    ∃ item,
-      item.key = key ∧
-      item ∈ Resonate.eligibleWorkAt abstract now ∧
-      let lifted := Resonate.runWork
-        appConfig item now
-          (Concrete.pendingWorkflow rest) abstract
-      StoreRep (physical.commit key document) lifted.1 ∧
-        lifted.2 = provenance.outputs ∧
-        lifted.1.workflow.pending =
-          Concrete.pendingWorkflow provenance.continuations := by
-  cases provenance with
-  | mk transaction loaded outputs continuations expected_eq selected =>
-    simp only at htransaction
-    rw [htransaction] at selected
-    cases selected with
-    | sweep hselectedTransaction hkey hselected =>
-      cases hselectedTransaction
-      cases hkey
-      rename_i candidate
-      have hselectedWork :
-          Concrete.selectScanWork appConfig timer.target.key now rest
-              ((loaded.map (·.1)).getD
-                (emptyDocument timer.target.key)) =
-            some candidate := by
-        unfold Concrete.selectScan at hselected
-        cases hworkResult :
-            Concrete.selectScanWork appConfig timer.target.key now rest
-              ((loaded.map (·.1)).getD
-                (emptyDocument timer.target.key)) with
-        | none =>
-            simp [hworkResult] at hwork
-        | some work =>
-            rw [hworkResult] at hselected
-            cases hselected
-            rfl
-      obtain ⟨deadline, target, token, armedBy⟩ := timer
-      cases target with
-      | origin origin =>
-        simp only [Concrete.TimerTarget.key] at *
-        change physical.read (.origin origin) = loaded at hcurrent
-        change Concrete.selectScanWork appConfig (.origin origin) now rest
-          ((loaded.map (·.1)).getD (emptyDocument (.origin origin))) =
-            some candidate at hselectedWork
-        have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
-        have habstract :
-            abstract.store.read (.origin origin) =
-              (loaded.map (·.1)).getD
-                (emptyDocument (.origin origin)) := by
-          rw [← hrep (.origin origin), hbefore]
-          rfl
-        obtain ⟨item, hitem, hdocument, houtputs, hcontinuations⟩ :=
-          Concrete.selectScan_origin_some appConfig origin now rest
-            ((loaded.map (·.1)).getD
-              (emptyDocument (.origin origin))) _ hselectedWork
-        have hitemAbstract :
-            item ∈ Abstract.originWork origin
-              ((loaded.map (·.1)).getD
-                (emptyDocument (.origin origin))) now := by
-          rw [← originWork_correspondence]
-          exact hitem
-        have hitemKey : item.key = .origin origin :=
-          originWork_key hitemAbstract
-        have hdecision := selectedWork_correspondence_key appConfig item
-          now rest (.origin origin)
-          ((loaded.map (·.1)).getD
-            (emptyDocument (.origin origin))) hitemKey
-        have hdocument' :
-            candidate.document =
-              (Resonate.runWork appConfig
-                item now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.origin origin)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.origin origin))))).1.store.read
-                  (.origin origin) := by
-          rw [← hdecision]
-          exact hdocument
-        have houtputs' :
-            candidate.outputs =
-              (Resonate.runWork appConfig
-                item now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.origin origin)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.origin origin))))).2 := by
-          rw [← hdecision]
-          exact houtputs
-        have hcontinuations' :
-            candidate.continuations =
-              (Resonate.runWork appConfig
-                item now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.origin origin)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.origin origin))))).1.workflow.pending.map
-                  Concrete.PendingEntry.fromWorkflow := by
-          rw [← hdecision]
-          exact hcontinuations
-        have hlocal := work_locality
-          appConfig item now
-          (Concrete.pendingWorkflow rest) (.origin origin)
-          ((loaded.map (·.1)).getD
-            (emptyDocument (.origin origin)))
-          abstract hitemKey habstract
-        refine ⟨item, hitemKey, ?_, ?_,
-          hlocal.2.2.trans houtputs'.symm, ?_⟩
-        · simp only [Resonate.eligibleWorkAt, List.mem_flatMap]
-          exact ⟨.origin origin, hkeymem, by
-            change item ∈ Abstract.originWork origin
-              (abstract.store.read (.origin origin)) now
-            rw [habstract]
-            exact hitemAbstract⟩
-        · constructor
-          · intro other
-            by_cases hother : other = .origin origin
-            · subst other
-              simp only [Concrete.Store.toAbstract_commit_read,
-                Resonate.Store.read_write_same]
-              exact hdocument'.trans hlocal.1.symm
-            · rw [Concrete.Store.toAbstract_commit_read]
-              simp [hother, Resonate.runWork_frame
-                appConfig item now
-                (Concrete.pendingWorkflow rest) abstract other
-                (by
-                  intro heq
-                  apply hother
-                  rw [← hitemKey]
-                  exact heq), hrep other]
-          · intro other hrelevant
-            by_cases hother : other = .origin origin
-            · subst other
-              simpa [hitemKey] using
-                (work_key_mem appConfig item now
-                  (Concrete.pendingWorkflow rest) abstract)
-            · exact work_keys_mono
-                appConfig item now
-                (Concrete.pendingWorkflow rest) abstract other
-                (hrep.relevantKeys other (by
-                  rw [Concrete.Store.toAbstract_commit_read] at hrelevant
-                  simpa [hother] using hrelevant))
-          · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
-        · rw [hlocal.2.1]
-          exact (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
-            (congrArg Concrete.pendingWorkflow hcontinuations'.symm)
-      | schedule id =>
-        simp only [Concrete.TimerTarget.key] at *
-        change physical.read (.schedule id) = loaded at hcurrent
-        change Concrete.selectScanWork appConfig (.schedule id) now rest
-          ((loaded.map (·.1)).getD (emptyDocument (.schedule id))) =
-            some candidate at hselectedWork
-        have hbefore := toAbstract_read_eq_loaded hrep.indexed hcurrent
-        have habstract :
-            abstract.store.read (.schedule id) =
-              (loaded.map (·.1)).getD
-                (emptyDocument (.schedule id)) := by
-          rw [← hrep (.schedule id), hbefore]
-          rfl
-        obtain ⟨schedule, hschedule, hdue, hdocument, houtputs,
-            hcontinuations⟩ :=
-          Concrete.selectScan_schedule_some appConfig id now rest
-            ((loaded.map (·.1)).getD
-              (emptyDocument (.schedule id))) _ hselectedWork
-        have hdecision := selectedWork_correspondence_key appConfig
-          (.scheduleTimeout id) now rest (.schedule id)
-          ((loaded.map (·.1)).getD
-            (emptyDocument (.schedule id))) rfl
-        have hdocument' :
-            candidate.document =
-              (Resonate.runWork appConfig
-                (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.schedule id)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.schedule id))))).1.store.read
-                  (.schedule id) := by
-          rw [← hdecision]
-          exact hdocument
-        have houtputs' :
-            candidate.outputs =
-              (Resonate.runWork appConfig
-                (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.schedule id)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.schedule id))))).2 := by
-          rw [← hdecision]
-          exact houtputs
-        have hcontinuations' :
-            candidate.continuations =
-              (Resonate.runWork appConfig
-                (.scheduleTimeout id) now (Concrete.pendingWorkflow rest)
-                (Concrete.singleState (.schedule id)
-                  ((loaded.map (·.1)).getD
-                    (emptyDocument (.schedule id))))).1.workflow.pending.map
-                  Concrete.PendingEntry.fromWorkflow := by
-          rw [← hdecision]
-          exact hcontinuations
-        have hlocal := work_locality
-          appConfig
-          (.scheduleTimeout id) now
-          (Concrete.pendingWorkflow rest) (.schedule id)
-          ((loaded.map (·.1)).getD
-            (emptyDocument (.schedule id)))
-          abstract rfl habstract
-        refine ⟨.scheduleTimeout id, rfl, ?_, ?_,
-          hlocal.2.2.trans houtputs'.symm, ?_⟩
-        · have habstractSchedule :
-              abstract.store.read (.schedule id) = some schedule :=
-            habstract.trans hschedule
-          simp only [Resonate.eligibleWorkAt, List.mem_flatMap]
-          exact ⟨.schedule id, hkeymem, by
-            simp [habstractSchedule, hdue]⟩
-        · constructor
-          · intro other
-            by_cases hother : other = .schedule id
-            · subst other
-              simp only [Concrete.Store.toAbstract_commit_read,
-                Resonate.Store.read_write_same]
-              exact hdocument'.trans hlocal.1.symm
-            · rw [Concrete.Store.toAbstract_commit_read]
-              simp [hother, Resonate.runWork_frame
-                appConfig
-                (.scheduleTimeout id) now
-                (Concrete.pendingWorkflow rest) abstract other
-                hother, hrep other]
-          · intro other hrelevant
-            by_cases hother : other = .schedule id
-            · subst other
-              exact work_key_mem appConfig
-                (.scheduleTimeout id) now
-                (Concrete.pendingWorkflow rest) abstract
-            · exact work_keys_mono
-                appConfig (.scheduleTimeout id)
-                now (Concrete.pendingWorkflow rest) abstract other
-                (hrep.relevantKeys other (by
-                  rw [Concrete.Store.toAbstract_commit_read] at hrelevant
-                  simpa [hother] using hrelevant))
-          · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
-        · rw [hlocal.2.1]
-          exact
-            (Concrete.pendingWorkflow_map_fromWorkflow _).symm.trans
-              (congrArg Concrete.pendingWorkflow hcontinuations'.symm)
-
-theorem sweep_cas_transport_rest
-    {appConfig : Resonate.Config}
-    {physical : Concrete.Store} {abstract : State}
-    (hrep : StoreRep physical abstract)
-    {key : DocumentKey} {timer : Concrete.TimerKey}
-    {document : Document key}
-    {expectedVersion : Option Concrete.Version}
-    (provenance :
-      PutProvenance appConfig key document expectedVersion)
-    {now : Time} {rest : List Concrete.PendingEntry}
-    (htransaction : provenance.transaction = .sweep timer now rest)
-    (htarget : timer.target.key = key)
-    (hcurrent : physical.read key = provenance.loaded)
-    (hwork :
-      (Concrete.selectScanWork appConfig key now rest
-        ((provenance.loaded.map (·.1)).getD
-          (emptyDocument key))).isSome = true)
-    (hkeymem : key ∈ abstract.store.keys)
-    (abstractRest : List WorkflowEntry) :
-    ∃ item,
-      item.key = key ∧
-      item ∈ Resonate.eligibleWorkAt abstract now ∧
-      let lifted := Resonate.runWork
-        appConfig item now abstractRest abstract
-      StoreRep (physical.commit key document) lifted.1 ∧
-        lifted.2 = provenance.outputs ∧
-        (Resonate.runWork appConfig item now
-          (Concrete.pendingWorkflow rest) abstract).1.workflow.pending =
-            Concrete.pendingWorkflow provenance.continuations := by
-  obtain ⟨item, hitemKey, hitem, hold⟩ :=
-    sweep_cas_transport hrep provenance htransaction htarget hcurrent hwork
-      hkeymem
-  refine ⟨item, hitemKey, hitem, ?_⟩
-  have hsame := runWork_rest_store_outputs
-    appConfig item now
-      (Concrete.pendingWorkflow rest) abstractRest abstract
-  refine ⟨?_, ?_, hold.2.2⟩
-  · exact hold.1.of_store_eq hsame.1
-  · rw [← hsame.2]
-    exact hold.2.1
-
-theorem sweep_idle_cas_transport
-    {appConfig : Resonate.Config}
-    {physical : Concrete.Store} {abstract : State}
-    (hrep : StoreRep physical abstract)
-    {key : DocumentKey} {timer : Concrete.TimerKey}
-    {document : Document key}
-    {expectedVersion : Option Concrete.Version}
-    (provenance :
-      PutProvenance appConfig key document expectedVersion)
-    {now : Time} {rest : List Concrete.PendingEntry}
-    (htransaction : provenance.transaction = .sweep timer now rest)
-    (hcurrent : physical.read key = provenance.loaded)
-    (hwork :
-      (Concrete.selectScanWork appConfig key now rest
-        ((provenance.loaded.map (·.1)).getD
-          (emptyDocument key))).isSome = false) :
-    StoreRep (physical.commit key document) abstract ∧
-      provenance.outputs = [] ∧
-      Concrete.pendingWorkflow provenance.continuations =
-        Concrete.pendingWorkflow rest := by
-  cases provenance with
-  | mk transaction loaded outputs continuations expected_eq selected =>
-    simp only at htransaction hcurrent hwork ⊢
-    subst transaction
-    cases selected with
-    | sweep hselectedTransaction hkey hselected =>
-        cases hselectedTransaction
-        cases hkey
-        rename_i candidate
-        have hworkNone :
-            Concrete.selectScanWork appConfig timer.target.key now rest
-                ((loaded.map (·.1)).getD
-                  (emptyDocument timer.target.key)) = none := by
-          cases hresult :
-              Concrete.selectScanWork appConfig timer.target.key now rest
-                ((loaded.map (·.1)).getD
-                  (emptyDocument timer.target.key)) with
-          | none => rfl
-          | some candidate => simp [hresult] at hwork
-        by_cases hdeadline :
-            (Concrete.documentDeadline? timer.target.key
-              ((loaded.map (·.1)).getD
-                (emptyDocument timer.target.key)) now).isSome
-        · rw [Concrete.selectScan, hworkNone, if_pos hdeadline] at hselected
-          have hcandidate := Option.some.inj hselected
-          cases hcandidate
-          refine ⟨?_, rfl, rfl⟩
-          have hdocument :
-              (loaded.map (·.1)).getD (emptyDocument timer.target.key) =
-                physical.toAbstract.read timer.target.key := by
-            symm
-            exact toAbstract_read_eq_loaded hrep.indexed hcurrent
-          rw [hdocument]
-          exact StoreRep.fence hrep timer.target.key
-        · rw [Concrete.selectScan, hworkNone, if_neg hdeadline] at hselected
-          contradiction
+    {candidate : Concrete.Candidate key}
+    (hselect :
+      Concrete.selectScan appConfig key instant rest
+        (physical.toAbstract.read key) = some candidate)
+    (hinstant : instant ≤ now) :
+    ∃ lifted added,
+      lifted ∈ (Abstract.runTimeout appConfig now abstract).val ∧
+      StoreRep (physical.commit key candidate.document) lifted.1 ∧
+      lifted.2 = candidate.outputs ∧
+      Concrete.pendingWorkflow candidate.continuations =
+        Concrete.pendingWorkflow rest ++ added ∧
+      lifted.1.workflow.pending = abstract.workflow.pending ++ added := by
+  have hread : abstract.store.read key = physical.toAbstract.read key :=
+    (hrep key).symm
+  have hidle : ∃ lifted added,
+      lifted ∈ (Abstract.runTimeout appConfig now abstract).val ∧
+      StoreRep (physical.commit key (physical.toAbstract.read key)) lifted.1 ∧
+      lifted.2 = [] ∧
+      Concrete.pendingWorkflow rest = Concrete.pendingWorkflow rest ++ added ∧
+      lifted.1.workflow.pending = abstract.workflow.pending ++ added :=
+    ⟨(abstract, []), [], by simp [Abstract.runTimeout], hrep.fence key, rfl,
+      by simp, by simp⟩
+  unfold Concrete.selectScan at hselect
+  cases hwork :
+      Concrete.selectScanWork appConfig key instant rest
+        (physical.toAbstract.read key) with
+  | none =>
+    simp only [hwork] at hselect
+    split at hselect
+    · cases hselect
+      exact hidle
+    · contradiction
+  | some work =>
+    rw [hwork] at hselect
+    cases hselect
+    obtain ⟨item, hcandidate, hdue⟩ := selectScanWork_due hwork
+    have hkey := selectedWorkCandidate_key hcandidate
+    subst hkey
+    by_cases hlocal : WorkLocal item
+    · obtain ⟨hsame, houtputs, added, hpending, hcontinuations⟩ :=
+        work_step appConfig item hcandidate hlocal abstract.workflow.pending
+          abstract hread
+      exact ⟨_, added,
+        runTimeout_mem_due appConfig abstract hinstant (hdue _ hread),
+        hrep.commit _ _ hsame, houtputs, hcontinuations, hpending⟩
+    · rw [selectedWorkCandidate_nonlocal appConfig hlocal] at hcandidate
+      cases hcandidate
+      exact hidle
 
 theorem sweep_timeout_transport
     {appConfig : Resonate.Config}
@@ -1818,66 +671,32 @@ theorem sweep_timeout_transport
       PutProvenance appConfig key document expectedVersion)
     {instant now : Time} {rest : List Concrete.PendingEntry}
     (htransaction : provenance.transaction = .sweep timer instant rest)
-    (htarget : timer.target.key = key)
     (hcurrent : physical.read key = provenance.loaded)
-    (hinstant : instant ≤ now)
-    (hkeyMem : key ∈ abstract.store.keys) :
+    (hinstant : instant ≤ now) :
     ∃ lifted added,
-      lifted ∈
-          (Resonate.runTimeoutChoices
-            appConfig now abstract).val ∧
+      lifted ∈ (Abstract.runTimeout appConfig now abstract).val ∧
       StoreRep (physical.commit key document) lifted.1 ∧
       lifted.2 = provenance.outputs ∧
       Concrete.pendingWorkflow provenance.continuations =
         Concrete.pendingWorkflow rest ++ added ∧
-      lifted.1.workflow.pending = abstract.workflow.pending ++ added ∧
-      (∀ knownKey ∈ abstract.store.keys,
-        knownKey ∈ lifted.1.store.keys) ∧
-      key ∈ lifted.1.store.keys := by
-  cases hwork :
-      (Concrete.selectScanWork appConfig key instant rest
-        ((provenance.loaded.map (·.1)).getD
-          (emptyDocument key))).isSome with
-  | false =>
-      have hidle :=
-        sweep_idle_cas_transport hrep provenance htransaction hcurrent hwork
-      refine ⟨(abstract, []), [], ?_, hidle.1, ?_, ?_, ?_, ?_, hkeyMem⟩
-      · simp [Resonate.runTimeoutChoices]
-      · exact hidle.2.1.symm
-      · simpa using hidle.2.2
-      · simp
-      · intro knownKey hknown
-        exact hknown
-  | true =>
-      obtain ⟨item, hitemKey, hitem, htransport⟩ :=
-        sweep_cas_transport_rest hrep provenance htransaction htarget hcurrent
-          hwork hkeyMem abstract.workflow.pending
-      let lifted :=
-        Resonate.runWork appConfig
-          item instant abstract.workflow.pending abstract
-      obtain ⟨added, hlocalPending, habstractPending⟩ :=
-        runWork_rest_pending appConfig
-          item instant (Concrete.pendingWorkflow rest)
-          abstract.workflow.pending abstract
-      refine ⟨lifted, added, ?_, htransport.1, htransport.2.1, ?_,
-        ?_, ?_, ?_⟩
-      · simp only [Resonate.runTimeoutChoices, List.mem_cons]
-        right
-        simp only [Resonate.timeoutChoices, List.mem_append]
-        right
-        simp only [Resonate.documentTimeoutChoices, List.mem_flatMap,
-          List.mem_map]
-        exact ⟨instant, List.mem_range.mpr (Nat.lt_succ_iff.mpr hinstant),
-          item, hitem, by simp [lifted]⟩
-      · rw [← htransport.2.2, hlocalPending]
-      · simpa [lifted] using habstractPending
-      · exact work_keys_mono appConfig
-          item instant abstract.workflow.pending abstract
-      · have hitemKeyMem :=
-          work_key_mem appConfig
-            item instant abstract.workflow.pending abstract
-        rw [hitemKey] at hitemKeyMem
-        simpa [lifted] using hitemKeyMem
+      lifted.1.workflow.pending = abstract.workflow.pending ++ added := by
+  cases provenance with
+  | mk transaction loaded outputs continuations expected_eq selected =>
+    simp only at htransaction hcurrent ⊢
+    subst transaction
+    cases selected with
+    | sweep hselectedTransaction hkey hselect =>
+      cases hselectedTransaction
+      cases hkey
+      rename_i candidate
+      have hscan :
+          Concrete.selectScan appConfig timer.target.key instant rest
+              (physical.toAbstract.read timer.target.key) =
+            some candidate := by
+        rw [toAbstract_read_eq_loaded hrep.indexed hcurrent]
+        exact hselect
+      exact scan_transport hrep hscan hinstant
+
 
 theorem takeFlight_once (node : Concrete.Node) (op : Concrete.OpId) :
     ((node.takeFlight op).2.takeFlight op).1 = none := by
@@ -9965,22 +8784,10 @@ theorem pending_work_choice_of_mem
     (now : Time) (entry : WorkflowEntry)
     (hmem : entry ∈ state.workflow.pending) :
     ∃ rest,
-      Resonate.runWork appConfig entry.item entry.instant rest state ∈
-        (Resonate.runTimeoutChoices appConfig now state).val ∧
-      List.Perm state.workflow.pending (entry :: rest) := by
-  obtain ⟨before, after, hpending⟩ := List.append_of_mem hmem
-  refine ⟨before ++ after, ?_, ?_⟩
-  simp only [Resonate.runTimeoutChoices, Resonate.timeoutChoices,
-    List.mem_cons, List.mem_append]
-  right
-  left
-  simp only [Resonate.pendingTimeoutChoices, List.mem_mapIdx]
-  refine ⟨before.length, by simp [hpending], ?_⟩
-  · simp [hpending, List.eraseIdx_append]
-  · rw [hpending]
-    simpa [List.append_assoc] using
-      (List.perm_middle :
-        List.Perm (before ++ entry :: after) (entry :: (before ++ after)))
+      Abstract.runWork appConfig entry.item entry.instant rest state ∈
+        (Abstract.runTimeout appConfig now state).val ∧
+      List.Perm state.workflow.pending (entry :: rest) :=
+  runTimeout_mem_pending appConfig state now hmem
 
 def Covered (abstract : World AModel) (outputs : List Output) : Prop :=
   ∀ output ∈ outputs,
@@ -10025,11 +8832,11 @@ def FlightWorkflowStage (flight : Concrete.Flight)
       match flight.phase with
       | .loading | .arming =>
           abstractPending =
-            (Resonate.occurrenceEntry? item).toList ++
+            (occurrenceEntry? item).toList ++
               Concrete.pendingWorkflow rest
       | .writing =>
           abstractPending =
-              (Resonate.occurrenceEntry? item).toList ++
+              (occurrenceEntry? item).toList ++
                 Concrete.pendingWorkflow rest ∨
           abstractPending =
             Concrete.pendingWorkflow flight.continuations
@@ -10051,7 +8858,7 @@ def FlightWorkflowStage (flight : Concrete.Flight)
 def TransactionPending : Concrete.Transaction → Option (List WorkflowEntry)
   | .external _ => none
   | .work item _ rest =>
-      some ((Resonate.occurrenceEntry? item).toList ++
+      some ((occurrenceEntry? item).toList ++
         Concrete.pendingWorkflow rest)
   | .sweep _ _ rest =>
       some (Concrete.pendingWorkflow rest)
@@ -10073,7 +8880,7 @@ def FlightWorkflowPart (store : Concrete.Store)
       flight.fired = none ∧
         nodePending = [] ∧
         let before :=
-          (Resonate.occurrenceEntry? item).toList ++
+          (occurrenceEntry? item).toList ++
             Concrete.pendingWorkflow rest
         match flight.phase with
         | .loading =>
@@ -10153,7 +8960,7 @@ structure NodeWorkflowFlightsWitness (store : Concrete.Store)
     (hphase : flight.phase = .loading)
     (hattempt : flight.attempt = 0) :
     part =
-      (Resonate.occurrenceEntry? item).toList ++
+      (occurrenceEntry? item).toList ++
         Concrete.pendingWorkflow rest := by
   simp only [FlightWorkflowPart, htransaction, hphase] at hpart
   obtain ⟨_, _, hpart⟩ := hpart
@@ -10456,7 +9263,6 @@ structure Related (nodes : List Addr) (appConfig : Resonate.Config)
             op
             payload := .put key document expectedVersion
           }) ∈ concrete.network ∧
-        key ∈ (abstract.process .service).store.keys ∧
         Covered abstract provenance.outputs
   failedCovered :
     ∀ address op,
@@ -10479,8 +9285,7 @@ structure Related (nodes : List Addr) (appConfig : Resonate.Config)
       (op, flight) ∈ node.flights →
       ((Concrete.Pid.store, .node address,
           .storeReply { op, payload := .written }) ∈ concrete.network →
-        flight.key ∈ (abstract.process .service).store.keys ∧
-          Covered abstract flight.selected ∧
+        Covered abstract flight.selected ∧
           (TransactionPending flight.transaction = none ∨ True)) ∧
       ((Concrete.Pid.store, .node address,
           .storeReply { op, payload := .failed }) ∈ concrete.network →
@@ -10750,7 +9555,7 @@ theorem workflowAligned_work_commit
     simp only [FlightWorkflowPart, htransaction, hphase] at hflightPart
     obtain ⟨_, _, hflightPart⟩ := hflightPart
     rcases hflightPart with hbefore | ⟨hstale, _⟩
-    · simpa [entry, Resonate.occurrenceEntry?] using hbefore
+    · simpa [entry, occurrenceEntry?] using hbefore
     · exact (hstale hversion).elim
   let nextParts : Addr → List WorkflowEntry := fun current =>
     if current = address then Concrete.pendingWorkflow rest else parts current
@@ -11824,14 +10629,14 @@ theorem nodeWorkflowPart_step
           Concrete.cleanupFlight,
           Concrete.Node.cachePut, Concrete.Node.cacheInvalidate,
           Concrete.pendingWorkflow, Concrete.PendingEntry.toWorkflow?,
-          Resonate.occurrenceEntry?, Outcomes.one]
+          occurrenceEntry?, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
         try simp_all [NodeWorkflowPart, FlightWorkflowPart, NodeSerial,
           TransactionPending, NodeValid, FlightValid, WorkShaped,
           Concrete.Node.await, Concrete.Node.awaitControl,
           Concrete.pendingWorkflow, Concrete.PendingEntry.toWorkflow?,
-          Resonate.occurrenceEntry?]
+          occurrenceEntry?]
       all_goals subst_vars
       all_goals try rcases entry with ⟨request, instant⟩
       all_goals try assumption
@@ -12278,12 +11083,11 @@ theorem related_after_inject
       (by simpa [cnext, World.inject] using hnode) hmem hphase hversion
       hpending
   · intro target op hmem
-    obtain ⟨key, document, expected, provenance, hput, hkey, hcover⟩ :=
+    obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.acknowledged target op
         (by simpa [cnext, World.inject] using hmem)
     exact ⟨key, document, expected, provenance,
       by simpa [cnext, World.inject] using hput,
-      by simpa [anext, World.inject] using hkey,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro target op hmem
@@ -12302,10 +11106,9 @@ theorem related_after_inject
       related.activeReplies target node op flight htarget hnodeOld hflight
     constructor
     · intro hreply
-      obtain ⟨hkey, hcover, hworkflow⟩ := hwritten
+      obtain ⟨hcover, hworkflow⟩ := hwritten
         (by simpa [cnext, World.inject] using hreply)
-      exact ⟨by simpa [anext, World.inject] using hkey,
-        hcover.mono fun message hmessage =>
+      exact ⟨hcover.mono fun message hmessage =>
           List.mem_append_left _ hmessage,
         by simpa [anext, World.inject] using hworkflow⟩
     · intro hreply
@@ -12385,12 +11188,11 @@ theorem related_after_store_inject
       (by simpa [cnext, World.inject] using hnode) hmem hphase hversion
       hpending
   · intro address op hmem
-    obtain ⟨key, document, expected, provenance, hput, hkey, hcover⟩ :=
+    obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.acknowledged address op
         (by simpa [cnext, World.inject] using hmem)
     exact ⟨key, document, expected, provenance,
       by simpa [cnext, World.inject] using hput,
-      by simpa [anext, World.inject] using hkey,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro address op hmem
@@ -12409,10 +11211,9 @@ theorem related_after_store_inject
       related.activeReplies address node op flight haddress hnodeOld hflight
     constructor
     · intro hreply
-      obtain ⟨hkey, hcover, hworkflow⟩ := hwritten
+      obtain ⟨hcover, hworkflow⟩ := hwritten
         (by simpa [cnext, World.inject] using hreply)
-      exact ⟨by simpa [anext, World.inject] using hkey,
-        hcover.mono fun message hmessage =>
+      exact ⟨hcover.mono fun message hmessage =>
           List.mem_append_left _ hmessage,
         by simpa [anext, World.inject] using hworkflow⟩
     · intro hreply
@@ -12718,9 +11519,6 @@ theorem related_after_land
     (htime : abstractNext.now ≤ now)
     (hnetwork :
       ∀ message ∈ abstract.network, message ∈ abstractNext.network)
-    (hkeys :
-      ∀ key ∈ (abstract.process .service).store.keys,
-        key ∈ (abstractNext.process .service).store.keys)
     (hstore :
       ∃ physical,
         (concrete.land pid now result).process .store = .store physical ∧
@@ -12750,7 +11548,6 @@ theorem related_after_land
               op
               payload := .put key document expectedVersion
             }) ∈ (concrete.land pid now result).network ∧
-          key ∈ (abstractNext.process .service).store.keys ∧
           Covered abstractNext provenance.outputs)
     (hnewFailed :
       ∀ {address op},
@@ -12775,8 +11572,7 @@ theorem related_after_land
         ((Concrete.Pid.store, .node address,
             .storeReply { op, payload := .written }) ∈
               (concrete.land pid now result).network →
-          flight.key ∈ (abstractNext.process .service).store.keys ∧
-            Covered abstractNext flight.selected ∧
+          Covered abstractNext flight.selected ∧
             (TransactionPending flight.transaction = none ∨ True)) ∧
         ((Concrete.Pid.store, .node address,
             .storeReply { op, payload := .failed }) ∈
@@ -12839,11 +11635,10 @@ theorem related_after_land
   · intro address op hmem
     simp only [World.land, List.mem_append] at hmem
     rcases hmem with hold | hnew
-    · obtain ⟨key, document, expected, provenance, hput, hkey, hcover⟩ :=
+    · obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
         related.acknowledged address op hold
       exact ⟨key, document, expected, provenance,
-        List.mem_append_left _ hput, hkeys key hkey,
-        hcover.mono hnetwork⟩
+        List.mem_append_left _ hput, hcover.mono hnetwork⟩
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
       obtain ⟨target, message⟩ := sent
       simp only [Prod.mk.injEq] at heq
@@ -12982,7 +11777,7 @@ theorem related_after_inert_store
     Step.process htime (by simp) hvalid (hphysical ▸ hresult)
   apply related_after_land related hreachable (by simp) hstep
       (Nat.le_trans related.time htime)
-      (fun _ h => h) (fun _ h => h)
+      (fun _ h => h)
   · obtain ⟨relatedPhysical, hrelatedPhysical, hrep⟩ := related.store
     rw [hphysical] at hrelatedPhysical
     cases Concrete.Local.store.inj hrelatedPhysical
@@ -12995,9 +11790,6 @@ theorem related_after_inert_store
     constructor
     · intro key
       simpa [hread key] using hrep key
-    · intro key hrelevant
-      apply hrep.relevantKeys key
-      simpa [hread key] using hrelevant
     · exact Concrete.Store.indexed_congr hvalues hkeys hrep.indexed
   · obtain ⟨workflowStore, parts, slack, hworkflowStore, hpending,
         hparts, hcommitted⟩ := related.workflow
@@ -13101,7 +11893,7 @@ theorem simulate_external_written_store
     (houtputs : provenance.outputs = flight.selected)
     {now : Time} (htime : concrete.now ≤ now) :
     let served :=
-      Resonate.run appConfig call
+      Abstract.run appConfig call
         (abstract.process .service)
     let abstractResult : Result Abstract.Pid State Message := {
       state := served.1
@@ -13122,7 +11914,7 @@ theorem simulate_external_written_store
       Abstract.boundaryTrace execution = [] := by
   dsimp
   let served :=
-    Resonate.run appConfig call
+    Abstract.run appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := served.1
@@ -13200,10 +11992,6 @@ theorem simulate_external_written_store
   · simp [abstractNext, World.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
-  · intro knownKey hknownKey
-    simpa [abstractNext, World.land, abstractResult, served] using
-      external_keys_mono appConfig call
-        (abstract.process .service) knownKey hknownKey
   · exact ⟨physical.commit key document,
       by simp [World.land, concreteResult],
       by simpa [abstractNext, World.land, abstractResult, served] using
@@ -13234,14 +12022,11 @@ theorem simulate_external_written_store
     simp [concreteResult] at hsend
     obtain ⟨rfl, rfl⟩ := hsend
     refine ⟨key, document, expectedVersion, provenance,
-      List.mem_append_left _ hrequest, ?_, ?_⟩
-    · simpa [abstractNext, World.land, abstractResult, served] using
-        external_key_mem appConfig call
-          (abstract.process .service) key hselectedKey
-    · have hcovered :=
-        covered_sent abstract now served.1 served.2
-      simpa [abstractNext, abstractResult, served, htransport.2.1] using
-        hcovered
+      List.mem_append_left _ hrequest, ?_⟩
+    have hcovered :=
+      covered_sent abstract now served.1 served.2
+    simpa [abstractNext, abstractResult, served, htransport.2.1] using
+      hcovered
   · intro failedAddress failedOp hsend
     simp [concreteResult] at hsend
   · intro activeAddress activeNode activeOp activeFlight hactiveAddress
@@ -13256,12 +12041,8 @@ theorem simulate_external_written_store
     · intro hreply
       simp only [World.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
-      · obtain ⟨hknown, hcovered, hworkflow⟩ := holdWritten hold
-        exact ⟨by
-          simpa [abstractNext, World.land, abstractResult, served] using
-            external_keys_mono appConfig call
-              (abstract.process .service) activeFlight.key hknown,
-          hcovered.land abstractResult,
+      · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
+        exact ⟨hcovered.land abstractResult,
           by
             rcases hworkflow with hnone | hpending
             · exact .inl hnone
@@ -13280,11 +12061,7 @@ theorem simulate_external_written_store
         cases Concrete.Local.node.inj hserialNode
         have hpairs := NodeSerial.eq_of_mem hserial hactiveFlight hflight
         cases hpairs
-        refine ⟨?_, ?_, ?_⟩
-        · subst key
-          simpa [abstractNext, World.land, abstractResult, served] using
-            external_key_mem appConfig call
-              (abstract.process .service) flight.key hselectedKey
+        refine ⟨?_, ?_⟩
         · have hcovered :=
             covered_sent abstract now served.1 served.2
           simpa [abstractNext, abstractResult, served, htransport.2.1,
@@ -13331,7 +12108,7 @@ theorem simulate_external_landed_failed_store
     (hflightTransaction : provenance.transaction = flight.transaction)
     {now : Time} (htime : concrete.now ≤ now) :
     let lost :=
-      Resonate.runLose appConfig call
+      Abstract.runLose appConfig call
         (abstract.process .service)
     let abstractResult : Result Abstract.Pid State Message := {
       state := lost.1
@@ -13352,7 +12129,7 @@ theorem simulate_external_landed_failed_store
       Abstract.boundaryTrace execution = [] := by
   dsimp
   let lost :=
-    Resonate.runLose appConfig call
+    Abstract.runLose appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := lost.1
@@ -13421,11 +12198,6 @@ theorem simulate_external_landed_failed_store
   · simp [abstractNext, World.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
-  · intro knownKey hknownKey
-    simpa [abstractNext, World.land, abstractResult, lost,
-      Resonate.runLose] using
-      external_keys_mono appConfig call
-        (abstract.process .service) knownKey hknownKey
   · exact ⟨physical.commit key document,
       by simp [World.land, concreteResult],
       by simpa [abstractNext, World.land, abstractResult, lost] using
@@ -13454,7 +12226,7 @@ theorem simulate_external_landed_failed_store
     rw [htransaction] at houtput
     simp [Concrete.failureOutputs] at houtput
     subst output
-    exact hcovered _ (by simp [lost, Resonate.runLose])
+    exact hcovered _ (by simp [lost, Abstract.runLose])
   · intro activeAddress activeNode activeOp activeFlight hactiveAddress
       hactiveNode hactiveFlight
     have hactiveNodeOld :
@@ -13467,12 +12239,8 @@ theorem simulate_external_landed_failed_store
     · intro hreply
       simp only [World.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
-      · obtain ⟨hknown, hcovered, hworkflow⟩ := holdWritten hold
-        exact ⟨by
-          simpa [abstractNext, World.land, abstractResult, lost,
-            Resonate.runLose] using
-            external_keys_mono appConfig call
-              (abstract.process .service) activeFlight.key hknown,
+      · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
+        exact ⟨
           hcovered.land abstractResult,
           by
             rcases hworkflow with hnone | hpending
@@ -13502,7 +12270,7 @@ theorem simulate_external_landed_failed_store
         rw [← hflightTransaction, htransaction] at houtput
         simp [Concrete.failureOutputs] at houtput
         subst output
-        exact hcovered _ (by simp [lost, Resonate.runLose])
+        exact hcovered _ (by simp [lost, Abstract.runLose])
   · exact related.cleanupCovered_transport
       (fun _ => by simp [World.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
@@ -13535,7 +12303,7 @@ theorem simulate_external_not_landed_failed_store
     (hflight : (op, flight) ∈ node.flights)
     (hflightTransaction : provenance.transaction = flight.transaction)
     {now : Time} (htime : concrete.now ≤ now) :
-    let shed := Resonate.runShed call (abstract.process .service)
+    let shed := Abstract.runShed call (abstract.process .service)
     let abstractResult : Result Abstract.Pid State Message := {
       state := shed.1
       send := Abstract.sends shed.2
@@ -13554,7 +12322,7 @@ theorem simulate_external_not_landed_failed_store
         (endOf abstract execution) ∧
       Abstract.boundaryTrace execution = [] := by
   dsimp
-  let shed := Resonate.runShed call (abstract.process .service)
+  let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := shed.1
     send := Abstract.sends shed.2
@@ -13614,21 +12382,18 @@ theorem simulate_external_not_landed_failed_store
   · simp [abstractNext, World.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
-  · intro knownKey hknownKey
-    simpa [abstractNext, World.land, abstractResult, shed,
-      Resonate.runShed] using hknownKey
   · obtain ⟨represented, hrepresented, hrep⟩ := related.store
     rw [hphysical] at hrepresented
     cases Concrete.Local.store.inj hrepresented
     exact ⟨physical.fence key,
       by simp [World.land, concreteResult],
       by simpa [abstractNext, World.land, abstractResult, shed,
-        Resonate.runShed] using StoreRep.fence hrep key⟩
+        Abstract.runShed] using StoreRep.fence hrep key⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
       (physical.toAbstract.read key) concreteResult
       (by simp [concreteResult, Concrete.Store.fence])
     · simp [abstractNext, World.land, abstractResult, shed,
-        Resonate.runShed]
+        Abstract.runShed]
     · intro activeAddress activeNode activeOp activeFlight hactiveAddress
         hactiveNode hactiveFlight hactivePhase hsend
       simp [concreteResult] at hsend
@@ -13649,7 +12414,7 @@ theorem simulate_external_not_landed_failed_store
     intro output houtput
     simp [Concrete.failureOutputs] at houtput
     subst output
-    exact hcovered _ (by simp [shed, Resonate.runShed])
+    exact hcovered _ (by simp [shed, Abstract.runShed])
   · intro activeAddress activeNode activeOp activeFlight hactiveAddress
       hactiveNode hactiveFlight
     have hactiveNodeOld :
@@ -13662,17 +12427,15 @@ theorem simulate_external_not_landed_failed_store
     · intro hreply
       simp only [World.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
-      · obtain ⟨hknown, hcovered, hworkflow⟩ := holdWritten hold
-        exact ⟨by
-          simpa [abstractNext, World.land, abstractResult, shed,
-            Resonate.runShed] using hknown,
+      · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
+        exact ⟨
           hcovered.land abstractResult,
           by
             rcases hworkflow with hnone | hpending
             · exact .inl hnone
             · exact .inr (by
                 simpa [abstractNext, World.land, abstractResult, shed,
-                  Resonate.runShed] using hpending)⟩
+                  Abstract.runShed] using hpending)⟩
       · simp [concreteResult] at hnew
     · intro hreply
       simp only [World.land, List.mem_append] at hreply
@@ -13695,7 +12458,7 @@ theorem simulate_external_not_landed_failed_store
         intro output houtput
         simp [Concrete.failureOutputs] at houtput
         subst output
-        exact hcovered _ (by simp [shed, Resonate.runShed])
+        exact hcovered _ (by simp [shed, Abstract.runShed])
   · exact related.cleanupCovered_transport
       (fun _ => by simp [World.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
@@ -13738,7 +12501,7 @@ theorem simulate_internal_committed_store
     (lifted : State × List Output)
     (hchoice :
       lifted ∈
-        (Resonate.runTimeoutChoices
+        (Abstract.runTimeout
           appConfig now
           (abstract.process .service)).val)
     (htransport :
@@ -13759,10 +12522,6 @@ theorem simulate_internal_committed_store
           state := lifted.1
           send := Abstract.sends lifted.2
         }))
-    (hkeys :
-      ∀ knownKey ∈ (abstract.process .service).store.keys,
-        knownKey ∈ lifted.1.store.keys)
-    (hkeyMem : key ∈ lifted.1.store.keys)
     (hreply : reply = .written ∨ reply = .failed)
     (htime : concrete.now ≤ now)
     (hconcreteResult :
@@ -13829,9 +12588,6 @@ theorem simulate_internal_committed_store
   · simp [abstractNext, World.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
-  · intro knownKey hknownKey
-    simpa [abstractNext, World.land, abstractResult] using
-      hkeys knownKey hknownKey
   · exact ⟨physical.commit key document,
       by simp [World.land, concreteResult],
       by simpa [abstractNext, World.land, abstractResult] using
@@ -13847,10 +12603,9 @@ theorem simulate_internal_committed_store
     · simp [concreteResult] at hsend
       obtain ⟨rfl, rfl⟩ := hsend
       refine ⟨key, document, expectedVersion, provenance,
-        List.mem_append_left _ hrequest, ?_, ?_⟩
-      · simpa [abstractNext, World.land, abstractResult] using hkeyMem
-      · have hcovered := covered_sent abstract now lifted.1 lifted.2
-        simpa [abstractNext, abstractResult, htransport.2] using hcovered
+        List.mem_append_left _ hrequest, ?_⟩
+      have hcovered := covered_sent abstract now lifted.1 lifted.2
+      simpa [abstractNext, abstractResult, htransport.2] using hcovered
     · simp [concreteResult] at hsend
   · intro failedAddress failedOp hsend
     rcases hreply with rfl | rfl
@@ -13873,10 +12628,8 @@ theorem simulate_internal_committed_store
     · intro hreplyMem
       simp only [World.land, List.mem_append] at hreplyMem
       rcases hreplyMem with hold | hnew
-      · obtain ⟨hknown, hcovered, hworkflow⟩ := holdWritten hold
-        exact ⟨by
-          simpa [abstractNext, World.land, abstractResult] using
-            hkeys activeFlight.key hknown,
+      · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
+        exact ⟨
           hcovered.land abstractResult,
           .inr trivial⟩
       · rcases hreply with rfl | rfl
@@ -13899,12 +12652,10 @@ theorem simulate_internal_committed_store
               (congrArg (fun value : Concrete.Flight =>
                 value.transaction) hactiveEq.symm)
           cases hpairs
-          refine ⟨by simpa [hkey, abstractNext, World.land,
-              abstractResult] using hkeyMem, ?_, ?_⟩
-          ·
-              have hcovered := covered_sent abstract now lifted.1 lifted.2
-              simpa [abstractNext, abstractResult, htransport.2,
-                houtputs] using hcovered
+          refine ⟨?_, ?_⟩
+          · have hcovered := covered_sent abstract now lifted.1 lifted.2
+            simpa [abstractNext, abstractResult, htransport.2,
+              houtputs] using hcovered
           · right
             trivial
         · simp [concreteResult] at hnew
@@ -14007,7 +12758,7 @@ theorem simulate_internal_not_landed_failed_store
     (concrete.land .store now concreteResult) abstract
   apply related_after_land related hreachable (by simp) hconcreteStep
       (Nat.le_trans related.time htime)
-      (fun _ h => h) (fun _ h => h)
+      (fun _ h => h)
   · obtain ⟨represented, hrepresented, hrep⟩ := related.store
     rw [hphysical] at hrepresented
     cases Concrete.Local.store.inj hrepresented
@@ -14189,24 +12940,24 @@ theorem simulate_matching_put_store
         appConfig
         (abstract.process .service) now entry hentryMem
     let lifted :=
-      Resonate.runWork appConfig
+      Abstract.runWork appConfig
         item semanticTime abstractRest (abstract.process .service)
     have hchoice :
         lifted ∈
-          (Resonate.runTimeoutChoices
+          (Abstract.runTimeout
             appConfig now
             (abstract.process .service)).val := by
       simpa [lifted, item, entry, WorkflowEntry.item] using hchoiceRaw
     have htransport :=
-      work_cas_transport_rest hrep provenance htransaction hcurrent
+      work_cas_transport_rest hrep provenance htransaction hcurrent trivial
         abstractRest
     have hconcreteTransport :=
-      work_cas_transport hrep provenance htransaction hcurrent
+      work_cas_transport hrep provenance htransaction hcurrent trivial
     have hprovenanceContinuations :
         Concrete.pendingWorkflow provenance.continuations =
           Concrete.pendingWorkflow rest := by
       symm
-      simpa [item, Resonate.runWork] using hconcreteTransport.2.2
+      simpa [item, Abstract.runWork] using hconcreteTransport.2.2
     have hflightContinuations :
         Concrete.pendingWorkflow flight.continuations =
           Concrete.pendingWorkflow rest := by
@@ -14216,7 +12967,7 @@ theorem simulate_matching_put_store
           (Concrete.pendingWorkflow provenance.continuations)
           lifted.1.workflow.pending := by
       have hold := hpending.cancel_head hpendingPerm
-      simpa [lifted, item, Resonate.runWork,
+      simpa [lifted, item, Abstract.runWork,
         hprovenanceContinuations] using hold
     have hworkflowNext :
         WorkflowAligned config
@@ -14243,12 +12994,7 @@ theorem simulate_matching_put_store
           intro replyAddress replyOp hsend
           simp at hsend
           exact ⟨hsend.1, hsend.2.1⟩) hpendingPerm
-      simp [World.land, lifted, item, entry, Resonate.runWork]
-    have hitemMem :=
-      work_key_mem appConfig
-        item semanticTime abstractRest
-          (abstract.process .service)
-    rw [hitemKey] at hitemMem
+      simp [World.land, lifted, item, entry, Abstract.runWork]
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance hsnapshot hmatch
       (htransactionPending := hpendingTransaction)
@@ -14256,10 +13002,6 @@ theorem simulate_matching_put_store
       haddress hnode hflight hphase hkey hloaded hflightTransaction
       houtputs hcontinuations lifted hchoice htransport
       hcontinuationsEmbedded hworkflowNext
-      (work_keys_mono appConfig
-        item semanticTime abstractRest
-          (abstract.process .service))
-      (by simpa [lifted] using hitemMem)
       hreply htime hconcreteResult
   have hsweep
       {timer : Concrete.TimerKey} {instant : Time}
@@ -14322,19 +13064,13 @@ theorem simulate_matching_put_store
     have hsweepValid :=
       hsweeps op flight hflight timer instant rest
         (hflightTransaction.symm.trans htransaction)
-    have hkeyMem :
-        key ∈ (abstract.process .service).store.keys := by
-      apply hrep.relevantKeys
-      rw [toAbstract_read_eq_loaded hrep.indexed hcurrent]
-      apply Selected.sweep_relevant
-      simpa [htransaction] using provenance.selected
     have hinstant :
         instant ≤ now :=
       Nat.le_trans hsweepValid htime
     obtain ⟨lifted, added, hchoice, htransport, htransportOutputs,
-        hprovenanceContinuations, habstractPending, hkeys, hliftedKey⟩ :=
-      sweep_timeout_transport hrep provenance htransaction htarget hcurrent
-        hinstant hkeyMem
+        hprovenanceContinuations, habstractPending⟩ :=
+      sweep_timeout_transport hrep provenance htransaction hcurrent
+        hinstant
     have hflightContinuations :
         Concrete.pendingWorkflow flight.continuations =
           Concrete.pendingWorkflow rest ++ added := by
@@ -14380,7 +13116,6 @@ theorem simulate_matching_put_store
       houtputs hcontinuations lifted hchoice
       ⟨htransport, htransportOutputs⟩
       hcontinuationsEmbedded hworkflowNext
-      hkeys hliftedKey
       hreply htime hconcreteResult
   have hinternalFence
       (hfailure : Concrete.failureOutputs provenance.transaction = [])
@@ -14654,9 +13389,6 @@ theorem related_after_node_land
     (habstractTime : abstractNext.now ≤ now)
     (hnetwork :
       ∀ message ∈ abstract.network, message ∈ abstractNext.network)
-    (hkeys :
-      ∀ key ∈ (abstract.process .service).store.keys,
-        key ∈ (abstractNext.process .service).store.keys)
     (hstore :
       ∃ physical,
         concrete.process .store = .store physical ∧
@@ -14684,8 +13416,7 @@ theorem related_after_node_land
         ((Concrete.Pid.store, .node currentAddress,
             .storeReply { op, payload := .written }) ∈
               (concrete.land (.node address) now result).network →
-          flight.key ∈ (abstractNext.process .service).store.keys ∧
-            Covered abstractNext flight.selected ∧
+          Covered abstractNext flight.selected ∧
             (TransactionPending flight.transaction = none ∨ True)) ∧
         ((Concrete.Pid.store, .node currentAddress,
             .storeReply { op, payload := .failed }) ∈
@@ -14707,7 +13438,7 @@ theorem related_after_node_land
         (concrete.land (.node address) now result) :=
     Step.process htime haddress hvalid (hnode ▸ hresult)
   apply related_after_land related hreachable haddress hstep
-      habstractTime hnetwork hkeys hstore hworkflow hcurrent
+      habstractTime hnetwork hstore hworkflow hcurrent
       hnewRequest hnewOutput
   · intro target op hsend
     exact (node_step_no_store_reply hresult hsend).elim
@@ -14753,7 +13484,7 @@ theorem related_after_inert_node
     · simp [World.land, hp]
   apply related_after_node_land hreachable related haddress hnode htime
       hvalid hresult (Nat.le_trans related.time htime)
-      (fun _ h => h) (fun _ h => h) related.store
+      (fun _ h => h) related.store
   · apply workflowAligned_node_land (nextNode := node)
       related.workflow haddress hnode
       {
@@ -15589,7 +14320,7 @@ theorem cleanup_mem_covered
         obtain ⟨hwritten, _⟩ :=
           related.activeReplies address node flightOp flight haddress hnode
             hflight
-        obtain ⟨_, hcovered, _⟩ := hwritten hreply
+        obtain ⟨hcovered, _⟩ := hwritten hreply
         exact hcover (houtputs.symm ▸ hcovered)
     | parkedLoading flightOp flight hflight houtputs hphase =>
         intro output houtput
@@ -15626,7 +14357,7 @@ theorem related_after_metadata_node
       (concrete.land (.node address) now result) abstract := by
   apply related_after_node_land hreachable related haddress hnode htime
       hvalid hresult (Nat.le_trans related.time htime)
-      (fun _ h => h) (fun _ h => h)
+      (fun _ h => h)
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     exact ⟨physical, by simpa [World.land] using hphysical, hrep⟩
   · apply workflowAligned_node_land (nextNode := nextNode)
@@ -15936,9 +14667,6 @@ theorem related_after_stuttering_node_to
       hparts, hcommitted⟩ := related.workflow
   apply related_after_node_land hreachable related haddress hnode htime
       hvalid hresult habstractTime hnetwork
-      (by
-        intro key hkey
-        simpa [hservice] using hkey)
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     exact ⟨physical, by simpa [World.land] using hphysical,
       by simpa [hservice] using hrep⟩
@@ -16014,10 +14742,9 @@ theorem related_after_stuttering_node_to
           related.activeReplies address node op flight haddress hnode holdFlight
         constructor
         · intro hreply
-          obtain ⟨hkey, hcovered, hpending⟩ :=
+          obtain ⟨hcovered, hpending⟩ :=
             hwritten (replyOld hreply)
-          exact ⟨by simpa [hservice] using hkey,
-            hcover _ hcovered, hpending⟩
+          exact ⟨hcover _ hcovered, hpending⟩
         · intro hreply
           exact hcover _ (hfailed (replyOld hreply))
       · subst op
@@ -16034,8 +14761,8 @@ theorem related_after_stuttering_node_to
           hcurrentAddress hcurrentNodeOld hflight
       constructor
       · intro hreply
-        obtain ⟨hkey, hcovered, hpending⟩ := hwritten (replyOld hreply)
-        exact ⟨by simpa [hservice] using hkey, hcover _ hcovered, hpending⟩
+        obtain ⟨hcovered, hpending⟩ := hwritten (replyOld hreply)
+        exact ⟨hcover _ hcovered, hpending⟩
       · intro hreply
         exact hcover _ (hfailed (replyOld hreply))
   · intro currentAddress currentNode op outputs haddress' hnodeNext hmem
@@ -16120,7 +14847,7 @@ theorem simulate_rejected_external_node
         })
         (endOf abstract execution) ∧
       Abstract.boundaryTrace execution = [] := by
-  let shed := Resonate.runShed call (abstract.process .service)
+  let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := shed.1
     send := Abstract.sends shed.2
@@ -16141,7 +14868,7 @@ theorem simulate_rejected_external_node
       (related.requests address call hrequest) habstractResult
   have hstate :
       (abstractNext.process .service) = abstract.process .service := by
-    simp [abstractNext, World.land, abstractResult, shed, Resonate.runShed]
+    simp [abstractNext, World.land, abstractResult, shed, Abstract.runShed]
   have hrelated :=
     related_after_stuttering_node_to
       (event := .receive .outside (.request call))
@@ -16153,7 +14880,7 @@ theorem simulate_rejected_external_node
         intro output houtput
         have hcovered := covered_sent abstract now shed.1 shed.2
         apply hcovered output
-        simpa [Concrete.sendOutputs, shed, Resonate.runShed] using houtput)
+        simpa [Concrete.sendOutputs, shed, Abstract.runShed] using houtput)
   exact ⟨[((.process .service now
       (.receive .outside (.request call)) abstractResult.send),
       abstractNext)], ⟨habstractStep, trivial⟩,
@@ -16188,7 +14915,7 @@ theorem simulate_pure_external_node
         (endOf abstract execution) ∧
       Abstract.boundaryTrace execution = [] := by
   let served :=
-    Resonate.run appConfig call
+    Abstract.run appConfig call
       (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := served.1
@@ -16240,10 +14967,6 @@ theorem simulate_pure_external_node
   · simp [abstractNext, World.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
-  · intro knownKey hknownKey
-    simpa [abstractNext, World.land, abstractResult, served] using
-      external_keys_mono appConfig call
-        (abstract.process .service) knownKey hknownKey
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     refine ⟨physical, hphysical, ?_⟩
     constructor
@@ -16251,11 +14974,6 @@ theorem simulate_pure_external_node
       rw [hrep other]
       simpa [abstractNext, World.land, abstractResult, served] using
         (hpure.1 other).symm
-    · intro other hrelevant
-      simpa [abstractNext, World.land, abstractResult, served] using
-        external_keys_mono appConfig call
-          (abstract.process .service) other
-          (hrep.relevantKeys other hrelevant)
     · exact hrep.indexed
   · have hold :
         WorkflowAligned config
@@ -16280,7 +14998,7 @@ theorem simulate_pure_external_node
   · intro output hsend
     have houtput :
         output ∈
-          (Resonate.run appConfig call {}).2 := by
+          (Abstract.run appConfig call {}).2 := by
       rw [pureResponse_correspondence
         appConfig call hkey]
       simpa [Concrete.pureExternal, Concrete.sendOutputs] using hsend
@@ -16295,13 +15013,9 @@ theorem simulate_pure_external_node
         hcurrentAddress hcurrentNode hflight
     constructor
     · intro hreply
-      obtain ⟨hknown, hcovered, hworkflow⟩ :=
+      obtain ⟨hcovered, hworkflow⟩ :=
         hwritten (by simpa [World.land] using hreply)
-      exact ⟨by
-        simpa [abstractNext, World.land, abstractResult, served] using
-          external_keys_mono appConfig call
-            (abstract.process .service) flight.key hknown,
-        hcovered.land abstractResult,
+      exact ⟨hcovered.land abstractResult,
         by
           rcases hworkflow with hnone | hpending
           · exact .inl hnone
@@ -16461,7 +15175,7 @@ theorem simulate_node_process
                       have hflight := takeFlight_some_mem ht
                       have hcovered :=
                         (related.activeReplies address node op flight haddress
-                          hnode hflight).1 hvalid |>.2.1
+                          hnode hflight).1 hvalid |>.1
                       simp [ht, hp, Outcomes.one] at hresult
                       subst result
                       apply stutter (committedFlight_state next flight).choose_spec
@@ -16909,11 +15623,6 @@ theorem initial_related
       constructor
       · intro key
         cases key <;> rfl
-      · intro key hrelevant
-        have hread := Concrete.Store.toAbstract_read ({} : Concrete.Store) key
-        have hempty : key ∉ ({} : Concrete.Store).keys := by simp
-        simp [hempty, emptyDocument] at hread
-        cases key <;> simp [RelevantDocument, hread] at hrelevant
       · exact Concrete.Store.indexed_empty⟩
     requests := ?_
     outputs := ?_

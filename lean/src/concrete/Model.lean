@@ -664,34 +664,6 @@ def selectedWorkCandidate (appConfig : Resonate.Config) (item : WorkItem)
           (Decision.processOccurrence req instant) rest).cast h)
       else none
 
-def singleState (key : DocumentKey) (document : Document key) : State :=
-  { store := ({} : Resonate.Store).write key document }
-
-/-- Proof-facing logical result of the independently computed concrete
-request decision. -/
-def selectedExternal (appConfig : Resonate.Config) (call : Call)
-    (key : DocumentKey) (document : Document key) :
-    State × List Output :=
-  match selectedExternalCandidate appConfig call key document with
-  | some candidate =>
-      ({ store := ({} : Resonate.Store).write key candidate.document
-         workflow := { pending := pendingWorkflow candidate.continuations } },
-       candidate.outputs)
-  | none => (singleState key document, [])
-
-/-- Proof-facing logical result of an independently computed concrete work
-decision. -/
-def selectedWork (appConfig : Resonate.Config) (item : WorkItem)
-    (now : Time) (rest : List PendingEntry)
-    (key : DocumentKey) (document : Document key) :
-    State × List Output :=
-  match selectedWorkCandidate appConfig item now rest key document with
-  | some candidate =>
-      ({ store := ({} : Resonate.Store).write key candidate.document
-         workflow := { pending := pendingWorkflow candidate.continuations } },
-       candidate.outputs)
-  | none => (singleState key document, [])
-
 def selectScanWork (appConfig : Resonate.Config) (key : DocumentKey)
     (now : Time) (rest : List PendingEntry) (document : Document key) :
     Option (Candidate key) :=
@@ -720,65 +692,6 @@ def selectScan (appConfig : Resonate.Config) (key : DocumentKey)
         some { document, outputs := [], continuations := rest }
       else
         none
-
-theorem selectScan_origin_some
-    (appConfig : Resonate.Config) (origin : String) (now : Time)
-    (rest : List PendingEntry) (document : OriginDocument origin)
-    (candidate : Candidate (.origin origin))
-    (hselect :
-      selectScanWork appConfig (.origin origin) now rest document =
-        some candidate) :
-    ∃ item,
-      item ∈ Decision.originWork origin document now ∧
-      let result := selectedWork appConfig item now rest
-        (.origin origin) document
-      candidate.document = result.1.store.read (.origin origin) ∧
-      candidate.outputs = result.2 ∧
-      candidate.continuations =
-        result.1.workflow.pending.map PendingEntry.fromWorkflow := by
-  cases hhead : (Decision.originWork origin document now).head? with
-  | none =>
-      simp only [selectScanWork] at hselect
-      rw [hhead] at hselect
-      contradiction
-  | some item =>
-      simp only [selectScanWork] at hselect
-      rw [hhead] at hselect
-      refine ⟨item, ?_, ?_⟩
-      obtain ⟨remaining, hitems⟩ := List.head?_eq_some_iff.mp hhead
-      rw [hitems]
-      · exact List.mem_cons_self
-      · simp [selectedWork, hselect]
-
-theorem selectScan_schedule_some
-    (appConfig : Resonate.Config) (id : ServerModel.Ident) (now : Time)
-    (rest : List PendingEntry) (document : ScheduleDocument id)
-    (candidate : Candidate (.schedule id))
-    (hselect :
-      selectScanWork appConfig (.schedule id) now rest document =
-        some candidate) :
-    ∃ schedule,
-      document = some schedule ∧ schedule.nextRunAt ≤ now ∧
-      let result := selectedWork appConfig (.scheduleTimeout id) now rest
-        (.schedule id) document
-      candidate.document = result.1.store.read (.schedule id) ∧
-      candidate.outputs = result.2 ∧
-      candidate.continuations =
-        result.1.workflow.pending.map PendingEntry.fromWorkflow := by
-  cases hdocument : document with
-  | none =>
-      simp only [selectScanWork] at hselect
-      rw [hdocument] at hselect
-      contradiction
-  | some schedule =>
-      subst document
-      simp only [selectScanWork] at hselect
-      by_cases hdue : schedule.nextRunAt ≤ now
-      · simp only [if_pos hdue] at hselect
-        refine ⟨schedule, rfl, hdue, ?_⟩
-        simp [selectedWork, hselect]
-      · simp only [if_neg hdue] at hselect
-        contradiction
 
 def select (appConfig : Resonate.Config) (flight : Flight)
     (loaded : Option (Document flight.key × Version)) :
