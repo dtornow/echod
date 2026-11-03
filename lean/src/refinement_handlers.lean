@@ -1340,4 +1340,164 @@ theorem external_none (appConfig : Resonate.Config) (call : Call) (state : State
       Abstract.scheduleSearch, Abstract.taskSearch, Concrete.Decision.promiseSearch,
       Concrete.Decision.scheduleSearch, Concrete.Decision.taskSearch]
 
+/-- The abstract callback step assumes the awaiter shares the awaited origin. -/
+def WorkLocal : WorkItem → Prop
+  | .callback req => req.awaiter.origin = req.awaited.origin
+  | _ => True
+
+theorem work_sim_of (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
+    (rest : List Concrete.PendingEntry) (abstractRest : List WorkflowEntry)
+    (state : State) {key : DocumentKey} {ma : Abstract.Handler Unit}
+    {action : Concrete.Decision.Handler key Unit}
+    (hcandidate :
+      Concrete.selectedWorkCandidate appConfig item now rest key (state.store.read key) =
+        some (Concrete.workCandidate appConfig (state.store.read key) action rest))
+    (hwork : Abstract.processWork item now = (ma >>= fun _ => Pure.pure []))
+    (hsim : Sim key Eq ma action) :
+    ∃ candidate,
+      Concrete.selectedWorkCandidate appConfig item now rest key (state.store.read key) =
+        some candidate ∧
+      let lifted := Abstract.runWork appConfig item now abstractRest state
+      Same lifted.1.store (state.store.write key candidate.document) ∧
+        lifted.2 = candidate.outputs ∧
+        ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
+          Concrete.pendingWorkflow candidate.continuations =
+            Concrete.pendingWorkflow rest ++ added := by
+  refine ⟨_, hcandidate, ?_⟩
+  obtain ⟨_, hsame, hemit⟩ := hsim { config := appConfig.toServerConfig } state.store
+  simp only [Abstract.runWork, hwork, Concrete.workCandidate, Concrete.Decision.run]
+  refine ⟨hsame, ?_, [], rfl, by simp⟩
+  show List.map Output.message ((ma _ state.store).2.2 ++ []) = _
+  rw [List.append_nil, hemit]
+
+/-- One piece of due work runs as the concrete work candidate for its
+document written back into the store. -/
+theorem work_sim (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
+    (rest : List Concrete.PendingEntry) (abstractRest : List WorkflowEntry)
+    (state : State) (hlocal : WorkLocal item) :
+    ∃ candidate,
+      Concrete.selectedWorkCandidate appConfig item now rest item.key
+          (state.store.read item.key) = some candidate ∧
+      let lifted := Abstract.runWork appConfig item now abstractRest state
+      Same lifted.1.store (state.store.write item.key candidate.document) ∧
+        lifted.2 = candidate.outputs ∧
+        ∃ added, lifted.1.workflow.pending = abstractRest ++ added ∧
+          Concrete.pendingWorkflow candidate.continuations =
+            Concrete.pendingWorkflow rest ++ added := by
+  cases item with
+  | promiseTimeout id =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (processPromiseTimeout_sim id now)
+  | callback req =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (processCallback_sim req now hlocal)
+  | listener req =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (processListener_sim req now)
+  | taskLeaseTimeout id =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (processLeaseTimeout_sim id now)
+  | taskRetryTimeout id =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (processRetryTimeout_sim id now)
+  | occurrence req time =>
+    exact work_sim_of appConfig _ now rest abstractRest state
+      (by simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast]) rfl
+      (createIfAbsent_sim req time)
+  | scheduleTimeout id =>
+    obtain ⟨hresult, hsame, hemit⟩ :=
+      processSchedule_sim id now { config := appConfig.toServerConfig } state.store
+    simp only [Concrete.selectedWorkCandidate, WorkItem.key, dite_true,
+      Concrete.Candidate.cast, Abstract.runWork, Abstract.processWork,
+      Concrete.Decision.run]
+    refine ⟨_, rfl, hsame, by rw [hemit], _, rfl, ?_⟩
+    rw [hresult]
+    simp only [Concrete.pendingWorkflow, List.filterMap_append, List.filterMap_map]
+    congr 1
+    induction (Abstract.processSchedule id now { config := appConfig.toServerConfig }
+      state.store).1 with
+    | nil => rfl
+    | cons entry entries ih =>
+      simp [Concrete.PendingEntry.toWorkflow?, ih]
+
+/-! ## Due work -/
+
+theorem originObjectWork_eq {origin : String} (row : OriginObject origin) (now : Nat) :
+    Concrete.Decision.originObjectWork row now = Abstract.objectWork (Object.ofOrigin row) now :=
+  rfl
+
+/-- Work the concrete sweep finds in an origin document is object work of the
+abstract store. -/
+theorem originWork_mem (store : Store) (origin : String) (now : Nat) {item : WorkItem}
+    (h : item ∈ Concrete.Decision.originWork origin (store.read (.origin origin)) now) :
+    item ∈ store.objects.flatMap (Abstract.objectWork · now) := by
+  simp only [Concrete.Decision.originWork, List.mem_flatMap] at h
+  obtain ⟨row, hrow, hitem⟩ := h
+  simp only [Store.read, Store.originRows, List.mem_filterMap] at hrow
+  obtain ⟨object, hobject, hrow⟩ := hrow
+  rw [List.mem_flatMap]
+  refine ⟨object, hobject, ?_⟩
+  rw [← Object.ofOrigin_toOriginRow hrow, ← originObjectWork_eq]
+  exact hitem
+
+theorem scheduleAt_go_due (id : Ident) (now : Nat) :
+    ∀ (schedules : List Schedule) (data : ScheduleData id),
+      Store.scheduleAt.go id schedules = some data → data.nextRunAt ≤ now →
+      WorkItem.scheduleTimeout id ∈ schedules.flatMap (Abstract.scheduleWork · now)
+  | [], _, h, _ => by simp [Store.scheduleAt.go] at h
+  | schedule :: rest, data, h, hdue => by
+    simp only [Store.scheduleAt.go] at h
+    split at h
+    · rename_i hid
+      subst hid
+      cases h
+      simp [Abstract.scheduleWork, ScheduleData.ofSchedule] at hdue ⊢
+      simp [hdue]
+    · simp only [List.flatMap_cons, List.mem_append]
+      exact .inr (scheduleAt_go_due id now rest data h hdue)
+
+/-- A due schedule document is schedule work of the abstract store. -/
+theorem scheduleWork_mem (store : Store) (id : Ident) (now : Nat) {data : ScheduleData id}
+    (h : store.read (.schedule id) = some data) (hdue : data.nextRunAt ≤ now) :
+    WorkItem.scheduleTimeout id ∈ store.schedules.flatMap (Abstract.scheduleWork · now) :=
+  scheduleAt_go_due id now store.schedules data h hdue
+
+theorem runTimeout_mem_due (appConfig : Resonate.Config) (state : State) {now instant : Nat}
+    {item : WorkItem} (hinstant : instant ≤ now)
+    (h : item ∈ state.store.objects.flatMap (Abstract.objectWork · instant) ++
+      state.store.schedules.flatMap (Abstract.scheduleWork · instant)) :
+    Abstract.runWork appConfig item instant state.workflow.pending state ∈
+      (Abstract.runTimeout appConfig now state).val := by
+  simp only [Abstract.runTimeout, Abstract.dueWork, List.mem_cons, List.mem_map,
+    List.mem_append]
+  right
+  refine ⟨(item, instant, state.workflow.pending), .inr ?_, rfl⟩
+  exact List.mem_flatMap.mpr ⟨instant, List.mem_range.mpr (by omega),
+    List.mem_map.mpr ⟨item, h, rfl⟩⟩
+
+theorem runTimeout_mem_pending (appConfig : Resonate.Config) (state : State) (now : Nat)
+    {entry : WorkflowEntry} (hmem : entry ∈ state.workflow.pending) :
+    ∃ rest,
+      Abstract.runWork appConfig entry.item entry.instant rest state ∈
+        (Abstract.runTimeout appConfig now state).val ∧
+      List.Perm state.workflow.pending (entry :: rest) := by
+  obtain ⟨before, after, hpending⟩ := List.append_of_mem hmem
+  refine ⟨before ++ after, ?_, ?_⟩
+  · simp only [Abstract.runTimeout, Abstract.dueWork, List.mem_cons, List.mem_map,
+      List.mem_append]
+    right
+    refine ⟨(entry.item, entry.instant, before ++ after), .inl ?_, rfl⟩
+    rw [List.mem_mapIdx]
+    refine ⟨before.length, by simp [hpending], ?_⟩
+    simp [hpending, List.eraseIdx_append]
+  · rw [hpending]
+    simpa [List.append_assoc] using
+      (List.perm_middle :
+        List.Perm (before ++ entry :: after) (entry :: (before ++ after)))
+
 end Resonate.Refinement
