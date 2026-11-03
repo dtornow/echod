@@ -52,7 +52,8 @@ abbrev ServerConfig := AbstractModel.ServerConfig
 
 abbrev Env := Resonate.HandlerEnv
 
-/-- Read the configuration, read and write the store, emit messages. -/
+/-- Read the configuration, read and write the store, emit messages.
+A read sees the writes made earlier in the same step. -/
 abbrev Handler (α : Type) :=
   HandlerEnv → Store → α × Store × List OutboxEntry
 
