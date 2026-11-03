@@ -21,7 +21,7 @@
 //!   and appends that occurrence; a later step creates the promise.
 //!   `next_run_at` is `nextCron cron now`, computed in the handler.
 //! - A task's offers are on a grid anchored at the instant it came to be
-//!   pending (Lean's `nextOffer`). The dial is `Resonate::retry_timeout`.
+//!   pending (Lean's `nextOffer`). The dial is `ServerConfig::retry_timeout`.
 //! - Lean's `nextCron` and `expand` are trusted (`collections.rs`): the cron
 //!   engine of the reference server.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
@@ -43,8 +43,8 @@
 //! properties stated as `ensures` (see `promise_create`). What it trusts:
 //! `collections.rs`. The handlers are the protocol.
 //!
-//! `external` is the request handlers. `internal` is one handler per due item.
-//! `system` is the match: a request calls `run`, a due item calls `run_work`.
+//! `external` is the request handlers. `internal` is one handler per work item.
+//! `system` is the match: a request calls `handler`, a work item calls `process_work`.
 
 use vstd::prelude::*;
 
@@ -77,7 +77,7 @@ fn delay_of(tags: &Tags) -> Option<u64> {
     tag(tags, "resonate:delay").and_then(|d| d.parse().ok())
 }
 #[cfg(verus_keep_ghost)]
-use super::spec::{Chars, DispatchV, InternalV, PromiseV, ServerV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
+use super::spec::{Chars, DispatchV, InternalV, PromiseV, StoreV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
 
 
 mod external;
@@ -115,16 +115,35 @@ impl Promise {
         has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)
     }
 
-    /// Stored state is pending. A read past the deadline is settled; see
-    /// `project_promise`.
-    pub fn live(&self) -> (r: bool)
-        ensures
-            r == (self.state == PromiseState::Pending),
+    /// The promise as a read at `now` sees it. A pending promise past its
+    /// deadline is settled at the deadline.
+    fn project(&self, now: Time) -> (r: Promise) {
+        if self.state == PromiseState::Pending && now >= self.timeout_at {
+            let mut q = copy(self);
+            q.state = if is_timer(&self.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout };
+            q.settled_at = Some(self.timeout_at);
+            q
+        } else {
+            copy(self)
+        }
+    }
 
+    fn to_record(&self, id: &Id) -> (r: PromiseRecord)
+        ensures
+            r.state == self.state,
+            r.timeout_at == self.timeout_at,
+            r.created_at == self.created_at,
+            r.settled_at == self.settled_at,
     {
-        match self.state {
-            PromiseState::Pending => true,
-            _ => false,
+        PromiseRecord {
+            id: id.clone(),
+            state: self.state,
+            param: self.param.dup(),
+            value: self.value.dup(),
+            tags: echod_types::clone_tags(&self.tags),
+            timeout_at: self.timeout_at,
+            created_at: self.created_at,
+            settled_at: self.settled_at,
         }
     }
 }
@@ -138,7 +157,7 @@ pub struct Task {
     /// When the lease started (or was last extended); its end is `acquired_at + ttl`.
     pub acquired_at: Time,
     /// When a pending task is next offered to a worker (Lean's `retryTimeoutAt`).
-    pub retry_at: Option<Time>,
+    pub retry_timeout_at: Option<Time>,
     /// The awaited promises that settled since the task last ran (Lean's `resumes`).
     pub resumes: Vec<Id>,
 }
@@ -151,7 +170,7 @@ impl Task {
         self.pid = None;
         self.ttl = None;
         self.acquired_at = 0;
-        self.retry_at = None;
+        self.retry_timeout_at = None;
         self.resumes = Vec::new();
         proof {
             broadcast use group_views;
@@ -166,7 +185,7 @@ impl Task {
         self.pid = Some(pid);
         self.ttl = Some(ttl);
         self.acquired_at = now;
-        self.retry_at = None;
+        self.retry_timeout_at = None;
         self.resumes = Vec::new();
         proof {
             broadcast use group_views;
@@ -181,10 +200,10 @@ impl Task {
         self.pid = None;
         self.ttl = None;
         self.acquired_at = 0;
-        self.retry_at = Some(at);
+        self.retry_timeout_at = Some(at);
     }
 
-    pub fn lease_expires(&self) -> (r: Time)
+    pub fn lease_timeout_at(&self) -> (r: Time)
         
     {
         match self.ttl {
@@ -192,47 +211,39 @@ impl Task {
             None => self.acquired_at,
         }
     }
-}
 
-/// The promise as a read at `now` sees it. A pending promise past its deadline
-/// is settled at the deadline. Callbacks and listeners stay until their steps.
-fn project_promise(p: &Promise, now: Time) -> (r: Promise) {
-    if p.state == PromiseState::Pending && now >= p.timeout_at {
-        let mut q = copy(p);
-        q.state = if is_timer(&p.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout };
-        q.settled_at = Some(p.timeout_at);
-        q
-    } else {
-        copy(p)
+    /// The task as its promise reads. A settled promise fulfills the task.
+    fn project(&self, promise: &Promise) -> (r: Task) {
+        if promise.state != PromiseState::Pending && self.state != TaskState::Fulfilled {
+            let mut u = copy(self);
+            u.fulfill();
+            u
+        } else {
+            copy(self)
+        }
     }
-}
 
-/// The task as its promise reads. A settled promise fulfills the task.
-fn project_task(promise: &Promise, t: &Task) -> (r: Task) {
-    if promise.state != PromiseState::Pending && t.state != TaskState::Fulfilled {
-        let mut u = copy(t);
-        u.fulfill();
-        u
-    } else {
-        copy(t)
+    fn to_record(&self, id: &Id) -> (r: TaskRecord) {
+        let resumes: u64 = if self.resumes.len() as u64 > u64::MAX { u64::MAX } else { self.resumes.len() as u64 };
+        TaskRecord { id: id.clone(), state: self.state, version: self.version, resumes, ttl: self.ttl, pid: copy(&self.pid) }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
-pub struct Server {
+pub struct Store {
     pub promises: PMap<Promise>,
     pub tasks: PMap<Task>,
     pub schedules: PMap<Schedule>,
 }
 
-fn copy_server(s: &Server) -> (r: Server)
+fn copy_store(s: &Store) -> (r: Store)
     ensures
         r.promises@ == s.promises@,
         r.tasks@ == s.tasks@,
         r.schedules@ == s.schedules@,
         r@ == s@,
 {
-    Server { promises: s.promises.copy(), tasks: s.tasks.copy(), schedules: s.schedules.copy() }
+    Store { promises: s.promises.copy(), tasks: s.tasks.copy(), schedules: s.schedules.copy() }
 }
 
 /// What the server sends on its own.
@@ -268,33 +279,6 @@ fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> Response {
     Response::TaskFence(TaskFenceRes { status, action })
 }
 
-fn prec(id: &Id, p: &Promise) -> (r: PromiseRecord)
-    ensures
-        r.state == p.state,
-        r.timeout_at == p.timeout_at,
-        r.created_at == p.created_at,
-        r.settled_at == p.settled_at,
-
-{
-    PromiseRecord {
-        id: id.clone(),
-        state: p.state,
-        param: p.param.dup(),
-        value: p.value.dup(),
-        tags: echod_types::clone_tags(&p.tags),
-        timeout_at: p.timeout_at,
-        created_at: p.created_at,
-        settled_at: p.settled_at,
-    }
-}
-
-fn trec(id: &Id, t: &Task) -> (r: TaskRecord)
-    
-{
-    let resumes: u64 = if t.resumes.len() as u64 > u64::MAX { u64::MAX } else { t.resumes.len() as u64 };
-    TaskRecord { id: id.clone(), state: t.state, version: t.version, resumes, ttl: t.ttl, pid: copy(&t.pid) }
-}
-
 // ------------------------------------------------------------------ outcomes
 
 /// One due item. A timeout runs exactly one. The schedule item appends an
@@ -304,11 +288,11 @@ pub enum Work {
     PromiseTimeout(Id),
     Callback { awaited: Id, awaiter: Id },
     Listener { awaited: Id, address: String },
-    Lease(Id),
-    Retry(Id),
+    TaskLeaseTimeout(Id),
+    TaskRetryTimeout(Id),
     /// Record the run and queue its occurrence. `promise` is the id that
     /// occurrence will create, so the step's footprint can name it.
-    Schedule { id: Id, promise: Id },
+    ScheduleTimeout { id: Id, promise: Id },
     /// A promise to create as of `at`, queued by the schedule item.
     Occurrence { promise: Id, at: Time, timeout: Time, param: Value, tags: Tags },
 }
@@ -317,28 +301,28 @@ pub enum Work {
 /// starts, the dispatches it sends. As `echod_rover::ExternalOutcome`.
 pub struct Out {
     pub resp: Response,
-    pub next: Server,
+    pub next: Store,
     pub work: Vec<Work>,
     pub send: Vec<Dispatch>,
     /// What this outcome does, for coverage. Changes nothing.
     pub marks: Vec<&'static str>,
 }
 
-/// The effect of internal work. As `echod_rover::InternalOutcome`; `pending`
-/// says the work cannot run yet (a fire before its instant) and stays as it is.
+/// The effect of one work item. As `echod_rover::InternalOutcome`. `not_due`
+/// means the handler did nothing, so the step is not a timeout choice.
 pub struct InOut {
-    pub next: Server,
+    pub next: Store,
     pub work: Vec<Work>,
     pub send: Vec<Dispatch>,
     pub marks: Vec<&'static str>,
-    pub pending: bool,
+    pub not_due: bool,
 }
 
 /// The server's dial: how long a pending task waits before it is offered
 /// again (Lean's `ServerConfig.retryTimeout`). A schedule is due at its
 /// `next_run_at`. `fire_within` is kept so a caller can still name a sweep
 /// bound; the due item does not read it.
-pub struct Resonate {
+pub struct ServerConfig {
     pub retry_timeout: Time,
     pub fire_within: Time,
 }
@@ -369,7 +353,7 @@ fn marked(name: &'static str) -> Vec<&'static str> {
     v
 }
 
-fn status(resp: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
+fn status(resp: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
         r[0].resp == resp,
@@ -379,10 +363,10 @@ fn status(resp: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
 
 {
     broadcast use group_views;
-    one(Out { resp, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
+    one(Out { resp, next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
 
-fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
+fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
         r[0].resp == res,
@@ -392,7 +376,7 @@ fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
 
 {
     broadcast use group_views;
-    one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
+    one(Out { resp: res, next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
 
 /// Lean's `nextOffer`: the first instant on the grid `due + k·T` strictly
@@ -413,7 +397,7 @@ fn next_offer(due: Time, now: Time, t: Time) -> (r: Time)
 }
 
 /// Settles `id` and fulfills its task, if any.
-fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
+fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
     
 {
     broadcast use group_views;
@@ -482,7 +466,7 @@ pub open spec fn promise_ok(p: Promise) -> bool {
     times_ok(p.created_at, p.settled_at, p.timeout_at)
 }
 
-pub open spec fn server_ok(s: Server) -> bool {
+pub open spec fn server_ok(s: Store) -> bool {
     forall|k: Seq<char>| #[trigger] s.promises@.contains_key(k) ==> promise_ok(s.promises@[k])
 }
 

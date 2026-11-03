@@ -14,23 +14,23 @@ use echod_abstract::*;
 /// Checked twice: with partitions, and in one factor with certificates, which
 /// must back everything it accepts.
 struct Trace {
-    c: Checker<Grouped<Resonate>>,
-    shadow: Certified<Keyed<Resonate>>,
+    c: Checker<Grouped<ServerConfig>>,
+    shadow: Certified<Keyed<ServerConfig>>,
     next: CallId,
 }
 
 impl Trace {
     /// Starts with the server's clock at `now`.
     fn new(now: Time) -> Self {
-        Trace::with(Resonate::default(), now)
+        Trace::with(ServerConfig::default(), now)
     }
 
     /// Starts with the server's clock at `now`, against `model`.
-    fn with(model: Resonate, now: Time) -> Self {
+    fn with(model: ServerConfig, now: Time) -> Self {
         let shadow = Config { certify: true, ..Config::default() };
         let mut t = Trace {
-            c: Checker::with_partitions(Resonate { ..model }, Server::default(), Config::default()),
-            shadow: Certified(Checker::with_footprints(model, Server::default(), shadow)),
+            c: Checker::with_partitions(ServerConfig { ..model }, Store::default(), Config::default()),
+            shadow: Certified(Checker::with_footprints(model, Store::default(), shadow)),
             next: 0,
         };
         t.tick(now);
@@ -493,7 +493,7 @@ fn settles_cfg() -> Config {
     Config { max_width: 1 << 16, max_explore: 5_000, ..Config::default() }
 }
 
-fn unanswered_settles<E: Engine<M = Resonate>>(
+fn unanswered_settles<E: Engine<M = ServerConfig>>(
     mut c: Checker<E>,
     origins: u64,
 ) -> Result<Checker<E>, echod_rover::Violation> {
@@ -513,7 +513,7 @@ fn unanswered_settles<E: Engine<M = Resonate>>(
 #[test]
 fn partitions_keep_independent_origins_apart() {
     let t0 = std::time::Instant::now();
-    let mut c = unanswered_settles(Checker::with_partitions(Resonate::default(), Server::default(), settles_cfg()), 20).unwrap();
+    let mut c = unanswered_settles(Checker::with_partitions(ServerConfig::default(), Store::default(), settles_cfg()), 20).unwrap();
     println!("partitioned: {:?}, width {}, {:?}", c.stats, c.width(), t0.elapsed());
     assert_eq!(c.factors().len(), 20);
     assert!(c.factors().iter().all(|f| f.nodes.len() == 2));
@@ -528,7 +528,7 @@ fn partitions_keep_independent_origins_apart() {
     assert!(c.factors().iter().all(|f| f.nodes.len() == 1));
 
     let t0 = std::time::Instant::now();
-    let v = unanswered_settles(Checker::with_footprints(Resonate::default(), Server::default(), settles_cfg()), 20)
+    let v = unanswered_settles(Checker::with_footprints(ServerConfig::default(), Store::default(), settles_cfg()), 20)
         .err()
         .expect("one profile of 2^20 candidates");
     println!("unpartitioned: {} {:?}", v.reason, t0.elapsed());
@@ -583,8 +583,8 @@ fn partitioning_never_changes_a_verdict() {
     for seed in 1..=40 {
         let mut rng = Lcg(seed);
         let now = 1_000_000;
-        let mut on = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
-        let mut off = Checker::with_footprints(Resonate::default(), Server::default(), Config::default());
+        let mut on = Checker::with_partitions(ServerConfig::default(), Store::default(), Config::default());
+        let mut off = Checker::with_footprints(ServerConfig::default(), Store::default(), Config::default());
         let mut open: Vec<(CallId, Request)> = Vec::new();
         let mut at = now;
         let mut all = Vec::new();
@@ -691,21 +691,21 @@ fn partitioning_never_changes_a_verdict() {
         }
         // The whole history (bogus responses make it invalid), online and depth
         // first: the same verdict.
-        let online = Checker::with_footprints(Resonate::default(), Server::default(), Config::default()).check_history(&all).is_ok();
-        let mut dfs = Checker::with_footprints(Resonate::default(), Server::default(), Config { certify: true, ..Config::default() });
+        let online = Checker::with_footprints(ServerConfig::default(), Store::default(), Config::default()).check_history(&all).is_ok();
+        let mut dfs = Checker::with_footprints(ServerConfig::default(), Store::default(), Config { certify: true, ..Config::default() });
         let deep = dfs.check_complete(&all).is_ok();
         assert_eq!(online, deep, "seed {seed}: online={online} depth-first={deep}");
         if deep {
             dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
         }
-        let mut split = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
+        let mut split = Checker::with_partitions(ServerConfig::default(), Store::default(), Config::default());
         assert_eq!(split.check_complete(&all).is_ok(), deep, "seed {seed}: depth first by partition");
         // What the online checker accepted, event by event, is a valid history:
         // depth first must accept it too, and certify it.
-        let mut dfs = Checker::with_footprints(Resonate::default(), Server::default(), Config { certify: true, ..Config::default() });
+        let mut dfs = Checker::with_footprints(ServerConfig::default(), Store::default(), Config { certify: true, ..Config::default() });
         dfs.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: accepted events rejected depth first: {v}"));
         dfs.certified().unwrap_or_else(|v| panic!("seed {seed}: {v}"));
-        let mut split = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
+        let mut split = Checker::with_partitions(ServerConfig::default(), Store::default(), Config::default());
         split.check_complete(&kept).unwrap_or_else(|v| panic!("seed {seed}: by partition: {v}"));
     }
 }
@@ -770,7 +770,7 @@ fn check_takes_calls_dispatches_and_clock_moves() {
     let mut t = Trace::new(now);
     let create_r = create("ex:r", now + 10_000, "r").target().op();
     let created = t.c.allowed(&create_r).remove(0); // the pending record
-    let mut c = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
+    let mut c = Checker::with_partitions(ServerConfig::default(), Store::default(), Config::default());
     let trace = vec![
         clock(now),
         Event::Invoke { call: 1, req: create_r },
@@ -1006,7 +1006,7 @@ fn schedules_fire_on_their_cron() {
 #[test]
 fn a_schedule_is_owed_at_its_instant() {
     let now = 1_000_000;
-    let mut t = Trace::with(Resonate { fire_within: 2_500, ..Resonate::default() }, now);
+    let mut t = Trace::with(ServerConfig { fire_within: 2_500, ..ServerConfig::default() }, now);
     let tags = flag_tags(true, false, false, None);
     t.step("create s", schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 60_000, tags.clone(), now), |r| sched(r).is_some_and(|c| c.next_run_at == 1_001_000));
     t.tick(1_000_999);

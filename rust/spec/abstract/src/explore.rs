@@ -9,7 +9,7 @@ use echod_types::{
 };
 
 use super::exec::*;
-use super::model::{next_cron, origin};
+use super::footprint::{next_cron, origin};
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `exec`.
@@ -160,13 +160,13 @@ fn suspend(id: &Id, version: u64, awaited: &Id) -> Request {
     Request::TaskSuspend(TaskSuspendReq { id: id.clone(), version, actions: vec![PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter: id.clone() }] })
 }
 
-impl Explore for Resonate {
+impl Explore for ServerConfig {
     /// Actions that reach the edges of what the state allows: fences and
     /// heartbeats at the current version and a stale one, the clock moved to
     /// just before and exactly at each deadline, promises settled while a task
     /// awaits them, settles and creates repeated, halts and continues in every
     /// task state, schedules fired and deleted.
-    fn suggest(&self, s: &Server, now: Time) -> Vec<(Action<Request>, &'static str)> {
+    fn suggest(&self, s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
         let mut out = Vec::new();
         let mut push = |a, why| out.push((a, why));
         let siblings = |id: &Id| -> Vec<&Id> { s.promises.iter().map(|(k, _)| k).filter(|k| *k != id && origin(k) == origin(id)).collect() };
@@ -195,7 +195,7 @@ impl Explore for Resonate {
                     push(Action::Request(Request::TaskHalt(TaskHaltReq { id: id.clone() })), "halt the held task");
                     // Only a lease that ends before its promise's deadline can
                     // expire: at the deadline the task is done.
-                    let end = t.lease_expires();
+                    let end = t.lease_timeout_at();
                     if s.promises.get(id).is_some_and(|p| end < p.timeout_at) {
                         push(Action::Clock(end.saturating_sub(1)), "clock to just before a lease ends");
                         push(Action::Clock(end), "clock to a lease end");
@@ -207,7 +207,7 @@ impl Explore for Resonate {
                     push(Action::Request(Request::TaskCreate(TaskCreateReq { pid: "w2".into(), ttl: 20, action: targeted(id, now + 50) })), "task.create a pending task");
                     push(Action::Request(Request::TaskHalt(TaskHaltReq { id: id.clone() })), "halt a pending task");
                     push(Action::Request(Request::TaskContinue(TaskContinueReq { id: id.clone() })), "continue a pending task");
-                    if let Some(r) = t.retry_at {
+                    if let Some(r) = t.retry_timeout_at {
                         if r > now && s.promises.get(id).is_some_and(|p| r < p.timeout_at) {
                             push(Action::Clock(r), "clock to a redispatch");
                         }
@@ -287,14 +287,14 @@ impl Explore for Resonate {
         out
     }
 
-    fn arbitrary(&self, _s: &Server, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
+    fn arbitrary(&self, _s: &Store, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
         random_action(pick, now)
     }
 
     /// Read everything, delete every schedule (or it fires forever), move the
     /// clock past every deadline, so every timer must have fired and every
     /// task is done, and read again.
-    fn finish(&self, s: &Server, now: Time) -> Vec<Action<Request>> {
+    fn finish(&self, s: &Store, now: Time) -> Vec<Action<Request>> {
         let reads = || {
             IDS.iter()
                 .flat_map(|id| [Request::TaskGet(TaskGetReq { id: id.to_string() }), Request::PromiseGet(PromiseGetReq { id: id.to_string() })])
@@ -307,7 +307,7 @@ impl Explore for Resonate {
             last = last.max(p.timeout_at);
         }
         for (_, t) in s.tasks.iter() {
-            last = last.max(t.lease_expires()).max(t.retry_at.unwrap_or(0));
+            last = last.max(t.lease_timeout_at()).max(t.retry_timeout_at.unwrap_or(0));
         }
         reads().chain(deletes).chain([Action::Clock(last + 1)]).chain(reads()).collect()
     }

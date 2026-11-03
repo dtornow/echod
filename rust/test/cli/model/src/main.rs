@@ -44,7 +44,7 @@ use std::time::Duration;
 use clap::Parser;
 use echod_rover::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
 use echod_abstract::types::{PromiseRegisterListenerReq, Request, Response, TaskFenceAction};
-use echod_abstract::{Dispatch, Resonate, Server as Model, MARKS};
+use echod_abstract::{Dispatch, ServerConfig, Store as Model, MARKS};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
@@ -91,7 +91,7 @@ struct Driver {
     echod: Server,
     sink: Arc<Sink>,
     worker: String,
-    model: Resonate,
+    model: ServerConfig,
     quiet_ms: u64,
     corr: u64,
 }
@@ -246,9 +246,9 @@ enum Outcome {
     Unknown(Violation),
 }
 
-fn check(model: &Resonate, trace: &Trace) -> Outcome {
-    let m = Resonate { retry_timeout: model.retry_timeout, fire_within: 0 };
-    let mut c: Checker<Keyed<Resonate>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
+fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
+    let m = ServerConfig { retry_timeout: model.retry_timeout, fire_within: 0 };
+    let mut c: Checker<Keyed<ServerConfig>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
     match Verdict::from(c.check_certified(trace.clone())) {
         Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
         Verdict::Ko(v) => Outcome::Ko(v),
@@ -280,7 +280,7 @@ async fn main() {
     client.wait_ready(&echod).await;
     eprintln!("[model] echod at {}, worker at {worker}", echod.url);
     // `debug.tick` lets every due step land before the next request: fires are exact.
-    let model = Resonate { retry_timeout: cli.retry_timeout, fire_within: 0 };
+    let model = ServerConfig { retry_timeout: cli.retry_timeout, fire_within: 0 };
     let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();

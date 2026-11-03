@@ -14,7 +14,7 @@ use echod_abstract::*;
 
 /// A run of the spec, driven at random and recorded.
 fn trace(seed: u64, requests: usize) -> Vec<Event<Request, Response, Dispatch>> {
-    drive(&Resonate::default(), Server::default(), &Drive { requests, concurrency: 3, guided: seed.is_multiple_of(2) }, Choices::random(seed)).trace
+    drive(&ServerConfig::default(), Store::default(), &Drive { requests, concurrency: 3, guided: seed.is_multiple_of(2) }, Choices::random(seed)).trace
 }
 
 #[test]
@@ -26,15 +26,15 @@ fn every_mode_accepts_what_the_simulator_does() {
                 panic!("seed {seed}: {mode} rejects a valid trace: {v}");
             }
         };
-        let mut c = Checker::new(Resonate::default(), Server::default(), Config::default());
+        let mut c = Checker::new(ServerConfig::default(), Store::default(), Config::default());
         ok(c.check(t.clone()).map(|_| ()), "plain");
-        let mut c = Checker::with_partitions(Resonate::default(), Server::default(), Config::default());
+        let mut c = Checker::with_partitions(ServerConfig::default(), Store::default(), Config::default());
         ok(c.check(t.clone()).map(|_| ()), "partitioned");
-        let mut c = Checker::with_footprints(Resonate::default(), Server::default(), Config::default());
+        let mut c = Checker::with_footprints(ServerConfig::default(), Store::default(), Config::default());
         ok(c.check_complete(&t).map(|_| ()), "depth-first");
-        let mut c = Checker::with_footprints(Resonate::default(), Server::default(), Config { certify: true, ..Config::default() });
+        let mut c = Checker::with_footprints(ServerConfig::default(), Store::default(), Config { certify: true, ..Config::default() });
         match c.check_certified(t.clone()) {
-            Ok(cert) => assert_eq!(certify(&Resonate::default(), Server::default(), &t, &cert), Ok(()), "seed {seed}"),
+            Ok(cert) => assert_eq!(certify(&ServerConfig::default(), Store::default(), &t, &cert), Ok(()), "seed {seed}"),
             Err(v) => panic!("seed {seed}: certified rejects a valid trace: {v}"),
         }
     }

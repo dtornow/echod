@@ -33,7 +33,7 @@ use super::abstract_model::{Pid, StateV};
 #[cfg(verus_keep_ghost)]
 use super::collections::origin;
 use echod_types::{PromiseState, TaskState};
-use super::exec::Resonate;
+use super::exec::ServerConfig;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
 use super::spec::distinct;
@@ -55,9 +55,9 @@ pub open spec fn well_formed_promise_created_at_lte_timeout_at(
     _now: Time,
     state: StateV,
 ) -> bool {
-    forall|id: Chars| state.server.promises.contains_key(id) ==>
+    forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_created_at_lte_timeout_at_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
 }
 
@@ -74,9 +74,9 @@ pub open spec fn well_formed_promise_settled_at_lte_timeout_at(
     _now: Time,
     state: StateV,
 ) -> bool {
-    forall|id: Chars| state.server.promises.contains_key(id) ==>
+    forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_settled_at_lte_timeout_at_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
 }
 
@@ -93,9 +93,9 @@ pub open spec fn well_formed_promise_created_at_lte_settled_at(
     _now: Time,
     state: StateV,
 ) -> bool {
-    forall|id: Chars| state.server.promises.contains_key(id) ==>
+    forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_created_at_lte_settled_at_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
 }
 
@@ -109,9 +109,9 @@ pub open spec fn well_formed_promise_settled_at_iff_not_pending(
     _now: Time,
     state: StateV,
 ) -> bool {
-    forall|id: Chars| state.server.promises.contains_key(id) ==>
+    forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_settled_at_iff_not_pending_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
 }
 
@@ -198,11 +198,11 @@ pub open spec fn well_formed_task_acquired_iff_has_ttl_at(task: TaskV) -> bool {
 pub open spec fn well_formed_task_pending_iff_has_retry_timeout_at_at(
     task: TaskV,
 ) -> bool {
-    (task.state == TaskState::Pending) == (task.retry_at is Some)
+    (task.state == TaskState::Pending) == (task.retry_timeout_at is Some)
 }
 
 pub open spec fn task_cleared(task: TaskV) -> bool {
-    task.pid is None && task.ttl is None && task.retry_at is None
+    task.pid is None && task.ttl is None && task.retry_timeout_at is None
 }
 
 pub open spec fn well_formed_task_fulfilled_is_cleared_at(task: TaskV) -> bool {
@@ -272,77 +272,77 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
     &&& well_formed_promise_settled_at_lte_timeout_at(now, state)
     &&& well_formed_promise_created_at_lte_settled_at(now, state)
     &&& well_formed_promise_settled_at_iff_not_pending(now, state)
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_pending_created_before_deadline_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_pending_has_no_value_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_deadline_settlement_has_no_value_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_timedout_is_server_owned_at(
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
-        well_formed_promise_callbacks_unique_at(state.server.promises[id])
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
-        well_formed_promise_listeners_unique_at(state.server.promises[id])
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
+        well_formed_promise_callbacks_unique_at(state.store.promises[id])
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
+        well_formed_promise_listeners_unique_at(state.store.promises[id])
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_awaiter_is_not_self_at(
             id,
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_callbacks_same_origin_at(
             id,
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_created_at_lte_now_at(
             now,
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.promises.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_settled_at_lte_now_at(
             now,
-            state.server.promises[id],
+            state.store.promises[id],
         )
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_acquired_iff_has_pid_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_acquired_iff_has_ttl_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_acquired_iff_has_pid_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_acquired_iff_has_ttl_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
         well_formed_task_pending_iff_has_retry_timeout_at_at(
-            state.server.tasks[id],
+            state.store.tasks[id],
         )
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_fulfilled_is_cleared_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_suspended_is_cleared_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_halted_is_cleared_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_suspended_has_no_resumes_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_resumes_unique_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.tasks.contains_key(id) ==>
-        well_formed_task_acquired_version_positive_at(state.server.tasks[id])
-    &&& forall|id: Chars| state.server.schedules.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_fulfilled_is_cleared_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_suspended_is_cleared_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_halted_is_cleared_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_suspended_has_no_resumes_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_resumes_unique_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        well_formed_task_acquired_version_positive_at(state.store.tasks[id])
+    &&& forall|id: Chars| state.store.schedules.contains_key(id) ==>
         well_formed_schedule_created_at_lte_next_run_at_at(
-            state.server.schedules[id],
+            state.store.schedules[id],
         )
-    &&& forall|id: Chars| state.server.schedules.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.schedules.contains_key(id) ==>
         well_formed_schedule_created_at_lte_last_run_at_at(
-            state.server.schedules[id],
+            state.store.schedules[id],
         )
-    &&& forall|id: Chars| state.server.schedules.contains_key(id) ==>
+    &&& forall|id: Chars| state.store.schedules.contains_key(id) ==>
         well_formed_schedule_last_run_at_lt_next_run_at_at(
-            state.server.schedules[id],
+            state.store.schedules[id],
         )
     &&& well_formed_store_object_ids_unique(state)
     &&& well_formed_store_schedule_ids_unique(state)
@@ -357,8 +357,8 @@ pub open spec fn monotone_promise_set_grows(
     before: StateV,
     after: StateV,
 ) -> bool {
-    forall|id: Chars| before.server.promises.contains_key(id) ==>
-        after.server.promises.contains_key(id)
+    forall|id: Chars| before.store.promises.contains_key(id) ==>
+        after.store.promises.contains_key(id)
 }
 
 pub open spec fn monotone_task_set_grows(
@@ -366,8 +366,8 @@ pub open spec fn monotone_task_set_grows(
     before: StateV,
     after: StateV,
 ) -> bool {
-    forall|id: Chars| before.server.tasks.contains_key(id) ==>
-        after.server.tasks.contains_key(id)
+    forall|id: Chars| before.store.tasks.contains_key(id) ==>
+        after.store.tasks.contains_key(id)
 }
 
 pub open spec fn preserved_promise_birth_fields_immutable(
@@ -376,11 +376,11 @@ pub open spec fn preserved_promise_birth_fields_immutable(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
         ==> {
-            let a = before.server.promises[id];
-            let b = after.server.promises[id];
+            let a = before.store.promises[id];
+            let b = after.store.promises[id];
             &&& a.created_at == b.created_at
             &&& a.timeout_at == b.timeout_at
             &&& a.param == b.param
@@ -394,11 +394,11 @@ pub open spec fn preserved_schedule_birth_fields_immutable(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.schedules.contains_key(id)
-        && after.server.schedules.contains_key(id)
+        before.store.schedules.contains_key(id)
+        && after.store.schedules.contains_key(id)
         ==> {
-            let a = before.server.schedules[id];
-            let b = after.server.schedules[id];
+            let a = before.store.schedules[id];
+            let b = after.store.schedules[id];
             &&& a.created_at == b.created_at
             &&& a.cron == b.cron
             &&& a.promise_id == b.promise_id
@@ -414,11 +414,11 @@ pub open spec fn preserved_promise_settlement_is_one_way(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
-        && before.server.promises[id].settled_at is Some
-        ==> after.server.promises[id].settled_at
-            == before.server.promises[id].settled_at
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
+        && before.store.promises[id].settled_at is Some
+        ==> after.store.promises[id].settled_at
+            == before.store.promises[id].settled_at
 }
 
 pub open spec fn preserved_promise_state_frozen_once_settled(
@@ -427,11 +427,11 @@ pub open spec fn preserved_promise_state_frozen_once_settled(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
-        && before.server.promises[id].state != PromiseState::Pending
-        ==> after.server.promises[id].state
-            == before.server.promises[id].state
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
+        && before.store.promises[id].state != PromiseState::Pending
+        ==> after.store.promises[id].state
+            == before.store.promises[id].state
 }
 
 pub open spec fn preserved_promise_value_until_settlement(
@@ -440,12 +440,12 @@ pub open spec fn preserved_promise_value_until_settlement(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PromiseState::Pending
-        && after.server.promises[id].state == PromiseState::Pending
-        ==> after.server.promises[id].value
-            == before.server.promises[id].value
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
+        && before.store.promises[id].state == PromiseState::Pending
+        && after.store.promises[id].state == PromiseState::Pending
+        ==> after.store.promises[id].value
+            == before.store.promises[id].value
 }
 
 pub open spec fn monotone_task_version(
@@ -454,9 +454,9 @@ pub open spec fn monotone_task_version(
     after: StateV,
 ) -> bool {
     forall|id: Chars|
-        before.server.tasks.contains_key(id)
-        && after.server.tasks.contains_key(id)
-        ==> after.server.tasks[id].version >= before.server.tasks[id].version
+        before.store.tasks.contains_key(id)
+        && after.store.tasks.contains_key(id)
+        ==> after.store.tasks[id].version >= before.store.tasks[id].version
 }
 
 pub open spec fn monotone_promise_callbacks_while_pending(
@@ -465,12 +465,12 @@ pub open spec fn monotone_promise_callbacks_while_pending(
     after: StateV,
 ) -> bool {
     forall|id: Chars, callback: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PromiseState::Pending
-        && after.server.promises[id].state == PromiseState::Pending
-        && before.server.promises[id].callbacks.contains(callback)
-        ==> after.server.promises[id].callbacks.contains(callback)
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
+        && before.store.promises[id].state == PromiseState::Pending
+        && after.store.promises[id].state == PromiseState::Pending
+        && before.store.promises[id].callbacks.contains(callback)
+        ==> after.store.promises[id].callbacks.contains(callback)
 }
 
 pub open spec fn monotone_promise_listeners_while_pending(
@@ -479,12 +479,12 @@ pub open spec fn monotone_promise_listeners_while_pending(
     after: StateV,
 ) -> bool {
     forall|id: Chars, listener: Chars|
-        before.server.promises.contains_key(id)
-        && after.server.promises.contains_key(id)
-        && before.server.promises[id].state == PromiseState::Pending
-        && after.server.promises[id].state == PromiseState::Pending
-        && before.server.promises[id].listeners.contains(listener)
-        ==> after.server.promises[id].listeners.contains(listener)
+        before.store.promises.contains_key(id)
+        && after.store.promises.contains_key(id)
+        && before.store.promises[id].state == PromiseState::Pending
+        && after.store.promises[id].state == PromiseState::Pending
+        && before.store.promises[id].listeners.contains(listener)
+        ==> after.store.promises[id].listeners.contains(listener)
 }
 
 pub open spec fn transition_catalogue(
@@ -519,7 +519,7 @@ pub open spec fn step_catalogue(
 // ---------------------------------------------------------------------------
 
 /// The exact obligation every allowed `on_event` outcome must discharge.
-pub open spec fn on_event_preserves_catalogue(config: Resonate) -> bool {
+pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
     forall|before: StateV, now: Time, event: ProcessEvent<Pid, Message>, i: int|
         #![trigger super::abstract_model::Model.spec_on_event(
             config,

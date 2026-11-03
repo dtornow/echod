@@ -13,10 +13,10 @@ use super::super::collections::*;
 use super::super::spec::MAX_VERSION;
 
 #[cfg(verus_keep_ghost)]
-use super::super::spec::{ServerV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
+use super::super::spec::{StoreV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
 
 use super::{
-    claim_res, contains, copy_server, delay_of, echo, fence_res, has_target, is_timer, mk, marked, next_cron, one, prec, project_promise, project_task, promise_res, schedule_res, settle, status, status_res, task_get_res, trec, Id, Out, Promise, Resonate, Server, Task, Time,
+    claim_res, contains, copy_store, delay_of, echo, fence_res, has_target, is_timer, mk, marked, next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out, Promise, ServerConfig, Store, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -24,7 +24,7 @@ use super::{promise_ok, response_ok, server_ok};
 
 verus! {
 
-impl Resonate {
+impl ServerConfig {
     /// Property 1: every promise `promise_create` creates has it, every
     /// response has it if the state had it, and every promise that had it keeps it.
     ///
@@ -35,7 +35,7 @@ impl Resonate {
     /// `fenced`: the create is a fence's action (for the marks). `now` is the
     /// instant the promise is created at: the clock, or an occurrence's instant
     /// for a schedule's fire.
-    pub fn promise_create(&self, req: &PromiseCreateReq, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub fn promise_create(&self, req: &PromiseCreateReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
             forall|i: int|
                 0 <= i < outs.len() ==> {
@@ -71,8 +71,8 @@ impl Resonate {
                         assert(promise_ok(s.promises@[req.id@]));
                     }
                 }
-                let seen = project_promise(p, now);
-                return echo(promise_res(200, Some(prec(&req.id, &seen))), mk("create: id exists (echo)"), s);
+                let seen = p.project(now);
+                return echo(promise_res(200, Some(seen.to_record(&req.id))), mk("create: id exists (echo)"), s);
             },
             None => {},
         }
@@ -95,8 +95,8 @@ impl Resonate {
             callbacks: PSet::empty(),
             listeners: PSet::empty(),
         };
-        let rec = prec(&req.id, &p);
-        let mut n = copy_server(s);
+        let rec = p.to_record(&req.id);
+        let mut n = copy_store(s);
         n.promises.insert(req.id.clone(), p);
         if has_target(&req.tags) {
             // A live targeted promise's task is runnable: offered to a worker
@@ -106,8 +106,8 @@ impl Resonate {
                 None => now,
             };
             let state = if live { TaskState::Pending } else { TaskState::Fulfilled };
-            let retry_at = if live { Some(due) } else { None };
-            let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() };
+            let retry_timeout_at = if live { Some(due) } else { None };
+            let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_timeout_at, resumes: Vec::new() };
             n.tasks.insert(req.id.clone(), task);
         }
         proof {
@@ -141,7 +141,7 @@ impl Resonate {
         outs
     }
 
-    pub(super) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -152,15 +152,15 @@ impl Resonate {
             Some(p) => p,
             None => return status(promise_res(404, None), mk("settle: no such promise (404)"), s),
         };
-        let p = project_promise(stored, now);
-        if !p.live() {
-            return echo(promise_res(200, Some(prec(&req.id, &p))), mk("settle: already settled (echo)"), s);
+        let p = stored.project(now);
+        if p.state != PromiseState::Pending {
+            return echo(promise_res(200, Some(p.to_record(&req.id))), mk("settle: already settled (echo)"), s);
         }
         let noted = !p.callbacks.to_vec().is_empty() || !p.listeners.to_vec().is_empty();
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         settle(&mut n, &req.id, req.state, &req.value, now);
         let res = match n.promises.get(&req.id) {
-            Some(q) => promise_res(200, Some(prec(&req.id, q))),
+            Some(q) => promise_res(200, Some(q.to_record(&req.id))),
             None => promise_res(500, None), // unreachable: the promise exists
         };
         let mut marks = Vec::new();
@@ -175,7 +175,7 @@ impl Resonate {
     /// version matches. `Ok` is the task.
     /// Acquired, own promise still pending as of `now`, version matches.
     /// `Ok` is the stored task, which agrees with its projection.
-    fn held<'a>(&self, s: &'a Server, id: &Id, version: u64, now: Time) -> (r: Result<&'a Task, u16>)
+    fn held<'a>(&self, s: &'a Store, id: &Id, version: u64, now: Time) -> (r: Result<&'a Task, u16>)
         
     {
         let t = match s.tasks.get(id) {
@@ -189,11 +189,11 @@ impl Resonate {
         assert(s@.tasks.contains_key(id@));
         assert(s@.tasks[id@] == t@);
         let seen = match s.promises.get(id) {
-            Some(p) => project_task(&project_promise(p, now), t).state,
+            Some(p) => t.project(&p.project(now)).state,
             None => t.state,
         };
         let live = match s.promises.get(id) {
-            Some(p) => project_promise(p, now).live(),
+            Some(p) => p.project(now).state == PromiseState::Pending,
             None => false,
         };
 
@@ -204,7 +204,7 @@ impl Resonate {
         Ok(t)
     }
 
-    pub(super) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -223,21 +223,21 @@ impl Resonate {
                     Some(t) => t,
                     None => return status(claim_res(409, None, None), mk("task.create: target without a task (409)"), s),  // unreachable
                 };
-                let seen_p = project_promise(p, now);
-                let seen_t = project_task(&seen_p, stored_task);
+                let seen_p = p.project(now);
+                let seen_t = stored_task.project(&seen_p);
                 return match seen_t.state {
-                    TaskState::Fulfilled => echo(claim_res(200, Some(trec(&req.id, &seen_t)), Some(prec(&req.id, &seen_p))), mk("task.create: task done (echo)"), s),
+                    TaskState::Fulfilled => echo(claim_res(200, Some(seen_t.to_record(&req.id)), Some(seen_p.to_record(&req.id))), mk("task.create: task done (echo)"), s),
                     TaskState::Pending => {
                         if stored_task.version >= MAX_VERSION as u64 {
                             return status(claim_res(409, None, None), mk("task.create: version at its cap (409)"), s);
                         }
-                        let mut n = copy_server(s);
+                        let mut n = copy_store(s);
                         let mut u = copy(stored_task);
                         u.acquire(stored_task.version + 1, pid.clone(), ttl, now);
-                        let rec = claim_res(200, Some(trec(&req.id, &u)), Some(prec(&req.id, &seen_p)));
+                        let rec = claim_res(200, Some(u.to_record(&req.id)), Some(seen_p.to_record(&req.id)));
                         n.tasks.insert(req.id.clone(), u);
 
-                        assert(n@ == (ServerV { tasks: s@.tasks.insert(req.id@, u@), ..s@ }));
+                        assert(n@ == (StoreV { tasks: s@.tasks.insert(req.id@, u@), ..s@ }));
                         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
                     },
                     _ => status(claim_res(409, None, None), mk("task.create: task held, suspended or halted (409)"), s),
@@ -257,24 +257,24 @@ impl Resonate {
             callbacks: PSet::empty(),
             listeners: PSet::empty(),
         };
-        let mut t = Task { state: TaskState::Fulfilled, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Vec::new() };
+        let mut t = Task { state: TaskState::Fulfilled, version: 0, pid: None, ttl: None, acquired_at: 0, retry_timeout_at: None, resumes: Vec::new() };
         if live {
             // Acquired by the caller right away: nothing to dispatch.
             t.acquire(1, pid.clone(), ttl, now);
         }
 
-        let res = claim_res(200, Some(trec(&req.id, &t)), Some(prec(&req.id, &p)));
+        let res = claim_res(200, Some(t.to_record(&req.id)), Some(p.to_record(&req.id)));
         let ghost pv = p@;
         let ghost tv = t@;
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         n.promises.insert(req.id.clone(), p);
         n.tasks.insert(req.id.clone(), t);
-        assert(n@ == (ServerV { promises: s@.promises.insert(req.id@, pv), tasks: s@.tasks.insert(req.id@, tv), ..s@ }));
+        assert(n@ == (StoreV { promises: s@.promises.insert(req.id@, pv), tasks: s@.tasks.insert(req.id@, tv), ..s@ }));
         let mark = if live { mk("task created") } else { mk("task created past its deadline") };
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
-    pub(super) fn task_suspend(&self, req: &TaskSuspendReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_suspend(&self, req: &TaskSuspendReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -350,7 +350,7 @@ impl Resonate {
                         return status(status_res(422), mk("suspend: awaited not external (422)"), s);
                     }
                     let ghost was = settled;
-                    settled = settled || !project_promise(p, now).live();
+                    settled = settled || p.project(now).state != PromiseState::Pending;
 
                 },
             }
@@ -359,7 +359,7 @@ impl Resonate {
         proof {
             assert(idv.take(ids.len() as int) =~= idv);
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut u = copy(t);
 
         if settled {
@@ -367,7 +367,7 @@ impl Resonate {
             u.resumes = Vec::new();
             assert(u@ == (TaskV { resumes: Seq::empty(), ..t@ }));
             n.tasks.insert(id.clone(), u);
-            assert(n@ == (ServerV { tasks: s@.tasks.insert(id@, TaskV { resumes: Seq::empty(), ..t@ }), ..s@ }));
+            assert(n@ == (StoreV { tasks: s@.tasks.insert(id@, TaskV { resumes: Seq::empty(), ..t@ }), ..s@ }));
             let r = one(Out { resp: status_res(300), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("suspend: awaited already settled (300)")) });
 
             return r;
@@ -376,7 +376,7 @@ impl Resonate {
         u.pid = None;
         u.ttl = None;
         u.acquired_at = 0;
-        u.retry_at = None;
+        u.retry_timeout_at = None;
         u.resumes = Vec::new();
         n.tasks.insert(id.clone(), u);
         let mut i = 0;
@@ -384,7 +384,7 @@ impl Resonate {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
-                n@.tasks == s@.tasks.insert(id@, TaskV { state: TaskState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Seq::empty(), ..t@ }),
+                n@.tasks == s@.tasks.insert(id@, TaskV { state: TaskState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_timeout_at: None, resumes: Seq::empty(), ..t@ }),
                 n@.schedules == s@.schedules,
             decreases ids.len() - i,
         {
@@ -412,7 +412,7 @@ impl Resonate {
         r
     }
 
-    pub(super) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -470,7 +470,7 @@ impl Resonate {
     /// The create goes first, as a request of its own in its origin; then the
     /// fence's check on the task decides the answer. A stale fence still
     /// leaves the promise created.
-    fn task_fence_detached(&self, id: &Id, version: u64, c: &PromiseCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    fn task_fence_detached(&self, id: &Id, version: u64, c: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -506,7 +506,7 @@ impl Resonate {
         }
     }
 
-    pub(super) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -529,7 +529,7 @@ impl Resonate {
             i += 1;
         }
 
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut extended = false;
         let mut i = 0;
         while i < refs.len()
@@ -577,7 +577,7 @@ impl Resonate {
         one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
-    pub(super) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -612,20 +612,20 @@ impl Resonate {
             last_run_at: None,
         };
         let rec = schedule_res(200, Some(c.dup()));
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         n.schedules.insert(req.id.clone(), c);
         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) })
     }
 
     /// `task.fence` with no action: the check alone, after a detached create.
-    pub(super) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Server, now: Time) -> (outs: Vec<Out>) {
+    pub(super) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>) {
         match self.held(s, &req.id, req.version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("fence: no such task (404)") } else { mk("fence: not held, or stale version (409)") }, s),
             Ok(_) => status(status_res(200), mk("fence check"), s),
         }
     }
 
-    pub(super) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -640,23 +640,23 @@ impl Resonate {
             Some(w) => w,
             None => return status(promise_res(422, None), mk("callback: no awaiter promise (422)"), s),
         };
-        let p = project_promise(stored, now);
-        let w = project_promise(stored_w, now);
+        let p = stored.project(now);
+        let w = stored_w.project(now);
         if !s.tasks.contains_key(awaiter) || !p.external() {
             return status(promise_res(422, None), mk("callback: awaiter no task, or awaited not external (422)"), s);
         }
-        let res = promise_res(200, Some(prec(awaited, &p)));
-        if !p.live() || !w.live() {
+        let res = promise_res(200, Some(p.to_record(awaited)));
+        if p.state != PromiseState::Pending || w.state != PromiseState::Pending {
             return echo(res, mk("callback: one of them settled (echo)"), s);
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut q = p;
         q.callbacks.insert(awaiter.clone());
         n.promises.insert(awaited.clone(), q);
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("callback registered")) })
     }
 
-    pub(super) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -667,22 +667,22 @@ impl Resonate {
             None => return status(promise_res(404, None), mk("listener: no such promise (404)"), s),
             Some(p) => p,
         };
-        let p = project_promise(stored, now);
+        let p = stored.project(now);
         if !p.external() {
             return status(promise_res(422, None), mk("listener: promise not external (422)"), s);
         }
-        let res = promise_res(200, Some(prec(awaited, &p)));
-        if !p.live() {
+        let res = promise_res(200, Some(p.to_record(awaited)));
+        if p.state != PromiseState::Pending {
             return echo(res, mk("listener: promise settled (echo)"), s);
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut q = p;
         q.listeners.insert(address.clone());
         n.promises.insert(awaited.clone(), q);
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("listener registered")) })
     }
 
-    pub(super) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -694,27 +694,27 @@ impl Resonate {
             Some(p) => p,
             None => return status(claim_res(404, None, None), mk("acquire: no such task (404)"), s),  // unreachable
         };
-        let p = project_promise(stored_p, now);
-        let seen = project_task(&p, t);
-        if seen.state != TaskState::Pending || !p.live() || t.version != version || t.version >= MAX_VERSION as u64 {
+        let p = stored_p.project(now);
+        let seen = t.project(&p);
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version || t.version >= MAX_VERSION as u64 {
             return status(claim_res(409, None, None), mk("acquire: not pending, or stale version (409)"), s);
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut u = copy(t);
         u.acquire(t.version + 1, pid.clone(), ttl, now);
-        let rec = claim_res(200, Some(trec(id, &u)), Some(prec(id, &p)));
+        let rec = claim_res(200, Some(u.to_record(id)), Some(p.to_record(id)));
         n.tasks.insert(id.clone(), u);
         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) })
     }
 
-    pub(super) fn task_release(&self, id: &Id, version: u64, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_release(&self, id: &Id, version: u64, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
         match self.held(s, id, version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("release: no such task (404)") } else { mk("release: not held (409)") }, s),
             Ok(t) => {
-                let mut n = copy_server(s);
+                let mut n = copy_store(s);
                 let mut u = copy(t);
                 u.release(now);
                 n.tasks.insert(id.clone(), u);
@@ -723,7 +723,7 @@ impl Resonate {
         }
     }
 
-    pub(super) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -734,16 +734,16 @@ impl Resonate {
             Err(code) => return status(promise_res(code, None), if code == 404 { mk("fulfill: no such task (404)") } else { mk("fulfill: not held (409)") }, s),
             Ok(_) => {},
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         settle(&mut n, id, action.state, &action.value, now);
         let res = match n.promises.get(id) {
-            Some(q) => promise_res(200, Some(prec(id, q))),
+            Some(q) => promise_res(200, Some(q.to_record(id))),
             None => promise_res(500, None), // unreachable: held checked the promise
         };
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task fulfilled")) })
     }
 
-    pub(super) fn task_halt(&self, id: &Id, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_halt(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -752,27 +752,27 @@ impl Resonate {
             None => return status(status_res(404), mk("halt: no such task (404)"), s),
         };
         let seen = match s.promises.get(id) {
-            Some(p) => project_task(&project_promise(p, now), t).state,
+            Some(p) => t.project(&p.project(now)).state,
             None => t.state,
         };
         match seen {
             TaskState::Fulfilled => status(status_res(409), mk("halt: task done (409)"), s),
             TaskState::Halted => status(status_res(200), mk("halt: already halted (echo)"), s),
             _ => {
-                let mut n = copy_server(s);
+                let mut n = copy_store(s);
                 let mut u = copy(t);
                 u.state = TaskState::Halted;
                 u.pid = None;
                 u.ttl = None;
                 u.acquired_at = 0;
-                u.retry_at = None;
+                u.retry_timeout_at = None;
                 n.tasks.insert(id.clone(), u);
                 one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) })
             },
         }
     }
 
-    pub(super) fn task_continue(&self, id: &Id, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub(super) fn task_continue(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -781,28 +781,28 @@ impl Resonate {
             None => return status(status_res(404), mk("continue: no such task (404)"), s),
         };
         let live = match s.promises.get(id) {
-            Some(p) => project_promise(p, now).live(),
+            Some(p) => p.project(now).state == PromiseState::Pending,
             None => false,
         };
         if t.state != TaskState::Halted || !live {
             return status(status_res(409), mk("continue: not halted (409)"), s);
         }
-        let mut n = copy_server(s);
+        let mut n = copy_store(s);
         let mut u = copy(t);
         u.state = TaskState::Pending;
-        u.retry_at = Some(now);
+        u.retry_timeout_at = Some(now);
         n.tasks.insert(id.clone(), u);
         one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task continued")) })
     }
 
-    pub(super) fn schedule_delete(&self, id: &Id, s: &Server) -> (outs: Vec<Out>)
+    pub(super) fn schedule_delete(&self, id: &Id, s: &Store) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
         match s.schedules.get(id) {
             None => status(status_res(404), mk("delete schedule: none (404)"), s),
             Some(_) => {
-                let mut n = copy_server(s);
+                let mut n = copy_store(s);
                 n.schedules.remove(id);
                 one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule deleted")) })
             },

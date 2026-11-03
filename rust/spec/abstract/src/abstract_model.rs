@@ -11,11 +11,11 @@ use echod_rover::{Sched, Time};
 
 use echod_types::Response;
 
-use super::exec::{Dispatch, InOut, Out, Resonate, Server, Work};
+use super::exec::{Dispatch, InOut, Out, ServerConfig, Store, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 use super::spec::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
-use super::spec::{InternalV, ServerV};
+use super::spec::{InternalV, StoreV};
 
 verus! {
 
@@ -28,12 +28,12 @@ pub enum Pid {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub struct State {
-    pub server: Server,
+    pub store: Store,
     pub pending: Vec<Work>,
 }
 
 pub struct StateV {
-    pub server: ServerV,
+    pub store: StoreV,
     pub pending: Seq<Sched<InternalV>>,
 }
 
@@ -42,7 +42,7 @@ impl View for State {
 
     open spec fn view(&self) -> StateV {
         StateV {
-            server: self.server@,
+            store: self.store@,
             pending: self.pending@.map_values(|work: Work| super::spec::as_sched(work)),
         }
     }
@@ -51,19 +51,19 @@ impl View for State {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Model;
 
-pub open spec fn empty_server() -> ServerV {
-    ServerV {
+pub open spec fn empty_store() -> StoreV {
+    StoreV {
         promises: Map::empty(),
         tasks: Map::empty(),
         schedules: Map::empty(),
     }
 }
 
-fn initial_server() -> (server: Server)
+fn initial_store() -> (server: Store)
     ensures
-        server@ == empty_server(),
+        server@ == empty_store(),
 {
-    let server = Server {
+    let server = Store {
         promises: super::collections::PMap::empty(),
         tasks: super::collections::PMap::empty(),
         schedules: super::collections::PMap::empty(),
@@ -104,7 +104,7 @@ pub open spec fn spec_request_outcome(
 ) -> StepResultV<StateV, Pid, Message> {
     StepResultV {
         state: StateV {
-            server: outcome.next,
+            store: outcome.next,
             pending: before.pending + outcome.work,
         },
         send: spec_send(call, outcome.resp, outcome.send),
@@ -254,21 +254,21 @@ fn request_outcome(
     } = outcome;
     StepResult {
         state: State {
-            server: next,
+            store: next,
             pending: append_work(&before.pending, work),
         },
         send: send(call, resp, dispatches),
     }
 }
 
-fn run_results(
-    config: &Resonate,
+fn run(
+    config: &ServerConfig,
     state: &State,
     call: &Call,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
 {
-    let mut outcomes = config.run(&call.request, &state.server, now);
+    let mut outcomes = config.handler(&call.request, &state.store, now);
     let ghost all = outcomes@;
     let mut results = Vec::new();
     while !outcomes.is_empty()
@@ -345,7 +345,7 @@ pub open spec fn spec_internal_result(
 ) -> StepResultV<StateV, Pid, Message> {
     StepResultV {
         state: StateV {
-            server: outcome.next,
+            store: outcome.next,
             pending: remove_at(before.pending, i) + outcome.work,
         },
         send: outcome.send.map_values(|dispatch: DispatchV| (
@@ -376,7 +376,7 @@ fn internal_result(
         mut work,
         send: mut dispatches,
         marks: _,
-        pending: _,
+        not_due: _,
     } = outcome;
     let mut pending = copy(&before.pending);
     pending.remove(i);
@@ -420,15 +420,15 @@ fn internal_result(
     }
     StepResult {
         state: State {
-            server: next,
+            store: next,
             pending,
         },
         send,
     }
 }
 
-fn internal_results_from(
-    config: &Resonate,
+fn run_timeout_from(
+    config: &ServerConfig,
     state: &State,
     now: Time,
     i: usize,
@@ -441,10 +441,10 @@ fn internal_results_from(
         return Vec::new();
     }
     let work = &state.pending[i];
-    let outcome = config.run_work(work, &state.server, now);
+    let outcome = config.process_work(work, &state.store, now);
     let is_ready = ready(work, now);
-    let mut tail = internal_results_from(config, state, now, i + 1);
-    if is_ready && !outcome.pending {
+    let mut tail = run_timeout_from(config, state, now, i + 1);
+    if is_ready && !outcome.not_due {
         let result = internal_result(state, i, outcome);
         let mut results = Vec::new();
         results.push(result);
@@ -456,7 +456,7 @@ fn internal_results_from(
 }
 
 fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>) {
-    let InOut { next, mut work, send: mut dispatches, marks: _, pending: _ } = outcome;
+    let InOut { next, mut work, send: mut dispatches, marks: _, not_due: _ } = outcome;
     let mut pending = copy(&before.pending);
     pending.append(&mut work);
     let ghost all = dispatches@;
@@ -470,17 +470,17 @@ fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>) {
         let dispatch = dispatches.remove(0);
         send.push((Pid::Outside, Message::Output(Output::Dispatch(dispatch))));
     }
-    StepResult { state: State { server: next, pending }, send }
+    StepResult { state: State { store: next, pending }, send }
 }
 
-fn internal_results(
-    config: &Resonate,
+fn run_timeout(
+    config: &ServerConfig,
     state: &State,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
 {
-    let mut results = internal_results_from(config, state, now, 0);
-    let due = super::model::due(config, &state.server, now);
+    let mut results = run_timeout_from(config, state, now, 0);
+    let due = super::footprint::timeout_work(config, &state.store, now);
     let n = due.len();
     let mut i = 0;
     while i < n
@@ -489,8 +489,8 @@ fn internal_results(
             due.len() == n,
         decreases n - i,
     {
-        let outcome = config.run_work(due[i].req(), &state.server, now);
-        if !outcome.pending {
+        let outcome = config.process_work(due[i].req(), &state.store, now);
+        if !outcome.not_due {
             results.push(due_result(state, outcome));
         }
         i += 1;
@@ -521,16 +521,16 @@ fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
 impl State {
     fn step(
         &self,
-        config: &Resonate,
+        config: &ServerConfig,
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> (results: Vec<StepResult<Model>>) {
         match event {
             ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-                run_results(config, self, call, now)
+                run(config, self, call, now)
             }
             ProcessEvent::Timeout => {
-                let results = internal_results(config, self, now);
+                let results = run_timeout(config, self, now);
                 if results.is_empty() { idle(self) } else { results }
             }
             _ => idle(self),
@@ -538,10 +538,10 @@ impl State {
     }
 }
 
-impl Process<Resonate, Pid, Message> for State {
+impl Process<ServerConfig, Pid, Message> for State {
     fn on_event(
         &self,
-        config: &Resonate,
+        config: &ServerConfig,
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> (pairs: Vec<(State, Vec<(Pid, Message)>)>) {
@@ -562,7 +562,7 @@ impl Process<Resonate, Pid, Message> for State {
 }
 
 impl RoverModel for Model {
-    type Config = Resonate;
+    type Config = ServerConfig;
     type Pid = Pid;
     type StateV = StateV;
     type State = State;
@@ -573,18 +573,18 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
-    fn initial(&self, _config: &Resonate) -> (states: Vec<(Pid, State)>) {
-        let server = initial_server();
+    fn initial(&self, _config: &ServerConfig) -> (states: Vec<(Pid, State)>) {
+        let server = initial_store();
         let pending: Vec<Work> = Vec::new();
         let state = State {
-            server,
+            store: server,
             pending,
         };
         proof {
-            assert(server@ == empty_server());
+            assert(server@ == empty_store());
             assert(pending@.map_values(|work: Work| super::spec::as_sched(work)) =~= Seq::empty());
             assert(state@ == StateV {
-                server: empty_server(),
+                store: empty_store(),
                 pending: Seq::empty(),
             });
         }
@@ -595,7 +595,7 @@ impl RoverModel for Model {
                 =~= seq![(
                     Pid::Service,
                     StateV {
-                        server: empty_server(),
+                        store: empty_store(),
                         pending: Seq::empty(),
                     },
                 )]);
@@ -603,7 +603,7 @@ impl RoverModel for Model {
         states
     }
 
-    fn injectable(&self, _config: &Resonate, message: &Message) -> (injectable: bool) {
+    fn injectable(&self, _config: &ServerConfig, message: &Message) -> (injectable: bool) {
         match message {
             Message::Request(_) => true,
             Message::Output(_) => false,
@@ -612,7 +612,7 @@ impl RoverModel for Model {
 
     fn on_event(
         &self,
-        config: &Resonate,
+        config: &ServerConfig,
         pid: &Pid,
         state: &State,
         now: Time,
@@ -628,17 +628,17 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
-    open spec fn spec_initial(&self, _config: Resonate) -> Seq<(Pid, StateV)> {
+    open spec fn spec_initial(&self, _config: ServerConfig) -> Seq<(Pid, StateV)> {
         seq![(
             Pid::Service,
             StateV {
-                server: empty_server(),
+                store: empty_store(),
                 pending: Seq::empty(),
             },
         )]
     }
 
-    open spec fn spec_injectable(&self, _config: Resonate, message: Message) -> bool {
+    open spec fn spec_injectable(&self, _config: ServerConfig, message: Message) -> bool {
         match message {
             Message::Request(_) => true,
             Message::Output(_) => false,

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use echod_abstract::types as rows;
-use echod_abstract::{PMap, PSet, Promise, Server as Model, Task};
+use echod_abstract::{PMap, PSet, Promise, Store as Model, Task};
 use serde_json::{json, Value};
 
 fn tags_out(t: &rows::Tags) -> Value {
@@ -242,7 +242,7 @@ pub fn model_state(snap: &Value) -> Model {
             _ => 0,
         };
         let resumes = (0..r.resumes).map(|i| format!("resume-{i}")).collect();
-        tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at, retry_at: retries.get(&r.id).copied(), resumes });
+        tasks.insert(r.id.clone(), Task { state: r.state, version: r.version, pid: r.pid, ttl: r.ttl, acquired_at, retry_timeout_at: retries.get(&r.id).copied(), resumes });
     }
     let mut schedules: PMap<rows::Schedule> = PMap::empty();
     for c in snap["schedules"].as_array().into_iter().flatten() {

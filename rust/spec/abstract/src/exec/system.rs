@@ -1,4 +1,4 @@
-//! The match. `run` is one request. `run_work` is one due item.
+//! The match. `handler` is one request. `process_work` is one work item.
 
 use vstd::prelude::*;
 
@@ -10,15 +10,15 @@ use super::super::spec::group_views;
 use super::super::collections::copy;
 
 use super::{
-    echo, mk, prec, project_promise, project_task, promise_res, schedule_res, status, task_get_res, trec, InOut, Out, Resonate, Server, Time, Work,
+    echo, mk, promise_res, schedule_res, status, task_get_res, InOut, Out, ServerConfig, Store, Time, Work,
 };
 
 verus! {
 
-impl Resonate {
+impl ServerConfig {
 
     /// A request takes effect in `s` at time `now`: every allowed outcome.
-    pub fn run(&self, op: &Request, s: &Server, now: Time) -> (outs: Vec<Out>)
+    pub fn handler(&self, op: &Request, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -27,8 +27,8 @@ impl Resonate {
             Request::PromiseGet(q) => match s.promises.get(&q.id) {
                 None => status(promise_res(404, None), mk("get promise: none (404)"), s),
                 Some(p) => {
-                    let seen = project_promise(p, now);
-                    echo(promise_res(200, Some(prec(&q.id, &seen))), mk("get promise"), s)
+                    let seen = p.project(now);
+                    echo(promise_res(200, Some(seen.to_record(&q.id))), mk("get promise"), s)
                 },
             },
             Request::PromiseSettle(st) => self.promise_settle(st, false, s, now),
@@ -38,10 +38,10 @@ impl Resonate {
                 None => status(task_get_res(404, None), mk("get task: none (404)"), s),
                 Some(t) => {
                     let seen = match s.promises.get(&q.id) {
-                        Some(p) => project_task(&project_promise(p, now), t),
+                        Some(p) => t.project(&p.project(now)),
                         None => copy(t),
                     };
-                    echo(task_get_res(200, Some(trec(&q.id, &seen))), mk("get task"), s)
+                    echo(task_get_res(200, Some(seen.to_record(&q.id))), mk("get task"), s)
                 },
             },
             Request::TaskCreate(q) => self.task_create(&q.pid, q.ttl, &q.action, s, now),
@@ -65,15 +65,15 @@ impl Resonate {
 
     /// One due item at `now`: a deadline, a callback, a listener, a lease, a
     /// retry, a schedule, or one queued occurrence.
-    pub fn run_work(&self, step: &Work, s: &Server, now: Time) -> (r: InOut) {
+    pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut) {
         match step {
-            Work::PromiseTimeout(id) => self.promise_timeout(id, s, now),
-            Work::Callback { awaited, awaiter } => self.callback(awaited, awaiter, s, now),
-            Work::Listener { awaited, address } => self.listener(awaited, address, s, now),
-            Work::Lease(id) => self.lease(id, s, now),
-            Work::Retry(id) => self.retry(id, s, now),
-            Work::Schedule { id, .. } => self.schedule(id, s, now),
-            Work::Occurrence { promise, at, timeout, param, tags } => self.occurrence(promise, *at, *timeout, param, tags, s, now),
+            Work::PromiseTimeout(id) => self.process_promise_timeout(id, s, now),
+            Work::Callback { awaited, awaiter } => self.process_callback(awaited, awaiter, s, now),
+            Work::Listener { awaited, address } => self.process_listener(awaited, address, s, now),
+            Work::TaskLeaseTimeout(id) => self.process_lease_timeout(id, s, now),
+            Work::TaskRetryTimeout(id) => self.process_retry_timeout(id, s, now),
+            Work::ScheduleTimeout { id, .. } => self.process_schedule(id, s, now),
+            Work::Occurrence { promise, at, timeout, param, tags } => self.create_if_absent(promise, *at, *timeout, param, tags, s, now),
         }
     }
 }

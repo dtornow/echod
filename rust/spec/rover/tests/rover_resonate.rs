@@ -27,8 +27,8 @@ fn settle(id: &str, data: &str) -> PromiseSettleReq {
 /// Build one concrete execution using the standalone handler, then ask Rover
 /// to rediscover and certify it from boundary events alone.
 fn trace_for(requests: Vec<Request>) -> Vec<Event> {
-    let logic = Resonate::default();
-    let mut server = Server::default();
+    let logic = ServerConfig::default();
+    let mut server = Store::default();
     let mut trace = Vec::new();
 
     for (i, request) in requests.into_iter().enumerate() {
@@ -37,7 +37,7 @@ fn trace_for(requests: Vec<Request>) -> Vec<Event> {
             id: i as u64,
             request: request.clone(),
         };
-        let mut outcomes = logic.run(&request, &server, 0);
+        let mut outcomes = logic.handler(&request, &server, 0);
         let outcome = outcomes.remove(0);
 
         trace.push(Event::Input {
@@ -117,7 +117,7 @@ fn every_request_family_runs_through_rover() {
     for request in requests {
         let trace = trace_for(vec![request.clone()]);
         assert!(
-            check(&Model, &Resonate::default(), &trace, CheckConfig { max_steps: 12 }).is_some(),
+            check(&Model, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12 }).is_some(),
             "Rover rejected {request:?}",
         );
     }
@@ -135,12 +135,12 @@ fn an_unpredicted_response_is_rejected() {
         response: Response::Status(StatusRes { status: 200 }),
     });
 
-    assert!(check(&Model, &Resonate::default(), &trace, CheckConfig { max_steps: 8 }).is_none());
+    assert!(check(&Model, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8 }).is_none());
 }
 
 #[test]
 fn timeout_runs_the_internal_work_started_by_a_request() {
-    let config = Resonate::default();
+    let config = ServerConfig::default();
     let mut initial = Model.initial(&config);
     let state = initial.remove(0).1;
     let call = Call {
@@ -165,7 +165,7 @@ fn timeout_runs_the_internal_work_started_by_a_request() {
     assert!(timed_out.iter().any(|result| {
         result
             .state
-            .server
+            .store
             .promises
             .get(&"o:deadline".to_string())
             .is_some_and(|promise| promise.state == PromiseState::RejectedTimedout)

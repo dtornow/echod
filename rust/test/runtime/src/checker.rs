@@ -21,7 +21,7 @@
 
 use echod_rover::{Checker, Config, Event, Grouped, Violation};
 use echod_abstract::types::{Request, Response};
-use echod_abstract::{Dispatch, Resonate, Server};
+use echod_abstract::{Dispatch, ServerConfig, Store};
 
 use crate::bus::Sent;
 use crate::history::Entry;
@@ -95,7 +95,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, fire_within: u64, budget: u64) -
     if let Some(w) = std::env::var("ECHOD_SIM_WIDTH").ok().and_then(|v| v.parse().ok()) {
         cfg.max_width = w;
     }
-    let mut c: Checker<Grouped<Resonate>> = Checker::with_partitions(Resonate { retry_timeout, fire_within }, Server::default(), cfg);
+    let mut c: Checker<Grouped<ServerConfig>> = Checker::with_partitions(ServerConfig { retry_timeout, fire_within }, Store::default(), cfg);
     // The history is whole: a call it never answers may have taken effect at
     // any point or never, and a candidate still holding it subsumes one that
     // applied it.

@@ -1,7 +1,7 @@
 //! The glue between the verified model and the checker: plain Rust, outside
 //! Verus. It says which keys a request touches and which origin a key belongs
-//! to, and holds the cron engine the spec trusts. Which steps can run is the
-//! handlers' decision: `due` asks them.
+//! to, and holds the cron engine the spec trusts. `timeout_work` is the list
+//! of steps a timeout may run; the handler decides which of them do anything.
 
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
 use echod_types::{Request, TaskFenceAction};
@@ -69,14 +69,14 @@ pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {
 
 // ------------------------------------------------------------------ the traits
 
-impl Default for Resonate {
+impl Default for ServerConfig {
     /// Lean's `ServerConfig.retryTimeout`: 5000. Schedules fire at the instant.
     fn default() -> Self {
-        Resonate { retry_timeout: 5_000, fire_within: 0 }
+        ServerConfig { retry_timeout: 5_000, fire_within: 0 }
     }
 }
 
-impl Footprint for Resonate {
+impl Footprint for ServerConfig {
     type Key = Key;
 
     fn external_touches(&self, op: &Request) -> Touches<Key> {
@@ -125,16 +125,16 @@ impl Footprint for Resonate {
 
     fn internal_touches(&self, step: &Work) -> Touches<Key> {
         match step {
-            Work::PromiseTimeout(id) | Work::Lease(id) | Work::Retry(id) | Work::Listener { awaited: id, .. } => {
+            Work::PromiseTimeout(id) | Work::TaskLeaseTimeout(id) | Work::TaskRetryTimeout(id) | Work::Listener { awaited: id, .. } => {
                 Touches::one(Key::Object(id.clone()))
             }
             Work::Callback { awaited, awaiter } => Touches::Only(vec![Key::Object(awaited.clone()), Key::Object(awaiter.clone())]),
-            Work::Schedule { id, promise } => Touches::Only(vec![Key::Schedule(id.clone()), Key::Object(promise.clone())]),
+            Work::ScheduleTimeout { id, promise } => Touches::Only(vec![Key::Schedule(id.clone()), Key::Object(promise.clone())]),
             Work::Occurrence { promise, .. } => Touches::one(Key::Object(promise.clone())),
         }
     }
 
-    fn state_spans(&self, s: &Server) -> Vec<Touches<Key>> {
+    fn state_spans(&self, s: &Store) -> Vec<Touches<Key>> {
         s.schedules
             .iter()
             .map(|(id, c)| match template_origin(&c.promise_id, id) {
@@ -152,7 +152,7 @@ impl Footprint for Resonate {
     }
 }
 
-impl Partitioned for Resonate {
+impl Partitioned for ServerConfig {
     type Group = String;
 
     /// Ids of different origins never interact, except through a detached create
@@ -164,16 +164,16 @@ impl Partitioned for Resonate {
         key.group()
     }
 
-    fn restrict(&self, s: &Server, keep: &dyn Fn(&String) -> bool) -> Server {
+    fn restrict(&self, s: &Store, keep: &dyn Fn(&String) -> bool) -> Store {
         let mine = |k: &Id| keep(&origin(k).to_string());
-        Server {
+        Store {
             promises: s.promises.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
             tasks: s.tasks.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
             schedules: s.schedules.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
 
-    fn join(&self, a: &Server, b: &Server) -> Server {
+    fn join(&self, a: &Store, b: &Store) -> Store {
         let mut n = a.clone();
         for (k, v) in b.promises.iter() {
             n.promises.insert(k.clone(), v.clone());
@@ -191,32 +191,32 @@ impl Partitioned for Resonate {
 /// The steps an object or schedule offers, keeping those the handler will
 /// perform. Occurrences are not here: a schedule step queues those, and the
 /// queue is the only one. The handler is the guard.
-pub fn due(m: &Resonate, s: &Server, now: Time) -> Vec<Sched<Work>> {
+pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
     let mut v = Vec::new();
     for (id, p) in s.promises.iter() {
-        offer(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        runs(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
         for awaiter in p.callbacks.to_vec() {
-            offer(m, s, now, &mut v, Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
+            runs(m, s, now, &mut v, Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
         }
         for address in p.listeners.to_vec() {
-            offer(m, s, now, &mut v, Sched::Later(Work::Listener { awaited: id.clone(), address }));
+            runs(m, s, now, &mut v, Sched::Later(Work::Listener { awaited: id.clone(), address }));
         }
     }
     for (id, t) in s.tasks.iter() {
-        offer(m, s, now, &mut v, Sched::Timer(t.lease_expires(), Work::Lease(id.clone())));
-        if let Some(r) = t.retry_at {
-            offer(m, s, now, &mut v, Sched::Timer(r, Work::Retry(id.clone())));
+        runs(m, s, now, &mut v, Sched::Timer(t.lease_timeout_at(), Work::TaskLeaseTimeout(id.clone())));
+        if let Some(r) = t.retry_timeout_at {
+            runs(m, s, now, &mut v, Sched::Timer(r, Work::TaskRetryTimeout(id.clone())));
         }
     }
     for (id, c) in s.schedules.iter() {
         let promise = expand(&c.promise_id, id, c.next_run_at);
-        offer(m, s, now, &mut v, Sched::Timer(c.next_run_at, Work::Schedule { id: id.clone(), promise }));
+        runs(m, s, now, &mut v, Sched::Timer(c.next_run_at, Work::ScheduleTimeout { id: id.clone(), promise }));
     }
     v
 }
 
-fn offer(m: &Resonate, s: &Server, now: Time, v: &mut Vec<Sched<Work>>, step: Sched<Work>) {
-    if !m.run_work(step.req(), s, now).pending {
+fn runs(m: &ServerConfig, s: &Store, now: Time, v: &mut Vec<Sched<Work>>, step: Sched<Work>) {
+    if !m.process_work(step.req(), s, now).not_due {
         v.push(step);
     }
 }

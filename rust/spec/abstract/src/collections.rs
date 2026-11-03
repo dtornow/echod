@@ -175,7 +175,7 @@ pub fn address_valid(addr: &String) -> (r: bool)
     ensures
         r == spec_address_valid(addr@),
 {
-    super::model::address_valid(addr)
+    super::footprint::address_valid(addr)
 }
 
 /// Whether an id holds a `:`: the reference server keeps it as the separator
@@ -202,7 +202,7 @@ pub fn cron_valid(cron: &String) -> (r: bool)
     ensures
         r == spec_cron_valid(cron@),
 {
-    super::model::cron_valid(cron)
+    super::footprint::cron_valid(cron)
 }
 
 /// Lean's `nextCron`, as the spec sees it: strictly after `after`.
@@ -223,7 +223,7 @@ pub fn next_cron(cron: &String, after: u64) -> (r: u64)
         r == spec_next_cron(cron@, after),
         r > after,
 {
-    super::model::next_cron(cron, after)
+    super::footprint::next_cron(cron, after)
 }
 
 /// Lean's `expand`, as the spec sees it.
@@ -236,7 +236,7 @@ pub fn expand(template: &String, id: &String, at: u64) -> (r: String)
     ensures
         r@ == spec_expand(template@, id@, at),
 {
-    super::model::expand(template, id, at)
+    super::footprint::expand(template, id, at)
 }
 
 // ------------------------------------------------------------------- axioms

@@ -47,7 +47,7 @@ pub struct TaskV {
     pub pid: Option<Chars>,
     pub ttl: Option<Time>,
     pub acquired_at: Time,
-    pub retry_at: Option<Time>,
+    pub retry_timeout_at: Option<Time>,
     pub resumes: Seq<Chars>,
 }
 
@@ -63,7 +63,7 @@ pub struct ScheduleV {
     pub last_run_at: Option<Time>,
 }
 
-pub struct ServerV {
+pub struct StoreV {
     pub promises: Map<Chars, PromiseV>,
     pub tasks: Map<Chars, TaskV>,
     pub schedules: Map<Chars, ScheduleV>,
@@ -78,9 +78,9 @@ pub enum InternalV {
     PromiseTimeout(Chars),
     Callback { awaited: Chars, awaiter: Chars },
     Listener { awaited: Chars, address: Chars },
-    Lease(Chars),
-    Retry(Chars),
-    Schedule { id: Chars, promise: Chars },
+    TaskLeaseTimeout(Chars),
+    TaskRetryTimeout(Chars),
+    ScheduleTimeout { id: Chars, promise: Chars },
     Occurrence { promise: Chars, at: Time, timeout: Time, param: Value, tags: Tags },
 }
 
@@ -123,17 +123,17 @@ impl View for Task {
             pid: ostr(self.pid),
             ttl: self.ttl,
             acquired_at: self.acquired_at,
-            retry_at: self.retry_at,
+            retry_timeout_at: self.retry_timeout_at,
             resumes: strs(self.resumes@),
         }
     }
 }
 
-impl View for Server {
-    type V = ServerV;
+impl View for Store {
+    type V = StoreV;
 
-    open spec fn view(&self) -> ServerV {
-        ServerV {
+    open spec fn view(&self) -> StoreV {
+        StoreV {
             promises: self.promises@.map_values(|p: Promise| p@),
             tasks: self.tasks@.map_values(|t: Task| t@),
             schedules: self.schedules@.map_values(|c: Schedule| c@),
@@ -160,9 +160,9 @@ impl View for Work {
             Work::PromiseTimeout(id) => InternalV::PromiseTimeout(id@),
             Work::Callback { awaited, awaiter } => InternalV::Callback { awaited: awaited@, awaiter: awaiter@ },
             Work::Listener { awaited, address } => InternalV::Listener { awaited: awaited@, address: address@ },
-            Work::Lease(id) => InternalV::Lease(id@),
-            Work::Retry(id) => InternalV::Retry(id@),
-            Work::Schedule { id, promise } => InternalV::Schedule { id: id@, promise: promise@ },
+            Work::TaskLeaseTimeout(id) => InternalV::TaskLeaseTimeout(id@),
+            Work::TaskRetryTimeout(id) => InternalV::TaskRetryTimeout(id@),
+            Work::ScheduleTimeout { id, promise } => InternalV::ScheduleTimeout { id: id@, promise: promise@ },
             Work::Occurrence { promise, at, timeout, param, tags } => InternalV::Occurrence {
                 promise: promise@,
                 at: *at,
@@ -185,9 +185,9 @@ pub open spec fn as_sched(w: Work) -> Sched<InternalV> {
         Work::PromiseTimeout(id) => Sched::Later(InternalV::PromiseTimeout(id@)),
         Work::Callback { awaited, awaiter } => Sched::Later(InternalV::Callback { awaited: awaited@, awaiter: awaiter@ }),
         Work::Listener { awaited, address } => Sched::Later(InternalV::Listener { awaited: awaited@, address: address@ }),
-        Work::Lease(id) => Sched::Later(InternalV::Lease(id@)),
-        Work::Retry(id) => Sched::Later(InternalV::Retry(id@)),
-        Work::Schedule { id, promise } => Sched::Later(InternalV::Schedule { id: id@, promise: promise@ }),
+        Work::TaskLeaseTimeout(id) => Sched::Later(InternalV::TaskLeaseTimeout(id@)),
+        Work::TaskRetryTimeout(id) => Sched::Later(InternalV::TaskRetryTimeout(id@)),
+        Work::ScheduleTimeout { id, promise } => Sched::Later(InternalV::ScheduleTimeout { id: id@, promise: promise@ }),
     }
 }
 
@@ -211,16 +211,16 @@ pub open spec fn sends(v: Seq<Dispatch>) -> Seq<DispatchV> {
 
 pub struct OutV {
     pub resp: Response,
-    pub next: ServerV,
+    pub next: StoreV,
     pub work: Seq<Sched<InternalV>>,
     pub send: Seq<DispatchV>,
 }
 
 pub struct InOutV {
-    pub next: ServerV,
+    pub next: StoreV,
     pub work: Seq<Sched<InternalV>>,
     pub send: Seq<DispatchV>,
-    pub pending: bool,
+    pub not_due: bool,
 }
 
 impl View for Out {
@@ -235,7 +235,7 @@ impl View for InOut {
     type V = InOutV;
 
     open spec fn view(&self) -> InOutV {
-        InOutV { next: self.next@, work: works(self.work@), send: sends(self.send@), pending: self.pending }
+        InOutV { next: self.next@, work: works(self.work@), send: sends(self.send@), not_due: self.not_due }
     }
 }
 
@@ -472,8 +472,8 @@ fn items(mut w: Vec<Work>) -> (r: Vec<Sched<Work>>)
     r
 }
 
-impl Model for Resonate {
-    type State = Server;
+impl Model for ServerConfig {
+    type State = Store;
 
     type External = Request;
 
@@ -483,9 +483,9 @@ impl Model for Resonate {
 
     type Dispatch = Dispatch;
 
-    fn external(&self, op: &Request, s: &Server, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        let mut outs = self.run(op, s, now);
-        let mut r: Vec<ExternalOutcome<Resonate>> = Vec::new();
+    fn external(&self, op: &Request, s: &Store, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
+        let mut outs = self.handler(op, s, now);
+        let mut r: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
         while outs.len() > 0
             decreases outs@.len(),
         {
@@ -498,21 +498,21 @@ impl Model for Resonate {
         r
     }
 
-    fn internal(&self, step: &Work, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
-        let o = self.run_work(step, s, now);
-        let mut r: Vec<InternalOutcome<Resonate>> = Vec::new();
-        if o.pending {
+    fn internal(&self, step: &Work, s: &Store, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
+        let o = self.process_work(step, s, now);
+        let mut r: Vec<InternalOutcome<ServerConfig>> = Vec::new();
+        if o.not_due {
             return r;
         }
-        let InOut { next, work, send, marks, pending: _ } = o;
+        let InOut { next, work, send, marks, not_due: _ } = o;
         let work = items(work);
         let e = InternalOutcome { next, work, send, marks };
         r.push(e);
         r
     }
 
-    fn due(&self, s: &Server, now: Time) -> (r: Vec<Sched<Work>>) {
-        super::model::due(self, s, now)
+    fn due(&self, s: &Store, now: Time) -> (r: Vec<Sched<Work>>) {
+        super::footprint::timeout_work(self, s, now)
     }
 }
 
