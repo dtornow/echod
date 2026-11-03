@@ -40,7 +40,7 @@ def DocEquiv : (key : DocumentKey) → Document key → Document key → Prop
 
 theorem DocEquiv.refl : (key : DocumentKey) → (document : Document key) →
     DocEquiv key document document
-  | .origin _, document => List.Perm.refl _
+  | .origin _, _ => List.Perm.refl _
   | .schedule _, _ => rfl
 
 theorem DocEquiv.of_eq {key : DocumentKey} {a b : Document key} (h : a = b) :

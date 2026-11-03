@@ -124,7 +124,7 @@ def taskFence (req : TaskFenceReq) (now : Nat) :
   if !req.action.targetId.sameOrigin req.id then return { status := 400 }
   match ← readTask req.id.suffix now with
   | none => return { status := 404 }
-  | some (o, t) =>
+  | some (_, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       match req.action with

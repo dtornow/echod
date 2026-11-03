@@ -77,7 +77,7 @@ def fnv1a (value : String) : UInt64 :=
     0xcbf29ce484222325
 
 def owner? (members : List Addr) (target : TimerTarget) : Option Addr :=
-  if h : members.length = 0 then
+  if members.length = 0 then
     none
   else
     members[(fnv1a target.partitionKey).toNat.mod members.length]?

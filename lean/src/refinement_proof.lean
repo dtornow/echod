@@ -322,7 +322,7 @@ theorem Snapshot.expected_ne_commit_version
         hsnapshot
       have hversion :
           store.version key = some currentVersion := by
-        simpa [Concrete.Store.version_eq_read, hread]
+        simp [Concrete.Store.version_eq_read, hread]
       rw [committed_version, hversion]
       simp only [Option.getD, Option.map_some]
       intro hversionEq
@@ -4678,7 +4678,7 @@ theorem node_step_cache_snapshots
               | some flight =>
                   have hremaining : NodeCacheSnapshots store remaining :=
                     hcache.takeFlight replyOp
-                      (by simpa [ht])
+                      (by simp [ht])
                   simp only [ht] at hresult
                   split at hresult
                   next heq =>
@@ -4726,7 +4726,7 @@ theorem node_step_cache_snapshots
                   exact ⟨node, rfl, hcache⟩
               | some flight =>
                   have hremaining : NodeCacheSnapshots store remaining :=
-                    hcache.takeFlight replyOp (by simpa [ht])
+                    hcache.takeFlight replyOp (by simp [ht])
                   cases hp : flight.phase with
                   | loading =>
                       simp [ht, hp, Outcomes.one] at hresult
@@ -4765,7 +4765,7 @@ theorem node_step_cache_snapshots
                     exact ⟨_, rfl, hcontrol⟩
               | some flight =>
                   have hremaining : NodeCacheSnapshots store remaining :=
-                    hcache.takeFlight replyOp (by simpa [ht])
+                    hcache.takeFlight replyOp (by simp [ht])
                   simp [ht, Outcomes.one] at hresult
                   subst result
                   exact ⟨{
@@ -4796,7 +4796,7 @@ theorem node_step_cache_snapshots
                     exact ⟨_, rfl, hcontrol⟩
               | some flight =>
                   have hremaining : NodeCacheSnapshots store remaining :=
-                    hcache.takeFlight replyOp (by simpa [ht])
+                    hcache.takeFlight replyOp (by simp [ht])
                   cases hp : flight.phase with
                   | deleting =>
                       simp [ht, hp, Outcomes.one] at hresult
@@ -5124,7 +5124,7 @@ theorem node_step_arming_snapshots
                   exact ⟨node, rfl, hnode⟩
               | some flight =>
                   have hremaining : NodeArmingSnapshots store remaining :=
-                    hnode.takeFlight replyOp (by simpa [ht])
+                    hnode.takeFlight replyOp (by simp [ht])
                   simp only [ht] at hresult
                   split at hresult
                   next heq =>
@@ -7622,7 +7622,7 @@ theorem Covered.land {abstract : World AModel} {outputs : List Output}
     (hcovered : Covered abstract outputs) {now : Time}
     (result : Result Abstract.Pid State Message) :
     Covered (abstract.land .service now result) outputs :=
-  hcovered.mono fun message hmessage =>
+  hcovered.mono fun _ hmessage =>
     List.mem_append_left _ hmessage
 
 theorem covered_sent
@@ -7852,25 +7852,6 @@ theorem NodeWorkflowPart.restore
     simp [hflights, hempty, List.mem_cons, Prod.mk.injEq] at hcurrent
     obtain ⟨rfl, rfl⟩ := hcurrent
     simpa [FlightWorkflowPart, hpending, hpend] using hflightPart
-
-theorem NodeWorkflowPart.drop
-    {store : Concrete.Store} {node : Concrete.Node}
-    {part : List WorkflowEntry}
-    (hpart : NodeWorkflowPart store node part)
-    (hserial : NodeSerial node)
-    {op : Concrete.OpId} {flight : Concrete.Flight}
-    {remaining next : Concrete.Node}
-    (htake : node.takeFlight op = (some flight, remaining))
-    (hflights : next.flights = remaining.flights)
-    (hpending : next.pending = node.pending)
-    (hpartEq : part = Concrete.pendingWorkflow node.pending) :
-    NodeWorkflowPart store next part := by
-  have hempty := takeFlight_remaining_empty hserial htake
-  constructor
-  · intro _
-    simpa [hpending] using hpartEq
-  · intro currentOp current hcurrent
-    simp [hflights, hempty] at hcurrent
 
 def WorkflowAligned
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -8986,7 +8967,6 @@ theorem nodeWorkflowPart_loading_decide
     {op : Concrete.OpId} {flight : Concrete.Flight}
     {remaining : Concrete.Node}
     {loaded : Option (Document flight.key × Concrete.Version)}
-    (hnodeValid : NodeValid appConfig node)
     (hserial : NodeSerial node)
     (hpart : NodeWorkflowPart store node part)
     (hattempt : flight.attempt = 0)
@@ -9491,7 +9471,7 @@ theorem nodeWorkflowPart_step
                           | some value => simp [cached, hloaded]
                         simp [hp, Outcomes.one] at hresult
                         subst result
-                        exact nodeWorkflowPart_loading_decide hnodeValid
+                        exact nodeWorkflowPart_loading_decide
                           hserial hpart
                           (hattempts op flight (takeFlight_some_mem ht))
                           ht hp hcachedFlights hcachedPending hstate
@@ -10659,7 +10639,6 @@ theorem simulate_external_written_store
     (haddress : address ∈ nodes)
     (hnode : concrete.process (.node address) = .node node)
     (hflight : (op, flight) ∈ node.flights)
-    (hphase : flight.phase = .writing)
     (hkey : key = flight.key)
     (hflightTransaction : provenance.transaction = flight.transaction)
     (houtputs : provenance.outputs = flight.selected)
@@ -11253,22 +11232,14 @@ theorem simulate_internal_committed_store
           payload := .put key document expectedVersion
         }) ∈ concrete.network)
     (provenance : PutProvenance appConfig key document expectedVersion)
-    (hsnapshot : Snapshot physical key provenance.loaded)
-    (hmatch : expectedVersion = physical.version key)
-    {pendingBefore : List WorkflowEntry}
-    (htransactionPending :
-      TransactionPending provenance.transaction = some pendingBefore)
     (hfailure : Concrete.failureOutputs provenance.transaction = [])
     {node : Concrete.Node} {flight : Concrete.Flight}
     (haddress : address ∈ nodes)
     (hnode : concrete.process (.node address) = .node node)
     (hflight : (op, flight) ∈ node.flights)
-    (hphase : flight.phase = .writing)
     (hkey : key = flight.key)
-    (hloaded : hkey ▸ provenance.loaded = flight.loaded)
     (hflightTransaction : provenance.transaction = flight.transaction)
     (houtputs : provenance.outputs = flight.selected)
-    (hcontinuations : provenance.continuations = flight.continuations)
     {now : Time}
     (lifted : State × List Output)
     (hchoice :
@@ -11279,9 +11250,6 @@ theorem simulate_internal_committed_store
     (htransport :
       StoreRep (physical.commit key document) lifted.1 ∧
         lifted.2 = provenance.outputs)
-    (hcontinuationsEmbedded :
-      PendingEmbedded (Concrete.pendingWorkflow provenance.continuations)
-        lifted.1.workflow.pending)
     {reply : StoreReply}
     (hworkflowNext :
       WorkflowAligned config
@@ -11474,14 +11442,12 @@ theorem simulate_internal_not_landed_failed_store
           payload := .put key document expectedVersion
         }) ∈ concrete.network)
     (provenance : PutProvenance appConfig key document expectedVersion)
-    (hsnapshot : Snapshot physical key provenance.loaded)
     (hfailure : Concrete.failureOutputs provenance.transaction = [])
     {node : Concrete.Node} {flight : Concrete.Flight}
     (haddress : address ∈ nodes)
     (hnode : concrete.process (.node address) = .node node)
     (hflight : (op, flight) ∈ node.flights)
     (hkey : key = flight.key)
-    (hloaded : hkey ▸ provenance.loaded = flight.loaded)
     (hflightTransaction : provenance.transaction = flight.transaction)
     {now : Time}
     (htime : concrete.now ≤ now)
@@ -11768,12 +11734,11 @@ theorem simulate_matching_put_store
           exact ⟨hsend.1, hsend.2.1⟩) hpendingPerm
       simp [World.land, lifted, item, Abstract.runWork]
     exact simulate_internal_committed_store hreachable related hphysical
-      hrequest provenance hsnapshot hmatch
-      (htransactionPending := hpendingTransaction)
+      hrequest provenance
       (hfailure := by simp [htransaction, Concrete.failureOutputs])
-      haddress hnode hflight hphase hkey hloaded hflightTransaction
-      houtputs hcontinuations lifted hchoice htransport
-      hcontinuationsEmbedded hworkflowNext
+      haddress hnode hflight hkey hflightTransaction
+      houtputs lifted hchoice htransport
+      hworkflowNext
       hreply htime hconcreteResult
   have hsweep
       {timer : Concrete.TimerKey} {instant : Time}
@@ -11881,13 +11846,12 @@ theorem simulate_matching_put_store
           exact ⟨hsend.1, hsend.2.1⟩)
       simp [World.land, habstractPending]
     exact simulate_internal_committed_store hreachable related hphysical
-      hrequest provenance hsnapshot hmatch
-      (htransactionPending := hpendingTransaction)
+      hrequest provenance
       (hfailure := by simp [htransaction, Concrete.failureOutputs])
-      haddress hnode hflight hphase hkey hloaded hflightTransaction
-      houtputs hcontinuations lifted hchoice
+      haddress hnode hflight hkey hflightTransaction
+      houtputs lifted hchoice
       ⟨htransport, htransportOutputs⟩
-      hcontinuationsEmbedded hworkflowNext
+      hworkflowNext
       hreply htime hconcreteResult
   have hinternalFence
       (hfailure : Concrete.failureOutputs provenance.transaction = [])
@@ -11915,8 +11879,8 @@ theorem simulate_matching_put_store
           (endOf abstract execution) ∧
         Abstract.boundaryTrace execution = [] :=
     simulate_internal_not_landed_failed_store hreachable related hphysical
-      hrequest provenance hsnapshot hfailure haddress hnode hflight hkey
-      hloaded hflightTransaction htime hconcreteResult
+      hrequest provenance hfailure haddress hnode hflight hkey
+      hflightTransaction htime hconcreteResult
   cases htransaction : provenance.transaction with
   | external call =>
       by_cases hflaky : config.flaky = true
@@ -11925,7 +11889,7 @@ theorem simulate_matching_put_store
         rcases hresult with rfl | rfl | rfl
         · exact simulate_external_written_store hreachable related hphysical
             hrequest provenance hmatch htransaction hcurrent
-            horigin haddress hnode hflight hphase hkey hflightTransaction
+            horigin haddress hnode hflight hkey hflightTransaction
             houtputs htime
         · exact simulate_external_landed_failed_store hreachable related
             hphysical hflaky hrequest provenance hmatch
@@ -11942,7 +11906,7 @@ theorem simulate_matching_put_store
         subst result
         exact simulate_external_written_store hreachable related hphysical
           hrequest provenance hmatch htransaction hcurrent
-          horigin haddress hnode hflight hphase hkey hflightTransaction
+          horigin haddress hnode hflight hkey hflightTransaction
           houtputs htime
   | work item instant rest =>
       have hvalid :=
