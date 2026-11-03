@@ -59,13 +59,13 @@ theorem step_send_outputs {config : Config} {pid : Abstract.Pid}
               simp only [Abstract.step, List.mem_cons] at hresult
               rcases hresult with hresult | hresult
               · subst result
-                exact ⟨(Resonate.run config call state).2, rfl⟩
+                exact ⟨(Abstract.run config call state).2, rfl⟩
               · rcases hresult with hresult | hresult
                 · subst result
-                  exact ⟨(Resonate.runLose config call state).2, rfl⟩
+                  exact ⟨(Abstract.runLose config call state).2, rfl⟩
                 · rcases hresult with hresult | hresult
                   · subst result
-                    exact ⟨(Resonate.runShed call state).2, rfl⟩
+                    exact ⟨(Abstract.runShed call state).2, rfl⟩
                   · contradiction
           | output output =>
               simp only [Abstract.step, Outcomes.one,

@@ -48,8 +48,6 @@ def Store.deleteSchedule (store : Store) (id : Ident) : Store :=
 
 namespace Abstract
 
-abbrev ServerConfig := AbstractModel.ServerConfig
-
 abbrev Env := Resonate.HandlerEnv
 
 /-- Read the configuration, read and write the store, emit messages.
@@ -94,10 +92,10 @@ def setMessage (address : String) (message : ServerModel.Message) : Handler Unit
 def readObject (id : Ident) (now : Nat) : Handler (Option Object) := do
   return (← getObject id).map (·.project now)
 
-/-- Read one object that has a task. -/
-def readTaskObject (id : Ident) (now : Nat) : Handler (Option Object) := do
+/-- Read one object together with its task. -/
+def readTask (id : Ident) (now : Nat) : Handler (Option (Object × TaskObject)) := do
   match ← readObject id now with
-  | some object => if object.task.isSome then return some object else return none
+  | some object => return object.task.map (object, ·)
   | none => return none
 
 /-- Settle a promise; a settled promise also finishes its task. -/
