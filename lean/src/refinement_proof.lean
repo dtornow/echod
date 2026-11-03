@@ -1949,19 +1949,12 @@ theorem node_step_valid
               exact sameFlights node _ hnode (by
                 simp [Concrete.beginMembershipRefresh,
                   Concrete.Node.awaitControl])
-            · let wheel := node.wheel.takeDue now config.fireConcurrency
-              cases hb : wheel.beginOne with
+            · cases hb : node.wheel.next? now with
               | some pair =>
                   obtain ⟨timer, nextWheel⟩ := pair
-                  have hb' :
-                      (node.wheel.takeDue now config.fireConcurrency).beginOne =
-                        some (timer, nextWheel) := by
-                    simpa [wheel] using hb
-                  rw [hb'] at hresult
-                  simp only [Option.some.injEq, Prod.mk.injEq] at *
-                  subst_vars
+                  simp only [hb] at hresult
                   split at hresult
-                  · simp [wheel, hb, Outcomes.one] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     simpa [hp] using
                       (NodeValid.start
@@ -1971,28 +1964,24 @@ theorem node_step_valid
                         (sameFlights node _ hnode (by simp))
                         (.sweep timer now []) timer.target.key rfl trivial
                         (address := address) (fired := some timer))
-                  · simp [wheel, hb, Outcomes.one] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     exact ⟨_, rfl, hnode⟩
               | none =>
-                  have hb' :
-                      (node.wheel.takeDue now config.fireConcurrency).beginOne =
-                        none := by
-                    simpa [wheel] using hb
-                  rw [hb'] at hresult
+                  simp only [hb] at hresult
                   try simp at *
                   split at hresult
                   · simp [Outcomes.one] at hresult
                     subst result
                     refine ⟨_, rfl, ?_⟩
-                    exact sameFlights { node with wheel } _ hnode (by
+                    exact sameFlights node _ hnode (by
                       simp [Concrete.beginTimerList,
                         Concrete.Node.awaitControl])
                   · split at hresult
                     · simp [Outcomes.one] at hresult
                       subst result
                       refine ⟨_, rfl, ?_⟩
-                      exact sameFlights { node with wheel } _ hnode (by
+                      exact sameFlights node _ hnode (by
                         simp [Concrete.beginTimerList,
                           Concrete.Node.awaitControl])
                     · simp [Outcomes.one] at hresult
@@ -4346,7 +4335,7 @@ theorem node_step_sent_put_valid
               subst result
               contradiction
             · cases hbegin :
-                (node.wheel.takeDue now config.fireConcurrency).beginOne with
+                (node.wheel.next? now) with
               | some pair =>
                   obtain ⟨timer, wheel⟩ := pair
                   simp only [hbegin, Option.some.injEq, Prod.mk.injEq]
@@ -6168,8 +6157,7 @@ theorem node_step_sent_put_snapshot
               have hpayload :=
                 congrArg Concrete.RpcRequest.payload hrpc
               nomatch hpayload
-            · cases hwheel :
-                (node.wheel.takeDue now config.fireConcurrency).beginOne with
+            · cases hwheel : node.wheel.next? now with
               | none =>
                   simp only [hwheel] at hresult
                   repeat' split at hresult
@@ -6461,8 +6449,7 @@ theorem node_step_sent_put_origin
               cases hresult
               exact (put_not_in_singleton_of_payload_ne
                 (by intro h; cases h) hsend).elim
-            · cases hwheel :
-                (node.wheel.takeDue now config.fireConcurrency).beginOne with
+            · cases hwheel : node.wheel.next? now with
               | none =>
                   simp only [hwheel] at hresult
                   repeat' split at hresult
@@ -7218,8 +7205,7 @@ theorem node_step_flight_request_origins
               subst result
               cases Concrete.Local.node.inj hstate
               exact hold (by simpa using hmem) htransaction
-            · cases hwheel :
-                (node.wheel.takeDue now config.fireConcurrency).beginOne with
+            · cases hwheel : node.wheel.next? now with
               | none =>
                   simp only [hwheel] at hresult
                   repeat' split at hresult
@@ -8005,8 +7991,7 @@ theorem node_step_sent_put_stageable
               subst result
               exact (put_not_in_singleton_of_payload_ne
                 (by intro h; cases h) hsend).elim
-            · cases hwheel :
-                (node.wheel.takeDue now config.fireConcurrency).beginOne with
+            · cases hwheel : node.wheel.next? now with
               | none =>
                   simp only [hwheel] at hresult
                   repeat' split at hresult
@@ -13901,17 +13886,10 @@ theorem step_cleanup_source
               subst result
               exact .kept (beginMembershipRefresh_cleanup_mem
                 node address now hstate hmem)
-            · let wheel := node.wheel.takeDue now config.fireConcurrency
-              cases hb : wheel.beginOne with
+            · cases hb : node.wheel.next? now with
               | some pair =>
                   obtain ⟨timer, nextWheel⟩ := pair
-                  have hb' :
-                      (node.wheel.takeDue now config.fireConcurrency).beginOne =
-                        some (timer, nextWheel) := by
-                    simpa [wheel] using hb
-                  rw [hb'] at hresult
-                  simp only [Option.some.injEq, Prod.mk.injEq] at hb' hresult
-                  subst_vars
+                  simp only [hb] at hresult
                   split at hresult
                   · simp [Outcomes.one, List.mem_singleton] at hresult
                     subst result
@@ -13925,26 +13903,23 @@ theorem step_cleanup_source
                     cases Concrete.Local.node.inj hstate
                     exact .kept hmem
               | none =>
-                  simp only [wheel, hb] at hresult
+                  simp only [hb] at hresult
                   split at hresult
                   · simp [Outcomes.one, List.mem_singleton] at hresult
                     subst result
                     have hstate' :
-                        (Concrete.beginTimerList { node with wheel } config now
-                          true).state =
+                        (Concrete.beginTimerList node config now true).state =
                           Concrete.Local.node next := by
-                      simpa [wheel, hp] using hstate
-                    exact .kept (beginTimerList_cleanup_mem
-                      (node := { node with wheel }) hstate' hmem)
+                      simpa [hp] using hstate
+                    exact .kept (beginTimerList_cleanup_mem hstate' hmem)
                   · split at hresult
                     · simp [Outcomes.one, List.mem_singleton] at hresult
                       subst result
                       have hstate' :
-                          (Concrete.beginTimerList { node with wheel } config now
-                            false).state = Concrete.Local.node next := by
-                        simpa [wheel, hp] using hstate
-                      exact .kept (beginTimerList_cleanup_mem
-                        (node := { node with wheel }) hstate' hmem)
+                          (Concrete.beginTimerList node config now false).state =
+                            Concrete.Local.node next := by
+                        simpa [hp] using hstate
+                      exact .kept (beginTimerList_cleanup_mem hstate' hmem)
                     · simp [Outcomes.one, List.mem_singleton] at hresult
                       subst result
                       cases Concrete.Local.node.inj hstate

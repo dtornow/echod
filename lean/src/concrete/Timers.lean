@@ -190,7 +190,6 @@ structure TimerWheel where
   entries : List TimerKey := []
   loadedThrough : Time := 0
   closedThrough : Time := 0
-  backlog : List TimerKey := []
   deriving Repr
 
 def TimerWheel.insert (wheel : TimerWheel) (key : TimerKey) : TimerWheel :=
@@ -210,15 +209,14 @@ def TimerWheel.load
 def TimerWheel.due (wheel : TimerWheel) (now : Time) : List TimerKey :=
   wheel.entries.filter (·.deadline ≤ now)
 
-def TimerWheel.takeDue (wheel : TimerWheel) (now limit : Time) : TimerWheel :=
-  let due := (wheel.due now).take limit
-  { wheel with
-    entries := wheel.entries.filter fun key => !(due.contains key)
-    backlog := wheel.backlog ++ due }
-
-def TimerWheel.beginOne (wheel : TimerWheel) : Option (TimerKey × TimerWheel) :=
-  match wheel.backlog with
+/-- Remove and return the due entry with the earliest deadline. -/
+def TimerWheel.next? (wheel : TimerWheel) (now : Time) :
+    Option (TimerKey × TimerWheel) :=
+  match wheel.due now with
   | [] => none
-  | key :: rest => some (key, { wheel with backlog := rest })
+  | first :: rest =>
+      let key := rest.foldl
+        (fun best key => if key.deadline < best.deadline then key else best) first
+      some (key, { wheel with entries := wheel.entries.filter (· != key) })
 
 end Resonate.Concrete

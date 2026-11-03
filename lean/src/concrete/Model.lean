@@ -27,7 +27,6 @@ structure Config where
   loadAhead : Time := 2000
   heartbeat : Time := 1000
   nodeTtl : Time := 5000
-  fireConcurrency : Nat := 16
 
 inductive Pid where
   | outside
@@ -945,8 +944,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
             if node.nextHeartbeat.all (· ≤ now) then
               Outcomes.one (beginMembershipRefresh node address now)
             else
-              let wheel := node.wheel.takeDue now config.fireConcurrency
-              match wheel.beginOne with
+              match node.wheel.next? now with
               | some (timer, wheel) =>
                   let node := { node with wheel }
                   if node.membership.owns address now config.nodeTtl
@@ -959,14 +957,11 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
               | none =>
                   let currentBucket := bucketOf config.bucketWidth now
                   if node.wheel.closedThrough < currentBucket then
-                    Outcomes.one
-                      (beginTimerList { node with wheel } config now
-                        true)
+                    Outcomes.one (beginTimerList node config now true)
                   else if node.wheel.loadedThrough < now + config.loadAhead then
-                    Outcomes.one
-                      (beginTimerList { node with wheel } config now false)
+                    Outcomes.one (beginTimerList node config now false)
                   else
-                    Outcomes.one { state := .node { node with wheel }, send := [] }
+                    Outcomes.one { state := .node node, send := [] }
   | .node _, .node node,
       .receive .store (.storeReply { op, payload := .got key loaded }) =>
       let (flight, next) := node.takeFlight op
