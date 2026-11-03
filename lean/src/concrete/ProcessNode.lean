@@ -384,106 +384,45 @@ def externalCandidate {key : DocumentKey} (appConfig : Resonate.Config)
       emitted.map .message
     continuations := [] }
 
+/-- The candidate `make` builds, when it decides `key`. -/
+def candidateAt {decided : DocumentKey} (key : DocumentKey) (document : Document key)
+    (make : Document decided → Candidate decided) : Option (Candidate key) :=
+  if h : decided = key then some ((make (h ▸ document)).cast h) else none
+
 def selectedExternalCandidate (appConfig : Resonate.Config) (call : Call)
     (key : DocumentKey) (document : Document key) :
     Option (Candidate key) :=
+  let run {decided : DocumentKey} {α : Type} (action : Decision.Handler decided α)
+      (wrap : α → Response) :=
+    candidateAt key document fun document =>
+      externalCandidate appConfig call document action wrap
   match call.request with
-  | .promiseGet req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.promiseGet req call.requestedAt) .promiseGet).cast h)
-      else none
+  | .promiseGet req => run (Decision.promiseGet req call.requestedAt) .promiseGet
   | .promiseCreate req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.promiseCreate req call.requestedAt) .promiseCreate).cast h)
-      else none
+      run (Decision.promiseCreate (origin := req.id.origin) req call.requestedAt) .promiseCreate
   | .promiseSettle req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.promiseSettle req call.requestedAt) .promiseSettle).cast h)
-      else none
+      run (Decision.promiseSettle (origin := req.id.origin) req call.requestedAt) .promiseSettle
   | .promiseRegisterCallback req =>
-      if h : DocumentKey.origin req.awaited.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.promiseRegisterCallback req call.requestedAt)
-          .promiseRegisterCallback).cast h)
-      else none
+      run (Decision.promiseRegisterCallback req call.requestedAt) .promiseRegisterCallback
   | .promiseRegisterListener req =>
-      if h : DocumentKey.origin req.awaited.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.promiseRegisterListener req call.requestedAt)
-          .promiseRegisterListener).cast h)
-      else none
-  | .scheduleGet req =>
-      if h : DocumentKey.schedule req.id = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.scheduleGet req call.requestedAt) .scheduleGet).cast h)
-      else none
-  | .scheduleCreate req =>
-      if h : DocumentKey.schedule req.id = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.scheduleCreate req call.requestedAt) .scheduleCreate).cast h)
-      else none
-  | .scheduleDelete req =>
-      if h : DocumentKey.schedule req.id = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.scheduleDelete req call.requestedAt) .scheduleDelete).cast h)
-      else none
-  | .taskGet req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskGet req call.requestedAt) .taskGet).cast h)
-      else none
-  | .taskCreate req =>
-      if h : DocumentKey.origin req.action.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskCreate req call.requestedAt) .taskCreate).cast h)
-      else none
-  | .taskAcquire req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskAcquire req call.requestedAt) .taskAcquire).cast h)
-      else none
-  | .taskFence req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskFence req call.requestedAt) .taskFence).cast h)
-      else none
+      run (Decision.promiseRegisterListener req call.requestedAt) .promiseRegisterListener
+  | .scheduleGet req => run (Decision.scheduleGet req call.requestedAt) .scheduleGet
+  | .scheduleCreate req => run (Decision.scheduleCreate req call.requestedAt) .scheduleCreate
+  | .scheduleDelete req => run (Decision.scheduleDelete req call.requestedAt) .scheduleDelete
+  | .taskGet req => run (Decision.taskGet req call.requestedAt) .taskGet
+  | .taskCreate req => run (Decision.taskCreate req call.requestedAt) .taskCreate
+  | .taskAcquire req => run (Decision.taskAcquire req call.requestedAt) .taskAcquire
+  | .taskFence req => run (Decision.taskFence req call.requestedAt) .taskFence
   | .taskHeartbeat req =>
       match req.tasks with
       | [] => none
       | first :: _ =>
-          if h : DocumentKey.origin first.id.origin = key then
-            some ((externalCandidate appConfig call (h ▸ document)
-              (Decision.taskHeartbeat first.id.origin req call.requestedAt)
-              .taskHeartbeat).cast h)
-          else none
-  | .taskSuspend req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskSuspend req call.requestedAt) .taskSuspend).cast h)
-      else none
-  | .taskFulfill req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskFulfill req call.requestedAt) .taskFulfill).cast h)
-      else none
-  | .taskRelease req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskRelease req call.requestedAt) .taskRelease).cast h)
-      else none
-  | .taskHalt req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskHalt req call.requestedAt) .taskHalt).cast h)
-      else none
-  | .taskContinue req =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((externalCandidate appConfig call (h ▸ document)
-          (Decision.taskContinue req call.requestedAt) .taskContinue).cast h)
-      else none
+          run (Decision.taskHeartbeat first.id.origin req call.requestedAt) .taskHeartbeat
+  | .taskSuspend req => run (Decision.taskSuspend req call.requestedAt) .taskSuspend
+  | .taskFulfill req => run (Decision.taskFulfill req call.requestedAt) .taskFulfill
+  | .taskRelease req => run (Decision.taskRelease req call.requestedAt) .taskRelease
+  | .taskHalt req => run (Decision.taskHalt req call.requestedAt) .taskHalt
+  | .taskContinue req => run (Decision.taskContinue req call.requestedAt) .taskContinue
   | .promiseSearch _ | .scheduleSearch _ | .taskSearch _ => none
 
 def workCandidate {key : DocumentKey} (appConfig : Resonate.Config)
@@ -499,52 +438,26 @@ def selectedWorkCandidate (appConfig : Resonate.Config) (item : WorkItem)
     (now : Time) (rest : List PendingEntry)
     (key : DocumentKey) (document : Document key) :
     Option (Candidate key) :=
+  let run {decided : DocumentKey} {α : Type} (action : Decision.Handler decided α) :=
+    candidateAt key document fun document =>
+      workCandidate appConfig document action rest
   match item with
-  | .promiseTimeout id =>
-      if h : DocumentKey.origin id.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processPromiseTimeout id now) rest).cast h)
-      else none
-  | .callback req =>
-      if h : DocumentKey.origin req.awaited.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processCallback req now) rest).cast h)
-      else none
-  | .listener req =>
-      if h : DocumentKey.origin req.awaited.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processListener req now) rest).cast h)
-      else none
-  | .taskLeaseTimeout id =>
-      if h : DocumentKey.origin id.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processLeaseTimeout id now) rest).cast h)
-      else none
-  | .taskRetryTimeout id =>
-      if h : DocumentKey.origin id.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processRetryTimeout id now) rest).cast h)
-      else none
+  | .promiseTimeout id => run (Decision.processPromiseTimeout id now)
+  | .callback req => run (Decision.processCallback req now)
+  | .listener req => run (Decision.processListener req now)
+  | .taskLeaseTimeout id => run (Decision.processLeaseTimeout id now)
+  | .taskRetryTimeout id => run (Decision.processRetryTimeout id now)
   | .scheduleTimeout id =>
-      if h : DocumentKey.schedule id = key then
+      candidateAt key document fun document =>
         let (occurrences, next, emitted) :=
-          Decision.run appConfig.toServerConfig
-            (Decision.processSchedule id now) (h ▸ document)
-        some (({
-          document := next
+          Decision.run appConfig.toServerConfig (Decision.processSchedule id now) document
+        { document := next
           outputs := emitted.map .message
           continuations := rest ++
             occurrences.filterMap fun
-              | .occurrence request instant =>
-                  some (.occurrence request instant)
-              | _ => none
-        } : Candidate (.schedule id)).cast h)
-      else none
-  | .occurrence req instant =>
-      if h : DocumentKey.origin req.id.origin = key then
-        some ((workCandidate appConfig (h ▸ document)
-          (Decision.processOccurrence req instant) rest).cast h)
-      else none
+              | .occurrence request instant => some (.occurrence request instant)
+              | _ => none }
+  | .occurrence req instant => run (Decision.processOccurrence req instant)
 
 def selectScanWork (appConfig : Resonate.Config) (key : DocumentKey)
     (now : Time) (rest : List PendingEntry) (document : Document key) :

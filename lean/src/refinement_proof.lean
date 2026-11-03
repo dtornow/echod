@@ -418,7 +418,7 @@ theorem selectedWorkCandidate_key {appConfig : Resonate.Config}
     (h : Concrete.selectedWorkCandidate appConfig item now rest key before =
       some candidate) :
     item.key = key := by
-  cases item <;> simp only [Concrete.selectedWorkCandidate] at h <;>
+  cases item <;> simp only [Concrete.selectedWorkCandidate, Concrete.candidateAt] at h <;>
     split at h <;> first | contradiction | simp only [WorkItem.key]; assumption
 
 /-- A callback whose awaiter lives in another origin is a concrete no-op. -/
@@ -432,8 +432,7 @@ theorem selectedWorkCandidate_nonlocal (appConfig : Resonate.Config)
   have hother : (req.awaited.sameOrigin req.awaiter) = false := by
     simp only [ServerModel.Ident.sameOrigin, beq_eq_false_iff_ne]
     exact fun h => hlocal h.symm
-  simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.Candidate.cast,
-    Concrete.workCandidate, Concrete.Decision.processCallback,
+  simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.workCandidate, Concrete.Decision.processCallback,
     Concrete.Decision.run, hother, Pure.pure, bind]
 
 /-- Work the concrete sweep selects is due work of any abstract store with
