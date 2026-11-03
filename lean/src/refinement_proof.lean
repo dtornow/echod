@@ -26,111 +26,111 @@ theorem promiseGet_handler_correspondence
     (config : ServerConfig) (req : ServerModel.PromiseGetReq) (now : Time)
     (document : Document (.origin req.id.origin)) :
     Concrete.Decision.run config (Concrete.Decision.promiseGet req now) document =
-      Direct.promiseGet req now { config } document := by
+      Abstract.promiseGet req now { config } document := by
   rfl
 
 theorem promiseGet_action_correspondence
     (req : ServerModel.PromiseGetReq) (now : Time) :
-    Concrete.Decision.promiseGet req now = Direct.promiseGet req now := by
+    Concrete.Decision.promiseGet req now = Abstract.promiseGet req now := by
   rfl
 
 theorem promiseCreate_handler_correspondence
     (req : ServerModel.PromiseCreateReq) (now : Time) :
-    Concrete.Decision.promiseCreate req now = Direct.promiseCreate req now := by
+    Concrete.Decision.promiseCreate req now = Abstract.promiseCreate req now := by
   rfl
 
 theorem promiseSettle_handler_correspondence
     (req : ServerModel.PromiseSettleReq) (now : Time) :
-    Concrete.Decision.promiseSettle req now = Direct.promiseSettle req now := by
+    Concrete.Decision.promiseSettle req now = Abstract.promiseSettle req now := by
   rfl
 
 theorem promiseRegisterCallback_handler_correspondence
     (req : ServerModel.PromiseRegisterCallbackReq) (now : Time) :
     Concrete.Decision.promiseRegisterCallback req now =
-      Direct.promiseRegisterCallback req now := by
+      Abstract.promiseRegisterCallback req now := by
   rfl
 
 theorem promiseRegisterListener_handler_correspondence
     (req : ServerModel.PromiseRegisterListenerReq) (now : Time) :
     Concrete.Decision.promiseRegisterListener req now =
-      Direct.promiseRegisterListener req now := by
+      Abstract.promiseRegisterListener req now := by
   rfl
 
 theorem promiseSearch_handler_correspondence
     (req : ServerModel.PromiseSearchReq) (now : Time) :
-    Concrete.Decision.promiseSearch req now = Direct.promiseSearch req now := by
+    Concrete.Decision.promiseSearch req now = Abstract.promiseSearch req now := by
   rfl
 
 theorem taskGet_handler_correspondence
     (req : ServerModel.TaskGetReq) (now : Time) :
-    Concrete.Decision.taskGet req now = Direct.taskGet req now := by
+    Concrete.Decision.taskGet req now = Abstract.taskGet req now := by
   rfl
 
 theorem taskCreate_handler_correspondence
     (req : ServerModel.TaskCreateReq) (now : Time) :
-    Concrete.Decision.taskCreate req now = Direct.taskCreate req now := by
+    Concrete.Decision.taskCreate req now = Abstract.taskCreate req now := by
   rfl
 
 theorem taskAcquire_handler_correspondence
     (req : ServerModel.TaskAcquireReq) (now : Time) :
-    Concrete.Decision.taskAcquire req now = Direct.taskAcquire req now := by
+    Concrete.Decision.taskAcquire req now = Abstract.taskAcquire req now := by
   rfl
 
 theorem taskFence_handler_correspondence
     (req : ServerModel.TaskFenceReq) (now : Time) :
-    Concrete.Decision.taskFence req now = Direct.taskFence req now := by
+    Concrete.Decision.taskFence req now = Abstract.taskFence req now := by
   rfl
 
 theorem heartbeatOne_handler_correspondence
     (origin pid : String) (ref : ServerModel.TaskRef) (now : Time) :
     (Concrete.Decision.heartbeatOne (origin := origin) pid ref now) =
-      Direct.heartbeatOne (origin := origin) pid ref now := by
+      Abstract.heartbeatOne (origin := origin) pid ref now := by
   rfl
 
 theorem heartbeatAll_handler_correspondence
     (origin pid : String) (now : Time) (refs : List ServerModel.TaskRef) :
     Concrete.Decision.heartbeatAll (origin := origin) pid now refs =
-      Direct.heartbeatAll (origin := origin) pid now refs := by
+      Abstract.heartbeatAll (origin := origin) pid now refs := by
   induction refs with
   | nil => rfl
   | cons ref rest ih =>
-      simp only [Concrete.Decision.heartbeatAll, Direct.heartbeatAll]
+      simp only [Concrete.Decision.heartbeatAll, Abstract.heartbeatAll]
       rw [heartbeatOne_handler_correspondence, ih]
 
 theorem taskHeartbeat_handler_correspondence
     (origin : String) (req : ServerModel.TaskHeartbeatReq) (now : Time) :
     Concrete.Decision.taskHeartbeat origin req now =
-      Direct.taskHeartbeat origin req now := by
-  unfold Concrete.Decision.taskHeartbeat Direct.taskHeartbeat
+      Abstract.taskHeartbeat origin req now := by
+  unfold Concrete.Decision.taskHeartbeat Abstract.taskHeartbeat
   rw [heartbeatAll_handler_correspondence]
 
 theorem readObject_handler_correspondence
     (origin suffix : String) (now : Time) :
     Concrete.Decision.readObject (origin := origin) suffix now =
-      Direct.readObject (origin := origin) suffix now := by
+      Abstract.readObject (origin := origin) suffix now := by
   rfl
 
 theorem setPromise_handler_correspondence
     (origin suffix : String) (promise : PromiseObject) :
     Concrete.Decision.setPromise (origin := origin) suffix promise =
-      Direct.setPromise (origin := origin) suffix promise := by
+      Abstract.setPromise (origin := origin) suffix promise := by
   rfl
 
 theorem readTaskObject_handler_correspondence
     (origin suffix : String) (now : Time) :
     Concrete.Decision.readTaskObject (origin := origin) suffix now =
-      Direct.readTaskObject (origin := origin) suffix now := by
+      Abstract.readTaskObject (origin := origin) suffix now := by
   rfl
 
 theorem checkAwaited_handler_correspondence
     (origin : String) (now : Time)
     (actions : List ServerModel.PromiseRegisterCallbackReq) :
     Concrete.Decision.checkAwaited (origin := origin) now actions =
-      Direct.checkAwaited (origin := origin) now actions := by
+      Abstract.checkAwaited (origin := origin) now actions := by
   induction actions with
   | nil => rfl
   | cons action rest ih =>
-      simp only [Concrete.Decision.checkAwaited, Direct.checkAwaited]
+      simp only [Concrete.Decision.checkAwaited, Abstract.checkAwaited]
       rw [readObject_handler_correspondence, ih]
       rfl
 
@@ -138,115 +138,115 @@ theorem registerAwaited_handler_correspondence
     (origin : String) (awaiter : ServerModel.Ident) (now : Time)
     (actions : List ServerModel.PromiseRegisterCallbackReq) :
     Concrete.Decision.registerAwaited (origin := origin) awaiter now actions =
-      Direct.registerAwaited (origin := origin) awaiter now actions := by
+      Abstract.registerAwaited (origin := origin) awaiter now actions := by
   induction actions with
   | nil => rfl
   | cons action rest ih =>
-      simp only [Concrete.Decision.registerAwaited, Direct.registerAwaited]
+      simp only [Concrete.Decision.registerAwaited, Abstract.registerAwaited]
       rw [readObject_handler_correspondence]
-      simp only [Concrete.Decision.setPromise, Direct.setPromise]
+      simp only [Concrete.Decision.setPromise, Abstract.setPromise]
       rw [ih]
       rfl
 
 theorem taskSuspend_handler_correspondence
     (req : ServerModel.TaskSuspendReq) (now : Time) :
-    Concrete.Decision.taskSuspend req now = Direct.taskSuspend req now := by
-  unfold Concrete.Decision.taskSuspend Direct.taskSuspend
+    Concrete.Decision.taskSuspend req now = Abstract.taskSuspend req now := by
+  unfold Concrete.Decision.taskSuspend Abstract.taskSuspend
   rw [readTaskObject_handler_correspondence,
     checkAwaited_handler_correspondence,
     registerAwaited_handler_correspondence]
-  simp only [Concrete.Decision.setTask, Direct.setTask,
-    Concrete.Decision.modify, Direct.modify]
+  simp only [Concrete.Decision.setTask, Abstract.setTask,
+    Concrete.Decision.modify, Abstract.modify]
   rfl
 
 theorem taskFulfill_handler_correspondence
     (req : ServerModel.TaskFulfillReq) (now : Time) :
-    Concrete.Decision.taskFulfill req now = Direct.taskFulfill req now := by
+    Concrete.Decision.taskFulfill req now = Abstract.taskFulfill req now := by
   rfl
 
 theorem taskRelease_handler_correspondence
     (req : ServerModel.TaskReleaseReq) (now : Time) :
-    Concrete.Decision.taskRelease req now = Direct.taskRelease req now := by
+    Concrete.Decision.taskRelease req now = Abstract.taskRelease req now := by
   rfl
 
 theorem taskHalt_handler_correspondence
     (req : ServerModel.TaskHaltReq) (now : Time) :
-    Concrete.Decision.taskHalt req now = Direct.taskHalt req now := by
+    Concrete.Decision.taskHalt req now = Abstract.taskHalt req now := by
   rfl
 
 theorem taskContinue_handler_correspondence
     (req : ServerModel.TaskContinueReq) (now : Time) :
-    Concrete.Decision.taskContinue req now = Direct.taskContinue req now := by
+    Concrete.Decision.taskContinue req now = Abstract.taskContinue req now := by
   rfl
 
 theorem taskSearch_handler_correspondence
     (req : ServerModel.TaskSearchReq) (now : Time) :
-    Concrete.Decision.taskSearch req now = Direct.taskSearch req now := by
+    Concrete.Decision.taskSearch req now = Abstract.taskSearch req now := by
   rfl
 
 theorem scheduleGet_handler_correspondence
     (req : ServerModel.ScheduleGetReq) (now : Time) :
-    Concrete.Decision.scheduleGet req now = Direct.scheduleGet req now := by
+    Concrete.Decision.scheduleGet req now = Abstract.scheduleGet req now := by
   rfl
 
 theorem scheduleCreate_handler_correspondence
     (req : ServerModel.ScheduleCreateReq) (now : Time) :
     Concrete.Decision.scheduleCreate req now =
-      Direct.scheduleCreate req now := by
+      Abstract.scheduleCreate req now := by
   rfl
 
 theorem scheduleDelete_handler_correspondence
     (req : ServerModel.ScheduleDeleteReq) (now : Time) :
     Concrete.Decision.scheduleDelete req now =
-      Direct.scheduleDelete req now := by
+      Abstract.scheduleDelete req now := by
   rfl
 
 theorem scheduleSearch_handler_correspondence
     (req : ServerModel.ScheduleSearchReq) (now : Time) :
     Concrete.Decision.scheduleSearch req now =
-      Direct.scheduleSearch req now := by
+      Abstract.scheduleSearch req now := by
   rfl
 
 theorem promiseTimeout_work_correspondence
     (id : ServerModel.Ident) (now : Time) :
     Concrete.Decision.processPromiseTimeout id now =
-      Direct.processPromiseTimeout id now := by
+      Abstract.processPromiseTimeout id now := by
   rfl
 
 theorem callback_work_correspondence
     (req : ServerModel.PromiseRegisterCallbackReq) (now : Time) :
     Concrete.Decision.processCallback req now =
-      Direct.processCallback req now := by
+      Abstract.processCallback req now := by
   rfl
 
 theorem listener_work_correspondence
     (req : ServerModel.PromiseRegisterListenerReq) (now : Time) :
     Concrete.Decision.processListener req now =
-      Direct.processListener req now := by
+      Abstract.processListener req now := by
   rfl
 
 theorem leaseTimeout_work_correspondence
     (id : ServerModel.Ident) (now : Time) :
     Concrete.Decision.processLeaseTimeout id now =
-      Direct.processLeaseTimeout id now := by
+      Abstract.processLeaseTimeout id now := by
   rfl
 
 theorem retryTimeout_work_correspondence
     (id : ServerModel.Ident) (now : Time) :
     Concrete.Decision.processRetryTimeout id now =
-      Direct.processRetryTimeout id now := by
+      Abstract.processRetryTimeout id now := by
   rfl
 
 theorem scheduleTimeout_work_correspondence
     (id : ServerModel.Ident) (now : Time) :
     Concrete.Decision.processSchedule id now =
-      Direct.processSchedule id now := by
+      Abstract.processSchedule id now := by
   rfl
 
 theorem occurrence_work_correspondence
     (req : ServerModel.PromiseCreateReq) (instant : Time) :
     Concrete.Decision.processOccurrence req instant =
-      Direct.processOccurrence req instant := by
+      Abstract.processOccurrence req instant := by
   rfl
 
 theorem committed_version (store : Concrete.Store)
@@ -279,7 +279,7 @@ theorem duplicate_absent_put_conflicts
 theorem originWork_correspondence
     (origin : String) (document : OriginDocument origin) (now : Time) :
     Concrete.Decision.originWork origin document now =
-      Direct.originWork origin document now := by
+      Abstract.originWork origin document now := by
   rfl
 
 @[simp] theorem singleton_rewrite
@@ -310,7 +310,7 @@ theorem selectedExternal_correspondence
             Concrete.selectedExternalCandidate, Concrete.externalCandidate,
             Concrete.Candidate.cast, Concrete.Decision.run,
             Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Concrete.singleState, Direct.runWith, request, tasks, hsame,
+            Concrete.singleState, Abstract.runWith, request, tasks, hsame,
             taskHeartbeat_handler_correspondence, singleton_rewrite,
             Concrete.pendingWorkflow]
         next _ => contradiction
@@ -328,7 +328,7 @@ theorem selectedExternal_correspondence
              Concrete.selectedExternalCandidate, Concrete.externalCandidate,
              Concrete.Candidate.cast, Concrete.Decision.run,
              Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-             Concrete.singleState, Direct.runWith, request,
+             Concrete.singleState, Abstract.runWith, request,
              taskSuspend_handler_correspondence, singleton_rewrite,
              promiseGet_action_correspondence,
              promiseCreate_handler_correspondence,
@@ -353,7 +353,7 @@ theorem selectedExternal_correspondence
            Concrete.selectedExternalCandidate, Concrete.externalCandidate,
            Concrete.Candidate.cast, Concrete.Decision.run,
            Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Concrete.singleState, Direct.runWith, request,
+           Concrete.singleState, Abstract.runWith, request,
            taskSuspend_handler_correspondence, singleton_rewrite,
            promiseGet_action_correspondence,
            promiseCreate_handler_correspondence,
@@ -412,7 +412,7 @@ theorem selectedWork_correspondence
     simp [Concrete.selectedWork, Concrete.selectedWorkCandidate,
       Concrete.workCandidate, Concrete.Candidate.cast,
       Concrete.Decision.run, Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Direct.runWith, WorkItem.key,
+      Concrete.singleState, Abstract.runWith, WorkItem.key,
       singleton_rewrite,
       promiseTimeout_work_correspondence,
       callback_work_correspondence, listener_work_correspondence,
@@ -545,9 +545,9 @@ theorem Selected.sweep_relevant
 
 theorem originSettledWork_key {origin : String}
     {object : OriginObject origin} {item : WorkItem}
-    (h : item ∈ Direct.originSettledWork object) :
+    (h : item ∈ Abstract.originSettledWork object) :
     item.key = .origin origin := by
-  simp only [Direct.originSettledWork] at h
+  simp only [Abstract.originSettledWork] at h
   split at h
   · contradiction
   · simp only [List.mem_append, List.mem_map] at h
@@ -556,12 +556,12 @@ theorem originSettledWork_key {origin : String}
 
 theorem originTaskWork_key {origin : String}
     {object : OriginObject origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Direct.originTaskWork object now) :
+    (h : item ∈ Abstract.originTaskWork object now) :
     item.key = .origin origin := by
   cases ht : object.task with
-  | none => simp [Direct.originTaskWork, ht] at h
+  | none => simp [Abstract.originTaskWork, ht] at h
   | some task =>
-      simp only [Direct.originTaskWork, ht, List.mem_append] at h
+      simp only [Abstract.originTaskWork, ht, List.mem_append] at h
       rcases h with h | h
       · cases hd : task.leaseTimeoutAt with
         | none => simp [hd] at h
@@ -576,9 +576,9 @@ theorem originTaskWork_key {origin : String}
 
 theorem originObjectWork_key {origin : String}
     {object : OriginObject origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Direct.originObjectWork object now) :
+    (h : item ∈ Abstract.originObjectWork object now) :
     item.key = .origin origin := by
-  simp only [Direct.originObjectWork, List.mem_append] at h
+  simp only [Abstract.originObjectWork, List.mem_append] at h
   rcases h with h | h
   · rcases h with h | h
     · split at h <;> simp_all [WorkItem.key, OriginObject.id]
@@ -587,9 +587,9 @@ theorem originObjectWork_key {origin : String}
 
 theorem originWork_key {origin : String}
     {document : OriginDocument origin} {now : Nat} {item : WorkItem}
-    (h : item ∈ Direct.originWork origin document now) :
+    (h : item ∈ Abstract.originWork origin document now) :
     item.key = .origin origin := by
-  simp only [Direct.originWork, List.mem_flatMap] at h
+  simp only [Abstract.originWork, List.mem_flatMap] at h
   obtain ⟨object, _, hitem⟩ := h
   exact originObjectWork_key hitem
 
@@ -801,7 +801,7 @@ theorem external_locality
           simp only [Option.some.injEq] at hkey
           subst key
           simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Concrete.singleState, Direct.runWith, hread, tasks, request,
+            Concrete.singleState, Abstract.runWith, hread, tasks, request,
             hsame]
         next _ => contradiction
   all_goals
@@ -815,12 +815,12 @@ theorem external_locality
          all_goals subst key
          all_goals
            simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Concrete.singleState, Direct.runWith,
+             Resonate.runDocument, Concrete.singleState, Abstract.runWith,
              hread, request] <;>
            split <;> simp [Resonate.pureRequest, hread])
       | (cases hkey
          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Concrete.singleState, Direct.runWith, hread, request]
+           Concrete.singleState, Abstract.runWith, hread, request]
          all_goals split <;> simp [Resonate.pureRequest, hread])
 
 @[grind] theorem Selected.external_continuations_nil
@@ -876,7 +876,7 @@ theorem external_frame
           simp only [Option.some.injEq] at hkey
           subst key
           simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Direct.runWith, tasks, request, hne, hsame]
+            Abstract.runWith, tasks, request, hne, hsame]
         next _ => contradiction
   all_goals
     first
@@ -889,11 +889,11 @@ theorem external_frame
          all_goals subst key
          all_goals
            simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Direct.runWith, request, hne] <;>
+             Resonate.runDocument, Abstract.runWith, request, hne] <;>
            split <;> simp [Resonate.pureRequest, hne])
       | (cases hkey
          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Direct.runWith, request, hne]
+           Abstract.runWith, request, hne]
          all_goals split <;> simp [Resonate.pureRequest, hne])
 
 /-- Internal work has the same document-local lifting property, including its
@@ -913,7 +913,7 @@ theorem work_locality
   subst key
   cases item <;>
     simp [Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Direct.runWith, WorkItem.key] at hread ⊢
+      Concrete.singleState, Abstract.runWith, WorkItem.key] at hread ⊢
   all_goals rw [hread]
   all_goals simp
 
@@ -934,7 +934,7 @@ theorem work_store_locality
   subst key
   cases item <;>
     simp [Resonate.runWork, Resonate.runDocument,
-      Concrete.singleState, Direct.runWith, WorkItem.key] at hread ⊢
+      Concrete.singleState, Abstract.runWith, WorkItem.key] at hread ⊢
   all_goals rw [hread]
   all_goals simp
 
@@ -955,7 +955,7 @@ theorem external_key_mem
           simp only [Option.some.injEq] at hkey
           subst key
           simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-            Direct.runWith, tasks, request, hsame]
+            Abstract.runWith, tasks, request, hsame]
         next _ => contradiction
   all_goals
     first
@@ -968,11 +968,11 @@ theorem external_key_mem
          all_goals subst key
          all_goals
            simp [Resonate.run, Resonate.handleExternal,
-             Resonate.runDocument, Direct.runWith, request] <;>
+             Resonate.runDocument, Abstract.runWith, request] <;>
            split <;> simp [Resonate.pureRequest])
       | (cases hkey
          simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-           Direct.runWith, request]
+           Abstract.runWith, request]
          all_goals split <;> simp [Resonate.pureRequest])
   all_goals simp_all
 
@@ -1010,11 +1010,11 @@ theorem external_key_none
           have hself : req.id.sameOrigin req.id = true := by
             simpa [hid] using hs
           simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Resonate.runDocument, Direct.runWith,
-            Direct.taskFence, Direct.Handler, request, hs, hid, hself]
+            Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
+            Abstract.taskFence, Abstract.Handler, request, hs, hid, hself]
           have hpure (document : Document (.origin req.id.origin)) :
               (pure { status := 400 } :
-                Direct.Handler (.origin req.id.origin)
+                Abstract.Handler (.origin req.id.origin)
                   ServerModel.TaskFenceRes)
                   { config := config.toServerConfig } document =
                 ({ status := 400 }, document, []) := rfl
@@ -1092,12 +1092,12 @@ theorem pureResponse_correspondence
           have hself : req.id.sameOrigin req.id = true := by
             simpa [hid] using hs
           simp [Resonate.run, Resonate.handleExternal,
-            Resonate.pureRequest, Resonate.runDocument, Direct.runWith,
-            Direct.taskFence, Direct.Handler, Concrete.pureResponse,
+            Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
+            Abstract.taskFence, Abstract.Handler, Concrete.pureResponse,
             request, hs, hid, hself]
           have hpure (document : Document (.origin req.id.origin)) :
               (pure { status := 400 } :
-                Direct.Handler (.origin req.id.origin)
+                Abstract.Handler (.origin req.id.origin)
                   ServerModel.TaskFenceRes)
                   { config := config.toServerConfig } document =
                 ({ status := 400 }, document, []) := rfl
@@ -1110,15 +1110,15 @@ theorem pureResponse_correspondence
     · contradiction
   case promiseSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.promiseSearch, Concrete.Decision.promiseSearch,
+      Abstract.promiseSearch, Concrete.Decision.promiseSearch,
       Concrete.pureResponse, request]
   case scheduleSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.scheduleSearch, Concrete.Decision.scheduleSearch,
+      Abstract.scheduleSearch, Concrete.Decision.scheduleSearch,
       Concrete.pureResponse, request]
   case taskSearch req =>
     simp [Resonate.run, Resonate.handleExternal, Resonate.pureRequest,
-      Direct.taskSearch, Concrete.Decision.taskSearch,
+      Abstract.taskSearch, Concrete.Decision.taskSearch,
       Concrete.pureResponse, request]
   all_goals
     rename_i req
@@ -1129,8 +1129,8 @@ theorem pureResponse_correspondence
        · simp [Resonate.run, Resonate.handleExternal,
            Resonate.pureRequest, Concrete.pureResponse, request, *])
     | simp [Resonate.run, Resonate.handleExternal,
-        Resonate.pureRequest, Resonate.runDocument, Direct.runWith,
-        Direct.taskFence, Direct.Handler, Concrete.pureResponse,
+        Resonate.pureRequest, Resonate.runDocument, Abstract.runWith,
+        Abstract.taskFence, Abstract.Handler, Concrete.pureResponse,
         request, *]
 
 theorem work_key_mem
@@ -1138,7 +1138,7 @@ theorem work_key_mem
     (rest : List WorkflowEntry) (state : State) :
     item.key ∈ (Resonate.runWork config item now rest state).1.store.keys := by
   cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument, Direct.runWith,
+    simp [Resonate.runWork, Resonate.runDocument, Abstract.runWith,
       WorkItem.key]
 
 @[simp] theorem Store.key_mem_write_of_mem
@@ -1156,7 +1156,7 @@ theorem external_keys_mono
   intro key hkey
   cases request : call.request <;>
     simp [Resonate.run, Resonate.handleExternal, Resonate.runDocument,
-      Direct.runWith, Resonate.pureRequest, request, hkey] <;>
+      Abstract.runWith, Resonate.pureRequest, request, hkey] <;>
     (try split) <;> (try split) <;> simp_all [hkey]
 
 theorem work_keys_mono
@@ -1166,7 +1166,7 @@ theorem work_keys_mono
       key ∈ (Resonate.runWork config item now rest state).1.store.keys := by
   intro key hkey
   cases item <;>
-    simp [Resonate.runWork, Resonate.runDocument, Direct.runWith,
+    simp [Resonate.runWork, Resonate.runDocument, Abstract.runWith,
       WorkItem.key, hkey]
 
 structure StoreRep (physical : Concrete.Store) (abstract : State) : Prop where
@@ -1526,7 +1526,7 @@ theorem sweep_cas_transport
             ((loaded.map (·.1)).getD
               (emptyDocument (.origin origin))) _ hselectedWork
         have hitemAbstract :
-            item ∈ Direct.originWork origin
+            item ∈ Abstract.originWork origin
               ((loaded.map (·.1)).getD
                 (emptyDocument (.origin origin))) now := by
           rw [← originWork_correspondence]
@@ -1576,7 +1576,7 @@ theorem sweep_cas_transport
           hlocal.2.2.trans houtputs'.symm, ?_⟩
         · simp only [Resonate.eligibleWorkAt, List.mem_flatMap]
           exact ⟨.origin origin, hkeymem, by
-            change item ∈ Direct.originWork origin
+            change item ∈ Abstract.originWork origin
               (abstract.store.read (.origin origin)) now
             rw [habstract]
             exact hitemAbstract⟩

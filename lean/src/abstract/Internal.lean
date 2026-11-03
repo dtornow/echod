@@ -2,7 +2,7 @@ import «abstract».External
 
 /-! Timeout steps and the due work they fire. -/
 
-namespace Resonate.Direct
+namespace Resonate.Abstract
 
 open ServerModel
 
@@ -36,7 +36,6 @@ def resumeOne (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
 /-- Read the awaited promise, drop the callback, and resume the awaiter. -/
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
     Handler Unit := do
-  if !req.awaited.sameOrigin req.awaiter then return ()
   match ← readObject req.awaited now with
   | none => pure ()
   | some awaited =>
@@ -158,4 +157,4 @@ def objectWork (object : Object) (now : Nat) : List WorkItem :=
 def scheduleWork (schedule : Schedule) (now : Nat) : List WorkItem :=
   if schedule.nextRunAt ≤ now then [.scheduleTimeout schedule.id] else []
 
-end Resonate.Direct
+end Resonate.Abstract

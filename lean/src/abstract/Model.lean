@@ -15,31 +15,31 @@ open Rover
 open ServerModel
 
 /-- The handler for each of the 21 public operations. -/
-def handler (request : Request) (now : Time) : Direct.Handler Response :=
+def handler (request : Request) (now : Time) : Abstract.Handler Response :=
   match request with
-  | .promiseGet req => .promiseGet <$> Direct.promiseGet req now
-  | .promiseCreate req => .promiseCreate <$> Direct.promiseCreate req now
-  | .promiseSettle req => .promiseSettle <$> Direct.promiseSettle req now
+  | .promiseGet req => .promiseGet <$> Abstract.promiseGet req now
+  | .promiseCreate req => .promiseCreate <$> Abstract.promiseCreate req now
+  | .promiseSettle req => .promiseSettle <$> Abstract.promiseSettle req now
   | .promiseRegisterCallback req =>
-      .promiseRegisterCallback <$> Direct.promiseRegisterCallback req now
+      .promiseRegisterCallback <$> Abstract.promiseRegisterCallback req now
   | .promiseRegisterListener req =>
-      .promiseRegisterListener <$> Direct.promiseRegisterListener req now
-  | .promiseSearch req => pure (.promiseSearch (Direct.promiseSearch req now))
-  | .scheduleGet req => .scheduleGet <$> Direct.scheduleGet req now
-  | .scheduleCreate req => .scheduleCreate <$> Direct.scheduleCreate req now
-  | .scheduleDelete req => .scheduleDelete <$> Direct.scheduleDelete req now
-  | .scheduleSearch req => pure (.scheduleSearch (Direct.scheduleSearch req now))
-  | .taskGet req => .taskGet <$> Direct.taskGet req now
-  | .taskCreate req => .taskCreate <$> Direct.taskCreate req now
-  | .taskAcquire req => .taskAcquire <$> Direct.taskAcquire req now
-  | .taskFence req => .taskFence <$> Direct.taskFence req now
-  | .taskHeartbeat req => .taskHeartbeat <$> Direct.taskHeartbeat req now
-  | .taskSuspend req => .taskSuspend <$> Direct.taskSuspend req now
-  | .taskFulfill req => .taskFulfill <$> Direct.taskFulfill req now
-  | .taskRelease req => .taskRelease <$> Direct.taskRelease req now
-  | .taskHalt req => .taskHalt <$> Direct.taskHalt req now
-  | .taskContinue req => .taskContinue <$> Direct.taskContinue req now
-  | .taskSearch req => pure (.taskSearch (Direct.taskSearch req now))
+      .promiseRegisterListener <$> Abstract.promiseRegisterListener req now
+  | .promiseSearch req => pure (.promiseSearch (Abstract.promiseSearch req now))
+  | .scheduleGet req => .scheduleGet <$> Abstract.scheduleGet req now
+  | .scheduleCreate req => .scheduleCreate <$> Abstract.scheduleCreate req now
+  | .scheduleDelete req => .scheduleDelete <$> Abstract.scheduleDelete req now
+  | .scheduleSearch req => pure (.scheduleSearch (Abstract.scheduleSearch req now))
+  | .taskGet req => .taskGet <$> Abstract.taskGet req now
+  | .taskCreate req => .taskCreate <$> Abstract.taskCreate req now
+  | .taskAcquire req => .taskAcquire <$> Abstract.taskAcquire req now
+  | .taskFence req => .taskFence <$> Abstract.taskFence req now
+  | .taskHeartbeat req => .taskHeartbeat <$> Abstract.taskHeartbeat req now
+  | .taskSuspend req => .taskSuspend <$> Abstract.taskSuspend req now
+  | .taskFulfill req => .taskFulfill <$> Abstract.taskFulfill req now
+  | .taskRelease req => .taskRelease <$> Abstract.taskRelease req now
+  | .taskHalt req => .taskHalt <$> Abstract.taskHalt req now
+  | .taskContinue req => .taskContinue <$> Abstract.taskContinue req now
+  | .taskSearch req => pure (.taskSearch (Abstract.taskSearch req now))
 
 /-- Serve one request: run its handler, reply, and send what it emitted. -/
 def run (config : Config) (call : Call) (state : State) :
@@ -66,37 +66,27 @@ a schedule appends the occurrences it fired. -/
 def runWork (config : Config) (work : WorkItem) (now : Time)
     (rest : List WorkflowEntry) (state : State) : State × List Output :=
   let (fired, store, emitted) :=
-    Direct.processWork work now { config := config.toServerConfig } state.store
+    Abstract.processWork work now { config := config.toServerConfig } state.store
   ({ store, workflow := { pending := rest ++ fired } }, emitted.map .message)
 
-/-- Work due at `instant`, found by looking at every object and schedule. -/
-def eligibleWorkAt (state : State) (instant : Time) : List WorkItem :=
-  state.store.objects.flatMap (Direct.objectWork · instant) ++
-  state.store.schedules.flatMap (Direct.scheduleWork · instant)
-
-/-- Run a queued occurrence; it leaves the queue. -/
-def pendingTimeoutChoices (config : Config) (state : State) :
-    List (State × List Output) :=
-  state.workflow.pending.mapIdx fun index entry =>
-    runWork config entry.item entry.instant
-      (state.workflow.pending.eraseIdx index) state
-
-/-- Run any work due at any instant up to `now`. -/
-def documentTimeoutChoices (config : Config) (now : Time) (state : State) :
-    List (State × List Output) :=
+/-- Work that is due by `now`: any queued occurrence, or any object or
+schedule work due at any instant up to `now`. Each comes with its instant and
+the queue left once it runs. -/
+def dueWork (state : State) (now : Time) :
+    List (WorkItem × Time × List WorkflowEntry) :=
+  let queue := state.workflow.pending
+  queue.mapIdx (fun index entry => (entry.item, entry.instant, queue.eraseIdx index)) ++
   (List.range (now + 1)).flatMap fun instant =>
-    (eligibleWorkAt state instant).map fun item =>
-      runWork config item instant state.workflow.pending state
+    (state.store.objects.flatMap (Abstract.objectWork · instant) ++
+      state.store.schedules.flatMap (Abstract.scheduleWork · instant)).map
+        fun item => (item, instant, queue)
 
-def timeoutChoices (config : Config) (now : Time) (state : State) :
-    List (State × List Output) :=
-  pendingTimeoutChoices config state ++
-    documentTimeoutChoices config now state
-
-/-- A timeout may run any choice or do nothing. -/
-def runTimeoutChoices (config : Config) (now : Time) (state : State) :
+/-- A timeout does nothing or runs any due work. -/
+def runTimeout (config : Config) (now : Time) (state : State) :
     Outcomes (State × List Output) :=
-  ⟨(state, []) :: timeoutChoices config now state, by simp⟩
+  ⟨(state, []) :: (dueWork state now).map
+      (fun (item, instant, rest) => runWork config item instant rest state),
+    by simp⟩
 
 end Resonate
 
@@ -125,7 +115,7 @@ def step (config : Config) (pid : Pid) (state : State) (now : Time)
         { state := shed.1, send := sends shed.2 }
       ], by simp⟩
   | .service, .timeout =>
-      let choices := Resonate.runTimeoutChoices config now state
+      let choices := Resonate.runTimeout config now state
       ⟨choices.val.map fun (next, outputs) =>
           { state := next, send := sends outputs },
         by

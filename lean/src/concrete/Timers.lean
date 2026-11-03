@@ -1,4 +1,4 @@
-import Protocol
+import «concrete».Document
 
 /-!
 # Echod-style durable timers and membership

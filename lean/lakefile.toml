@@ -23,6 +23,7 @@ roots = [
   "abstract.External",
   "abstract.Internal",
   "abstract.Model",
+  "concrete.Document",
   "concrete.Timers",
   "concrete.Machine",
   "concrete.External",

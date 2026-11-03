@@ -46,7 +46,7 @@ def Store.setSchedule (store : Store) (schedule : Schedule) : Store :=
 def Store.deleteSchedule (store : Store) (id : Ident) : Store :=
   { store with schedules := store.schedules.filter (·.id != id) }
 
-namespace Direct
+namespace Abstract
 
 abbrev ServerConfig := AbstractModel.ServerConfig
 
@@ -141,5 +141,5 @@ def createIfAbsent (req : PromiseCreateReq) (now : Nat) : Handler Unit := do
   if (← readObject req.id now).isNone then
     let _ ← createPromiseAt req.id req.timeoutAt now req.param req.tags
 
-end Direct
+end Abstract
 end Resonate

@@ -1,6 +1,6 @@
 import «abstract».Machine
 
-namespace Resonate.Direct
+namespace Resonate.Abstract
 
 open ServerModel
 
@@ -367,4 +367,4 @@ def scheduleSearch (_req : ScheduleSearchReq) (_now : Nat) :
     ScheduleSearchRes :=
   { status := 501 }
 
-end Resonate.Direct
+end Resonate.Abstract
