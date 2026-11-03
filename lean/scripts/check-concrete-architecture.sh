@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-model="$(dirname "$0")/../src/concrete/Model.lean"
+concrete="$(dirname "$0")/../src/concrete"
 
 if rg -n \
   'import .*abstract|Resonate\.(run|runWork|handleExternal)|Direct\.' \
-  "$model"
+  "$concrete"
 then
-  echo "concrete Model imports or invokes an abstract transition" >&2
+  echo "a concrete file imports or invokes an abstract transition" >&2
   exit 1
 fi
 

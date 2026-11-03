@@ -12,6 +12,106 @@ and an execution fold, so delayed/reordered outside observations do not need a
 special trace argument.
 -/
 
+namespace Resonate.Concrete
+
+open Rover
+
+/-- The abstract objects and schedules held by the documents in `keys`. -/
+def Store.toAbstract (store : Store) : Resonate.Store :=
+  store.keys.foldl (fun (acc : Resonate.Store) key =>
+    acc.write key (store.documentAt key)) {}
+
+theorem foldl_write_read (acc : Resonate.Store) (done keys : List DocumentKey)
+    (doc : (key : DocumentKey) → Document key) (query : DocumentKey)
+    (hacc : acc.read query =
+      if query ∈ done then doc query else emptyDocument query) :
+    (keys.foldl (fun (acc : Resonate.Store) key => acc.write key (doc key)) acc).read
+        query =
+      if query ∈ done ++ keys then doc query else emptyDocument query := by
+  induction keys generalizing acc done with
+  | nil =>
+      rw [List.foldl_nil, List.append_nil]
+      exact hacc
+  | cons key rest ih =>
+      rw [List.foldl_cons]
+      have hmem : (done ++ [key]) ++ rest = done ++ key :: rest := by
+        rw [List.append_assoc, List.singleton_append]
+      rw [← hmem]
+      exact ih (acc.write key (doc key)) (done ++ [key]) (by
+        by_cases hquery : query = key
+        · subst hquery
+          rw [Resonate.Store.read_write_same]
+          have hmem : query ∈ done ++ [query] := by
+            simp [List.mem_append]
+          simp [hmem]
+        · rw [Resonate.Store.read_write_other _ _ _ _ hquery, hacc]
+          have hmem : query ∈ done ++ [key] ↔ query ∈ done := by
+            simp [List.mem_append, hquery]
+          by_cases hdone : query ∈ done <;> simp [hdone, hmem])
+
+theorem Store.toAbstract_read (store : Store) (key : DocumentKey) :
+    store.toAbstract.read key =
+      if key ∈ store.keys then store.documentAt key else emptyDocument key := by
+  have hfold :=
+    foldl_write_read {} [] store.keys store.documentAt key (by
+      cases key <;> rfl)
+  simp only [Store.toAbstract, List.nil_append] at hfold ⊢
+  exact hfold
+
+@[simp] theorem Store.toAbstract_commit_read (store : Store)
+    (key other : DocumentKey) (document : Document key) :
+    (store.commit key document).toAbstract.read other =
+      (store.toAbstract.write key document).read other := by
+  rw [Store.toAbstract_read]
+  by_cases hother : other = key
+  · subst hother
+    rw [Resonate.Store.read_write_same]
+    by_cases hk : other ∈ store.keys
+    · simp [Store.commit, hk, Store.documentAt]
+    · simp [Store.commit, hk, List.mem_append, Store.documentAt]
+  · have hkeys :
+        other ∈ (store.commit key document).keys ↔ other ∈ store.keys := by
+      by_cases hk : key ∈ store.keys <;>
+        simp [Store.commit, hk, hother, List.mem_append]
+    have hdoc :
+        (store.commit key document).documentAt other =
+          store.documentAt other := by
+      simp [Store.documentAt, Store.commit, hother]
+    by_cases hmem : other ∈ store.keys
+    · have hmem' : other ∈ (store.commit key document).keys := hkeys.mpr hmem
+      simp [hother, hmem, hmem', hdoc, Resonate.Store.read_write_other,
+        Store.toAbstract_read]
+    · have hmem' : other ∉ (store.commit key document).keys := by
+        intro h
+        exact hmem (hkeys.mp h)
+      simp [hother, hmem, hmem', Resonate.Store.read_write_other,
+        Store.toAbstract_read]
+
+theorem Store.toAbstract_read_eq_documentAt (store : Store)
+    (hindexed : store.indexed) (key : DocumentKey) :
+    store.toAbstract.read key = store.documentAt key := by
+  rw [Store.toAbstract_read]
+  by_cases hk : key ∈ store.keys
+  · simp [hk]
+  · have hnone : store.values key = none := by
+      cases hvalue : store.values key with
+      | none => rfl
+      | some _ => exact absurd (hindexed key (by simp [hvalue])) hk
+    simp [hk, Store.documentAt, hnone]
+
+@[simp] theorem Store.toAbstract_read_fence (store : Store)
+    (hindexed : store.indexed) (key other : DocumentKey) :
+    (store.fence key).toAbstract.read other =
+      store.toAbstract.read other := by
+  rw [Store.fence, Store.toAbstract_commit_read,
+    ← Store.toAbstract_read_eq_documentAt store hindexed key]
+  by_cases h : other = key
+  · subst other
+    simp
+  · simp [h]
+
+end Resonate.Concrete
+
 namespace Resonate.Refinement
 
 open Rover
@@ -38,7 +138,7 @@ the conflict branch. This is the store-level duplicate-PUT safety fact. -/
 theorem duplicate_absent_put_conflicts
     (sender : Concrete.Pid) (op : Concrete.OpId)
     (key : DocumentKey) (document : Document key) :
-    (Concrete.storePut {}
+    (Concrete.storePut Concrete.Local.store {}
       sender (({} : Concrete.Store).commit key document)
       op key document none).val =
       [({
@@ -430,7 +530,7 @@ theorem StoreRep.fence {physical : Concrete.Store} {abstract : State}
     StoreRep (physical.fence key) abstract := by
   constructor
   · intro other
-    rw [Concrete.Store.toAbstract_read_fence]
+    rw [Concrete.Store.toAbstract_read_fence _ hrep.indexed]
     exact hrep.documents other
   · exact hrep.unique
   · exact Concrete.Store.indexed_commit _ _ _ hrep.indexed
@@ -627,8 +727,9 @@ theorem scan_transport
       lifted.2 = [] ∧
       Concrete.pendingWorkflow rest = Concrete.pendingWorkflow rest ++ added ∧
       lifted.1.workflow.pending = abstract.workflow.pending ++ added :=
-    ⟨(abstract, []), [], by simp [Abstract.runTimeout], hrep.fence key, rfl,
-      by simp, by simp⟩
+    ⟨(abstract, []), [], by simp [Abstract.runTimeout], by
+      rw [Concrete.Store.toAbstract_read_eq_documentAt _ hrep.indexed]
+      exact hrep.fence key, rfl, by simp, by simp⟩
   unfold Concrete.selectScan at hselect
   cases hwork :
       Concrete.selectScanWork appConfig key instant rest
@@ -1923,7 +2024,7 @@ theorem node_step_valid
     sameFlights before _ hbefore (by simp [Concrete.Node.awaitControl])
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -1989,7 +2090,7 @@ theorem node_step_valid
                       exact ⟨_, rfl, hnode⟩
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -2358,7 +2459,7 @@ theorem node_step_ids
         rpc₁ = rpc₂) := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
@@ -2373,7 +2474,7 @@ theorem node_step_ids
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         repeat' first | split at hresult
       all_goals
@@ -2480,7 +2581,7 @@ theorem node_step_old_flight
     (op, flight) ∈ node.flights := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
@@ -2495,7 +2596,7 @@ theorem node_step_old_flight
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
@@ -2557,7 +2658,7 @@ theorem node_step_preserves_writing_flight
       result.state = .node next ∧ (op, flight) ∈ next.flights := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -2571,7 +2672,7 @@ theorem node_step_preserves_writing_flight
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -2796,7 +2897,7 @@ theorem node_step_serial
     ∃ next, result.state = .node next ∧ NodeSerial next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeSerial, Concrete.start, Concrete.decide,
@@ -2818,7 +2919,7 @@ theorem node_step_serial
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeSerial, Concrete.start, Concrete.decide,
@@ -2909,7 +3010,7 @@ theorem node_step_flights_addressed
       result.state = .node next ∧ NodeFlightsAddressed address next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeFlightsAddressed, Concrete.start, Concrete.decide,
@@ -2925,7 +3026,7 @@ theorem node_step_flights_addressed
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeFlightsAddressed, Concrete.start, Concrete.decide,
@@ -3088,7 +3189,7 @@ theorem node_step_sweeps_valid
   intro op flight hflight timer instant rest htransaction
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeSweepsValid, Concrete.start, Concrete.decide,
@@ -3104,7 +3205,7 @@ theorem node_step_sweeps_valid
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeSweepsValid, Concrete.start, Concrete.decide,
@@ -3557,7 +3658,7 @@ theorem node_step_loading_gets
         address next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -3574,7 +3675,7 @@ theorem node_step_loading_gets
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -3771,7 +3872,7 @@ theorem node_step_writing_puts
         address next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -3788,7 +3889,7 @@ theorem node_step_writing_puts
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -4189,7 +4290,7 @@ theorem conflict_step_sends_no_put
         payload := .put key document expectedVersion
       }) ∈ result.send) :
     False := by
-  simp only [Concrete.step] at hresult
+  simp only [Concrete.step, Concrete.nodeStep] at hresult
   repeat' split at hresult
   all_goals
     simp_all [Concrete.Node.takeFlight, Concrete.Node.cacheInvalidate,
@@ -4216,7 +4317,7 @@ theorem written_step_sends_no_put
         payload := .put key document expectedVersion
       }) ∈ result.send) :
     False := by
-  simp only [Concrete.step] at hresult
+  simp only [Concrete.step, Concrete.nodeStep] at hresult
   cases ht : node.takeFlight replyOp with
   | mk taken remaining =>
       cases taken with
@@ -4253,7 +4354,7 @@ theorem failed_step_sends_no_put
         payload := .put key document expectedVersion
       }) ∈ result.send) :
     False := by
-  simp only [Concrete.step] at hresult
+  simp only [Concrete.step, Concrete.nodeStep] at hresult
   cases ht : node.takeFlight replyOp with
   | mk taken remaining =>
       cases taken with
@@ -4310,7 +4411,7 @@ theorem node_step_sent_put_valid
     ValidPut appConfig key document expectedVersion := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -4369,7 +4470,7 @@ theorem node_step_sent_put_valid
                       contradiction
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -4550,24 +4651,24 @@ theorem step_sent_put_valid
       cases hlocal : world.process .store <;>
         cases event with
         | timeout =>
-            simp [Concrete.step, Outcomes.one, hlocal] at hresult
+            simp [Concrete.step, Concrete.storeStep, Outcomes.one, hlocal] at hresult
             subst result
             contradiction
         | receive sender message =>
             cases message with
             | request call | output output | storeReply rpc =>
-                simp [Concrete.step, hlocal, Outcomes.one] at hresult
+                simp [Concrete.step, Concrete.storeStep, hlocal, Outcomes.one] at hresult
                 subst result
                 contradiction
             | storeRequest rpc =>
                 obtain ⟨requestOp, payload⟩ := rpc
                 cases payload with
                 | get requestKey =>
-                    simp [Concrete.step, hlocal, Outcomes.one] at hresult
+                    simp [Concrete.step, Concrete.storeStep, hlocal, Outcomes.one] at hresult
                     subst result
                     contradiction
                 | put requestKey requestDocument requestVersion =>
-                    simp only [Concrete.step, hlocal] at hresult
+                    simp only [Concrete.step, Concrete.storeStep, hlocal] at hresult
                     (first
                     | (simp [Outcomes.one] at hresult
                        subst result
@@ -4590,7 +4691,7 @@ theorem step_sent_put_valid
                 | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
                 | announce _
                 | listAnnouncements | getMembership | putMembership _ _ =>
-                    simp only [Concrete.step, hlocal] at hresult
+                    simp only [Concrete.step, Concrete.storeStep, hlocal] at hresult
                     repeat' split at hresult
                     all_goals simp [Outcomes.one] at hresult
                     all_goals subst result
@@ -4660,14 +4761,11 @@ theorem storeExists_initial
   ⟨{}, hinit.2.1⟩
 
 theorem store_step_effect
-    {appConfig : Resonate.Config} {config : Concrete.Config}
-    {store : Concrete.Store} {now : Time}
+    {config : Concrete.Config} {store : Concrete.Store}
     {event : Event Concrete.Pid Concrete.Msg}
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult :
-      result ∈
-        (Concrete.step appConfig config .store (.store store)
-          now event).val) :
+      result ∈ (Concrete.storeStep Concrete.Local.store config store event).val) :
     ∃ nextStore,
       result.state = .store nextStore ∧
       (nextStore = store ∨
@@ -4676,24 +4774,24 @@ theorem store_step_effect
           nextStore.values = store.values)) := by
   cases event with
   | timeout =>
-      simp [Concrete.step, Outcomes.one] at hresult
+      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
       subst result
       exact ⟨store, rfl, .inl rfl⟩
   | receive sender message =>
       cases message with
       | request call | output output | storeReply rpc =>
-          simp [Concrete.step, Outcomes.one] at hresult
+          simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
           subst result
           exact ⟨store, rfl, .inl rfl⟩
       | storeRequest rpc =>
           obtain ⟨op, payload⟩ := rpc
           cases payload with
           | get key =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | put key document expected =>
-              simp only [Concrete.step, Concrete.storePut] at hresult
+              simp only [Concrete.step, Concrete.storeStep, Concrete.storePut] at hresult
               split at hresult
               · simp [Outcomes.one] at hresult
                 subst result
@@ -4710,37 +4808,37 @@ theorem store_step_effect
                   · subst result
                     exact ⟨store.fence key, rfl,
                       .inr (.inl
-                        ⟨key, store.toAbstract.read key, rfl⟩)⟩
+                        ⟨key, store.documentAt key, rfl⟩)⟩
                 · simp [Outcomes.one] at hresult
                   subst result
                   exact ⟨store.commit key document, rfl,
                     .inr (.inl ⟨key, document, rfl⟩)⟩
           | armTimer timer =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | deleteTimer timer =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | deleteTimers timers =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | listTimers through =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | announce announcement =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | listAnnouncements | getMembership =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | putMembership expected next =>
-              simp only [Concrete.step] at hresult
+              simp only [Concrete.step, Concrete.storeStep] at hresult
               split at hresult
               · simp [Outcomes.one] at hresult
                 subst result
@@ -4836,7 +4934,7 @@ theorem node_step_no_store_reply
     (hsend : (recipient, .storeReply reply) ∈ result.send) : False := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -4851,7 +4949,7 @@ theorem node_step_no_store_reply
         Concrete.sendOutputs]
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -4882,7 +4980,7 @@ theorem node_step_no_request
     (hsend : (recipient, .request call) ∈ result.send) : False := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -4897,7 +4995,7 @@ theorem node_step_no_request
         Concrete.sendOutputs]
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -4954,24 +5052,24 @@ theorem sent_got_origin
       | store store =>
           cases event with
           | timeout =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               contradiction
           | receive sender message =>
               cases message with
               | request call | output output | storeReply rpc =>
-                  simp [Concrete.step, Outcomes.one] at hresult
+                  simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                   subst result
                   contradiction
               | storeRequest rpc =>
                   obtain ⟨requestOp, payload⟩ := rpc
                   cases payload with
                   | get requestKey =>
-                      simp [Concrete.step, Outcomes.one] at hresult
+                      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                       subst result
                       grind
                   | put requestKey requestDocument requestVersion =>
-                      simp only [Concrete.step, Concrete.storePut] at hresult
+                      simp only [Concrete.step, Concrete.storeStep, Concrete.storePut] at hresult
                       split at hresult
                       · simp [Outcomes.one] at hresult
                         subst result
@@ -4987,7 +5085,7 @@ theorem sent_got_origin
                   | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
                   | announce _
                   | listAnnouncements | getMembership | putMembership _ _ =>
-                      simp only [Concrete.step] at hresult
+                      simp only [Concrete.step, Concrete.storeStep] at hresult
                       repeat' split at hresult
                       all_goals simp [Outcomes.one] at hresult
                       all_goals subst result
@@ -5356,7 +5454,7 @@ theorem node_step_cache_snapshots
       result.state = .node next ∧ NodeCacheSnapshots store next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeCacheSnapshots, Concrete.start, Concrete.decide,
@@ -5373,7 +5471,7 @@ theorem node_step_cache_snapshots
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -5806,7 +5904,7 @@ theorem node_step_arming_snapshots
       result.state = .node next ∧ NodeArmingSnapshots store next := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeArmingSnapshots, NodeCacheSnapshots,
@@ -5824,7 +5922,7 @@ theorem node_step_arming_snapshots
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -6139,7 +6237,7 @@ theorem node_step_sent_put_snapshot
       Snapshot store key provenance.loaded := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -6207,7 +6305,7 @@ theorem node_step_sent_put_snapshot
                 · exact hsend
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -6435,7 +6533,7 @@ theorem node_step_sent_put_origin
         address provenance.transaction := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -6498,7 +6596,7 @@ theorem node_step_sent_put_origin
                 · exact hsend
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -6882,27 +6980,27 @@ theorem sent_put_reply_origin
       | store store =>
           cases event with
           | timeout =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               contradiction
           | receive sender message =>
               cases message with
               | request call | output output | storeReply rpc =>
-                  simp [Concrete.step, Outcomes.one] at hresult
+                  simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                   subst result
                   contradiction
               | storeRequest rpc =>
                   obtain ⟨requestOp, payload⟩ := rpc
                   cases payload with
                   | get requestKey =>
-                      simp [Concrete.step, Outcomes.one] at hresult
+                      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                       subst result
                       rcases hreply with rfl | rfl | rfl <;>
                         contradiction
                   | put key document expected =>
                       left
                       refine ⟨key, document, expected, ?_⟩
-                      simp only [Concrete.step, Concrete.storePut] at hresult
+                      simp only [Concrete.step, Concrete.storeStep, Concrete.storePut] at hresult
                       split at hresult
                       · simp [Outcomes.one] at hresult
                         subst result
@@ -6916,7 +7014,7 @@ theorem sent_put_reply_origin
                           subst result
                           grind
                   | putMembership expected membership =>
-                      simp only [Concrete.step] at hresult
+                      simp only [Concrete.step, Concrete.storeStep] at hresult
                       split at hresult
                       · simp [Outcomes.one] at hresult
                         subst result
@@ -6928,7 +7026,7 @@ theorem sent_put_reply_origin
                         refine ⟨?_, expected, membership, ?_⟩ <;> grind
                   | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
                   | announce _ | listAnnouncements | getMembership =>
-                      simp [Concrete.step, Outcomes.one] at hresult
+                      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                       subst result
                       rcases hreply with rfl | rfl | rfl <;>
                         contradiction
@@ -7190,7 +7288,7 @@ theorem node_step_flight_request_origins
   intro currentOp current call hmem htransaction
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -7251,7 +7349,7 @@ theorem node_step_flight_request_origins
                   (by intros; contradiction) hmem htransaction
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -7977,7 +8075,7 @@ theorem node_step_sent_put_stageable
     node_step_ids hresult
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -8048,7 +8146,7 @@ theorem node_step_sent_put_stageable
                   (by simpa using hempty) hsend
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -8570,7 +8668,7 @@ theorem stageablePuts_step
               cases hpayload
               have hresult' := hresult
               rw [hstore] at hresult'
-              simp only [Concrete.step, Concrete.storePut] at hresult'
+              simp only [Concrete.step, Concrete.storeStep, Concrete.storePut] at hresult'
               split at hresult'
               · simp [Outcomes.one] at hresult'
                 subst result
@@ -8603,7 +8701,7 @@ theorem stageablePuts_step
                       simpa [World.land] using hnextStore
                     subst nextStore
                     exact (Snapshot.expected_ne_commit_version
-                      (document := store.toAbstract.read key) hsnapshot
+                      (document := store.documentAt key) hsnapshot
                       (provenance.expected_eq.trans hmatch)).elim
                 · simp [Outcomes.one] at hresult'
                   subst result
@@ -10595,7 +10693,7 @@ theorem nodeWorkflowPart_step
   cases event with
   | timeout =>
       refine ⟨part, [], ?_, by simp, fun _ _ _ _ => rfl⟩
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeWorkflowPart, FlightWorkflowPart,
@@ -10626,7 +10724,7 @@ theorem nodeWorkflowPart_step
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals
         try
           simp [Outcomes.one] at hresult
@@ -10939,7 +11037,7 @@ theorem node_step_flight_origin
     (op, flight) ∈ node.flights ∨ op = node.nextOp := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -10957,7 +11055,7 @@ theorem node_step_flight_origin
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
@@ -11319,12 +11417,12 @@ theorem reachable_output_sender
                         now event).val := hresult'
                 cases event with
                 | timeout =>
-                    simp [Concrete.step, Outcomes.one] at hresult0
+                    simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult0
                     subst result
                     contradiction
                 | receive process message =>
                     cases message <;>
-                      simp only [Concrete.step] at hresult0
+                      simp only [Concrete.step, Concrete.storeStep] at hresult0
                     all_goals
                       try
                         simp [Outcomes.one] at hresult0
@@ -11437,12 +11535,12 @@ theorem reachable_store_request_sender
                 rw [hstore] at hresult'
                 cases event with
                 | timeout =>
-                    simp [Concrete.step, Outcomes.one] at hresult'
+                    simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult'
                     subst result
                     contradiction
                 | receive process message =>
                     cases message <;>
-                      simp only [Concrete.step] at hresult'
+                      simp only [Concrete.step, Concrete.storeStep] at hresult'
                     all_goals
                       try
                         simp [Outcomes.one] at hresult'
@@ -11936,7 +12034,7 @@ theorem simulate_external_written_store
               op
               payload := .put key document expectedVersion
             }))).val := by
-    simp [Concrete.step, Concrete.storePut, concreteResult]
+    simp [Concrete.step, Concrete.storeStep, Concrete.storePut, concreteResult]
     simp [hmatch]
     cases config.flaky <;> simp [Outcomes.one]
   have hconcreteStep :
@@ -12151,7 +12249,7 @@ theorem simulate_external_landed_failed_store
               op
               payload := .put key document expectedVersion
             }))).val := by
-    simp [Concrete.step, Concrete.storePut, concreteResult,
+    simp [Concrete.step, Concrete.storeStep, Concrete.storePut, concreteResult,
       hmatch, hflaky]
   have hconcreteStep :
       Step (CModel nodes appConfig) config concrete
@@ -12343,7 +12441,7 @@ theorem simulate_external_not_landed_failed_store
               op
               payload := .put key document expectedVersion
             }))).val := by
-    simp [Concrete.step, Concrete.storePut, concreteResult,
+    simp [Concrete.step, Concrete.storeStep, Concrete.storePut, concreteResult,
       hmatch, hflaky]
   have hconcreteStep :
       Step (CModel nodes appConfig) config concrete
@@ -12373,7 +12471,7 @@ theorem simulate_external_not_landed_failed_store
       by simpa [abstractNext, World.land, abstractResult, shed,
         Abstract.runShed] using StoreRep.fence hrep key⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
-      (physical.toAbstract.read key) concreteResult
+      (physical.documentAt key) concreteResult
       (by simp [concreteResult, Concrete.Store.fence])
     · simp [abstractNext, World.land, abstractResult, shed,
         Abstract.runShed]
@@ -12749,7 +12847,7 @@ theorem simulate_internal_not_landed_failed_store
       by simp [World.land, concreteResult],
       StoreRep.fence hrep key⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
-      (physical.toAbstract.read key) concreteResult
+      (physical.documentAt key) concreteResult
       (by simp [concreteResult, Concrete.Store.fence])
     · rfl
     · intro activeAddress activeNode activeOp activeFlight hactiveAddress
@@ -13131,7 +13229,7 @@ theorem simulate_matching_put_store
   cases htransaction : provenance.transaction with
   | external call =>
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hmatch,
+      · simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact simulate_external_written_store hreachable related hphysical
@@ -13148,7 +13246,7 @@ theorem simulate_matching_put_store
             htime
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hmatch,
+        simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact simulate_external_written_store hreachable related hphysical
@@ -13163,49 +13261,49 @@ theorem simulate_matching_put_store
       obtain ⟨request, hitem⟩ := hshape
       subst item
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hmatch,
+      · simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact hwork htransaction rfl (.inl rfl) (by
-            simp [Concrete.step, Concrete.storePut, hmatch,
+            simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
               hflaky])
         · exact hwork htransaction rfl (.inr rfl) (by
-            simp [Concrete.step, Concrete.storePut, hmatch,
+            simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
               hflaky])
         · exact hinternalFence
             (by simp [htransaction, Concrete.failureOutputs]) (by
-              simp [Concrete.step, Concrete.storePut, hmatch,
+              simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
                 hflaky])
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hmatch,
+        simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact hwork htransaction rfl (.inl rfl) (by
-          simp [Concrete.step, Concrete.storePut, hmatch,
+          simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
             hflakyFalse, Outcomes.one])
   | sweep timer instant rest =>
       by_cases hflaky : config.flaky = true
-      · simp [Concrete.step, Concrete.storePut, hmatch,
+      · simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflaky] at hresult
         rcases hresult with rfl | rfl | rfl
         · exact hsweep htransaction (.inl rfl) (by
-            simp [Concrete.step, Concrete.storePut, hmatch,
+            simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
               hflaky])
         · exact hsweep htransaction (.inr rfl) (by
-            simp [Concrete.step, Concrete.storePut, hmatch,
+            simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
               hflaky])
         · exact hinternalFence
             (by simp [htransaction, Concrete.failureOutputs]) (by
-              simp [Concrete.step, Concrete.storePut, hmatch,
+              simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
                 hflaky])
       · have hflakyFalse : config.flaky = false := by
           cases ht : config.flaky <;> simp_all
-        simp [Concrete.step, Concrete.storePut, hmatch,
+        simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
           hflakyFalse, Outcomes.one] at hresult
         subst result
         exact hsweep htransaction (.inl rfl) (by
-          simp [Concrete.step, Concrete.storePut, hmatch,
+          simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
             hflakyFalse, Outcomes.one])
 theorem simulate_store_process
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -13265,34 +13363,34 @@ theorem simulate_store_process
       rfl⟩
   cases event with
   | timeout =>
-      simp [Concrete.step, Outcomes.one] at hresult
+      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
       subst result
-      exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+      exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
         (by simp) (by simp) (by simp)
   | receive sender message =>
       cases message with
       | request call =>
-          simp [Concrete.step, Outcomes.one] at hresult
+          simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+          exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | output output =>
-          simp [Concrete.step, Outcomes.one] at hresult
+          simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+          exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | storeReply reply =>
-          simp [Concrete.step, Outcomes.one] at hresult
+          simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
           subst result
-          exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+          exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
             (by simp) (by simp) (by simp)
       | storeRequest rpc =>
           obtain ⟨op, payload⟩ := rpc
           cases payload with
           | get key =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | put key document expectedVersion =>
               obtain ⟨address, rfl⟩ :=
@@ -13301,54 +13399,54 @@ theorem simulate_store_process
                   expectedVersion = physical.version key
               · exact simulate_matching_put_store hreachable related
                   hphysical hvalid hmatch htime hresult
-              · simp [Concrete.step, Concrete.storePut, hmatch,
+              · simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
                   Outcomes.one] at hresult
                 subst result
                 exact hinert (by
-                  simp [Concrete.step, Concrete.storePut, hmatch,
+                  simp [Concrete.step, Concrete.storeStep, Concrete.storePut, hmatch,
                     Outcomes.one]) rfl rfl rfl
                   (by simp) (by simp) (by simp)
           | armTimer timer =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | deleteTimer timer =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | deleteTimers timers =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | listTimers through =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | announce announcement =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | listAnnouncements =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | getMembership =>
-              simp [Concrete.step, Outcomes.one] at hresult
+              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
-              exact hinert (by simp [Concrete.step, Outcomes.one]) rfl rfl rfl
+              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
                 (by simp) (by simp) (by simp)
           | putMembership expected next =>
-              simp only [Concrete.step] at hresult
+              simp only [Concrete.step, Concrete.storeStep] at hresult
               split at hresult <;> simp [Outcomes.one] at hresult
               all_goals subst result
               all_goals
-                exact hinert (by simp_all [Concrete.step, Outcomes.one])
+                exact hinert (by simp_all [Concrete.step, Concrete.storeStep, Outcomes.one])
                   rfl rfl rfl (by simp) (by simp) (by simp)
 
 theorem related_after_node_land
@@ -13528,7 +13626,7 @@ theorem node_step_no_deleting
   intro op flight hflight
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeNoDeleting, Concrete.start, Concrete.decide,
@@ -13549,7 +13647,7 @@ theorem node_step_no_deleting
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeNoDeleting, Concrete.start, Concrete.decide,
@@ -13668,7 +13766,7 @@ theorem node_step_loading_quiet
   intro op flight hflight
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeLoadingQuiet, Concrete.start, Concrete.decide,
@@ -13692,7 +13790,7 @@ theorem node_step_loading_quiet
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeLoadingQuiet, Concrete.start, Concrete.decide,
@@ -13858,7 +13956,7 @@ theorem step_cleanup_source
     CleanupSource node event op outputs := by
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       split at hresult
       · simp [Outcomes.one] at hresult
         subst result
@@ -13926,7 +14024,7 @@ theorem step_cleanup_source
                       exact .kept hmem
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals try
         simp [Outcomes.one] at hresult
         subst result
@@ -14407,7 +14505,7 @@ theorem node_step_attempts
   intro op flight hflight
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals
         simp_all [NodeAttempts, Concrete.start, Concrete.decide,
@@ -14428,7 +14526,7 @@ theorem node_step_attempts
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeAttempts, Concrete.start, Concrete.decide,
@@ -15058,7 +15156,7 @@ theorem simulate_node_process
       rfl⟩
   cases event with
   | timeout =>
-      simp only [Concrete.step] at hresult
+      simp only [Concrete.step, Concrete.nodeStep] at hresult
       repeat' first | split at hresult
       all_goals simp only [Outcomes.one, List.mem_singleton] at hresult
       all_goals subst result
@@ -15088,7 +15186,7 @@ theorem simulate_node_process
           Concrete.cleanupFlight_cleanup] at houtput
   | receive sender message =>
       cases sender <;> cases message <;>
-        simp only [Concrete.step] at hresult
+        simp only [Concrete.step, Concrete.nodeStep] at hresult
       case outside.request call =>
         split at hresult
         next hbusy =>
@@ -15104,7 +15202,7 @@ theorem simulate_node_process
               subst result
               exact simulate_pure_external_node hreachable related haddress
                 hnode hkey htime hvalid (by
-                  simp [hready, hkey, Concrete.step, Outcomes.one])
+                  simp [hready, hkey, Concrete.step, Concrete.nodeStep, Outcomes.one])
           | some key =>
               simp only [hkey, hready] at hresult
               split at hresult
@@ -15129,7 +15227,7 @@ theorem simulate_node_process
                 subst result
                 exact simulate_rejected_external_node hreachable related
                   haddress hnode htime hvalid hnodeValid hserial (by
-                    simp [Concrete.step, hready, hkey, hnotOwns,
+                    simp [Concrete.step, Concrete.nodeStep, hready, hkey, hnotOwns,
                       Outcomes.one])
       case store.storeReply rpc =>
         obtain ⟨op, payload⟩ := rpc
