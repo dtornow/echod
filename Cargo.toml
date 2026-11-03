@@ -5,6 +5,7 @@ members = [
   "rust/impl/process",
   "rust/impl/runtime",
   "rust/impl/cli",
+  "rust/experiment/claude-quickjs",
   "rust/spec/rover",
   "rust/spec/abstract",
   "rust/spec/concrete",
