@@ -6,27 +6,29 @@ namespace Resonate.Abstract
 
 open ServerModel
 
-/-- Write the timed-out promise back. -/
+/-- Write the object back as seen at `now`: a promise past its deadline is
+stored settled. -/
 def processPromiseTimeout (id : Ident) (now : Nat) : Handler Unit := do
-  match ← getObject id with
+  match ← readObject id now with
   | none => pure ()
-  | some object => setObject (object.project now)
+  | some object => setObject object
 
 /-- Wake the awaiter's task because `awaited` settled. -/
 def resumeOne (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
   match ← readTask awaiter now with
   | none => pure ()
-  | some (_, task) =>
+  | some (object, task) =>
       match task.state with
       | .suspended =>
-          setTask awaiter
-            { task with
+          setObject { object with
+            task := some { task with
               state := .pending
               resumes := [awaited]
-              retryTimeoutAt := some now }
+              retryTimeoutAt := some now } }
       | .pending | .acquired | .halted =>
           if !(task.resumes.contains awaited) then
-            setTask awaiter { task with resumes := task.resumes ++ [awaited] }
+            setObject { object with
+              task := some { task with resumes := task.resumes ++ [awaited] } }
       | .fulfilled => pure ()
 
 /-- Read the awaited promise, drop the callback, and resume the awaiter. -/
@@ -37,9 +39,8 @@ def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.callbacks.contains req.awaiter then
-        setPromise req.awaited
-          { awaited.promise with
-            callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
+        setObject { awaited with
+          promise.callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
         resumeOne req.awaited req.awaiter now
 
 def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
@@ -49,9 +50,8 @@ def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.listeners.contains req.address then
-        setPromise req.awaited
-          { awaited.promise with
-            listeners := awaited.promise.listeners.filter (· != req.address) }
+        setObject { awaited with
+          promise.listeners := awaited.promise.listeners.filter (· != req.address) }
         setMessage req.address (.unblock (awaited.promise.toRecord req.awaited))
 
 def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
@@ -63,13 +63,13 @@ def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
       | some deadline =>
           if task.state == .acquired ∧ deadline ≤ now ∧
               object.promise.state == .pending then
-            setTask id
-              { task with
+            setObject { object with
+              task := some { task with
                 state := .pending
                 pid := none
                 ttl := none
                 leaseTimeoutAt := none
-                retryTimeoutAt := some now }
+                retryTimeoutAt := some now } }
 
 def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
   match ← readTask id now with
@@ -81,8 +81,8 @@ def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
           if task.state == .pending ∧ due ≤ now ∧
               object.promise.state == .pending then
             let env ← ask
-            setTask id
-              { task with retryTimeoutAt := some (now + env.config.retryTimeout) }
+            setObject { object with
+              task := some { task with retryTimeoutAt := some (now + env.config.retryTimeout) } }
             setMessage
               ((object.promise.tags.get? "resonate:target").getD "")
               (.execute id task.version)

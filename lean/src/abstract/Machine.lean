@@ -24,21 +24,6 @@ def Store.getObject (store : Store) (id : Ident) : Option Object :=
 def Store.setObject (store : Store) (object : Object) : Store :=
   { store with objects := object :: store.objects.filter (·.id != object.id) }
 
-/-- Write the promise of `id`, creating the object if it is new. -/
-def Store.setPromise (store : Store) (id : Ident) (promise : PromiseObject) :
-    Store :=
-  store.setObject
-    (match store.getObject id with
-     | some existing => { existing with promise }
-     | none => { id, promise })
-
-/-- Write the task of `id`. A task belongs to a promise, so an id with no
-object is left alone. -/
-def Store.setTask (store : Store) (id : Ident) (task : TaskObject) : Store :=
-  match store.getObject id with
-  | some object => store.setObject { object with task := some task }
-  | none => store
-
 def Store.getSchedule (store : Store) (id : Ident) : Option Schedule :=
   store.schedules.find? (·.id == id)
 
@@ -71,12 +56,6 @@ def ask : Handler Env := fun env store => (env, store, [])
 def getObject (id : Ident) : Handler (Option Object) := fun _ store =>
   (store.getObject id, store, [])
 
-def setPromise (id : Ident) (promise : PromiseObject) : Handler Unit :=
-  fun _ store => ((), store.setPromise id promise, [])
-
-def setTask (id : Ident) (task : TaskObject) : Handler Unit :=
-  fun _ store => ((), store.setTask id task, [])
-
 def setObject (object : Object) : Handler Unit :=
   fun _ store => ((), store.setObject object, [])
 
@@ -103,42 +82,39 @@ def readTask (id : Ident) (now : Nat) : Handler (Option (Object × TaskObject)) 
   | none => return none
 
 /-- Settle a promise; a settled promise also finishes its task. -/
-def setSettled (id : Ident) (object : Object) (promise : PromiseObject) :
-    Handler Unit := do
-  setPromise id promise
-  if promise.state != .pending then
-    match object.task with
-    | some task => if task.state != .fulfilled then setTask id task.fulfill
-    | none => pure ()
+def setSettled (object : Object) (promise : PromiseObject) : Handler Unit :=
+  setObject { object with promise, task := object.task.map (·.view promise) }
 
-def createPromiseAt (id : Ident) (timeoutAt now : Nat) (param : Value)
-    (tags : Tags) : Handler Object := do
+/-- A new promise, with a task if it is runnable. A promise created at or
+past its deadline is created settled. -/
+def newObject (id : Ident) (timeoutAt now : Nat) (param : Value) (tags : Tags) :
+    Object :=
   if timeoutAt > now then
     let promise : PromiseObject :=
       { state := .pending, param, tags, timeoutAt, createdAt := now }
-    setPromise id promise
     if promise.otype == .runnable then
       let due :=
         match promise.tags.get? "resonate:delay" with
         | some delay => max (parseNat delay) now
         | none => now
-      let task : TaskObject :=
-        { state := .pending, version := 0, retryTimeoutAt := some due }
-      setTask id task
-      return { id, promise, task := some task }
-    return { id, promise }
+      { id, promise,
+        task := some { state := .pending, version := 0, retryTimeoutAt := some due } }
+    else { id, promise }
   else
     let state :=
       if tags.isTimer then PromiseState.resolved else PromiseState.rejectedTimedout
     let promise : PromiseObject :=
       { state, param, tags, timeoutAt,
         createdAt := timeoutAt, settledAt := some timeoutAt }
-    setPromise id promise
     if promise.otype == .runnable then
-      let task : TaskObject := { state := .fulfilled, version := 0 }
-      setTask id task
-      return { id, promise, task := some task }
-    return { id, promise }
+      { id, promise, task := some { state := .fulfilled, version := 0 } }
+    else { id, promise }
+
+def createPromiseAt (id : Ident) (timeoutAt now : Nat) (param : Value)
+    (tags : Tags) : Handler Object := do
+  let object := newObject id timeoutAt now param tags
+  setObject object
+  return object
 
 def createIfAbsent (req : PromiseCreateReq) (now : Nat) : Handler Unit := do
   if (← readObject req.id now).isNone then
