@@ -20,11 +20,6 @@ const tools = [
 async function createMessage(messages) {
   const response = await fetch(API_URL, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": globalThis.__anthropic_api_key,
-      "anthropic-version": "2026-10-21",
-    },
     body: JSON.stringify({
       model: globalThis.__anthropic_model,
       max_tokens: 1024,
