@@ -4688,7 +4688,7 @@ theorem step_sent_put_valid
                         · simp [Outcomes.one] at hresult
                           subst result
                           contradiction
-                | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
+                | armTimer _ | deleteTimers _ | listTimers _
                 | announce _
                 | listAnnouncements | getMembership | putMembership _ _ =>
                     simp only [Concrete.step, Concrete.storeStep, hlocal] at hresult
@@ -4814,10 +4814,6 @@ theorem store_step_effect
                   exact ⟨store.commit key document, rfl,
                     .inr (.inl ⟨key, document, rfl⟩)⟩
           | armTimer timer =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
-              subst result
-              exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
-          | deleteTimer timer =>
               simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
@@ -5082,7 +5078,7 @@ theorem sent_got_origin
                         · simp [Outcomes.one] at hresult
                           subst result
                           contradiction
-                  | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
+                  | armTimer _ | deleteTimers _ | listTimers _
                   | announce _
                   | listAnnouncements | getMembership | putMembership _ _ =>
                       simp only [Concrete.step, Concrete.storeStep] at hresult
@@ -7024,7 +7020,7 @@ theorem sent_put_reply_origin
                         subst result
                         right
                         refine ⟨?_, expected, membership, ?_⟩ <;> grind
-                  | armTimer _ | deleteTimer _ | deleteTimers _ | listTimers _
+                  | armTimer _ | deleteTimers _ | listTimers _
                   | announce _ | listAnnouncements | getMembership =>
                       simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
                       subst result
@@ -11449,7 +11445,7 @@ theorem reachable_output_sender
                             · simp [Outcomes.one] at hresult0
                               subst result
                               contradiction
-                      | armTimer _ | deleteTimer _ | deleteTimers _
+                      | armTimer _ | deleteTimers _
                       | listTimers _
                       | announce _ | listAnnouncements | getMembership =>
                           simp [Outcomes.one] at hresult0
@@ -11567,7 +11563,7 @@ theorem reachable_store_request_sender
                             · simp [Outcomes.one] at hresult'
                               subst result
                               contradiction
-                      | armTimer _ | deleteTimer _ | deleteTimers _
+                      | armTimer _ | deleteTimers _
                       | listTimers _
                       | announce _ | listAnnouncements | getMembership =>
                           simp [Outcomes.one] at hresult'
@@ -13407,11 +13403,6 @@ theorem simulate_store_process
                     Outcomes.one]) rfl rfl rfl
                   (by simp) (by simp) (by simp)
           | armTimer timer =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
-              subst result
-              exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl
-                (by simp) (by simp) (by simp)
-          | deleteTimer timer =>
               simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact hinert (by simp [Concrete.step, Concrete.storeStep, Outcomes.one]) rfl rfl rfl

@@ -191,11 +191,6 @@ def storeStep {S : Type} (wrap : Store → S) (config : Config) (store : Store)
         state := wrap { store with timers := store.timers.arm timer }
         send := [(sender, .storeReply { op, payload := .done })]
       }
-  | .receive sender (.storeRequest { op, payload := .deleteTimer timer }) =>
-      Outcomes.one {
-        state := wrap { store with timers := store.timers.delete timer }
-        send := [(sender, .storeReply { op, payload := .done })]
-      }
   | .receive sender (.storeRequest { op, payload := .deleteTimers timers }) =>
       Outcomes.one {
         state := wrap {

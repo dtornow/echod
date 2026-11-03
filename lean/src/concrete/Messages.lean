@@ -74,7 +74,6 @@ inductive StoreRequest where
   | put (key : DocumentKey) (document : Document key)
       (expectedVersion : Option Version)
   | armTimer (key : TimerKey)
-  | deleteTimer (key : TimerKey)
   | deleteTimers (keys : List TimerKey)
   | listTimers (through : Time)
   | announce (announcement : Announcement)

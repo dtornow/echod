@@ -381,21 +381,4 @@ def WorkItem.key : WorkItem → DocumentKey
 def WorkflowEntry.key (entry : WorkflowEntry) : DocumentKey :=
   .origin entry.request.id.origin
 
-def State.originDocument (state : State) (origin : String) :
-    OriginDocument origin :=
-  state.store.read (.origin origin)
-
-def State.scheduleDocument (state : State) (id : ServerModel.Ident) :
-    ScheduleDocument id :=
-  state.store.read (.schedule id)
-
-def State.withOrigin (state : State) (origin : String)
-    (document : OriginDocument origin) : State :=
-  { state with store := state.store.write (.origin origin) document }
-
-def State.withSchedule (state : State) (schedule : Schedule) : State :=
-  { state with
-    store := state.store.write (.schedule schedule.id)
-      (some (ScheduleData.ofSchedule schedule)) }
-
 end Resonate
