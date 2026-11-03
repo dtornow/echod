@@ -1,0 +1,9 @@
+[package]
+name = "claude-quickjs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rquickjs = { version = "0.14.0", features = ["loader"] }
