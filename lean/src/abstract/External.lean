@@ -83,16 +83,26 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
     return { status := 400 }
   match ← readObject action.id now with
   | none =>
-      let o ← createPromiseAt action.id action.timeoutAt now action.param action.tags
-      if o.promise.state == .pending then
+      if action.timeoutAt > now then
+        let p : PromiseObject :=
+          { state := .pending, param := action.param, tags := action.tags,
+            timeoutAt := action.timeoutAt, createdAt := now }
         let t : TaskObject :=
           { state := .acquired, version := 1, ttl := some req.ttl,
             pid := some req.pid, leaseTimeoutAt := some (now + req.ttl) }
+        setPromise action.id p
         setTask action.id t
         return { status := 200, task := some (t.toRecord action.id),
-                 promise := some (o.promise.toRecord action.id) }
-      return { status := 200, task := o.task.map (·.toRecord action.id),
-               promise := some (o.promise.toRecord action.id) }
+                 promise := some (p.toRecord action.id) }
+      let p : PromiseObject :=
+        { state := .rejectedTimedout, param := action.param, tags := action.tags,
+          timeoutAt := action.timeoutAt, createdAt := action.timeoutAt,
+          settledAt := some action.timeoutAt }
+      let t : TaskObject := { state := .fulfilled, version := 0 }
+      setPromise action.id p
+      setTask action.id t
+      return { status := 200, task := some (t.toRecord action.id),
+               promise := some (p.toRecord action.id) }
   | some o =>
       if o.promise.otype != .runnable then return { status := 422 }
       match o.task with

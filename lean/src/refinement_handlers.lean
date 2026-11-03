@@ -304,7 +304,7 @@ theorem setPromise_sim (id : Ident) (promise : PromiseObject) :
   | none =>
       rw [hfind] at hget
       simp only [Option.map_none] at hget
-      simp only [Store.setPromise, hget]
+      simp only [Store.setPromise, Store.setObject, hget]
       refine same_write_origin rfl ?_ ?_
       · rw [read_upsert_same _ _ _ rfl]
         simp [toOriginRow?_mk]
@@ -318,15 +318,14 @@ theorem setPromise_sim (id : Ident) (promise : PromiseObject) :
       have hid : (Object.ofOrigin existing).id = id := by
         cases id
         simp [Object.ofOrigin, hsuffix]
-      simp only [Store.setPromise, hget]
+      simp only [Store.setPromise, Store.setObject, hget, hid]
       refine same_write_origin rfl ?_ ?_
       · exact (read_upsert_same store
-          { id := (Object.ofOrigin existing).id, promise := promise, task := existing.task }
-          id hid).trans (by simp [Object.toOriginRow?, Object.ofOrigin, hsuffix])
+          { id, promise, task := existing.task } id rfl).trans
+          (by simp [Object.toOriginRow?, hsuffix])
       · intro other hother
         exact read_upsert_other store
-          { id := (Object.ofOrigin existing).id, promise := promise, task := existing.task }
-          id hid hother
+          { id, promise, task := (Object.ofOrigin existing).task } id rfl hother
 
 theorem setObject_sim {origin : String} (row : OriginObject origin) :
     Sim (.origin origin) Eq (Abstract.setObject (Object.ofOrigin row))
@@ -426,6 +425,25 @@ theorem getSchedule_eq_read (store : Store) (id : Ident) :
     store.getSchedule id = (store.read (.schedule id)).map ScheduleData.toSchedule :=
   (scheduleAt_go_find id store.schedules).symm
 
+theorem Store.setSchedule_same (store : Store) (schedule : Schedule) :
+    Same (store.setSchedule schedule)
+      (store.write (.schedule schedule.id) (some (ScheduleData.ofSchedule schedule))) := by
+  intro key
+  by_cases hkey : key = .schedule schedule.id
+  · subst hkey
+    rw [Store.read_write_same]
+    simp only [Store.setSchedule, Store.read, Store.scheduleAt]
+    rw [Store.scheduleAt.go, dif_pos rfl]
+  · rw [Store.read_write_other _ _ _ _ hkey]
+    cases key with
+    | origin origin => rfl
+    | schedule other =>
+        have hother : other ≠ schedule.id := fun h => hkey (by rw [h])
+        have hne : ¬ schedule.id = other := fun h => hother h.symm
+        simp only [Store.setSchedule, Store.read, Store.scheduleAt]
+        rw [Store.scheduleAt.go, dif_neg hne,
+          scheduleAt_go_filter_other _ _ hother]
+
 theorem getSchedule_sim (id : Ident) :
     Sim (.schedule id) Eq (Abstract.getSchedule id)
       (Concrete.Decision.getSchedule (id := id)) := by
@@ -440,14 +458,9 @@ theorem setSchedule_sim (id : Ident) (schedule : Schedule) (h : schedule.id = id
   subst h
   intro env store
   refine ⟨rfl, ?_, rfl⟩
-  have : store.setSchedule schedule =
-      store.write (.schedule schedule.id)
-        (some (ScheduleData.ofSchedule schedule)) := by
-    simp [Store.setSchedule, Store.write, ScheduleData.toSchedule,
-      ScheduleData.ofSchedule]
   simp only [Abstract.setSchedule, Concrete.Decision.setScheduleValue,
-    Concrete.Decision.setSchedule, Concrete.Decision.set, documentSet, this]
-  exact Same.refl _
+    Concrete.Decision.setSchedule, Concrete.Decision.set, documentSet]
+  exact Store.setSchedule_same store schedule
 
 theorem deleteSchedule_sim (id : Ident) :
     Sim (.schedule id) Eq (Abstract.deleteSchedule id)
@@ -637,20 +650,6 @@ theorem Abstract.ite_bind (p : Prop) [Decidable p] (x y : Abstract.Handler α)
     (f : α → Abstract.Handler β) :
     (if p then x else y) >>= f = if p then x >>= f else y >>= f := by
   split <;> rfl
-
-theorem Store.setTask_setTask (store : Store) (id : Ident) (first second : TaskObject) :
-    (store.setTask id first).setTask id second = store.setTask id second := by
-  simp only [Store.setTask, List.map_map, Store.mk.injEq, and_true]
-  apply List.map_congr_left
-  intro object _
-  by_cases h : object.id = id <;> simp [h]
-
-theorem Abstract.setTask_setTask (id : Ident) (first second : TaskObject)
-    (f : Unit → Abstract.Handler α) :
-    (Abstract.setTask id first >>= fun _ => Abstract.setTask id second >>= f) =
-      Abstract.setTask id second >>= f := by
-  funext env store
-  simp only [bind, Abstract.setTask, Store.setTask_setTask, List.nil_append]
 
 theorem Concrete.pure_bind {key : DocumentKey} (u : α) (f : α → DocumentHandler key β) :
     (Pure.pure u : DocumentHandler key α) >>= f = f u := by
@@ -847,34 +846,11 @@ theorem taskContinue_sim (req : TaskContinueReq) (now : Nat) :
   unfold Abstract.taskContinue Concrete.Decision.taskContinue
   sim
 
-theorem Tags.not_timer_of_runnable {tags : Tags} (hrun : tags.otype = .runnable)
-    (htimer : tags.timerTargeted = false) : tags.isTimer = false := by
-  have htarget : tags.has "resonate:target" = true := by
-    unfold Tags.otype at hrun
-    split at hrun
-    · assumption
-    · split at hrun <;> cases hrun
-  simpa [Tags.timerTargeted, htarget] using htimer
-
 theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
     Sim (.origin req.action.id.origin) Eq (Abstract.taskCreate req now)
       (Concrete.Decision.taskCreate req now) := by
   unfold Abstract.taskCreate Concrete.Decision.taskCreate
   sim
-  rename_i hguard _ _ _
-  simp only [not_or, bne_iff_ne, ne_eq, Decidable.not_not, Bool.not_eq_true] at hguard
-  obtain ⟨hrun, htimer⟩ := hguard
-  have hnotimer := Tags.not_timer_of_runnable hrun htimer
-  unfold Abstract.createPromiseAt
-  rw [Abstract.ite_bind]
-  refine Sim.ite _ (fun _ => ?_) (fun _ => ?_)
-  · simp only [Abstract.bind_assoc, Abstract.pure_bind, Abstract.ite_bind, AbstractModel.PromiseObject.otype, hrun,
-      beq_self_eq_true, ↓reduceIte, Abstract.setTask_setTask]
-    sim
-  · simp only [Abstract.bind_assoc, Abstract.pure_bind, Abstract.ite_bind, AbstractModel.PromiseObject.otype, hrun,
-      hnotimer, Bool.false_eq_true, beq_self_eq_true, ↓reduceIte,
-      show (PromiseState.rejectedTimedout == PromiseState.pending) = false from rfl]
-    sim
 
 theorem Sim.bind_left {key : DocumentKey} {R : α → β → Prop} {S : γ → δ → Prop}
     {ma : Abstract.Handler α} {u : β} {fa : α → Abstract.Handler γ}

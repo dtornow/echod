@@ -19,29 +19,32 @@ def Object.project (object : Object) (now : Nat) : Object :=
 def Store.getObject (store : Store) (id : Ident) : Option Object :=
   store.objects.find? (·.id == id)
 
+/-- Write an object, replacing the one with its id. -/
+def Store.setObject (store : Store) (object : Object) : Store :=
+  { store with objects := object :: store.objects.filter (·.id != object.id) }
+
 /-- Write the promise of `id`, creating the object if it is new. -/
 def Store.setPromise (store : Store) (id : Ident) (promise : PromiseObject) :
     Store :=
-  let object : Object :=
-    match store.getObject id with
-    | some existing => { existing with promise }
-    | none => { id, promise }
-  { store with objects := object :: store.objects.filter (·.id != id) }
+  store.setObject
+    (match store.getObject id with
+     | some existing => { existing with promise }
+     | none => { id, promise })
 
+/-- Write the task of `id`. A task belongs to a promise, so an id with no
+object is left alone. -/
 def Store.setTask (store : Store) (id : Ident) (task : TaskObject) : Store :=
   { store with
     objects := store.objects.map fun object =>
       if object.id == id then { object with task := some task } else object }
 
-def Store.setObject (store : Store) (object : Object) : Store :=
-  { store with objects := object :: store.objects.filter (·.id != object.id) }
-
 def Store.getSchedule (store : Store) (id : Ident) : Option Schedule :=
   store.schedules.find? (·.id == id)
 
+/-- Write a schedule, replacing the one with its id. -/
 def Store.setSchedule (store : Store) (schedule : Schedule) : Store :=
   { store with
-    schedules := store.schedules.filter (·.id != schedule.id) ++ [schedule] }
+    schedules := schedule :: store.schedules.filter (·.id != schedule.id) }
 
 def Store.deleteSchedule (store : Store) (id : Ident) : Store :=
   { store with schedules := store.schedules.filter (·.id != id) }
