@@ -1,8 +1,5 @@
-//! Complete one-process abstract Resonate model.
-//!
-//! Requests atomically run the complete Resonate handler. Timeout events run
-//! any enabled internal item: promise deadlines, task leases, callbacks,
-//! retries, listener notification, and schedule fire/advance work.
+//! One process. A request runs its handler. A timeout runs one queued
+//! occurrence or one step the handler will perform, or it does nothing.
 
 use vstd::prelude::*;
 

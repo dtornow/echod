@@ -1,5 +1,5 @@
-//! One handler per due item. A deadline, a callback, a listener, a lease, a
-//! retry, a schedule, or one queued occurrence.
+//! One handler per internal step. The handler does nothing when the step is
+//! not due. A deadline writes the projected promise back.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -10,7 +10,7 @@ use echod_types::{PromiseState, TaskState, Value};
 use super::super::collections::*;
 
 use super::{
-    contains, copy_server, delay_of, expand, has_target, is_timer, mk, next_cron, next_offer, prec, settle, Dispatch, Id, InOut, Promise, Resonate, Server, Task, Time, Work,
+    contains, copy_server, delay_of, expand, has_target, is_timer, mk, next_cron, next_offer, prec, project_promise, project_task, Dispatch, Id, InOut, Promise, Resonate, Server, Task, Time, Work,
 };
 
 verus! {
@@ -23,51 +23,52 @@ impl Resonate {
         InOut { next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), pending: true }
     }
 
+    /// Write the promise back as a read at `now` sees it.
     pub(super) fn promise_timeout(&self, id: &Id, s: &Server, now: Time) -> (r: InOut) {
-        let found = match s.promises.get(id) {
-            Some(p) => Some(copy(p)),
-            None => None,
-        };
-        let Some(p) = found else { return self.noop(s) };
-        if !p.live() || now < p.timeout_at {
+        let Some(stored) = s.promises.get(id) else { return self.noop(s) };
+        let q = project_promise(stored, now);
+        if q.state == stored.state && q.settled_at == stored.settled_at {
             return self.noop(s);
         }
-        let timer = is_timer(&p.tags);
-        let state = if timer { PromiseState::Resolved } else { PromiseState::RejectedTimedout };
         let mut n = copy_server(s);
-        settle(&mut n, id, state, &Value::empty(), p.timeout_at);
-        let mark = if timer { mk("timer promise resolved") } else { mk("promise timed out") };
+        if let Some(t) = s.tasks.get(id) {
+            n.tasks.insert(id.clone(), project_task(&q, t));
+        }
+        n.promises.insert(id.clone(), q.clone());
+        let mark = if is_timer(&q.tags) { mk("timer promise resolved") } else { mk("promise timed out") };
         InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mark], pending: false }
     }
 
     /// A suspended task resumes when a promise it awaits has settled; any
-    /// other task is told. The callback is spent either way.
-    pub(super) fn callback(&self, awaited: &Id, awaiter: &Id, s: &Server, _now: Time) -> (r: InOut) {
-        let due = match s.promises.get(awaited) {
-            Some(p) => !p.live() && p.callbacks.contains(awaiter),
-            None => false,
-        };
-        if !due {
+    /// other task is told. The callback is spent either way. The awaited
+    /// promise is written as it reads, with the callback removed.
+    pub(super) fn callback(&self, awaited: &Id, awaiter: &Id, s: &Server, now: Time) -> (r: InOut) {
+        let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
+        let projected = project_promise(stored, now);
+        if projected.live() || !projected.callbacks.contains(awaiter) {
             return self.noop(s);
         }
-        let since = match s.promises.get(awaited) {
-            Some(p) => match p.settled_at {
-                Some(t) => t,
-                None => 0,
-            },
+        let since = match projected.settled_at {
+            Some(t) => t,
             None => 0,
         };
         let mut n = copy_server(s);
         let mut marks = Vec::new();
-        if let Some(p) = n.promises.get(awaited) {
-            let mut q = copy(p);
-            q.callbacks.remove(awaiter);
-            n.promises.insert(awaited.clone(), q);
+        let mut q = projected;
+        q.callbacks.remove(awaiter);
+        if let Some(t) = s.tasks.get(awaited) {
+            n.tasks.insert(awaited.clone(), project_task(&q, t));
         }
-        if let Some(t) = n.tasks.get(awaiter) {
+        n.promises.insert(awaited.clone(), q);
+        if let Some(stored_task) = s.tasks.get(awaiter) {
+            let awaiter_promise = s.promises.get(awaiter).map(|w| project_promise(w, now));
+            let t = match &awaiter_promise {
+                Some(w) => project_task(w, stored_task),
+                None => copy(stored_task),
+            };
             match t.state {
                 TaskState::Suspended => {
-                    let mut u = copy(t);
+                    let mut u = t;
                     u.state = TaskState::Pending;
                     u.resumes = vec![awaited.clone()];
                     u.retry_at = Some(since);
@@ -77,7 +78,7 @@ impl Resonate {
                 TaskState::Fulfilled => {},
                 _ => {
                     if !contains(&t.resumes, awaited) {
-                        let mut u = copy(t);
+                        let mut u = t;
                         u.resumes.push(awaited.clone());
                         n.tasks.insert(awaiter.clone(), u);
                         marks.push(mk("resume noted on a running task"));
@@ -88,30 +89,32 @@ impl Resonate {
         InOut { next: n, work: Vec::new(), send: Vec::new(), marks, pending: false }
     }
 
-    pub(super) fn listener(&self, awaited: &Id, address: &str, s: &Server, _now: Time) -> (r: InOut) {
-        let found = match s.promises.get(awaited) {
-            Some(p) => Some(copy(p)),
-            None => None,
-        };
-        let Some(p) = found else { return self.noop(s) };
+    pub(super) fn listener(&self, awaited: &Id, address: &str, s: &Server, now: Time) -> (r: InOut) {
+        let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
+        let projected = project_promise(stored, now);
         let addr = address.to_string();
-        if p.live() || !p.listeners.contains(&addr) {
+        if projected.live() || !projected.listeners.contains(&addr) {
             return self.noop(s);
         }
-        let rec = prec(awaited, &p);
+        let rec = prec(awaited, &projected);
         let mut n = copy_server(s);
-        if let Some(q0) = n.promises.get(awaited) {
-            let mut q = copy(q0);
-            q.listeners.remove(&addr);
-            n.promises.insert(awaited.clone(), q);
+        let mut q = projected;
+        q.listeners.remove(&addr);
+        if let Some(t) = s.tasks.get(awaited) {
+            n.tasks.insert(awaited.clone(), project_task(&q, t));
         }
+        n.promises.insert(awaited.clone(), q);
         let send = vec![Dispatch::Unblock { address: addr, promise: rec }];
         InOut { next: n, work: Vec::new(), send, marks: vec![mk("listeners told")], pending: false }
     }
 
     pub(super) fn lease(&self, id: &Id, s: &Server, now: Time) -> (r: InOut) {
         let Some(t) = s.tasks.get(id) else { return self.noop(s) };
-        if t.state != TaskState::Acquired || now < t.lease_expires() {
+        let pending = match s.promises.get(id) {
+            Some(p) => project_promise(p, now).live(),
+            None => false,
+        };
+        if t.state != TaskState::Acquired || now < t.lease_expires() || !pending {
             return self.noop(s);
         }
         let mut n = copy_server(s);
@@ -123,7 +126,7 @@ impl Resonate {
 
     pub(super) fn retry(&self, id: &Id, s: &Server, now: Time) -> (r: InOut) {
         let live = match s.promises.get(id) {
-            Some(p) => p.live(),
+            Some(p) => project_promise(p, now).live(),
             None => false,
         };
         let Some(t) = s.tasks.get(id) else { return self.noop(s) };

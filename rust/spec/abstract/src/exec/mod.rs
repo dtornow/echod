@@ -10,16 +10,16 @@
 //! How the Lean specification's shape becomes a checker model:
 //! - Time is the system's clock, `now`, which the checker keeps and passes to
 //!   every step. The spec reads it and never moves it.
-//! - The state is the three maps. A timeout looks at them and runs one due
-//!   item: a deadline, a callback, a listener, a lease, a retry, or a schedule
-//!   whose `next_run_at` has passed. Nothing is armed in advance.
-//! - The only queue is the occurrence list a schedule step appends. That step
-//!   records the run and names the promise; a later step creates the promise.
+//! - The state is the three maps. A read projects: a pending promise past its
+//!   deadline is settled at that deadline, and the task of a settled promise
+//!   is fulfilled. The deadline step writes that projection back.
+//! - A timeout runs one queued occurrence, or one step whose handler changes
+//!   something. The handler is the guard. An object offers its deadline, each
+//!   callback, each listener, its lease, and its retry; a schedule offers its
+//!   next run. Nothing is armed in advance.
+//! - The only queue is the occurrence list. A schedule step records one run
+//!   and appends that occurrence; a later step creates the promise.
 //!   `next_run_at` is `nextCron cron now`, computed in the handler.
-//! - A pending promise is live until its deadline item runs, and an acquired
-//!   task holds its lease until its lease item runs. Lean projects both on
-//!   read; the checker runs the due item before the read, and the two agree
-//!   on everything a client can see.
 //! - A task's offers are on a grid anchored at the instant it came to be
 //!   pending (Lean's `nextOffer`). The dial is `Resonate::retry_timeout`.
 //! - Lean's `nextCron` and `expand` are trusted (`collections.rs`): the cron
@@ -115,8 +115,8 @@ impl Promise {
         has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)
     }
 
-    /// Pending and before its deadline. The deadline is a timer that fires first
-    /// at its instant, so a pending promise is always live.
+    /// Stored state is pending. A read past the deadline is settled; see
+    /// `project_promise`.
     pub fn live(&self) -> (r: bool)
         ensures
             r == (self.state == PromiseState::Pending),
@@ -191,6 +191,30 @@ impl Task {
             Some(ttl) => self.acquired_at.saturating_add(ttl),
             None => self.acquired_at,
         }
+    }
+}
+
+/// The promise as a read at `now` sees it. A pending promise past its deadline
+/// is settled at the deadline. Callbacks and listeners stay until their steps.
+fn project_promise(p: &Promise, now: Time) -> (r: Promise) {
+    if p.state == PromiseState::Pending && now >= p.timeout_at {
+        let mut q = copy(p);
+        q.state = if is_timer(&p.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout };
+        q.settled_at = Some(p.timeout_at);
+        q
+    } else {
+        copy(p)
+    }
+}
+
+/// The task as its promise reads. A settled promise fulfills the task.
+fn project_task(promise: &Promise, t: &Task) -> (r: Task) {
+    if promise.state != PromiseState::Pending && t.state != TaskState::Fulfilled {
+        let mut u = copy(t);
+        u.fulfill();
+        u
+    } else {
+        copy(t)
     }
 }
 

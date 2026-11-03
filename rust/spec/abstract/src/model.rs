@@ -1,10 +1,10 @@
 //! The glue between the verified model and the checker: plain Rust, outside
 //! Verus. It says which keys a request touches and which origin a key belongs
-//! to, and holds the cron engine the spec trusts. None of it decides what the
-//! server does: the `Model` impl itself is verified, in `spec.rs`.
+//! to, and holds the cron engine the spec trusts. Which steps can run is the
+//! handlers' decision: `due` asks them.
 
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
-use echod_types::{Request, TaskFenceAction, TaskState};
+use echod_types::{Request, TaskFenceAction};
 
 use super::exec::*;
 
@@ -188,41 +188,35 @@ impl Partitioned for Resonate {
     }
 }
 
-/// What the maps and the clock make due, one item each. Occurrences are not
-/// here: a schedule step queues those, and the queue is the only one.
-pub fn due(_m: &Resonate, s: &Server, now: Time) -> Vec<Sched<Work>> {
+/// The steps an object or schedule offers, keeping those the handler will
+/// perform. Occurrences are not here: a schedule step queues those, and the
+/// queue is the only one. The handler is the guard.
+pub fn due(m: &Resonate, s: &Server, now: Time) -> Vec<Sched<Work>> {
     let mut v = Vec::new();
     for (id, p) in s.promises.iter() {
-        if p.live() && now >= p.timeout_at {
-            v.push(Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        offer(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        for awaiter in p.callbacks.to_vec() {
+            offer(m, s, now, &mut v, Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
         }
-        if !p.live() {
-            for awaiter in p.callbacks.to_vec() {
-                v.push(Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
-            }
-            for address in p.listeners.to_vec() {
-                v.push(Sched::Later(Work::Listener { awaited: id.clone(), address }));
-            }
+        for address in p.listeners.to_vec() {
+            offer(m, s, now, &mut v, Sched::Later(Work::Listener { awaited: id.clone(), address }));
         }
     }
     for (id, t) in s.tasks.iter() {
-        if t.state == TaskState::Acquired && now >= t.lease_expires() {
-            v.push(Sched::Timer(t.lease_expires(), Work::Lease(id.clone())));
-        }
-        if t.state == TaskState::Pending {
-            if let Some(r) = t.retry_at {
-                let live = s.promises.get(id).is_some_and(|p| p.live());
-                if r <= now && live {
-                    v.push(Sched::Timer(r, Work::Retry(id.clone())));
-                }
-            }
+        offer(m, s, now, &mut v, Sched::Timer(t.lease_expires(), Work::Lease(id.clone())));
+        if let Some(r) = t.retry_at {
+            offer(m, s, now, &mut v, Sched::Timer(r, Work::Retry(id.clone())));
         }
     }
     for (id, c) in s.schedules.iter() {
-        if c.next_run_at <= now {
-            let promise = expand(&c.promise_id, id, c.next_run_at);
-            v.push(Sched::Timer(c.next_run_at, Work::Schedule { id: id.clone(), promise }));
-        }
+        let promise = expand(&c.promise_id, id, c.next_run_at);
+        offer(m, s, now, &mut v, Sched::Timer(c.next_run_at, Work::Schedule { id: id.clone(), promise }));
     }
     v
+}
+
+fn offer(m: &Resonate, s: &Server, now: Time, v: &mut Vec<Sched<Work>>, step: Sched<Work>) {
+    if !m.run_work(step.req(), s, now).pending {
+        v.push(step);
+    }
 }
