@@ -6,4 +6,4 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rquickjs = { version = "0.14.0", features = ["loader"] }
+rquickjs = "0.14.0"

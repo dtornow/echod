@@ -1,103 +1,50 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
-use rquickjs::{
-    loader::{ImportAttributes, Loader, Resolver},
-    module::Declared,
-    CatchResultExt, Context, Ctx, Error, Module, Result as JsResult, Runtime,
-};
+use rquickjs::{CatchResultExt, Context, Module, Runtime};
 
-const SDK_MODULE: &str = "@anthropic-ai/claude-agent-sdk";
+const SDK_MODULE: &str = "@anthropic-ai/sdk";
 const ENTRY_MODULE: &str = "claude-quickjs-chat.mjs";
 
-struct AgentSdkResolver;
-
-impl Resolver for AgentSdkResolver {
-    fn resolve<'js>(
-        &mut self,
-        _ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
-    ) -> JsResult<String> {
-        if name == SDK_MODULE {
-            return Ok(name.to_owned());
-        }
-
-        Err(Error::new_resolving_message(
-            base,
-            name,
-            format!(
-                "QuickJS host capability missing: `{name}`. \
-                 Only `{SDK_MODULE}` is mounted in this sandbox."
-            ),
-        ))
-    }
-}
-
-struct AgentSdkLoader {
-    source: Vec<u8>,
-}
-
-impl Loader for AgentSdkLoader {
-    fn load<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
-    ) -> JsResult<Module<'js, Declared>> {
-        if name != SDK_MODULE {
-            return Err(Error::new_loading(name));
-        }
-
-        Module::declare(ctx.clone(), name, self.source.clone())
-    }
-}
-
-fn sdk_path() -> PathBuf {
+fn bundle_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("node_modules")
-        .join("@anthropic-ai")
-        .join("claude-agent-sdk")
-        .join("sdk.mjs")
+        .join("dist")
+        .join("chat.mjs")
 }
 
 fn run(prompt: &str) -> Result<(), String> {
-    let path = sdk_path();
-    let sdk_source = fs::read(&path).map_err(|error| {
+    let path = bundle_path();
+    let bundle = fs::read(&path).map_err(|error| {
         format!(
             "could not read {}: {error}\n\
-             Install the pinned JavaScript package with:\n\
-             (cd {} && npm ci)",
+             Install and bundle the pinned in-process SDK with:\n\
+             (cd {} && npm ci && npm run bundle)",
             path.display(),
             env!("CARGO_MANIFEST_DIR")
         )
     })?;
 
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
-    runtime.set_loader(AgentSdkResolver, AgentSdkLoader { source: sdk_source });
     let context = Context::full(&runtime).map_err(|error| error.to_string())?;
 
     context.with(|ctx| {
+        ctx.eval::<(), _>(
+            "globalThis.console = { debug() {}, info() {}, log() {}, warn() {}, error() {} };",
+        )
+        .catch(&ctx)
+        .map_err(|error| error.to_string())?;
         ctx.globals()
             .set("__claude_prompt", prompt)
             .catch(&ctx)
             .map_err(|error| error.to_string())?;
+        ctx.globals()
+            .set(
+                "__anthropic_api_key",
+                env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "sandbox-probe".to_owned()),
+            )
+            .catch(&ctx)
+            .map_err(|error| error.to_string())?;
 
-        let source = format!(
-            r#"
-                import {{ query }} from "{SDK_MODULE}";
-
-                globalThis.__claude_messages = [];
-                for await (const message of query({{
-                    prompt: globalThis.__claude_prompt,
-                    options: {{ maxTurns: 1 }}
-                }})) {{
-                    globalThis.__claude_messages.push(JSON.stringify(message));
-                }}
-            "#
-        );
-
-        let evaluation = Module::evaluate(ctx.clone(), ENTRY_MODULE, source)
+        let evaluation = Module::evaluate(ctx.clone(), ENTRY_MODULE, bundle)
             .catch(&ctx)
             .map_err(|error| error.to_string())?;
         evaluation
@@ -105,11 +52,11 @@ fn run(prompt: &str) -> Result<(), String> {
             .catch(&ctx)
             .map_err(|error| error.to_string())?;
 
-        let messages: String = ctx
-            .eval("JSON.stringify(globalThis.__claude_messages)")
+        let result: String = ctx
+            .eval("globalThis.__claude_result")
             .catch(&ctx)
             .map_err(|error| error.to_string())?;
-        println!("{messages}");
+        println!("{result}");
         Ok(())
     })
 }
@@ -127,9 +74,8 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("QuickJS stopped before a chat could start:\n{error}");
             eprintln!(
-                "\nExpected boundary: the Agent SDK's Node entry point imports Node built-ins \
-                 and later spawns the Claude Code CLI. Bare QuickJS provides neither capability, \
-                 so this happens before any network request."
+                "\nExpected boundary: the API SDK and its tool runner execute in this QuickJS \
+                 process, but bare QuickJS has no HTTP host capability."
             );
             ExitCode::FAILURE
         }
@@ -141,22 +87,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_mounts_only_the_agent_sdk() {
+    fn bare_quickjs_has_no_fetch_capability() {
         let runtime = Runtime::new().unwrap();
         let context = Context::full(&runtime).unwrap();
-        let mut resolver = AgentSdkResolver;
 
         context.with(|ctx| {
-            assert_eq!(
-                resolver
-                    .resolve(&ctx, ENTRY_MODULE, SDK_MODULE, None)
-                    .unwrap(),
-                SDK_MODULE
-            );
-            assert!(resolver
-                .resolve(&ctx, SDK_MODULE, "node:module", None)
-                .unwrap_err()
-                .is_resolving());
+            let fetch_type: String = ctx.eval("typeof globalThis.fetch").unwrap();
+            assert_eq!(fetch_type, "undefined");
         });
     }
 }
