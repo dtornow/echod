@@ -129,7 +129,6 @@ def taskAcquire (req : TaskAcquireReq) (now : Nat) : Handler TaskAcquireRes := d
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .pending then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       let next :=
         { t with
@@ -151,7 +150,6 @@ def taskFence (req : TaskFenceReq) (now : Nat) : Handler TaskFenceRes := do
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       match req.action with
       | .create action =>
@@ -165,8 +163,7 @@ def heartbeatOne (pid : String) (ref : TaskRef) (now : Nat) : Handler Unit := do
   match ← readTask ref.id now with
   | none => pure ()
   | some (o, t) =>
-      if t.state == .acquired ∧ t.version == ref.version ∧
-          t.pid == some pid ∧ o.promise.state == .pending then
+      if t.state == .acquired ∧ t.version == ref.version ∧ t.pid == some pid then
         setObject { o with task := some { t with leaseTimeoutAt := some (now + t.ttl.getD 0) } }
 
 /-- Every task in one heartbeat must share an origin. -/
@@ -199,7 +196,6 @@ def taskSuspend (req : TaskSuspendReq) (now : Nat) : Handler TaskSuspendRes := d
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       let awaited ← req.actions.mapM (readObject ·.awaited now)
       if !awaited.all (·.any (·.promise.otype.awaitable)) then
@@ -225,7 +221,6 @@ def taskFulfill (req : TaskFulfillReq) (now : Nat) : Handler TaskFulfillRes := d
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       let p :=
         { o.promise with
@@ -240,7 +235,6 @@ def taskRelease (req : TaskReleaseReq) (now : Nat) : Handler TaskReleaseRes := d
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
       setObject { o with
         task := some { t with
@@ -271,7 +265,6 @@ def taskContinue (req : TaskContinueReq) (now : Nat) : Handler TaskContinueRes :
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .halted then return { status := 409 }
-      if o.promise.state != .pending then return { status := 409 }
       setObject { o with task := some { t with state := .pending, retryTimeoutAt := some now } }
       return { status := 200 }
 

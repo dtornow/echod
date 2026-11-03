@@ -206,6 +206,30 @@ theorem Sim.frame {key : DocumentKey} {P : Document key → Prop} {R : α → β
   obtain ⟨hr, hq, hrest⟩ := hs env store document hunique hdoc hp
   exact ⟨hr, ⟨hq, hF env document hf⟩, hrest⟩
 
+/-- A concrete branch the precondition rules out. -/
+theorem Sim.ite_right {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
+    {Q : β → Document key → Prop} (p : Prop) [Decidable p]
+    {a : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
+    (hp : ∀ d, P d → ¬ p) (h : Sim key P R Q a c₂) :
+    Sim key P R Q a (if p then c₁ else c₂) := by
+  intro env store document hunique hdoc hpre
+  rw [if_neg (hp document hpre)]
+  exact h env store document hunique hdoc hpre
+
+/-- Two branches on conditions the precondition makes equivalent. -/
+theorem Sim.ite_iff {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
+    {Q : β → Document key → Prop} (p q : Prop) [Decidable p] [Decidable q]
+    {a₁ a₂ : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
+    (hpq : ∀ d, P d → (p ↔ q))
+    (h₁ : p → Sim key P R Q a₁ c₁) (h₂ : ¬ p → Sim key P R Q a₂ c₂) :
+    Sim key P R Q (if p then a₁ else a₂) (if q then c₁ else c₂) := by
+  intro env store document hunique hdoc hpre
+  by_cases hp : p
+  · rw [if_pos hp, if_pos ((hpq document hpre).1 hp)]
+    exact h₁ hp env store document hunique hdoc hpre
+  · rw [if_neg hp, if_neg (fun hq => hp ((hpq document hpre).2 hq))]
+    exact h₂ hp env store document hunique hdoc hpre
+
 theorem Sim.ite {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
     {Q : β → Document key → Prop} (p : Prop) [Decidable p]
     {a₁ a₂ : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
@@ -634,6 +658,21 @@ theorem Fact.cases {origin s : String} {now : Nat} {promise : PromiseObject}
   simp only [OriginObject.project, OriginObject.mk.injEq] at hrow
   obtain ⟨rfl, rfl, rfl⟩ := hrow
   exact ⟨stored, current, hfind, rfl, rfl⟩
+
+/-- A read shows a task unfinished only while its promise is pending. -/
+theorem Fact.pending {origin s : String} {now : Nat} {promise : PromiseObject}
+    {task : TaskObject} {document : OriginDocument origin}
+    (h : Fact s now (some ⟨s, promise, some task⟩) document) :
+    promise.state = .pending ∨ task.state = .fulfilled := by
+  obtain ⟨stored, current, _, rfl, htask⟩ := h.cases
+  by_cases hp : (stored.project now).state = .pending
+  · exact Or.inl hp
+  · cases current with
+    | none => simp at htask
+    | some t =>
+        simp only [Option.map_some, Option.some.injEq] at htask
+        subst htask
+        exact Or.inr (task_project_state_of_settled hp)
 
 theorem readObject_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) → Prop} :
     Sim (.origin id.origin) P (ObjRel id.origin id.suffix)
@@ -1282,12 +1321,23 @@ macro "sim_fact" : tactic => `(tactic| first
   | exact fun _ h => h.2.2.1 _ rfl)
 
 /-- The new promise is settled when the read one was. -/
-macro "sim_state" : tactic => `(tactic| (intro; simp_all; done))
+macro "sim_state" : tactic => `(tactic| (intro; simp_all [PromiseState.settable]; done))
 
 /-- The read promise is the stored one. -/
 macro "sim_pending" : tactic => `(tactic| first
   | (apply Or.inl; simp_all; done)
   | (refine Or.inr ⟨_, rfl, ?_⟩; simp_all; done))
+
+/-- Close a side condition with what the task read showed: its promise is
+pending or the task is fulfilled. -/
+macro "sim_read" : tactic => `(tactic| (
+  intro d hd
+  first
+    | have hread := Fact.pending (hd.1 _ rfl)
+    | have hread := Fact.pending (hd.2.1 _ rfl)
+    | have hread := Fact.pending hd.1
+    | have hread := Fact.pending hd
+  rcases hread with hread | hread <;> simp_all <;> done))
 
 def lastString : Lean.Name → String
   | .str _ s => s
@@ -1375,6 +1425,10 @@ elab "sim_dispatch" : tactic => withMainContext do
 
 macro "sim_step" : tactic => `(tactic| first
   | sim_dispatch
+  | (refine Sim.ite_right _ ?_ ?_
+     next => sim_read)
+  | (refine Sim.ite_iff _ _ ?_ (fun _ => ?_) (fun _ => ?_)
+     next => sim_read)
   | dsimp only [Object.ofOrigin]
   | simp only [Concrete.pure_bind, Abstract.pure_bind, Option.isNone_none,
       Option.isNone_some, Bool.false_eq_true, ↓reduceIte])

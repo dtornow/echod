@@ -61,8 +61,7 @@ def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
       match task.leaseTimeoutAt with
       | none => pure ()
       | some deadline =>
-          if task.state == .acquired ∧ deadline ≤ now ∧
-              object.promise.state == .pending then
+          if task.state == .acquired ∧ deadline ≤ now then
             setObject { object with
               task := some { task with
                 state := .pending
@@ -78,8 +77,7 @@ def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
       match task.retryTimeoutAt with
       | none => pure ()
       | some due =>
-          if task.state == .pending ∧ due ≤ now ∧
-              object.promise.state == .pending then
+          if task.state == .pending ∧ due ≤ now then
             let env ← ask
             setObject { object with
               task := some { task with retryTimeoutAt := some (now + env.config.retryTimeout) } }
