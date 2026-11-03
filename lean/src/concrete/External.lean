@@ -13,22 +13,14 @@ def promiseGet (req : PromiseGetReq) (now : Nat) :
   | some o =>
       return { status := 200, promise := some (o.promise.toRecord o.id) }
 
-def promiseCreateAt {origin : String} (req : PromiseCreateReq) (now : Nat) :
+def promiseCreate {origin : String} (req : PromiseCreateReq) (now : Nat) :
     Handler (.origin origin) PromiseCreateRes := do
   if req.tags.timerTargeted then
     return { status := 400, promise := none }
-  match ← readObject req.id.suffix now with
-  | some o =>
-      return { status := 200, promise := some (o.promise.toRecord o.id) }
-  | none =>
-      let o ← createPromiseAt req.id.suffix req.timeoutAt now req.param req.tags
-      return { status := 200, promise := some (o.promise.toRecord o.id) }
+  let o ← readOrCreate req now
+  return { status := 200, promise := some (o.promise.toRecord o.id) }
 
-def promiseCreate (req : PromiseCreateReq) (now : Nat) :
-    Handler (.origin req.id.origin) PromiseCreateRes :=
-  promiseCreateAt req now
-
-def promiseSettleAt {origin : String} (req : PromiseSettleReq) (now : Nat) :
+def promiseSettle {origin : String} (req : PromiseSettleReq) (now : Nat) :
     Handler (.origin origin) PromiseSettleRes := do
   if !req.state.settable then return { status := 400 }
   match ← readObject req.id.suffix now with
@@ -40,12 +32,8 @@ def promiseSettleAt {origin : String} (req : PromiseSettleReq) (now : Nat) :
           value := req.value
           settledAt := some now }
         setSettled o p
-        return { status := 200, promise := some (p.toRecord o.id) }
-      return { status := 200, promise := some (o.promise.toRecord o.id) }
-
-def promiseSettle (req : PromiseSettleReq) (now : Nat) :
-    Handler (.origin req.id.origin) PromiseSettleRes :=
-  promiseSettleAt req now
+        return { status := 200, promise := some (p.toRecord req.id) }
+      return { status := 200, promise := some (o.promise.toRecord req.id) }
 
 def promiseRegisterCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
     Handler (.origin req.awaited.origin) PromiseRegisterCallbackRes := do
@@ -61,7 +49,7 @@ def promiseRegisterCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
           if !awaited.promise.otype.awaitable then return { status := 422 }
           if awaited.promise.state == .pending &&
               awaiter.promise.state == .pending then
-            setPromise awaited.suffix (awaited.promise.addCallback req.awaiter)
+            setObject { awaited with promise := awaited.promise.addCallback req.awaiter }
           return { status := 200, promise := some (awaited.promise.toRecord awaited.id) }
 
 def promiseRegisterListener (req : PromiseRegisterListenerReq) (now : Nat) :
@@ -71,7 +59,7 @@ def promiseRegisterListener (req : PromiseRegisterListenerReq) (now : Nat) :
   | some awaited =>
       if !awaited.promise.otype.awaitable then return { status := 422 }
       if awaited.promise.state == .pending then
-        setPromise awaited.suffix (awaited.promise.addListener req.address)
+        setObject { awaited with promise := awaited.promise.addListener req.address }
       return { status := 200, promise := some (awaited.promise.toRecord awaited.id) }
 
 def promiseSearch (_req : PromiseSearchReq) (_now : Nat) :
@@ -90,55 +78,27 @@ def taskCreate (req : TaskCreateReq) (now : Nat) :
   let action := req.action
   if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
     return { status := 400 }
-  match ← readObject action.id.suffix now with
-  | none =>
-      if action.timeoutAt > now then
-        let p : PromiseObject :=
-          { state := .pending,
-            param := action.param,
-            tags := action.tags,
-            timeoutAt := action.timeoutAt,
-            createdAt := now }
-        setPromise action.id.suffix p
-        let t : TaskObject :=
-          { state := .acquired,
-            version := 1,
-            ttl := some req.ttl,
-            pid := some req.pid,
-            leaseTimeoutAt := some (now + req.ttl) }
-        setTask action.id.suffix t
-        return { status := 200, task := some (t.toRecord action.id), promise := some (p.toRecord action.id) }
-      else
-        let p : PromiseObject :=
-          { state := .rejectedTimedout,
-            param := action.param,
-            tags := action.tags,
-            timeoutAt := action.timeoutAt,
-            createdAt := action.timeoutAt,
-            settledAt := some action.timeoutAt }
-        setPromise action.id.suffix p
-        let t : TaskObject := { state := .fulfilled, version := 0 }
-        setTask action.id.suffix t
-        return { status := 200, task := some (t.toRecord action.id), promise := some (p.toRecord action.id) }
-  | some o =>
-      if o.promise.otype != .runnable then return { status := 422 }
-      match o.task with
-      | none => return { status := 409 }
-      | some t =>
-          if t.state == .fulfilled then
-            return { status := 200, task := some (t.toRecord o.id), promise := some (o.promise.toRecord o.id) }
-          else if t.state == .pending then
-            let next := { t with
-              state := .acquired
-              version := t.version + 1
-              ttl := some req.ttl
-              pid := some req.pid
-              leaseTimeoutAt := some (now + req.ttl)
-              retryTimeoutAt := none
-              resumes := [] }
-            setTask o.suffix next
-            return { status := 200, task := some (next.toRecord o.id), promise := some (o.promise.toRecord o.id) }
-          return { status := 409 }
+  let o ← readOrCreate action now
+  if o.promise.otype != .runnable then return { status := 422 }
+  match o.task with
+  | none => return { status := 409 }
+  | some t =>
+      if t.state == .fulfilled then
+        return { status := 200, task := some (t.toRecord action.id),
+                 promise := some (o.promise.toRecord action.id) }
+      else if t.state == .pending then
+        let next := { t with
+          state := .acquired
+          version := t.version + 1
+          ttl := some req.ttl
+          pid := some req.pid
+          leaseTimeoutAt := some (now + req.ttl)
+          retryTimeoutAt := none
+          resumes := [] }
+        setObject { o with task := some next }
+        return { status := 200, task := some (next.toRecord action.id),
+                 promise := some (o.promise.toRecord action.id) }
+      return { status := 409 }
 
 def taskAcquire (req : TaskAcquireReq) (now : Nat) :
     Handler (.origin req.id.origin) TaskAcquireRes := do
@@ -155,7 +115,7 @@ def taskAcquire (req : TaskAcquireReq) (now : Nat) :
         leaseTimeoutAt := some (now + req.ttl)
         retryTimeoutAt := none
         resumes := [] }
-      setTask o.suffix next
+      setObject { o with task := some next }
       return { status := 200, task := some (next.toRecord o.id), promise := some (o.promise.toRecord o.id) }
 
 def taskFence (req : TaskFenceReq) (now : Nat) :
@@ -169,10 +129,10 @@ def taskFence (req : TaskFenceReq) (now : Nat) :
       if t.version != req.version then return { status := 409 }
       match req.action with
       | .create action =>
-          let response ← promiseCreateAt action now
+          let response ← promiseCreate action now
           return { status := 200, action := some (.create response) }
       | .settle action =>
-          let response ← promiseSettleAt action now
+          let response ← promiseSettle action now
           return { status := 200, action := some (.settle response) }
 
 def heartbeatOne {origin : String} (pid : String) (ref : TaskRef) (now : Nat) :
@@ -182,9 +142,8 @@ def heartbeatOne {origin : String} (pid : String) (ref : TaskRef) (now : Nat) :
   | some (o, t) =>
       if t.state == .acquired ∧ t.version == ref.version ∧
           t.pid == some pid then
-        setTask o.suffix
-          { t with
-            leaseTimeoutAt := some (now + t.ttl.getD 0) }
+        setObject { o with task := some { t with
+            leaseTimeoutAt := some (now + t.ttl.getD 0) } }
 
 def heartbeatAll {origin : String} (pid : String) (now : Nat) :
     List TaskRef → Handler (.origin origin) Unit
@@ -219,7 +178,7 @@ def registerAwaited {origin : String} (awaiter : Ident) (now : Nat) :
   | action :: rest => do
       match ← readObject action.awaited.suffix now with
       | some awaited =>
-          setPromise awaited.suffix (awaited.promise.addCallback awaiter)
+          setObject { awaited with promise := awaited.promise.addCallback awaiter }
       | none => pure ()
       registerAwaited awaiter now rest
 
@@ -240,18 +199,18 @@ def taskSuspend (req : TaskSuspendReq) (now : Nat) :
       match ← checkAwaited now req.actions with
       | none => return { status := 422 }
       | some true =>
-          setTask o.suffix { t with
-            resumes := [] }
+          setObject { o with task := some { t with
+            resumes := [] } }
           return { status := 300 }
       | some false =>
           registerAwaited req.id now req.actions
-          setTask o.suffix { t with
+          setObject { o with task := some { t with
             state := .suspended
             pid := none
             ttl := none
             leaseTimeoutAt := none
             retryTimeoutAt := none
-            resumes := [] }
+            resumes := [] } }
           return { status := 200 }
 
 def taskFulfill (req : TaskFulfillReq) (now : Nat) :
@@ -277,12 +236,12 @@ def taskRelease (req : TaskReleaseReq) (now : Nat) :
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      setTask o.suffix { t with
+      setObject { o with task := some { t with
         state := .pending
         pid := none
         ttl := none
         leaseTimeoutAt := none
-        retryTimeoutAt := some now }
+        retryTimeoutAt := some now } }
       return { status := 200 }
 
 def taskHalt (req : TaskHaltReq) (now : Nat) :
@@ -292,12 +251,12 @@ def taskHalt (req : TaskHaltReq) (now : Nat) :
   | some (o, t) =>
       if t.state == .fulfilled then return { status := 409 }
       if t.state == .halted then return { status := 200 }
-      setTask o.suffix { t with
+      setObject { o with task := some { t with
         state := .halted
         pid := none
         ttl := none
         leaseTimeoutAt := none
-        retryTimeoutAt := none }
+        retryTimeoutAt := none } }
       return { status := 200 }
 
 def taskContinue (req : TaskContinueReq) (now : Nat) :
@@ -306,10 +265,9 @@ def taskContinue (req : TaskContinueReq) (now : Nat) :
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .halted then return { status := 409 }
-      setTask o.suffix
-        { t with
+      setObject { o with task := some { t with
           state := .pending
-          retryTimeoutAt := some now }
+          retryTimeoutAt := some now } }
       return { status := 200 }
 
 def taskSearch (_req : TaskSearchReq) (_now : Nat) : TaskSearchRes :=

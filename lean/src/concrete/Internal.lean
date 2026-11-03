@@ -8,9 +8,9 @@ open ServerModel
 
 def processPromiseTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
-  match ← getObject id.suffix with
+  match ← readObject id.suffix now with
   | none => pure ()
-  | some object => setObject (object.project now)
+  | some object => setObject object
 
 def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
     Handler (.origin origin) Unit := do
@@ -19,15 +19,14 @@ def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
   | some (object, task) =>
       match task.state with
       | .suspended =>
-          setTask object.suffix { task with
+          setObject { object with task := some { task with
             state := .pending
             resumes := [awaited]
-            retryTimeoutAt := some now }
+            retryTimeoutAt := some now } }
       | .pending | .acquired | .halted =>
           if !(task.resumes.contains awaited) then
-            setTask object.suffix
-              { task with
-                resumes := task.resumes ++ [awaited] }
+            setObject { object with task := some { task with
+                resumes := task.resumes ++ [awaited] } }
       | .fulfilled => pure ()
 
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
@@ -38,9 +37,8 @@ def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.callbacks.contains req.awaiter then
-        setPromise awaited.suffix
-          { awaited.promise with
-            callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
+        setObject { awaited with
+          promise.callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
         resumeOne awaited.id req.awaiter now
 
 def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
@@ -50,9 +48,8 @@ def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
   | some awaited =>
       if awaited.promise.state == .pending then pure ()
       else if awaited.promise.listeners.contains req.address then
-        setPromise awaited.suffix
-          { awaited.promise with
-            listeners := awaited.promise.listeners.filter (· != req.address) }
+        setObject { awaited with
+          promise.listeners := awaited.promise.listeners.filter (· != req.address) }
         setMessage req.address (.unblock (awaited.promise.toRecord awaited.id))
 
 def processLeaseTimeout (id : Ident) (now : Nat) :
@@ -64,12 +61,12 @@ def processLeaseTimeout (id : Ident) (now : Nat) :
       | none => pure ()
       | some deadline =>
           if task.state == .acquired ∧ deadline ≤ now then
-            setTask object.suffix { task with
+            setObject { object with task := some { task with
               state := .pending
               pid := none
               ttl := none
               leaseTimeoutAt := none
-              retryTimeoutAt := some now }
+              retryTimeoutAt := some now } }
 
 def processRetryTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
@@ -81,8 +78,8 @@ def processRetryTimeout (id : Ident) (now : Nat) :
       | some due =>
           if task.state == .pending ∧ due ≤ now then
             let env ← ask
-            setTask object.suffix { task with
-              retryTimeoutAt := some (now + env.config.retryTimeout) }
+            setObject { object with task := some { task with
+              retryTimeoutAt := some (now + env.config.retryTimeout) } }
             setMessage
               ((object.promise.tags.get? "resonate:target").getD "")
               (.execute object.id task.version)
@@ -109,8 +106,8 @@ def processSchedule (id : Ident) (now : Nat) :
           time
 
 def processOccurrence (req : PromiseCreateReq) (time : Nat) :
-    Handler (.origin req.id.origin) Unit :=
-  createIfAbsent req time
+    Handler (.origin req.id.origin) Unit := do
+  let _ ← readOrCreate req time
 
 def originTaskWork {origin : String} (object : OriginObject origin)
     (now : Nat) : List WorkItem :=

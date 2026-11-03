@@ -29,22 +29,6 @@ def getObject {origin : String} (suffix : String) :
     Handler (.origin origin) (Option (OriginObject origin)) := do
   return (← get).find? (·.suffix == suffix)
 
-def setPromise {origin : String} (suffix : String) (promise : PromiseObject) :
-    Handler (.origin origin) Unit :=
-  modify fun document =>
-    let object :=
-      match document.find? (·.suffix == suffix) with
-      | some existing => { existing with promise }
-      | none => { suffix, promise }
-    object :: document.filter (·.suffix != suffix)
-
-def setTask {origin : String} (suffix : String) (task : TaskObject) :
-    Handler (.origin origin) Unit :=
-  modify fun document =>
-    document.map fun object =>
-      if object.suffix == suffix then { object with task := some task }
-      else object
-
 def setObject {origin : String} (object : OriginObject origin) :
     Handler (.origin origin) Unit :=
   modify fun document =>
@@ -77,49 +61,42 @@ def setMessage {key : DocumentKey} (address : String)
     (message : ServerModel.Message) : Handler key Unit :=
   emit { address, message }
 
+/-- Settle a promise; a settled promise also finishes its task. -/
 def setSettled {origin : String} (object : OriginObject origin)
-    (promise : PromiseObject) : Handler (.origin origin) Unit := do
-  setPromise object.suffix promise
-  if promise.state != .pending then
-    match object.task with
-    | some task =>
-        if task.state != .fulfilled then setTask object.suffix task.fulfill
-    | none => pure ()
+    (promise : PromiseObject) : Handler (.origin origin) Unit :=
+  setObject { object with promise, task := object.task.map (·.project promise) }
 
-def createPromiseAt {origin : String} (suffix : String) (timeoutAt now : Nat)
-    (param : Value) (tags : Tags) :
-    Handler (.origin origin) (OriginObject origin) := do
+/-- A new promise, with a task if it is runnable. A promise created at or
+past its deadline is created settled. -/
+def newObject {origin : String} (suffix : String) (timeoutAt now : Nat)
+    (param : Value) (tags : Tags) : OriginObject origin :=
   if timeoutAt > now then
     let promise : PromiseObject :=
       { state := .pending, param, tags, timeoutAt, createdAt := now }
-    setPromise suffix promise
     if promise.otype == .runnable then
       let due :=
         match promise.tags.get? "resonate:delay" with
         | some delay => max (parseNat delay) now
         | none => now
-      let task : TaskObject :=
-        { state := .pending, version := 0, retryTimeoutAt := some due }
-      setTask suffix task
-      return { suffix, promise, task := some task }
-    return { suffix, promise }
+      { suffix, promise,
+        task := some { state := .pending, version := 0, retryTimeoutAt := some due } }
+    else { suffix, promise }
   else
-    let promiseState :=
-      if tags.isTimer then PromiseState.resolved
-      else PromiseState.rejectedTimedout
+    let state :=
+      if tags.isTimer then PromiseState.resolved else PromiseState.rejectedTimedout
     let promise : PromiseObject :=
-      { state := promiseState, param, tags, timeoutAt,
+      { state, param, tags, timeoutAt,
         createdAt := timeoutAt, settledAt := some timeoutAt }
-    setPromise suffix promise
     if promise.otype == .runnable then
-      let task : TaskObject := { state := .fulfilled, version := 0 }
-      setTask suffix task
-      return { suffix, promise, task := some task }
-    return { suffix, promise }
+      { suffix, promise, task := some { state := .fulfilled, version := 0 } }
+    else { suffix, promise }
 
-def createPromise (req : PromiseCreateReq) (now : Nat) :
-    Handler (.origin req.id.origin) (OriginObject req.id.origin) :=
-  createPromiseAt req.id.suffix req.timeoutAt now req.param req.tags
+def createPromiseAt {origin : String} (suffix : String) (timeoutAt now : Nat)
+    (param : Value) (tags : Tags) :
+    Handler (.origin origin) (OriginObject origin) := do
+  let object := newObject suffix timeoutAt now param tags
+  setObject object
+  return object
 
 def readObject {origin : String} (suffix : String) (now : Nat) :
     Handler (.origin origin) (Option (OriginObject origin)) := do
@@ -133,15 +110,11 @@ def readTask {origin : String} (suffix : String) (now : Nat) :
   | some object => return object.task.map (object, ·)
   | none => return none
 
-def createIfAbsentAt {origin : String} (suffix : String) (timeoutAt now : Nat)
-    (param : Value) (tags : Tags) : Handler (.origin origin) Unit := do
-  match ← readObject suffix now with
-  | some _ => pure ()
-  | none =>
-      let _ ← createPromiseAt suffix timeoutAt now param tags
-
-def createIfAbsent (req : PromiseCreateReq) (now : Nat) :
-    Handler (.origin req.id.origin) Unit :=
-  createIfAbsentAt req.id.suffix req.timeoutAt now req.param req.tags
+/-- The object at `req.id`, created from `req` if there is none. -/
+def readOrCreate {origin : String} (req : PromiseCreateReq) (now : Nat) :
+    Handler (.origin origin) (OriginObject origin) := do
+  match ← readObject req.id.suffix now with
+  | some object => return object
+  | none => createPromiseAt req.id.suffix req.timeoutAt now req.param req.tags
 
 end Resonate.Concrete.Decision

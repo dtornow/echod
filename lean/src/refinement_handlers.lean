@@ -748,19 +748,6 @@ theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) 
             subst h
             simp [Fact, hfind]
 
-/-- The timeout step reads the stored row and writes it back as read. -/
-theorem readObject_getObject_sim (id : Ident) (now : Nat)
-    {P : Document (.origin id.origin) → Prop} :
-    Sim (.origin id.origin) P
-      (fun a c => a = c.map (fun row => Object.ofOrigin (row.project now)))
-      (fun _ d => P d)
-      (Abstract.readObject id now) (Concrete.Decision.getObject id.suffix) := by
-  intro env store document hunique hdoc hp
-  refine ⟨?_, hp, Same.write_of hdoc, rfl, hunique⟩
-  simp only [Abstract.readObject, Abstract.getObject, Concrete.Decision.getObject, bind,
-    documentGet, pure]
-  exact readObject_eq_document hunique hdoc now
-
 /-! ## Writes -/
 
 theorem same_write_origin {a store : Store} {origin : String}
@@ -860,111 +847,14 @@ theorem setObject_equiv {store : Store} (object : Object)
   rw [hrow, map_norm_filter, map_norm_filter]
   exact (List.Perm.filter _ hdoc).cons _
 
-theorem setPromise_apply {origin : String} (s : String) (p : PromiseObject) (env : HandlerEnv)
-    (document : OriginDocument origin) :
-    Concrete.Decision.setPromise s p env document =
-      ((), (match document.find? (·.suffix == s) with
-        | some existing => { existing with promise := p }
-        | none => { suffix := s, promise := p }) :: document.filter (·.suffix != s), []) :=
-  rfl
-
-theorem setTask_apply {origin : String} (s : String) (t : TaskObject) (env : HandlerEnv)
-    (document : OriginDocument origin) :
-    Concrete.Decision.setTask s t env document =
-      ((), document.map (fun object =>
-        if object.suffix == s then { object with task := some t } else object), []) :=
-  rfl
-
-theorem map_setTask_filter {origin : String} (s : String) (t : TaskObject)
-    (document : OriginDocument origin) :
-    (document.filter (·.suffix != s)).map (fun object =>
-        if object.suffix == s then { object with task := some t } else object) =
-      document.filter (·.suffix != s) := by
-  rw [List.map_congr_left (g := fun x => x), List.map_id']
-  intro object hobject
-  have := (List.mem_filter.mp hobject).2
-  simp only [bne_iff_ne, ne_eq] at this
-  simp [this]
-
-@[simp] theorem map_setTask_filter' {origin : String} (s : String) (t : TaskObject)
-    (document : OriginDocument origin) :
-    (document.filter (·.suffix != s)).map (fun object =>
-        if object.suffix = s then
-          { suffix := object.suffix, promise := object.promise, task := some t }
-        else object) =
-      document.filter (·.suffix != s) := by
-  rw [List.map_congr_left (g := fun x => x), List.map_id']
-  intro object hobject
-  have := (List.mem_filter.mp hobject).2
-  simp only [bne_iff_ne, ne_eq] at this
-  simp [this]
-
-theorem setObject_sim {origin : String} (row : OriginObject origin)
-    {P : Document (.origin origin) → Prop} :
-    Sim (.origin origin) P Eq (fun _ _ => True) (Abstract.setObject (Object.ofOrigin row))
+theorem setObject_sim {origin : String} (row : OriginObject origin) {object : Object}
+    (h : Object.ofOrigin row = object) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P Eq (fun _ _ => True) (Abstract.setObject object)
       (Concrete.Decision.setObject row) := by
+  subst h
   intro env store document hunique hdoc _
   refine ⟨rfl, trivial, ?_, rfl, hunique.setObject _⟩
   exact setObject_equiv (Object.ofOrigin row) hdoc (by rfl)
-
-/-- Writing the read object with a new promise is setting the promise on the
-stored row, as long as the new promise is settled when the read one was. -/
-theorem setPromise_sim {origin : String} (s : String) {now : Nat}
-    {promise p : PromiseObject} {task : Option TaskObject}
-    {P : Document (.origin origin) → Prop}
-    (hfact : ∀ d, P d → Fact s now (some ⟨s, promise, task⟩) d)
-    (hstate : p.state = .pending → promise.state = .pending) :
-    Sim (.origin origin) P Eq (fun _ _ => True)
-      (Abstract.setObject { id := { origin, suffix := s }, promise := p, task })
-      (Concrete.Decision.setPromise s p) := by
-  intro env store document hunique hdoc hp
-  obtain ⟨stored, current, hfind, rfl, rfl⟩ := (hfact document hp).cases
-  refine ⟨rfl, trivial, ?_, rfl, hunique.setObject _⟩
-  rw [setPromise_apply, hfind]
-  exact setObject_equiv _ hdoc (by exact (norm_project s current hstate).symm)
-
-/-- Writing the read object with a new task is setting the task on the
-stored row, as long as the read promise is the stored one: it is pending,
-or the read task is not finished. -/
-theorem setTask_sim {origin : String} (s : String) {now : Nat}
-    {promise : PromiseObject} {current : Option TaskObject} {task : TaskObject}
-    {P : Document (.origin origin) → Prop}
-    (hfact : ∀ d, P d → Fact s now (some ⟨s, promise, current⟩) d)
-    (hpending : promise.state = .pending ∨ ∃ t, current = some t ∧ t.state ≠ .fulfilled) :
-    Sim (.origin origin) P Eq (fun _ _ => True)
-      (Abstract.setObject { id := { origin, suffix := s }, promise, task := some task })
-      (Concrete.Decision.setTask s task) := by
-  intro env store document hunique hdoc hp
-  obtain ⟨stored, stask, hfind, rfl, rfl⟩ := (hfact document hp).cases
-  have hstored : stored.project now = stored := by
-    rcases project_cases stored now with h | h
-    · exact h
-    · rcases hpending with hp | ⟨t, ht, hfulfilled⟩
-      · exact (h hp).elim
-      · cases stask with
-        | none => cases ht
-        | some st =>
-            simp only [Option.map_some, Option.some.injEq] at ht
-            subst ht
-            exact (hfulfilled (task_project_state_of_settled h)).elim
-  have hunique' : RowsUnique document := (hunique.rows origin).of_equiv hdoc
-  have hmem := List.mem_of_find?_eq_some hfind
-  refine ⟨rfl, trivial, ?_, rfl, hunique.setObject _⟩
-  rw [setTask_apply]
-  refine (setObject_equiv _ hdoc (row := ⟨s, stored.project now, some task⟩)
-    (by rfl)).trans
-    (Same.write_equiv store (DocEquiv.of_perm ?_))
-  have hperm := (perm_cons_filter hunique' hmem).map (fun object =>
-    if object.suffix == s then { object with task := some task } else object)
-  simp only [List.map_cons, beq_self_eq_true, ↓reduceIte] at hperm
-  rw [map_setTask_filter] at hperm
-  rw [hstored]
-  exact hperm.symm
-
-theorem settable_ne_pending {state : PromiseState} (h : state.settable = true) :
-    state ≠ .pending := by
-  rintro rfl
-  simp [PromiseState.settable] at h
 
 /-- A settled promise reads as it is, and its task as finished. -/
 theorem Object.project_settled (o : Object) {p : PromiseObject} (now : Nat)
@@ -973,74 +863,17 @@ theorem Object.project_settled (o : Object) {p : PromiseObject} (now : Nat)
       { o with promise := p, task := o.task.map (·.project p) } := by
   simp [Object.project, h, AbstractModel.TaskObject.project]
 
-/-- Settling the read object is setting the promise on the stored row and
-finishing its task. -/
-theorem setSettled_sim {origin : String} (s : String) {now : Nat}
-    {promise p : PromiseObject} {task : Option TaskObject}
-    {P : Document (.origin origin) → Prop}
-    (hfact : ∀ d, P d → Fact s now (some ⟨s, promise, task⟩) d)
-    (hstate : p.state = .pending → promise.state = .pending)
-    (hsettled : p.state ≠ .pending) :
-    Sim (.origin origin) P Eq (fun _ _ => True)
-      (Abstract.setSettled { id := { origin, suffix := s }, promise, task } p now)
-      (Concrete.Decision.setSettled ⟨s, promise, task⟩ p) := by
-  unfold Abstract.setSettled
+/-- Settling the read object writes it with the promise settled and its task
+finished. -/
+theorem setSettled_sim {origin : String} (row : OriginObject origin) {object : Object}
+    (h : Object.ofOrigin row = object) {p : PromiseObject} {now : Nat}
+    (hsettled : p.state ≠ .pending) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P Eq (fun _ _ => True) (Abstract.setSettled object p now)
+      (Concrete.Decision.setSettled row p) := by
+  subst h
+  unfold Abstract.setSettled Concrete.Decision.setSettled
   rw [Object.project_settled _ _ hsettled]
-  intro env store document hunique hdoc hp
-  obtain ⟨stored, current, hfind, rfl, rfl⟩ := (hfact document hp).cases
-  cases current with
-  | none =>
-      have hc : Concrete.Decision.setSettled ⟨s, stored.project now, none⟩ p env document =
-          ((), ⟨s, p, none⟩ :: document.filter (·.suffix != s), []) := by
-        by_cases hpending : p.state = .pending <;>
-          simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply, hfind, hpending] <;> rfl
-      simp only [Option.map_none]
-      rw [hc]
-      exact ⟨by trivial, trivial, setObject_equiv _ hdoc (by rfl), by trivial, hunique.setObject _⟩
-  | some t =>
-      simp only [Option.map_some]
-      by_cases hpending : p.state = .pending
-      · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-            some (t.project (stored.project now))⟩ p env document =
-            ((), ⟨s, p, some t⟩ :: document.filter (·.suffix != s), []) := by
-          simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply, hfind, hpending] <;> rfl
-        rw [hc]
-        refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-        simp [OriginObject.norm, task_project_of_pending hpending,
-          task_project_of_pending (hstate hpending)]
-      · by_cases ht : (t.project (stored.project now)).state = .fulfilled
-        · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-              some (t.project (stored.project now))⟩ p env document =
-              ((), ⟨s, p, some t⟩ :: document.filter (·.suffix != s), []) := by
-            simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply, hfind,
-              hpending, ht] <;> rfl
-          rw [hc]
-          refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-          simp [OriginObject.norm, task_project_project hstate, task_project_project (t := t) (p := p) (q := p) id]
-        · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-              some (t.project (stored.project now))⟩ p env document =
-              ((), ⟨s, p, some (t.project (stored.project now)).fulfill⟩ ::
-                document.filter (·.suffix != s), []) := by
-            simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply,
-              setTask_apply, hfind, hpending, ht, map_setTask_filter] <;> rfl
-          rw [hc]
-          refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-          simp [task_project_of_settled hpending ht]
-
-theorem setPromise_setTask_apply {origin : String} (s : String) (p : PromiseObject)
-    (t : TaskObject) (env : HandlerEnv) (document : OriginDocument origin) :
-    (Concrete.Decision.setPromise s p >>= fun _ => Concrete.Decision.setTask s t) env
-        document =
-      ((), ⟨s, p, some t⟩ :: document.filter (·.suffix != s), []) := by
-  simp only [bind, setPromise_apply, setTask_apply, List.append_nil]
-  cases hfind : document.find? (·.suffix == s) with
-  | none => simp <;> rfl
-  | some row =>
-      have hsuffix := find?_suffix hfind
-      obtain ⟨rs, rp, rt⟩ := row
-      simp only at hsuffix
-      subst hsuffix
-      simp <;> rfl
+  exact setObject_sim _ rfl
 
 theorem Concrete.bind_assoc {key : DocumentKey} (x : DocumentHandler key α)
     (f : α → DocumentHandler key β) (g : β → DocumentHandler key γ) :
@@ -1053,67 +886,23 @@ theorem Concrete.pure_bind {key : DocumentKey} (u : α) (f : α → DocumentHand
   funext env document
   simp only [bind, Pure.pure, List.nil_append]
 
-/-- Creating an object with its task is setting the promise and then the
-task, whatever the document held. -/
-theorem setObject_create_sim {origin : String} (s : String) (p : PromiseObject)
-    (t : TaskObject) {P : Document (.origin origin) → Prop} {S : γ → δ → Prop}
-    {T : δ → Document (.origin origin) → Prop} {ka : Abstract.Handler γ}
-    {kc : DocumentHandler (.origin origin) δ}
-    (hk : Sim (.origin origin) (fun _ => True) S T ka kc) :
-    Sim (.origin origin) P S T
-      (Abstract.setObject { id := { origin, suffix := s }, promise := p, task := some t } >>=
-        fun _ => ka)
-      (Concrete.Decision.setPromise s p >>= fun _ => Concrete.Decision.setTask s t >>=
-        fun _ => kc) := by
-  rw [← Concrete.bind_assoc]
-  refine Sim.seq (Q := fun _ _ => True) ?_ hk
-  intro env store document hunique hdoc _
-  rw [setPromise_setTask_apply]
-  exact ⟨rfl, trivial, setObject_equiv _ hdoc (by rfl), rfl, hunique.setObject _⟩
-
-theorem newObject_id (id : Ident) (timeoutAt now : Nat) (param : Value) (tags : Tags) :
-    (Abstract.newObject id timeoutAt now param tags).id = id := by
-  unfold Abstract.newObject
-  dsimp only
-  repeat' split
-  all_goals rfl
-
-theorem newObject_eq (id : Ident) (timeoutAt now : Nat) (param : Value) (tags : Tags) :
-    ∃ promise task, Abstract.newObject id timeoutAt now param tags = { id, promise, task } := by
-  have h := newObject_id id timeoutAt now param tags
-  generalize Abstract.newObject id timeoutAt now param tags = object at h ⊢
-  subst h
-  exact ⟨_, _, rfl⟩
-
-theorem createPromiseAt_apply (id : Ident) (timeoutAt now : Nat) (param : Value)
-    (tags : Tags) (env : HandlerEnv) {document : OriginDocument id.origin}
-    (hnone : document.find? (·.suffix == id.suffix) = none) :
-    Concrete.Decision.createPromiseAt id.suffix timeoutAt now param tags env document =
-      (⟨id.suffix, (Abstract.newObject id timeoutAt now param tags).promise,
-          (Abstract.newObject id timeoutAt now param tags).task⟩,
-        ⟨id.suffix, (Abstract.newObject id timeoutAt now param tags).promise,
-          (Abstract.newObject id timeoutAt now param tags).task⟩ ::
-          document.filter (·.suffix != id.suffix), []) := by
-  unfold Abstract.newObject Concrete.Decision.createPromiseAt
+theorem ofOrigin_newObject (id : Ident) (timeoutAt now : Nat) (param : Value)
+    (tags : Tags) :
+    Object.ofOrigin (Concrete.Decision.newObject (origin := id.origin) id.suffix timeoutAt now
+      param tags) = Abstract.newObject id timeoutAt now param tags := by
+  unfold Abstract.newObject Concrete.Decision.newObject
   by_cases htime : timeoutAt > now <;> by_cases hrun : tags.otype = .runnable <;>
-    simp [htime, hrun, bind, pure, setPromise_apply, setTask_apply, map_setTask_filter,
-      hnone, AbstractModel.PromiseObject.otype] <;> rfl
+    simp [htime, hrun, Object.ofOrigin, AbstractModel.PromiseObject.otype] <;>
+    cases tags.get? "resonate:delay" <;> rfl
 
 theorem createPromiseAt_sim (id : Ident) (timeoutAt now : Nat) (param : Value)
-    (tags : Tags) {n : Nat} {P : Document (.origin id.origin) → Prop}
-    (hfact : ∀ d, P d → Fact id.suffix n none d) :
+    (tags : Tags) {P : Document (.origin id.origin) → Prop} :
     Sim (.origin id.origin) P (fun a c => a = Object.ofOrigin c) (fun _ _ => True)
       (Abstract.createPromiseAt id timeoutAt now param tags)
       (Concrete.Decision.createPromiseAt id.suffix timeoutAt now param tags) := by
-  intro env store document hunique hdoc hp
-  have ha : Abstract.createPromiseAt id timeoutAt now param tags env store =
-      (Abstract.newObject id timeoutAt now param tags,
-        store.setObject (Abstract.newObject id timeoutAt now param tags), []) := rfl
-  rw [ha, createPromiseAt_apply id timeoutAt now param tags env (hfact document hp).none]
-  obtain ⟨promise, task, hobject⟩ := newObject_eq id timeoutAt now param tags
-  rw [hobject]
-  exact ⟨rfl, trivial, setObject_equiv { id, promise, task } hdoc (by rfl), rfl,
-    hunique.setObject _⟩
+  have h := ofOrigin_newObject id timeoutAt now param tags
+  unfold Abstract.createPromiseAt Concrete.Decision.createPromiseAt
+  exact Sim.bind (setObject_sim _ h) fun _ _ _ => Sim.pure h.symm (fun _ _ => trivial)
 
 theorem scheduleAt_go_find (id : Ident) (schedules : List Schedule) :
     (Store.scheduleAt.go id schedules).map ScheduleData.toSchedule =
@@ -1193,47 +982,6 @@ theorem ask_sim {key : DocumentKey} {P : Document key → Prop} :
   intro env store document hunique hdoc hp
   exact ⟨rfl, hp, Same.write_of hdoc, rfl, hunique⟩
 
-/-- Setting a promise leaves what reads of other suffixes show. -/
-theorem find?_filter_ne {origin : String} {s s' : String} (h : s' ≠ s) :
-    ∀ document : OriginDocument origin,
-      (document.filter (·.suffix != s)).find? (·.suffix == s') =
-        document.find? (·.suffix == s')
-  | [] => rfl
-  | row :: rest => by
-      have ih := find?_filter_ne h rest
-      by_cases hs : row.suffix = s
-      · have hskip : (row.suffix == s') = false := by simp [hs, Ne.symm h]
-        rw [List.filter_cons, if_neg (by simp [hs])]
-        simp only [List.find?_cons, hskip]
-        exact ih
-      · have hkeep : (row.suffix != s) = true := by simpa using hs
-        rw [List.filter_cons, if_pos hkeep]
-        simp only [List.find?_cons]
-        cases (row.suffix == s') with
-        | true => rfl
-        | false => exact ih
-
-theorem setPromise_frame {origin : String} {s s' : String} (p : PromiseObject)
-    (h : s' ≠ s) {now : Nat} {value : Option (OriginObject origin)} (env : HandlerEnv)
-    (document : OriginDocument origin) (hfact : Fact s' now value document) :
-    Fact s' now value (Concrete.Decision.setPromise s p env document).2.1 := by
-  unfold Fact at hfact ⊢
-  rw [setPromise_apply]
-  have hhead : ∀ row : OriginObject origin, row.suffix = s →
-      (row :: document.filter (·.suffix != s)).find? (·.suffix == s') =
-        document.find? (·.suffix == s') := by
-    intro row hrow
-    have : (row.suffix == s') = false := by simp [hrow, Ne.symm h]
-    rw [List.find?_cons, this, find?_filter_ne h]
-  cases hfind : document.find? (·.suffix == s) with
-  | none =>
-      dsimp only
-      rw [hhead _ rfl, hfact]
-  | some row =>
-      dsimp only
-      rw [hhead { suffix := row.suffix, promise := p, task := row.task }
-        (find?_suffix hfind : row.suffix = s), hfact]
-
 theorem readObject_sim' (id : Ident) (now : Nat) {origin : String}
     (h : id.origin = origin) {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P (ObjRel origin id.suffix)
@@ -1249,14 +997,24 @@ theorem readTask_sim' (id : Ident) (now : Nat) {origin : String}
   subst h; exact readTask_sim id now
 
 theorem createPromiseAt_sim' (id : Ident) (timeoutAt now : Nat) (param : Value)
-    (tags : Tags) {origin : String} (h : id.origin = origin) {n : Nat}
-    {P : Document (.origin origin) → Prop}
-    (hfact : ∀ d, P d → Fact id.suffix n none d) :
+    (tags : Tags) {origin : String} (h : id.origin = origin)
+    {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P (fun a c => a = Object.ofOrigin c) (fun _ _ => True)
       (Abstract.createPromiseAt id timeoutAt now param tags)
       (Concrete.Decision.createPromiseAt (origin := origin) id.suffix timeoutAt now
         param tags) := by
-  subst h; exact createPromiseAt_sim id timeoutAt now param tags hfact
+  subst h; exact createPromiseAt_sim id timeoutAt now param tags
+
+theorem readOrCreate_sim (req : PromiseCreateReq) (now : Nat) {origin : String}
+    (h : req.id.origin = origin) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P (fun a c => a = Object.ofOrigin c) (fun _ _ => True)
+      (Abstract.readOrCreate req now)
+      (Concrete.Decision.readOrCreate (origin := origin) req now) := by
+  unfold Abstract.readOrCreate Concrete.Decision.readOrCreate
+  refine Sim.bind (readObject_sim' _ _ h) ?_
+  refine ObjRel.cases ?_ (fun _ _ => ?_)
+  · exact createPromiseAt_sim' _ _ _ _ _ h
+  · exact Sim.pure rfl (fun _ _ => trivial)
 
 theorem TaskRel.cases {origin suffix : String} {P : Option (Object × TaskObject) →
       Option (OriginObject origin × TaskObject) → Prop}
@@ -1302,25 +1060,6 @@ macro "sim_origin" : tactic => `(tactic| first
   | rfl
   | (simp_all [Ident.sameOrigin, TaskFenceAction.targetId]; done))
 
-/-- Find, among the facts the precondition carries, the read a write
-needs. -/
-macro "sim_fact" : tactic => `(tactic| first
-  | exact fun _ h => h
-  | exact fun _ h => h.1
-  | exact fun _ h => h.1 _ rfl
-  | exact fun _ h => h.2.1
-  | exact fun _ h => h.2.1 _ rfl
-  | exact fun _ h => h.2.2.1
-  | exact fun _ h => h.2.2.1 _ rfl)
-
-/-- The new promise is settled when the read one was. -/
-macro "sim_state" : tactic => `(tactic| (intro; simp_all [PromiseState.settable]; done))
-
-/-- The read promise is the stored one. -/
-macro "sim_pending" : tactic => `(tactic| first
-  | (apply Or.inl; simp_all; done)
-  | (refine Or.inr ⟨_, rfl, ?_⟩; simp_all; done))
-
 /-- Close a side condition with what the task read showed: its promise is
 pending or the task is fulfilled. -/
 macro "sim_read" : tactic => `(tactic| (
@@ -1363,20 +1102,16 @@ elab "sim_dispatch" : tactic => withMainContext do
         run `(tactic| (refine Sim.bind (getSchedule_sim _) ?_
                        intro _ _ h; subst h))
     | some ``Resonate.Abstract.createPromiseAt =>
-        run `(tactic| (refine Sim.bind
-                         (createPromiseAt_sim' _ _ _ _ _ (by sim_origin) (by sim_fact)) ?_
+        run `(tactic| (refine Sim.bind (createPromiseAt_sim' _ _ _ _ _ (by sim_origin)) ?_
+                       intro _ _ h; subst h))
+    | some ``Resonate.Abstract.readOrCreate =>
+        run `(tactic| (refine Sim.bind (readOrCreate_sim _ _ (by sim_origin)) ?_
                        intro _ _ h; subst h))
     | some ``Resonate.Abstract.setObject =>
-        run `(tactic| first
-          | (refine Sim.bind (setTask_sim _ (by sim_fact) ?_) fun _ _ _ => ?_
-             next => sim_pending)
-          | (refine Sim.bind (setPromise_sim _ (by sim_fact) ?_) fun _ _ _ => ?_
-             next => sim_state)
-          | refine setObject_create_sim _ _ _ ?_)
+        run `(tactic| refine Sim.bind (setObject_sim _ (by rfl)) fun _ _ _ => ?_)
     | some ``Resonate.Abstract.setSettled =>
         run `(tactic|
-          (refine Sim.bind (setSettled_sim _ (by sim_fact) ?_ ?_) fun _ _ _ => ?_
-           next => sim_state
+          (refine Sim.bind (setSettled_sim _ (by rfl) ?_) fun _ _ _ => ?_
            next => (intro h; simp_all [PromiseState.settable]; done)))
     | some ``Resonate.Abstract.ask =>
         run `(tactic| (refine Sim.bind ask_sim ?_; intro _ _ h; subst h))
@@ -1394,10 +1129,7 @@ elab "sim_dispatch" : tactic => withMainContext do
   else
     match a.getAppFn.constName? with
     | some ``Resonate.Abstract.setObject =>
-        run `(tactic| first
-          | (refine setTask_sim _ (by sim_fact) ?_; sim_pending)
-          | (refine setPromise_sim _ (by sim_fact) ?_; sim_state)
-          | exact setObject_sim _)
+        run `(tactic| exact setObject_sim _ (by rfl))
     | some ``Resonate.Abstract.setMessage =>
         run `(tactic| exact Sim.post (fun _ _ _ => trivial) (setMessage_sim _ _))
     | some ``Resonate.Abstract.deleteSchedule =>
@@ -1440,35 +1172,20 @@ theorem promiseGet_sim (req : PromiseGetReq) (now : Nat) :
   unfold Abstract.promiseGet Concrete.Decision.promiseGet
   sim
 
-theorem Abstract.readOrCreate_bind (req : PromiseCreateReq) (now : Nat)
-    (k : Object → Abstract.Handler β) :
-    Abstract.readOrCreate req now >>= k =
-      Abstract.readObject req.id now >>= fun found =>
-        match found with
-        | some o => k o
-        | none =>
-            Abstract.createPromiseAt req.id req.timeoutAt now req.param req.tags >>= k := by
-  unfold Abstract.readOrCreate
-  rw [bind_assoc]
-  congr 1
-  funext found
-  cases found <;> simp only [pure_bind]
-
 theorem promiseCreate_sim (req : PromiseCreateReq) (now : Nat) {origin : String}
     (h : req.id.origin = origin) :
     HandlerSim (.origin origin) (Abstract.promiseCreate req now)
-      (Concrete.Decision.promiseCreateAt (origin := origin) req now) := by
+      (Concrete.Decision.promiseCreate (origin := origin) req now) := by
   subst h
-  unfold Abstract.promiseCreate Concrete.Decision.promiseCreateAt
-  simp only [Abstract.readOrCreate_bind]
+  unfold Abstract.promiseCreate Concrete.Decision.promiseCreate
   sim
 
 theorem promiseSettle_sim (req : PromiseSettleReq) (now : Nat) {origin : String}
     (h : req.id.origin = origin) :
     HandlerSim (.origin origin) (Abstract.promiseSettle req now)
-      (Concrete.Decision.promiseSettleAt (origin := origin) req now) := by
+      (Concrete.Decision.promiseSettle (origin := origin) req now) := by
   subst h
-  unfold Abstract.promiseSettle Concrete.Decision.promiseSettleAt
+  unfold Abstract.promiseSettle Concrete.Decision.promiseSettle
   sim
 
 theorem promiseRegisterCallback_sim (req : PromiseRegisterCallbackReq) (now : Nat) :
@@ -1544,84 +1261,10 @@ theorem taskContinue_sim (req : TaskContinueReq) (now : Nat) :
   unfold Abstract.taskContinue Concrete.Decision.taskContinue
   sim
 
-/-- `taskCreate` as the concrete decision takes it: a missing object is created
-in one write, already acquired. -/
-def taskCreateSteps (req : TaskCreateReq) (now : Nat) : Abstract.Handler TaskCreateRes := do
-  let action := req.action
-  if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
-    return { status := 400 }
-  match ← Abstract.readObject action.id now with
-  | none =>
-      if action.timeoutAt > now then
-        let p : PromiseObject :=
-          { state := .pending, param := action.param, tags := action.tags,
-            timeoutAt := action.timeoutAt, createdAt := now }
-        let t : TaskObject :=
-          { state := .acquired, version := 1, ttl := some req.ttl,
-            pid := some req.pid, leaseTimeoutAt := some (now + req.ttl) }
-        Abstract.setObject { id := action.id, promise := p, task := some t }
-        return { status := 200, task := some (t.toRecord action.id),
-                 promise := some (p.toRecord action.id) }
-      let p : PromiseObject :=
-        { state := .rejectedTimedout, param := action.param, tags := action.tags,
-          timeoutAt := action.timeoutAt, createdAt := action.timeoutAt,
-          settledAt := some action.timeoutAt }
-      let t : TaskObject := { state := .fulfilled, version := 0 }
-      Abstract.setObject { id := action.id, promise := p, task := some t }
-      return { status := 200, task := some (t.toRecord action.id),
-               promise := some (p.toRecord action.id) }
-  | some o =>
-      if o.promise.otype != .runnable then return { status := 422 }
-      match o.task with
-      | none => return { status := 409 }
-      | some t =>
-          if t.state == .fulfilled then
-            return { status := 200, task := some (t.toRecord action.id),
-                     promise := some (o.promise.toRecord action.id) }
-          else if t.state == .pending then
-            let next := t.acquire req.pid req.ttl now
-            Abstract.setObject { o with task := some next }
-            return { status := 200, task := some (next.toRecord action.id),
-                     promise := some (o.promise.toRecord action.id) }
-          return { status := 409 }
-
-theorem Store.setObject_setObject (store : Store) {a b : Object} (h : a.id = b.id) :
-    (store.setObject a).setObject b = store.setObject b := by
-  simp only [Store.setObject, List.filter_cons, h, bne_self_eq_false, Bool.false_eq_true,
-    ↓reduceIte, List.filter_filter, Bool.and_self]
-
-theorem taskCreate_eq (req : TaskCreateReq) (now : Nat) :
-    Abstract.taskCreate req now = taskCreateSteps req now := by
-  unfold Abstract.taskCreate taskCreateSteps Abstract.readOrCreate
-  by_cases hg : (req.action.tags.otype != .runnable ∨ req.action.tags.timerTargeted)
-  · simp only [hg, ↓reduceIte]
-  simp only [hg, ↓reduceIte]
-  have hrun : req.action.tags.otype = .runnable := by simpa using (not_or.1 hg).1
-  have htimer : req.action.tags.isTimer = false := by
-    have h2 := (not_or.1 hg).2
-    have := (otype_runnable_iff_targeted _).1 hrun
-    simp_all [Tags.timerTargeted]
-  simp only [bind_assoc, pure_bind]
-  congr 1
-  funext found
-  cases found with
-  | some o =>
-      simp only [pure_bind]
-      obtain ⟨id, p, task⟩ := o
-      cases task <;> rfl
-  | none =>
-      funext env store
-      simp only [Abstract.createPromiseAt, Abstract.newObject, Abstract.setObject, bind, pure]
-      by_cases ht : req.action.timeoutAt > now
-      · simp [ht, hrun, AbstractModel.PromiseObject.otype, Store.setObject_setObject,
-          AbstractModel.TaskObject.acquire]
-      · simp [ht, hrun, htimer, AbstractModel.PromiseObject.otype]
-
 theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
     HandlerSim (.origin req.action.id.origin) (Abstract.taskCreate req now)
       (Concrete.Decision.taskCreate req now) := by
-  rw [taskCreate_eq]
-  unfold taskCreateSteps Concrete.Decision.taskCreate
+  unfold Abstract.taskCreate Concrete.Decision.taskCreate
   sim
 
 /-! ## Heartbeat -/
@@ -1717,32 +1360,22 @@ theorem checkAwaited_sim (now : Nat) {origin : String}
           exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
             fun _ _ => Sim.pure (by simp [AwaitedRel, hawait]) (fun _ h => h.2)
 
-/-- Registering callbacks keeps every property that setting an awaited
-promise keeps. -/
-theorem registerAwaited_sim (awaiter : Ident) (now : Nat) {origin : String}
-    (F : Document (.origin origin) → Prop) :
+theorem registerAwaited_sim (awaiter : Ident) (now : Nat) {origin : String} :
     ∀ actions : List PromiseRegisterCallbackReq,
       (∀ action ∈ actions, action.awaited.origin = origin) →
-      (∀ action ∈ actions, ∀ env d p,
-        F d → F (Concrete.Decision.setPromise action.awaited.suffix p env d).2.1) →
-      Sim (.origin origin) F Eq (fun _ d => F d)
-        (actions.forM (Abstract.addCallback awaiter now))
+      HandlerSim (.origin origin) (actions.forM (Abstract.addCallback awaiter now))
         (Concrete.Decision.registerAwaited (origin := origin) awaiter now actions)
-  | [], _, _ => by
+  | [], _ => by
       simp only [List.forM_nil, Concrete.Decision.registerAwaited]
-      exact Sim.pure rfl (fun _ h => h)
-  | action :: rest, h, hF => by
-      have ih := registerAwaited_sim awaiter now F rest (fun a ha => h a (by simp [ha]))
-        (fun a ha => hF a (by simp [ha]))
+      exact Sim.pure rfl (fun _ _ => trivial)
+  | action :: rest, h => by
+      have ih := registerAwaited_sim awaiter now rest (fun a ha => h a (by simp [ha]))
       simp only [List.forM, Concrete.Decision.registerAwaited, Abstract.addCallback,
         Abstract.bind_assoc]
       refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
       refine ObjRel.cases ?_ (fun _ _ => ?_)
-      · exact Sim.seq (Sim.pure (Q := fun _ d => F d) rfl (fun _ h => h.2)) ih
-      · exact Sim.seq
-          (Sim.frame F (fun env d hd => hF action (by simp) env d _ hd)
-            (setPromise_sim _ (fun _ h => h) (by simp [Object.ofOrigin])))
-          (Sim.pre (fun _ h => h.2) ih)
+      · exact Sim.seq (Sim.pure (Q := fun _ _ => True) rfl (fun _ _ => trivial)) ih
+      · exact Sim.seq (Q := fun _ _ => True) (setObject_sim _ rfl) ih
 
 theorem taskSuspend_sim (req : TaskSuspendReq) (now : Nat) :
     HandlerSim (.origin req.id.origin) (Abstract.taskSuspend req now)
@@ -1760,21 +1393,8 @@ theorem taskSuspend_sim (req : TaskSuspendReq) (now : Nat) :
       sim
     · simp only [hall, hany, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
       sim
-      refine Sim.seq (registerAwaited_sim _ _ _ _ ?_ ?_) ?_
+      refine Sim.seq (Sim.weaken (registerAwaited_sim _ _ _ ?_)) ?_
       · simp_all [Ident.sameOrigin]
-      · intro action haction env d p hd
-        have hne : req.id.suffix ≠ action.awaited.suffix := by
-          intro hsuffix
-          have horigin : action.awaited.origin = req.id.origin := by
-            simp_all [Ident.sameOrigin]
-          have hid : action.awaited ≠ req.id := by
-            intro hid
-            simp_all
-          apply hid
-          cases haw : action.awaited
-          cases hreq : req.id
-          simp_all
-        exact ⟨fun row hrow => setPromise_frame p hne env d (hd.1 row hrow), hd.2⟩
       sim
   · simp only [hall, Bool.not_false, ↓reduceIte]
     sim
@@ -1785,10 +1405,7 @@ theorem processPromiseTimeout_sim (id : Ident) (now : Nat) :
     HandlerSim (.origin id.origin) (Abstract.processPromiseTimeout id now)
       (Concrete.Decision.processPromiseTimeout id now) := by
   unfold Abstract.processPromiseTimeout Concrete.Decision.processPromiseTimeout
-  refine Sim.bind (readObject_getObject_sim id now) ?_
-  rintro a (_ | row) rfl
-  · exact Sim.pure rfl (fun _ _ => trivial)
-  · exact setObject_sim (row.project now)
+  sim
 
 theorem resumeOne_sim (awaited awaiter : Ident) (now : Nat) {origin : String}
     (h : awaiter.origin = origin) :
@@ -1831,8 +1448,6 @@ theorem createIfAbsent_sim (req : PromiseCreateReq) (now : Nat) :
     HandlerSim (.origin req.id.origin) (Abstract.createIfAbsent req now)
       (Concrete.Decision.processOccurrence req now) := by
   unfold Abstract.createIfAbsent Concrete.Decision.processOccurrence
-    Concrete.Decision.createIfAbsent Concrete.Decision.createIfAbsentAt
-  simp only [Abstract.readOrCreate_bind]
   sim
 
 theorem getSchedule_sim_id (id : Ident) :
@@ -1948,14 +1563,12 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
   case promiseCreate req =>
     cases hkey
     exact external_sim_of appConfig call before (wrap := .promiseCreate)
-      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
-        Concrete.Decision.promiseCreate])
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (promiseCreate_sim req call.requestedAt rfl)
   case promiseSettle req =>
     cases hkey
     exact external_sim_of appConfig call before (wrap := .promiseSettle)
-      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
-        Concrete.Decision.promiseSettle])
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
       (by rw [hrequest]; rfl) (promiseSettle_sim req call.requestedAt rfl)
   case promiseRegisterCallback req =>
     split at hkey
