@@ -732,7 +732,9 @@ elab "sim_dispatch" : tactic => withMainContext do
         run `(tactic| exact setSchedule_sim _ _ rfl)
     | some name =>
         if (← Lean.Meta.isMatcher name) then
-          run `(tactic| first | dsimp only [Object.ofOrigin] | split)
+          run `(tactic| first
+            | dsimp only [Object.ofOrigin]
+            | (split <;> try (rename_i heq; simp only [heq])))
         else if name.getPrefix == `Resonate.Abstract then
           let lemma := mkIdent (Name.mkSimple (lastString name ++ "_sim"))
           run `(tactic| (apply $lemma <;> sim_origin))
@@ -743,7 +745,8 @@ elab "sim_dispatch" : tactic => withMainContext do
 macro "sim_step" : tactic => `(tactic| first
   | sim_dispatch
   | dsimp only [Object.ofOrigin]
-  | simp only [Concrete.pure_bind, Abstract.pure_bind])
+  | simp only [Concrete.pure_bind, Abstract.pure_bind, Option.isNone_none,
+      Option.isNone_some, Bool.false_eq_true, ↓reduceIte])
 
 macro "sim" : tactic => `(tactic| repeat' sim_step)
 
@@ -1027,5 +1030,91 @@ theorem taskSuspend_sim (req : TaskSuspendReq) (now : Nat) :
       sim
   · simp only [hall, Bool.not_false, ↓reduceIte]
     sim
+
+/-! ## Internal work -/
+
+theorem processPromiseTimeout_sim (id : Ident) (now : Nat) :
+    Sim (.origin id.origin) Eq (Abstract.processPromiseTimeout id now)
+      (Concrete.Decision.processPromiseTimeout id now) := by
+  unfold Abstract.processPromiseTimeout Concrete.Decision.processPromiseTimeout
+  sim
+
+theorem resumeOne_sim (awaited awaiter : Ident) (now : Nat) {origin : String}
+    (h : awaiter.origin = origin) :
+    Sim (.origin origin) Eq (Abstract.resumeOne awaited awaiter now)
+      (Concrete.Decision.resumeOne (origin := origin) awaited awaiter now) := by
+  subst h
+  unfold Abstract.resumeOne Concrete.Decision.resumeOne
+  sim
+
+/-- The concrete callback step checks that the awaiter shares the awaited
+origin; the abstract step relies on every registered callback doing so. -/
+theorem processCallback_sim (req : PromiseRegisterCallbackReq) (now : Nat)
+    (h : req.awaiter.origin = req.awaited.origin) :
+    Sim (.origin req.awaited.origin) Eq (Abstract.processCallback req now)
+      (Concrete.Decision.processCallback req now) := by
+  unfold Abstract.processCallback Concrete.Decision.processCallback
+  simp only [Ident.sameOrigin, h, beq_self_eq_true, Bool.not_true, Bool.false_eq_true,
+    ↓reduceIte, Concrete.pure_bind]
+  sim
+
+theorem processListener_sim (req : PromiseRegisterListenerReq) (now : Nat) :
+    Sim (.origin req.awaited.origin) Eq (Abstract.processListener req now)
+      (Concrete.Decision.processListener req now) := by
+  unfold Abstract.processListener Concrete.Decision.processListener
+  sim
+
+theorem processLeaseTimeout_sim (id : Ident) (now : Nat) :
+    Sim (.origin id.origin) Eq (Abstract.processLeaseTimeout id now)
+      (Concrete.Decision.processLeaseTimeout id now) := by
+  unfold Abstract.processLeaseTimeout Concrete.Decision.processLeaseTimeout
+  sim
+
+theorem processRetryTimeout_sim (id : Ident) (now : Nat) :
+    Sim (.origin id.origin) Eq (Abstract.processRetryTimeout id now)
+      (Concrete.Decision.processRetryTimeout id now) := by
+  unfold Abstract.processRetryTimeout Concrete.Decision.processRetryTimeout
+  sim
+
+theorem createIfAbsent_sim (req : PromiseCreateReq) (now : Nat) :
+    Sim (.origin req.id.origin) Eq (Abstract.createIfAbsent req now)
+      (Concrete.Decision.processOccurrence req now) := by
+  unfold Abstract.createIfAbsent Concrete.Decision.processOccurrence
+    Concrete.Decision.createIfAbsent Concrete.Decision.createIfAbsentAt
+  sim
+
+theorem getSchedule_sim_id (id : Ident) :
+    Sim (.schedule id) (fun a c => a = c ∧ ∀ schedule, c = some schedule → schedule.id = id)
+      (Abstract.getSchedule id) (Concrete.Decision.getSchedule (id := id)) := by
+  intro env store
+  obtain ⟨h₁, h₂, h₃⟩ := getSchedule_sim id env store
+  refine ⟨⟨h₁, ?_⟩, h₂, h₃⟩
+  intro schedule hschedule
+  simp only [Concrete.Decision.getSchedule, bind, documentGet, pure] at hschedule
+  revert hschedule
+  cases store.read (.schedule id) <;> simp
+  rintro rfl
+  rfl
+
+/-- A concrete schedule step returns the occurrences as work items. -/
+def OccurrenceRel (entries : List WorkflowEntry) (items : List WorkItem) : Prop :=
+  items = entries.map fun entry => .occurrence entry.request entry.instant
+
+theorem processSchedule_sim (id : Ident) (now : Nat) :
+    Sim (.schedule id) OccurrenceRel (Abstract.processSchedule id now)
+      (Concrete.Decision.processSchedule id now) := by
+  unfold Abstract.processSchedule Concrete.Decision.processSchedule
+  refine Sim.bind (getSchedule_sim_id id) ?_
+  rintro a _ ⟨rfl, hid⟩
+  cases a with
+  | none => exact Sim.pure rfl
+  | some schedule =>
+    have hschedule : schedule.id = id := hid _ rfl
+    dsimp only
+    rcases (List.filter (fun x => decide (x ≤ now))
+      (occurrences schedule.cron schedule.nextRunAt now)).getLast? with _ | last
+    · exact Sim.seq (Sim.pure rfl) (Sim.pure (by simp [OccurrenceRel, hschedule]))
+    · exact Sim.seq (setSchedule_sim _ _ hschedule)
+        (Sim.pure (by simp [OccurrenceRel, hschedule]))
 
 end Resonate.Refinement
