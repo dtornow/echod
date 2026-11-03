@@ -20,9 +20,8 @@ the result document written back: the results are related by `R`, the
 concrete result satisfies `Q`, every document view of the two stores has the
 same normal forms, the emitted messages are equal, and ids stay unique.
 
-Abstract writes store whole objects as read; concrete writes update a field
-of the stored row. A write is matched only knowing the row the handler read,
-which `P` carries from the read to the write (`Fact`).
+Both sides write whole objects as read, so a write needs nothing of the
+document it replaces.
 -/
 
 namespace Resonate.Refinement
@@ -206,30 +205,6 @@ theorem Sim.frame {key : DocumentKey} {P : Document key → Prop} {R : α → β
   obtain ⟨hr, hq, hrest⟩ := hs env store document hunique hdoc hp
   exact ⟨hr, ⟨hq, hF env document hf⟩, hrest⟩
 
-/-- A concrete branch the precondition rules out. -/
-theorem Sim.ite_right {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
-    {Q : β → Document key → Prop} (p : Prop) [Decidable p]
-    {a : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
-    (hp : ∀ d, P d → ¬ p) (h : Sim key P R Q a c₂) :
-    Sim key P R Q a (if p then c₁ else c₂) := by
-  intro env store document hunique hdoc hpre
-  rw [if_neg (hp document hpre)]
-  exact h env store document hunique hdoc hpre
-
-/-- Two branches on conditions the precondition makes equivalent. -/
-theorem Sim.ite_iff {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
-    {Q : β → Document key → Prop} (p q : Prop) [Decidable p] [Decidable q]
-    {a₁ a₂ : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
-    (hpq : ∀ d, P d → (p ↔ q))
-    (h₁ : p → Sim key P R Q a₁ c₁) (h₂ : ¬ p → Sim key P R Q a₂ c₂) :
-    Sim key P R Q (if p then a₁ else a₂) (if q then c₁ else c₂) := by
-  intro env store document hunique hdoc hpre
-  by_cases hp : p
-  · rw [if_pos hp, if_pos ((hpq document hpre).1 hp)]
-    exact h₁ hp env store document hunique hdoc hpre
-  · rw [if_neg hp, if_neg (fun hq => hp ((hpq document hpre).2 hq))]
-    exact h₂ hp env store document hunique hdoc hpre
-
 theorem Sim.ite {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
     {Q : β → Document key → Prop} (p : Prop) [Decidable p]
     {a₁ a₂ : Abstract.Handler α} {c₁ c₂ : DocumentHandler key β}
@@ -293,13 +268,6 @@ theorem task_project_of_pending {t : TaskObject} {p : PromiseObject} (h : p.stat
     t.project p = t := by
   simp [AbstractModel.TaskObject.project, h]
 
-theorem task_project_state_of_settled {t : TaskObject} {p : PromiseObject}
-    (h : p.state ≠ .pending) : (t.project p).state = .fulfilled := by
-  unfold AbstractModel.TaskObject.project
-  by_cases ht : t.state = .fulfilled
-  · simp [ht]
-  · simp [h, ht, AbstractModel.TaskObject.fulfill]
-
 theorem task_project_of_settled {t : TaskObject} {p : PromiseObject} (h : p.state ≠ .pending)
     (ht : t.state ≠ .fulfilled) : t.project p = t.fulfill := by
   simp [AbstractModel.TaskObject.project, h, ht]
@@ -324,15 +292,6 @@ theorem project_pending (p : PromiseObject) (now : Nat) :
   · split <;> simp
   · exact id
 
-theorem project_cases (p : PromiseObject) (now : Nat) :
-    p.project now = p ∨ (p.project now).state ≠ .pending := by
-  unfold AbstractModel.PromiseObject.project
-  split
-  · right
-    split <;> simp
-  · left
-    rfl
-
 @[simp] theorem addCallback_state (p : PromiseObject) (awaiter : Ident) :
     (p.addCallback awaiter).state = p.state := by
   unfold AbstractModel.PromiseObject.addCallback
@@ -349,16 +308,6 @@ theorem project_norm {origin : String} (row : OriginObject origin) (now : Nat) :
   · rfl
   · simp only [OriginObject.project, OriginObject.norm, Option.map_some,
       task_project_project (project_pending promise now)]
-
-/-- Two rows with the same promise read alike when the stored task is projected
-through a promise settled whenever this one is. -/
-theorem norm_project {origin : String} (s : String) {p q : PromiseObject}
-    (task : Option TaskObject) (h : p.state = .pending → q.state = .pending) :
-    (⟨s, p, task.map (·.project q)⟩ : OriginObject origin).norm =
-      (⟨s, p, task⟩ : OriginObject origin).norm := by
-  cases task with
-  | none => rfl
-  | some t => simp only [OriginObject.norm, Option.map_some, task_project_project h]
 
 /-! ## Object lookups through an origin document -/
 
@@ -621,63 +570,9 @@ theorem readObject_eq_document {store : Store} {id : Ident}
     (fun row => Object.ofOrigin (row.project now)) = _
   rw [key, find?_equiv (hunique.rows _) hdoc, ← key]
 
-/-- What a read of `suffix` at `now` showed. -/
-def Fact {origin : String} (suffix : String) (now : Nat)
-    (value : Option (OriginObject origin)) (document : OriginDocument origin) : Prop :=
-  (document.find? (·.suffix == suffix)).map (·.project now) = value
-
-/-- What a task read of `suffix` at `now` showed, when it found a task. -/
-def TaskFact {origin : String} (suffix : String) (now : Nat)
-    (value : Option (OriginObject origin × TaskObject))
-    (document : OriginDocument origin) : Prop :=
-  ∀ row, value.map Prod.fst = some row → Fact suffix now (some row) document
-
-theorem Fact.row {origin s : String} {now : Nat} {value : OriginObject origin}
-    {document : OriginDocument origin} (h : Fact s now (some value) document) :
-    ∃ row, document.find? (·.suffix == s) = some row ∧ row.project now = value := by
-  unfold Fact at h
-  cases hfind : document.find? (·.suffix == s) with
-  | none => simp [hfind] at h
-  | some row =>
-      simp only [hfind, Option.map_some, Option.some.injEq] at h
-      exact ⟨row, rfl, h⟩
-
-theorem Fact.none {origin s : String} {now : Nat} {document : OriginDocument origin}
-    (h : Fact s now none document) : document.find? (·.suffix == s) = none := by
-  unfold Fact at h
-  cases hfind : document.find? (·.suffix == s) with
-  | none => rfl
-  | some row => simp [hfind] at h
-
-/-- The row a read found, with what it showed. -/
-theorem Fact.cases {origin s : String} {now : Nat} {promise : PromiseObject}
-    {task : Option TaskObject} {document : OriginDocument origin}
-    (h : Fact s now (some ⟨s, promise, task⟩) document) :
-    ∃ stored current, document.find? (·.suffix == s) = some ⟨s, stored, current⟩ ∧
-      promise = stored.project now ∧ task = current.map (·.project (stored.project now)) := by
-  obtain ⟨⟨rs, stored, current⟩, hfind, hrow⟩ := h.row
-  simp only [OriginObject.project, OriginObject.mk.injEq] at hrow
-  obtain ⟨rfl, rfl, rfl⟩ := hrow
-  exact ⟨stored, current, hfind, rfl, rfl⟩
-
-/-- A read shows a task unfinished only while its promise is pending. -/
-theorem Fact.pending {origin s : String} {now : Nat} {promise : PromiseObject}
-    {task : TaskObject} {document : OriginDocument origin}
-    (h : Fact s now (some ⟨s, promise, some task⟩) document) :
-    promise.state = .pending ∨ task.state = .fulfilled := by
-  obtain ⟨stored, current, _, rfl, htask⟩ := h.cases
-  by_cases hp : (stored.project now).state = .pending
-  · exact Or.inl hp
-  · cases current with
-    | none => simp at htask
-    | some t =>
-        simp only [Option.map_some, Option.some.injEq] at htask
-        subst htask
-        exact Or.inr (task_project_state_of_settled hp)
-
 theorem readObject_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) → Prop} :
     Sim (.origin id.origin) P (ObjRel id.origin id.suffix)
-      (fun found d => Fact id.suffix now found d ∧ P d)
+      (fun _ d => P d)
       (Abstract.readObject id now) (Concrete.Decision.readObject id.suffix now) := by
   intro env store document hunique hdoc hp
   have ha : Abstract.readObject id now env store =
@@ -689,7 +584,7 @@ theorem readObject_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin
       bind, pure]
     cases document.find? (·.suffix == id.suffix) <;> rfl
   rw [ha, hc, readObject_eq_document hunique hdoc]
-  refine ⟨⟨?_, ?_⟩, ⟨rfl, hp⟩, Same.write_of hdoc, rfl, hunique⟩
+  refine ⟨⟨?_, ?_⟩, hp, Same.write_of hdoc, rfl, hunique⟩
   · cases document.find? (·.suffix == id.suffix) <;> rfl
   · intro row h
     cases hfind : document.find? (·.suffix == id.suffix) with
@@ -707,7 +602,7 @@ def TaskRel (origin suffix : String) (a : Option (Object × TaskObject))
 
 theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) → Prop} :
     Sim (.origin id.origin) P (TaskRel id.origin id.suffix)
-      (fun found d => TaskFact id.suffix now found d ∧ P d)
+      (fun _ d => P d)
       (Abstract.readTask id now) (Concrete.Decision.readTask id.suffix now) := by
   intro env store document hunique hdoc hp
   have ha : Abstract.readTask id now env store =
@@ -722,7 +617,7 @@ theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) 
       Concrete.Decision.getObject, documentGet, bind, pure]
     cases document.find? (·.suffix == id.suffix) <;> rfl
   rw [ha, hc, readObject_eq_document hunique hdoc]
-  refine ⟨⟨?_, ?_⟩, ⟨?_, hp⟩, Same.write_of hdoc, rfl, hunique⟩
+  refine ⟨⟨?_, ?_⟩, hp, Same.write_of hdoc, rfl, hunique⟩
   · cases document.find? (·.suffix == id.suffix) with
     | none => rfl
     | some row => cases h : (row.project now).task <;> simp [h, Object.ofOrigin]
@@ -737,16 +632,6 @@ theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) 
               Prod.mk.injEq] at h
             obtain ⟨rfl, rfl⟩ := h
             exact ⟨by simpa [OriginObject.project] using find?_suffix hfind, ht⟩
-  · intro row h
-    cases hfind : document.find? (·.suffix == id.suffix) with
-    | none => simp [hfind] at h
-    | some found =>
-        cases ht : (found.project now).task with
-        | none => simp [hfind, ht] at h
-        | some t =>
-            simp only [hfind, ht, Option.map_some, Option.bind_some, Option.some.injEq] at h
-            subst h
-            simp [Fact, hfind]
 
 /-! ## Writes -/
 
@@ -985,14 +870,14 @@ theorem ask_sim {key : DocumentKey} {P : Document key → Prop} :
 theorem readObject_sim' (id : Ident) (now : Nat) {origin : String}
     (h : id.origin = origin) {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P (ObjRel origin id.suffix)
-      (fun found d => Fact id.suffix now found d ∧ P d) (Abstract.readObject id now)
+      (fun _ d => P d) (Abstract.readObject id now)
       (Concrete.Decision.readObject (origin := origin) id.suffix now) := by
   subst h; exact readObject_sim id now
 
 theorem readTask_sim' (id : Ident) (now : Nat) {origin : String}
     (h : id.origin = origin) {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P (TaskRel origin id.suffix)
-      (fun found d => TaskFact id.suffix now found d ∧ P d) (Abstract.readTask id now)
+      (fun _ d => P d) (Abstract.readTask id now)
       (Concrete.Decision.readTask (origin := origin) id.suffix now) := by
   subst h; exact readTask_sim id now
 
@@ -1059,17 +944,6 @@ theorem Abstract.ite_bind (p : Prop) [Decidable p] (x y : Abstract.Handler α)
 macro "sim_origin" : tactic => `(tactic| first
   | rfl
   | (simp_all [Ident.sameOrigin, TaskFenceAction.targetId]; done))
-
-/-- Close a side condition with what the task read showed: its promise is
-pending or the task is fulfilled. -/
-macro "sim_read" : tactic => `(tactic| (
-  intro d hd
-  first
-    | have hread := Fact.pending (hd.1 _ rfl)
-    | have hread := Fact.pending (hd.2.1 _ rfl)
-    | have hread := Fact.pending hd.1
-    | have hread := Fact.pending hd
-  rcases hread with hread | hread <;> simp_all <;> done))
 
 def lastString : Lean.Name → String
   | .str _ s => s
@@ -1150,10 +1024,6 @@ elab "sim_dispatch" : tactic => withMainContext do
 
 macro "sim_step" : tactic => `(tactic| first
   | sim_dispatch
-  | (refine Sim.ite_right _ ?_ ?_
-     next => sim_read)
-  | (refine Sim.ite_iff _ _ ?_ (fun _ => ?_) (fun _ => ?_)
-     next => sim_read)
   | dsimp only [Object.ofOrigin]
   | simp only [Concrete.pure_bind, Abstract.pure_bind, Option.isNone_none,
       Option.isNone_some, Bool.false_eq_true, ↓reduceIte])
@@ -1341,12 +1211,11 @@ theorem checkAwaited_sim (now : Nat) {origin : String}
       refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
       refine ObjRel.cases ?_ (fun promise task => ?_)
       · exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
-          fun _ _ => Sim.pure (by simp [AwaitedRel]) (fun _ h => h.2)
+          fun _ _ => Sim.pure (by simp [AwaitedRel]) (fun _ h => h)
       · dsimp only [Object.ofOrigin]
         by_cases hawait : promise.otype.awaitable
         · simp only [hawait, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
             Concrete.pure_bind]
-          refine Sim.pre (fun _ h => h.2) ?_
           refine Sim.bind (checkAwaited_sim now rest fun a ha => h a (by simp [ha])) ?_
           intro awaited check hcheck
           rw [hcheck]
@@ -1358,7 +1227,7 @@ theorem checkAwaited_sim (now : Nat) {origin : String}
             exact Sim.pure (by simp [AwaitedRel, hall, hawait]) (fun _ h => h)
         · simp only [hawait, Bool.not_false, ↓reduceIte]
           exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
-            fun _ _ => Sim.pure (by simp [AwaitedRel, hawait]) (fun _ h => h.2)
+            fun _ _ => Sim.pure (by simp [AwaitedRel, hawait]) (fun _ h => h)
 
 theorem registerAwaited_sim (awaiter : Ident) (now : Nat) {origin : String} :
     ∀ actions : List PromiseRegisterCallbackReq,

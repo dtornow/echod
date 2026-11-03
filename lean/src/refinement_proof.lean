@@ -127,28 +127,6 @@ theorem committed_version (store : Concrete.Store)
       some ((store.version key).getD 0 + 1) := by
   simp [Concrete.Store.commit, Concrete.Store.version]
 
-theorem commit_frames (store : Concrete.Store)
-    (key other : DocumentKey) (document : Document key)
-    (h : other ≠ key) :
-    (store.commit key document).read other = store.read other :=
-  Concrete.Store.read_commit_other store key other document h
-
-/-- Replaying an absent-version conditional PUT after it landed selects only
-the conflict branch. This is the store-level duplicate-PUT safety fact. -/
-theorem duplicate_absent_put_conflicts
-    (sender : Concrete.Pid) (op : Concrete.OpId)
-    (key : DocumentKey) (document : Document key) :
-    (Concrete.storePut Concrete.Local.store {}
-      sender (({} : Concrete.Store).commit key document)
-      op key document none).val =
-      [({
-        state := .store (({} : Concrete.Store).commit key document)
-        send := [(sender, .storeReply { op, payload := .conflict })]
-      } : Result Concrete.Pid Concrete.Local Concrete.Msg)] := by
-  simp [Concrete.storePut, Concrete.Store.commit,
-    Concrete.Store.version, Rover.Outcomes.one]
-
-
 def occurrenceEntry? : WorkItem → Option WorkflowEntry
   | .occurrence request instant => some { request, instant }
   | _ => none
@@ -413,20 +391,6 @@ theorem work_step (appConfig : Resonate.Config) (item : WorkItem)
       obtain rfl := Option.some.inj (hselect.symm.trans hfound)
       exact hcontinuations
   | sweep htransaction _ _ => contradiction
-
-@[grind] theorem select_external_continuations_nil
-    {appConfig : Resonate.Config} {key : DocumentKey} {call : Call}
-    {address : Addr}
-    {loaded : Option (Document key × Concrete.Version)}
-    {candidate : Concrete.Candidate key}
-    (hkey : (Concrete.Transaction.external call).key? = some key)
-    (hselect :
-      Concrete.select appConfig
-          { key := key, transaction := .external call, address }
-          loaded =
-        some candidate) :
-    candidate.continuations = [] :=
-  Selected.external_continuations_nil (select_valid hkey hselect)
 
 /-- A request that names no document changes nothing and replies with the
 pure response. -/
@@ -795,10 +759,6 @@ theorem sweep_timeout_transport
       exact scan_transport hrep hscan hinstant
 
 
-theorem takeFlight_once (node : Concrete.Node) (op : Concrete.OpId) :
-    ((node.takeFlight op).2.takeFlight op).1 = none := by
-  simp [Concrete.Node.takeFlight]
-
 def concreteObservation
     {nodes : List Addr} {appConfig : Resonate.Config}
     (label : Label (CModel nodes appConfig)) :
@@ -1059,25 +1019,6 @@ theorem NodeValid.work_select_none_false_of_find
   FlightValid.work_select_ne_none
     (hvalid foundOp flight (List.mem_of_find?_eq_some hfind))
     htransaction loaded hselect
-
-@[simp, grind .] theorem select_pending_entry_ne_none
-    (appConfig : Resonate.Config)
-    (entry : Concrete.PendingEntry) (rest : List Concrete.PendingEntry)
-    (address : Addr)
-    (loaded : Option (Document entry.key × Concrete.Version)) :
-    Concrete.select appConfig {
-      key := entry.key
-      transaction := .work (.occurrence entry.1 entry.2) entry.2 rest
-      address
-    } loaded ≠ none := by
-  cases entry with
-  | occurrence request instant =>
-      apply FlightValid.select_ne_none
-      · exact ⟨by simp [Concrete.Transaction.key?, WorkItem.key,
-            Concrete.PendingEntry.key],
-          trivial, ⟨request, rfl⟩⟩
-      · intro timer sweepInstant sweepRest h
-        contradiction
 
 theorem takeFlight_remaining_mem {node next : Concrete.Node}
     {op : Concrete.OpId} {taken : Option Concrete.Flight}
@@ -1791,20 +1732,6 @@ theorem continueCleanup_state (node : Concrete.Node) (flight : Concrete.Flight) 
       · simp [next, finished, Concrete.Node.awaitControl, Concrete.finishNode]
       · simp [next, finished, Concrete.Node.awaitControl, Concrete.finishNode]
 
-theorem continueCleanup_outside_mem
-    {node : Concrete.Node} {flight : Concrete.Flight} {output : Output}
-    (houtput :
-      (.outside, Concrete.Msg.output output) ∈
-        (Concrete.continueCleanup node flight).send) :
-    output ∈ flight.selected ∧ flight.cleanup = [] := by
-  cases hcleanup : flight.cleanup with
-  | nil =>
-      simp [Concrete.continueCleanup, hcleanup, Concrete.sendOutputs] at houtput
-      exact ⟨houtput, rfl⟩
-  | cons key rest =>
-      simp [Concrete.continueCleanup, hcleanup, Concrete.Node.awaitControl]
-        at houtput
-
 theorem committedFlight_state (node : Concrete.Node) (flight : Concrete.Flight) :
     ∃ next,
       (Concrete.committedFlight node flight).state = .node next := by
@@ -2360,84 +2287,6 @@ theorem node_step_valid
                         exact ⟨_, rfl, sameFlights node _ hnode (by
                           simp [Concrete.Node.takeControl])⟩
 
-theorem start_ids
-    (appConfig : Resonate.Config) (node : Concrete.Node)
-    (transaction : Concrete.Transaction) (key : DocumentKey) :
-    ∃ next,
-      (Concrete.start appConfig node transaction key).state = .node next ∧
-      node.nextOp ≤ next.nextOp ∧
-      (∀ recipient rpc,
-        (recipient, Concrete.Msg.storeRequest rpc) ∈
-            (Concrete.start appConfig node transaction key).send →
-        rpc.op = node.nextOp ∧ next.nextOp = node.nextOp + 1) ∧
-      (∀ recipient₁ rpc₁ recipient₂ rpc₂,
-        (recipient₁, Concrete.Msg.storeRequest rpc₁) ∈
-            (Concrete.start appConfig node transaction key).send →
-        (recipient₂, Concrete.Msg.storeRequest rpc₂) ∈
-            (Concrete.start appConfig node transaction key).send →
-        rpc₁ = rpc₂) := by
-  simp only [Concrete.start]
-  cases hcache : node.cacheRead key with
-  | none =>
-      refine ⟨(node.await { key, transaction } (.get key)).1,
-        by simp [hcache], by simp [Concrete.Node.await],
-        ?_, ?_⟩
-      · simp [hcache, Concrete.Node.await]
-      · intros
-        simp_all [hcache, Concrete.Node.await]
-  | some value =>
-      simp only [hcache]
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          exact ⟨node, by simp [Concrete.decide, hselect],
-            Nat.le_refl _, by simp [Concrete.decide, hselect],
-            by simp [Concrete.decide, hselect]⟩
-      | some candidate =>
-          cases htimer : Concrete.timerForDocument key candidate.document
-              transaction.logicalTime node.nextTimerToken "" with
-          | none =>
-              refine ⟨(node.await {
-                  key
-                  transaction
-                  loaded := some (value.document, value.version)
-                  document := some candidate.document
-                  selected := candidate.outputs
-                  continuations := candidate.continuations
-                  phase := .writing
-                } (.put key candidate.document (some value.version))).1,
-                by simp [Concrete.decide, Concrete.writeCandidate, hselect,
-                  htimer],
-                by simp [Concrete.Node.await], ?_, ?_⟩
-              · simp [Concrete.decide, Concrete.writeCandidate, hselect,
-                  htimer, Concrete.Node.await]
-              · intros
-                simp_all [Concrete.decide, Concrete.writeCandidate, hselect,
-                  htimer, Concrete.Node.await]
-          | some timer =>
-              let advanced :=
-                { node with nextTimerToken := node.nextTimerToken + 1 }
-              refine ⟨(advanced.await {
-                  key
-                  transaction
-                  loaded := some (value.document, value.version)
-                  document := some candidate.document
-                  selected := candidate.outputs
-                  continuations := candidate.continuations
-                  phase := .arming
-                  armed := some timer
-                } (.armTimer timer)).1,
-                by simp [Concrete.decide, hselect, htimer, advanced],
-                by simp [advanced, Concrete.Node.await], ?_, ?_⟩
-              · simp [Concrete.decide, hselect, htimer, advanced,
-                  Concrete.Node.await]
-              · intros
-                simp_all [Concrete.decide, hselect, htimer, advanced,
-                  Concrete.Node.await]
-
-
-
 theorem node_step_ids
     {appConfig : Resonate.Config} {config : Concrete.Config}
     {address : Addr} {node : Concrete.Node}
@@ -2491,79 +2340,6 @@ theorem node_step_ids
       all_goals repeat' first | split at hresult
       all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
       all_goals first | contradiction | grind
-
-theorem start_old_flight
-    (appConfig : Resonate.Config) (node : Concrete.Node)
-    (transaction : Concrete.Transaction) (key : DocumentKey)
-    {next : Concrete.Node} {op : Concrete.OpId} {flight : Concrete.Flight}
-    (hstate :
-      (Concrete.start appConfig node transaction key).state = .node next)
-    (hop : op < node.nextOp) (hmem : (op, flight) ∈ next.flights) :
-    (op, flight) ∈ node.flights := by
-  simp only [Concrete.start] at hstate
-  cases hcache : node.cacheRead key with
-  | none =>
-      simp [hcache, Concrete.Node.await] at hstate
-      subst next
-      simp only [List.mem_cons, Prod.mk.injEq] at hmem
-      rcases hmem with hnew | hold
-      · exact (Nat.ne_of_lt hop hnew.1).elim
-      · exact hold
-  | some value =>
-      simp only [hcache] at hstate
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          simp [Concrete.decide, hselect] at hstate
-          subst next
-          exact hmem
-      | some candidate =>
-          simp only [Concrete.decide, hselect] at hstate
-          split at hstate <;>
-            simp [Concrete.writeCandidate, Concrete.Node.await] at hstate
-          all_goals subst next
-          all_goals simp only [List.mem_cons, Prod.mk.injEq] at hmem
-          all_goals rcases hmem with hnew | hold
-          all_goals
-            first
-            | exact (Nat.ne_of_lt hop hnew.1).elim
-            | exact hold
-
-theorem decide_old_flight
-    (appConfig : Resonate.Config) (node : Concrete.Node)
-    (current : Concrete.Flight)
-    (loaded : Option (Document current.key × Concrete.Version))
-    {next : Concrete.Node} {op : Concrete.OpId} {flight : Concrete.Flight}
-    (hstate :
-      (Concrete.decide appConfig node current loaded).state = .node next)
-    (hop : op < node.nextOp) (hmem : (op, flight) ∈ next.flights) :
-    (op, flight) ∈ node.flights := by
-  cases hselect : Concrete.select appConfig current loaded with
-  | none =>
-      cases hfired : current.fired with
-      | none =>
-          simp [Concrete.decide, hselect, hfired] at hstate
-          subst next
-          exact hmem
-      | some timer =>
-          rw [decide_state_cleanup appConfig node current loaded timer
-            hselect hfired] at hstate
-          cases hstate
-          simpa using hmem
-  | some candidate =>
-      simp only [Concrete.decide, hselect] at hstate
-      split at hstate <;>
-        simp [Concrete.writeCandidate, Concrete.Node.await] at hstate
-      all_goals subst next
-      all_goals simp only [List.mem_cons, Prod.mk.injEq] at hmem
-      all_goals rcases hmem with hnew | hold
-      all_goals
-        first
-        | exact (Nat.ne_of_lt hop hnew.1).elim
-        | exact hold
-
-
 
 theorem node_step_old_flight
     {appConfig : Resonate.Config} {config : Concrete.Config}
@@ -2854,35 +2630,6 @@ theorem takeFlight_remaining_empty
   simp [Concrete.Node.takeFlight, hfilter] at hsnd
   exact hsnd
 
-theorem start_serial_of_empty
-    (appConfig : Resonate.Config) (node : Concrete.Node)
-    (transaction : Concrete.Transaction) (key : DocumentKey)
-    (hempty : node.flights = []) :
-    ∃ next,
-      (Concrete.start appConfig node transaction key).state = .node next ∧
-      NodeSerial next := by
-  simp only [Concrete.start]
-  cases hcache : node.cacheRead key with
-  | none =>
-      refine ⟨(node.await { key, transaction } (.get key)).1,
-        by simp [hcache], ?_⟩
-      simp [NodeSerial, Concrete.Node.await, hempty]
-  | some value =>
-      simp only [hcache]
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          exact ⟨node, by simp [Concrete.decide, hselect], by
-            simp [NodeSerial, hempty]⟩
-      | some candidate =>
-          simp only [Concrete.decide, hselect]
-          split
-          all_goals
-            refine ⟨_, rfl, ?_⟩
-            simp [Concrete.writeCandidate, NodeSerial, Concrete.Node.await,
-              hempty]
-
 set_option maxHeartbeats 800000 in
 theorem node_step_serial
     {appConfig : Resonate.Config} {config : Concrete.Config}
@@ -3093,23 +2840,6 @@ theorem reachable_flights_addressed
   induction hreachable with
   | init hinit => exact flightsAddressed_initial hinit
   | step _ hstep ih => exact flightsAddressed_step ih hstep
-
-theorem reachable_flight_owner
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    {address : Addr} (haddress : address ∈ nodes)
-    {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node)
-    {op : Concrete.OpId} {flight : Concrete.Flight}
-    (hflight : (op, flight) ∈ node.flights) :
-    address = flight.address := by
-  obtain ⟨actual, hactual, haddressed⟩ :=
-    reachable_flights_addressed hreachable address haddress
-  rw [hnode] at hactual
-  cases Concrete.Local.node.inj hactual
-  exact (haddressed op flight hflight).symm
 
 def NodesValid {nodes : List Addr} {appConfig : Resonate.Config}
     (world : World (CModel nodes appConfig)) : Prop :=
@@ -3550,95 +3280,6 @@ theorem NodeLoadingGets.cacheInvalidate
   exact h (by
     simpa [Concrete.Node.cacheInvalidate] using hmem) hphase
 
-theorem start_loading_gets
-    {nodes : List Addr} (appConfig : Resonate.Config)
-    {world : World (CModel nodes appConfig)}
-    (address : Addr) (node : Concrete.Node)
-    (hinvariant : NodeLoadingGets world address node)
-    (now : Time) (transaction : Concrete.Transaction)
-    (key : DocumentKey) :
-    ∃ next,
-      (Concrete.start appConfig node transaction key).state = .node next ∧
-      NodeLoadingGets
-        (world.land (.node address) now
-          (Concrete.start appConfig node transaction key))
-        address next := by
-  simp only [Concrete.start]
-  cases hcache : node.cacheRead key with
-  | none =>
-      refine ⟨(node.await { key, transaction } (.get key)).1,
-        by simp [hcache], ?_⟩
-      intro op flight hmem hphase
-      simp only [Concrete.Node.await, List.mem_cons] at hmem
-      rcases hmem with hnew | hold
-      · cases hnew
-        simp [World.land, hcache, Concrete.Node.await]
-      · exact List.mem_append_left _
-          (hinvariant hold hphase)
-  | some value =>
-      simp only [hcache]
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          refine ⟨node, by simp [Concrete.decide, hselect], ?_⟩
-          exact hinvariant.mono fun message hmessage =>
-            List.mem_append_left _ hmessage
-      | some candidate =>
-          simp only [Concrete.decide, hselect]
-          split
-          all_goals
-            refine ⟨_, rfl, ?_⟩
-            intro op flight hmem hphase
-            simp [Concrete.writeCandidate, Concrete.Node.await] at hmem
-            rcases hmem with hnew | hold
-            · obtain ⟨rfl, rfl⟩ := hnew
-              simp at hphase
-            · exact List.mem_append_left _
-                (hinvariant hold hphase)
-
-theorem decide_loading_gets
-    {nodes : List Addr} (appConfig : Resonate.Config)
-    {world : World (CModel nodes appConfig)}
-    (address : Addr) (node : Concrete.Node)
-    (hinvariant : NodeLoadingGets world address node)
-    (now : Time) (current : Concrete.Flight)
-    (loaded : Option (Document current.key × Concrete.Version)) :
-    ∃ next,
-      (Concrete.decide appConfig node current loaded).state = .node next ∧
-      NodeLoadingGets
-        (world.land (.node address) now
-          (Concrete.decide appConfig node current loaded))
-        address next := by
-  cases hselect : Concrete.select appConfig current loaded with
-  | none =>
-      cases hfired : current.fired with
-      | none =>
-          refine ⟨node, by simp [Concrete.decide, hselect, hfired], ?_⟩
-          exact hinvariant.mono fun message hmessage =>
-            List.mem_append_left _ hmessage
-      | some timer =>
-          refine ⟨cleanupNext node current timer,
-            decide_state_cleanup appConfig node current loaded timer
-              hselect hfired, ?_⟩
-          intro op flight hmem hphase
-          exact List.mem_append_left _
-            (hinvariant (by simpa using hmem) hphase)
-  | some candidate =>
-      simp only [Concrete.decide, hselect]
-      split
-      all_goals
-        refine ⟨_, rfl, ?_⟩
-        intro op flight hmem hphase
-        simp [Concrete.writeCandidate, Concrete.Node.await] at hmem
-        rcases hmem with hnew | hold
-        · obtain ⟨rfl, rfl⟩ := hnew
-          simp at hphase
-        · exact List.mem_append_left _
-            (hinvariant hold hphase)
-
-
-
 set_option maxHeartbeats 800000 in
 theorem node_step_loading_gets
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -3736,122 +3377,6 @@ theorem NodeWritingPuts.cacheInvalidate
     NodeWritingPuts world address (node.cacheInvalidate key) := by
   intro op flight hmem hphase
   exact h (by simpa [Concrete.Node.cacheInvalidate] using hmem) hphase
-
-theorem start_writing_puts
-    {nodes : List Addr} (appConfig : Resonate.Config)
-    {world : World (CModel nodes appConfig)}
-    (address : Addr) (node : Concrete.Node)
-    (hinvariant : NodeWritingPuts world address node)
-    (now : Time) (transaction : Concrete.Transaction)
-    (key : DocumentKey) :
-    ∃ next,
-      (Concrete.start appConfig node transaction key).state = .node next ∧
-      NodeWritingPuts
-        (world.land (.node address) now
-          (Concrete.start appConfig node transaction key))
-        address next := by
-  simp only [Concrete.start]
-  cases hcache : node.cacheRead key with
-  | none =>
-      refine ⟨(node.await { key, transaction } (.get key)).1,
-        by simp [hcache], ?_⟩
-      intro op flight hmem hphase
-      simp only [Concrete.Node.await, List.mem_cons] at hmem
-      rcases hmem with hnew | hold
-      · cases hnew
-        cases hphase
-      · obtain ⟨document, hdocument, hput⟩ :=
-          hinvariant hold hphase
-        exact ⟨document, hdocument,
-          List.mem_append_left _ hput⟩
-  | some value =>
-      simp only [hcache]
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          refine ⟨node, by simp [Concrete.decide, hselect], ?_⟩
-          exact hinvariant.mono fun message hmessage =>
-            List.mem_append_left _ hmessage
-      | some candidate =>
-          simp only [Concrete.decide, hselect]
-          split
-          · refine ⟨_, rfl, ?_⟩
-            intro op flight hmem hphase
-            simp [Concrete.writeCandidate, Concrete.Node.await] at hmem
-            rcases hmem with hnew | hold
-            · obtain ⟨rfl, rfl⟩ := hnew
-              refine ⟨candidate.document, rfl, ?_⟩
-              simp [World.land, Concrete.writeCandidate,
-                Concrete.Node.await]
-            · obtain ⟨document, hdocument, hput⟩ :=
-                hinvariant hold hphase
-              exact ⟨document, hdocument,
-                List.mem_append_left _ hput⟩
-          · refine ⟨_, rfl, ?_⟩
-            intro op flight hmem hphase
-            simp [Concrete.Node.await] at hmem
-            rcases hmem with hnew | hold
-            · obtain ⟨rfl, rfl⟩ := hnew
-              simp at hphase
-            · obtain ⟨document, hdocument, hput⟩ :=
-                hinvariant hold hphase
-              exact ⟨document, hdocument,
-                List.mem_append_left _ hput⟩
-
-theorem decide_writing_puts
-    {nodes : List Addr} (appConfig : Resonate.Config)
-    {world : World (CModel nodes appConfig)}
-    (address : Addr) (node : Concrete.Node)
-    (hinvariant : NodeWritingPuts world address node)
-    (now : Time) (current : Concrete.Flight)
-    (loaded : Option (Document current.key × Concrete.Version)) :
-    ∃ next,
-      (Concrete.decide appConfig node current loaded).state = .node next ∧
-      NodeWritingPuts
-        (world.land (.node address) now
-          (Concrete.decide appConfig node current loaded))
-        address next := by
-  cases hselect : Concrete.select appConfig current loaded with
-  | none =>
-      cases hfired : current.fired with
-      | none =>
-          refine ⟨node, by simp [Concrete.decide, hselect, hfired], ?_⟩
-          exact hinvariant.mono fun message hmessage =>
-            List.mem_append_left _ hmessage
-      | some timer =>
-          refine ⟨cleanupNext node current timer,
-            decide_state_cleanup appConfig node current loaded timer
-              hselect hfired, ?_⟩
-          intro op flight hmem hphase
-          obtain ⟨document, hdocument, hput⟩ :=
-            hinvariant (by simpa using hmem) hphase
-          exact ⟨document, hdocument, List.mem_append_left _ hput⟩
-  | some candidate =>
-      simp only [Concrete.decide, hselect]
-      split
-      · refine ⟨_, rfl, ?_⟩
-        intro op flight hmem hphase
-        simp [Concrete.writeCandidate, Concrete.Node.await] at hmem
-        rcases hmem with hnew | hold
-        · obtain ⟨rfl, rfl⟩ := hnew
-          refine ⟨candidate.document, rfl, ?_⟩
-          simp [World.land, Concrete.writeCandidate,
-            Concrete.Node.await]
-        · obtain ⟨document, hdocument, hput⟩ :=
-            hinvariant hold hphase
-          exact ⟨document, hdocument, List.mem_append_left _ hput⟩
-      · refine ⟨_, rfl, ?_⟩
-        intro op flight hmem hphase
-        simp [Concrete.Node.await] at hmem
-        rcases hmem with hnew | hold
-        · obtain ⟨rfl, rfl⟩ := hnew
-          simp at hphase
-        · obtain ⟨document, hdocument, hput⟩ :=
-            hinvariant hold hphase
-          exact ⟨document, hdocument, List.mem_append_left _ hput⟩
-
-
 
 set_option maxHeartbeats 800000 in
 theorem node_step_writing_puts
@@ -4023,25 +3548,6 @@ theorem reachable_loading_gets
   induction hreachable with
   | init hinit => exact loadingGets_initial hinit
   | step _ hstep ih => exact loadingGets_step ih hstep
-
-theorem reachable_loading_flight_request
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    {address : Addr} (haddress : address ∈ nodes)
-    {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node)
-    {op : Concrete.OpId} {flight : Concrete.Flight}
-    (hflight : (op, flight) ∈ node.flights)
-    (hphase : flight.phase = .loading) :
-    (Concrete.Pid.node address, .store,
-      .storeRequest { op, payload := .get flight.key }) ∈ world.network := by
-  obtain ⟨actual, hactual, hgets⟩ :=
-    reachable_loading_gets hreachable address haddress
-  rw [hnode] at hactual
-  cases Concrete.Local.node.inj hactual
-  exact hgets hflight hphase
 
 theorem reachable_writing_flight_provenance
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -4891,31 +4397,6 @@ theorem gotSnapshots_initial
       (World.initial process) := by
   intro store address op key loaded hstore hmem
   simp [World.initial] at hmem
-
-theorem start_no_store_reply
-    {appConfig : Resonate.Config} {node : Concrete.Node}
-    {transaction : Concrete.Transaction} {key : DocumentKey}
-    {recipient : Concrete.Pid} {reply : Concrete.RpcReply}
-    (hsend :
-      (recipient, Concrete.Msg.storeReply reply) ∈
-        (Concrete.start appConfig node transaction key).send) : False := by
-  simp only [Concrete.start] at hsend
-  cases hcache : node.cacheRead key with
-  | none =>
-      simp [hcache, Concrete.Node.await] at hsend
-  | some value =>
-      simp only [hcache] at hsend
-      cases hselect :
-          Concrete.select appConfig { key, transaction }
-            (some (value.document, value.version)) with
-      | none =>
-          simp [Concrete.decide, hselect, Concrete.Node.await] at hsend
-      | some candidate =>
-          simp only [Concrete.decide, hselect] at hsend
-          split at hsend <;>
-            simp [Concrete.writeCandidate, Concrete.Node.await] at hsend
-
-
 
 set_option maxHeartbeats 800000 in
 theorem node_step_no_store_reply
@@ -7832,17 +7313,6 @@ theorem putRequestOrigins_step
             hvalid (hnodeLocal ▸ hresult) hsent
         exact ⟨provenance, horigin⟩
 
-theorem reachable_put_request_origins
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    PutRequestOrigins world := by
-  induction hreachable with
-  | init hinit => exact putRequestOrigins_initial _
-  | step hreachable hstep ih =>
-      exact putRequestOrigins_step hreachable ih hstep
-
 /-- A raw PUT that is still eligible to match the physical version carries
 one provenance witness that is both tied to its loaded snapshot and, for an
 external transaction, to the originating request.  Keeping these facts on the
@@ -8896,39 +8366,6 @@ theorem covered_sent
   right
   exact ⟨(.outside, Message.output output),
     ⟨output, houtput, rfl⟩, rfl⟩
-
-def FlightWorkflowStage (flight : Concrete.Flight)
-    (nodePending : List Concrete.PendingEntry)
-    (abstractPending : List WorkflowEntry) : Prop :=
-  match flight.transaction with
-  | .external _ =>
-      abstractPending = Concrete.pendingWorkflow nodePending
-  | .work item instant rest =>
-      match flight.phase with
-      | .loading | .arming =>
-          abstractPending =
-            (occurrenceEntry? item).toList ++
-              Concrete.pendingWorkflow rest
-      | .writing =>
-          abstractPending =
-              (occurrenceEntry? item).toList ++
-                Concrete.pendingWorkflow rest ∨
-          abstractPending =
-            Concrete.pendingWorkflow flight.continuations
-      | .deleting =>
-          abstractPending =
-            Concrete.pendingWorkflow flight.continuations
-  | .sweep _ _ rest =>
-      match flight.phase with
-      | .loading | .arming =>
-          abstractPending = Concrete.pendingWorkflow rest
-      | .writing =>
-          abstractPending = Concrete.pendingWorkflow rest ∨
-          abstractPending =
-            Concrete.pendingWorkflow flight.continuations
-      | .deleting =>
-          abstractPending =
-            Concrete.pendingWorkflow flight.continuations
 
 def TransactionPending : Concrete.Transaction → Option (List WorkflowEntry)
   | .external _ => none
@@ -13519,76 +12956,6 @@ theorem related_after_node_land
   · exact hactive
   · exact hcleanup
 
-theorem related_after_inert_node
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
-    (hreachable : Reachable (CModel nodes appConfig) config concrete)
-    (related : Related nodes appConfig config concrete abstract)
-    {address : Addr} (haddress : address ∈ nodes)
-    {node : Concrete.Node}
-    (hnode : concrete.process (.node address) = .node node)
-    {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (htime : concrete.now ≤ now)
-    (hvalid : event.Valid concrete (.node address))
-    (hresult :
-      ({
-        state := .node node
-        send := []
-      } : Result Concrete.Pid Concrete.Local Concrete.Msg) ∈
-        (Concrete.step appConfig config (.node address) (.node node)
-          now event).val) :
-    Related nodes appConfig config
-      (concrete.land (.node address) now {
-        state := .node node
-        send := []
-      }) abstract := by
-  have hprocessEq :
-      (concrete.land (.node address) now {
-        state := .node node
-        send := []
-      }).process = concrete.process := by
-    funext pid
-    by_cases hp : pid = .node address
-    · subst pid
-      simp [World.land, hnode]
-    · simp [World.land, hp]
-  apply related_after_node_land hreachable related haddress hnode htime
-      hvalid hresult (Nat.le_trans related.time htime)
-      (fun _ h => h) related.store
-  · apply workflowAligned_node_land (nextNode := node)
-      related.workflow haddress hnode
-      {
-        state := .node node
-        send := []
-      } rfl
-    · intro store part hpart
-      exact hpart
-    · intro parts hcommitted op flight hflight hphase hreply
-      exact hcommitted address haddress node op flight hnode hflight hphase
-        hreply
-    · simp
-  · trivial
-  · intro target call hsend
-    contradiction
-  · intro output hsend
-    contradiction
-  · intro currentAddress currentNode op flight hcurrentAddress hcurrentNode
-      hflight
-    rw [hprocessEq] at hcurrentNode
-    obtain ⟨hwritten, hfailed⟩ :=
-      related.activeReplies currentAddress currentNode op flight
-        hcurrentAddress hcurrentNode hflight
-    constructor
-    · intro hreply
-      exact hwritten (by simpa [World.land] using hreply)
-    · intro hreply
-      exact hfailed (by simpa [World.land] using hreply)
-  · intro currentAddress currentNode op outputs haddress hnodeNext hmem
-    exact related.cleanupCovered currentAddress currentNode op outputs
-      haddress (by simpa [hprocessEq] using hnodeNext) hmem
-
 /-- Reachable flights are never in the deleting phase. The transition
 system does not construct it; cleanup runs through `continueCleanup`. -/
 def NodeNoDeleting (node : Concrete.Node) : Prop :=
@@ -14388,97 +13755,6 @@ theorem cleanup_mem_covered
         cases hquiet flightOp flight hflight hphase ▸ houtputs.symm ▸ houtput
     | parkedDeleting flightOp flight hflight _ hphase =>
         exact absurd hphase (hnoDeleting flightOp flight hflight)
-
-theorem related_after_metadata_node
-    {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
-    (hreachable : Reachable (CModel nodes appConfig) config concrete)
-    (related : Related nodes appConfig config concrete abstract)
-    {address : Addr} (haddress : address ∈ nodes)
-    {node nextNode : Concrete.Node}
-    (hnode : concrete.process (.node address) = .node node)
-    {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
-    (htime : concrete.now ≤ now)
-    (hvalid : event.Valid concrete (.node address))
-    (hresult :
-      result ∈
-        (Concrete.step appConfig config (.node address) (.node node)
-          now event).val)
-    (hstate : result.state = .node nextNode)
-    (hflights : nextNode.flights = node.flights)
-    (hpending : nextNode.pending = node.pending)
-    (hnoRequest :
-      ∀ target call, (target, Concrete.Msg.request call) ∉ result.send)
-    (hnoOutput :
-      ∀ output, (.outside, Concrete.Msg.output output) ∉ result.send) :
-    Related nodes appConfig config
-      (concrete.land (.node address) now result) abstract := by
-  apply related_after_node_land hreachable related haddress hnode htime
-      hvalid hresult (Nat.le_trans related.time htime)
-      (fun _ h => h)
-  · obtain ⟨physical, hphysical, hrep⟩ := related.store
-    exact ⟨physical, by simpa [World.land] using hphysical, hrep⟩
-  · apply workflowAligned_node_land (nextNode := nextNode)
-      related.workflow haddress hnode result hstate
-    · intro store part hpart
-      simpa [NodeWorkflowPart, hflights, hpending] using hpart
-    · intro parts hcommitted op flight hflight hphase hreply
-      apply hcommitted address haddress node op flight hnode
-      · simpa [hflights] using hflight
-      · exact hphase
-      · exact hreply
-    · intro target op hsend
-      exact node_step_no_store_reply hresult hsend
-  · trivial
-  · intro target call hsend
-    exact (hnoRequest (.node target) call hsend).elim
-  · intro output hsend
-    exact (hnoOutput output hsend).elim
-  · intro currentAddress currentNode op flight hcurrentAddress hcurrentNode
-      hflight
-    by_cases heq : currentAddress = address
-    · subst currentAddress
-      rw [show
-        (concrete.land (.node address) now result).process (.node address) =
-          result.state by simp [World.land],
-        hstate] at hcurrentNode
-      cases Concrete.Local.node.inj hcurrentNode
-      obtain ⟨hwritten, hfailed⟩ :=
-        related.activeReplies address node op flight haddress hnode
-          (by simpa [hflights] using hflight)
-      constructor
-      · intro hreply
-        exact hwritten (by
-          simpa [World.land] using hreply)
-      · intro hreply
-        exact hfailed (by
-          simpa [World.land] using hreply)
-    · obtain ⟨hwritten, hfailed⟩ :=
-        related.activeReplies currentAddress currentNode op flight
-          hcurrentAddress (by simpa [World.land, heq] using hcurrentNode)
-          hflight
-      constructor
-      · intro hreply
-        exact hwritten (by simpa [World.land] using hreply)
-      · intro hreply
-        exact hfailed (by simpa [World.land] using hreply)
-  · intro currentAddress currentNode op outputs haddress hnodeNext hmem
-    by_cases heq : currentAddress = address
-    · subst currentAddress
-      rw [show
-        (concrete.land (.node address) now result).process (.node address) =
-          result.state by simp [World.land],
-        hstate] at hnodeNext
-      cases Concrete.Local.node.inj hnodeNext
-      exact cleanup_mem_covered related haddress hnode
-        (reachable_node_no_deleting hreachable haddress hnode)
-        (reachable_node_loading_quiet hreachable haddress hnode)
-        hmem (fun h => h) hvalid hresult hstate
-    · exact related.cleanupCovered currentAddress currentNode op outputs
-        haddress (by simpa [World.land, heq] using hnodeNext) hmem
 
 set_option maxHeartbeats 2000000 in
 theorem node_step_attempts
