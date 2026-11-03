@@ -98,12 +98,11 @@ pub open spec fn max(a: Time, b: Time) -> Time {
     if a >= b { a } else { b }
 }
 
-/// An internal op started at `now`: a timer in the past fires now.
+/// An internal op as it joins the queue. Its timer keeps the instant it names,
+/// even when that instant is already past: it is overdue, earliest first.
 pub open spec fn schedule<I>(now: Time, s: Sched<I>) -> Sched<I> {
-    match s {
-        Sched::Later(req) => Sched::Later(req),
-        Sched::Timer(t, req) => Sched::Timer(max(t, now), req),
-    }
+    let _ = now;
+    s
 }
 
 pub open spec fn start_all<I>(internals: Seq<Sched<I>>, new: Seq<Sched<I>>, now: Time) -> Seq<Sched<I>> {

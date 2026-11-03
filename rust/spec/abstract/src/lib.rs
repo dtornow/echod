@@ -27,5 +27,5 @@ pub use collections::{PMap, PSet};
 pub use echod_types as types;
 pub use exec::*;
 pub use explore::{plain, IDS, MARKS, SCHEDULES};
-pub use model::{next_cron, on, Key};
+pub use model::{next_cron, Key};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

@@ -3,16 +3,10 @@
 //! to, and holds the cron engine the spec trusts. None of it decides what the
 //! server does: the `Model` impl itself is verified, in `spec.rs`.
 
-use echod_rover::{Footprint, Partitioned, Touches};
-use echod_types::{Request, TaskFenceAction};
+use echod_rover::{Footprint, Partitioned, Sched, Touches};
+use echod_types::{Request, TaskFenceAction, TaskState};
 
 use super::exec::*;
-
-/// The step on these objects, as the model names it: the awaited promise
-/// first, then its awaiter.
-pub fn on(ids: &[&str]) -> Internal {
-    Internal::On(ids.iter().map(|i| i.to_string()).collect())
-}
 
 /// What a footprint names: a promise with its task, a schedule, or a whole
 /// origin (what a schedule's future occurrences will touch).
@@ -129,12 +123,25 @@ impl Footprint for Resonate {
         }
     }
 
-    fn internal_touches(&self, step: &Internal) -> Touches<Key> {
+    fn internal_touches(&self, step: &Work) -> Touches<Key> {
         match step {
-            Internal::On(ids) => Touches::Only(ids.iter().map(|id| Key::Object(id.clone())).collect()),
-            Internal::Fire { schedule, promise, .. } => Touches::Only(vec![Key::Schedule(schedule.clone()), Key::Object(promise.clone())]),
-            Internal::Advance { schedule, .. } => Touches::one(Key::Schedule(schedule.clone())),
+            Work::PromiseTimeout(id) | Work::Lease(id) | Work::Retry(id) | Work::Listener { awaited: id, .. } => {
+                Touches::one(Key::Object(id.clone()))
+            }
+            Work::Callback { awaited, awaiter } => Touches::Only(vec![Key::Object(awaited.clone()), Key::Object(awaiter.clone())]),
+            Work::Schedule { id, promise } => Touches::Only(vec![Key::Schedule(id.clone()), Key::Object(promise.clone())]),
+            Work::Occurrence { promise, .. } => Touches::one(Key::Object(promise.clone())),
         }
+    }
+
+    fn state_spans(&self, s: &Server) -> Vec<Touches<Key>> {
+        s.schedules
+            .iter()
+            .map(|(id, c)| match template_origin(&c.promise_id, id) {
+                Some(o) => Touches::Only(vec![Key::Schedule(id.clone()), Key::Origin(o)]),
+                None => Touches::Everything,
+            })
+            .collect()
     }
 
     fn dispatch_touches(&self, msg: &Dispatch) -> Touches<Key> {
@@ -179,4 +186,43 @@ impl Partitioned for Resonate {
         }
         n
     }
+}
+
+/// What the maps and the clock make due, one item each. Occurrences are not
+/// here: a schedule step queues those, and the queue is the only one.
+pub fn due(_m: &Resonate, s: &Server, now: Time) -> Vec<Sched<Work>> {
+    let mut v = Vec::new();
+    for (id, p) in s.promises.iter() {
+        if p.live() && now >= p.timeout_at {
+            v.push(Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        }
+        if !p.live() {
+            for awaiter in p.callbacks.to_vec() {
+                v.push(Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
+            }
+            for address in p.listeners.to_vec() {
+                v.push(Sched::Later(Work::Listener { awaited: id.clone(), address }));
+            }
+        }
+    }
+    for (id, t) in s.tasks.iter() {
+        if t.state == TaskState::Acquired && now >= t.lease_expires() {
+            v.push(Sched::Timer(t.lease_expires(), Work::Lease(id.clone())));
+        }
+        if t.state == TaskState::Pending {
+            if let Some(r) = t.retry_at {
+                let live = s.promises.get(id).is_some_and(|p| p.live());
+                if r <= now && live {
+                    v.push(Sched::Timer(r, Work::Retry(id.clone())));
+                }
+            }
+        }
+    }
+    for (id, c) in s.schedules.iter() {
+        if c.next_run_at <= now {
+            let promise = expand(&c.promise_id, id, c.next_run_at);
+            v.push(Sched::Timer(c.next_run_at, Work::Schedule { id: id.clone(), promise }));
+        }
+    }
+    v
 }

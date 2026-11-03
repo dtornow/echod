@@ -727,7 +727,7 @@ impl<S: Engine> Checker<S> {
             }
             // A clock move may also come after work it doesn't commute with.
         }
-        let owed: Vec<P<S>> = self.owed(n, e).into_iter().cloned().collect();
+        let owed: Vec<P<S>> = self.owed(n, e);
         let first = self.earliest_overdue(n);
         let relevant = if !self.cfg.footprints {
             Touches::Everything
@@ -737,11 +737,10 @@ impl<S: Engine> Checker<S> {
                 Ev::Clock(to) => self.clock_seed(n, *to),
                 _ => Touches::Only(Vec::new()),
             };
-            let owed_refs: Vec<&P<S>> = owed.iter().collect();
-            self.relevant(n, &owed_refs, seed)
+            self.relevant(n, &owed, seed)
         };
-        let mut items: Vec<&P<S>> = n
-            .pending
+        let locals = self.locals(n);
+        let mut items: Vec<&P<S>> = locals
             .iter()
             .filter(|item| self.can_fire(item))
             .filter(|item| match first {
@@ -904,7 +903,8 @@ impl<S: Engine> Checker<S> {
                 Record::Early { call, j, .. } if chosen.contains(&k) => Silent::Effect { call, j },
                 Record::Early { .. } => continue,
                 Record::Run { sched, j } => {
-                    Silent::Run { i: c.internals.iter().position(|w| *w == sched).ok_or(format!("{sched:?} is not pending"))?, j }
+                    let full = c.augmented();
+                    Silent::Run { i: full.iter().position(|w| *w == sched).ok_or(format!("{sched:?} is not due"))?, j }
                 }
             };
             c.silent(s).map_err(|()| format!("before event {}, the step can't be taken: {s:?}", cert.len()))?;
@@ -1073,11 +1073,19 @@ impl<S: Engine> Checker<S> {
         let nodes = &self.factors[i].nodes;
         let mut groups: Vec<BTreeSet<S::Part>> = parts.iter().map(|p| BTreeSet::from([p.clone()])).collect();
         for n in nodes {
-            for item in &n.pending {
-                if matches!(item, Pending::Settled { .. }) {
-                    return; // answered by the spec, not yet returned: its footprint is gone
+            if n.pending.iter().any(|item| matches!(item, Pending::Settled { .. })) {
+                return; // answered by the spec, not yet returned: its footprint is gone
+            }
+            let mut spans: Vec<Touches<S::Key>> = n.pending.iter().map(|item| self.keys(item)).collect();
+            for sched in self.engine.model().due(&n.state, self.now) {
+                spans.push(self.engine.internal_keys(sched.req()));
+            }
+            spans.extend(self.engine.state_spans(&n.state));
+            for span in spans {
+                if matches!(span, Touches::Only(ref ks) if ks.is_empty()) {
+                    continue;
                 }
-                let Touches::Only(ks) = self.keys(item) else { return };
+                let Touches::Only(ks) = span else { return };
                 if ks.iter().any(|k| self.engine.part(k).is_none_or(|p| !parts.contains(&p))) {
                     return; // work outside the known partitions
                 }
@@ -1302,8 +1310,8 @@ impl<S: Engine> Checker<S> {
             };
             let mut owed = owed;
             if let Some((_, _, item)) = &returning {
-                if !owed.contains(&item) {
-                    owed.push(item);
+                if !owed.contains(item) {
+                    owed.push(item.clone());
                 }
             }
             self.relevant(&n, &owed, seed)
@@ -1353,11 +1361,12 @@ impl<S: Engine> Checker<S> {
         // `item` does may then depend on the time once that other one has
         // fired, though it doesn't now (a create of a schedule that exists,
         // with its delete in flight).
+        let locals = self.locals(n);
         let shared = |item: &P<S>| {
             let mine = self.keys(item);
-            n.pending.iter().any(|other| !std::ptr::eq(other, item) && self.can_fire(other) && intersects(&mine, &self.keys(other)))
+            locals.iter().any(|other| !std::ptr::eq(other, item) && self.can_fire(other) && intersects(&mine, &self.keys(other)))
         };
-        for item in &n.pending {
+        for item in &locals {
             let differs = match item {
                 Pending::Internal { sched: Sched::Timer(t, _), .. } if *t <= at => true,
                 Pending::External { req, .. } => {
@@ -1376,6 +1385,20 @@ impl<S: Engine> Checker<S> {
                 match self.keys(item) {
                     Touches::Everything => return Touches::Everything,
                     Touches::Only(ks) => keys.extend(ks),
+                }
+            }
+        }
+        // A timer the clock is about to pass is not due yet, and still does
+        // not commute with the move: its keys pull in work that must be
+        // allowed to run first.
+        if at > self.now {
+            for sched in self.engine.model().due(&n.state, at) {
+                let Some(t) = sched.due() else { continue };
+                if t > self.now && t <= at {
+                    match self.engine.internal_keys(sched.req()) {
+                        Touches::Everything => return Touches::Everything,
+                        Touches::Only(ks) => keys.extend(ks),
+                    }
                 }
             }
         }
@@ -1410,7 +1433,8 @@ impl<S: Engine> Checker<S> {
             if !visit(parent.as_ref(), &m)? {
                 continue;
             }
-            for item in &m.pending {
+            let locals = self.locals(&m);
+            for item in &locals {
                 if !self.can_fire(item) {
                     continue;
                 }
@@ -1470,10 +1494,24 @@ impl<S: Engine> Checker<S> {
 
     /// The earliest deadline among `m`'s overdue work, if it has any. Asks the
     /// model whether work can run only in deadline order, until one can.
+    /// Pending work, plus what `Model::due` reads off the state. Derived items
+    /// are not stored: firing one leaves the set as it was, and the next
+    /// state no longer offers it.
+    fn locals(&self, n: &Node<S>) -> Vec<P<S>> {
+        let mut items: Vec<P<S>> = n.pending.iter().cloned().collect();
+        for sched in self.engine.model().due(&n.state, self.now) {
+            let item = Pending::Internal { sched, count: 1 };
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
+        items
+    }
+
     fn earliest_overdue(&self, m: &Node<S>) -> Option<Time> {
         let now = self.now;
-        let mut due: Vec<(Time, &P<S>)> = m
-            .pending
+        let locals = self.locals(m);
+        let mut due: Vec<(Time, &P<S>)> = locals
             .iter()
             .filter_map(|i| match i {
                 Pending::Internal { sched: Sched::Timer(t, _), .. } if *t <= now => Some((*t, i)),
@@ -1485,7 +1523,7 @@ impl<S: Engine> Checker<S> {
     }
 
     /// What must happen, at the current time, before `e` can be consumed from `m`.
-    fn owed<'a>(&self, m: &'a Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Vec<&'a P<S>> {
+    fn owed(&self, m: &Node<S>, e: &Ev<Ex<S>, Re<S>, Ms<S>>) -> Vec<P<S>> {
         let returning = match e {
             Ev::Return(c, r) => Some((*c, Some(r))),
             _ => None,
@@ -1511,13 +1549,9 @@ impl<S: Engine> Checker<S> {
 
     /// `returning`: the call being answered, and the answer if known. A call whose
     /// early answers already admit it owes nothing.
-    fn owed_for<'a>(
-        &self,
-        m: &'a Node<S>,
-        returning: Option<(CallId, Option<&Re<S>>)>,
-    ) -> Vec<&'a P<S>> {
-        m.pending
-            .iter()
+    fn owed_for(&self, m: &Node<S>, returning: Option<(CallId, Option<&Re<S>>)>) -> Vec<P<S>> {
+        self.locals(m)
+            .into_iter()
             .filter(|item| match item {
                 Pending::External { call, early, .. } => match returning {
                     Some((c, obs)) if c == *call => !obs.is_some_and(|o| early.iter().any(|r| r == o)),
@@ -1534,7 +1568,7 @@ impl<S: Engine> Checker<S> {
     }
 
     /// The footprint of what is owed, closed over pending work that shares keys with it.
-    fn relevant(&self, n: &Node<S>, owed: &[&P<S>], seed: Touches<S::Key>) -> Touches<S::Key> {
+    fn relevant(&self, n: &Node<S>, owed: &[P<S>], seed: Touches<S::Key>) -> Touches<S::Key> {
         let mut keys: BTreeSet<S::Key> = match seed {
             Touches::Everything => return Touches::Everything,
             Touches::Only(ks) => ks.into_iter().collect(),
@@ -1546,7 +1580,7 @@ impl<S: Engine> Checker<S> {
             }
         }
         let mut prints = Vec::new();
-        for item in n.pending.iter().filter(|i| self.can_fire(i)) {
+        for item in self.locals(n).iter().filter(|i| self.can_fire(i)) {
             match self.footprint(item, n) {
                 Touches::Everything => return Touches::Everything,
                 Touches::Only(ks) => prints.push(ks),
@@ -1706,7 +1740,9 @@ impl<S: Engine> Checker<S> {
     /// Starts internal ops, on the clock as it reads now.
     fn spawn(&self, pending: &mut HashedSet<P<S>>, steps: Vec<Sched<In<S>>>) {
         for sched in steps {
-            let sched = sched.at(self.now);
+            // A timer keeps the instant it names. Lifting a catch-up of past
+            // instants onto `now` would make them one deadline and every order
+            // a candidate.
             if let Some(Some(parts)) = &self.scope {
                 let escaped = match self.engine.internal_keys(sched.req()) {
                     Touches::Everything => true,

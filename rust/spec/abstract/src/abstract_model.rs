@@ -46,7 +46,7 @@ impl View for State {
     open spec fn view(&self) -> StateV {
         StateV {
             server: self.server@,
-            pending: self.pending@.map_values(|work: Work| work@),
+            pending: self.pending@.map_values(|work: Work| super::spec::as_sched(work)),
         }
     }
 }
@@ -228,9 +228,9 @@ fn append_work(
     mut work: Vec<Work>,
 ) -> (result: Vec<Work>)
     ensures
-        result@.map_values(|item: Work| item@)
-            == pending@.map_values(|item: Work| item@)
-                + work@.map_values(|item: Work| item@),
+        result@.map_values(|item: Work| super::spec::as_sched(item))
+            == pending@.map_values(|item: Work| super::spec::as_sched(item))
+                + work@.map_values(|item: Work| super::spec::as_sched(item)),
 {
     let mut result = copy(pending);
     result.append(&mut work);
@@ -320,10 +320,10 @@ fn run_results(
     results
 }
 
-pub open spec fn spec_ready(work: Sched<InternalV>, now: Time) -> bool {
+pub open spec fn spec_ready(work: InternalV, now: Time) -> bool {
     match work {
-        Sched::Later(_) => true,
-        Sched::Timer(at, _) => at <= now,
+        InternalV::Occurrence { at, .. } => at <= now,
+        _ => false,
     }
 }
 
@@ -332,8 +332,8 @@ fn ready(work: &Work, now: Time) -> (is_ready: bool)
         is_ready == spec_ready(work@, now),
 {
     match work {
-        Work::Later(_) => true,
-        Work::Timer(at, _) => *at <= now,
+        Work::Occurrence { at, .. } => *at <= now,
+        _ => false,
     }
 }
 
@@ -444,9 +444,7 @@ fn internal_results_from(
         return Vec::new();
     }
     let work = &state.pending[i];
-    let outcome = match work {
-        Work::Later(step) | Work::Timer(_, step) => config.run_timeout(step, &state.server, now),
-    };
+    let outcome = config.run_work(work, &state.server, now);
     let is_ready = ready(work, now);
     let mut tail = internal_results_from(config, state, now, i + 1);
     if is_ready && !outcome.pending {
@@ -460,13 +458,47 @@ fn internal_results_from(
     }
 }
 
+fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>) {
+    let InOut { next, mut work, send: mut dispatches, marks: _, pending: _ } = outcome;
+    let mut pending = copy(&before.pending);
+    pending.append(&mut work);
+    let ghost all = dispatches@;
+    let mut send = Vec::new();
+    while !dispatches.is_empty()
+        invariant
+            send@.len() + dispatches@.len() == all.len(),
+            dispatches@ == all.skip(send@.len() as int),
+        decreases dispatches.len(),
+    {
+        let dispatch = dispatches.remove(0);
+        send.push((Pid::Outside, Message::Output(Output::Dispatch(dispatch))));
+    }
+    StepResult { state: State { server: next, pending }, send }
+}
+
 fn internal_results(
     config: &Resonate,
     state: &State,
     now: Time,
 ) -> (results: Vec<StepResult<Model>>)
 {
-    internal_results_from(config, state, now, 0)
+    let mut results = internal_results_from(config, state, now, 0);
+    let due = super::model::due(config, &state.server, now);
+    let n = due.len();
+    let mut i = 0;
+    while i < n
+        invariant
+            i <= n,
+            due.len() == n,
+        decreases n - i,
+    {
+        let outcome = config.run_work(due[i].req(), &state.server, now);
+        if !outcome.pending {
+            results.push(due_result(state, outcome));
+        }
+        i += 1;
+    }
+    results
 }
 
 pub open spec fn spec_idle(state: StateV) -> Seq<StepResultV<StateV, Pid, Message>> {
@@ -553,7 +585,7 @@ impl RoverModel for Model {
         };
         proof {
             assert(server@ == empty_server());
-            assert(pending@.map_values(|work: Work| work@) =~= Seq::empty());
+            assert(pending@.map_values(|work: Work| super::spec::as_sched(work)) =~= Seq::empty());
             assert(state@ == StateV {
                 server: empty_server(),
                 pending: Seq::empty(),

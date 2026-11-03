@@ -1,4 +1,4 @@
-//! The match. `run` is one request. `run_timeout` is one armed step.
+//! The match. `run` is one request. `run_work` is one due item.
 
 use vstd::prelude::*;
 
@@ -8,7 +8,7 @@ use echod_types::Request;
 use super::super::spec::group_views;
 
 use super::{
-    echo, mk, prec, promise_res, schedule_res, status, task_get_res, trec, InOut, Internal, Out, Resonate, Server, Step, Time,
+    echo, mk, prec, promise_res, schedule_res, status, task_get_res, trec, InOut, Out, Resonate, Server, Time, Work,
 };
 
 verus! {
@@ -52,22 +52,17 @@ impl Resonate {
         }
     }
 
-    /// One armed step, at `now`: whatever is due on the named objects, or a
-    /// schedule's fire or advance.
-    pub fn run_timeout(&self, step: &Step, s: &Server, now: Time) -> (r: InOut) {
+    /// One due item at `now`: a deadline, a callback, a listener, a lease, a
+    /// retry, a schedule, or one queued occurrence.
+    pub fn run_work(&self, step: &Work, s: &Server, now: Time) -> (r: InOut) {
         match step {
-            Step::Objects(ids) => self.objects(ids, s, now),
-            Step::Fire { schedule, at, promise } => self.fire(schedule, *at, promise, s, now),
-            Step::Advance { schedule, at, promise } => self.advance(schedule, *at, promise, s, now),
-        }
-    }
-
-    /// The same step, named as the checker's `Internal`.
-    pub fn run_internal(&self, step: &Internal, s: &Server, now: Time) -> (r: InOut) {
-        match step {
-            Internal::On(ids) => self.objects(ids, s, now),
-            Internal::Fire { schedule, at, promise } => self.fire(schedule, *at, promise, s, now),
-            Internal::Advance { schedule, at, promise } => self.advance(schedule, *at, promise, s, now),
+            Work::PromiseTimeout(id) => self.promise_timeout(id, s, now),
+            Work::Callback { awaited, awaiter } => self.callback(awaited, awaiter, s, now),
+            Work::Listener { awaited, address } => self.listener(awaited, address, s, now),
+            Work::Lease(id) => self.lease(id, s, now),
+            Work::Retry(id) => self.retry(id, s, now),
+            Work::Schedule { id, .. } => self.schedule(id, s, now),
+            Work::Occurrence { promise, at, timeout, param, tags } => self.occurrence(promise, *at, *timeout, param, tags, s, now),
         }
     }
 }

@@ -16,7 +16,7 @@ use super::super::spec::MAX_VERSION;
 use super::super::spec::{ServerV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
 
 use super::{
-    at, claim_res, contains, copy_server, delay_of, echo, fence_res, has_target, is_timer, mk, marked, one, prec, promise_res, schedule_res, settle, settled_work, status, status_res, task_get_res, trec, Id, Out, Promise, Resonate, Server, Task, Time, Work,
+    claim_res, contains, copy_server, delay_of, echo, fence_res, has_target, is_timer, mk, marked, next_cron, one, prec, promise_res, schedule_res, settle, status, status_res, task_get_res, trec, Id, Out, Promise, Resonate, Server, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -97,10 +97,6 @@ impl Resonate {
         let rec = prec(&req.id, &p);
         let mut n = copy_server(s);
         n.promises.insert(req.id.clone(), p);
-        let mut work = Vec::new();
-        if live {
-            work.push(at(req.timeout_at, &req.id));
-        }
         if has_target(&req.tags) {
             // A live targeted promise's task is runnable: offered to a worker
             // at once, or at its delay.
@@ -112,9 +108,6 @@ impl Resonate {
             let retry_at = if live { Some(due) } else { None };
             let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at, resumes: Vec::new() };
             n.tasks.insert(req.id.clone(), task);
-            if live {
-                work.push(at(due, &req.id));
-            }
         }
         proof {
             if server_ok(*s) {
@@ -142,7 +135,7 @@ impl Resonate {
         if live && has_target(&req.tags) {
             marks.push(mk("task created pending"));
         }
-        let outs = one(Out { resp: promise_res(200, Some(rec)), next: n, work, send: Vec::new(), marks });
+        let outs = one(Out { resp: promise_res(200, Some(rec)), next: n, work: Vec::new(), send: Vec::new(), marks });
 
         outs
     }
@@ -161,7 +154,7 @@ impl Resonate {
         if !p.live() {
             return echo(promise_res(200, Some(prec(&req.id, p))), mk("settle: already settled (echo)"), s);
         }
-        let work = settled_work(p, &req.id);
+        let noted = !p.callbacks.to_vec().is_empty() || !p.listeners.to_vec().is_empty();
         let mut n = copy_server(s);
         settle(&mut n, &req.id, req.state, &req.value, now);
         let res = match n.promises.get(&req.id) {
@@ -170,10 +163,10 @@ impl Resonate {
         };
         let mut marks = Vec::new();
         marks.push(if fenced { mk("fence: promise settled") } else { mk("promise settled") });
-        if work.len() > 0 {
+        if noted {
             marks.push(mk("settled with callbacks or listeners"));
         }
-        one(Out { resp: res, next: n, work, send: Vec::new(), marks })
+        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks })
     }
 
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
@@ -233,11 +226,9 @@ impl Resonate {
                         u.acquire(t.version + 1, pid.clone(), ttl, now);
                         let rec = claim_res(200, Some(trec(&req.id, &u)), Some(prec(&req.id, p)));
                         n.tasks.insert(req.id.clone(), u);
-                        let mut work = Vec::new();
-                        work.push(at(now.saturating_add(ttl), &req.id));
 
                         assert(n@ == (ServerV { tasks: s@.tasks.insert(req.id@, u@), ..s@ }));
-                        one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
+                        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
                     },
                     _ => status(claim_res(409, None, None), mk("task.create: task held, suspended or halted (409)"), s),
                 };
@@ -257,12 +248,9 @@ impl Resonate {
             listeners: PSet::empty(),
         };
         let mut t = Task { state: TaskState::Fulfilled, version: 0, pid: None, ttl: None, acquired_at: 0, retry_at: None, resumes: Vec::new() };
-        let mut work = Vec::new();
         if live {
             // Acquired by the caller right away: nothing to dispatch.
             t.acquire(1, pid.clone(), ttl, now);
-            work.push(at(req.timeout_at, &req.id));
-            work.push(at(now.saturating_add(ttl), &req.id));
         }
 
         let res = claim_res(200, Some(trec(&req.id, &t)), Some(prec(&req.id, &p)));
@@ -273,7 +261,7 @@ impl Resonate {
         n.tasks.insert(req.id.clone(), t);
         assert(n@ == (ServerV { promises: s@.promises.insert(req.id@, pv), tasks: s@.tasks.insert(req.id@, tv), ..s@ }));
         let mark = if live { mk("task created") } else { mk("task created past its deadline") };
-        one(Out { resp: res, next: n, work, send: Vec::new(), marks: marked(mark) })
+        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
     pub(super) fn task_suspend(&self, req: &TaskSuspendReq, s: &Server) -> (outs: Vec<Out>)
@@ -532,7 +520,6 @@ impl Resonate {
         }
 
         let mut n = copy_server(s);
-        let mut work = Vec::new();
         let mut extended = false;
         let mut i = 0;
         while i < refs.len()
@@ -559,17 +546,11 @@ impl Resonate {
                         let mut u = copy(t);
                         u.acquired_at = now;
                         assert(u@ == (TaskV { acquired_at: now, ..t@ }));
-                        let expires = u.lease_expires();
 
                         let ghost nt = n.tasks@;
                         n.tasks.insert(r.id.clone(), u);
                         assert(n.tasks@ == nt.insert(r.id@, u));
                         assert(n.tasks@.map_values(|t: Task| t@) == nt.map_values(|t: Task| t@).insert(r.id@, u@));
-
-                        let ghost before = works(work@);
-                        let w = at(expires, &r.id);
-                        work.push(w);
-                        assert(works(work@) == before.push(w@));
                         extended = true;
 
                     }
@@ -583,7 +564,7 @@ impl Resonate {
         }
         // Always 200: a heartbeat says nothing about what it kept.
         let mark = if extended { mk("lease extended") } else { mk("heartbeat: nothing held by this worker") };
-        one(Out { resp: status_res(200), next: n, work, send: Vec::new(), marks: marked(mark) })
+        one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
     pub(super) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Server, now: Time) -> (outs: Vec<Out>)
@@ -599,13 +580,16 @@ impl Resonate {
         if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
-        if !cron_valid(&req.cron) || req.next_run_at < now {
+        if !cron_valid(&req.cron) {
             return status(schedule_res(400, None), mk("schedule: invalid cron (400)"), s);
         }
         match s.schedules.get(&req.id) {
             Some(c) => return echo(schedule_res(200, Some(c.dup())), mk("schedule: id exists (echo)"), s),
             None => {},
         }
+        // `next_run_at` is the server's: the first instant the cron names
+        // strictly after now. The request does not carry it.
+        let next_run_at = next_cron(&req.cron, now);
         let c = Schedule {
             id: req.id.clone(),
             cron: req.cron.clone(),
@@ -614,15 +598,13 @@ impl Resonate {
             promise_param: req.promise_param.dup(),
             promise_tags: echod_types::clone_tags(&req.promise_tags),
             created_at: now,
-            next_run_at: req.next_run_at,
+            next_run_at,
             last_run_at: None,
         };
         let rec = schedule_res(200, Some(c.dup()));
         let mut n = copy_server(s);
         n.schedules.insert(req.id.clone(), c);
-        let mut work = Vec::new();
-        self.arm_fire(&mut work, &req.id, req.next_run_at, &req.promise_id);
-        one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("schedule created")) })
+        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) })
     }
 
     /// `task.fence` with no action: the check alone, after a detached create.
@@ -707,9 +689,7 @@ impl Resonate {
         u.acquire(t.version + 1, pid.clone(), ttl, now);
         let rec = claim_res(200, Some(trec(id, &u)), Some(prec(id, p)));
         n.tasks.insert(id.clone(), u);
-        let mut work = Vec::new();
-        work.push(at(now.saturating_add(ttl), id));
-        one(Out { resp: rec, next: n, work, send: Vec::new(), marks: marked(mk("task acquired")) })
+        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) })
     }
 
     pub(super) fn task_release(&self, id: &Id, version: u64, s: &Server, now: Time) -> (outs: Vec<Out>)
@@ -723,9 +703,7 @@ impl Resonate {
                 let mut u = copy(t);
                 u.release(now);
                 n.tasks.insert(id.clone(), u);
-                let mut work = Vec::new();
-                work.push(at(now, id));
-                one(Out { resp: status_res(200), next: n, work, send: Vec::new(), marks: marked(mk("task released")) })
+                one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task released")) })
             },
         }
     }
@@ -741,17 +719,13 @@ impl Resonate {
             Err(code) => return status(promise_res(code, None), if code == 404 { mk("fulfill: no such task (404)") } else { mk("fulfill: not held (409)") }, s),
             Ok(_) => {},
         }
-        let work = match s.promises.get(id) {
-            Some(p) => settled_work(p, id),
-            None => Vec::new(),
-        };
         let mut n = copy_server(s);
         settle(&mut n, id, action.state, &action.value, now);
         let res = match n.promises.get(id) {
             Some(q) => promise_res(200, Some(prec(id, q))),
             None => promise_res(500, None), // unreachable: held checked the promise
         };
-        one(Out { resp: res, next: n, work, send: Vec::new(), marks: marked(mk("task fulfilled")) })
+        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task fulfilled")) })
     }
 
     pub(super) fn task_halt(&self, id: &Id, s: &Server) -> (outs: Vec<Out>)
@@ -799,9 +773,7 @@ impl Resonate {
         u.state = TaskState::Pending;
         u.retry_at = Some(now);
         n.tasks.insert(id.clone(), u);
-        let mut work = Vec::new();
-        work.push(at(now, id));
-        one(Out { resp: status_res(200), next: n, work, send: Vec::new(), marks: marked(mk("task continued")) })
+        one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task continued")) })
     }
 
     pub(super) fn schedule_delete(&self, id: &Id, s: &Server) -> (outs: Vec<Out>)

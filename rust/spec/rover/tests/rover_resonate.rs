@@ -158,7 +158,7 @@ fn timeout_runs_the_internal_work_started_by_a_request() {
         message: Message::Request(call),
     };
     let created = Model.on_event(&config, &Pid::Service, &state, 0, &event);
-    assert!(!created[0].state.pending.is_empty());
+    assert!(created[0].state.pending.is_empty(), "a deadline is read off the promise, not queued");
 
     let timed_out = Model.on_event(&config, &Pid::Service, &created[0].state, 10, &ProcessEvent::Timeout);
     assert!(!timed_out.is_empty());

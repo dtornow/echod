@@ -1000,50 +1000,39 @@ fn schedules_fire_on_their_cron() {
     t.step("w advanced anyway", Request::ScheduleGet(ScheduleGetReq { id: "w".into() }), |r| sched(r).is_some_and(|c| c.last_run_at == Some(1_010_000) && c.next_run_at == 1_015_000));
 }
 
-/// The reference server's wire rules, as 400s.
-
-/// With a window, a server that sweeps its schedules may fire an occurrence
-/// any time from its instant to the window's end: a read in between may see
-/// the schedule not yet advanced and the occurrence absent, or both moved.
-/// At the window's end the fire is owed.
+/// A schedule is owed at `next_run_at`. That step records the run and queues
+/// the occurrence; the occurrence then creates the promise. A read at the
+/// instant sees both. `fire_within` is not a window on this step.
 #[test]
-fn a_schedule_may_fire_late_within_the_window() {
+fn a_schedule_is_owed_at_its_instant() {
     let now = 1_000_000;
     let mut t = Trace::with(Resonate { fire_within: 2_500, ..Resonate::default() }, now);
     let tags = flag_tags(true, false, false, None);
     t.step("create s", schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 60_000, tags.clone(), now), |r| sched(r).is_some_and(|c| c.next_run_at == 1_001_000));
-    t.tick(1_001_500);
-    // Not yet swept: the schedule stands, the occurrence is absent.
+    t.tick(1_000_999);
     t.step("s not yet advanced", Request::ScheduleGet(ScheduleGetReq { id: "s".into() }), |r| sched(r).is_some_and(|c| c.last_run_at.is_none()));
     t.step("run-1001000 absent", get("ex:run-1001000"), st(404));
-    t.tick(1_002_200);
-    // Swept now: the occurrence as of its instant, the schedule advanced.
+    t.tick(1_001_000);
     let r = t.step("run-1001000 created at its instant", get("ex:run-1001000"), promise(PromiseState::Pending, None));
     assert!(promise_record(&r).is_some_and(|p| p.created_at == 1_001_000));
     t.c.receive(execute("ex:run-1001000", 0)).unwrap();
     t.step("s advanced", Request::ScheduleGet(ScheduleGetReq { id: "s".into() }), |r| sched(r).is_some_and(|c| c.last_run_at == Some(1_001_000) && c.next_run_at == 1_002_000));
-    // Past the window of the next occurrence, the fire is owed: the
-    // occurrence exists, whatever the sweep did.
-    t.tick(1_004_600);
-    t.step("run-1002000 owed by 1004500", get("ex:run-1002000"), promise(PromiseState::Pending, None));
-    t.rejects("run-1002000 cannot be absent past its window", get("ex:run-1002000"), Response::Status(StatusRes { status: 404 }));
-    // Within the window of run-1003000 and run-1004000 again: either way.
-    t.step("run-1003000 may be absent", get("ex:run-1003000"), st(404));
-    t.step("run-1004000 may exist", get("ex:run-1004000"), promise(PromiseState::Pending, None));
+    t.rejects("run-1001000 cannot be absent at its instant", get("ex:run-1001000"), Response::Status(StatusRes { status: 404 }));
+    // A jump over later instants owes every one of them, not a sweep window.
+    t.tick(1_004_000);
+    t.step("run-1002000 owed", get("ex:run-1002000"), promise(PromiseState::Pending, None));
+    t.step("run-1003000 owed", get("ex:run-1003000"), promise(PromiseState::Pending, None));
+    t.step("run-1004000 owed", get("ex:run-1004000"), promise(PromiseState::Pending, None));
+    t.rejects("run-1003000 cannot be absent", get("ex:run-1003000"), Response::Status(StatusRes { status: 404 }));
     t.step("s advanced to 1005000", Request::ScheduleGet(ScheduleGetReq { id: "s".into() }), |r| sched(r).is_some_and(|c| c.last_run_at == Some(1_004_000) && c.next_run_at == 1_005_000));
     t.step("delete s", Request::ScheduleDelete(ScheduleDeleteReq { id: "s".into() }), st(200));
 
-    // A sweeping server commits the occurrence, then the schedule: in between
-    // the occurrence exists and the schedule still expects it. The run is
-    // recorded by the window's end.
     t.tick(1_010_000);
     t.step("create u", schedule("u", "*/5 * * * * *", "ex:job-{{.timestamp}}", 60_000, tags.clone(), 1_010_000), |r| sched(r).is_some_and(|c| c.next_run_at == 1_015_000));
-    t.tick(1_016_000);
+    t.tick(1_015_000);
     t.step("job-1015000 exists", get("ex:job-1015000"), promise(PromiseState::Pending, None));
-    t.step("u not yet advanced", Request::ScheduleGet(ScheduleGetReq { id: "u".into() }), |r| sched(r).is_some_and(|c| c.last_run_at.is_none() && c.next_run_at == 1_015_000));
-    t.tick(1_017_600);
-    t.step("u advanced by 1017500", Request::ScheduleGet(ScheduleGetReq { id: "u".into() }), |r| sched(r).is_some_and(|c| c.last_run_at == Some(1_015_000) && c.next_run_at == 1_020_000));
-    t.rejects("u cannot still expect 1015000 past the window", Request::ScheduleGet(ScheduleGetReq { id: "u".into() }), Response::Schedule(ScheduleRes {
+    t.step("u advanced with the occurrence", Request::ScheduleGet(ScheduleGetReq { id: "u".into() }), |r| sched(r).is_some_and(|c| c.last_run_at == Some(1_015_000) && c.next_run_at == 1_020_000));
+    t.rejects("u cannot still expect 1015000 at that instant", Request::ScheduleGet(ScheduleGetReq { id: "u".into() }), Response::Schedule(ScheduleRes {
         status: 200,
         schedule: Some(Schedule {
             id: "u".into(),

@@ -75,9 +75,13 @@ pub enum DispatchV {
 }
 
 pub enum InternalV {
-    On(Seq<Chars>),
-    Fire { schedule: Chars, at: Time, promise: Chars },
-    Advance { schedule: Chars, at: Time, promise: Chars },
+    PromiseTimeout(Chars),
+    Callback { awaited: Chars, awaiter: Chars },
+    Listener { awaited: Chars, address: Chars },
+    Lease(Chars),
+    Retry(Chars),
+    Schedule { id: Chars, promise: Chars },
+    Occurrence { promise: Chars, at: Time, timeout: Time, param: Value, tags: Tags },
 }
 
 pub open spec fn ostr(o: Option<String>) -> Option<Chars> {
@@ -148,43 +152,47 @@ impl View for Dispatch {
     }
 }
 
-impl View for Internal {
-    type V = InternalV;
-
-    open spec fn view(&self) -> InternalV {
-        match self {
-            Internal::On(ids) => InternalV::On(strs(ids@)),
-            Internal::Fire { schedule, at, promise } => InternalV::Fire { schedule: schedule@, at: *at, promise: promise@ },
-            Internal::Advance { schedule, at, promise } => InternalV::Advance { schedule: schedule@, at: *at, promise: promise@ },
-        }
-    }
-}
-
-impl View for Step {
-    type V = InternalV;
-
-    open spec fn view(&self) -> InternalV {
-        match self {
-            Step::Objects(ids) => InternalV::On(strs(ids@)),
-            Step::Fire { schedule, at, promise } => InternalV::Fire { schedule: schedule@, at: *at, promise: promise@ },
-            Step::Advance { schedule, at, promise } => InternalV::Advance { schedule: schedule@, at: *at, promise: promise@ },
-        }
-    }
-}
-
 impl View for Work {
-    type V = Sched<InternalV>;
+    type V = InternalV;
 
-    open spec fn view(&self) -> Sched<InternalV> {
+    open spec fn view(&self) -> InternalV {
         match self {
-            Work::Later(s) => Sched::Later(s@),
-            Work::Timer(t, s) => Sched::Timer(*t, s@),
+            Work::PromiseTimeout(id) => InternalV::PromiseTimeout(id@),
+            Work::Callback { awaited, awaiter } => InternalV::Callback { awaited: awaited@, awaiter: awaiter@ },
+            Work::Listener { awaited, address } => InternalV::Listener { awaited: awaited@, address: address@ },
+            Work::Lease(id) => InternalV::Lease(id@),
+            Work::Retry(id) => InternalV::Retry(id@),
+            Work::Schedule { id, promise } => InternalV::Schedule { id: id@, promise: promise@ },
+            Work::Occurrence { promise, at, timeout, param, tags } => InternalV::Occurrence {
+                promise: promise@,
+                at: *at,
+                timeout: *timeout,
+                param: *param,
+                tags: *tags,
+            },
         }
+    }
+}
+
+/// An occurrence is a timer at its instant. Anything else is later, and the
+/// checker derives those from the maps instead of the queue.
+pub open spec fn as_sched(w: Work) -> Sched<InternalV> {
+    match w {
+        Work::Occurrence { promise, at, timeout, param, tags } => Sched::Timer(
+            at,
+            InternalV::Occurrence { promise: promise@, at, timeout, param, tags },
+        ),
+        Work::PromiseTimeout(id) => Sched::Later(InternalV::PromiseTimeout(id@)),
+        Work::Callback { awaited, awaiter } => Sched::Later(InternalV::Callback { awaited: awaited@, awaiter: awaiter@ }),
+        Work::Listener { awaited, address } => Sched::Later(InternalV::Listener { awaited: awaited@, address: address@ }),
+        Work::Lease(id) => Sched::Later(InternalV::Lease(id@)),
+        Work::Retry(id) => Sched::Later(InternalV::Retry(id@)),
+        Work::Schedule { id, promise } => Sched::Later(InternalV::Schedule { id: id@, promise: promise@ }),
     }
 }
 
 /// An internal item of the checker's, as a view.
-pub open spec fn sched_v(s: Sched<Internal>) -> Sched<InternalV> {
+pub open spec fn sched_v(s: Sched<Work>) -> Sched<InternalV> {
     match s {
         Sched::Later(r) => Sched::Later(r@),
         Sched::Timer(t, r) => Sched::Timer(t, r@),
@@ -192,7 +200,7 @@ pub open spec fn sched_v(s: Sched<Internal>) -> Sched<InternalV> {
 }
 
 pub open spec fn works(v: Seq<Work>) -> Seq<Sched<InternalV>> {
-    v.map_values(|w: Work| w@)
+    v.map_values(|w: Work| as_sched(w))
 }
 
 pub open spec fn sends(v: Seq<Dispatch>) -> Seq<DispatchV> {
@@ -425,39 +433,32 @@ pub proof fn lemma_lift_dispatch(d: Dispatch)
 
 // ------------------------------------------------------------- the model
 
-fn step(s: Step) -> (r: Internal)
+fn sched(w: Work) -> (r: Sched<Work>)
     ensures
-        r@ == s@,
+        sched_v(r) == as_sched(w),
 {
-    match s {
-        Step::Objects(ids) => Internal::On(ids),
-        Step::Fire { schedule, at, promise } => Internal::Fire { schedule, at, promise },
-        Step::Advance { schedule, at, promise } => Internal::Advance { schedule, at, promise },
+    match &w {
+        Work::Occurrence { at, .. } => {
+            let at = *at;
+            Sched::Timer(at, w)
+        },
+        _ => Sched::Later(w),
     }
 }
 
-fn sched(w: Work) -> (r: Sched<Internal>)
+/// The work an outcome starts, as the checker's items. Only an occurrence
+/// is queued; a timeout reads the rest off the maps.
+fn items(mut w: Vec<Work>) -> (r: Vec<Sched<Work>>)
     ensures
-        sched_v(r) == w@,
-{
-    match w {
-        Work::Later(s) => Sched::Later(step(s)),
-        Work::Timer(at, s) => Sched::Timer(at, step(s)),
-    }
-}
-
-/// The work an outcome starts, as the checker's items.
-fn items(mut w: Vec<Work>) -> (r: Vec<Sched<Internal>>)
-    ensures
-        r@.map_values(|x: Sched<Internal>| sched_v(x)) == works(w@),
+        r@.map_values(|x: Sched<Work>| sched_v(x)) == works(w@),
 {
     let ghost all = w@;
-    let mut r: Vec<Sched<Internal>> = Vec::new();
+    let mut r: Vec<Sched<Work>> = Vec::new();
     while w.len() > 0
         invariant
             r@.len() + w@.len() == all.len(),
             w@ == all.skip(r@.len() as int),
-            r@.map_values(|x: Sched<Internal>| sched_v(x)) == works(all.take(r@.len() as int)),
+            r@.map_values(|x: Sched<Work>| sched_v(x)) == works(all.take(r@.len() as int)),
         decreases w@.len(),
     {
         broadcast use group_views;
@@ -478,7 +479,7 @@ impl Model for Resonate {
 
     type Response = Response;
 
-    type Internal = Internal;
+    type Internal = Work;
 
     type Dispatch = Dispatch;
 
@@ -497,8 +498,8 @@ impl Model for Resonate {
         r
     }
 
-    fn internal(&self, step: &Internal, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
-        let o = self.run_internal(step, s, now);
+    fn internal(&self, step: &Work, s: &Server, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
+        let o = self.run_work(step, s, now);
         let mut r: Vec<InternalOutcome<Resonate>> = Vec::new();
         if o.pending {
             return r;
@@ -508,6 +509,10 @@ impl Model for Resonate {
         let e = InternalOutcome { next, work, send, marks };
         r.push(e);
         r
+    }
+
+    fn due(&self, s: &Server, now: Time) -> (r: Vec<Sched<Work>>) {
+        super::model::due(self, s, now)
     }
 }
 

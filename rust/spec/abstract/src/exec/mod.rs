@@ -10,40 +10,20 @@
 //! How the Lean specification's shape becomes a checker model:
 //! - Time is the system's clock, `now`, which the checker keeps and passes to
 //!   every step. The spec reads it and never moves it.
-//! - Lean projects a promise past its deadline on every read. Here the deadline
-//!   is a timer step that settles it, so a pending promise is always live and
-//!   there is no projection. The two agree on everything a client can see.
-//! - Lean projects a promise past its deadline on every read, and a lease past
-//!   its end (`TaskObject.lapse`): the task is pending again. Here both are
-//!   timer steps at the instant, so a pending promise is always live and an
-//!   acquired task always holds its lease, and there is no projection. The two
-//!   agree on everything a client can see.
-//! - Lean's other internal steps are enabled by the state (a callback on a
-//!   settled promise, a retry due) and fired by a fair scheduler. Here each is
-//!   work the step that enables it starts: a timer at the instant it falls due,
-//!   or "later" when it is due at once. A step is "process these objects":
-//!   whatever is due on them happens, in the order Lean's steps would be
-//!   enabled (a deadline before the resumes it fires, a resume before the
-//!   redispatch it arms). What a step writes never depends on when it ran: a
-//!   task's offers are on a grid anchored at the instant it came to be pending
-//!   (Lean's `nextOffer`), a resume at the awaited promise's settlement.
-//! - A schedule's occurrence is a step, not a projection: it creates a
-//!   promise, as of the occurrence's instant. Lean's fair scheduler fires it
-//!   some time from `nextRunAt` on, so a client may read the schedule not yet
-//!   advanced and the occurrence absent. Here the fire is work due at
-//!   `nextRunAt` and owed `fire_within` later: "later" work from the instant,
-//!   and a timer at the bound. With `fire_within` zero it is a timer at the
-//!   instant, exact, and one step, as Lean's `processSchedule` is. A server
-//!   that sweeps its schedules every so often is given its sweep as the
-//!   bound, and fires in the two commits such a server makes, the occurrence
-//!   first and the run recorded after (`Step::Advance`), the second owed by
-//!   the same bound: a client may see the occurrence while the schedule still
-//!   expects it, which Lean's one step never shows.
-//! - The model's two dials: the redispatch cadence
-//!   (`ServerConfig.retryTimeout`), `Resonate::retry_timeout`, and
-//!   `Resonate::fire_within`.
-//! - Lean's `nextCron`, `occurrences` and `expand` are opaque. Here they are
-//!   trusted (`collections.rs`): the cron engine of the reference server.
+//! - The state is the three maps. A timeout looks at them and runs one due
+//!   item: a deadline, a callback, a listener, a lease, a retry, or a schedule
+//!   whose `next_run_at` has passed. Nothing is armed in advance.
+//! - The only queue is the occurrence list a schedule step appends. That step
+//!   records the run and names the promise; a later step creates the promise.
+//!   `next_run_at` is `nextCron cron now`, computed in the handler.
+//! - A pending promise is live until its deadline item runs, and an acquired
+//!   task holds its lease until its lease item runs. Lean projects both on
+//!   read; the checker runs the due item before the read, and the two agree
+//!   on everything a client can see.
+//! - A task's offers are on a grid anchored at the instant it came to be
+//!   pending (Lean's `nextOffer`). The dial is `Resonate::retry_timeout`.
+//! - Lean's `nextCron` and `expand` are trusted (`collections.rs`): the cron
+//!   engine of the reference server.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
 //!   already "maybe".
 //! - Clock and version arithmetic saturates instead of overflowing.
@@ -63,9 +43,8 @@
 //! properties stated as `ensures` (see `promise_create`). What it trusts:
 //! `collections.rs`. The handlers are the protocol.
 //!
-//! `external` is the request handlers. `internal` is the timeout handlers:
-//! a deadline, a lease, a callback, a retry, listeners, and a schedule's fire.
-//! `system` is the match. A request calls `run`. One armed step calls `run_timeout`.
+//! `external` is the request handlers. `internal` is one handler per due item.
+//! `system` is the match: a request calls `run`, a due item calls `run_work`.
 
 use vstd::prelude::*;
 
@@ -294,43 +273,20 @@ fn trec(id: &Id, t: &Task) -> (r: TaskRecord)
 
 // ------------------------------------------------------------------ outcomes
 
-/// Internal work: the objects a step processes, or a schedule's occurrence.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Step {
-    /// Process these objects: whatever is due on them happens.
-    Objects(Vec<Id>),
-    /// Fire the occurrence of `schedule` at `at`, which creates `promise`
-    /// (`expand` of its template), and arm the next.
-    Fire { schedule: Id, at: Time, promise: Id },
-    /// Record the run at `at` on `schedule`, whose occurrence is `promise`,
-    /// and arm the next: the second half of a fire that a sweeping server
-    /// commits apart from the first.
-    Advance { schedule: Id, at: Time, promise: Id },
-}
-
-/// An internal step, as the checker schedules it. `On`: the server processes
-/// these objects and does whatever is due on them (a promise past its deadline
-/// times out, a task past its lease is reclaimed, a suspended task whose
-/// awaited promise settled resumes, a pending task due for a retry is
-/// dispatched, a settled promise's listeners are told). What is due is read
-/// from the state and the clock, not from the step. `Fire`: a schedule's
-/// occurrence; `Advance`: its run recorded, when a sweeping server commits
-/// that apart. The ids of `On` are as the step that started it named them:
-/// a settled promise before the awaiter it resumes.
-///
-/// The step names every object it may touch, so its footprint is exact.
+/// One due item. A timeout runs exactly one. The schedule item appends an
+/// `Occurrence` to the queue; that is the only work a step starts.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Internal {
-    On(Vec<Id>),
-    Fire { schedule: Id, at: Time, promise: Id },
-    Advance { schedule: Id, at: Time, promise: Id },
-}
-
-/// Internal work to start, and when it runs. As `echod_rover::Sched`.
-#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Work {
-    Later(Step),
-    Timer(Time, Step),
+    PromiseTimeout(Id),
+    Callback { awaited: Id, awaiter: Id },
+    Listener { awaited: Id, address: String },
+    Lease(Id),
+    Retry(Id),
+    /// Record the run and queue its occurrence. `promise` is the id that
+    /// occurrence will create, so the step's footprint can name it.
+    Schedule { id: Id, promise: Id },
+    /// A promise to create as of `at`, queued by the schedule item.
+    Occurrence { promise: Id, at: Time, timeout: Time, param: Value, tags: Tags },
 }
 
 /// One possible effect of a request: the response, the next state, the work it
@@ -354,11 +310,10 @@ pub struct InOut {
     pub pending: bool,
 }
 
-/// The server, with its dials: how long a pending task waits before it is
-/// offered to a worker again (Lean's `ServerConfig.retryTimeout`), and how
-/// long after a schedule's `nextRunAt` the occurrence is owed. Zero: it fires
-/// at the instant. A server that gets to its schedules by a sweep fires within
-/// the sweep's period; Lean's fair scheduler, within any bound at all.
+/// The server's dial: how long a pending task waits before it is offered
+/// again (Lean's `ServerConfig.retryTimeout`). A schedule is due at its
+/// `next_run_at`. `fire_within` is kept so a caller can still name a sweep
+/// bound; the due item does not read it.
 pub struct Resonate {
     pub retry_timeout: Time,
     pub fire_within: Time,
@@ -416,45 +371,6 @@ fn echo(res: Response, mark: &'static str, s: &Server) -> (r: Vec<Out>)
     one(Out { resp: res, next: copy_server(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
 
-fn ids1(a: &Id) -> (r: Vec<Id>)
-    ensures
-        strs(r@) == seq![a@],
-{
-    broadcast use group_views;
-    let mut v = Vec::new();
-    v.push(a.clone());
-    v
-}
-
-fn ids2(a: &Id, b: &Id) -> (r: Vec<Id>)
-    ensures
-        strs(r@) == seq![a@, b@],
-{
-    broadcast use group_views;
-    let mut v = Vec::new();
-    v.push(a.clone());
-    v.push(b.clone());
-    v
-}
-
-/// Work on one object at `at`.
-fn at(t: Time, id: &Id) -> (r: Work)
-    
-{
-    Work::Timer(t, Step::Objects(ids1(id)))
-}
-
-fn copy_step(s: &Step) -> (r: Step)
-    ensures
-        r@ == s@,
-{
-    match s {
-        Step::Objects(ids) => Step::Objects(ids.clone()),
-        Step::Fire { schedule, at, promise } => Step::Fire { schedule: schedule.clone(), at: *at, promise: promise.clone() },
-        Step::Advance { schedule, at, promise } => Step::Advance { schedule: schedule.clone(), at: *at, promise: promise.clone() },
-    }
-}
-
 /// Lean's `nextOffer`: the first instant on the grid `due + k·T` strictly
 /// after `now`. Anchored at `due`, so it does not depend on when the retry
 /// step ran; a server late to it re-offers the task once and lands on the
@@ -508,45 +424,6 @@ fn settle(s: &mut Server, id: &Id, state: PromiseState, value: &Value, at: Time)
 
 }
 
-/// The work a settled promise starts: one resume per stored callback (the
-/// awaited promise and its awaiter), and its listeners' unblocks.
-fn settled_work(p: &Promise, awaited: &Id) -> (r: Vec<Work>)
-    
-{
-    broadcast use group_views;
-    let awaiters = p.callbacks.to_vec();
-    let ghost cs = pset_seq(p.callbacks@);
-    assert(strs(awaiters@).len() == awaiters@.len());
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < awaiters.len()
-        invariant
-            i <= awaiters.len(),
-            strs(awaiters@) == cs,
-        decreases awaiters.len() - i,
-    {
-        let ghost before = works(out@);
-        let w = Work::Later(Step::Objects(ids2(awaited, &awaiters[i])));
-
-        out.push(w);
-        proof {
-            assert(works(out@) == before.push(w@));
-            assert(cs.take(i + 1) =~= cs.take(i as int).push(cs[i as int]));
-
-        }
-        i += 1;
-    }
-    proof {
-        assert(cs.take(awaiters.len() as int) =~= cs);
-    }
-    let ls = p.listeners.to_vec();
-    assert(strs(ls@).len() == ls@.len());
-    if ls.len() > 0 {
-        out.push(Work::Later(Step::Objects(ids1(awaited))));
-    }
-    out
-}
-
 fn contains(ids: &Vec<Id>, id: &Id) -> (r: bool)
     ensures
         r == strs(ids@).contains(id@),
@@ -565,32 +442,6 @@ fn contains(ids: &Vec<Id>, id: &Id) -> (r: bool)
         i += 1;
     }
     false
-}
-
-fn push_all(out: &mut Vec<Work>, more: &Vec<Work>)
-    ensures
-        works(final(out)@) == works(old(out)@) + works(more@),
-{
-    broadcast use group_views;
-    let mut j = 0;
-    while j < more.len()
-        invariant
-            j <= more.len(),
-            works(out@) == works(old(out)@) + works(more@).take(j as int),
-        decreases more.len() - j,
-    {
-        let ghost before = works(out@);
-        let w = copy(&more[j]);
-        out.push(w);
-        proof {
-            assert(works(out@) == before.push(w@));
-            assert(works(more@).take(j + 1) =~= works(more@).take(j as int).push(more@[j as int]@));
-        }
-        j += 1;
-    }
-    proof {
-        assert(works(more@).take(more.len() as int) =~= works(more@));
-    }
 }
 
 // ------------------------------------------------------------- property 1
