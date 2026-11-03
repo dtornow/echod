@@ -1447,12 +1447,27 @@ theorem promiseGet_sim (req : PromiseGetReq) (now : Nat) :
   unfold Abstract.promiseGet Concrete.Decision.promiseGet
   sim
 
+theorem Abstract.readOrCreate_bind (req : PromiseCreateReq) (now : Nat)
+    (k : Object → Abstract.Handler β) :
+    Abstract.readOrCreate req now >>= k =
+      Abstract.readObject req.id now >>= fun found =>
+        match found with
+        | some o => k o
+        | none =>
+            Abstract.createPromiseAt req.id req.timeoutAt now req.param req.tags >>= k := by
+  unfold Abstract.readOrCreate
+  rw [bind_assoc]
+  congr 1
+  funext found
+  cases found <;> simp only [pure_bind]
+
 theorem promiseCreate_sim (req : PromiseCreateReq) (now : Nat) {origin : String}
     (h : req.id.origin = origin) :
     HandlerSim (.origin origin) (Abstract.promiseCreate req now)
       (Concrete.Decision.promiseCreateAt (origin := origin) req now) := by
   subst h
   unfold Abstract.promiseCreate Concrete.Decision.promiseCreateAt
+  simp only [Abstract.readOrCreate_bind]
   sim
 
 theorem promiseSettle_sim (req : PromiseSettleReq) (now : Nat) {origin : String}
@@ -1536,10 +1551,84 @@ theorem taskContinue_sim (req : TaskContinueReq) (now : Nat) :
   unfold Abstract.taskContinue Concrete.Decision.taskContinue
   sim
 
+/-- `taskCreate` as the concrete decision takes it: a missing object is created
+in one write, already acquired. -/
+def taskCreateSteps (req : TaskCreateReq) (now : Nat) : Abstract.Handler TaskCreateRes := do
+  let action := req.action
+  if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
+    return { status := 400 }
+  match ← Abstract.readObject action.id now with
+  | none =>
+      if action.timeoutAt > now then
+        let p : PromiseObject :=
+          { state := .pending, param := action.param, tags := action.tags,
+            timeoutAt := action.timeoutAt, createdAt := now }
+        let t : TaskObject :=
+          { state := .acquired, version := 1, ttl := some req.ttl,
+            pid := some req.pid, leaseTimeoutAt := some (now + req.ttl) }
+        Abstract.setObject { id := action.id, promise := p, task := some t }
+        return { status := 200, task := some (t.toRecord action.id),
+                 promise := some (p.toRecord action.id) }
+      let p : PromiseObject :=
+        { state := .rejectedTimedout, param := action.param, tags := action.tags,
+          timeoutAt := action.timeoutAt, createdAt := action.timeoutAt,
+          settledAt := some action.timeoutAt }
+      let t : TaskObject := { state := .fulfilled, version := 0 }
+      Abstract.setObject { id := action.id, promise := p, task := some t }
+      return { status := 200, task := some (t.toRecord action.id),
+               promise := some (p.toRecord action.id) }
+  | some o =>
+      if o.promise.otype != .runnable then return { status := 422 }
+      match o.task with
+      | none => return { status := 409 }
+      | some t =>
+          if t.state == .fulfilled then
+            return { status := 200, task := some (t.toRecord action.id),
+                     promise := some (o.promise.toRecord action.id) }
+          else if t.state == .pending then
+            let next := t.acquire req.pid req.ttl now
+            Abstract.setObject { o with task := some next }
+            return { status := 200, task := some (next.toRecord action.id),
+                     promise := some (o.promise.toRecord action.id) }
+          return { status := 409 }
+
+theorem Store.setObject_setObject (store : Store) {a b : Object} (h : a.id = b.id) :
+    (store.setObject a).setObject b = store.setObject b := by
+  simp only [Store.setObject, List.filter_cons, h, bne_self_eq_false, Bool.false_eq_true,
+    ↓reduceIte, List.filter_filter, Bool.and_self]
+
+theorem taskCreate_eq (req : TaskCreateReq) (now : Nat) :
+    Abstract.taskCreate req now = taskCreateSteps req now := by
+  unfold Abstract.taskCreate taskCreateSteps Abstract.readOrCreate
+  by_cases hg : (req.action.tags.otype != .runnable ∨ req.action.tags.timerTargeted)
+  · simp only [hg, ↓reduceIte]
+  simp only [hg, ↓reduceIte]
+  have hrun : req.action.tags.otype = .runnable := by simpa using (not_or.1 hg).1
+  have htimer : req.action.tags.isTimer = false := by
+    have h2 := (not_or.1 hg).2
+    have := (otype_runnable_iff_targeted _).1 hrun
+    simp_all [Tags.timerTargeted]
+  simp only [bind_assoc, pure_bind]
+  congr 1
+  funext found
+  cases found with
+  | some o =>
+      simp only [pure_bind]
+      obtain ⟨id, p, task⟩ := o
+      cases task <;> rfl
+  | none =>
+      funext env store
+      simp only [Abstract.createPromiseAt, Abstract.newObject, Abstract.setObject, bind, pure]
+      by_cases ht : req.action.timeoutAt > now
+      · simp [ht, hrun, AbstractModel.PromiseObject.otype, Store.setObject_setObject,
+          AbstractModel.TaskObject.acquire]
+      · simp [ht, hrun, htimer, AbstractModel.PromiseObject.otype]
+
 theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
     HandlerSim (.origin req.action.id.origin) (Abstract.taskCreate req now)
       (Concrete.Decision.taskCreate req now) := by
-  unfold Abstract.taskCreate Concrete.Decision.taskCreate
+  rw [taskCreate_eq]
+  unfold taskCreateSteps Concrete.Decision.taskCreate
   sim
 
 /-! ## Heartbeat -/
@@ -1750,6 +1839,7 @@ theorem createIfAbsent_sim (req : PromiseCreateReq) (now : Nat) :
       (Concrete.Decision.processOccurrence req now) := by
   unfold Abstract.createIfAbsent Concrete.Decision.processOccurrence
     Concrete.Decision.createIfAbsent Concrete.Decision.createIfAbsentAt
+  simp only [Abstract.readOrCreate_bind]
   sim
 
 theorem getSchedule_sim_id (id : Ident) :

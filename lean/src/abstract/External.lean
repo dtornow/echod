@@ -14,12 +14,8 @@ def promiseCreate (req : PromiseCreateReq) (now : Nat) :
     Handler PromiseCreateRes := do
   if req.tags.timerTargeted then
     return { status := 400, promise := none }
-  match ← readObject req.id now with
-  | some o =>
-    return { status := 200, promise := some (o.promise.toRecord o.id) }
-  | none =>
-      let o ← createPromiseAt req.id req.timeoutAt now req.param req.tags
-      return { status := 200, promise := some (o.promise.toRecord o.id) }
+  let o ← readOrCreate req now
+  return { status := 200, promise := some (o.promise.toRecord o.id) }
 
 def promiseSettle (req : PromiseSettleReq) (now : Nat) :
     Handler PromiseSettleRes := do
@@ -81,40 +77,20 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
   let action := req.action
   if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
     return { status := 400 }
-  match ← readObject action.id now with
-  | none =>
-      if action.timeoutAt > now then
-        let p : PromiseObject :=
-          { state := .pending, param := action.param, tags := action.tags,
-            timeoutAt := action.timeoutAt, createdAt := now }
-        let t : TaskObject :=
-          { state := .acquired, version := 1, ttl := some req.ttl,
-            pid := some req.pid, leaseTimeoutAt := some (now + req.ttl) }
-        setObject { id := action.id, promise := p, task := some t }
+  let o ← readOrCreate action now
+  if o.promise.otype != .runnable then return { status := 422 }
+  match o.task with
+  | none => return { status := 409 }
+  | some t =>
+      if t.state == .fulfilled then
         return { status := 200, task := some (t.toRecord action.id),
-                 promise := some (p.toRecord action.id) }
-      let p : PromiseObject :=
-        { state := .rejectedTimedout, param := action.param, tags := action.tags,
-          timeoutAt := action.timeoutAt, createdAt := action.timeoutAt,
-          settledAt := some action.timeoutAt }
-      let t : TaskObject := { state := .fulfilled, version := 0 }
-      setObject { id := action.id, promise := p, task := some t }
-      return { status := 200, task := some (t.toRecord action.id),
-               promise := some (p.toRecord action.id) }
-  | some o =>
-      if o.promise.otype != .runnable then return { status := 422 }
-      match o.task with
-      | none => return { status := 409 }
-      | some t =>
-          if t.state == .fulfilled then
-            return { status := 200, task := some (t.toRecord action.id),
-                     promise := some (o.promise.toRecord action.id) }
-          else if t.state == .pending then
-            let next := t.acquire req.pid req.ttl now
-            setObject { o with task := some next }
-            return { status := 200, task := some (next.toRecord action.id),
-                     promise := some (o.promise.toRecord action.id) }
-          return { status := 409 }
+                 promise := some (o.promise.toRecord action.id) }
+      else if t.state == .pending then
+        let next := t.acquire req.pid req.ttl now
+        setObject { o with task := some next }
+        return { status := 200, task := some (next.toRecord action.id),
+                 promise := some (o.promise.toRecord action.id) }
+      return { status := 409 }
 
 def taskAcquire (req : TaskAcquireReq) (now : Nat) : Handler TaskAcquireRes := do
   match ← readTask req.id now with

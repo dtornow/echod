@@ -137,9 +137,14 @@ def createPromiseAt (id : Ident) (timeoutAt now : Nat) (param : Value)
   setObject object
   return object
 
+/-- The object at `req.id`, created from `req` if there is none. -/
+def readOrCreate (req : PromiseCreateReq) (now : Nat) : Handler Object := do
+  match ← readObject req.id now with
+  | some o => return o
+  | none => createPromiseAt req.id req.timeoutAt now req.param req.tags
+
 def createIfAbsent (req : PromiseCreateReq) (now : Nat) : Handler Unit := do
-  if (← readObject req.id now).isNone then
-    let _ ← createPromiseAt req.id req.timeoutAt now req.param req.tags
+  let _ ← readOrCreate req now
 
 end Abstract
 end Resonate
