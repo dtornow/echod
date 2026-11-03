@@ -93,7 +93,7 @@ def processSchedule (id : Ident) (now : Nat) :
         (occurrences schedule.cron schedule.nextRunAt now).filter (· ≤ now)
       match times.getLast? with
       | some last =>
-          setScheduleValue { schedule with
+          setSchedule { schedule with
             lastRunAt := some last
             nextRunAt := nextCron schedule.cron last }
       | none => pure ()

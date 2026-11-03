@@ -37,13 +37,9 @@ def setObject {origin : String} (object : OriginObject origin) :
 def getSchedule {id : Ident} : Handler (.schedule id) (Option Schedule) := do
   return (← get).map (·.toSchedule)
 
-def setSchedule {id : Ident} (data : ScheduleData id) :
+def setSchedule {id : Ident} (schedule : Schedule) :
     Handler (.schedule id) Unit :=
-  set (some data)
-
-def setScheduleValue {id : Ident} (schedule : Schedule) :
-    Handler (.schedule id) Unit :=
-  setSchedule {
+  set (some {
     cron := schedule.cron
     promiseId := schedule.promiseId
     promiseTimeout := schedule.promiseTimeout
@@ -51,8 +47,7 @@ def setScheduleValue {id : Ident} (schedule : Schedule) :
     promiseTags := schedule.promiseTags
     nextRunAt := schedule.nextRunAt
     lastRunAt := schedule.lastRunAt
-    createdAt := schedule.createdAt
-  }
+    createdAt := schedule.createdAt })
 
 def delSchedule {id : Ident} : Handler (.schedule id) Unit :=
   set none

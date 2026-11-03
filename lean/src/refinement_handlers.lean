@@ -218,37 +218,6 @@ theorem Sim.pure_bind {key : DocumentKey} {P : Document key → Prop} {S : γ �
   Sim.bind (Sim.pure (R := fun x y => x = a ∧ y = a) (Q := fun _ d => P d) ⟨rfl, rfl⟩
     fun _ h => h) fun _ _ ⟨ha, hc⟩ => by subst ha; subst hc; exact h
 
-theorem Sim.bind_left {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
-    {Q : β → Document key → Prop} {S : γ → δ → Prop} {T : δ → Document key → Prop}
-    {ma : Abstract.Handler α} {u : β} {fa : α → Abstract.Handler γ}
-    {mc : DocumentHandler key δ}
-    (hm : Sim key P R Q ma (Pure.pure u)) (hf : ∀ a, R a u → Sim key (Q u) S T (fa a) mc) :
-    Sim key P S T (ma >>= fa) mc := by
-  intro env store document hunique hdoc hp
-  obtain ⟨hr, hq, hsame, hemit, hunique'⟩ := hm env store document hunique hdoc hp
-  obtain ⟨hr', hq', hsame', hemit', hunique''⟩ :=
-    hf _ hr env (ma env store).2.1 document hunique' (Same.read_of_write hsame) hq
-  refine ⟨hr', hq', ?_, ?_, hunique''⟩
-  · exact hsame'.trans
-      ((Same.write hsame key _).trans (Store.write_write_same store key _ _))
-  · show (ma env store).2.2 ++ (fa (ma env store).1 env (ma env store).2.1).2.2 = _
-    rw [hemit', hemit]
-    rfl
-
-/-- A handler that only reads simulates doing nothing. -/
-theorem Sim.readOnly {key : DocumentKey} {P : Document key → Prop}
-    {ma : Abstract.Handler α}
-    (h : ∀ env store, (ma env store).2 = (store, [])) :
-    Sim key P (fun _ _ => True) (fun _ d => P d) ma (Pure.pure ()) := by
-  intro env store document hunique hdoc hp
-  refine ⟨trivial, hp, ?_, ?_, ?_⟩
-  · rw [h env store]
-    exact Same.write_of hdoc
-  · rw [h env store]
-    rfl
-  · rw [h env store]
-    exact hunique
-
 /-! ## What a read shows -/
 
 theorem task_project_of_pending {t : TaskObject} {p : PromiseObject} (h : p.state = .pending) :
@@ -817,12 +786,12 @@ theorem getSchedule_sim (id : Ident) {P : Document (.schedule id) → Prop} :
 theorem setSchedule_sim (id : Ident) (schedule : Schedule) (h : schedule.id = id)
     {P : Document (.schedule id) → Prop} :
     Sim (.schedule id) P Eq (fun _ _ => True) (Abstract.setSchedule schedule)
-      (Concrete.Decision.setScheduleValue (id := id) schedule) := by
+      (Concrete.Decision.setSchedule (id := id) schedule) := by
   subst h
   intro env store document hunique _ _
   refine ⟨rfl, trivial, ?_, rfl, hunique.schedules rfl⟩
-  simp only [Abstract.setSchedule, Concrete.Decision.setScheduleValue,
-    Concrete.Decision.setSchedule, Concrete.Decision.set, documentSet]
+  simp only [Abstract.setSchedule, Concrete.Decision.setSchedule, Concrete.Decision.set,
+    documentSet]
   exact Store.setSchedule_same store schedule
 
 theorem deleteSchedule_sim (id : Ident) {P : Document (.schedule id) → Prop} :
@@ -915,6 +884,14 @@ instance : LawfulMonad Abstract.Handler := LawfulMonad.mk'
     simp)
   (pure_bind := fun a f => Abstract.pure_bind a f)
   (bind_assoc := fun x f g => Abstract.bind_assoc x f g)
+
+instance {key : DocumentKey} : LawfulMonad (DocumentHandler key) := LawfulMonad.mk'
+  (id_map := fun x => by
+    funext env document
+    show (let (v, s, e) := x env document; (v, s, e ++ [])) = x env document
+    simp)
+  (pure_bind := fun a f => Concrete.pure_bind a f)
+  (bind_assoc := fun x f g => Concrete.bind_assoc x f g)
 
 /-- Close the side condition that an id lies in the document's origin. -/
 macro "sim_origin" : tactic => `(tactic| first
@@ -1113,6 +1090,39 @@ theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
   unfold Abstract.taskCreate Concrete.Decision.taskCreate
   sim
 
+/-! ## Lists of steps -/
+
+theorem forM_sim {key : DocumentKey} {fa : γ → Abstract.Handler Unit}
+    {fc : γ → DocumentHandler key Unit} :
+    ∀ l : List γ, (∀ x ∈ l, HandlerSim key (fa x) (fc x)) →
+      HandlerSim key (l.forM fa) (l.forM fc)
+  | [], _ => Sim.pure rfl (fun _ _ => trivial)
+  | x :: rest, h =>
+      Sim.seq (h x (by simp)) (forM_sim rest fun y hy => h y (by simp [hy]))
+
+theorem mapM_sim {key : DocumentKey} {f : β → α} {fa : γ → Abstract.Handler α}
+    {fc : γ → DocumentHandler key β} :
+    ∀ l : List γ,
+      (∀ x ∈ l, Sim key (fun _ => True) (fun a c => a = f c) (fun _ _ => True)
+        (fa x) (fc x)) →
+      Sim key (fun _ => True) (fun as cs => as = cs.map f) (fun _ _ => True)
+        (l.mapM fa) (l.mapM fc)
+  | [], _ => Sim.pure rfl (fun _ _ => trivial)
+  | x :: rest, h => by
+      simp only [List.mapM_cons]
+      refine Sim.bind (h x (by simp)) fun a c hac => ?_
+      refine Sim.bind (mapM_sim rest fun y hy => h y (by simp [hy])) fun as cs has => ?_
+      exact Sim.pure (by simp [hac, has]) (fun _ _ => trivial)
+
+theorem readObject_map_sim (id : Ident) (now : Nat) {origin : String}
+    (h : id.origin = origin) :
+    Sim (.origin origin) (fun _ => True) (fun a c => a = c.map Object.ofOrigin)
+      (fun _ _ => True) (Abstract.readObject id now)
+      (Concrete.Decision.readObject (origin := origin) id.suffix now) := by
+  intro env store document hunique hdoc hp
+  obtain ⟨⟨hr, _⟩, _, hrest⟩ := readObject_sim' id now h (P := fun _ => True) env store document hunique hdoc hp
+  exact ⟨hr, trivial, hrest⟩
+
 /-! ## Heartbeat -/
 
 theorem heartbeatOne_sim (pid : String) (ref : TaskRef) (now : Nat) {origin : String}
@@ -1122,18 +1132,6 @@ theorem heartbeatOne_sim (pid : String) (ref : TaskRef) (now : Nat) {origin : St
   subst h
   unfold Abstract.heartbeatOne Concrete.Decision.heartbeatOne
   sim
-
-theorem heartbeatAll_sim (pid : String) (now : Nat) {origin : String} :
-    ∀ refs : List TaskRef, (∀ ref ∈ refs, ref.id.origin = origin) →
-      HandlerSim (.origin origin) (refs.forM (Abstract.heartbeatOne pid · now))
-        (Concrete.Decision.heartbeatAll (origin := origin) pid now refs)
-  | [], _ => by
-      simp only [List.forM_nil, Concrete.Decision.heartbeatAll]
-      exact Sim.pure rfl (fun _ _ => trivial)
-  | ref :: rest, h => by
-      simp only [List.forM_cons, Concrete.Decision.heartbeatAll]
-      exact Sim.seq (heartbeatOne_sim pid ref now (h ref (by simp)))
-        (heartbeatAll_sim pid now rest fun r hr => h r (by simp [hr]))
 
 theorem taskHeartbeat_sim (req : TaskHeartbeatReq) (now : Nat) (first : TaskRef)
     (rest : List TaskRef) (htasks : req.tasks = first :: rest) :
@@ -1146,103 +1144,38 @@ theorem taskHeartbeat_sim (req : TaskHeartbeatReq) (now : Nat) (first : TaskRef)
     simp only [sameOriginRefs, List.all_eq_not_any_not, Bool.not_not, bne]
   simp only [hcheck]
   refine Sim.ite _ (fun _ => Sim.pure rfl (fun _ _ => trivial)) (fun hall => ?_)
-  refine Sim.seq (Q := fun _ _ => True) (Sim.pure rfl (fun _ _ => trivial))
-    (Sim.seq (heartbeatAll_sim _ _ _ ?_) (Sim.pure rfl (fun _ _ => trivial)))
-  simpa [bne_iff_ne] using hall
+  have hall' : ∀ ref ∈ first :: rest, ref.id.origin = first.id.origin := by
+    simpa [bne_iff_ne] using hall
+  exact Sim.seq (Q := fun _ _ => True) (Sim.pure rfl (fun _ _ => trivial))
+    (Sim.seq (forM_sim _ fun ref href => heartbeatOne_sim _ _ _ (hall' ref href))
+      (Sim.pure rfl (fun _ _ => trivial)))
 
 /-! ## Suspend -/
 
-theorem mapM_readObject_state (now : Nat) :
-    ∀ (actions : List PromiseRegisterCallbackReq) env store,
-      (actions.mapM (Abstract.readObject ·.awaited now) env store).2 = (store, [])
-  | [], _, _ => rfl
-  | action :: rest, env, store => by
-      rw [List.mapM_cons]
-      have ih := mapM_readObject_state now rest
-      generalize rest.mapM (Abstract.readObject ·.awaited now) = m at ih ⊢
-      have hm := ih env store
-      rcases h : m env store with ⟨v, s, e⟩
-      rw [h] at hm
-      cases hm
-      simp [bind, Pure.pure, Abstract.readObject, Abstract.getObject, h]
-
-/-- What the concrete `checkAwaited` says about the awaited objects. -/
-def AwaitedRel (awaited : List (Option Object)) (check : Option Bool) : Prop :=
-  check = if awaited.all (·.any (·.promise.otype.awaitable)) then
-    some (awaited.any (·.any (·.promise.state != .pending))) else none
-
-theorem checkAwaited_sim (now : Nat) {origin : String}
-    {P : Document (.origin origin) → Prop} :
-    ∀ actions : List PromiseRegisterCallbackReq,
-      (∀ action ∈ actions, action.awaited.origin = origin) →
-      Sim (.origin origin) P AwaitedRel (fun _ d => P d)
-        (actions.mapM (Abstract.readObject ·.awaited now))
-        (Concrete.Decision.checkAwaited (origin := origin) now actions)
-  | [], _ => by
-      simp only [List.mapM_nil, Concrete.Decision.checkAwaited]
-      exact Sim.pure (by simp [AwaitedRel]) (fun _ h => h)
-  | action :: rest, h => by
-      rw [List.mapM_cons]
-      simp only [Concrete.Decision.checkAwaited]
-      refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
-      refine ObjRel.cases ?_ (fun promise task => ?_)
-      · exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
-          fun _ _ => Sim.pure (by simp [AwaitedRel]) (fun _ h => h)
-      · dsimp only [Object.ofOrigin]
-        by_cases hawait : promise.otype.awaitable
-        · simp only [hawait, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
-            Concrete.pure_bind]
-          refine Sim.bind (checkAwaited_sim now rest fun a ha => h a (by simp [ha])) ?_
-          intro awaited check hcheck
-          rw [hcheck]
-          by_cases hall : awaited.all (·.any (·.promise.otype.awaitable))
-          · simp only [hall, ↓reduceIte]
-            exact Sim.pure (by simp [AwaitedRel, hall, hawait, Bool.or_comm])
-              (fun _ h => h)
-          · simp only [hall, Bool.false_eq_true, ↓reduceIte]
-            exact Sim.pure (by simp [AwaitedRel, hall, hawait]) (fun _ h => h)
-        · simp only [hawait, Bool.not_false, ↓reduceIte]
-          exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
-            fun _ _ => Sim.pure (by simp [AwaitedRel, hawait]) (fun _ h => h)
-
-theorem registerAwaited_sim (awaiter : Ident) (now : Nat) {origin : String} :
-    ∀ actions : List PromiseRegisterCallbackReq,
-      (∀ action ∈ actions, action.awaited.origin = origin) →
-      HandlerSim (.origin origin) (actions.forM (Abstract.addCallback awaiter now))
-        (Concrete.Decision.registerAwaited (origin := origin) awaiter now actions)
-  | [], _ => by
-      simp only [List.forM_nil, Concrete.Decision.registerAwaited]
-      exact Sim.pure rfl (fun _ _ => trivial)
-  | action :: rest, h => by
-      have ih := registerAwaited_sim awaiter now rest (fun a ha => h a (by simp [ha]))
-      simp only [List.forM, Concrete.Decision.registerAwaited, Abstract.addCallback,
-        Abstract.bind_assoc]
-      refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
-      refine ObjRel.cases ?_ (fun _ _ => ?_)
-      · exact Sim.seq (Sim.pure (Q := fun _ _ => True) rfl (fun _ _ => trivial)) ih
-      · exact Sim.seq (Q := fun _ _ => True) (setObject_sim _ rfl) ih
+theorem addCallback_sim (awaiter : Ident) (now : Nat) (action : PromiseRegisterCallbackReq)
+    {origin : String} (h : action.awaited.origin = origin) :
+    HandlerSim (.origin origin) (Abstract.addCallback awaiter now action)
+      (Concrete.Decision.addCallback (origin := origin) awaiter now action) := by
+  subst h
+  unfold Abstract.addCallback Concrete.Decision.addCallback
+  sim
 
 theorem taskSuspend_sim (req : TaskSuspendReq) (now : Nat) :
     HandlerSim (.origin req.id.origin) (Abstract.taskSuspend req now)
       (Concrete.Decision.taskSuspend req now) := by
   unfold Abstract.taskSuspend Concrete.Decision.taskSuspend
   sim
-  refine Sim.bind (checkAwaited_sim _ _ ?_) ?_
+  refine Sim.bind (Sim.weaken (mapM_sim (f := Option.map Object.ofOrigin) _
+    fun action haction => readObject_map_sim _ _ ?_)) ?_
   · simp_all [Ident.sameOrigin]
-  intro awaited check hcheck
-  simp only [AwaitedRel] at hcheck
-  subst hcheck
-  by_cases hall : awaited.all (·.any (·.promise.otype.awaitable))
-  · by_cases hany : awaited.any (·.any (·.promise.state != .pending))
-    · simp only [hall, hany, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      sim
-    · simp only [hall, hany, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      sim
-      refine Sim.seq (Sim.weaken (registerAwaited_sim _ _ _ ?_)) ?_
-      · simp_all [Ident.sameOrigin]
-      sim
-  · simp only [hall, Bool.not_false, ↓reduceIte]
-    sim
+  intro _ awaited h
+  subst h
+  simp only [List.all_map, List.any_map, Function.comp_def, Option.any_map]
+  dsimp only [Object.ofOrigin]
+  sim
+  refine Sim.seq (Sim.weaken (forM_sim _ fun action haction => addCallback_sim _ _ _ ?_)) ?_
+  · simp_all [Ident.sameOrigin]
+  sim
 
 /-! ## Internal work -/
 

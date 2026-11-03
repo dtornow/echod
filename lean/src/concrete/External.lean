@@ -145,42 +145,19 @@ def heartbeatOne {origin : String} (pid : String) (ref : TaskRef) (now : Nat) :
         setObject { o with task := some { t with
             leaseTimeoutAt := some (now + t.ttl.getD 0) } }
 
-def heartbeatAll {origin : String} (pid : String) (now : Nat) :
-    List TaskRef → Handler (.origin origin) Unit
-  | [] => pure ()
-  | ref :: rest => do
-      heartbeatOne pid ref now
-      heartbeatAll pid now rest
-
 def taskHeartbeat (origin : String) (req : TaskHeartbeatReq) (now : Nat) :
     Handler (.origin origin) TaskHeartbeatRes := do
   if req.tasks.any (fun ref => ref.id.origin != origin) then
     return { status := 400 }
-  heartbeatAll req.pid now req.tasks
+  req.tasks.forM (heartbeatOne req.pid · now)
   return { status := 200 }
 
-def checkAwaited {origin : String} (now : Nat) :
-    List PromiseRegisterCallbackReq → Handler (.origin origin) (Option Bool)
-  | [] => return some false
-  | action :: rest => do
-      match ← readObject action.awaited.suffix now with
-      | none => return none
-      | some awaited =>
-          if !awaited.promise.otype.awaitable then return none
-          match ← checkAwaited now rest with
-          | none => return none
-          | some settled =>
-              return some (settled || awaited.promise.state != .pending)
-
-def registerAwaited {origin : String} (awaiter : Ident) (now : Nat) :
-    List PromiseRegisterCallbackReq → Handler (.origin origin) Unit
-  | [] => pure ()
-  | action :: rest => do
-      match ← readObject action.awaited.suffix now with
-      | some awaited =>
-          setObject { awaited with promise := awaited.promise.addCallback awaiter }
-      | none => pure ()
-      registerAwaited awaiter now rest
+def addCallback {origin : String} (awaiter : Ident) (now : Nat)
+    (action : PromiseRegisterCallbackReq) : Handler (.origin origin) Unit := do
+  match ← readObject action.awaited.suffix now with
+  | some awaited =>
+      setObject { awaited with promise := awaited.promise.addCallback awaiter }
+  | none => pure ()
 
 def taskSuspend (req : TaskSuspendReq) (now : Nat) :
     Handler (.origin req.id.origin) TaskSuspendRes := do
@@ -196,22 +173,21 @@ def taskSuspend (req : TaskSuspendReq) (now : Nat) :
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      match ← checkAwaited now req.actions with
-      | none => return { status := 422 }
-      | some true =>
-          setObject { o with task := some { t with
-            resumes := [] } }
-          return { status := 300 }
-      | some false =>
-          registerAwaited req.id now req.actions
-          setObject { o with task := some { t with
-            state := .suspended
-            pid := none
-            ttl := none
-            leaseTimeoutAt := none
-            retryTimeoutAt := none
-            resumes := [] } }
-          return { status := 200 }
+      let awaited ← req.actions.mapM (readObject ·.awaited.suffix now)
+      if !awaited.all (·.any (·.promise.otype.awaitable)) then
+        return { status := 422 }
+      if awaited.any (·.any (·.promise.state != .pending)) then
+        setObject { o with task := some { t with resumes := [] } }
+        return { status := 300 }
+      req.actions.forM (addCallback req.id now)
+      setObject { o with task := some { t with
+        state := .suspended
+        pid := none
+        ttl := none
+        leaseTimeoutAt := none
+        retryTimeoutAt := none
+        resumes := [] } }
+      return { status := 200 }
 
 def taskFulfill (req : TaskFulfillReq) (now : Nat) :
     Handler (.origin req.id.origin) TaskFulfillRes := do
@@ -297,7 +273,7 @@ def scheduleCreate (req : ScheduleCreateReq) (now : Nat) :
           createdAt := now,
           nextRunAt := nextCron req.cron now,
           lastRunAt := none }
-      setScheduleValue schedule
+      setSchedule schedule
       return { status := 200, schedule := some schedule }
 
 def scheduleDelete (req : ScheduleDeleteReq) (_now : Nat) :
