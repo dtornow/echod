@@ -613,6 +613,50 @@ theorem setTask_sim' (id : Ident) (task : TaskObject) {origin : String}
       (Concrete.Decision.setTask (origin := origin) id.suffix task) := by
   subst h; exact setTask_sim id task
 
+/-! ## Rewriting abstract handlers -/
+
+theorem Abstract.bind_assoc (x : Abstract.Handler α) (f : α → Abstract.Handler β)
+    (g : β → Abstract.Handler γ) : (x >>= f) >>= g = x >>= fun a => f a >>= g := by
+  funext env store
+  simp only [bind, List.append_assoc]
+
+theorem Abstract.pure_bind (a : α) (f : α → Abstract.Handler β) :
+    (Pure.pure a : Abstract.Handler α) >>= f = f a := by
+  funext env store
+  simp only [bind, Pure.pure, List.nil_append]
+
+instance : LawfulMonad Abstract.Handler := LawfulMonad.mk'
+  (id_map := fun x => by
+    funext env store
+    show (let (v, s, e) := x env store; (v, s, e ++ [])) = x env store
+    simp)
+  (pure_bind := fun a f => Abstract.pure_bind a f)
+  (bind_assoc := fun x f g => Abstract.bind_assoc x f g)
+
+theorem Abstract.ite_bind (p : Prop) [Decidable p] (x y : Abstract.Handler α)
+    (f : α → Abstract.Handler β) :
+    (if p then x else y) >>= f = if p then x >>= f else y >>= f := by
+  split <;> rfl
+
+theorem Store.setTask_setTask (store : Store) (id : Ident) (first second : TaskObject) :
+    (store.setTask id first).setTask id second = store.setTask id second := by
+  simp only [Store.setTask, List.map_map, Store.mk.injEq, and_true]
+  apply List.map_congr_left
+  intro object _
+  by_cases h : object.id = id <;> simp [h]
+
+theorem Abstract.setTask_setTask (id : Ident) (first second : TaskObject)
+    (f : Unit → Abstract.Handler α) :
+    (Abstract.setTask id first >>= fun _ => Abstract.setTask id second >>= f) =
+      Abstract.setTask id second >>= f := by
+  funext env store
+  simp only [bind, Abstract.setTask, Store.setTask_setTask, List.nil_append]
+
+theorem Concrete.pure_bind {key : DocumentKey} (u : α) (f : α → DocumentHandler key β) :
+    (Pure.pure u : DocumentHandler key α) >>= f = f u := by
+  funext env document
+  simp only [bind, Pure.pure, List.nil_append]
+
 /-- Close the side condition that an id lies in the document's origin. -/
 macro "sim_origin" : tactic => `(tactic| first
   | rfl
@@ -626,7 +670,7 @@ def lastString : Lean.Name → String
 open Lean Meta Elab Tactic in
 /-- One step of a handler simulation, chosen by the head of the abstract
 handler. -/
-elab "sim_step" : tactic => withMainContext do
+elab "sim_dispatch" : tactic => withMainContext do
   let target ← instantiateMVars (← getMainTarget)
   unless target.isAppOfArity ``Sim 6 do throwError "sim_step: not a Sim goal"
   let a := (← instantiateMVars target.getAppArgs[4]!).headBeta
@@ -696,7 +740,12 @@ elab "sim_step" : tactic => withMainContext do
           run `(tactic| dsimp only [Object.ofOrigin])
     | none => run `(tactic| dsimp only [Object.ofOrigin])
 
-macro "sim" : tactic => `(tactic| repeat sim_step)
+macro "sim_step" : tactic => `(tactic| first
+  | sim_dispatch
+  | dsimp only [Object.ofOrigin]
+  | simp only [Concrete.pure_bind, Abstract.pure_bind])
+
+macro "sim" : tactic => `(tactic| repeat' sim_step)
 
 theorem promiseGet_sim (req : PromiseGetReq) (now : Nat) :
     Sim (.origin req.id.origin) Eq (Abstract.promiseGet req now)
@@ -794,5 +843,189 @@ theorem taskContinue_sim (req : TaskContinueReq) (now : Nat) :
       (Concrete.Decision.taskContinue req now) := by
   unfold Abstract.taskContinue Concrete.Decision.taskContinue
   sim
+
+theorem Tags.not_timer_of_runnable {tags : Tags} (hrun : tags.otype = .runnable)
+    (htimer : tags.timerTargeted = false) : tags.isTimer = false := by
+  have htarget : tags.has "resonate:target" = true := by
+    unfold Tags.otype at hrun
+    split at hrun
+    · assumption
+    · split at hrun <;> cases hrun
+  simpa [Tags.timerTargeted, htarget] using htimer
+
+theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
+    Sim (.origin req.action.id.origin) Eq (Abstract.taskCreate req now)
+      (Concrete.Decision.taskCreate req now) := by
+  unfold Abstract.taskCreate Concrete.Decision.taskCreate
+  sim
+  rename_i hguard _ _ _
+  simp only [not_or, bne_iff_ne, ne_eq, Decidable.not_not, Bool.not_eq_true] at hguard
+  obtain ⟨hrun, htimer⟩ := hguard
+  have hnotimer := Tags.not_timer_of_runnable hrun htimer
+  unfold Abstract.createPromiseAt
+  rw [Abstract.ite_bind]
+  refine Sim.ite _ (fun _ => ?_) (fun _ => ?_)
+  · simp only [Abstract.bind_assoc, Abstract.pure_bind, Abstract.ite_bind, AbstractModel.PromiseObject.otype, hrun,
+      beq_self_eq_true, ↓reduceIte, Abstract.setTask_setTask]
+    sim
+  · simp only [Abstract.bind_assoc, Abstract.pure_bind, Abstract.ite_bind, AbstractModel.PromiseObject.otype, hrun,
+      hnotimer, Bool.false_eq_true, beq_self_eq_true, ↓reduceIte,
+      show (PromiseState.rejectedTimedout == PromiseState.pending) = false from rfl]
+    sim
+
+theorem Sim.bind_left {key : DocumentKey} {R : α → β → Prop} {S : γ → δ → Prop}
+    {ma : Abstract.Handler α} {u : β} {fa : α → Abstract.Handler γ}
+    {mc : DocumentHandler key δ}
+    (hm : Sim key R ma (Pure.pure u)) (hf : ∀ a, R a u → Sim key S (fa a) mc) :
+    Sim key S (ma >>= fa) mc := by
+  intro env store
+  obtain ⟨hr, hsame, hemit⟩ := hm env store
+  have hs : Same (ma env store).2.1 store :=
+    hsame.trans (Store.read_write_read store key)
+  have hread : (ma env store).2.1.read key = store.read key := hs key
+  obtain ⟨hr', hsame', hemit'⟩ := hf _ hr env (ma env store).2.1
+  rw [hread] at hr' hsame' hemit'
+  refine ⟨hr', hsame'.trans (Same.write hs key _), ?_⟩
+  show (ma env store).2.2 ++ (fa (ma env store).1 env (ma env store).2.1).2.2 = _
+  rw [hemit', hemit]
+  rfl
+
+/-- A handler that only reads simulates doing nothing. -/
+theorem Sim.readOnly {key : DocumentKey} {ma : Abstract.Handler α}
+    (h : ∀ env store, (ma env store).2 = (store, [])) :
+    Sim key (fun _ _ => True) ma (Pure.pure ()) := by
+  intro env store
+  refine ⟨trivial, ?_, ?_⟩
+  · rw [h env store]
+    exact Same.symm (Store.read_write_read store key)
+  · rw [h env store]
+    rfl
+
+/-! ## Heartbeat -/
+
+theorem heartbeatOne_sim (pid : String) (ref : TaskRef) (now : Nat) {origin : String}
+    (h : ref.id.origin = origin) :
+    Sim (.origin origin) Eq (Abstract.heartbeatOne pid ref now)
+      (Concrete.Decision.heartbeatOne (origin := origin) pid ref now) := by
+  subst h
+  unfold Abstract.heartbeatOne Concrete.Decision.heartbeatOne
+  sim
+
+theorem heartbeatAll_sim (pid : String) (now : Nat) {origin : String} :
+    ∀ refs : List TaskRef, (∀ ref ∈ refs, ref.id.origin = origin) →
+      Sim (.origin origin) Eq (refs.forM (Abstract.heartbeatOne pid · now))
+        (Concrete.Decision.heartbeatAll (origin := origin) pid now refs)
+  | [], _ => by
+      simp only [List.forM_nil, Concrete.Decision.heartbeatAll]
+      exact Sim.pure rfl
+  | ref :: rest, h => by
+      simp only [List.forM_cons, Concrete.Decision.heartbeatAll]
+      exact Sim.seq (heartbeatOne_sim pid ref now (h ref (by simp)))
+        (heartbeatAll_sim pid now rest fun r hr => h r (by simp [hr]))
+
+theorem taskHeartbeat_sim (req : TaskHeartbeatReq) (now : Nat) (first : TaskRef)
+    (rest : List TaskRef) (htasks : req.tasks = first :: rest) :
+    Sim (.origin first.id.origin) Eq (Abstract.taskHeartbeat req now)
+      (Concrete.Decision.taskHeartbeat first.id.origin req now) := by
+  unfold Abstract.taskHeartbeat Concrete.Decision.taskHeartbeat
+  rw [htasks]
+  have hcheck : (!sameOriginRefs first.id.origin (first :: rest)) =
+      (first :: rest).any (fun ref => ref.id.origin != first.id.origin) := by
+    simp only [sameOriginRefs, List.all_eq_not_any_not, Bool.not_not, bne]
+  simp only [hcheck]
+  refine Sim.ite _ (fun _ => Sim.pure rfl) (fun hall => ?_)
+  refine Sim.seq (Sim.pure rfl) (Sim.seq (heartbeatAll_sim _ _ _ ?_) (Sim.pure rfl))
+  simpa [bne_iff_ne] using hall
+
+/-! ## Suspend -/
+
+theorem mapM_readObject_state (now : Nat) :
+    ∀ (actions : List PromiseRegisterCallbackReq) env store,
+      (actions.mapM (Abstract.readObject ·.awaited now) env store).2 = (store, [])
+  | [], _, _ => rfl
+  | action :: rest, env, store => by
+      rw [List.mapM_cons]
+      have ih := mapM_readObject_state now rest
+      generalize rest.mapM (Abstract.readObject ·.awaited now) = m at ih ⊢
+      have hm := ih env store
+      rcases h : m env store with ⟨v, s, e⟩
+      rw [h] at hm
+      cases hm
+      simp [bind, Pure.pure, Abstract.readObject, Abstract.getObject, h]
+
+/-- What the concrete `checkAwaited` says about the awaited objects. -/
+def AwaitedRel (awaited : List (Option Object)) (check : Option Bool) : Prop :=
+  check = if awaited.all (·.any (·.promise.otype.awaitable)) then
+    some (awaited.any (·.any (·.promise.state != .pending))) else none
+
+theorem checkAwaited_sim (now : Nat) {origin : String} :
+    ∀ actions : List PromiseRegisterCallbackReq,
+      (∀ action ∈ actions, action.awaited.origin = origin) →
+      Sim (.origin origin) AwaitedRel (actions.mapM (Abstract.readObject ·.awaited now))
+        (Concrete.Decision.checkAwaited (origin := origin) now actions)
+  | [], _ => by
+      simp only [List.mapM_nil, Concrete.Decision.checkAwaited]
+      exact Sim.pure (by simp [AwaitedRel])
+  | action :: rest, h => by
+      rw [List.mapM_cons]
+      simp only [Concrete.Decision.checkAwaited]
+      refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
+      refine ObjRel.cases ?_ (fun promise task => ?_)
+      · exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
+          fun _ _ => Sim.pure (by simp [AwaitedRel])
+      · dsimp only [Object.ofOrigin]
+        by_cases hawait : promise.otype.awaitable
+        · simp only [hawait, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+            Concrete.pure_bind]
+          refine Sim.bind (checkAwaited_sim now rest fun a ha => h a (by simp [ha])) ?_
+          intro awaited check hcheck
+          rw [hcheck]
+          by_cases hall : awaited.all (·.any (·.promise.otype.awaitable))
+          · simp only [hall, ↓reduceIte]
+            exact Sim.pure (by simp [AwaitedRel, hall, hawait, Bool.or_comm])
+          · simp only [hall, Bool.false_eq_true, ↓reduceIte]
+            exact Sim.pure (by simp [AwaitedRel, hall, hawait])
+        · simp only [hawait, Bool.not_false, ↓reduceIte]
+          exact Sim.bind_left (Sim.readOnly (mapM_readObject_state now rest))
+            fun _ _ => Sim.pure (by simp [AwaitedRel, hawait])
+
+theorem registerAwaited_sim (awaiter : Ident) (now : Nat) {origin : String} :
+    ∀ actions : List PromiseRegisterCallbackReq,
+      (∀ action ∈ actions, action.awaited.origin = origin) →
+      Sim (.origin origin) Eq (actions.forM (Abstract.addCallback awaiter now))
+        (Concrete.Decision.registerAwaited (origin := origin) awaiter now actions)
+  | [], _ => by
+      simp only [List.forM_nil, Concrete.Decision.registerAwaited]
+      exact Sim.pure rfl
+  | action :: rest, h => by
+      have ih := registerAwaited_sim awaiter now rest fun a ha => h a (by simp [ha])
+      simp only [List.forM, Concrete.Decision.registerAwaited, Abstract.addCallback,
+        Abstract.bind_assoc]
+      refine Sim.bind (readObject_sim' _ _ (h action (by simp))) ?_
+      refine ObjRel.cases ?_ (fun _ _ => ?_)
+      · exact Sim.seq (Sim.pure rfl) ih
+      · exact Sim.seq (setPromise_sim' _ _ (h action (by simp))) ih
+
+theorem taskSuspend_sim (req : TaskSuspendReq) (now : Nat) :
+    Sim (.origin req.id.origin) Eq (Abstract.taskSuspend req now)
+      (Concrete.Decision.taskSuspend req now) := by
+  unfold Abstract.taskSuspend Concrete.Decision.taskSuspend
+  sim
+  refine Sim.bind (checkAwaited_sim _ _ ?_) ?_
+  · simp_all [Ident.sameOrigin]
+  intro awaited check hcheck
+  simp only [AwaitedRel] at hcheck
+  subst hcheck
+  by_cases hall : awaited.all (·.any (·.promise.otype.awaitable))
+  · by_cases hany : awaited.any (·.any (·.promise.state != .pending))
+    · simp only [hall, hany, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      sim
+    · simp only [hall, hany, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      sim
+      refine Sim.seq (registerAwaited_sim _ _ _ ?_) ?_
+      · simp_all [Ident.sameOrigin]
+      sim
+  · simp only [hall, Bool.not_false, ↓reduceIte]
+    sim
 
 end Resonate.Refinement
