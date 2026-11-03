@@ -1117,4 +1117,227 @@ theorem processSchedule_sim (id : Ident) (now : Nat) :
     · exact Sim.seq (setSchedule_sim _ _ hschedule)
         (Sim.pure (by simp [OccurrenceRel, hschedule]))
 
+/-! ## Whole steps -/
+
+theorem Abstract.map_apply (f : α → β) (m : Abstract.Handler α) (env : Abstract.Env)
+    (store : Store) :
+    (f <$> m) env store = (f (m env store).1, (m env store).2.1, (m env store).2.2) := by
+  show (m >>= fun a => Pure.pure (f a)) env store = _
+  simp only [bind, Pure.pure, List.append_nil]
+
+/-- A request whose handler simulates a concrete decision runs as that
+decision's candidate written back into the store. -/
+theorem run_of_sim (appConfig : Resonate.Config) (call : Call) (state : State)
+    {key : DocumentKey} {ma : Abstract.Handler β}
+    {action : Concrete.Decision.Handler key β} {wrap : β → Response}
+    (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
+    (hsim : Sim key Eq ma action) :
+    let candidate :=
+      Concrete.externalCandidate appConfig call (state.store.read key) action wrap
+    let lifted := Abstract.run appConfig call state
+    Same lifted.1.store (state.store.write key candidate.document) ∧
+      lifted.1.workflow = state.workflow ∧
+      lifted.2 = candidate.outputs ∧
+      candidate.continuations = [] := by
+  obtain ⟨hresult, hsame, hemit⟩ := hsim { config := appConfig.toServerConfig } state.store
+  simp only [Abstract.run, Abstract.serve, hhandler, Abstract.map_apply,
+    Concrete.externalCandidate, Concrete.Decision.run]
+  exact ⟨hsame, trivial, by rw [hresult, hemit], trivial⟩
+
+theorem external_sim_of (appConfig : Resonate.Config) (call : Call) (state : State)
+    {key : DocumentKey} {ma : Abstract.Handler β}
+    {action : Concrete.Decision.Handler key β} {wrap : β → Response}
+    (hcandidate :
+      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
+        some (Concrete.externalCandidate appConfig call (state.store.read key) action wrap))
+    (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
+    (hsim : Sim key Eq ma action) :
+    ∃ candidate,
+      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
+        some candidate ∧
+      let lifted := Abstract.run appConfig call state
+      Same lifted.1.store (state.store.write key candidate.document) ∧
+        lifted.1.workflow = state.workflow ∧
+        lifted.2 = candidate.outputs ∧
+        candidate.continuations = [] :=
+  ⟨_, hcandidate, run_of_sim appConfig call state hhandler hsim⟩
+
+/-- A request that names a document runs as the concrete candidate for that
+document written back into the store. -/
+theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : DocumentKey)
+    (hkey : (Concrete.Transaction.external call).key? = some key) (state : State) :
+    ∃ candidate,
+      Concrete.selectedExternalCandidate appConfig call key (state.store.read key) =
+        some candidate ∧
+      let lifted := Abstract.run appConfig call state
+      Same lifted.1.store (state.store.write key candidate.document) ∧
+        lifted.1.workflow = state.workflow ∧
+        lifted.2 = candidate.outputs ∧
+        candidate.continuations = [] := by
+  cases hrequest : call.request <;>
+    simp only [Concrete.Transaction.key?, hrequest] at hkey
+  case promiseGet req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .promiseGet)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (promiseGet_sim req call.requestedAt)
+  case promiseCreate req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .promiseCreate)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
+        Concrete.Decision.promiseCreate])
+      (by rw [hrequest]; rfl) (promiseCreate_sim req call.requestedAt rfl)
+  case promiseSettle req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .promiseSettle)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast,
+        Concrete.Decision.promiseSettle])
+      (by rw [hrequest]; rfl) (promiseSettle_sim req call.requestedAt rfl)
+  case promiseRegisterCallback req =>
+    split at hkey
+    · cases hkey
+      exact external_sim_of appConfig call state (wrap := .promiseRegisterCallback)
+        (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+        (by rw [hrequest]; rfl) (promiseRegisterCallback_sim req call.requestedAt)
+    · contradiction
+  case promiseRegisterListener req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .promiseRegisterListener)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (promiseRegisterListener_sim req call.requestedAt)
+  case scheduleGet req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .scheduleGet)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (scheduleGet_sim req call.requestedAt)
+  case scheduleCreate req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .scheduleCreate)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (scheduleCreate_sim req call.requestedAt)
+  case scheduleDelete req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .scheduleDelete)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (scheduleDelete_sim req call.requestedAt)
+  case taskGet req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskGet)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskGet_sim req call.requestedAt)
+  case taskCreate req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskCreate)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskCreate_sim req call.requestedAt)
+  case taskAcquire req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskAcquire)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskAcquire_sim req call.requestedAt)
+  case taskFence req =>
+    split at hkey
+    · cases hkey
+      exact external_sim_of appConfig call state (wrap := .taskFence)
+        (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+        (by rw [hrequest]; rfl) (taskFence_sim req call.requestedAt)
+    · contradiction
+  case taskHeartbeat req =>
+    cases htasks : req.tasks with
+    | nil => simp [htasks] at hkey
+    | cons first rest =>
+      simp only [htasks] at hkey
+      split at hkey
+      · cases hkey
+        exact external_sim_of appConfig call state (wrap := .taskHeartbeat)
+          (by simp [Concrete.selectedExternalCandidate, hrequest, htasks,
+            Concrete.Candidate.cast])
+          (by rw [hrequest]; rfl)
+          (taskHeartbeat_sim req call.requestedAt first rest htasks)
+      · contradiction
+  case taskSuspend req =>
+    split at hkey
+    · contradiction
+    · cases hkey
+      exact external_sim_of appConfig call state (wrap := .taskSuspend)
+        (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+        (by rw [hrequest]; rfl) (taskSuspend_sim req call.requestedAt)
+  case taskFulfill req =>
+    split at hkey
+    · cases hkey
+      exact external_sim_of appConfig call state (wrap := .taskFulfill)
+        (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+        (by rw [hrequest]; rfl) (taskFulfill_sim req call.requestedAt)
+    · contradiction
+  case taskRelease req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskRelease)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskRelease_sim req call.requestedAt)
+  case taskHalt req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskHalt)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskHalt_sim req call.requestedAt)
+  case taskContinue req =>
+    cases hkey
+    exact external_sim_of appConfig call state (wrap := .taskContinue)
+      (by simp [Concrete.selectedExternalCandidate, hrequest, Concrete.Candidate.cast])
+      (by rw [hrequest]; rfl) (taskContinue_sim req call.requestedAt)
+  all_goals contradiction
+
+/-- A request that names no document leaves the state alone and replies with
+the concrete pure response. -/
+theorem external_none (appConfig : Resonate.Config) (call : Call) (state : State)
+    (hkey : (Concrete.Transaction.external call).key? = none) :
+    Abstract.run appConfig call state =
+      (state, [.response call.client call.id
+        (Concrete.pureResponse call.requestedAt call.request)]) := by
+  cases hrequest : call.request <;>
+    simp only [Concrete.Transaction.key?, hrequest, reduceCtorEq] at hkey
+  case promiseRegisterCallback req =>
+    split at hkey
+    · contradiction
+    · rename_i horigin
+      by_cases hsame : req.awaited == req.awaiter <;>
+        simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+          Abstract.promiseRegisterCallback, Concrete.pureResponse, bind, Pure.pure]
+  case taskFence req =>
+    split at hkey
+    · contradiction
+    · rename_i hcondition
+      by_cases hsame : req.action.targetId == req.id <;>
+        simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+          Abstract.taskFence, Concrete.pureResponse, bind, Pure.pure]
+  case taskHeartbeat req =>
+    cases htasks : req.tasks with
+    | nil =>
+      simp [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+        Abstract.taskHeartbeat, Concrete.pureResponse, bind, Pure.pure, hrequest, htasks]
+    | cons first rest =>
+      simp only [htasks] at hkey
+      split at hkey
+      · contradiction
+      · simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+          Abstract.taskHeartbeat, Concrete.pureResponse, bind, Pure.pure]
+  case taskSuspend req =>
+    split at hkey
+    · rename_i hmismatch
+      have hnonempty : req.actions.isEmpty = false := by
+        cases hactions : req.actions <;> simp_all
+      by_cases hself : req.actions.any (·.awaited == req.id) <;>
+        simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+          Abstract.taskSuspend, Concrete.pureResponse, bind, Pure.pure]
+    · contradiction
+  case taskFulfill req =>
+    split at hkey
+    · contradiction
+    · simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+        Abstract.taskFulfill, Concrete.pureResponse, bind, Pure.pure]
+  all_goals
+    simp [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
+      Concrete.pureResponse, bind, Pure.pure, hrequest, Abstract.promiseSearch,
+      Abstract.scheduleSearch, Abstract.taskSearch, Concrete.Decision.promiseSearch,
+      Concrete.Decision.scheduleSearch, Concrete.Decision.taskSearch]
+
 end Resonate.Refinement
