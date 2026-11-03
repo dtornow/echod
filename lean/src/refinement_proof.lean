@@ -382,8 +382,8 @@ theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
       Concrete.selectedWorkCandidate appConfig item now rest key before =
         some candidate ∧
       ∀ store : Resonate.Store, DocEquiv key (store.read key) before →
-        item ∈ store.objects.flatMap (Abstract.objectWork · now) ++
-          store.schedules.flatMap (Abstract.scheduleWork · now) := by
+        item ∈ store.objects.flatMap Abstract.objectWork ++
+          store.schedules.map (fun schedule => WorkItem.scheduleTimeout schedule.id) := by
   cases key with
   | origin origin =>
     simp only [Concrete.selectScanWork] at h
@@ -399,10 +399,9 @@ theorem selectScanWork_due {appConfig : Resonate.Config} {key : DocumentKey}
     simp only [Concrete.selectScanWork] at h
     split at h
     · split at h
-      · rename_i hdue
-        refine ⟨.scheduleTimeout id, h, fun store hread =>
+      · refine ⟨.scheduleTimeout id, h, fun store hread =>
           List.mem_append_right _ ?_⟩
-        exact scheduleWork_mem store id now hread hdue
+        exact scheduleWork_mem store id hread
       · contradiction
     · contradiction
 

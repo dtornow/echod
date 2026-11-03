@@ -1584,58 +1584,89 @@ theorem work_sim (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
 
 /-! ## Due work -/
 
-theorem originObjectWork_eq {origin : String} (row : OriginObject origin) (now : Nat) :
-    Concrete.Decision.originObjectWork row now = Abstract.objectWork (Object.ofOrigin row) now :=
-  rfl
+/-- Work the concrete sweep finds in a row is a step of the abstract object. -/
+theorem originObjectWork_mem {origin : String} (row : OriginObject origin) (now : Nat)
+    {item : WorkItem} (h : item ∈ Concrete.Decision.originObjectWork row now) :
+    item ∈ Abstract.objectWork (Object.ofOrigin row) := by
+  simp only [Concrete.Decision.originObjectWork, Concrete.Decision.originSettledWork,
+    Concrete.Decision.originTaskWork, List.mem_append] at h
+  simp only [Abstract.objectWork, List.mem_append, List.mem_cons, List.mem_map,
+    List.not_mem_nil, or_false]
+  rcases h with (h | h) | h
+  · split at h
+    · simp only [List.mem_singleton] at h
+      exact .inl (.inl (.inl h))
+    · cases h
+  · split at h
+    · cases h
+    · simp only [List.mem_append, List.mem_map] at h
+      rcases h with h | h
+      · exact .inl (.inr h)
+      · exact .inr h
+  · split at h
+    · cases h
+    · simp only [List.mem_append] at h
+      rcases h with h | h
+      · split at h
+        · split at h
+          · simp only [List.mem_singleton] at h
+            exact .inl (.inl (.inr (.inl h)))
+          · cases h
+        · cases h
+      · split at h
+        · split at h
+          · simp only [List.mem_singleton] at h
+            exact .inl (.inl (.inr (.inr h)))
+          · cases h
+        · cases h
 
-/-- Work the concrete sweep finds in an origin document is object work of the
-abstract store. -/
+/-- Work the concrete sweep finds in an origin document is a step of an
+object of the abstract store. -/
 theorem originWork_mem (store : Store) (origin : String) (now : Nat)
     {document : OriginDocument origin}
     (hdoc : DocEquiv (.origin origin) (store.read (.origin origin)) document)
     {item : WorkItem}
     (h : item ∈ Concrete.Decision.originWork origin document now) :
-    item ∈ store.objects.flatMap (Abstract.objectWork · now) := by
+    item ∈ store.objects.flatMap Abstract.objectWork := by
   simp only [Concrete.Decision.originWork, List.mem_flatMap] at h
   obtain ⟨row, hrow, hitem⟩ := h
   have hrow : row ∈ store.objects.filterMap (Object.toOriginRow? origin) :=
     (List.Perm.mem_iff hdoc).mpr hrow
-  simp only [Store.read, Store.originRows, List.mem_filterMap] at hrow
+  simp only [List.mem_filterMap] at hrow
   obtain ⟨object, hobject, hrow⟩ := hrow
   rw [List.mem_flatMap]
   refine ⟨object, hobject, ?_⟩
-  rw [← Object.ofOrigin_toOriginRow hrow, ← originObjectWork_eq]
-  exact hitem
+  rw [← Object.ofOrigin_toOriginRow hrow]
+  exact originObjectWork_mem row now hitem
 
-theorem scheduleAt_go_due (id : Ident) (now : Nat) :
+theorem scheduleAt_go_mem (id : Ident) :
     ∀ (schedules : List Schedule) (data : ScheduleData id),
-      Store.scheduleAt.go id schedules = some data → data.nextRunAt ≤ now →
-      WorkItem.scheduleTimeout id ∈ schedules.flatMap (Abstract.scheduleWork · now)
-  | [], _, h, _ => by simp [Store.scheduleAt.go] at h
-  | schedule :: rest, data, h, hdue => by
+      Store.scheduleAt.go id schedules = some data →
+      WorkItem.scheduleTimeout id ∈
+        schedules.map (fun schedule => WorkItem.scheduleTimeout schedule.id)
+  | [], _, h => by simp [Store.scheduleAt.go] at h
+  | schedule :: rest, data, h => by
     simp only [Store.scheduleAt.go] at h
     split at h
     · rename_i hid
-      subst hid
-      cases h
-      simp [Abstract.scheduleWork, ScheduleData.ofSchedule] at hdue ⊢
-      simp [hdue]
-    · simp only [List.flatMap_cons, List.mem_append]
-      exact .inr (scheduleAt_go_due id now rest data h hdue)
+      simp [hid]
+    · simp only [List.map_cons, List.mem_cons]
+      exact .inr (scheduleAt_go_mem id rest data h)
 
-/-- A due schedule document is schedule work of the abstract store. -/
-theorem scheduleWork_mem (store : Store) (id : Ident) (now : Nat) {data : ScheduleData id}
-    (h : store.read (.schedule id) = some data) (hdue : data.nextRunAt ≤ now) :
-    WorkItem.scheduleTimeout id ∈ store.schedules.flatMap (Abstract.scheduleWork · now) :=
-  scheduleAt_go_due id now store.schedules data h hdue
+/-- A stored schedule is a step of the abstract store. -/
+theorem scheduleWork_mem (store : Store) (id : Ident) {data : ScheduleData id}
+    (h : store.read (.schedule id) = some data) :
+    WorkItem.scheduleTimeout id ∈
+      store.schedules.map (fun schedule => WorkItem.scheduleTimeout schedule.id) :=
+  scheduleAt_go_mem id store.schedules data h
 
 theorem runTimeout_mem_due (appConfig : Resonate.Config) (state : State) {now instant : Nat}
     {item : WorkItem} (hinstant : instant ≤ now)
-    (h : item ∈ state.store.objects.flatMap (Abstract.objectWork · instant) ++
-      state.store.schedules.flatMap (Abstract.scheduleWork · instant)) :
+    (h : item ∈ state.store.objects.flatMap Abstract.objectWork ++
+      state.store.schedules.map (fun schedule => WorkItem.scheduleTimeout schedule.id)) :
     Abstract.runWork appConfig item instant state.workflow.pending state ∈
       (Abstract.runTimeout appConfig now state).val := by
-  simp only [Abstract.runTimeout, Abstract.dueWork, List.mem_cons, List.mem_map,
+  simp only [Abstract.runTimeout, Abstract.timeoutWork, List.mem_cons, List.mem_map,
     List.mem_append]
   right
   refine ⟨(item, instant, state.workflow.pending), .inr ?_, rfl⟩
@@ -1650,7 +1681,7 @@ theorem runTimeout_mem_pending (appConfig : Resonate.Config) (state : State) (no
       List.Perm state.workflow.pending (entry :: rest) := by
   obtain ⟨before, after, hpending⟩ := List.append_of_mem hmem
   refine ⟨before ++ after, ?_, ?_⟩
-  · simp only [Abstract.runTimeout, Abstract.dueWork, List.mem_cons, List.mem_map,
+  · simp only [Abstract.runTimeout, Abstract.timeoutWork, List.mem_cons, List.mem_map,
       List.mem_append]
     right
     refine ⟨(entry.item, entry.instant, before ++ after), .inl ?_, rfl⟩

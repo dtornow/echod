@@ -75,22 +75,23 @@ def runWork (config : Config) (work : WorkItem) (now : Time)
     processWork work now { config := config.toServerConfig } state.store
   ({ store, workflow := { pending := rest ++ fired } }, emitted.map .message)
 
-/-- Work that is due by `now`: any queued occurrence, or any object or
-schedule work due at any instant up to `now`. Each comes with its instant and
-the queue left once it runs. -/
-def dueWork (state : State) (now : Time) :
+/-- Work a timeout may run: any queued occurrence, or any step of an object
+or schedule at any instant up to `now`. Each comes with its instant and the
+queue left once it runs. -/
+def timeoutWork (state : State) (now : Time) :
     List (WorkItem × Time × List WorkflowEntry) :=
   let queue := state.workflow.pending
   queue.mapIdx (fun index entry => (entry.item, entry.instant, queue.eraseIdx index)) ++
   (List.range (now + 1)).flatMap fun instant =>
-    (state.store.objects.flatMap (objectWork · instant) ++
-      state.store.schedules.flatMap (scheduleWork · instant)).map
+    (state.store.objects.flatMap objectWork ++
+      state.store.schedules.map (fun schedule => WorkItem.scheduleTimeout schedule.id)).map
         fun item => (item, instant, queue)
 
-/-- A timeout does nothing or runs any due work. -/
+/-- A timeout does nothing or runs any internal step. A step that is not due
+does nothing. -/
 def runTimeout (config : Config) (now : Time) (state : State) :
     Outcomes (State × List Output) :=
-  ⟨(state, []) :: (dueWork state now).map
+  ⟨(state, []) :: (timeoutWork state now).map
       (fun (item, instant, rest) => runWork config item instant rest state),
     by simp⟩
 

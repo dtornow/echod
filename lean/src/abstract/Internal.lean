@@ -119,30 +119,12 @@ def processWork (item : WorkItem) (now : Nat) : Handler (List WorkflowEntry) :=
   | .taskRetryTimeout id => do processRetryTimeout id now; return []
   | .occurrence req time => do createIfAbsent req time; return []
 
-/-- Work an object makes due at `now`. -/
-def objectWork (object : Object) (now : Nat) : List WorkItem :=
-  let promise := object.promise
-  let pending := promise.state == .pending
-  (if pending ∧ promise.timeoutAt ≤ now then [.promiseTimeout object.id] else []) ++
-  (if pending then [] else
-    promise.callbacks.map (fun awaiter => .callback { awaited := object.id, awaiter }) ++
-    promise.listeners.map (fun address => .listener { awaited := object.id, address })) ++
-  (match object.task with
-   | none => []
-   | some task =>
-       (match task.leaseTimeoutAt with
-        | some due =>
-            if task.state == .acquired ∧ due ≤ now ∧ pending then
-              [.taskLeaseTimeout object.id] else []
-        | none => []) ++
-       (match task.retryTimeoutAt with
-        | some due =>
-            if task.state == .pending ∧ due ≤ now ∧ pending then
-              [.taskRetryTimeout object.id] else []
-        | none => []))
-
-/-- Work a schedule makes due at `now`. -/
-def scheduleWork (schedule : Schedule) (now : Nat) : List WorkItem :=
-  if schedule.nextRunAt ≤ now then [.scheduleTimeout schedule.id] else []
+/-- The internal steps an object can take. Each step's own guard decides
+whether it does anything. -/
+def objectWork (object : Object) : List WorkItem :=
+  [.promiseTimeout object.id, .taskLeaseTimeout object.id,
+    .taskRetryTimeout object.id] ++
+  object.promise.callbacks.map (fun awaiter => .callback { awaited := object.id, awaiter }) ++
+  object.promise.listeners.map (fun address => .listener { awaited := object.id, address })
 
 end Resonate.Abstract
