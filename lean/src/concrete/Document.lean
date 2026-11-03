@@ -29,11 +29,16 @@ structure OriginObject (origin : String) where
 def OriginObject.id (object : OriginObject origin) : ServerModel.Ident :=
   { origin, suffix := object.suffix }
 
+/-- The task as its promise reads: fulfilled once the promise is settled. -/
+def _root_.AbstractModel.TaskObject.project (task : TaskObject) (promise : PromiseObject) :
+    TaskObject :=
+  if promise.state != .pending ∧ task.state != .fulfilled then task.fulfill else task
+
 /-- Pure read projection at a logical time. -/
 def OriginObject.project (object : OriginObject origin) (now : Nat) :
     OriginObject origin :=
   let promise := object.promise.project now
-  { object with promise, task := object.task.map (·.view promise) }
+  { object with promise, task := object.task.map (·.project promise) }
 
 abbrev OriginDocument (origin : String) := List (OriginObject origin)
 

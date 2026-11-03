@@ -9,7 +9,7 @@ The abstract handlers run on the whole store and address objects by id. The
 concrete decisions run on one document and address objects by suffix.
 
 Documents are compared by what a read shows, not by what they store. A read
-shows a task as its promise has it (`TaskObject.view`), so two rows with the
+shows a task as its promise has it (`TaskObject.project`), so two rows with the
 same normal form (`OriginObject.norm`) read alike at every instant. Rows are
 compared as a multiset: both sides look rows up by suffix.
 
@@ -32,7 +32,7 @@ open ServerModel
 /-- A row with its task as its promise shows it. -/
 def _root_.Resonate.OriginObject.norm {origin : String} (row : OriginObject origin) :
     OriginObject origin :=
-  { row with task := row.task.map (·.view row.promise) }
+  { row with task := row.task.map (·.project row.promise) }
 
 /-- Two documents that read alike. -/
 def DocEquiv : (key : DocumentKey) → Document key → Document key → Prop
@@ -265,33 +265,33 @@ theorem Sim.readOnly {key : DocumentKey} {P : Document key → Prop}
 
 /-! ## What a read shows -/
 
-theorem view_of_pending {t : TaskObject} {p : PromiseObject} (h : p.state = .pending) :
-    t.view p = t := by
-  simp [AbstractModel.TaskObject.view, h]
+theorem task_project_of_pending {t : TaskObject} {p : PromiseObject} (h : p.state = .pending) :
+    t.project p = t := by
+  simp [AbstractModel.TaskObject.project, h]
 
-theorem view_state_of_settled {t : TaskObject} {p : PromiseObject}
-    (h : p.state ≠ .pending) : (t.view p).state = .fulfilled := by
-  unfold AbstractModel.TaskObject.view
+theorem task_project_state_of_settled {t : TaskObject} {p : PromiseObject}
+    (h : p.state ≠ .pending) : (t.project p).state = .fulfilled := by
+  unfold AbstractModel.TaskObject.project
   by_cases ht : t.state = .fulfilled
   · simp [ht]
   · simp [h, ht, AbstractModel.TaskObject.fulfill]
 
-theorem view_of_settled {t : TaskObject} {p : PromiseObject} (h : p.state ≠ .pending)
-    (ht : t.state ≠ .fulfilled) : t.view p = t.fulfill := by
-  simp [AbstractModel.TaskObject.view, h, ht]
+theorem task_project_of_settled {t : TaskObject} {p : PromiseObject} (h : p.state ≠ .pending)
+    (ht : t.state ≠ .fulfilled) : t.project p = t.fulfill := by
+  simp [AbstractModel.TaskObject.project, h, ht]
 
 /-- Viewing through `q` first changes nothing when `q` is settled whenever
 `p` is. -/
-theorem view_view {t : TaskObject} {p q : PromiseObject}
+theorem task_project_project {t : TaskObject} {p q : PromiseObject}
     (h : p.state = .pending → q.state = .pending) :
-    (t.view q).view p = t.view p := by
+    (t.project q).project p = t.project p := by
   by_cases hq : q.state = .pending
-  · rw [view_of_pending hq]
+  · rw [task_project_of_pending hq]
   · have hp : p.state ≠ .pending := fun hp => hq (h hp)
     by_cases ht : t.state = .fulfilled
-    · simp [AbstractModel.TaskObject.view, ht]
-    · rw [view_of_settled hq ht, view_of_settled hp ht]
-      simp [AbstractModel.TaskObject.view, AbstractModel.TaskObject.fulfill]
+    · simp [AbstractModel.TaskObject.project, ht]
+    · rw [task_project_of_settled hq ht, task_project_of_settled hp ht]
+      simp [AbstractModel.TaskObject.project, AbstractModel.TaskObject.fulfill]
 
 theorem project_pending (p : PromiseObject) (now : Nat) :
     (p.project now).state = .pending → p.state = .pending := by
@@ -324,17 +324,17 @@ theorem project_norm {origin : String} (row : OriginObject origin) (now : Nat) :
   obtain ⟨suffix, promise, _ | task⟩ := row
   · rfl
   · simp only [OriginObject.project, OriginObject.norm, Option.map_some,
-      view_view (project_pending promise now)]
+      task_project_project (project_pending promise now)]
 
-/-- Two rows with the same promise read alike when the stored task is viewed
+/-- Two rows with the same promise read alike when the stored task is projected
 through a promise settled whenever this one is. -/
-theorem norm_view {origin : String} (s : String) {p q : PromiseObject}
+theorem norm_project {origin : String} (s : String) {p q : PromiseObject}
     (task : Option TaskObject) (h : p.state = .pending → q.state = .pending) :
-    (⟨s, p, task.map (·.view q)⟩ : OriginObject origin).norm =
+    (⟨s, p, task.map (·.project q)⟩ : OriginObject origin).norm =
       (⟨s, p, task⟩ : OriginObject origin).norm := by
   cases task with
   | none => rfl
-  | some t => simp only [OriginObject.norm, Option.map_some, view_view h]
+  | some t => simp only [OriginObject.norm, Option.map_some, task_project_project h]
 
 /-! ## Object lookups through an origin document -/
 
@@ -629,7 +629,7 @@ theorem Fact.cases {origin s : String} {now : Nat} {promise : PromiseObject}
     {task : Option TaskObject} {document : OriginDocument origin}
     (h : Fact s now (some ⟨s, promise, task⟩) document) :
     ∃ stored current, document.find? (·.suffix == s) = some ⟨s, stored, current⟩ ∧
-      promise = stored.project now ∧ task = current.map (·.view (stored.project now)) := by
+      promise = stored.project now ∧ task = current.map (·.project (stored.project now)) := by
   obtain ⟨⟨rs, stored, current⟩, hfind, hrow⟩ := h.row
   simp only [OriginObject.project, OriginObject.mk.injEq] at hrow
   obtain ⟨rfl, rfl, rfl⟩ := hrow
@@ -884,7 +884,7 @@ theorem setPromise_sim {origin : String} (s : String) {now : Nat}
   obtain ⟨stored, current, hfind, rfl, rfl⟩ := (hfact document hp).cases
   refine ⟨rfl, trivial, ?_, rfl, hunique.setObject _⟩
   rw [setPromise_apply, hfind]
-  exact setObject_equiv _ hdoc (by exact (norm_view s current hstate).symm)
+  exact setObject_equiv _ hdoc (by exact (norm_project s current hstate).symm)
 
 /-- Writing the read object with a new task is setting the task on the
 stored row, as long as the read promise is the stored one: it is pending,
@@ -909,7 +909,7 @@ theorem setTask_sim {origin : String} (s : String) {now : Nat}
         | some st =>
             simp only [Option.map_some, Option.some.injEq] at ht
             subst ht
-            exact (hfulfilled (view_state_of_settled h)).elim
+            exact (hfulfilled (task_project_state_of_settled h)).elim
   have hunique' : RowsUnique document := (hunique.rows origin).of_equiv hdoc
   have hmem := List.mem_of_find?_eq_some hfind
   refine ⟨rfl, trivial, ?_, rfl, hunique.setObject _⟩
@@ -924,16 +924,31 @@ theorem setTask_sim {origin : String} (s : String) {now : Nat}
   rw [hstored]
   exact hperm.symm
 
+theorem settable_ne_pending {state : PromiseState} (h : state.settable = true) :
+    state ≠ .pending := by
+  rintro rfl
+  simp [PromiseState.settable] at h
+
+/-- A settled promise reads as it is, and its task as finished. -/
+theorem Object.project_settled (o : Object) {p : PromiseObject} (now : Nat)
+    (h : p.state ≠ .pending) :
+    ({ o with promise := p }.project now) =
+      { o with promise := p, task := o.task.map (·.project p) } := by
+  simp [Object.project, h, AbstractModel.TaskObject.project]
+
 /-- Settling the read object is setting the promise on the stored row and
 finishing its task. -/
 theorem setSettled_sim {origin : String} (s : String) {now : Nat}
     {promise p : PromiseObject} {task : Option TaskObject}
     {P : Document (.origin origin) → Prop}
     (hfact : ∀ d, P d → Fact s now (some ⟨s, promise, task⟩) d)
-    (hstate : p.state = .pending → promise.state = .pending) :
+    (hstate : p.state = .pending → promise.state = .pending)
+    (hsettled : p.state ≠ .pending) :
     Sim (.origin origin) P Eq (fun _ _ => True)
-      (Abstract.setSettled { id := { origin, suffix := s }, promise, task } p)
+      (Abstract.setSettled { id := { origin, suffix := s }, promise, task } p now)
       (Concrete.Decision.setSettled ⟨s, promise, task⟩ p) := by
+  unfold Abstract.setSettled
+  rw [Object.project_settled _ _ hsettled]
   intro env store document hunique hdoc hp
   obtain ⟨stored, current, hfind, rfl, rfl⟩ := (hfact document hp).cases
   cases current with
@@ -949,31 +964,31 @@ theorem setSettled_sim {origin : String} (s : String) {now : Nat}
       simp only [Option.map_some]
       by_cases hpending : p.state = .pending
       · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-            some (t.view (stored.project now))⟩ p env document =
+            some (t.project (stored.project now))⟩ p env document =
             ((), ⟨s, p, some t⟩ :: document.filter (·.suffix != s), []) := by
           simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply, hfind, hpending] <;> rfl
         rw [hc]
         refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-        simp [OriginObject.norm, view_of_pending hpending,
-          view_of_pending (hstate hpending)]
-      · by_cases ht : (t.view (stored.project now)).state = .fulfilled
+        simp [OriginObject.norm, task_project_of_pending hpending,
+          task_project_of_pending (hstate hpending)]
+      · by_cases ht : (t.project (stored.project now)).state = .fulfilled
         · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-              some (t.view (stored.project now))⟩ p env document =
+              some (t.project (stored.project now))⟩ p env document =
               ((), ⟨s, p, some t⟩ :: document.filter (·.suffix != s), []) := by
             simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply, hfind,
               hpending, ht] <;> rfl
           rw [hc]
           refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-          simp [OriginObject.norm, view_view hstate, view_view (t := t) (p := p) (q := p) id]
+          simp [OriginObject.norm, task_project_project hstate, task_project_project (t := t) (p := p) (q := p) id]
         · have hc : Concrete.Decision.setSettled ⟨s, stored.project now,
-              some (t.view (stored.project now))⟩ p env document =
-              ((), ⟨s, p, some (t.view (stored.project now)).fulfill⟩ ::
+              some (t.project (stored.project now))⟩ p env document =
+              ((), ⟨s, p, some (t.project (stored.project now)).fulfill⟩ ::
                 document.filter (·.suffix != s), []) := by
             simp [Concrete.Decision.setSettled, bind, pure, setPromise_apply,
               setTask_apply, hfind, hpending, ht, map_setTask_filter] <;> rfl
           rw [hc]
           refine ⟨by trivial, trivial, setObject_equiv _ hdoc ?_, by trivial, hunique.setObject _⟩
-          simp [view_of_settled hpending ht]
+          simp [task_project_of_settled hpending ht]
 
 theorem setPromise_setTask_apply {origin : String} (s : String) (p : PromiseObject)
     (t : TaskObject) (env : HandlerEnv) (document : OriginDocument origin) :
@@ -1317,8 +1332,9 @@ elab "sim_dispatch" : tactic => withMainContext do
           | refine setObject_create_sim _ _ _ ?_)
     | some ``Resonate.Abstract.setSettled =>
         run `(tactic|
-          (refine Sim.bind (setSettled_sim _ (by sim_fact) ?_) fun _ _ _ => ?_
-           next => sim_state))
+          (refine Sim.bind (setSettled_sim _ (by sim_fact) ?_ ?_) fun _ _ _ => ?_
+           next => sim_state
+           next => (intro h; simp_all [PromiseState.settable]; done)))
     | some ``Resonate.Abstract.ask =>
         run `(tactic| (refine Sim.bind ask_sim ?_; intro _ _ h; subst h))
     | some ``Bind.bind =>

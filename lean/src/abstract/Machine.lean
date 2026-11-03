@@ -13,9 +13,18 @@ namespace Resonate
 
 open ServerModel
 
+/-- The object as it reads at `now`: a pending promise past its deadline is
+settled at the deadline, and the task of a settled promise is fulfilled. -/
 def Object.project (object : Object) (now : Nat) : Object :=
-  let promise := object.promise.project now
-  { object with promise, task := object.task.map (·.view promise) }
+  let p := object.promise
+  let promise :=
+    if p.state == .pending ∧ p.timeoutAt ≤ now then
+      if p.isTimer then { p with state := .resolved, settledAt := some p.timeoutAt }
+      else { p with state := .rejectedTimedout, settledAt := some p.timeoutAt }
+    else p
+  let task := object.task.map fun t =>
+    if promise.state != .pending ∧ t.state != .fulfilled then t.fulfill else t
+  { object with promise, task }
 
 def Store.getObject (store : Store) (id : Ident) : Option Object :=
   store.objects.find? (·.id == id)
@@ -82,8 +91,8 @@ def readTask (id : Ident) (now : Nat) : Handler (Option (Object × TaskObject)) 
   | none => return none
 
 /-- Settle a promise; a settled promise also finishes its task. -/
-def setSettled (object : Object) (promise : PromiseObject) : Handler Unit :=
-  setObject { object with promise, task := object.task.map (·.view promise) }
+def setSettled (object : Object) (promise : PromiseObject) (now : Nat) : Handler Unit :=
+  setObject ({ object with promise }.project now)
 
 /-- A new promise, with a task if it is runnable. A promise created at or
 past its deadline is created settled. -/

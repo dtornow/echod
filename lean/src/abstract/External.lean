@@ -33,7 +33,7 @@ def promiseSettle (req : PromiseSettleReq) (now : Nat) :
           state := req.state
           value := req.value
           settledAt := some now }
-        setSettled o p
+        setSettled o p now
         return { status := 200, promise := some (p.toRecord req.id) }
       return { status := 200, promise := some (o.promise.toRecord req.id) }
 
@@ -232,7 +232,7 @@ def taskFulfill (req : TaskFulfillReq) (now : Nat) : Handler TaskFulfillRes := d
           state := req.action.state
           value := req.action.value
           settledAt := some now }
-      setSettled o p
+      setSettled o p now
       return { status := 200, promise := some (p.toRecord req.id) }
 
 def taskRelease (req : TaskReleaseReq) (now : Nat) : Handler TaskReleaseRes := do
