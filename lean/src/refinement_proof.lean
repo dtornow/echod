@@ -1585,7 +1585,7 @@ theorem beginMembershipRefresh_cleanup_mem
 
 theorem beginTimerList_cleanup_mem
     {node : Concrete.Node} {config : Concrete.Config} {now : Time}
-    {kind : Concrete.ListingKind}
+    {kind : Bool}
     {next : Concrete.Node} {op : Concrete.OpId} {outputs : List Output}
     (hstate :
       (Concrete.beginTimerList node config now kind).state = Concrete.Local.node next)
@@ -1607,7 +1607,7 @@ theorem refreshEnded_cleanup_mem
   have hstate' :
       (Concrete.beginTimerList
         { node with nextHeartbeat := some (now + config.heartbeat) }
-        config now .initial).state = Concrete.Local.node next := by
+        config now false).state = Concrete.Local.node next := by
     simpa [Concrete.refreshEnded] using hstate
   exact beginTimerList_cleanup_mem
     (node := { node with nextHeartbeat := some (now + config.heartbeat) })
@@ -13931,7 +13931,7 @@ theorem step_cleanup_source
                     subst result
                     have hstate' :
                         (Concrete.beginTimerList { node with wheel } config now
-                          (.relist node.wheel.closedThrough)).state =
+                          true).state =
                           Concrete.Local.node next := by
                       simpa [wheel, hp] using hstate
                     exact .kept (beginTimerList_cleanup_mem
@@ -13941,7 +13941,7 @@ theorem step_cleanup_source
                       subst result
                       have hstate' :
                           (Concrete.beginTimerList { node with wheel } config now
-                            .extend).state = Concrete.Local.node next := by
+                            false).state = Concrete.Local.node next := by
                         simpa [wheel, hp] using hstate
                       exact .kept (beginTimerList_cleanup_mem
                         (node := { node with wheel }) hstate' hmem)

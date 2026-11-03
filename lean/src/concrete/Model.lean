@@ -92,7 +92,7 @@ inductive Control where
   | announcements (now : Time)
   | membership (now : Time) (live : List Addr)
   | membershipWrite (now : Time)
-  | timerList (now through : Time) (kind : ListingKind)
+  | timerList (now through : Time) (relist : Bool)
   | cleanup (outputs : List Output)
   deriving Repr
 
@@ -726,13 +726,7 @@ def writeCandidate (node : Node) (flight : Flight)
   { state := .node nextNode, send := [request] }
 
 def finishNode (node : Node) (flight : Flight) : Node :=
-  let wheel :=
-    match flight.fired with
-    | some _ => node.wheel.finishOne
-    | none => node.wheel
-  { node with
-    pending := flight.continuations ++ node.pending
-    wheel }
+  { node with pending := flight.continuations ++ node.pending }
 
 def finishFlight (node : Node) (flight : Flight) :
     Result Pid Local Msg :=
@@ -903,18 +897,16 @@ def beginMembershipRefresh (node : Node) (address : Addr) (now : Time) :
   { state := .node next, send := [request] }
 
 def beginTimerList (node : Node) (config : Config)
-    (now : Time) (kind : ListingKind) : Result Pid Local Msg :=
+    (now : Time) (relist : Bool) : Result Pid Local Msg :=
   let through := now + config.loadAhead
   let (next, request) :=
-    node.awaitControl (.timerList now through kind) (.listTimers through)
-  { state := .node {
-      next with wheel := { next.wheel with listing := some kind } }
-    send := [request] }
+    node.awaitControl (.timerList now through relist) (.listTimers through)
+  { state := .node next, send := [request] }
 
 def refreshEnded (node : Node) (config : Config) (now : Time) :
     Result Pid Local Msg :=
   beginTimerList { node with nextHeartbeat := some (now + config.heartbeat) }
-    config now .initial
+    config now false
 
 def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
     (localState : Local) (now : Time) (event : Event Pid Msg) :
@@ -963,20 +955,16 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
                       (start appConfig node (.sweep timer now [])
                         timer.target.key address (some timer))
                   else
-                    Outcomes.one {
-                      state := .node {
-                        node with wheel := node.wheel.finishOne }
-                      send := []
-                    }
+                    Outcomes.one { state := .node node, send := [] }
               | none =>
                   let currentBucket := bucketOf config.bucketWidth now
                   if node.wheel.closedThrough < currentBucket then
                     Outcomes.one
                       (beginTimerList { node with wheel } config now
-                        (.relist node.wheel.closedThrough))
+                        true)
                   else if node.wheel.loadedThrough < now + config.loadAhead then
                     Outcomes.one
-                      (beginTimerList { node with wheel } config now .extend)
+                      (beginTimerList { node with wheel } config now false)
                   else
                     Outcomes.one { state := .node { node with wheel }, send := [] }
   | .node _, .node node,
@@ -1098,18 +1086,17 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
       .receive .store (.storeReply { op, payload := .timers keys }) =>
       let (control, next) := node.takeControl op
       match control with
-      | some (.timerList instant through kind) =>
+      | some (.timerList instant through relist) =>
           let wheel :=
             next.wheel.load next.membership address instant config.nodeTtl
               through keys
           let wheel :=
-            match kind with
-            | .relist closed =>
-                { wheel with
-                  closedThrough :=
-                    max wheel.closedThrough
-                      (bucketOf config.bucketWidth instant) }
-            | .initial | .extend => wheel
+            if relist then
+              { wheel with
+                closedThrough :=
+                  max wheel.closedThrough
+                    (bucketOf config.bucketWidth instant) }
+            else wheel
           Outcomes.one { state := .node { next with wheel }, send := [] }
       | _ => Outcomes.one { state := .node next, send := [] }
   | .node _, .node node,
@@ -1157,11 +1144,7 @@ def step (appConfig : Resonate.Config) (config : Config) (pid : Pid)
                 send := []
               }
           | some (.timerList _ _ _) =>
-              Outcomes.one {
-                state := .node {
-                  next with wheel := { next.wheel with listing := none } }
-                send := []
-              }
+              Outcomes.one { state := .node next, send := [] }
           | some (.cleanup outputs) =>
               Outcomes.one {
                 state := .node next

@@ -49,16 +49,10 @@ structure ArmedEntry where
   version : Nat
   deriving Repr
 
-def positiveBucketWidth (bucketWidth : Time) : Time :=
-  max bucketWidth 1
-
 /-- Start of the time bucket containing `instant`. -/
 def bucketOf (bucketWidth instant : Time) : Time :=
-  let width := positiveBucketWidth bucketWidth
+  let width := max bucketWidth 1
   instant / width * width
-
-def TimerKey.bucket (bucketWidth : Time) (key : TimerKey) : Time :=
-  bucketOf bucketWidth key.deadline
 
 def TimerTarget.ofDocumentKey : DocumentKey → TimerTarget
   | .origin name => .origin name
@@ -119,31 +113,9 @@ def TimerObjects.delete (objects : TimerObjects) (key : TimerKey) :
     TimerObjects :=
   { keys := objects.keys.filter (· != key) }
 
-def TimerObjects.listBucket (objects : TimerObjects) (bucketWidth bucket : Time) :
-    List TimerKey :=
-  objects.keys.filter (·.bucket bucketWidth == bucket)
-
 def TimerObjects.listThrough (objects : TimerObjects) (through : Time) :
     List TimerKey :=
   objects.keys.filter (·.deadline ≤ through)
-
-@[simp] theorem TimerObjects.mem_arm (objects : TimerObjects) (key : TimerKey) :
-    key ∈ (objects.arm key).keys := by
-  simp only [TimerObjects.arm]
-  split
-  · simpa using ‹objects.keys.contains key = true›
-  · simp
-
-@[simp] theorem TimerObjects.not_mem_delete
-    (objects : TimerObjects) (key : TimerKey) :
-    key ∉ (objects.delete key).keys := by
-  simp [TimerObjects.delete]
-
-theorem TimerObjects.mem_delete_other
-    (objects : TimerObjects) (deleted other : TimerKey)
-    (hne : other ≠ deleted) :
-    other ∈ (objects.delete deleted).keys ↔ other ∈ objects.keys := by
-  simp [TimerObjects.delete, hne]
 
 structure Announcement where
   id : Addr
@@ -210,24 +182,15 @@ def MembershipView.owns
     (target : TimerTarget) : Bool :=
   view.fresh now ttl && owner? view.members target == some me
 
-/-- Which listing closes the gap that can occur while another node arms a
-key in a bucket already loaded by this node. -/
-inductive ListingKind where
-  | initial
-  | extend
-  | relist (closedBucket : Time)
-  deriving Repr, DecidableEq
-
 /-- Node-local index of durable keys.  `loadedThrough` is the look-ahead
 horizon; `closedThrough` records the last bucket that received its mandatory
-second listing. -/
+second listing, which closes the gap that can occur while another node arms a
+key in a bucket already loaded by this node. -/
 structure TimerWheel where
   entries : List TimerKey := []
   loadedThrough : Time := 0
   closedThrough : Time := 0
-  listing : Option ListingKind := none
   backlog : List TimerKey := []
-  active : Nat := 0
   deriving Repr
 
 def TimerWheel.insert (wheel : TimerWheel) (key : TimerKey) : TimerWheel :=
@@ -242,8 +205,7 @@ def TimerWheel.load
       key.deadline ≤ through && view.owns me now ttl key.target
   { wheel with
     entries := (owned.foldl TimerWheel.insert wheel).entries
-    loadedThrough := max wheel.loadedThrough through
-    listing := none }
+    loadedThrough := max wheel.loadedThrough through }
 
 def TimerWheel.due (wheel : TimerWheel) (now : Time) : List TimerKey :=
   wheel.entries.filter (·.deadline ≤ now)
@@ -257,37 +219,6 @@ def TimerWheel.takeDue (wheel : TimerWheel) (now limit : Time) : TimerWheel :=
 def TimerWheel.beginOne (wheel : TimerWheel) : Option (TimerKey × TimerWheel) :=
   match wheel.backlog with
   | [] => none
-  | key :: rest =>
-      some (key, {
-        wheel with
-        backlog := rest
-        active := wheel.active + 1
-      })
-
-def TimerWheel.finishOne (wheel : TimerWheel) : TimerWheel :=
-  { wheel with active := wheel.active - 1 }
-
-/-- The next local clock instant at which the timer subsystem needs service. -/
-def TimerWheel.wakeAt?
-    (wheel : TimerWheel) (nextBucket nextRelist retryAt : Option Time) :
-    Option Time :=
-  minimumTime?
-    ((wheel.entries.map (·.deadline)) ++
-      nextBucket.toList ++ nextRelist.toList ++ retryAt.toList)
-
-theorem TimerWheel.takeDue_backlog_contains
-    (wheel : TimerWheel) (now limit : Time) (key : TimerKey)
-    (hmem : key ∈ (wheel.due now).take limit) :
-    key ∈ (wheel.takeDue now limit).backlog := by
-  simp [TimerWheel.takeDue, hmem]
-
-theorem TimerWheel.due_is_due
-    {wheel : TimerWheel} {now : Time} {key : TimerKey}
-    (hmem : key ∈ wheel.due now) :
-    key.deadline ≤ now := by
-  have h :
-      key ∈ wheel.entries ∧ key.deadline ≤ now := by
-    simpa [TimerWheel.due] using hmem
-  exact h.2
+  | key :: rest => some (key, { wheel with backlog := rest })
 
 end Resonate.Concrete
