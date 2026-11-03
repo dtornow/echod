@@ -433,7 +433,7 @@ theorem selectedWorkCandidate_nonlocal (appConfig : Resonate.Config)
     simp only [ServerModel.Ident.sameOrigin, beq_eq_false_iff_ne]
     exact fun h => hlocal h.symm
   simp [Concrete.selectedWorkCandidate, WorkItem.key, Concrete.workCandidate, Concrete.Decision.processCallback,
-    Concrete.Decision.run, hother, Pure.pure, bind]
+    Concrete.Decision.run, hother, Pure.pure]
 
 /-- Work the concrete sweep selects is due work of any abstract store with
 the same document. -/
@@ -1034,7 +1034,7 @@ theorem NodeValid.start {appConfig : Resonate.Config}
         by simp [Concrete.start, flight, hcache], ?_⟩
       exact NodeValid.await hnode hflight _
   | some value =>
-      simp only [Concrete.start, flight, hcache]
+      simp only [Concrete.start, hcache]
       cases hselect :
           Concrete.select appConfig flight
             (some (value.document, value.version)) with
@@ -1070,7 +1070,7 @@ theorem NodeValid.start {appConfig : Resonate.Config}
                 (finished.awaitControl (.cleanup cleaning.selected)
                   (.deleteTimers [timer])).1
               refine ⟨next, ?_, ?_⟩
-              · simp only [Concrete.decide, hselectSome, hfired]
+              · simp only [Concrete.decide, hselectSome]
                 change (Concrete.continueCleanup node cleaning).state =
                   .node next
                 rw [Concrete.continueCleanup, hcleaningCleanup]
@@ -1121,8 +1121,7 @@ theorem NodeValid.start {appConfig : Resonate.Config}
                   flight]
               · have hadvanced : NodeValid appConfig advanced := hnode
                 have harming : FlightValid appConfig arming := by
-                  simp only [FlightValid, arming,
-                    Concrete.Phase.arming]
+                  simp only [FlightValid, arming]
                   exact ⟨hkey, ⟨candidate.document, rfl,
                     select_valid hkey hselect⟩, hshape⟩
                 exact NodeValid.await hadvanced harming (.armTimer timer)
@@ -1189,8 +1188,7 @@ theorem NodeValid.decide {appConfig : Resonate.Config}
             by simp [Concrete.decide, hselect, htimer, arming, advanced], ?_⟩
           have hadvanced : NodeValid appConfig advanced := hnode
           have harming : FlightValid appConfig arming := by
-            simp only [FlightValid, arming,
-              Concrete.Phase.arming]
+            simp only [FlightValid, arming]
             exact ⟨hflight.1, ⟨candidate.document, rfl,
               select_valid hflight.1 hselect⟩, hflight.2.2⟩
           exact NodeValid.await hadvanced harming (.armTimer timer)
@@ -1574,7 +1572,7 @@ theorem beginMembershipRefresh_cleanup_mem
   simp only [Concrete.beginMembershipRefresh, Concrete.Node.awaitControl]
     at hstate
   cases Concrete.Local.node.inj hstate
-  simp only [List.mem_cons, Concrete.Node.awaitControl, Prod.mk.injEq] at hmem
+  simp only [List.mem_cons, Prod.mk.injEq] at hmem
   rcases hmem with ⟨_, hcontrol⟩ | htail
   · cases hcontrol
   · exact htail
@@ -1589,7 +1587,7 @@ theorem beginTimerList_cleanup_mem
     (op, .cleanup outputs) ∈ node.controls := by
   simp only [Concrete.beginTimerList, Concrete.Node.awaitControl] at hstate
   cases Concrete.Local.node.inj hstate
-  simp only [List.mem_cons, Concrete.Node.awaitControl, Prod.mk.injEq] at hmem
+  simp only [List.mem_cons, Prod.mk.injEq] at hmem
   rcases hmem with ⟨_, hcontrol⟩ | htail
   · cases hcontrol
   · exact htail
@@ -1929,8 +1927,7 @@ theorem node_step_valid
               subst result
               refine ⟨_, rfl, ?_⟩
               exact sameFlights node _ hnode (by
-                simp [Concrete.beginMembershipRefresh,
-                  Concrete.Node.awaitControl])
+                simp)
             · cases hb : node.wheel.next? now with
               | some pair =>
                   obtain ⟨timer, nextWheel⟩ := pair
@@ -1957,15 +1954,13 @@ theorem node_step_valid
                     subst result
                     refine ⟨_, rfl, ?_⟩
                     exact sameFlights node _ hnode (by
-                      simp [Concrete.beginTimerList,
-                        Concrete.Node.awaitControl])
+                      simp)
                   · split at hresult
                     · simp [Outcomes.one] at hresult
                       subst result
                       refine ⟨_, rfl, ?_⟩
                       exact sameFlights node _ hnode (by
-                        simp [Concrete.beginTimerList,
-                          Concrete.Node.awaitControl])
+                        simp)
                     · simp [Outcomes.one] at hresult
                       subst result
                       exact ⟨_, rfl, hnode⟩
@@ -1988,20 +1983,20 @@ theorem node_step_valid
               subst result
               exact ⟨node, rfl, hnode⟩
           | some key =>
-              simp only [hk, Option.some.injEq] at hresult
+              simp only [hk] at hresult
               split at hresult
-              · simp [hk, Outcomes.one] at hresult
+              · simp [Outcomes.one] at hresult
                 subst result
                 exact NodeValid.start hnode (.external call) key hk trivial
                   (address := address)
-              · simp [hk, Outcomes.one] at hresult
+              · simp [Outcomes.one] at hresult
                 subst result
                 exact ⟨node, rfl, hnode⟩
       case store.storeReply rpc =>
         obtain ⟨op, payload⟩ := rpc
         cases payload with
         | got key loaded =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken next =>
               cases taken with
@@ -2035,21 +2030,21 @@ theorem node_step_valid
                                 (NodeValid.cachePut hnext flight.key {
                                   document := value.1
                                   version := value.2 })
-                        simp [ht, hp, loaded', cached, Outcomes.one] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         exact NodeValid.decide hcached hflight loaded'
                     | arming | writing | deleting =>
-                        simp [ht, hp, Outcomes.one] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         exact ⟨_, rfl, hnext.consFlight
                           (hnode op flight (takeFlight_some_mem ht))⟩
                   next _ =>
-                    simp [ht, Outcomes.one] at hresult
+                    simp [Outcomes.one] at hresult
                     subst result
                     exact ⟨_, rfl, hnext.consFlight
                       (hnode op flight (takeFlight_some_mem ht))⟩
         | written =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken next =>
               cases taken with
@@ -2072,7 +2067,7 @@ theorem node_step_valid
                       exact ⟨_, rfl, hnext.consFlight
                         (hnode op flight (takeFlight_some_mem ht))⟩
         | done =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken next =>
               cases taken with
@@ -2110,26 +2105,26 @@ theorem node_step_valid
                       simp [next, Concrete.Node.takeControl])
                   cases hc : (node.takeControl op).1 with
                   | none =>
-                      simp [ht, hc, next, Outcomes.one] at hresult
+                      simp [ht, hc, Outcomes.one] at hresult
                       subst result
                       exact ⟨next, rfl, hnext⟩
                   | some control =>
                       cases control with
                       | announced instant =>
-                          simp [ht, hc, next, Outcomes.one] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           refine ⟨_, rfl, ?_⟩
                           exact controlValid next hnext
                             (.announcements instant) .listAnnouncements
                       | membershipWrite instant =>
-                          simp [ht, hc, next, Concrete.refreshEnded,
+                          simp [ht, hc, Concrete.refreshEnded,
                             Outcomes.one] at hresult
                           subst result
                           refine ⟨_, rfl, ?_⟩
                           exact sameFlights next _ hnext (by rfl)
                       | announcements instant | membership instant live
                       | timerList instant through kind | cleanup outputs =>
-                          simp [ht, hc, next, Outcomes.one] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           exact ⟨next, rfl, hnext⟩
         | announcements values =>
@@ -2149,7 +2144,7 @@ theorem node_step_valid
                     simp [Concrete.Node.takeControl,
                       Concrete.Node.awaitControl])⟩
         | membership configuration version =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases hc : (node.takeControl op).1 with
             | none =>
                 simp [hc, Outcomes.one] at hresult
@@ -2180,7 +2175,7 @@ theorem node_step_valid
                   exact ⟨_, rfl, sameFlights node _ hnode (by
                     simp [Concrete.Node.takeControl])⟩
         | conflict =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken next =>
               cases taken with
@@ -2209,7 +2204,7 @@ theorem node_step_valid
                           simp [Concrete.Node.takeControl,
                             Concrete.Node.awaitControl])⟩
         | failed =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken next =>
               cases taken with
@@ -2266,14 +2261,13 @@ theorem node_step_ids
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
-          Concrete.refreshEnded, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.committedFlight,
+          Concrete.beginMembershipRefresh, Concrete.beginTimerList, Concrete.Node.await,
+          Concrete.Node.awaitControl,
           Concrete.continueCleanup,
-          Concrete.finishNode, Concrete.finishFlight,
+          Concrete.finishNode,
           Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals simp_all
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
@@ -2281,18 +2275,16 @@ theorem node_step_ids
       all_goals
         repeat' first | split at hresult
       all_goals
-        simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
-          Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+        simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishNode, Concrete.finishFlight,
+          Concrete.finishNode,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals simp_all
       all_goals first | contradiction | grind
 
 theorem node_step_old_flight
@@ -2315,23 +2307,19 @@ theorem node_step_old_flight
       repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
-          Concrete.refreshEnded, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.committedFlight,
+          Concrete.beginMembershipRefresh, Concrete.beginTimerList, Concrete.Node.await,
+          Concrete.Node.awaitControl,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
         simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
-        simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate,
-          Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+        simp_all [Concrete.start, Concrete.decide, Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
@@ -2340,11 +2328,11 @@ theorem node_step_old_flight
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals
         try
           subst next
-          simp only [finishNode_flights, noteArmed_flights] at hmem
+          simp only at hmem
           exact (List.mem_filter.mp hmem).1
       all_goals first | contradiction | grind
 
@@ -2393,9 +2381,8 @@ theorem node_step_preserves_writing_flight
       all_goals
         simp_all [Concrete.start, Concrete.decide,
           Concrete.writeCandidate,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
-          Concrete.refreshEnded, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.finishFlight,
+          Concrete.beginMembershipRefresh, Concrete.beginTimerList, Concrete.Node.await,
+          Concrete.Node.awaitControl,
           Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
@@ -2406,17 +2393,15 @@ theorem node_step_preserves_writing_flight
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
-          Concrete.writeCandidate,
-          Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
-          Concrete.continueCleanup, Concrete.finishFlight,
+          Concrete.continueCleanup,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals first | contradiction | grind
 
 def NodeSerial (node : Concrete.Node) : Prop :=
@@ -2518,7 +2503,7 @@ theorem takeFlight_filter_empty_of_some
       subst tail
       obtain ⟨headOp, headFlight⟩ := head
       simp [hflights] at hfind
-      simp [hflights, hfind.1]
+      simp [hfind.1]
 
 @[simp] theorem takeFlight_filter_empty_of_find_some
     {node : Concrete.Node} {op : Concrete.OpId}
@@ -2603,14 +2588,11 @@ theorem node_step_serial
       all_goals
         simp_all [NodeSerial, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight, Outcomes.one]
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeSerial, Concrete.Node.await,
-          Concrete.Node.awaitControl]
+        try simp_all
       all_goals
         try
           obtain ⟨found, hfind⟩ := heq_3
@@ -2624,19 +2606,16 @@ theorem node_step_serial
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeSerial, Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeSerial, Concrete.Node.await,
-          Concrete.Node.awaitControl]
+        try simp_all [NodeSerial]
       all_goals
         try
           obtain ⟨found, hfind⟩ := heq_3
@@ -2777,14 +2756,12 @@ theorem node_step_sweeps_valid
       all_goals
         simp_all [NodeSweepsValid, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           Concrete.Node.cacheRead, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+        try simp_all
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
@@ -2792,18 +2769,16 @@ theorem node_step_sweeps_valid
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeSweepsValid, Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+        try simp_all
       all_goals
         try
           subst next
@@ -3015,7 +2990,7 @@ theorem rpcIds_step
             node_step_ids (hbefore ▸ hresult)
           have holdFresh := hinvariant.fresh hprocess hbefore hone
           have hnewOp := (hsent _ _ hsend).1
-          simp only [Concrete.RpcRequest.mk.injEq] at heq
+          simp only at heq
           exact (Nat.ne_of_lt holdFresh hnewOp).elim
         · obtain ⟨sent, hsend, heq⟩ := List.mem_map.mp hone
           obtain ⟨recipient, message⟩ := sent
@@ -3030,7 +3005,7 @@ theorem rpcIds_step
             node_step_ids (hbefore ▸ hresult)
           have holdFresh := hinvariant.fresh hprocess hbefore htwo
           have hnewOp := (hsent _ _ hsend).1
-          simp only [Concrete.RpcRequest.mk.injEq] at heq
+          simp only at heq
           exact (Nat.ne_of_lt holdFresh hnewOp).elim
         · obtain ⟨sent₁, hsend₁, heq₁⟩ := List.mem_map.mp hone
           obtain ⟨recipient₁, message₁⟩ := sent₁
@@ -3200,15 +3175,12 @@ theorem node_step_writing_puts
       all_goals
         simp_all [Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           World.land, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeWritingPuts, Concrete.Node.await,
-          Concrete.Node.awaitControl, World.land]
+        try simp_all [NodeWritingPuts]
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
@@ -3216,20 +3188,17 @@ theorem node_step_writing_puts
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs,
           World.land, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeWritingPuts, Concrete.Node.await,
-          Concrete.Node.awaitControl, World.land]
+        try simp_all [NodeWritingPuts]
       all_goals first | contradiction | grind
 
 def WritingPuts
@@ -3350,7 +3319,7 @@ theorem decide_put_valid {appConfig : Resonate.Config}
   | none =>
       simp only [Concrete.decide, hselect] at hmessage
       split at hmessage <;>
-        simp [Concrete.Node.await] at hmessage
+        simp at hmessage
   | some candidate =>
       simp only [Concrete.decide, hselect] at hmessage
       split at hmessage
@@ -3390,7 +3359,7 @@ theorem decide_put_provenance {appConfig : Resonate.Config}
   | none =>
       simp only [Concrete.decide, hselect] at hmessage
       split at hmessage <;>
-        simp [Concrete.Node.await] at hmessage
+        simp at hmessage
   | some candidate =>
       simp only [Concrete.decide, hselect] at hmessage
       split at hmessage
@@ -3438,7 +3407,7 @@ theorem decide_put_provenance_complete {appConfig : Resonate.Config}
   | none =>
       simp only [Concrete.decide, hselect] at hmessage
       split at hmessage <;>
-        simp [Concrete.Node.await] at hmessage
+        simp at hmessage
   | some candidate =>
       simp only [Concrete.decide, hselect] at hmessage
       cases htimer :
@@ -3540,10 +3509,9 @@ theorem conflict_step_sends_no_put
   simp only [Concrete.step, Concrete.nodeStep] at hresult
   repeat' split at hresult
   all_goals
-    simp_all [Concrete.Node.takeFlight, Concrete.Node.cacheInvalidate,
-      Concrete.Node.await, Concrete.Node.takeControl,
+    simp_all [Concrete.Node.takeFlight, Concrete.Node.takeControl,
       Concrete.refreshEnded, Concrete.beginTimerList,
-      Concrete.Node.awaitControl, Concrete.sendOutputs,
+      Concrete.Node.awaitControl,
       Outcomes.one]
 
 theorem written_step_sends_no_put
@@ -3614,7 +3582,7 @@ theorem failed_step_sends_no_put
           | loading | arming | writing =>
               simp [ht, hp, Concrete.sendOutputs, Outcomes.one] at hresult
               subst result
-              simp [Concrete.sendOutputs] at hsend
+              simp at hsend
       | none =>
           cases hc : node.takeControl replyOp with
           | mk control next =>
@@ -3631,8 +3599,7 @@ theorem failed_step_sends_no_put
                       simp [Concrete.sendOutputs] at hsend
                   | announced _ | announcements _ | membership _ _
                     | membershipWrite _ | timerList _ _ _ =>
-                      simp [ht, hc, Concrete.refreshEnded,
-                        Concrete.beginTimerList, Concrete.Node.awaitControl,
+                      simp [ht, hc,
                         Outcomes.one] at hresult
                       subst result
                       contradiction
@@ -3686,7 +3653,7 @@ theorem node_step_sent_put_valid
                 (node.wheel.next? now) with
               | some pair =>
                   obtain ⟨timer, wheel⟩ := pair
-                  simp only [hbegin, Option.some.injEq, Prod.mk.injEq]
+                  simp only [hbegin]
                     at hresult
                   subst_vars
                   split at hresult
@@ -3697,7 +3664,7 @@ theorem node_step_sent_put_valid
                       (transactionKey := timer.target.key)
                     · exact ⟨rfl, trivial, trivial⟩
                     · exact hsend
-                  · simp [Concrete.sendOutputs, Outcomes.one] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     contradiction
               | none =>
@@ -3733,7 +3700,7 @@ theorem node_step_sent_put_valid
               simp [hk, Concrete.pureExternal, Concrete.sendOutputs,
                 Outcomes.one] at hresult
               subst result
-              simp [Concrete.sendOutputs] at hsend
+              simp at hsend
           | some requestKey =>
               simp only [hk] at hresult
               split at hresult
@@ -3746,12 +3713,12 @@ theorem node_step_sent_put_valid
                 · exact hsend
               · simp [Concrete.sendOutputs, Outcomes.one] at hresult
                 subst result
-                simp [Concrete.sendOutputs] at hsend
+                simp at hsend
       case store.storeReply rpc =>
         obtain ⟨replyOp, payload⟩ := rpc
         cases payload
         case got loadedKey loaded =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨flight, next⟩ := taken
             cases flight with
@@ -3760,7 +3727,7 @@ theorem node_step_sent_put_valid
                 subst result
                 contradiction
             | some flight =>
-                simp only [Prod.fst, Prod.snd] at hresult
+                simp only at hresult
                 split at hresult
                 next heq =>
                   cases hp : flight.phase with
@@ -3791,7 +3758,7 @@ theorem node_step_sent_put_valid
               (appConfig := appConfig) (config := config)
               (address := address) (now := now) hresult hsend).elim
         case done =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨taken, remaining⟩ := taken
             cases taken with
@@ -3802,14 +3769,14 @@ theorem node_step_sent_put_valid
                 | arming =>
                     cases hd : flight.document with
                     | none =>
-                        simp [ht, hp, hd, Outcomes.one] at hresult
+                        simp [hp, hd, Outcomes.one] at hresult
                         subst result
                         contradiction
                     | some selectedDocument =>
-                        simp [ht, hp, hd, Concrete.Node.await,
+                        simp [hp, hd, Concrete.Node.await,
                           Outcomes.one] at hresult
                         subst result
-                        simp [Concrete.Node.await] at hsend
+                        simp at hsend
                         obtain ⟨rfl, _, hkey, hdocument, hexpected⟩ := hsend
                         subst key
                         have : document = selectedDocument :=
@@ -3818,43 +3785,40 @@ theorem node_step_sent_put_valid
                         subst expectedVersion
                         exact hvalid.putValid (.inl hp) hd
                 | deleting =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     exact (continueCleanup_sends_no_put hsend).elim
                 | loading | writing =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     contradiction
             | none =>
-                simp only [ht] at hresult
+                simp only at hresult
                 repeat' split at hresult
                 all_goals
                   simp_all [Concrete.Node.takeControl,
                     Concrete.Node.awaitControl, Concrete.refreshEnded,
                     Concrete.beginTimerList, Outcomes.one]
         case timers _ =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             repeat' split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
-                Concrete.Node.awaitControl, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.sendOutputs,
                 Outcomes.one]
         case announcements _ =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             repeat' split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
-                Concrete.Node.awaitControl, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.sendOutputs,
+                Concrete.Node.awaitControl,
                 Outcomes.one]
         case membership _ _ =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             repeat' split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
                 Concrete.Node.awaitControl, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.sendOutputs,
+                Concrete.beginTimerList,
                 Outcomes.one]
 
 def RawPutsValid {nodes : List Addr} {appConfig : Resonate.Config}
@@ -4021,24 +3985,24 @@ theorem store_step_effect
           nextStore.values = store.values)) := by
   cases event with
   | timeout =>
-      simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+      simp [Concrete.storeStep, Outcomes.one] at hresult
       subst result
       exact ⟨store, rfl, .inl rfl⟩
   | receive sender message =>
       cases message with
       | request call | output output | storeReply rpc =>
-          simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+          simp [Concrete.storeStep, Outcomes.one] at hresult
           subst result
           exact ⟨store, rfl, .inl rfl⟩
       | storeRequest rpc =>
           obtain ⟨op, payload⟩ := rpc
           cases payload with
           | get key =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | put key document expected =>
-              simp only [Concrete.step, Concrete.storeStep, Concrete.storePut] at hresult
+              simp only [Concrete.storeStep, Concrete.storePut] at hresult
               split at hresult
               · simp [Outcomes.one] at hresult
                 subst result
@@ -4061,27 +4025,27 @@ theorem store_step_effect
                   exact ⟨store.commit key document, rfl,
                     .inr (.inl ⟨key, document, rfl⟩)⟩
           | armTimer timer =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | deleteTimers timers =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | listTimers through =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | announce announcement =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨_, rfl, .inr (.inr ⟨rfl, rfl⟩)⟩
           | listAnnouncements | getMembership =>
-              simp [Concrete.step, Concrete.storeStep, Outcomes.one] at hresult
+              simp [Concrete.storeStep, Outcomes.one] at hresult
               subst result
               exact ⟨store, rfl, .inl rfl⟩
           | putMembership expected next =>
-              simp only [Concrete.step, Concrete.storeStep] at hresult
+              simp only [Concrete.storeStep] at hresult
               split at hresult
               · simp [Outcomes.one] at hresult
                 subst result
@@ -4157,33 +4121,26 @@ theorem node_step_no_store_reply
       all_goals
         simp_all [Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight,
-          Concrete.sendOutputs, Outcomes.one]
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup, Outcomes.one]
       all_goals repeat' first | split at hsend
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl,
-        Concrete.sendOutputs]
+      all_goals simp_all
   | receive sender message =>
       cases sender <;> cases message <;>
         simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs,
           Outcomes.one]
       all_goals repeat' first | split at hsend
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl,
-        Concrete.sendOutputs]
+      all_goals simp_all
 
 set_option maxHeartbeats 800000 in
 theorem node_step_no_request
@@ -4203,32 +4160,25 @@ theorem node_step_no_request
       all_goals
         simp_all [Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight,
-          Concrete.sendOutputs, Outcomes.one]
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup, Outcomes.one]
       all_goals repeat' first | split at hsend
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl,
-        Concrete.sendOutputs]
+      all_goals simp_all
   | receive sender message =>
       cases sender <;> cases message <;>
         simp only [Concrete.step, Concrete.nodeStep] at hresult
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
           Concrete.continueCleanup,
-          Concrete.finishFlight,
           Concrete.Node.cachePut, Concrete.Node.cacheInvalidate,
           Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hsend
-      all_goals simp_all [Concrete.Node.await, Concrete.Node.awaitControl,
-        Concrete.sendOutputs]
+      all_goals simp_all
 
 theorem sent_got_origin
     {appConfig : Resonate.Config} {config : Concrete.Config}
@@ -4433,11 +4383,11 @@ theorem cacheRead_filter_other (entries : List Concrete.CacheEntry)
   | cons entry rest ih =>
       by_cases hk : entry.key = removed
       · subst removed
-        simp [Concrete.CacheEntry.read, hne, Ne.symm hne, ih]
+        simp [Concrete.CacheEntry.read, Ne.symm hne]
         simpa only [Concrete.CacheEntry.read] using ih
       · have hb : (entry.key != removed) = true := by simp [hk]
         cases hread : entry.read query <;>
-          simp [List.filter_cons, hb, hread, ih]
+          simp [hb, hread, ih]
 
 @[simp] theorem cacheRead_cachePut_same (node : Concrete.Node)
     (key : DocumentKey) (value : Concrete.Versioned key) :
@@ -4465,8 +4415,8 @@ theorem cacheRead_cachePut_other (node : Concrete.Node)
   | cons entry rest ih =>
       by_cases hk : entry.key = key
       · subst key
-        simp [Concrete.CacheEntry.read, ih]
-      · simp [Concrete.CacheEntry.read, hk, ih]
+        simp [Concrete.CacheEntry.read]
+      · simp [Concrete.CacheEntry.read, hk]
 
 theorem cacheRead_cacheInvalidate_other (node : Concrete.Node)
     (key other : DocumentKey) (hne : other ≠ key) :
@@ -4634,12 +4584,12 @@ theorem start_cache_snapshots
   cases hread : node.cacheRead key with
   | none =>
       refine ⟨(node.await { key, transaction, address, fired } (.get key)).1,
-        by simp [hread], ?_⟩
+        by simp, ?_⟩
       intro other value hcached
       change node.cacheRead other = some value at hcached
       exact hcache other value hcached
   | some value =>
-      simp only [hread]
+      simp only
       exact decide_cache_snapshots appConfig node hcache
         { key, transaction, address, fired }
         (some (value.document, value.version))
@@ -4677,15 +4627,13 @@ theorem node_step_cache_snapshots
       all_goals
         simp_all [NodeCacheSnapshots, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
+          Concrete.beginTimerList,
           Concrete.Node.await, Concrete.Node.awaitControl,
           Concrete.continueCleanup, Concrete.finishNode,
           Concrete.cleanupFlight, Concrete.Node.cacheRead, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeCacheSnapshots, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.continueCleanup,
-          Concrete.finishNode, Concrete.Node.cacheRead]
+        try simp_all
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
@@ -4719,7 +4667,7 @@ theorem node_step_cache_snapshots
         obtain ⟨replyOp, payload⟩ := rpc
         cases payload with
         | got loadedKey loaded =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -4768,7 +4716,7 @@ theorem node_step_cache_snapshots
                     subst result
                     exact ⟨_, rfl, hremaining⟩
         | written =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -4793,7 +4741,7 @@ theorem node_step_cache_snapshots
                       subst result
                       exact ⟨_, rfl, hremaining⟩
         | conflict =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -4828,7 +4776,7 @@ theorem node_step_cache_snapshots
                     exact hremaining key value (by
                       simpa [Concrete.Node.cacheRead] using hread)⟩
         | failed =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -4860,21 +4808,18 @@ theorem node_step_cache_snapshots
                       exact ⟨_, rfl,
                         hremaining.cacheInvalidate flight.key⟩
         | done | timers _ | announcements _ | membership _ _ =>
-            all_goals simp only [Concrete.step] at hresult
+            all_goals simp only at hresult
             all_goals repeat' split at hresult
             all_goals
               simp_all [NodeCacheSnapshots, Concrete.Node.takeFlight,
                 Concrete.Node.takeControl, Concrete.Node.await,
                 Concrete.Node.awaitControl, Concrete.continueCleanup,
-                Concrete.finishFlight,
                 Concrete.refreshEnded,
                 Concrete.beginTimerList, Concrete.Node.cacheRead,
                 Outcomes.one]
             all_goals repeat' first | split at hresult
             all_goals
-              simp_all [NodeCacheSnapshots, Concrete.Node.await,
-                Concrete.Node.awaitControl, Concrete.Node.cacheRead,
-                Concrete.finishFlight, Outcomes.one]
+              simp_all
             all_goals
               intro key value hread
               apply hcache key value
@@ -5128,15 +5073,12 @@ theorem node_step_arming_snapshots
         simp_all [NodeArmingSnapshots, NodeCacheSnapshots,
           Concrete.Node.cacheRead, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
-          Concrete.finishFlight,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeArmingSnapshots, Concrete.Node.await,
-          Concrete.Node.awaitControl]
+        try simp_all
       all_goals first | contradiction | grind
   | receive sender message =>
       cases sender <;> cases message <;>
@@ -5172,7 +5114,7 @@ theorem node_step_arming_snapshots
         | got loadedKey loaded =>
             have hsnapshot : Snapshot store loadedKey loaded :=
               hgots hstore hvalid
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -5222,21 +5164,19 @@ theorem node_step_arming_snapshots
                         hnode (takeFlight_some_mem ht) hphase)⟩
         | written | done | timers _ | announcements _ | membership _ _ |
             conflict | failed =>
-            all_goals simp only [Concrete.step] at hresult
+            all_goals simp only at hresult
             all_goals repeat' first | split at hresult
             all_goals
-              simp_all [NodeArmingSnapshots, Concrete.retry,
+              simp_all [NodeArmingSnapshots,
                 Concrete.Node.takeFlight, Concrete.Node.takeControl,
                 Concrete.Node.await, Concrete.Node.awaitControl,
                 Concrete.committedFlight, Concrete.continueCleanup,
-                Concrete.finishFlight,
                 Concrete.Node.cacheInvalidate, Concrete.refreshEnded,
                 Concrete.beginTimerList, Concrete.sendOutputs,
                 Outcomes.one]
             all_goals repeat' first | split at hresult
             all_goals
-              try simp_all [NodeArmingSnapshots, Concrete.Node.await,
-                Concrete.finishFlight, Outcomes.one]
+              try simp_all
             all_goals first | contradiction | grind
 
 theorem armingSnapshots_initial
@@ -5377,8 +5317,7 @@ theorem start_put_snapshot
             (some (value.document, value.version)) with
       | none =>
           cases fired <;>
-            simp [Concrete.decide, hselect,
-              Concrete.Node.await] at hmessage
+            simp [Concrete.decide, hselect] at hmessage
       | some candidate =>
           simp only [Concrete.decide, hselect] at hmessage
           cases htimer :
@@ -5539,7 +5478,7 @@ theorem node_step_sent_put_snapshot
               simp [hk, Concrete.pureExternal, Concrete.sendOutputs,
                 Outcomes.one] at hresult
               subst result
-              simp [Concrete.sendOutputs] at hsend
+              simp at hsend
           | some requestKey =>
               simp only [hk] at hresult
               split at hresult
@@ -5552,17 +5491,17 @@ theorem node_step_sent_put_snapshot
                 · exact ⟨hk, trivial, trivial⟩
                 · exact hcache
                 · exact hsend
-              · simp [Concrete.pureExternal, Concrete.sendOutputs,
+              · simp [Concrete.sendOutputs,
                   Outcomes.one] at hresult
                 rw [hresult] at hsend
-                simp [Concrete.sendOutputs] at hsend
+                simp at hsend
       case store.storeReply rpc =>
         obtain ⟨replyOp, payload⟩ := rpc
         cases payload with
         | got loadedKey loaded =>
             have hsnapshot : Snapshot store loadedKey loaded :=
               hgots hstore hvalid
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨flight, next⟩ := taken
             cases flight with
@@ -5571,7 +5510,7 @@ theorem node_step_sent_put_snapshot
                 subst result
                 contradiction
             | some flight =>
-                simp only [Prod.fst, Prod.snd] at hresult
+                simp only at hresult
                 split at hresult
                 next heq =>
                   cases hp : flight.phase with
@@ -5607,7 +5546,7 @@ theorem node_step_sent_put_snapshot
               (appConfig := appConfig) (config := config)
               (address := address) (now := now) hresult hsend).elim
         | done =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨taken, remaining⟩ := taken
             cases taken with
@@ -5621,14 +5560,14 @@ theorem node_step_sent_put_snapshot
                       harming (takeFlight_some_mem ht) hp
                     cases hd : flight.document with
                     | none =>
-                        simp [ht, hp, hd, Outcomes.one] at hresult
+                        simp [hp, hd, Outcomes.one] at hresult
                         subst result
                         contradiction
                     | some selectedDocument =>
-                        simp [ht, hp, hd, Concrete.Node.await,
+                        simp [hp, hd, Concrete.Node.await,
                           Outcomes.one] at hresult
                         subst result
-                        simp [Concrete.Node.await] at hsend
+                        simp at hsend
                         obtain ⟨rfl, _, hkey, hdocument, hexpected⟩ := hsend
                         subst key
                         have : document = selectedDocument :=
@@ -5650,27 +5589,27 @@ theorem node_step_sent_put_snapshot
                           selected := hselected
                         }, hsnapshot⟩
                 | deleting =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     exact (continueCleanup_sends_no_put hsend).elim
                 | loading | writing =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     contradiction
             | none =>
-                simp only [ht] at hresult
+                simp only at hresult
                 repeat' split at hresult
                 all_goals
                   simp_all [Concrete.Node.takeControl,
                     Concrete.Node.awaitControl, Concrete.refreshEnded,
                     Concrete.beginTimerList, Outcomes.one]
         | timers _ | announcements _ | membership _ _ =>
-            all_goals simp [Concrete.step] at hresult
+            all_goals simp at hresult
             all_goals repeat' split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
                 Concrete.Node.awaitControl, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.sendOutputs,
+                Concrete.beginTimerList,
                 Outcomes.one]
 
 def OwnedPutSnapshots
@@ -6134,8 +6073,7 @@ theorem start_external_flight_provenance
                 exact fresh call htransaction
               · exact hold op flight call holdMem htransaction
           | some timer =>
-              simp [Concrete.decide, hselect, htimer,
-                Concrete.writeCandidate, Concrete.Node.await] at hstate
+              simp [Concrete.decide, hselect, htimer, Concrete.Node.await] at hstate
               subst next
               simp only [List.mem_cons] at hmem
               rcases hmem with hnew | holdMem
@@ -6268,7 +6206,7 @@ theorem node_step_flight_request_origins
                     cases Concrete.Transaction.external.inj htx
                     exact List.mem_append_left _ hvalid)
                   hmem htransaction
-              · simp [Concrete.pureExternal, Outcomes.one] at hresult
+              · simp [Outcomes.one] at hresult
                 subst result
                 cases Concrete.Local.node.inj hstate
                 exact hold hmem htransaction
@@ -6276,7 +6214,7 @@ theorem node_step_flight_request_origins
         obtain ⟨replyOp, payload⟩ := rpc
         cases payload with
         | got loadedKey loaded =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk flight remaining =>
               cases flight with
@@ -6333,8 +6271,7 @@ theorem node_step_flight_request_origins
                                   Concrete.cleanupFlight_cleanup] at hstate'
                                 cases hstate'
                                 cases hloaded : heq ▸ loaded <;>
-                                  simp [hloaded, Concrete.finishNode,
-                                    Concrete.Node.awaitControl,
+                                  simp [Concrete.finishNode,
                                     Concrete.Node.cachePut,
                                     Concrete.Node.cacheInvalidate]
                               rw [hflights] at hmem
@@ -6392,7 +6329,7 @@ theorem node_step_flight_request_origins
                     exact hold (takeFlight_some_mem ht) htransaction
                   · exact hold (hremaining holdMem) htransaction
         | written =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -6454,7 +6391,7 @@ theorem node_step_flight_request_origins
                           exact hold (takeFlight_remaining_mem ht hmem)
                             htransaction
         | conflict =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -6469,8 +6406,7 @@ theorem node_step_flight_request_origins
                       match localState with
                       | .node value => value.flights
                       | _ => []) hstate
-                    simp [Concrete.refreshEnded, Concrete.beginTimerList,
-                      Concrete.Node.awaitControl] at hflights
+                    simp at hflights
                     rw [← hflights] at hmem
                     exact hold hmem htransaction
               | some taken =>
@@ -6488,7 +6424,7 @@ theorem node_step_flight_request_origins
                   · exact hold (takeFlight_remaining_mem ht holdMem)
                       htransaction
         | failed =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight replyOp with
             | mk taken remaining =>
               cases taken with
@@ -6499,7 +6435,7 @@ theorem node_step_flight_request_origins
                   obtain ⟨control, afterControl⟩ := controlled
                   cases control with
                   | none =>
-                      simp [hc, Outcomes.one] at hresult
+                      simp [Outcomes.one] at hresult
                       subst result
                       have hflights := congrArg (fun localState =>
                         match localState with
@@ -6515,7 +6451,7 @@ theorem node_step_flight_request_origins
                       exact hold hmem htransaction
                   | some control =>
                       cases control <;>
-                        simp [hc, Outcomes.one] at hresult
+                        simp [Outcomes.one] at hresult
                       all_goals
                         subst result
                         have hflights := congrArg (fun localState =>
@@ -6569,7 +6505,7 @@ theorem node_step_flight_request_origins
                           exact hold (takeFlight_remaining_mem ht hmem)
                             htransaction
         | done =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             repeat' first | split at hresult
             all_goals
               simp_all [Concrete.Node.takeFlight, Concrete.Node.takeControl,
@@ -6578,16 +6514,15 @@ theorem node_step_flight_request_origins
                 Concrete.refreshEnded, Concrete.beginTimerList,
                 Concrete.sendOutputs, Outcomes.one]
             all_goals repeat' first | split at hresult
-            all_goals try simp_all [Concrete.Node.await,
-              Concrete.Node.awaitControl, Concrete.finishNode]
+            all_goals try simp_all
             all_goals
               try
                 subst next
-                simp only [finishNode_flights, noteArmed_flights] at hmem
+                simp only at hmem
                 exact hold (List.mem_filter.mp hmem).1 htransaction
             all_goals first | contradiction | grind
         | timers _ | announcements _ | membership _ _ =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             repeat' first | split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
@@ -6760,8 +6695,7 @@ theorem start_put_stageable
             (some (value.document, value.version)) with
       | none =>
           cases fired <;>
-            simp [Concrete.decide, hselect,
-              Concrete.Node.await] at hmessage
+            simp [Concrete.decide, hselect] at hmessage
       | some candidate =>
           cases htimer :
               Concrete.timerForDocument transactionKey candidate.document
@@ -6806,7 +6740,7 @@ theorem start_put_stageable
                 simp [Concrete.decide, hselect, htimer,
                   Concrete.writeCandidate, Concrete.Node.await] at hstate
                 subst next
-                simp [Concrete.Node.await, hempty] at hmem
+                simp [hempty] at hmem
                 rcases hmem with ⟨_, rfl⟩
                 exact ⟨rfl, rfl, rfl, rfl, rfl⟩
               · let writing : Concrete.Flight := {
@@ -6966,7 +6900,7 @@ theorem node_step_sent_put_stageable
               simp [hk, Concrete.pureExternal, Concrete.sendOutputs,
                 Outcomes.one] at hresult
               subst result
-              simp [Concrete.sendOutputs] at hsend
+              simp at hsend
           | some requestKey =>
               simp only [hk] at hresult
               split at hresult
@@ -6978,17 +6912,17 @@ theorem node_step_sent_put_stageable
                   (flightAddress := address) (fired := none)
                   ⟨hk, trivial, trivial⟩ hcache
                   (List.mem_append_left _ hvalid) hempty hsend
-              · simp [Concrete.pureExternal, Concrete.sendOutputs,
+              · simp [Concrete.sendOutputs,
                   Outcomes.one] at hresult
                 subst result
-                simp [Concrete.sendOutputs] at hsend
+                simp at hsend
       case store.storeReply rpc =>
         obtain ⟨replyOp, payload⟩ := rpc
         cases payload with
         | got loadedKey loaded =>
             have hsnapshot : Snapshot store loadedKey loaded :=
               hgots hstore hvalid
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨flight, next⟩ := taken
             cases flight with
@@ -6997,7 +6931,7 @@ theorem node_step_sent_put_stageable
                 subst result
                 contradiction
             | some flight =>
-                simp only [Prod.fst, Prod.snd] at hresult
+                simp only at hresult
                 split at hresult
                 next heq =>
                   cases hp : flight.phase with
@@ -7067,7 +7001,7 @@ theorem node_step_sent_put_stageable
                               obtain ⟨document, version⟩ := value
                               simpa [hloaded, Concrete.Node.cachePut] using
                                 hempty
-                        try simp [Concrete.Node.await, hcachedEmpty] at hactive
+                        try simp at hactive
                         rcases hactive with hnew | holdActive
                         · rcases hnew with ⟨_, rfl⟩
                           exact ⟨rfl, rfl, htransaction, houtputs,
@@ -7132,7 +7066,7 @@ theorem node_step_sent_put_stageable
                   subst result
                   contradiction
         | done =>
-            simp [Concrete.step] at hresult
+            simp at hresult
             generalize ht : node.takeFlight replyOp = taken at hresult
             obtain ⟨taken, remaining⟩ := taken
             cases taken with
@@ -7146,14 +7080,14 @@ theorem node_step_sent_put_stageable
                       harming hflightMem hp
                     cases hd : flight.document with
                     | none =>
-                        simp [ht, hp, hd, Outcomes.one] at hresult
+                        simp [hp, hd, Outcomes.one] at hresult
                         subst result
                         contradiction
                     | some selectedDocument =>
-                        simp [ht, hp, hd, Concrete.Node.await,
+                        simp [hp, hd, Concrete.Node.await,
                           Outcomes.one] at hresult
                         subst result
-                        simp [Concrete.Node.await] at hsend
+                        simp at hsend
                         obtain ⟨rfl, _, hkey, hdocument, hexpected⟩ := hsend
                         subst key
                         have : document = selectedDocument :=
@@ -7219,9 +7153,9 @@ theorem node_step_sent_put_stageable
                           exact hnext
                         refine ⟨provenance, hsnapshot, horigin, ?_, ?_⟩
                         · intro resultNode active hstate hactive hactivePhase
-                          simp [Concrete.Node.await, hd] at hstate
+                          simp at hstate
                           subst resultNode
-                          simp [Concrete.Node.await, hempty, hd] at hactive
+                          simp [hempty] at hactive
                           rcases hactive with ⟨_, rfl⟩
                           exact ⟨rfl, rfl, rfl, rfl, rfl⟩
                         · let writing : Concrete.Flight :=
@@ -7231,17 +7165,17 @@ theorem node_step_sent_put_stageable
                                 (flight.loaded.map (·.2)))).1,
                             writing, by
                               simp [Concrete.Node.await, writing, hd], ?_, rfl⟩
-                          simp_all [Concrete.Node.await, writing, hd]
+                          simp_all [Concrete.Node.await, writing]
                 | deleting =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     exact (continueCleanup_sends_no_put hsend).elim
                 | loading | writing =>
-                    simp [ht, hp, Outcomes.one] at hresult
+                    simp [hp, Outcomes.one] at hresult
                     subst result
                     contradiction
             | none =>
-                simp only [ht] at hresult
+                simp only at hresult
                 repeat' split at hresult
                 all_goals
                   simp_all [Concrete.Node.takeControl,
@@ -7260,12 +7194,12 @@ theorem node_step_sent_put_stageable
               (appConfig := appConfig) (config := config)
               (address := address) (now := now) hresult hsend).elim
         | timers _ | announcements _ | membership _ _ =>
-            all_goals simp [Concrete.step] at hresult
+            all_goals simp at hresult
             all_goals repeat' split at hresult
             all_goals
               simp_all [Concrete.Node.takeControl,
                 Concrete.Node.awaitControl, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.sendOutputs,
+                Concrete.beginTimerList,
                 Outcomes.one]
 
 theorem stageablePuts_initial
@@ -9470,23 +9404,15 @@ theorem nodeWorkflowPart_step
         simp_all [NodeWorkflowPart, FlightWorkflowPart,
           TransactionPending, NodeValid, FlightValid, WorkShaped,
           Concrete.start, Concrete.decide, Concrete.writeCandidate,
-          Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
-          Concrete.refreshEnded, Concrete.Node.takeFlight,
-          Concrete.Node.takeControl, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.committedFlight,
+          Concrete.beginMembershipRefresh, Concrete.beginTimerList, Concrete.Node.await,
+          Concrete.Node.awaitControl,
           Concrete.continueCleanup, Concrete.finishNode,
           Concrete.cleanupFlight,
-          Concrete.Node.cachePut, Concrete.Node.cacheInvalidate,
           Concrete.pendingWorkflow, Concrete.PendingEntry.toWorkflow?,
           occurrenceEntry?, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
-        try simp_all [NodeWorkflowPart, FlightWorkflowPart, NodeSerial,
-          TransactionPending, NodeValid, FlightValid, WorkShaped,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.pendingWorkflow, Concrete.PendingEntry.toWorkflow?,
-          occurrenceEntry?]
+        try simp_all [NodeSerial]
       all_goals subst_vars
       all_goals try rcases entry with ⟨request, instant⟩
       all_goals try assumption
@@ -9531,7 +9457,7 @@ theorem nodeWorkflowPart_step
         obtain ⟨op, payload⟩ := rpc
         cases payload with
         | got key loaded =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
@@ -9563,7 +9489,7 @@ theorem nodeWorkflowPart_step
                           cases hloaded : loaded' with
                           | none => simp [cached, hloaded]
                           | some value => simp [cached, hloaded]
-                        simp [hp, loaded', cached, Outcomes.one] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         exact nodeWorkflowPart_loading_decide hnodeValid
                           hserial hpart
@@ -9582,7 +9508,7 @@ theorem nodeWorkflowPart_step
                     exact hpart.kept_restore hserial ht rfl
                       (takeFlight_pending (next := remaining) ht)
         | written =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
@@ -9606,7 +9532,7 @@ theorem nodeWorkflowPart_step
                       exact hpart.kept_restore hserial ht rfl
                         (takeFlight_pending (next := remaining) ht)
         | done =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
@@ -9640,26 +9566,26 @@ theorem nodeWorkflowPart_step
                   let controlled := (node.takeControl op).2
                   cases hc : (node.takeControl op).1 with
                   | none =>
-                      simp [ht, hc, controlled, Outcomes.one] at hresult
+                      simp [ht, hc, Outcomes.one] at hresult
                       subst result
                       cases Concrete.Local.node.inj hstate
                       exact (hpart.copy (by rfl) (by rfl)).kept
                   | some control =>
                       cases control with
                       | announced instant =>
-                          simp [ht, hc, controlled, Outcomes.one] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           cases Concrete.Local.node.inj hstate
                           exact (hpart.copy (by rfl) (by rfl)).kept
                       | membershipWrite instant =>
-                          simp [ht, hc, controlled, Concrete.refreshEnded,
+                          simp [ht, hc, Concrete.refreshEnded,
                             Concrete.beginTimerList, Outcomes.one] at hresult
                           subst result
                           cases Concrete.Local.node.inj hstate
                           exact (hpart.copy (by rfl) (by rfl)).kept
                       | announcements instant | membership instant live
                       | timerList instant through kind | cleanup outputs =>
-                          simp [ht, hc, controlled, Outcomes.one] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           cases Concrete.Local.node.inj hstate
                           exact (hpart.copy (by rfl) (by rfl)).kept
@@ -9678,7 +9604,7 @@ theorem nodeWorkflowPart_step
                 all_goals cases Concrete.Local.node.inj hstate
                 all_goals exact (hpart.copy (by rfl) (by rfl)).kept
         | membership configuration version =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases hc : (node.takeControl op).1 with
             | none =>
                 simp [hc, Outcomes.one] at hresult
@@ -9706,7 +9632,7 @@ theorem nodeWorkflowPart_step
                 all_goals cases Concrete.Local.node.inj hstate
                 all_goals exact (hpart.copy (by rfl) (by rfl)).kept
         | conflict =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
@@ -9731,7 +9657,7 @@ theorem nodeWorkflowPart_step
                       all_goals cases Concrete.Local.node.inj hstate
                       all_goals exact (hpart.copy (by rfl) (by rfl)).kept
         | failed =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
@@ -9813,15 +9739,15 @@ theorem node_step_flight_origin
       all_goals
         simp_all [Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
+          Concrete.beginTimerList,
           Concrete.Node.await, Concrete.Node.awaitControl,
           Concrete.finishNode, Concrete.continueCleanup, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals
         try
           subst next
-          simp only [finishNode_flights, noteArmed_flights] at hflight
+          simp only at hflight
           exact Or.inl (List.mem_filter.mp hflight).1
       all_goals first | contradiction | grind
   | receive sender message =>
@@ -9830,34 +9756,28 @@ theorem node_step_flight_origin
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.finishNode,
+          Concrete.Node.awaitControl,
           Concrete.Node.cachePut, Concrete.Node.cacheInvalidate,
           Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals
         try
           subst result
           simp only [Concrete.continueCleanup, Concrete.cleanupFlight_cleanup,
-            Concrete.finishNode, Concrete.Node.awaitControl,
-            Concrete.Node.cachePut, Concrete.Node.cacheInvalidate] at hstate
+            Concrete.finishNode, Concrete.Node.awaitControl] at hstate
           cases hstate
-          simp only [finishNode_flights, awaitControl_flights,
-            cachePut_flights, cacheInvalidate_flights, noteArmed_flights,
-            List.mem_filter] at hflight
+          simp only [List.mem_filter] at hflight
           first
           | exact Or.inl hflight
           | exact Or.inl hflight.1
       all_goals
         try
           subst next
-          simp only [finishNode_flights, noteArmed_flights,
-            awaitControl_flights, cachePut_flights,
-            cacheInvalidate_flights] at hflight
+          simp only at hflight
           first
           | exact Or.inl hflight
           | exact Or.inl (List.mem_filter.mp hflight).1
@@ -9910,7 +9830,7 @@ theorem related_after_inject
   }
   · simpa [cnext, anext, World.inject] using related.store
   · intro target knownCall hmem
-    simp only [cnext, World.inject, List.mem_append,
+    simp only [World.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _ (related.requests target knownCall hold)
@@ -9918,9 +9838,9 @@ theorem related_after_inject
       obtain ⟨_, _, hcall⟩ := hnew
       cases Concrete.Msg.request.inj hcall
       exact List.mem_append_right _ (by
-        simp [anext, World.inject])
+        simp)
   · intro target output hmem
-    simp only [cnext, World.inject, List.mem_append,
+    simp only [World.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _ (related.outputs target output hold)
@@ -9974,7 +9894,7 @@ theorem related_after_inject
     exact ⟨op, rfl, reachable_got_replies_have_request hreach hmem⟩
   · exact reachable_put_replies_have_request hreach
   · exact related.cleanupCovered_transport
-      (fun address => by simp [cnext, World.inject])
+      (fun address => by simp [World.inject])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem related_after_store_inject
@@ -10016,14 +9936,14 @@ theorem related_after_store_inject
     cleanupCovered := ?_
   }
   · intro address knownCall hmem
-    simp only [cnext, World.inject, List.mem_append,
+    simp only [World.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _
         (related.requests address knownCall hold)
     · simp at hnew
   · intro address output hmem
-    simp only [cnext, World.inject, List.mem_append,
+    simp only [World.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _
@@ -10080,7 +10000,7 @@ theorem related_after_store_inject
     exact ⟨op, rfl, reachable_got_replies_have_request hreach hmem⟩
   · exact reachable_put_replies_have_request hreach
   · exact related.cleanupCovered_transport
-      (fun address => by simp [cnext, World.inject])
+      (fun address => by simp [World.inject])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem related_after_observe
@@ -10227,7 +10147,7 @@ theorem reachable_output_sender
                           subst result
                           contradiction
                       | putMembership expected next =>
-                          simp only [Concrete.step] at hresult0
+                          simp only at hresult0
                           split at hresult0 <;>
                             simp [Outcomes.one] at hresult0
                           all_goals subst result
@@ -10345,7 +10265,7 @@ theorem reachable_store_request_sender
                           subst result
                           contradiction
                       | putMembership expected next =>
-                          simp only [Concrete.step] at hresult'
+                          simp only at hresult'
                           split at hresult' <;>
                             simp [Outcomes.one] at hresult'
                           all_goals subst result
@@ -11846,7 +11766,7 @@ theorem simulate_matching_put_store
           intro replyAddress replyOp hsend
           simp at hsend
           exact ⟨hsend.1, hsend.2.1⟩) hpendingPerm
-      simp [World.land, lifted, item, entry, Abstract.runWork]
+      simp [World.land, lifted, item, Abstract.runWork]
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance hsnapshot hmatch
       (htransactionPending := hpendingTransaction)
@@ -12327,18 +12247,17 @@ theorem node_step_no_deleting
       all_goals
         simp_all [NodeNoDeleting, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           Concrete.finishNode, Concrete.cleanupFlight, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try decide
       all_goals try
         exact hphases op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights] at hflight
+        simp only at hflight
         exact hphases _ _ (List.mem_filter.mp hflight).1
       all_goals first | contradiction | grind
   | receive sender message =>
@@ -12347,8 +12266,7 @@ theorem node_step_no_deleting
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeNoDeleting, Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
@@ -12356,14 +12274,13 @@ theorem node_step_no_deleting
           Concrete.cleanupFlight, Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try decide
       all_goals try
         exact hphases op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights, cachePut_flights,
-          cacheInvalidate_flights] at hflight
+        simp only at hflight
         first
         | exact hphases _ _ hflight
         | exact hphases _ _ (List.mem_filter.mp hflight).1
@@ -12467,18 +12384,17 @@ theorem node_step_loading_quiet
       all_goals
         simp_all [NodeLoadingQuiet, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           Concrete.finishNode, Concrete.cleanupFlight, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try decide
       all_goals try
         exact hquiet op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights] at hflight
+        simp only at hflight
         exact hquiet _ _ (List.mem_filter.mp hflight).1
       all_goals try
         intro hphase
@@ -12490,8 +12406,7 @@ theorem node_step_loading_quiet
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeLoadingQuiet, Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
@@ -12499,14 +12414,13 @@ theorem node_step_loading_quiet
           Concrete.cleanupFlight, Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try decide
       all_goals try
         exact hquiet op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights, cachePut_flights,
-          cacheInvalidate_flights] at hflight
+        simp only at hflight
         first
         | exact hquiet _ _ hflight
         | exact hquiet _ _ (List.mem_filter.mp hflight).1
@@ -12685,21 +12599,21 @@ theorem step_cleanup_source
                   obtain ⟨timer, nextWheel⟩ := pair
                   simp only [hb] at hresult
                   split at hresult
-                  · simp [Outcomes.one, List.mem_singleton] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     rcases start_cleanup_mem (appConfig := appConfig)
                         (fired := some timer) hstate hmem with
                       hkept | hempty
                     · exact .kept hkept
                     · exact .vacant hempty
-                  · simp [Outcomes.one, List.mem_singleton] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     cases Concrete.Local.node.inj hstate
                     exact .kept hmem
               | none =>
                   simp only [hb] at hresult
                   split at hresult
-                  · simp [Outcomes.one, List.mem_singleton] at hresult
+                  · simp [Outcomes.one] at hresult
                     subst result
                     have hstate' :
                         (Concrete.beginTimerList node config now true).state =
@@ -12707,14 +12621,14 @@ theorem step_cleanup_source
                       simpa [hp] using hstate
                     exact .kept (beginTimerList_cleanup_mem hstate' hmem)
                   · split at hresult
-                    · simp [Outcomes.one, List.mem_singleton] at hresult
+                    · simp [Outcomes.one] at hresult
                       subst result
                       have hstate' :
                           (Concrete.beginTimerList node config now false).state =
                             Concrete.Local.node next := by
                         simpa [hp] using hstate
                       exact .kept (beginTimerList_cleanup_mem hstate' hmem)
-                    · simp [Outcomes.one, List.mem_singleton] at hresult
+                    · simp [Outcomes.one] at hresult
                       subst result
                       cases Concrete.Local.node.inj hstate
                       exact .kept hmem
@@ -12741,7 +12655,7 @@ theorem step_cleanup_source
           | some key =>
               simp only [hk] at hresult
               split at hresult
-              · simp [hk, Outcomes.one] at hresult
+              · simp [Outcomes.one] at hresult
                 subst result
                 rcases start_cleanup_mem (appConfig := appConfig)
                     (node := node) (transaction := .external call)
@@ -12750,7 +12664,7 @@ theorem step_cleanup_source
                   hkept | hempty
                 · exact .kept hkept
                 · exact .vacant hempty
-              · simp [hk, Outcomes.one] at hresult
+              · simp [Outcomes.one] at hresult
                 subst result
                 cases Concrete.Local.node.inj hstate
                 exact .kept hmem
@@ -12779,7 +12693,7 @@ theorem step_cleanup_source
                               remaining.cachePut flight.key
                                 { document, version }
                           | none => remaining.cacheInvalidate flight.key
-                        simp [ht, hp, loaded', cached, Outcomes.one] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         rcases decide_cleanup_mem appConfig cached flight
                             loaded' hstate hmem with
@@ -12787,17 +12701,17 @@ theorem step_cleanup_source
                         · exact .kept_takeFlight ht (by
                             simp only [cached]
                             cases hloaded : loaded' <;>
-                              simp [hloaded, cachePut_controls,
+                              simp [cachePut_controls,
                                 cacheInvalidate_controls]) hkept
                         · exact .parkedLoading flightOp flight
                             (takeFlight_some_mem ht) hselected hp
                     | arming | writing | deleting =>
-                        simp [ht, hp, Outcomes.one] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         cases Concrete.Local.node.inj hstate
                         exact .kept_takeFlight ht rfl hmem
                   next _ =>
-                    simp [ht, Outcomes.one] at hresult
+                    simp [Outcomes.one] at hresult
                     subst result
                     cases Concrete.Local.node.inj hstate
                     exact .kept_takeFlight ht rfl hmem
@@ -12817,7 +12731,7 @@ theorem step_cleanup_source
                       subst result
                       rcases committedFlight_cleanup_mem hstate hmem with
                         hkept | hselected
-                      · exact .kept_takeFlight ht (by simp [noteArmed_controls])
+                      · exact .kept_takeFlight ht (by simp)
                           hkept
                       · exact .parkedWriting flightOp flight
                           (takeFlight_some_mem ht) hselected hp rfl
@@ -12914,7 +12828,7 @@ theorem step_cleanup_source
                       cases Concrete.Local.node.inj hstate
                       exact .kept_takeControl hc rfl hmem
         | membership configuration version =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases hc : node.takeControl flightOp with
             | mk taken controlled =>
               cases taken with
@@ -12928,7 +12842,7 @@ theorem step_cleanup_source
                   | membership instant live =>
                       simp only [hc] at hresult
                       split at hresult
-                      · simp [hc, Outcomes.one]
+                      · simp [Outcomes.one]
                           at hresult
                         subst result
                         let view : Concrete.MembershipView := {
@@ -12941,7 +12855,7 @@ theorem step_cleanup_source
                           (refreshEnded_cleanup_mem
                             (node := { controlled with membership := view })
                             hstate hmem)
-                      · simp [hc, Outcomes.one] at hresult
+                      · simp [Outcomes.one] at hresult
                         subst result
                         cases Concrete.Local.node.inj hstate
                         rcases awaitControl_cleanup_mem hmem with
@@ -12977,7 +12891,7 @@ theorem step_cleanup_source
                       cases Concrete.Local.node.inj hstate
                       exact .kept_takeControl hc rfl hmem
         | conflict =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight flightOp with
             | mk taken remaining =>
               cases taken with
@@ -13009,7 +12923,7 @@ theorem step_cleanup_source
                             cases Concrete.Local.node.inj hstate
                             exact .kept_takeControl hc rfl hmem
         | failed =>
-            simp only [Concrete.step] at hresult
+            simp only at hresult
             cases ht : node.takeFlight flightOp with
             | mk taken remaining =>
               cases taken with
@@ -13115,18 +13029,17 @@ theorem node_step_attempts
       all_goals
         simp_all [NodeAttempts, Concrete.start, Concrete.decide,
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
-          Concrete.beginTimerList, Concrete.refreshEnded,
-          Concrete.Node.await, Concrete.Node.awaitControl,
-          Concrete.committedFlight, Concrete.continueCleanup,
+          Concrete.beginTimerList,
+          Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
           Concrete.finishNode, Concrete.cleanupFlight, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try rfl
       all_goals try
         exact hattempts op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights] at hflight
+        simp only at hflight
         exact hattempts _ _ (List.mem_filter.mp hflight).1
       all_goals first | contradiction | grind
   | receive sender message =>
@@ -13135,8 +13048,7 @@ theorem node_step_attempts
       all_goals repeat' first | split at hresult
       all_goals
         simp_all [NodeAttempts, Concrete.start, Concrete.decide,
-          Concrete.writeCandidate, Concrete.retry, Concrete.pureExternal,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
+          Concrete.writeCandidate, Concrete.pureExternal, Concrete.beginTimerList,
           Concrete.refreshEnded, Concrete.Node.takeFlight,
           Concrete.Node.takeControl, Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.committedFlight,
@@ -13144,14 +13056,13 @@ theorem node_step_attempts
           Concrete.cleanupFlight, Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs, Outcomes.one]
       all_goals repeat' first | split at hresult
-      all_goals try simp_all [Concrete.Node.await, Concrete.Node.awaitControl]
+      all_goals try simp_all
       all_goals try rfl
       all_goals try
         exact hattempts op flight hflight
       all_goals try
         subst next
-        simp only [finishNode_flights, noteArmed_flights, cachePut_flights,
-          cacheInvalidate_flights] at hflight
+        simp only at hflight
         first
         | exact hattempts _ _ hflight
         | exact hattempts _ _ (List.mem_filter.mp hflight).1
@@ -13779,23 +13690,20 @@ theorem simulate_node_process
               Concrete.finishNode, Concrete.Node.cachePut,
               Concrete.Node.cacheInvalidate])
         intro output houtput
-        simp only [Concrete.sendOutputs, Concrete.Node.await,
+        simp only [Concrete.Node.await,
           Concrete.Node.awaitControl, Concrete.continueCleanup,
           Concrete.cleanupFlight_cleanup, Concrete.start,
           Concrete.decide, Concrete.writeCandidate,
-          Concrete.beginMembershipRefresh, Concrete.beginTimerList,
-          Concrete.refreshEnded] at houtput
+          Concrete.beginMembershipRefresh, Concrete.beginTimerList] at houtput
         repeat' first | split at houtput
-        all_goals simp [Concrete.sendOutputs, Concrete.Node.await,
-          Concrete.Node.awaitControl, Concrete.continueCleanup,
-          Concrete.cleanupFlight_cleanup] at houtput
+        all_goals simp at houtput
   | receive sender message =>
       cases sender <;> cases message <;>
         simp only [Concrete.step, Concrete.nodeStep] at hresult
       case outside.request call =>
         split at hresult
         next hbusy =>
-          simp [hbusy, Outcomes.one] at hresult
+          simp [Outcomes.one] at hresult
           subst result
           apply stutter rfl
           intro output houtput
@@ -13803,30 +13711,24 @@ theorem simulate_node_process
         next hready =>
           cases hkey : (Concrete.Transaction.external call).key? with
           | none =>
-              simp [hready, hkey, Outcomes.one] at hresult
+              simp [hkey, Outcomes.one] at hresult
               subst result
               exact simulate_pure_external_node hreachable related haddress
                 hnode hkey htime hvalid (by
                   simp [hready, hkey, Concrete.step, Concrete.nodeStep, Outcomes.one])
           | some key =>
-              simp only [hkey, hready] at hresult
+              simp only [hkey] at hresult
               split at hresult
               next howns =>
-                simp [howns, Outcomes.one] at hresult
+                simp [Outcomes.one] at hresult
                 subst result
                 apply stutter
                   (start_state appConfig node (.external call) key address).choose_spec
                 intro output houtput
                 simp only [Concrete.start, Concrete.decide,
-                  Concrete.writeCandidate, Concrete.Node.await,
-                  Concrete.continueCleanup, Concrete.cleanupFlight_cleanup,
-                  Concrete.finishNode, Concrete.Node.awaitControl,
-                  Concrete.sendOutputs] at houtput
+                  Concrete.writeCandidate, Concrete.Node.await] at houtput
                 repeat' first | split at houtput
-                all_goals simp_all [Concrete.Node.await, Concrete.sendOutputs,
-                  Concrete.Node.awaitControl, Concrete.decide,
-                  Concrete.writeCandidate, Concrete.continueCleanup,
-                  Concrete.cleanupFlight_cleanup]
+                all_goals simp_all
               next hnotOwns =>
                 simp [Outcomes.one] at hresult
                 subst result
@@ -13872,7 +13774,7 @@ theorem simulate_node_process
               | none =>
                   cases hc : (node.takeControl op).1 with
                   | none =>
-                      simp [ht, hc, Outcomes.one, List.mem_singleton] at hresult
+                      simp [ht, hc, Outcomes.one] at hresult
                       subst result
                       apply stutter rfl
                       intro output houtput
@@ -13880,7 +13782,7 @@ theorem simulate_node_process
                   | some control =>
                       cases control with
                       | cleanup outputs =>
-                          simp [ht, hc, Outcomes.one, List.mem_singleton] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           apply stutter rfl
                           intro output houtput
@@ -13891,14 +13793,11 @@ theorem simulate_node_process
                       | announced instant | announcements instant
                       | membershipWrite instant | membership instant live
                       | timerList instant through kind =>
-                          simp [ht, hc, Outcomes.one, List.mem_singleton,
-                            Concrete.refreshEnded, Concrete.beginTimerList,
-                            Concrete.Node.awaitControl] at hresult
+                          simp [ht, hc, Outcomes.one] at hresult
                           subst result
                           apply stutter rfl
                           intro output houtput
-                          simp [Concrete.sendOutputs, Concrete.Node.awaitControl,
-                            Concrete.refreshEnded, Concrete.beginTimerList] at houtput
+                          simp at houtput
               | some flight =>
                   have hflight := takeFlight_some_mem ht
                   have hcovered :=
@@ -13911,7 +13810,7 @@ theorem simulate_node_process
                         (reachable_node_no_deleting hreachable haddress hnode
                           op flight hflight)
                   | loading | arming | writing =>
-                      simp [hp, List.mem_singleton] at hresult
+                      simp [hp] at hresult
                       subst result
                       apply stutter rfl
                       intro output houtput
@@ -13930,21 +13829,21 @@ theorem simulate_node_process
                   | arming =>
                       cases hd : flight.document with
                       | none =>
-                          simp [ht, hp, hd, Outcomes.one, List.mem_singleton]
+                          simp [ht, hp, hd, Outcomes.one]
                             at hresult
                           subst result
                           apply stutter rfl
                           intro output houtput
                           simp at houtput
                       | some document =>
-                          simp [ht, hp, hd, Outcomes.one, List.mem_singleton]
+                          simp [ht, hp, hd, Outcomes.one]
                             at hresult
                           subst result
                           apply stutter rfl
                           intro output houtput
                           simp [Concrete.Node.await] at houtput
                   | loading | writing =>
-                      simp [ht, hp, Outcomes.one, List.mem_singleton] at hresult
+                      simp [ht, hp, Outcomes.one] at hresult
                       subst result
                       apply stutter rfl
                       intro output houtput
@@ -13952,7 +13851,7 @@ theorem simulate_node_process
               | none =>
                   cases hc : (node.takeControl op).1 with
                   | none =>
-                      simp [ht, hc, Outcomes.one, List.mem_singleton] at hresult
+                      simp [ht, hc, Outcomes.one] at hresult
                       subst result
                       apply stutter rfl
                       intro output houtput
@@ -13960,7 +13859,7 @@ theorem simulate_node_process
                   | some control =>
                       cases control with
                       | cleanup outputs =>
-                          simp [ht, hc, Outcomes.one, List.mem_singleton]
+                          simp [ht, hc, Outcomes.one]
                             at hresult
                           subst result
                           apply stutter rfl
@@ -13972,21 +13871,19 @@ theorem simulate_node_process
                       | announced instant | membershipWrite instant
                       | announcements instant | membership instant live
                       | timerList instant through kind =>
-                          simp [ht, hc, Outcomes.one, List.mem_singleton,
+                          simp [ht, hc, Outcomes.one,
                             Concrete.refreshEnded, Concrete.beginTimerList,
                             Concrete.Node.awaitControl] at hresult
                           subst result
                           apply stutter rfl
                           intro output houtput
-                          simp [Concrete.sendOutputs, Concrete.Node.await,
-                            Concrete.Node.awaitControl, Concrete.refreshEnded,
-                            Concrete.beginTimerList] at houtput
+                          simp at houtput
         | got key loaded =>
             cases ht : node.takeFlight op with
             | mk taken remaining =>
               cases taken with
               | none =>
-                  simp [ht, Outcomes.one, List.mem_singleton] at hresult
+                  simp [ht, Outcomes.one] at hresult
                   subst result
                   apply stutter rfl
                   intro output houtput
@@ -14021,8 +13918,7 @@ theorem simulate_node_process
                                 hremaining.cachePut flight.key {
                                   document := value.1
                                   version := value.2 }
-                        simp [hp, loaded', cached, Outcomes.one,
-                          List.mem_singleton] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         apply stutter
                           (NodeValid.decide hcached hflightValid loaded').choose_spec.1
@@ -14030,19 +13926,18 @@ theorem simulate_node_process
                         simp only [Concrete.decide, Concrete.writeCandidate,
                           Concrete.continueCleanup, Concrete.cleanupFlight_cleanup,
                           Concrete.finishNode, Concrete.Node.await,
-                          Concrete.Node.awaitControl, Concrete.sendOutputs]
+                          Concrete.Node.awaitControl]
                           at houtput
                         repeat' first | split at houtput
-                        all_goals simp [Concrete.sendOutputs,
-                          Concrete.Node.await, Concrete.Node.awaitControl] at houtput
+                        all_goals simp at houtput
                     | arming | writing | deleting =>
-                        simp [hp, Outcomes.one, List.mem_singleton] at hresult
+                        simp [hp, Outcomes.one] at hresult
                         subst result
                         apply stutter rfl
                         intro output houtput
                         simp at houtput
                   next _ =>
-                    simp [Outcomes.one, List.mem_singleton] at hresult
+                    simp [Outcomes.one] at hresult
                     subst result
                     apply stutter rfl
                     intro output houtput
@@ -14053,7 +13948,7 @@ theorem simulate_node_process
         | membership configuration version =>
             simp only [Outcomes.one] at hresult
             repeat' first | split at hresult
-            all_goals simp only [Outcomes.one, List.mem_singleton] at hresult
+            all_goals simp only [List.mem_singleton] at hresult
             all_goals subst result
             all_goals
               apply stutter (by
@@ -14070,16 +13965,10 @@ theorem simulate_node_process
                         Concrete.retry, Concrete.Node.cachePut,
                         Concrete.Node.cacheInvalidate, Concrete.finishNode])
               intro output houtput
-              simp only [Concrete.sendOutputs, Concrete.Node.await,
-                Concrete.Node.awaitControl, Concrete.continueCleanup,
-                Concrete.cleanupFlight_cleanup, Concrete.refreshEnded,
-                Concrete.beginTimerList, Concrete.decide,
-                Concrete.writeCandidate, Concrete.retry,
-                Concrete.failureOutputs, Concrete.finishNode] at houtput
+              simp only [Concrete.Node.awaitControl, Concrete.refreshEnded,
+                Concrete.beginTimerList] at houtput
               repeat' first | split at houtput
-              all_goals simp [Concrete.sendOutputs,
-                Concrete.Node.awaitControl, Concrete.continueCleanup,
-                Concrete.cleanupFlight_cleanup, Concrete.failureOutputs] at houtput
+              all_goals simp at houtput
       all_goals
         try
           simp [Outcomes.one] at hresult

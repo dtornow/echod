@@ -622,11 +622,11 @@ theorem filterMap_filter_id_same (objects : List Object) (id : Ident) :
         · have hid : object.id = id := by
             cases hobj : object.id; cases id
             simp_all
-          simp [List.filter_cons, hid, hrow, ih, hsuffix]
+          simp [hid, hrow, ih]
         · have hid : ¬ object.id = id := fun h => hsuffix (by rw [h])
-          simp [List.filter_cons, hid, hrow, ih, hsuffix]
+          simp [hid, hrow, ih, hsuffix]
       · have hid : ¬ object.id = id := fun h => horigin (by rw [h])
-        simp [List.filter_cons, hid, toOriginRow?_eq_none horigin, ih]
+        simp [hid, toOriginRow?_eq_none horigin, ih]
 
 theorem filterMap_filter_id_other (objects : List Object) (id : Ident)
     {other : String} (h : other ≠ id.origin) :
@@ -637,7 +637,7 @@ theorem filterMap_filter_id_other (objects : List Object) (id : Ident)
   | cons object rest ih =>
       by_cases hid : object.id = id
       · have horigin : object.id.origin ≠ other := by rw [hid]; exact Ne.symm h
-        simp [List.filter_cons, hid, toOriginRow?_eq_none horigin, ih]
+        simp [hid, toOriginRow?_eq_none horigin, ih]
       · have hkeep : (object.id != id) = true := by simp [hid]
         rw [List.filter_cons, if_pos hkeep, List.filterMap_cons, List.filterMap_cons, ih]
 
@@ -1410,8 +1410,7 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
       split at hkey
       · cases hkey
         exact external_sim_of appConfig call before (wrap := .taskHeartbeat)
-          (by simp [Concrete.selectedExternalCandidate, hrequest, htasks,
-            Concrete.Candidate.cast])
+          (by simp [Concrete.selectedExternalCandidate, hrequest, htasks])
           (by rw [hrequest]; rfl)
           (taskHeartbeat_sim req call.requestedAt first rest htasks)
       · contradiction
@@ -1473,13 +1472,13 @@ theorem external_none (appConfig : Resonate.Config) (call : Call) (state : State
     cases htasks : req.tasks with
     | nil =>
       simp [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
-        Abstract.taskHeartbeat, Concrete.pureResponse, bind, Pure.pure, hrequest, htasks]
+        Abstract.taskHeartbeat, Concrete.pureResponse, Pure.pure, hrequest, htasks]
     | cons first rest =>
       simp only [htasks] at hkey
       split at hkey
       · contradiction
       · simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
-          Abstract.taskHeartbeat, Concrete.pureResponse, bind, Pure.pure]
+          Abstract.taskHeartbeat, Concrete.pureResponse, Pure.pure]
   case taskSuspend req =>
     split at hkey
     · rename_i hmismatch
@@ -1493,10 +1492,10 @@ theorem external_none (appConfig : Resonate.Config) (call : Call) (state : State
     split at hkey
     · contradiction
     · simp_all [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
-        Abstract.taskFulfill, Concrete.pureResponse, bind, Pure.pure]
+        Abstract.taskFulfill, Concrete.pureResponse, Pure.pure]
   all_goals
-    simp [Abstract.run, Abstract.serve, Abstract.handler, Abstract.map_apply,
-      Concrete.pureResponse, bind, Pure.pure, hrequest, Abstract.promiseSearch,
+    simp [Abstract.run, Abstract.serve, Abstract.handler,
+      Concrete.pureResponse, Pure.pure, hrequest, Abstract.promiseSearch,
       Abstract.scheduleSearch, Abstract.taskSearch, Concrete.Decision.promiseSearch,
       Concrete.Decision.scheduleSearch, Concrete.Decision.taskSearch]
 

@@ -173,7 +173,7 @@ def pendingWorkflow (entries : List PendingEntry) :
   | nil => rfl
   | cons entry rest ih =>
       simp [pendingWorkflow, PendingEntry.fromWorkflow,
-        PendingEntry.toWorkflow?, Function.comp_apply] at ih ⊢
+        PendingEntry.toWorkflow?] at ih ⊢
       exact ih
 
 @[simp] theorem map_fromWorkflow_pendingWorkflow
@@ -184,8 +184,7 @@ def pendingWorkflow (entries : List PendingEntry) :
   | cons entry rest ih =>
       obtain ⟨request, instant⟩ := entry
       simp only [pendingWorkflow, PendingEntry.toWorkflow?,
-        PendingEntry.fromWorkflow, List.filterMap_cons,
-        Option.toList_some, List.map_cons] at ih ⊢
+        PendingEntry.fromWorkflow, List.filterMap_cons, List.map_cons] at ih ⊢
       exact congrArg
         (fun tail => PendingEntry.occurrence request instant :: tail) ih
 
