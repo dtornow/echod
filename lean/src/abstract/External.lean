@@ -110,15 +110,7 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
             return { status := 200, task := some (t.toRecord action.id),
                      promise := some (o.promise.toRecord action.id) }
           else if t.state == .pending then
-            let next :=
-              { t with
-                state := .acquired
-                version := t.version + 1
-                ttl := some req.ttl
-                pid := some req.pid
-                leaseTimeoutAt := some (now + req.ttl)
-                retryTimeoutAt := none
-                resumes := [] }
+            let next := t.acquire req.pid req.ttl now
             setObject { o with task := some next }
             return { status := 200, task := some (next.toRecord action.id),
                      promise := some (o.promise.toRecord action.id) }
@@ -130,15 +122,7 @@ def taskAcquire (req : TaskAcquireReq) (now : Nat) : Handler TaskAcquireRes := d
   | some (o, t) =>
       if t.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      let next :=
-        { t with
-          state := .acquired
-          version := t.version + 1
-          ttl := some req.ttl
-          pid := some req.pid
-          leaseTimeoutAt := some (now + req.ttl)
-          retryTimeoutAt := none
-          resumes := [] }
+      let next := t.acquire req.pid req.ttl now
       setObject { o with task := some next }
       return { status := 200, task := some (next.toRecord req.id),
                promise := some (o.promise.toRecord req.id) }
@@ -204,14 +188,7 @@ def taskSuspend (req : TaskSuspendReq) (now : Nat) : Handler TaskSuspendRes := d
         setObject { o with task := some { t with resumes := [] } }
         return { status := 300 }
       req.actions.forM (addCallback req.id now)
-      setObject { o with
-        task := some { t with
-          state := .suspended
-          pid := none
-          ttl := none
-          leaseTimeoutAt := none
-          retryTimeoutAt := none
-          resumes := [] } }
+      setObject { o with task := some { t.unlease .suspended none with resumes := [] } }
       return { status := 200 }
 
 def taskFulfill (req : TaskFulfillReq) (now : Nat) : Handler TaskFulfillRes := do
@@ -236,13 +213,7 @@ def taskRelease (req : TaskReleaseReq) (now : Nat) : Handler TaskReleaseRes := d
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      setObject { o with
-        task := some { t with
-          state := .pending
-          pid := none
-          ttl := none
-          leaseTimeoutAt := none
-          retryTimeoutAt := some now } }
+      setObject { o with task := some (t.unlease .pending (some now)) }
       return { status := 200 }
 
 def taskHalt (req : TaskHaltReq) (now : Nat) : Handler TaskHaltRes := do
@@ -251,13 +222,7 @@ def taskHalt (req : TaskHaltReq) (now : Nat) : Handler TaskHaltRes := do
   | some (o, t) =>
       if t.state == .fulfilled then return { status := 409 }
       if t.state == .halted then return { status := 200 }
-      setObject { o with
-        task := some { t with
-          state := .halted
-          pid := none
-          ttl := none
-          leaseTimeoutAt := none
-          retryTimeoutAt := none } }
+      setObject { o with task := some (t.unlease .halted none) }
       return { status := 200 }
 
 def taskContinue (req : TaskContinueReq) (now : Nat) : Handler TaskContinueRes := do

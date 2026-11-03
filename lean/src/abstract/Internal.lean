@@ -62,13 +62,7 @@ def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
       | none => pure ()
       | some deadline =>
           if task.state == .acquired ∧ deadline ≤ now then
-            setObject { object with
-              task := some { task with
-                state := .pending
-                pid := none
-                ttl := none
-                leaseTimeoutAt := none
-                retryTimeoutAt := some now } }
+            setObject { object with task := some (task.unlease .pending (some now)) }
 
 def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
   match ← readTask id now with

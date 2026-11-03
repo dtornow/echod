@@ -26,6 +26,18 @@ def Object.project (object : Object) (now : Nat) : Object :=
     if promise.state != .pending ∧ t.state != .fulfilled then t.fulfill else t
   { object with promise, task }
 
+/-- The task taken by `pid` for `ttl`, from `now`. -/
+def _root_.AbstractModel.TaskObject.acquire (t : TaskObject) (pid : String) (ttl now : Nat) :
+    TaskObject :=
+  { t with
+    state := .acquired, version := t.version + 1, ttl := some ttl, pid := some pid,
+    leaseTimeoutAt := some (now + ttl), retryTimeoutAt := none, resumes := [] }
+
+/-- The task in `state` with no lease, retried at `retry`. -/
+def _root_.AbstractModel.TaskObject.unlease (t : TaskObject) (state : TaskState)
+    (retry : Option Nat) : TaskObject :=
+  { t with state, pid := none, ttl := none, leaseTimeoutAt := none, retryTimeoutAt := retry }
+
 def Store.getObject (store : Store) (id : Ident) : Option Object :=
   store.objects.find? (·.id == id)
 
