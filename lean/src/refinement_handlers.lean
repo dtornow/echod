@@ -56,9 +56,6 @@ theorem DocEquiv.trans : {key : DocumentKey} → {a b c : Document key} →
   | .origin _, _, _, _, h₁, h₂ => List.Perm.trans h₁ h₂
   | .schedule _, _, _, _, h₁, h₂ => Eq.trans h₁ h₂
 
-theorem DocEquiv.of_perm {origin : String} {a b : OriginDocument origin}
-    (h : List.Perm a b) : DocEquiv (.origin origin) a b := h.map _
-
 /-- Two stores whose document views read alike. -/
 def Same (a b : Store) : Prop := ∀ key, DocEquiv key (a.read key) (b.read key)
 
@@ -194,16 +191,6 @@ theorem Sim.weaken {key : DocumentKey} {P : Document key → Prop} {R : α → �
     {Q : β → Document key → Prop} {a : Abstract.Handler α} {c : DocumentHandler key β}
     (hs : Sim key (fun _ => True) R Q a c) : Sim key P R Q a c :=
   Sim.pre (fun _ _ => trivial) hs
-
-/-- A property the concrete step preserves holds after it. -/
-theorem Sim.frame {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
-    {Q : β → Document key → Prop} {a : Abstract.Handler α} {c : DocumentHandler key β}
-    (F : Document key → Prop) (hF : ∀ env d, F d → F (c env d).2.1)
-    (hs : Sim key P R Q a c) :
-    Sim key (fun d => P d ∧ F d) R (fun b d => Q b d ∧ F d) a c := by
-  intro env store document hunique hdoc ⟨hp, hf⟩
-  obtain ⟨hr, hq, hrest⟩ := hs env store document hunique hdoc hp
-  exact ⟨hr, ⟨hq, hF env document hf⟩, hrest⟩
 
 theorem Sim.ite {key : DocumentKey} {P : Document key → Prop} {R : α → β → Prop}
     {Q : β → Document key → Prop} (p : Prop) [Decidable p]
@@ -497,12 +484,6 @@ theorem map_norm_suffix {origin : String} (document : OriginDocument origin) :
     (document.map (·.norm)).map (·.suffix) = document.map (·.suffix) := by
   rw [List.map_map]
   rfl
-
-theorem RowsUnique.of_equiv {origin : String} {a b : OriginDocument origin}
-    (ha : RowsUnique a) (h : DocEquiv (.origin origin) a b) : RowsUnique b := by
-  have hb := ((List.Perm.map (·.suffix) h).nodup_iff).mp
-    (by rw [map_norm_suffix]; exact ha)
-  rwa [map_norm_suffix] at hb
 
 theorem find?_map_norm {origin : String} (document : OriginDocument origin) (s : String) :
     (document.map (·.norm)).find? (·.suffix == s) =
@@ -934,11 +915,6 @@ instance : LawfulMonad Abstract.Handler := LawfulMonad.mk'
     simp)
   (pure_bind := fun a f => Abstract.pure_bind a f)
   (bind_assoc := fun x f g => Abstract.bind_assoc x f g)
-
-theorem Abstract.ite_bind (p : Prop) [Decidable p] (x y : Abstract.Handler α)
-    (f : α → Abstract.Handler β) :
-    (if p then x else y) >>= f = if p then x >>= f else y >>= f := by
-  split <;> rfl
 
 /-- Close the side condition that an id lies in the document's origin. -/
 macro "sim_origin" : tactic => `(tactic| first
