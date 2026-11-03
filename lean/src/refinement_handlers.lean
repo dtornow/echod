@@ -628,8 +628,9 @@ def Fact {origin : String} (suffix : String) (now : Nat)
 
 /-- What a task read of `suffix` at `now` showed, when it found a task. -/
 def TaskFact {origin : String} (suffix : String) (now : Nat)
-    (value : Option (OriginObject origin)) (document : OriginDocument origin) : Prop :=
-  ∀ row, value = some row → Fact suffix now (some row) document
+    (value : Option (OriginObject origin × TaskObject))
+    (document : OriginDocument origin) : Prop :=
+  ∀ row, value.map Prod.fst = some row → Fact suffix now (some row) document
 
 theorem Fact.row {origin s : String} {now : Nat} {value : OriginObject origin}
     {document : OriginDocument origin} (h : Fact s now (some value) document) :
@@ -698,55 +699,52 @@ theorem readObject_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin
         subst h
         exact (find?_suffix hfind : found.suffix = id.suffix)
 
-/-- An abstract task read corresponds to the concrete read followed by a
-match on the task. -/
+/-- An abstract task read corresponds to the concrete one. -/
 def TaskRel (origin suffix : String) (a : Option (Object × TaskObject))
-    (c : Option (OriginObject origin)) : Prop :=
-  a = c.bind (fun row => row.task.map (Object.ofOrigin row, ·)) ∧
-    ∀ row, c = some row → row.suffix = suffix
+    (c : Option (OriginObject origin × TaskObject)) : Prop :=
+  a = c.map (fun found => (Object.ofOrigin found.1, found.2)) ∧
+    ∀ row task, c = some (row, task) → row.suffix = suffix ∧ row.task = some task
 
 theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) → Prop} :
     Sim (.origin id.origin) P (TaskRel id.origin id.suffix)
       (fun found d => TaskFact id.suffix now found d ∧ P d)
-      (Abstract.readTask id now) (Concrete.Decision.readTaskObject id.suffix now) := by
+      (Abstract.readTask id now) (Concrete.Decision.readTask id.suffix now) := by
   intro env store document hunique hdoc hp
   have ha : Abstract.readTask id now env store =
       ((((store.getObject id).map (·.project now)).bind fun o => o.task.map (o, ·)),
         store, []) := by
     simp only [Abstract.readTask, Abstract.readObject, Abstract.getObject, bind, pure]
     cases store.getObject id <;> rfl
-  have hc : Concrete.Decision.readTaskObject id.suffix now env document =
-      ((match document.find? (·.suffix == id.suffix) with
-        | some row => if row.task.isSome then some (row.project now) else none
-        | none => none),
-        document, []) := by
-    simp only [Concrete.Decision.readTaskObject, Concrete.Decision.readObject,
+  have hc : Concrete.Decision.readTask id.suffix now env document =
+      ((((document.find? (·.suffix == id.suffix)).map (·.project now)).bind
+        fun o => o.task.map (o, ·)), document, []) := by
+    simp only [Concrete.Decision.readTask, Concrete.Decision.readObject,
       Concrete.Decision.getObject, documentGet, bind, pure]
-    cases hfind : document.find? (·.suffix == id.suffix) with
-    | none => rfl
-    | some row => cases ht : row.task.isSome <;> simp [hfind, ht]
+    cases document.find? (·.suffix == id.suffix) <;> rfl
   rw [ha, hc, readObject_eq_document hunique hdoc]
-  refine ⟨?_, ⟨?_, hp⟩, Same.write_of hdoc, rfl, hunique⟩
-  · cases hfind : document.find? (·.suffix == id.suffix) with
-    | none => exact ⟨rfl, by simp⟩
-    | some row =>
-        have hsuffix := find?_suffix hfind
-        cases htask : row.task with
-        | none =>
-            exact ⟨by simp [htask, Object.ofOrigin, OriginObject.project], by simp [htask]⟩
-        | some task =>
-            refine ⟨?_, ?_⟩
-            · simp [htask, Object.project, Object.ofOrigin, OriginObject.project]
-            · simpa [htask, OriginObject.project] using hsuffix
+  refine ⟨⟨?_, ?_⟩, ⟨?_, hp⟩, Same.write_of hdoc, rfl, hunique⟩
+  · cases document.find? (·.suffix == id.suffix) with
+    | none => rfl
+    | some row => cases h : (row.project now).task <;> simp [h, Object.ofOrigin]
+  · intro row task h
+    cases hfind : document.find? (·.suffix == id.suffix) with
+    | none => simp [hfind] at h
+    | some found =>
+        cases ht : (found.project now).task with
+        | none => simp [hfind, ht] at h
+        | some t =>
+            simp only [hfind, ht, Option.map_some, Option.bind_some, Option.some.injEq,
+              Prod.mk.injEq] at h
+            obtain ⟨rfl, rfl⟩ := h
+            exact ⟨by simpa [OriginObject.project] using find?_suffix hfind, ht⟩
   · intro row h
     cases hfind : document.find? (·.suffix == id.suffix) with
     | none => simp [hfind] at h
     | some found =>
-        cases htask : found.task with
-        | none => simp [hfind, htask] at h
-        | some task =>
-            simp only [hfind, htask, Option.isSome_some, ↓reduceIte,
-              Option.some.injEq] at h
+        cases ht : (found.project now).task with
+        | none => simp [hfind, ht] at h
+        | some t =>
+            simp only [hfind, ht, Option.map_some, Option.bind_some, Option.some.injEq] at h
             subst h
             simp [Fact, hfind]
 
@@ -1247,7 +1245,7 @@ theorem readTask_sim' (id : Ident) (now : Nat) {origin : String}
     (h : id.origin = origin) {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P (TaskRel origin id.suffix)
       (fun found d => TaskFact id.suffix now found d ∧ P d) (Abstract.readTask id now)
-      (Concrete.Decision.readTaskObject (origin := origin) id.suffix now) := by
+      (Concrete.Decision.readTask (origin := origin) id.suffix now) := by
   subst h; exact readTask_sim id now
 
 theorem createPromiseAt_sim' (id : Ident) (timeoutAt now : Nat) (param : Value)
@@ -1261,22 +1259,17 @@ theorem createPromiseAt_sim' (id : Ident) (timeoutAt now : Nat) (param : Value)
   subst h; exact createPromiseAt_sim id timeoutAt now param tags hfact
 
 theorem TaskRel.cases {origin suffix : String} {P : Option (Object × TaskObject) →
-      Option (OriginObject origin) → Prop}
+      Option (OriginObject origin × TaskObject) → Prop}
     (hnone : P none none)
-    (hnotask : ∀ promise, P none (some ⟨suffix, promise, none⟩))
     (hsome : ∀ promise task,
       P (some (Object.ofOrigin (⟨suffix, promise, some task⟩ : OriginObject origin), task))
-        (some ⟨suffix, promise, some task⟩)) :
+        (some (⟨suffix, promise, some task⟩, task))) :
     ∀ a c, TaskRel origin suffix a c → P a c := by
-  rintro a (_ | ⟨rowSuffix, promise, _ | task⟩) ⟨rfl, hsuffix⟩
+  rintro a (_ | ⟨⟨rowSuffix, promise, current⟩, task⟩) ⟨rfl, h⟩
   · exact hnone
-  · have := hsuffix _ rfl
-    simp only at this
-    subst this
-    exact hnotask promise
-  · have := hsuffix _ rfl
-    simp only at this
-    subst this
+  · obtain ⟨hs, ht⟩ := h _ _ rfl
+    simp only at hs ht
+    subst hs ht
     exact hsome promise task
 
 /-! ## Rewriting abstract handlers -/
@@ -1365,7 +1358,7 @@ elab "sim_dispatch" : tactic => withMainContext do
                        refine ObjRel.cases ?_ (fun _ _ => ?_)))
     | some ``Resonate.Abstract.readTask =>
         run `(tactic| (refine Sim.bind (readTask_sim' _ _ (by sim_origin)) ?_
-                       refine TaskRel.cases ?_ (fun _ => ?_) (fun _ _ => ?_)))
+                       refine TaskRel.cases ?_ (fun _ _ => ?_)))
     | some ``Resonate.Abstract.getSchedule =>
         run `(tactic| (refine Sim.bind (getSchedule_sim _) ?_
                        intro _ _ h; subst h))

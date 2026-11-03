@@ -127,11 +127,10 @@ def readObject {origin : String} (suffix : String) (now : Nat) :
   | none => return none
   | some object => return some (object.project now)
 
-def readTaskObject {origin : String} (suffix : String) (now : Nat) :
-    Handler (.origin origin) (Option (OriginObject origin)) := do
-  match ← getObject suffix with
-  | some object =>
-      if object.task.isSome then readObject suffix now else return none
+def readTask {origin : String} (suffix : String) (now : Nat) :
+    Handler (.origin origin) (Option (OriginObject origin × TaskObject)) := do
+  match ← readObject suffix now with
+  | some object => return object.task.map (object, ·)
   | none => return none
 
 def createIfAbsentAt {origin : String} (suffix : String) (timeoutAt now : Nat)

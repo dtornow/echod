@@ -14,24 +14,21 @@ def processPromiseTimeout (id : Ident) (now : Nat) :
 
 def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
     Handler (.origin origin) Unit := do
-  match ← readTaskObject awaiter.suffix now with
+  match ← readTask awaiter.suffix now with
   | none => pure ()
-  | some object =>
-      match object.task with
-      | none => pure ()
-      | some task =>
-          match task.state with
-          | .suspended =>
-              setTask object.suffix { task with
-                state := .pending
-                resumes := [awaited]
-                retryTimeoutAt := some now }
-          | .pending | .acquired | .halted =>
-              if !(task.resumes.contains awaited) then
-                setTask object.suffix
-                  { task with
-                    resumes := task.resumes ++ [awaited] }
-          | .fulfilled => pure ()
+  | some (object, task) =>
+      match task.state with
+      | .suspended =>
+          setTask object.suffix { task with
+            state := .pending
+            resumes := [awaited]
+            retryTimeoutAt := some now }
+      | .pending | .acquired | .halted =>
+          if !(task.resumes.contains awaited) then
+            setTask object.suffix
+              { task with
+                resumes := task.resumes ++ [awaited] }
+      | .fulfilled => pure ()
 
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
     Handler (.origin req.awaited.origin) Unit := do
@@ -60,43 +57,35 @@ def processListener (req : PromiseRegisterListenerReq) (now : Nat) :
 
 def processLeaseTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
-  match ← readTaskObject id.suffix now with
+  match ← readTask id.suffix now with
   | none => pure ()
-  | some object =>
-      match object.task with
+  | some (object, task) =>
+      match task.leaseTimeoutAt with
       | none => pure ()
-      | some task =>
-          match task.leaseTimeoutAt with
-          | none => pure ()
-          | some deadline =>
-              if task.state == .acquired ∧ deadline ≤ now ∧
-                  object.promise.state == .pending then
-                setTask object.suffix { task with
-                  state := .pending
-                  pid := none
-                  ttl := none
-                  leaseTimeoutAt := none
-                  retryTimeoutAt := some now }
+      | some deadline =>
+          if task.state == .acquired ∧ deadline ≤ now then
+            setTask object.suffix { task with
+              state := .pending
+              pid := none
+              ttl := none
+              leaseTimeoutAt := none
+              retryTimeoutAt := some now }
 
 def processRetryTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
-  match ← readTaskObject id.suffix now with
+  match ← readTask id.suffix now with
   | none => pure ()
-  | some object =>
-      match object.task with
+  | some (object, task) =>
+      match task.retryTimeoutAt with
       | none => pure ()
-      | some task =>
-          match task.retryTimeoutAt with
-          | none => pure ()
-          | some due =>
-              if task.state == .pending ∧ due ≤ now ∧
-                  object.promise.state == .pending then
-                let env ← ask
-                setTask object.suffix { task with
-                  retryTimeoutAt := some (now + env.config.retryTimeout) }
-                setMessage
-                  ((object.promise.tags.get? "resonate:target").getD "")
-                  (.execute object.id task.version)
+      | some due =>
+          if task.state == .pending ∧ due ≤ now then
+            let env ← ask
+            setTask object.suffix { task with
+              retryTimeoutAt := some (now + env.config.retryTimeout) }
+            setMessage
+              ((object.promise.tags.get? "resonate:target").getD "")
+              (.execute object.id task.version)
 
 def processSchedule (id : Ident) (now : Nat) :
     Handler (.schedule id) (List WorkItem) := do
