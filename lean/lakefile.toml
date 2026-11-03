@@ -29,6 +29,7 @@ roots = [
   "concrete.External",
   "concrete.Internal",
   "concrete.Model",
+  "refinement_handlers",
   "refinement_proof",
   "refinement_claim",
 ]
