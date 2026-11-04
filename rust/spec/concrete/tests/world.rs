@@ -4,7 +4,10 @@
 use echod_concrete::model::{
     route_effects, ClientRequest, Effect, Fleet, Incoming, Local, Message, Model, Pid, Store,
 };
-use echod_concrete::{Etag, StoreCall, StoreError, StoreOutcome};
+use echod_concrete::{
+    Etag, PromiseCreateReq, PromiseGetReq, PromiseRes, Request, Response, StoreCall, StoreError,
+    StoreOutcome, Value,
+};
 use echod_rover::rover::{ProcessEvent, RoverModel};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
@@ -88,17 +91,72 @@ fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
     assert!(through.is_empty());
 }
 
+fn call(id: u64, request: Request) -> ClientRequest {
+    ClientRequest {
+        client: "c".into(),
+        id,
+        kind: "request".into(),
+        request,
+    }
+}
+
+fn deliver(
+    node_pid: Pid,
+    node_state: Local,
+    store_state: Local,
+    now: u64,
+    event: &Incoming,
+) -> (Local, Local, Vec<(Pid, Message)>) {
+    let stepped = Model.step(&node_pid, &node_state, now, event);
+    assert_eq!(stepped.len(), 1);
+    let mut node_state = stepped[0].state.clone();
+    let mut store_state = store_state;
+    let mut send = stepped[0].send.clone();
+    // A flight is one store round trip at a time. Answer it, then the node finishes.
+    while let [(Pid::Store, Message::StoreReq { op, call })] = send.as_slice() {
+        let stored = Model.step(
+            &Pid::Store,
+            &store_state,
+            now,
+            &Incoming::Receive {
+                sender: node_pid,
+                message: Message::StoreReq {
+                    op: *op,
+                    call: call.clone(),
+                },
+            },
+        );
+        assert_eq!(stored.len(), 1);
+        store_state = stored[0].state.clone();
+        let reply = stored[0].send[0].1.clone();
+        let answered = Model.step(
+            &node_pid,
+            &node_state,
+            now,
+            &Incoming::Receive {
+                sender: Pid::Store,
+                message: reply,
+            },
+        );
+        assert_eq!(answered.len(), 1);
+        node_state = answered[0].state.clone();
+        send = answered[0].send.clone();
+    }
+    (node_state, store_state, send)
+}
+
 #[test]
-fn the_shell_forwards_a_request_and_keeps_its_wake() {
+fn a_promise_get_loads_the_document_and_a_miss_is_404() {
     let world = Model.world(&Fleet::new(1, true));
     let (pid, state) = world.process[0].clone();
     let mut armed = node(&state).clone();
     armed.wake = Some(40);
-    let request = ClientRequest {
-        client: "c".into(),
-        id: 7,
-        kind: "create".into(),
-    };
+    let request = call(
+        7,
+        Request::PromiseGet(PromiseGetReq {
+            id: "a:missing".into(),
+        }),
+    );
     let stepped = Model.step(
         &pid,
         &Local::Node(armed),
@@ -109,11 +167,125 @@ fn the_shell_forwards_a_request_and_keeps_its_wake() {
         },
     );
     assert_eq!(stepped.len(), 1);
-    let node = node(&stepped[0].state);
-    assert_eq!(node.logic.clock, 3);
-    assert_eq!(node.next_request, 2);
-    assert_eq!(node.wake, Some(40));
-    assert!(stepped[0].send.is_empty());
+    let loaded = node(&stepped[0].state);
+    assert_eq!(loaded.logic.clock, 3);
+    assert_eq!(loaded.next_request, 2);
+    assert_eq!(loaded.wake, None);
+    assert_eq!(
+        stepped[0].send,
+        vec![(
+            Pid::Store,
+            Message::StoreReq {
+                op: 1,
+                call: StoreCall::Get { key: "o/a".into() },
+            },
+        )]
+    );
+
+    let (node_state, _, send) = deliver(
+        pid,
+        stepped[0].state.clone(),
+        world.process[1].1.clone(),
+        3,
+        &Incoming::Receive {
+            sender: Pid::Store,
+            message: Message::StoreReply {
+                op: 1,
+                outcome: StoreOutcome::Got(None),
+            },
+        },
+    );
+    assert_eq!(node(&node_state).wake, None);
+    assert_eq!(
+        send,
+        vec![(
+            Pid::Outside,
+            Message::Reply {
+                id: 7,
+                status: 404,
+                response: Some(Response::Promise(PromiseRes {
+                    status: 404,
+                    promise: None
+                })),
+            },
+        )]
+    );
+}
+
+#[test]
+fn a_promise_create_lands_and_the_next_get_reads_it() {
+    let world = Model.world(&Fleet::new(1, true));
+    let (pid, node_state) = world.process[0].clone();
+    let store_state = world.process[1].1.clone();
+    let create = call(
+        1,
+        Request::PromiseCreate(PromiseCreateReq {
+            id: "a:1".into(),
+            timeout_at: 1_000,
+            param: Value::empty(),
+            tags: Vec::new(),
+        }),
+    );
+    let (node_state, store_state, send) = deliver(
+        pid,
+        node_state,
+        store_state,
+        5,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(create),
+        },
+    );
+    match &send[..] {
+        [(
+            Pid::Outside,
+            Message::Reply {
+                id: 1,
+                status: 200,
+                response: Some(Response::Promise(body)),
+            },
+        )] => {
+            assert_eq!(body.status, 200);
+            assert_eq!(body.promise.as_ref().map(|p| p.id.as_str()), Some("a:1"));
+            assert_eq!(body.promise.as_ref().map(|p| p.timeout_at), Some(1_000));
+        }
+        other => panic!("create reply {other:?}"),
+    }
+    assert_eq!(node(&node_state).wake, Some(1_000));
+    assert_eq!(store(&store_state).entries.len(), 1);
+    assert_eq!(store(&store_state).entries[0].key, "o/a");
+
+    let (node_state, store_state, send) = deliver(
+        pid,
+        node_state,
+        store_state,
+        6,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(call(
+                2,
+                Request::PromiseGet(PromiseGetReq { id: "a:1".into() }),
+            )),
+        },
+    );
+    match &send[..] {
+        [(
+            Pid::Outside,
+            Message::Reply {
+                id: 2,
+                status: 200,
+                response: Some(Response::Promise(body)),
+            },
+        )] => {
+            assert_eq!(
+                body.promise.as_ref().map(|p| p.state),
+                Some(echod_concrete::PromiseState::Pending)
+            );
+        }
+        other => panic!("get reply {other:?}"),
+    }
+    assert_eq!(store(&store_state).entries.len(), 1);
+    assert_eq!(node(&node_state).logic.clock, 6);
 }
 
 #[test]
@@ -152,7 +324,14 @@ fn stop_ends_the_loop_and_a_wake_replaces_only_the_shell() {
     assert_eq!(
         send,
         vec![
-            (Pid::Outside, Message::Reply { id: 1, status: 200 }),
+            (
+                Pid::Outside,
+                Message::Reply {
+                    id: 1,
+                    status: 200,
+                    response: None,
+                },
+            ),
             (
                 Pid::Store,
                 Message::StoreReq {
@@ -288,11 +467,10 @@ fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
     assert!(Model.step(node_pid, node_state, 0, &ask).is_empty());
     let client = Incoming::Receive {
         sender: Pid::Outside,
-        message: Message::Request(ClientRequest {
-            client: "c".into(),
-            id: 1,
-            kind: "get".into(),
-        }),
+        message: Message::Request(call(
+            1,
+            Request::PromiseGet(PromiseGetReq { id: "a:1".into() }),
+        )),
     };
     assert!(Model
         .step(&Pid::Store, &world.process[1].1, 0, &client)

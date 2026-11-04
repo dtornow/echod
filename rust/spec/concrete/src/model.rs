@@ -13,9 +13,9 @@
 //! origin that owes a deadline has that key in the bucket the deadline
 //! falls in. The store process applies the `Store` effect the node sent.
 //!
-//! The handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`,
-//! `spec_completed`, `spec_tick`, `spec_stop`) are uninterpreted. The control
-//! around them is the control in `State::on_event`.
+//! The executable node is `plane`: its own documents and one flight. The
+//! ghost arms of `spec_logic_on_event` stay uninterpreted; the process still
+//! proves its handler specifications against those names.
 //!
 //! The theorem this model is for is `echod_rover::rover::refinement::refines`
 //! of this instantiation against the abstract Rover model. See `refine`.
@@ -64,6 +64,7 @@ pub struct ClientRequest {
     pub client: String,
     pub id: u64,
     pub kind: String,
+    pub request: echod_types::Request,
 }
 
 /// A message on the concrete network. Store traffic is between a node and
@@ -81,7 +82,7 @@ pub enum Boundary {
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Message {
     Request(ClientRequest),
-    Reply { id: u64, status: u16 },
+    Reply { id: u64, status: u16, response: Option<echod_types::Response> },
     Send { address: String, body: Vec<u8> },
     StoreReq { op: u64, call: StoreCall },
     StoreReply { op: u64, outcome: StoreOutcome },
@@ -234,6 +235,8 @@ pub struct Node {
     pub logic: Logic,
     pub wake: Option<u64>,
     pub next_request: u64,
+    /// The node's own machine: documents, one flight, the pending occurrences.
+    pub(crate) plane: crate::plane::Plane,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -717,7 +720,7 @@ pub open spec fn spec_world(config: Fleet) -> SpecWorld {
 pub open spec fn spec_boundary(at: u64, from_outside: bool, message: Message) -> Seq<Boundary> {
     match (from_outside, message) {
         (true, Message::Request(request)) => seq![Boundary::Input { at, request }],
-        (false, Message::Reply { id, status }) => seq![Boundary::Reply { at, id, status }],
+        (false, Message::Reply { id, status, .. }) => seq![Boundary::Reply { at, id, status }],
         (false, Message::Send { address, body }) => seq![Boundary::Send { at, address, body }],
         (_, _) => Seq::empty(),
     }
@@ -1018,7 +1021,9 @@ impl Store {
                 etag: want,
             } => {
                 if !self.appendable {
-                    StoreOutcome::Failed(StoreError::Unavailable("this store does not append".into()))
+                    StoreOutcome::Failed(StoreError::Unavailable(
+                        "this store does not append".into(),
+                    ))
                 } else {
                     match find_entry(&self.entries, key) {
                         Some(i)
@@ -1117,6 +1122,7 @@ pub fn route_effects(
                 Message::Reply {
                     id: *id,
                     status: *status,
+                    response: None,
                 },
             )),
             Effect::Send { address, body } => send.push((
@@ -1198,12 +1204,35 @@ fn apply_event(
             logic,
             wake,
             next_request: node.next_request,
+            plane: node.plane.clone(),
         },
         send,
     )
 }
 
-fn started_node(loops: bool) -> Node {
+fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
+    acts.iter()
+        .map(|act| match act {
+            crate::plane::Act::ToStore { op, call } => (
+                Pid::Store,
+                Message::StoreReq {
+                    op: *op,
+                    call: call.clone(),
+                },
+            ),
+            crate::plane::Act::Reply { id, response } => (
+                Pid::Outside,
+                Message::Reply {
+                    id: *id,
+                    status: crate::plane::reply_status(response),
+                    response: Some(response.clone()),
+                },
+            ),
+        })
+        .collect()
+}
+
+fn started_node(id: u64, nodes: u64, loops: bool) -> Node {
     let (node, _) = apply_event(
         &Node {
             logic: Logic {
@@ -1215,6 +1244,7 @@ fn started_node(loops: bool) -> Node {
             },
             wake: None,
             next_request: 1,
+            plane: crate::plane::Plane::new(id, nodes),
         },
         LogicEvent::Start { clock: 0, loops },
         0,
@@ -1241,7 +1271,10 @@ impl Model {
     pub fn world(self, config: &Fleet) -> World {
         let mut process = Vec::new();
         for id in 0..config.nodes {
-            process.push((Pid::Node(id), Local::Node(started_node(config.loops))));
+            process.push((
+                Pid::Node(id),
+                Local::Node(started_node(id, config.nodes, config.loops)),
+            ));
         }
         process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
         World {
@@ -1263,12 +1296,18 @@ impl Model {
             (Pid::Node(_), Local::Node(node)) => node
                 .on_event(&(), now, &event)
                 .into_iter()
-                .map(|(node, send)| Transition { state: Local::Node(node), send })
+                .map(|(node, send)| Transition {
+                    state: Local::Node(node),
+                    send,
+                })
                 .collect(),
             (Pid::Store, Local::Store(store)) => store
                 .on_event(&(), now, &event)
                 .into_iter()
-                .map(|(store, send)| Transition { state: Local::Store(store), send })
+                .map(|(store, send)| Transition {
+                    state: Local::Store(store),
+                    send,
+                })
                 .collect(),
             _ => Vec::new(),
         }
@@ -1284,32 +1323,50 @@ impl Process<(), Pid, Message> for Node {
     ) -> Vec<(Self, Vec<(Pid, Message)>)> {
         match event {
             ProcessEvent::Timeout => match self.wake {
-                Some(at) if at <= now => {
-                    let (next, send) = apply_event(self, LogicEvent::Tick { clock: now }, now, None);
-                    vec![(next, send)]
+                Some(at) if at <= now && !self.plane.busy() => {
+                    let mut next = self.clone();
+                    next.logic.clock = now;
+                    next.logic.last_wake = None;
+                    let acts = next.plane.timeout(now);
+                    next.wake = next.plane.next_wake();
+                    vec![(next, route_acts(&acts))]
                 }
+                Some(at) if at <= now => vec![(self.clone(), Vec::new())],
                 _ => Vec::new(),
             },
-            ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(request) } => {
-                let (next, send) = apply_event(
-                    self,
-                    LogicEvent::Request { id: self.next_request, request: request.clone(), clock: now },
-                    now,
-                    self.wake,
-                );
-                vec![(Node { next_request: self.next_request + 1, ..next }, send)]
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(request),
+            } => {
+                if self.plane.busy() {
+                    return vec![(self.clone(), Vec::new())];
+                }
+                let mut next = self.clone();
+                next.logic.clock = now;
+                next.next_request += 1;
+                let acts = next.plane.request(now, request.id, &request.request);
+                next.wake = next.plane.next_wake();
+                vec![(next, route_acts(&acts))]
             }
-            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
-                let (next, send) = apply_event(
-                    self,
-                    LogicEvent::Completed { op: *op, outcome: outcome.clone(), clock: now },
-                    now,
-                    self.wake,
-                );
-                vec![(next, send)]
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreReply { op, outcome },
+            } => {
+                if !self.plane.busy() {
+                    return vec![(self.clone(), Vec::new())];
+                }
+                let mut next = self.clone();
+                next.logic.clock = now;
+                let acts = next.plane.store(now, *op, outcome);
+                next.wake = next.plane.next_wake();
+                vec![(next, route_acts(&acts))]
             }
-            ProcessEvent::Receive { sender: Pid::Outside, message: Message::Stop } => {
-                let (next, send) = apply_event(self, LogicEvent::Stop { clock: now }, now, self.wake);
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Stop,
+            } => {
+                let (next, send) =
+                    apply_event(self, LogicEvent::Stop { clock: now }, now, self.wake);
                 vec![(next, send)]
             }
             _ => Vec::new(),
@@ -1325,9 +1382,15 @@ impl Process<(), Pid, Message> for Store {
         event: &ProcessEvent<Pid, Message>,
     ) -> Vec<(Self, Vec<(Pid, Message)>)> {
         match event {
-            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+            ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq { op, call },
+            } => {
                 let (next, outcome) = self.apply(call);
-                vec![(next, vec![(*sender, Message::StoreReply { op: *op, outcome })])]
+                vec![(
+                    next,
+                    vec![(*sender, Message::StoreReply { op: *op, outcome })],
+                )]
             }
             _ => Vec::new(),
         }

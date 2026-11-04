@@ -11,9 +11,11 @@ path = "src/lib.rs"
 
 [dependencies]
 echod-types = { path = "../../comm/types" }
+echod-cron = { path = "../../comm/cron" }
 echod-rover = { path = "../rover" }
 echod-abstract = { path = "../abstract" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"

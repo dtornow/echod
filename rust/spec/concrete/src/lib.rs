@@ -8,6 +8,7 @@
 //! abstract one is stated in `refine` and is not proved yet.
 //!
 //! ```text
+//! plane.rs            one node: its documents, one flight, the store round trip
 //! model.rs            the Rover model: nodes, one store, the initial world
 //! rover_model.rs      RoverModel for that world
 //! refine.rs           the statement against the abstract Rover model
@@ -43,6 +44,7 @@ pub mod node_spec;
 pub mod object;
 pub mod object_proof;
 pub mod on_event;
+mod plane;
 pub mod properties;
 pub mod properties_proof;
 pub mod spec;

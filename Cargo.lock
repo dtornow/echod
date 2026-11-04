@@ -1106,9 +1106,11 @@ name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
  "echod-abstract",
+ "echod-cron",
  "echod-rover",
  "echod-types",
  "serde",
+ "serde_json",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
