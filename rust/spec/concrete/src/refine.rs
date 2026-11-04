@@ -22,9 +22,8 @@
 //!
 //! `spec_on_event` on each model is that model's step. The executable
 //! `on_event` is obliged to agree with it; that equality is not proved.
-//! A lease sets the next offer to the deadline on the abstract model and to
-//! `now` on this one, and an abstract retry lands on the `next_offer` grid
-//! while this plane uses `now + 5000`.
+//! A lease timeout offers the task again at `now`, and a retry offers it
+//! again at `now + retryTimeout`, on both models.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {

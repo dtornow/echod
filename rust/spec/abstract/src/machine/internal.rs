@@ -10,7 +10,7 @@ use echod_types::{PromiseState, TaskState, Value};
 use super::super::trusted::*;
 
 use super::{
-    contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, next_offer, Dispatch, Id, InOut, Promise, ServerConfig, Store, Task, Time, Work,
+    contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, Dispatch, Id, InOut, Promise, ServerConfig, Store, Task, Time, Work,
 };
 
 verus! {
@@ -119,7 +119,7 @@ impl ServerConfig {
         }
         let mut n = copy_store(s);
         let mut u = copy(t);
-        u.unlease(TaskState::Pending, Some(t.lease_timeout_at()));
+        u.unlease(TaskState::Pending, Some(now));
         n.tasks.insert(id.clone(), u);
         InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mk("lease expired")], not_due: false }
     }
@@ -137,10 +137,7 @@ impl ServerConfig {
         if t.state != TaskState::Pending || !due || !live {
             return self.noop(s);
         }
-        let again = match t.retry_timeout_at {
-            Some(r) => next_offer(r, now, self.retry_timeout),
-            None => now.saturating_add(self.retry_timeout),
-        };
+        let again = now.saturating_add(self.retry_timeout);
         let mut n = copy_store(s);
         let mut u = copy(t);
         u.retry_timeout_at = Some(again);

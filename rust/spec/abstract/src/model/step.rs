@@ -77,25 +77,6 @@ pub open spec fn spec_keys<V>(m: Map<Seq<char>, V>) -> Seq<Seq<char>> {
     spec_sorted(m.dom())
 }
 
-pub open spec fn spec_sat_mul(a: u64, b: u64) -> u64 {
-    if b != 0 && a > u64::MAX / b {
-        u64::MAX
-    } else {
-        a * b
-    }
-}
-
-/// Lean's `nextOffer`, on the grid `due + k·t` strictly after `now`.
-pub open spec fn spec_next_offer(due: Time, now: Time, t: Time) -> Time {
-    let t = if t == 0 { 1 } else { t };
-    if now < due {
-        due
-    } else {
-        let k = (now - due) / t;
-        sat_add(due, spec_sat_mul(t, sat_add(k, 1)))
-    }
-}
-
 // ----------------------------------------------------------------------- tags
 
 pub open spec fn tag_target() -> Seq<char> {
@@ -1102,7 +1083,7 @@ pub open spec fn spec_lease(s: StoreV, id: Seq<char>, now: Time) -> InOutV {
         if t.state != TaskState::Acquired || now < spec_lease_at(t) || !pending {
             spec_noop(s)
         } else {
-            let u = spec_unlease(t, TaskState::Pending, Some(spec_lease_at(t)));
+            let u = spec_unlease(t, TaskState::Pending, Some(now));
             spec_did(StoreV { tasks: s.tasks.insert(id, u), ..s }, Seq::empty(), Seq::empty())
         }
     }
@@ -1122,10 +1103,7 @@ pub open spec fn spec_retry(config: ServerConfig, s: StoreV, id: Seq<char>, now:
         if t.state != TaskState::Pending || !due || !live {
             spec_noop(s)
         } else {
-            let again = match t.retry_timeout_at {
-                Some(r) => spec_next_offer(r, now, config.retry_timeout),
-                None => sat_add(now, config.retry_timeout),
-            };
+            let again = sat_add(now, config.retry_timeout);
             let u = TaskV { retry_timeout_at: Some(again), ..t };
             spec_did(
                 StoreV { tasks: s.tasks.insert(id, u), ..s },

@@ -20,8 +20,9 @@
 //! - The only queue is the occurrence list. A schedule step records one run
 //!   and appends that occurrence; a later step creates the promise.
 //!   `next_run_at` is `nextCron cron now`, computed in the handler.
-//! - A task's offers are on a grid anchored at the instant it came to be
-//!   pending (Lean's `nextOffer`). The dial is `ServerConfig::retry_timeout`.
+//! - A lease timeout offers the task again at `now`. A retry offers it again
+//!   at `now + retry_timeout` (Lean's `processLeaseTimeout` and
+//!   `processRetryTimeout`). The dial is `ServerConfig::retry_timeout`.
 //! - Lean's `nextCron` and `expand` are trusted (`trusted.rs`): the cron
 //!   engine of the reference server.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
@@ -422,23 +423,6 @@ pub(crate) fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>
 {
     broadcast use group_views;
     one(Out { resp: res, next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
-}
-
-/// Lean's `nextOffer`: the first instant on the grid `due + k·T` strictly
-/// after `now`. Anchored at `due`, so it does not depend on when the retry
-/// step ran; a server late to it re-offers the task once and lands on the
-/// same grid. `T = 0` would give `due` itself (and a step forever enabled);
-/// the model treats it as 1.
-fn next_offer(due: Time, now: Time, t: Time) -> (r: Time)
-    
-{
-    let t = if t == 0 { 1 } else { t };
-    if now < due {
-        due
-    } else {
-        let k = (now - due) / t;
-        due.saturating_add(t.saturating_mul(k.saturating_add(1)))
-    }
 }
 
 /// Settles `id` and fulfills its task, if any.
