@@ -7,6 +7,7 @@
 
 use vstd::prelude::*;
 
+use echod_abstract::{Call, Output};
 use echod_rover::rover::{Process, ProcessEvent};
 use echod_rover::Time;
 
@@ -43,31 +44,14 @@ pub struct Model;
 // What crosses the boundary
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct ClientRequest {
-    pub client: String,
-    pub id: u64,
-    pub request: echod_types::Request,
-}
-
-/// A message on the concrete network. Store traffic is between a node and
-/// the store process. `Request` and `Stop` are what outside may inject.
-/// What a trace of this world shows. Store traffic is absent.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum Boundary {
-    Input { at: u64, request: ClientRequest },
-    Reply { at: u64, id: u64, status: u16 },
-    Send { at: u64, address: String, body: Vec<u8> },
-}
-
+/// A message on the concrete network. A client request is a [`Call`] and a
+/// client reply is an [`Output`], the same values the abstract model
+/// observes. Store traffic stays between a node and the store.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Message {
-    Request(ClientRequest),
-    Reply { id: u64, status: u16, response: Option<echod_types::Response> },
-    Send { address: String, body: Vec<u8> },
+    Request(Call),
+    Output(Output),
     StoreReq { op: u64, call: StoreCall },
     StoreReply { op: u64, outcome: StoreOutcome },
     Stop,
@@ -411,13 +395,13 @@ fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
                     call: call.clone(),
                 },
             ),
-            crate::plane::Act::Reply { id, response } => (
+            crate::plane::Act::Reply { client, id, response } => (
                 Pid::Outside,
-                Message::Reply {
+                Message::Output(Output::Response {
+                    client: client.clone(),
                     id: *id,
-                    status: crate::plane::reply_status(response),
-                    response: Some(response.clone()),
-                },
+                    response: response.clone(),
+                }),
             ),
         })
         .collect()
@@ -529,7 +513,7 @@ impl Process<(), Pid, Message> for Node {
                 let mut next = self.clone();
                 next.logic.clock = now;
                 next.next_request += 1;
-                let acts = next.plane.request(now, request.id, &request.request);
+                let acts = next.plane.request(now, &request.client, request.id, &request.request);
                 next.wake = next.plane.next_wake();
                 vec![(next, route_acts(&acts))]
             }

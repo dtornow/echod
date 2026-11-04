@@ -7,7 +7,7 @@
 use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
-use crate::model::{Boundary, Fleet, Incoming, Local, LocalV, Message, Model, Pid};
+use crate::model::{Fleet, Incoming, Local, LocalV, Message, Model, Pid};
 
 impl RoverModel for Model {
     type Config = Fleet;
@@ -15,7 +15,7 @@ impl RoverModel for Model {
     type StateV = LocalV;
     type State = Local;
     type Message = Message;
-    type Boundary = Boundary;
+    type Boundary = echod_abstract::BoundaryEvent;
 
     fn outside(&self) -> Pid {
         Pid::Outside

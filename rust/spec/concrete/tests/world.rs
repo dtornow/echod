@@ -1,9 +1,8 @@
 //! The concrete world: the nodes and the store Rover starts from, one node
 //! flight, and the store's conditional write.
 
-use echod_concrete::model::{
-    ClientRequest, Fleet, Incoming, Local, Message, Model, Pid, Store,
-};
+use echod_abstract::{Call, Output};
+use echod_concrete::model::{Fleet, Incoming, Local, Message, Model, Pid, Store};
 use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRes, Request, Response, StoreCall, StoreError,
     StoreOutcome, Value,
@@ -91,8 +90,8 @@ fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
     assert!(through.is_empty());
 }
 
-fn call(id: u64, request: Request) -> ClientRequest {
-    ClientRequest {
+fn call(id: u64, request: Request) -> Call {
+    Call {
         client: "c".into(),
         id,
         request,
@@ -199,14 +198,14 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
         send,
         vec![(
             Pid::Outside,
-            Message::Reply {
+            Message::Output(Output::Response {
+                client: "c".into(),
                 id: 7,
-                status: 404,
-                response: Some(Response::Promise(PromiseRes {
+                response: Response::Promise(PromiseRes {
                     status: 404,
-                    promise: None
-                })),
-            },
+                    promise: None,
+                }),
+            }),
         )]
     );
 }
@@ -238,12 +237,12 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
     match &send[..] {
         [(
             Pid::Outside,
-            Message::Reply {
+            Message::Output(Output::Response {
+                client,
                 id: 1,
-                status: 200,
-                response: Some(Response::Promise(body)),
-            },
-        )] => {
+                response: Response::Promise(body),
+            }),
+        )] if client == "c" => {
             assert_eq!(body.status, 200);
             assert_eq!(body.promise.as_ref().map(|p| p.id.as_str()), Some("a:1"));
             assert_eq!(body.promise.as_ref().map(|p| p.timeout_at), Some(1_000));
@@ -270,12 +269,12 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
     match &send[..] {
         [(
             Pid::Outside,
-            Message::Reply {
+            Message::Output(Output::Response {
+                client,
                 id: 2,
-                status: 200,
-                response: Some(Response::Promise(body)),
-            },
-        )] => {
+                response: Response::Promise(body),
+            }),
+        )] if client == "c" => {
             assert_eq!(
                 body.promise.as_ref().map(|p| p.state),
                 Some(echod_concrete::PromiseState::Pending)

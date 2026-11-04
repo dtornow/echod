@@ -42,13 +42,13 @@ struct Flight {
     etag: Option<Etag>,
     /// The clock of the event that opened the flight.
     now: u64,
-    /// The client a request flight answers, once the document is decided.
-    client: Option<u64>,
+    /// The client a request flight answers: its name and the call id.
+    caller: Option<(String, u64)>,
     /// The document a write is putting, installed in the cache when it lands.
     decided: Option<Doc>,
     /// Occurrences a schedule step queued, delivered to the pending list when the write lands.
     born: Vec<Pending>,
-    reply: Option<(u64, Response)>,
+    reply: Option<(String, u64, Response)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +112,7 @@ struct Tk {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     ToStore { op: u64, call: StoreCall },
-    Reply { id: u64, response: Response },
+    Reply { client: String, id: u64, response: Response },
 }
 
 impl Plane {
@@ -131,21 +131,20 @@ impl Plane {
         self.flight.is_some()
     }
 
-    pub fn request(&mut self, now: u64, id: u64, request: &Request) -> Vec<Act> {
+    pub fn request(&mut self, now: u64, client: &str, id: u64, request: &Request) -> Vec<Act> {
         if self.flight.is_some() {
             return Vec::new();
         }
+        let answer = |response: Response| Act::Reply {
+            client: client.to_string(),
+            id,
+            response,
+        };
         let Some(key) = key_of(request) else {
-            return vec![Act::Reply {
-                id,
-                response: pure(request),
-            }];
+            return vec![answer(pure(request))];
         };
         if !self.owns(&key) {
-            return vec![Act::Reply {
-                id,
-                response: unavailable(request),
-            }];
+            return vec![answer(unavailable(request))];
         }
         self.begin(
             key,
@@ -153,7 +152,7 @@ impl Plane {
                 request: request.clone(),
             },
             now,
-            Some(id),
+            Some((client.to_string(), id)),
         )
     }
 
@@ -224,7 +223,7 @@ impl Plane {
         op
     }
 
-    fn begin(&mut self, key: String, job: Job, now: u64, client: Option<u64>) -> Vec<Act> {
+    fn begin(&mut self, key: String, job: Job, now: u64, caller: Option<(String, u64)>) -> Vec<Act> {
         if let Some(cached) = self.cache.get(&key).cloned() {
             let flight = Flight {
                 op: 0,
@@ -233,7 +232,7 @@ impl Plane {
                 job,
                 etag: cached.etag,
                 now,
-                client,
+                caller,
                 decided: None,
                 born: Vec::new(),
                 reply: None,
@@ -249,7 +248,7 @@ impl Plane {
             job,
             etag: None,
             now,
-            client,
+            caller,
             decided: None,
             born: Vec::new(),
             reply: None,
@@ -282,8 +281,8 @@ impl Plane {
                 (next, None, Vec::new())
             }
         };
-        if let (Some(id), Some(response)) = (flight.client, reply) {
-            flight.reply = Some((id, response));
+        if let (Some((client, id)), Some(response)) = (flight.caller.clone(), reply) {
+            flight.reply = Some((client, id, response));
         }
         let previous = self
             .cache
@@ -296,7 +295,7 @@ impl Plane {
             return flight
                 .reply
                 .into_iter()
-                .map(|(id, response)| Act::Reply { id, response })
+                .map(|(client, id, response)| Act::Reply { client, id, response })
                 .collect();
         }
         let body = encode(&next);
@@ -331,15 +330,16 @@ impl Plane {
         flight
             .reply
             .into_iter()
-            .map(|(id, response)| Act::Reply { id, response })
+            .map(|(client, id, response)| Act::Reply { client, id, response })
             .collect()
     }
 
     fn fail(&mut self, flight: Flight) -> Vec<Act> {
         self.flight = None;
-        match (&flight.job, flight.client) {
-            (Job::External { request }, Some(id)) => {
+        match (&flight.job, flight.caller) {
+            (Job::External { request }, Some((client, id))) => {
                 vec![Act::Reply {
+                    client,
                     id,
                     response: unavailable(request),
                 }]

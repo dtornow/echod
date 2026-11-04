@@ -13,9 +13,10 @@
 //! )
 //! ```
 //!
-//! That theorem needs a relation on the two initial worlds and a forward
-//! simulation. Neither is proved yet. The two boundaries are not the same
-//! type yet, and the concrete view does not yet carry the node's documents.
+//! Both models observe `echod_abstract::BoundaryEvent`: a `Call` in, an
+//! `Output` out. The theorem needs a relation on the two initial worlds and
+//! a forward simulation. Neither is proved yet. The concrete view does not
+//! yet carry the node's documents.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {
