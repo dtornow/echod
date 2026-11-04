@@ -441,6 +441,42 @@ Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
 
+### Chaos
+
+The simulator's faults are the interpreter's: a store that answers nothing,
+a node that is dropped. `scripts/chaos.sh` inflicts the real ones on the
+system as deployed. `compose.yaml` is a fleet: three `echod` processes in
+containers over `fakes3`, each as the child of a `chaos-agent`
+(`rust/test/cli/chaos/src/agent.rs`), which on a control port of its own
+kills it, stops it, freezes it (`SIGSTOP`, sometimes past its TTL, so it
+comes back believing it still owns what it owned), cuts it off the store,
+the clients or the worker with `iptables`, isolates it, or slows and loses
+its packets with `tc netem`. The store is left alone: it is where the truth
+is kept, and the faults are everything around it. `echod-chaos`
+(`src/main.rs`) is the clients, the worker and the check in one process:
+clients draw every request kind from the simulator's generator and send
+them over HTTP to whichever node answers, moving to fresh origins every
+few seconds so a minute is many lifetimes; a chaos task rolls a fault
+every second or so. Then the faults are lifted, the fleet is given time to
+settle, every id named is read once more, and the bucket is read directly.
+
+The check is black-box and holds whatever the faults, which is what
+distinguishes it from the simulator's: a promise's state never goes back
+between requests one of which was sent after the other was answered, and
+settles one way; a task's version never goes back and fulfilled is final;
+what a client was shown exists at the end; no promise is pending past its
+timeout once the fleet has had time, and no expired timer key is left in
+the bucket; every `unblock` names a promise settled the way it says and
+every `execute` a task that exists; a task still unclaimed at the end was
+offered again once the fleet healed; every document decodes and agrees
+with what the clients were last told; every node answers, acts and sees
+the whole fleet. Delivery is at most once by design, so a lost `unblock`
+is counted, not held against the system. The simulator's checker is not
+run here: it needs the instant each request was decided at, which a node
+on wall time does not tell the client, and the sweeps' instants besides.
+Giving it both — a header with the decision instant, the notes port over
+the wire — is what it would take to run the model against a real fleet.
+
 ### Differential
 
 `echod-diff` runs echod against the Resonate reference server, both as
