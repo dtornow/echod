@@ -20,11 +20,11 @@
 //! `Dispatch::Execute` and a settled listener sends `Dispatch::Unblock`, the
 //! same boundary outputs the abstract model sends.
 //!
-//! The simulation is not proved. `spec_on_event` is still the trait default
-//! on both models, so a step has no specification yet. Two state differences
-//! remain for the relation: a lease sets the next offer to the deadline on
-//! the abstract model and to `now` on this one, and an abstract retry lands
-//! on the `next_offer` grid while this plane uses `now + 5000`.
+//! `spec_on_event` on each model is that model's step. The executable
+//! `on_event` is obliged to agree with it; that equality is not proved.
+//! A lease sets the next offer to the deadline on the abstract model and to
+//! `now` on this one, and an abstract retry lands on the `next_offer` grid
+//! while this plane uses `now + 5000`.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {

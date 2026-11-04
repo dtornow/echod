@@ -14,6 +14,8 @@ use echod_rover::Time;
 
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
+mod step;
+
 verus! {
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,7 @@ pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
             flight: None,
             documents: Seq::empty(),
             pending: Seq::empty(),
+            next_op: 1,
         },
     }
 }
@@ -691,6 +694,20 @@ impl RoverModel for Model {
             Message::Request(_) | Message::Stop => true,
             Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
         }
+    }
+
+    /// One local step. `step::spec_step` is that transition. The trait's
+    /// `ensures` on `on_event` is the equality with the executable results;
+    /// that proof is not written yet.
+    open spec fn spec_on_event(
+        &self,
+        config: Fleet,
+        pid: Pid,
+        state: LocalV,
+        now: Time,
+        event: ProcessEvent<Pid, Message>,
+    ) -> Seq<StepResultV<LocalV, Pid, Message>> {
+        step::spec_step(config, pid, state, now, event)
     }
 
     /// A call in and an output out. Store traffic and `Stop` stay off the boundary,

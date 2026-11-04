@@ -364,6 +364,23 @@ impl Plane {
         self.pending.iter().map(|item| item.promise.clone()).collect()
     }
 
+    fn pending_items(&self) -> Vec<Pending> {
+        self.pending.iter().cloned().collect()
+    }
+
+    fn cached_entries(&self) -> Vec<(String, Vec<u8>, Option<String>)> {
+        self.cache
+            .iter()
+            .map(|(key, cached)| {
+                (
+                    key.clone(),
+                    encode(&cached.doc),
+                    cached.etag.as_ref().map(|tag| tag.0.clone()),
+                )
+            })
+            .collect()
+    }
+
     /// The open flight's key, and whether it is writing the document back.
     pub fn flight_key(&self) -> Option<(String, bool)> {
         self.flight
@@ -1616,15 +1633,61 @@ impl Tk {
 
 verus! {
 
-/// The node's documents, as a proof sees them. The relation to the abstract
-/// store reads these bytes; this view does not call the abstract model.
+/// One occurrence the node still owes.
+pub struct PendingV {
+    pub promise: Seq<char>,
+    pub at: u64,
+    pub timeout: u64,
+    pub param: Value,
+    pub tags: Tags,
+}
+
+/// A dispatch the flight will send when its write lands.
+pub enum NoteV {
+    Execute { id: Seq<char>, version: u64 },
+    Unblock { address: Seq<char>, promise: PromiseRecord },
+}
+
+/// What the open flight is doing.
+pub enum JobV {
+    External(Request),
+    Due,
+    Occurrence(PendingV),
+}
+
+/// The open flight. A proof reads this instead of the private exec fields.
+pub struct FlightV {
+    pub op: u64,
+    pub key: Seq<char>,
+    pub writing: bool,
+    pub etag: Option<Seq<char>>,
+    pub now: u64,
+    pub caller: Option<(Seq<char>, u64)>,
+    pub job: JobV,
+    pub born: Seq<PendingV>,
+    pub reply: Option<(Seq<char>, u64, Response)>,
+    pub notify: Seq<NoteV>,
+    /// `encode` of the document a write is putting.
+    pub decided: Option<Seq<u8>>,
+}
+
+/// One cached document: the bytes `encode` would write, and the etag the
+/// next conditional write must match. `None` is a document that was loaded
+/// as absent and then remembered without a version.
+pub struct CachedV {
+    pub key: Seq<char>,
+    pub body: Seq<u8>,
+    pub etag: Option<Seq<char>>,
+}
+
+/// The node's documents, as a proof sees them.
 pub struct PlaneV {
     pub address: nat,
     pub nodes: nat,
-    /// `Some` while a flight is open: the document key, and whether the flight is writing it back.
-    pub flight: Option<(Seq<char>, bool)>,
-    pub documents: Seq<(Seq<char>, Seq<u8>)>,
-    pub pending: Seq<Seq<char>>,
+    pub flight: Option<FlightV>,
+    pub documents: Seq<CachedV>,
+    pub pending: Seq<PendingV>,
+    pub next_op: u64,
 }
 
 impl View for Plane {
@@ -1633,12 +1696,72 @@ impl View for Plane {
         PlaneV {
             address: self.address as nat,
             nodes: self.nodes as nat,
-            flight: match self.flight_key() {
-                Some((key, writing)) => Some((key@, writing)),
+            flight: match &self.flight {
                 None => None,
+                Some(flight) => Some(FlightV {
+                    op: flight.op,
+                    key: flight.key@,
+                    writing: flight.phase == Phase::Write,
+                    etag: match &flight.etag {
+                        None => None,
+                        Some(tag) => Some(tag.0@),
+                    },
+                    now: flight.now,
+                    caller: match &flight.caller {
+                        None => None,
+                        Some((client, id)) => Some((client@, *id)),
+                    },
+                    job: match &flight.job {
+                        Job::External { request } => JobV::External(*request),
+                        Job::Due => JobV::Due,
+                        Job::Occurrence(pending) => JobV::Occurrence(PendingV {
+                            promise: pending.promise@,
+                            at: pending.at,
+                            timeout: pending.timeout,
+                            param: pending.param,
+                            tags: pending.tags,
+                        }),
+                    },
+                    born: flight.born@.map_values(|pending: Pending| PendingV {
+                        promise: pending.promise@,
+                        at: pending.at,
+                        timeout: pending.timeout,
+                        param: pending.param,
+                        tags: pending.tags,
+                    }),
+                    reply: match &flight.reply {
+                        None => None,
+                        Some((client, id, response)) => Some((client@, *id, *response)),
+                    },
+                    decided: match &flight.decided {
+                        None => None,
+                        Some(doc) => Some(encode(doc)@),
+                    },
+                    notify: flight.notify@.map_values(|note: Outbound| match note {
+                        Outbound::Execute { id, version } => NoteV::Execute { id: id@, version: *version },
+                        Outbound::Unblock { address, promise } => NoteV::Unblock {
+                            address: address@,
+                            promise: *promise,
+                        },
+                    }),
+                }),
             },
-            documents: self.document_bodies()@.map_values(|e: (String, Vec<u8>)| (e.0@, e.1@)),
-            pending: self.pending_ids()@.map_values(|s: String| s@),
+            documents: self.cached_entries()@.map_values(|e: (String, Vec<u8>, Option<String>)| CachedV {
+                key: e.0@,
+                body: e.1@,
+                etag: match e.2 {
+                    None => None,
+                    Some(tag) => Some(tag@),
+                },
+            }),
+            pending: self.pending_items()@.map_values(|pending: Pending| PendingV {
+                promise: pending.promise@,
+                at: pending.at,
+                timeout: pending.timeout,
+                param: pending.param,
+                tags: pending.tags,
+            }),
+            next_op: self.next_op,
         }
     }
 }

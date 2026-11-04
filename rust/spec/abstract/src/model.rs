@@ -20,6 +20,8 @@ use super::protocol::{BoundaryEvent, Call, Message, Output};
 use super::view::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
 use super::view::{InternalV, StoreV};
 
+mod step;
+
 verus! {
 
 #[derive(Clone, Copy, PartialEq, Eq, Structural, Hash, PartialOrd, Ord, Debug)]
@@ -646,6 +648,20 @@ impl RoverModel for Model {
             Message::Request(_) => true,
             Message::Output(_) => false,
         }
+    }
+
+    /// One local step. `step::spec_step` is that transition. The `ensures` on
+    /// `on_event` is the equality of the executable results with this function;
+    /// that proof is not written yet.
+    open spec fn spec_on_event(
+        &self,
+        config: ServerConfig,
+        pid: Pid,
+        state: StateV,
+        now: Time,
+        event: ProcessEvent<Pid, Message>,
+    ) -> Seq<StepResultV<StateV, Pid, Message>> {
+        step::spec_step(config, pid, state, now, event)
     }
 
     open spec fn spec_observe(
