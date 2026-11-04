@@ -14,26 +14,21 @@ use super::footprint::{next_cron, origin};
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `exec`.
 pub const MARKS: &[&str] = &[
-    "task.create: version at its cap (409)",
     "acquire: no such task (404)",
     "acquire: not pending, or stale version (409)",
     "callback registered",
-    "callback: awaiter no task, or awaited not external (422)",
+    "callback: awaiter not runnable, or awaited not awaitable (422)",
     "callback: itself or another origin (400)",
     "callback: no awaited promise (404)",
     "callback: no awaiter promise (422)",
     "callback: one of them settled (echo)",
     "continue: no such task (404)",
     "continue: not halted (409)",
-    "create: delay past the deadline (400)",
-    "create: delay without a target (400)",
     "create: id exists (echo)",
     "create: timer with target (400)",
     "delete schedule: none (404)",
     "fence check",
-    "fence: detached create",
-    "fence: detached create, no such task (404)",
-    "fence: detached create, not held (409)",
+    "fence: create in another origin (400)",
     "fence: no such task (404)",
     "fence: not held, or stale version (409)",
     "fence: promise created",
@@ -58,9 +53,8 @@ pub const MARKS: &[&str] = &[
     "lease expired",
     "lease extended",
     "listener registered",
-    "listener: bad address (400)",
     "listener: no such promise (404)",
-    "listener: promise not external (422)",
+    "listener: promise not awaitable (422)",
     "listener: promise settled (echo)",
     "listeners told",
     "promise created",
@@ -76,10 +70,7 @@ pub const MARKS: &[&str] = &[
     "schedule fired past the occurrence's deadline",
     "schedule advanced",
     "schedule: id exists (echo)",
-    "schedule: id with a colon (400)",
-    "schedule: invalid cron (400)",
     "schedule: occurrence exists",
-    "schedule: promises without a target (400)",
     "schedule: timer with target (400)",
     "settle: already settled (echo)",
     "settle: no such promise (404)",
@@ -88,7 +79,7 @@ pub const MARKS: &[&str] = &[
     "suspend: awaited already settled (300)",
     "suspend: awaited in another origin (400)",
     "suspend: awaited missing (422)",
-    "suspend: awaited not external (422)",
+    "suspend: awaited not awaitable (422)",
     "suspend: awaited twice (400)",
     "suspend: no awaited, or itself (400)",
     "suspend: no such task (404)",
@@ -104,7 +95,6 @@ pub const MARKS: &[&str] = &[
     "task released",
     "task resumed",
     "task suspended",
-    "task.create: action with a delay (400)",
     "task.create: not runnable, or a timer (400)",
     "task.create: pending task acquired",
     "task.create: promise exists, not a target (422)",
@@ -180,8 +170,8 @@ impl Explore for ServerConfig {
                     let fresh = format!("{}:child{}", origin(id), v);
                     push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v, action: TaskFenceAction::Create(create(&fresh, now + 50)) })), "fence a create at the held version");
                     push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v.wrapping_sub(1), action: TaskFenceAction::Create(create(&fresh, now + 50)) })), "fence at a stale version");
-                    push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v, action: TaskFenceAction::Create(targeted(&format!("elsewhere:{id}"), now + 50)) })), "fence a detached create");
-                    push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v.wrapping_sub(1), action: TaskFenceAction::Create(create(&format!("elsewhere:{id}.stale"), now + 50)) })), "fence a detached create at a stale version");
+                    push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v, action: TaskFenceAction::Create(targeted(&format!("elsewhere:{id}"), now + 50)) })), "fence a create in another origin");
+                    push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v.wrapping_sub(1), action: TaskFenceAction::Create(create(&format!("elsewhere:{id}.stale"), now + 50)) })), "fence a create in another origin at a stale version");
                     for p in siblings(id) {
                         push(Action::Request(Request::TaskFence(TaskFenceReq { id: id.clone(), version: v, action: TaskFenceAction::Settle(settle(p)) })), "fence a settle at the held version");
                         push(Action::Request(suspend(id, v, p)), "suspend on a promise");

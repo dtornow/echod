@@ -23,7 +23,12 @@
 //! `spec_on_event` on each model is that model's step. The executable
 //! `on_event` is obliged to agree with it; that equality is not proved.
 //! A lease timeout offers the task again at `now`, and a retry offers it
-//! again at `now + retryTimeout`, on both models.
+//! again at `now + retryTimeout`, on both models. A read projects for the
+//! answer and writes the document only when the handler writes. A promise is
+//! awaitable when it has a target, `resonate:scope=global`,
+//! `resonate:external=true`, or a timer. A fence that names another origin
+//! is refused. A schedule is refused only when its promises are a timer with
+//! a target. The simulation is not proved.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {

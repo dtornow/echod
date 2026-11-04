@@ -15,14 +15,14 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::ProcessEvent;
 use echod_rover::{Sched, Time};
 
-use echod_types::{
-    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseRes, PromiseSettleReq,
-    PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, TaskClaimRes,
-    TaskFenceAction, TaskFenceInnerRes, TaskFenceReq, TaskFenceRes, TaskGetRes, TaskRecord, TaskRef,
-    TaskState, Value,
-};
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec};
+use echod_types::{
+    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseRes, PromiseSettleReq,
+    PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes,
+    TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceReq, TaskFenceRes, TaskGetRes,
+    TaskRecord, TaskRef, TaskState, Value,
+};
 
 use crate::machine::ServerConfig;
 use crate::protocol::{Call, Message, Output};
@@ -30,13 +30,13 @@ use crate::protocol::{Call, Message, Output};
 use crate::trusted::{
     pset_seq, spec_address_valid, spec_cron_valid, spec_expand, spec_has_colon, spec_next_cron,
 };
-use crate::view::{DispatchV, InOutV, InternalV, OutV, PromiseV, ScheduleV, StoreV, TaskV, MAX_VERSION};
 #[cfg(verus_keep_ghost)]
 use crate::view::{all_in_origin, distinct, lift_dispatch, sat_add};
+use crate::view::{DispatchV, InOutV, InternalV, OutV, PromiseV, ScheduleV, StoreV, TaskV};
 
-use super::{Pid, StateV};
 #[cfg(verus_keep_ghost)]
 use super::{spec_idle, spec_internal_result, spec_ready, spec_request_outcome};
+use super::{Pid, StateV};
 
 verus! {
 
@@ -89,6 +89,14 @@ pub open spec fn tag_timer() -> Seq<char> {
 
 pub open spec fn tag_external() -> Seq<char> {
     seq!['r', 'e', 's', 'o', 'n', 'a', 't', 'e', ':', 'e', 'x', 't', 'e', 'r', 'n', 'a', 'l']
+}
+
+pub open spec fn tag_scope() -> Seq<char> {
+    seq!['r', 'e', 's', 'o', 'n', 'a', 't', 'e', ':', 's', 'c', 'o', 'p', 'e']
+}
+
+pub open spec fn tag_global() -> Seq<char> {
+    seq!['g', 'l', 'o', 'b', 'a', 'l']
 }
 
 pub open spec fn tag_delay() -> Seq<char> {
@@ -159,8 +167,12 @@ pub open spec fn spec_delay(tags: echod_types::Tags) -> Option<u64> {
     }
 }
 
+pub open spec fn spec_is_global(tags: echod_types::Tags) -> bool {
+    spec_first(tags, tag_scope(), 0) == Some(tag_global())
+}
+
 pub open spec fn spec_external(p: PromiseV) -> bool {
-    spec_has_target(p.tags) || spec_is_external_tag(p.tags) || spec_is_timer(p.tags)
+    spec_has_target(p.tags) || spec_is_global(p.tags) || spec_is_external_tag(p.tags) || spec_is_timer(p.tags)
 }
 
 pub open spec fn spec_string(chars: Seq<char>) -> String {
@@ -414,27 +426,18 @@ pub open spec fn spec_held(s: StoreV, id: Seq<char>, version: u64, now: Time) ->
 pub open spec fn spec_promise_create(req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
     if spec_is_timer(req.tags) && spec_has_target(req.tags) {
         spec_out(spec_promise_res(400, None), s)
+    } else if s.promises.contains_key(req.id@) {
+        let seen = spec_project_promise(s.promises[req.id@], now);
+        spec_out(spec_promise_res(200, Some(spec_promise_record(req.id, seen))), s)
     } else {
-        match spec_delay(req.tags) {
-            Some(d) if d >= req.timeout_at || !spec_has_target(req.tags) => {
-                spec_out(spec_promise_res(400, None), s)
-            },
-            _ => {
-                if s.promises.contains_key(req.id@) {
-                    let seen = spec_project_promise(s.promises[req.id@], now);
-                    spec_out(spec_promise_res(200, Some(spec_promise_record(req.id, seen))), s)
-                } else {
-                    let (p, task) = spec_new_object(req.timeout_at, now, now, req.param, req.tags, spec_has_target(req.tags));
-                    let rec = spec_promise_record(req.id, p);
-                    let promises = s.promises.insert(req.id@, p);
-                    let tasks = match task {
-                        Some(t) => s.tasks.insert(req.id@, t),
-                        None => s.tasks,
-                    };
-                    spec_out(spec_promise_res(200, Some(rec)), StoreV { promises, tasks, ..s })
-                }
-            },
-        }
+        let (p, task) = spec_new_object(req.timeout_at, now, now, req.param, req.tags, spec_has_target(req.tags));
+        let rec = spec_promise_record(req.id, p);
+        let promises = s.promises.insert(req.id@, p);
+        let tasks = match task {
+            Some(t) => s.tasks.insert(req.id@, t),
+            None => s.tasks,
+        };
+        spec_out(spec_promise_res(200, Some(rec)), StoreV { promises, tasks, ..s })
     }
 }
 
@@ -460,7 +463,7 @@ pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time
 }
 
 pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if !spec_has_target(req.tags) || spec_is_timer(req.tags) || spec_delay(req.tags) is Some {
+    if !spec_has_target(req.tags) || spec_is_timer(req.tags) {
         spec_out(spec_claim_res(400, None, None), s)
     } else if s.promises.contains_key(req.id@) {
         let p = s.promises[req.id@];
@@ -478,16 +481,12 @@ pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq,
                     s,
                 ),
                 TaskState::Pending => {
-                    if stored.version >= MAX_VERSION as u64 {
-                        spec_out(spec_claim_res(409, None, None), s)
-                    } else {
-                        let u = spec_acquire(stored, stored.version + 1, pid@, ttl, now);
-                        let n = StoreV { tasks: s.tasks.insert(req.id@, u), ..s };
-                        spec_out(
-                            spec_claim_res(200, Some(spec_task_record(req.id, u)), Some(spec_promise_record(req.id, seen_p))),
-                            n,
-                        )
-                    }
+                    let u = spec_acquire(stored, sat_add(stored.version, 1), pid@, ttl, now);
+                    let n = StoreV { tasks: s.tasks.insert(req.id@, u), ..s };
+                    spec_out(
+                        spec_claim_res(200, Some(spec_task_record(req.id, u)), Some(spec_promise_record(req.id, seen_p))),
+                        n,
+                    )
                 },
                 _ => spec_out(spec_claim_res(409, None, None), s),
             }
@@ -614,23 +613,6 @@ pub open spec fn spec_wrap_fence(outs: Seq<OutV>, create: bool) -> Seq<OutV> {
     }
 }
 
-pub open spec fn spec_fence_detached(id: String, version: u64, c: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    let outs = spec_promise_create(c, s, now);
-    if outs.len() != 1 {
-        outs
-    } else {
-        let o = outs[0];
-        match o.resp {
-            Response::Promise(inner) => match spec_held(o.next, id@, version, now) {
-                SpecHeld::Ok(_) => seq![OutV { resp: spec_fence_res(200, Some(TaskFenceInnerRes::Create(inner))), ..o }],
-                SpecHeld::Missing => seq![OutV { resp: spec_fence_res(404, None), ..o }],
-                SpecHeld::Stale => seq![OutV { resp: spec_fence_res(409, None), ..o }],
-            },
-            _ => outs,
-        }
-    }
-}
-
 pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV> {
     let id = req.id;
     let target = match req.action {
@@ -645,7 +627,7 @@ pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV
                 spec_out(spec_fence_res(400, None), s)
             },
             TaskFenceAction::Create(c) if !same_origin_spec(c.id@, id@) => {
-                spec_fence_detached(id, req.version, c, s, now)
+                spec_out(spec_fence_res(400, None), s)
             },
             action => match spec_held(s, id@, req.version, now) {
                 SpecHeld::Missing => spec_out(spec_fence_res(404, None), s),
@@ -710,11 +692,7 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_has_colon(req.id@)
-        || !spec_has_target(req.promise_tags)
-        || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
-        || !spec_cron_valid(req.cron@)
-    {
+    if spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags) {
         spec_out(spec_schedule_res(400, None), s)
     } else if s.schedules.contains_key(req.id@) {
         spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
@@ -757,12 +735,10 @@ pub open spec fn spec_register_callback(awaited: String, awaiter: String, s: Sto
         let p = spec_project_promise(s.promises[awaited@], now);
         let w = spec_project_promise(s.promises[awaiter@], now);
         let res = spec_promise_res(200, Some(spec_promise_record(awaited, p)));
-        if !s.tasks.contains_key(awaiter@) || !spec_external(p) || p.state != PromiseState::Pending || w.state != PromiseState::Pending {
-            if !s.tasks.contains_key(awaiter@) || !spec_external(p) {
-                spec_out(spec_promise_res(422, None), s)
-            } else {
-                spec_out(res, s)
-            }
+        if !spec_has_target(w.tags) || !spec_external(p) {
+            spec_out(spec_promise_res(422, None), s)
+        } else if p.state != PromiseState::Pending || w.state != PromiseState::Pending {
+            spec_out(res, s)
         } else {
             let q = PromiseV { callbacks: p.callbacks.insert(awaiter@), ..p };
             spec_out(res, StoreV { promises: s.promises.insert(awaited@, q), ..s })
@@ -771,9 +747,7 @@ pub open spec fn spec_register_callback(awaited: String, awaiter: String, s: Sto
 }
 
 pub open spec fn spec_register_listener(awaited: String, address: String, s: StoreV, now: Time) -> Seq<OutV> {
-    if !spec_address_valid(address@) {
-        spec_out(spec_promise_res(400, None), s)
-    } else if !s.promises.contains_key(awaited@) {
+    if !s.promises.contains_key(awaited@) {
         spec_out(spec_promise_res(404, None), s)
     } else {
         let p = spec_project_promise(s.promises[awaited@], now);
@@ -798,10 +772,10 @@ pub open spec fn spec_task_acquire(id: String, version: u64, pid: String, ttl: T
         let t = s.tasks[id@];
         let p = spec_project_promise(s.promises[id@], now);
         let seen = spec_project_task(t, p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version || t.version >= MAX_VERSION as u64 {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
             spec_out(spec_claim_res(409, None, None), s)
         } else {
-            let u = spec_acquire(t, t.version + 1, pid@, ttl, now);
+            let u = spec_acquire(t, sat_add(t.version, 1), pid@, ttl, now);
             spec_out(
                 spec_claim_res(200, Some(spec_task_record(id, u)), Some(spec_promise_record(id, p))),
                 StoreV { tasks: s.tasks.insert(id@, u), ..s },

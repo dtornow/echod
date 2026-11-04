@@ -155,11 +155,10 @@ impl Footprint for ServerConfig {
 impl Partitioned for ServerConfig {
     type Group = String;
 
-    /// Ids of different origins never interact, except through a detached create
-    /// (`FenceTask` creating in another origin) and a schedule whose template
-    /// names another origin. Their footprints span origins and merge the
-    /// partitions; the checker splits them again once the candidates are
-    /// independent.
+    /// Ids of different origins never interact, except a schedule whose
+    /// template names another origin. That footprint spans origins and merges
+    /// the partitions; the checker splits them again once the candidates are
+    /// independent. A fence that names another origin is refused.
     fn group(&self, key: &Key) -> String {
         key.group()
     }

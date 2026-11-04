@@ -503,7 +503,7 @@ fn a_settled_listener_is_told() {
                     id: "a:1".into(),
                     timeout_at: 10_000,
                     param: Value::empty(),
-                    tags: Vec::new(),
+                    tags: vec![("resonate:external".into(), "true".into())],
                 }),
             )),
         },

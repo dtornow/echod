@@ -353,7 +353,7 @@ fn callback_layer() {
     let listen = |a: &str| Request::PromiseRegisterListener(PromiseRegisterListenerReq { awaited: "ex:awaited".into(), address: a.into() });
     t.step("listener http → 200", listen("http://localhost/cb"), st(200));
     t.step("listener poll://bad → 200", listen("poll://bad"), st(200));
-    t.step("listener not a url → 400", listen("not a url"), st(400));
+    t.step("listener not a url → 200", listen("not a url"), st(200));
 
     t.step("create root +target", create("ex:root", now + 100_000, "r").target().op(), st(200));
     t.step("acquire root → v1", acquire("ex:root", 0, "worker-1"), task(TaskState::Acquired, 1));
@@ -535,7 +535,7 @@ fn partitions_keep_independent_origins_apart() {
 }
 
 #[test]
-fn only_a_detached_create_crosses_origins() {
+fn a_fence_that_leaves_its_origin_is_refused() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     t.step("create a:t", create("a:t", FAR, "w").target().op(), st(200));
@@ -548,22 +548,10 @@ fn only_a_detached_create_crosses_origins() {
     t.step("fence-settle across origins → 400", fence("a:t", 1, TaskFenceAction::Settle(settle("b:p", "resolved", "v"))), st(400));
     t.step("callback across origins → 400", callback("b:p", "a:t"), st(400));
     t.step("suspend across origins → 400", suspend("a:t", 1, &["b:p"]), st(400));
-    assert_eq!((t.c.factors().len(), t.c.stats.merges), (3, 0));
-
-    // A detached workflow: a:t creates d:root. The two origins merge for the
-    // request and split again once it has returned.
-    t.step("detached create d:root", fence("a:t", 1, TaskFenceAction::Create(create("d:root", FAR, "w").target())), promise(PromiseState::Pending, None));
-    assert_eq!(t.c.stats.splits, 1);
-    assert_eq!(t.c.factors().len(), 4, "a, b, c and d, each on its own");
-    t.step("d:root is its own workflow", acquire("d:root", 0, "w2"), task(TaskState::Acquired, 1));
-
-    // Unanswered, the detached create keeps the two origins together until it is resolved.
-    let calls = t.next;
-    t.invoke(calls + 1, fence("a:t", 1, TaskFenceAction::Create(create("e:root", FAR, "w"))));
-    assert_eq!(t.c.factors().len(), 4, "a and e merged");
-    t.next += 1;
-    t.step("e:root exists, so the create landed", get("e:root"), promise(PromiseState::Pending, None));
-    assert_eq!(t.c.factors().len(), 4, "the unanswered fence still links a and e");
+    t.step("fence-create across origins → 400", fence("a:t", 1, TaskFenceAction::Create(create("d:root", FAR, "w").target())), st(400));
+    // The request names `d`, so that origin is its own factor. Nothing merged, and the promise was not created.
+    assert_eq!((t.c.factors().len(), t.c.stats.merges), (4, 0));
+    t.step("d:root was not created", get("d:root"), st(404));
 }
 
 /// A small deterministic generator, so the differential test needs no crates.
@@ -891,12 +879,13 @@ fn listeners_are_told_once_when_the_promise_settles() {
     t.step("listener 1 → 200", listen("http://l/1"), promise(PromiseState::Pending, None));
     t.step("listener 2 → 200", listen("poll://w"), promise(PromiseState::Pending, None));
     t.step("listener 1 again → 200", listen("http://l/1"), promise(PromiseState::Pending, None));
-    t.step("bad address → 400", listen("not a url"), st(400));
+    t.step("any address is kept", listen("not a url"), promise(PromiseState::Pending, None));
     t.step("create q (internal)", create("ex:q", FAR, "x").op(), st(200));
     t.step("listener on internal → 422", Request::PromiseRegisterListener(PromiseRegisterListenerReq { awaited: "ex:q".into(), address: "http://l/1".into() }), st(422));
     let Response::Promise(settled) = t.step("settle p", Request::PromiseSettle(settle("ex:p", "resolved", "v")), promise(PromiseState::Resolved, Some("v"))) else { panic!() };
     t.c.receive(unblock("http://l/1", &settled)).unwrap();
     t.c.receive(unblock("poll://w", &settled)).unwrap();
+    t.c.receive(unblock("not a url", &settled)).unwrap();
     assert!(t.c.receive(unblock("http://l/1", &settled)).is_err(), "told once");
     t.step("listener on a settled promise → 200", listen("http://l/late"), promise(PromiseState::Resolved, Some("v")));
     assert!(t.c.receive(unblock("http://l/late", &settled)).is_err(), "nothing to tell later");
@@ -961,9 +950,9 @@ fn schedules_fire_on_their_cron() {
     let now = 1_000_000; // 1000 s
     let mut t = Trace::new(now);
     let tags = flag_tags(true, false, false, None);
-    t.step("id with a colon → 400", schedule("ex:bad", "* * * * * *", "ex:x", 1_500, tags.clone(), now), st(400));
-    t.step("promises without a target → 400", schedule("bad", "* * * * * *", "ex:x", 1_500, plain(), now), st(400));
-    t.step("invalid cron → 400", schedule("bad", "bogus", "ex:x", 1_500, tags.clone(), now), st(400));
+    t.step("id with a colon is kept", schedule("ex:bad", "0 0 0 1 1 *", "ex:x", 1_500, tags.clone(), now), |r| sched(r).is_some());
+    t.step("promises without a target are kept", schedule("plain", "0 0 0 1 1 *", "ex:x", 1_500, plain(), now), |r| sched(r).is_some());
+    t.step("an unreadable cron is kept", schedule("bogus", "bogus", "ex:x", 1_500, tags.clone(), now), |r| sched(r).is_some_and(|c| c.next_run_at == now + 60_000));
     t.step("timer with target → 400", schedule("bad", "* * * * * *", "ex:x", 1_500, flag_tags(true, false, true, None), now), st(400));
     let every_second = schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 1_500, tags.clone(), now);
     let r = t.step("create s", every_second.clone(), |r| sched(r).is_some_and(|c| c.next_run_at == 1_001_000 && c.last_run_at.is_none()));
@@ -1054,15 +1043,15 @@ fn the_wire_rules_are_refusals() {
     let delayed = |id: &str, target: bool, delay: Time| {
         Request::PromiseCreate(PromiseCreateReq { id: id.into(), timeout_at: now + 1_000, param: val(None), tags: flag_tags(target, false, false, Some(delay)) })
     };
-    t.step("delay without a target → 400", delayed("ex:d1", false, now + 10), st(400));
-    t.step("delay at the deadline → 400", delayed("ex:d2", true, now + 1_000), st(400));
+    t.step("delay without a target → 200", delayed("ex:d1", false, now + 10), promise(PromiseState::Pending, None));
+    t.step("delay at the deadline → 200", delayed("ex:d2", true, now + 1_000), promise(PromiseState::Pending, None));
     t.step("delay before the deadline → 200", delayed("ex:d3", true, now + 999), promise(PromiseState::Pending, None));
     let tc = Request::TaskCreate(TaskCreateReq {
         pid: "w".into(),
         ttl: 10,
         action: PromiseCreateReq { id: "ex:t".into(), timeout_at: FAR, param: val(None), tags: flag_tags(true, false, false, Some(now + 1)) },
     });
-    t.step("task.create with a delay → 400", tc, st(400));
+    t.step("task.create with a delay → 200", tc, |r| matches!(r, Response::TaskClaim(c) if c.status == 200 && c.task.as_ref().is_some_and(|t| t.state == TaskState::Acquired)));
     t.step("create a:t +target", create("a:t", FAR, "w").target().op(), st(200));
     t.step("create b:t +target", create("b:t", FAR, "w").target().op(), st(200));
     t.step("acquire a:t", acquire("a:t", 0, "w"), st(200));
@@ -1076,24 +1065,25 @@ fn the_wire_rules_are_refusals() {
     t.step("heartbeat across origins → 400", hb(&["a:t", "b:t"]), st(400));
     t.step("heartbeat in one origin → 200", hb(&["a:t"]), st(200));
     // The fence's check runs before the action. A stale same-origin fence is 409.
-    // A detached create runs first; a missing task then answers 404.
+    // A create that names another origin is 400, and creates nothing.
     let bad = PromiseCreateReq { id: "a:d".into(), timeout_at: FAR, param: val(None), tags: flag_tags(false, false, false, Some(now)) };
     t.step("stale fence, delayed create without a target → 409", fence("a:t", 9, TaskFenceAction::Create(bad.clone())), st(409));
-    t.step("missing task, detached delayed create → 404", fence("a:ghost", 0, TaskFenceAction::Create(PromiseCreateReq { id: "d:d".into(), ..bad })), st(404));
+    t.step("a:d not created", get("a:d"), st(404));
+    t.step("create in another origin → 400", fence("a:ghost", 0, TaskFenceAction::Create(PromiseCreateReq { id: "d:d".into(), ..bad })), st(400));
     t.step("d:d not created", get("d:d"), st(404));
 }
 
 #[test]
-fn a_detached_create_lands_before_the_fence_is_checked() {
+fn a_fence_create_in_another_origin_is_refused() {
     let mut t = Trace::new(1_000_000);
     t.step("create a:t +target", create("a:t", FAR, "w").target().op(), st(200));
     t.step("acquire a:t → v1", acquire("a:t", 0, "w"), st(200));
-    t.step("stale detached create → 409", fence("a:t", 9, TaskFenceAction::Create(create("d:x", FAR, "x").target())), st(409));
-    t.step("d:x exists all the same", get("d:x"), promise(PromiseState::Pending, None));
-    t.c.receive(execute("d:x", 0)).unwrap();
-    t.step("detached create from a missing task → 404", fence("a:ghost", 0, TaskFenceAction::Create(create("d:y", FAR, "y"))), st(404));
-    t.step("d:y exists all the same", get("d:y"), promise(PromiseState::Pending, None));
-    t.step("detached create at the held version → 200", fence("a:t", 1, TaskFenceAction::Create(create("d:z", FAR, "z"))), promise(PromiseState::Pending, None));
+    t.step("stale create in another origin → 400", fence("a:t", 9, TaskFenceAction::Create(create("d:x", FAR, "x").target())), st(400));
+    t.step("d:x was not created", get("d:x"), st(404));
+    t.step("create in another origin from a missing task → 400", fence("a:ghost", 0, TaskFenceAction::Create(create("d:y", FAR, "y"))), st(400));
+    t.step("d:y was not created", get("d:y"), st(404));
+    t.step("create in another origin at the held version → 400", fence("a:t", 1, TaskFenceAction::Create(create("d:z", FAR, "z"))), st(400));
+    t.step("d:z was not created", get("d:z"), st(404));
     t.step("same-origin stale fence creates nothing", fence("a:t", 9, TaskFenceAction::Create(create("a:n", FAR, "n"))), st(409));
     t.step("a:n not created", get("a:n"), st(404));
 }

@@ -6,17 +6,19 @@
 use vstd::prelude::*;
 
 use echod_types::{
-    PromiseCreateReq, PromiseSettleReq, PromiseState, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq, TaskFenceInnerRes, TaskRef, TaskState, TaskSuspendReq, Value,
+    PromiseCreateReq, PromiseSettleReq, PromiseState, Response, Schedule, ScheduleCreateReq,
+    TaskFenceAction, TaskFenceCheckReq, TaskFenceInnerRes, TaskRef, TaskState, TaskSuspendReq,
+    Value,
 };
 
 use super::super::trusted::*;
-use super::super::view::MAX_VERSION;
-
 #[cfg(verus_keep_ghost)]
-use super::super::view::{StoreV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
+use super::super::view::{all_in_origin, distinct, group_views, sends, strs, works, StoreV, TaskV};
 
 use super::{
-    claim_res, contains, copy_store, delay_of, echo, fence_res, has_target, is_timer, mk, marked, new_object, next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out, Promise, ServerConfig, Store, Task, Time,
+    claim_res, contains, copy_store, echo, fence_res, has_target, is_timer, marked, mk, new_object,
+    next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out,
+    Promise, ServerConfig, Store, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -55,14 +57,6 @@ impl ServerConfig {
         broadcast use group_views;
         if is_timer(&req.tags) && has_target(&req.tags) {
             return status(promise_res(400, None), mk("create: timer with target (400)"), s);
-        }
-        if let Some(d) = delay_of(&req.tags) {
-            if d >= req.timeout_at {
-                return status(promise_res(400, None), mk("create: delay past the deadline (400)"), s);
-            }
-            if !has_target(&req.tags) {
-                return status(promise_res(400, None), mk("create: delay without a target (400)"), s);
-            }
         }
         match s.promises.get(&req.id) {
             Some(p) => {
@@ -116,7 +110,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         if !req.state.settable() {
@@ -150,7 +144,7 @@ impl ServerConfig {
     /// Acquired, own promise still pending as of `now`, version matches.
     /// `Ok` is the stored task, which agrees with its projection.
     fn held<'a>(&self, s: &'a Store, id: &Id, version: u64, now: Time) -> (r: Result<&'a Task, u16>)
-        
+
     {
         let t = match s.tasks.get(id) {
             Some(t) => t,
@@ -179,14 +173,11 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         if !has_target(&req.tags) || is_timer(&req.tags) {
             return status(claim_res(400, None, None), mk("task.create: not runnable, or a timer (400)"), s);
-        }
-        if delay_of(&req.tags).is_some() {
-            return status(claim_res(400, None, None), mk("task.create: action with a delay (400)"), s);
         }
         match s.promises.get(&req.id) {
             Some(p) => {
@@ -202,12 +193,9 @@ impl ServerConfig {
                 return match seen_t.state {
                     TaskState::Fulfilled => echo(claim_res(200, Some(seen_t.to_record(&req.id)), Some(seen_p.to_record(&req.id))), mk("task.create: task done (echo)"), s),
                     TaskState::Pending => {
-                        if stored_task.version >= MAX_VERSION as u64 {
-                            return status(claim_res(409, None, None), mk("task.create: version at its cap (409)"), s);
-                        }
                         let mut n = copy_store(s);
                         let mut u = copy(stored_task);
-                        u.acquire(stored_task.version + 1, pid.clone(), ttl, now);
+                        u.acquire(stored_task.version.saturating_add(1), pid.clone(), ttl, now);
                         let rec = claim_res(200, Some(u.to_record(&req.id)), Some(seen_p.to_record(&req.id)));
                         n.tasks.insert(req.id.clone(), u);
 
@@ -249,7 +237,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_suspend(&self, req: &TaskSuspendReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let id = &req.id;
@@ -321,7 +309,7 @@ impl ServerConfig {
                 Some(p) => {
                     assert(s@.promises[idv[i as int]] == p@);
                     if !p.external() {
-                        return status(status_res(422), mk("suspend: awaited not external (422)"), s);
+                        return status(status_res(422), mk("suspend: awaited not awaitable (422)"), s);
                     }
                     let ghost was = settled;
                     settled = settled || p.project(now).state != PromiseState::Pending;
@@ -387,7 +375,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let id = &req.id;
@@ -407,7 +395,7 @@ impl ServerConfig {
             },
             TaskFenceAction::Create(c) => {
                 if !same_origin(&c.id, id) {
-                    return self.task_fence_detached(id, version, c, s, now);
+                    return status(fence_res(400, None), mk("fence: create in another origin (400)"), s);
                 }
             },
         }
@@ -440,48 +428,8 @@ impl ServerConfig {
         outs
     }
 
-    /// A fence that creates a promise in another origin: a detached workflow.
-    /// The create goes first, as a request of its own in its origin; then the
-    /// fence's check on the task decides the answer. A stale fence still
-    /// leaves the promise created.
-    fn task_fence_detached(&self, id: &Id, version: u64, c: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
-    {
-        broadcast use group_views;
-        let mut outs = self.promise_create(c, true, s, now);
-
-        if outs.len() != 1 {
-            return outs;  // unreachable: a create has one outcome
-        }
-        let o = outs.pop().unwrap();
-        let ghost ov = o@;
-
-        let Out { resp, next, work, send, mut marks } = o;
-        assert(next@ == ov.next);
-        assert(works(work@) == ov.work);
-        assert(sends(send@) == ov.send);
-        let inner = match resp {
-            Response::Promise(p) => p,
-            other => return one(Out { resp: other, next, work, send, marks }),
-        };
-        match self.held(&next, id, version, now) {
-            Err(code) => {
-                marks.push(if code == 404 { mk("fence: detached create, no such task (404)") } else { mk("fence: detached create, not held (409)") });
-                let r = one(Out { resp: fence_res(code, None), next, work, send, marks });
-
-                r
-            },
-            Ok(_) => {
-                marks.push(mk("fence: detached create"));
-                let r = one(Out { resp: fence_res(200, Some(TaskFenceInnerRes::Create(inner))), next, work, send, marks });
-
-                r
-            },
-        }
-    }
-
     pub(crate) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let ghost rv = refs@.map_values(|r: TaskRef| r@);
@@ -552,20 +500,11 @@ impl ServerConfig {
     }
 
     pub(crate) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
-        if has_colon(&req.id) {
-            return status(schedule_res(400, None), mk("schedule: id with a colon (400)"), s);
-        }
-        if !has_target(&req.promise_tags) {
-            return status(schedule_res(400, None), mk("schedule: promises without a target (400)"), s);
-        }
         if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
-        }
-        if !cron_valid(&req.cron) {
-            return status(schedule_res(400, None), mk("schedule: invalid cron (400)"), s);
         }
         match s.schedules.get(&req.id) {
             Some(c) => return echo(schedule_res(200, Some(c.dup())), mk("schedule: id exists (echo)"), s),
@@ -591,7 +530,7 @@ impl ServerConfig {
         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) })
     }
 
-    /// `task.fence` with no action: the check alone, after a detached create.
+    /// `task.fence` with no action: the check alone.
     pub(crate) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>) {
         match self.held(s, &req.id, req.version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("fence: no such task (404)") } else { mk("fence: not held, or stale version (409)") }, s),
@@ -600,7 +539,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         if *awaited == *awaiter || !same_origin(awaited, awaiter) {
@@ -616,8 +555,8 @@ impl ServerConfig {
         };
         let p = stored.project(now);
         let w = stored_w.project(now);
-        if !s.tasks.contains_key(awaiter) || !p.external() {
-            return status(promise_res(422, None), mk("callback: awaiter no task, or awaited not external (422)"), s);
+        if !has_target(&w.tags) || !p.external() {
+            return status(promise_res(422, None), mk("callback: awaiter not runnable, or awaited not awaitable (422)"), s);
         }
         let res = promise_res(200, Some(p.to_record(awaited)));
         if p.state != PromiseState::Pending || w.state != PromiseState::Pending {
@@ -631,19 +570,16 @@ impl ServerConfig {
     }
 
     pub(crate) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
-        if !address_valid(address) {
-            return status(promise_res(400, None), mk("listener: bad address (400)"), s);
-        }
         let stored = match s.promises.get(awaited) {
             None => return status(promise_res(404, None), mk("listener: no such promise (404)"), s),
             Some(p) => p,
         };
         let p = stored.project(now);
         if !p.external() {
-            return status(promise_res(422, None), mk("listener: promise not external (422)"), s);
+            return status(promise_res(422, None), mk("listener: promise not awaitable (422)"), s);
         }
         let res = promise_res(200, Some(p.to_record(awaited)));
         if p.state != PromiseState::Pending {
@@ -657,7 +593,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -670,19 +606,19 @@ impl ServerConfig {
         };
         let p = stored_p.project(now);
         let seen = t.project(&p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version || t.version >= MAX_VERSION as u64 {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
             return status(claim_res(409, None, None), mk("acquire: not pending, or stale version (409)"), s);
         }
         let mut n = copy_store(s);
         let mut u = copy(t);
-        u.acquire(t.version + 1, pid.clone(), ttl, now);
+        u.acquire(t.version.saturating_add(1), pid.clone(), ttl, now);
         let rec = claim_res(200, Some(u.to_record(id)), Some(p.to_record(id)));
         n.tasks.insert(id.clone(), u);
         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) })
     }
 
     pub(crate) fn task_release(&self, id: &Id, version: u64, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         match self.held(s, id, version, now) {
@@ -698,7 +634,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         if !action.state.settable() {
@@ -718,7 +654,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_halt(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -743,7 +679,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_continue(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -766,7 +702,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn schedule_delete(&self, id: &Id, s: &Store) -> (outs: Vec<Out>)
-        
+
     {
         broadcast use group_views;
         match s.schedules.get(id) {

@@ -3,9 +3,8 @@
 //! of `resonatehq/resonate` (`spec/spec/02-abstract/{external,internal}.lean`),
 //! the whole of it: promises, callbacks, listeners, tasks with their leases,
 //! resumes and redispatch, halt and continue, and schedules. It began as a port
-//! of the C# specification, and keeps that spec's one
-//! liberty: a fence may create a promise in another origin (a detached
-//! workflow), which the Lean specification refuses.
+//! of the C# specification. A fence that names another origin is refused,
+//! as the Lean specification refuses it.
 //!
 //! How the Lean specification's shape becomes a checker model:
 //! - Time is the system's clock, `now`, which the checker keeps and passes to
@@ -29,16 +28,9 @@
 //!   already "maybe".
 //! - Clock and version arithmetic saturates instead of overflowing.
 //! - Not ported: the searches (501 in Lean), `preload`, and `task.poll`.
-//! - The reference server's wire rules, which the Lean specification leaves to
-//!   the protocol layer, are here too, as 400s: a delay needs a target and
-//!   ends before the deadline, a task.create's action carries no delay, a
-//!   schedule's id has no `:` and its promises a target, a heartbeat's tasks
-//!   share an origin.
-//!
-//! The detached create: a fence whose create targets another origin runs the
-//! create first, as a request of its own in that origin, and then the fence's
-//! check on the task. A stale fence still leaves the promise created, and
-//! answers its 409.
+//! - A heartbeat's tasks share an origin. A promise is awaitable unless it is
+//!   internal: a target, `resonate:scope=global`, `resonate:external=true`, or
+//!   a timer. A listener or a callback on one that is not is 422.
 //!
 //! What Verus checks here: no panics and no overflow anywhere, and the
 //! properties stated as `ensures` (see `promise_create`). What it trusts:
@@ -52,7 +44,10 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use echod_rover::Sched;
 
-use echod_types::{PromiseRecord, PromiseRes, PromiseState, Response, Schedule, ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value};
+use echod_types::{
+    PromiseRecord, PromiseRes, PromiseState, Response, Schedule, ScheduleRes, StatusRes, Tags,
+    TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value,
+};
 
 use super::trusted::*;
 
@@ -73,13 +68,19 @@ fn is_external_tag(tags: &Tags) -> bool {
     tag(tags, "resonate:external") == Some("true")
 }
 
+fn is_global(tags: &Tags) -> bool {
+    tag(tags, "resonate:scope") == Some("global")
+}
+
 /// `resonate:delay`, when it is a number of milliseconds.
 fn delay_of(tags: &Tags) -> Option<u64> {
     tag(tags, "resonate:delay").and_then(|d| d.parse().ok())
 }
 #[cfg(verus_keep_ghost)]
-use super::view::{Chars, DispatchV, InternalV, PromiseV, StoreV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
-
+use super::view::{
+    all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works, Chars, DispatchV,
+    InternalV, PromiseV, StoreV, TaskV,
+};
 
 mod external;
 mod internal;
@@ -109,10 +110,16 @@ impl Promise {
     /// Awaitable: Lean's `otype.awaitable`, everything but an internal promise.
     pub fn external(&self) -> (r: bool)
         ensures
-            r == (has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)),
+            r == (has_target(&self.tags)
+                || is_global(&self.tags)
+                || is_external_tag(&self.tags)
+                || is_timer(&self.tags)),
 
     {
-        has_target(&self.tags) || is_external_tag(&self.tags) || is_timer(&self.tags)
+        has_target(&self.tags)
+            || is_global(&self.tags)
+            || is_external_tag(&self.tags)
+            || is_timer(&self.tags)
     }
 
     /// The promise as a read at `now` sees it. A pending promise past its
@@ -164,7 +171,7 @@ pub struct Task {
 
 impl Task {
     fn fulfill(&mut self)
-        
+
     {
         self.state = TaskState::Fulfilled;
         self.pid = None;
@@ -178,7 +185,7 @@ impl Task {
     }
 
     fn acquire(&mut self, version: u64, pid: String, ttl: Time, now: Time)
-        
+
     {
         self.state = TaskState::Acquired;
         self.version = version;
@@ -194,7 +201,7 @@ impl Task {
 
     /// Lean's `unlease`: `state`, no lease, next offer at `retry`.
     fn unlease(&mut self, state: TaskState, retry: Option<Time>)
-        
+
     {
         self.state = state;
         self.pid = None;
@@ -204,7 +211,7 @@ impl Task {
     }
 
     pub fn lease_timeout_at(&self) -> (r: Time)
-        
+
     {
         match self.ttl {
             Some(ttl) => self.acquired_at.saturating_add(ttl),
@@ -427,7 +434,7 @@ pub(crate) fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>
 
 /// Settles `id` and fulfills its task, if any.
 fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
-    
+
 {
     broadcast use group_views;
     let ghost s0 = *s;

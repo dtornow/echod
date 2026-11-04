@@ -16,14 +16,14 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::ProcessEvent;
 use echod_rover::Time;
 
+#[cfg(verus_keep_ghost)]
+use echod_types::{origin, same_origin_spec};
 use echod_types::{
     PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseRes, PromiseSettleReq,
     PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, Tags,
     TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceReq, TaskFenceRes, TaskGetRes,
     TaskRecord, TaskRef, TaskState, Value,
 };
-#[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec};
 
 use crate::plane::{CachedV, FlightV, JobV, NoteV, PendingV, PlaneV};
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
@@ -950,6 +950,13 @@ pub open spec fn spec_targeted(tags: Tags) -> bool {
     spec_tag_key(tags, seq!['r','e','s','o','n','a','t','e',':','t','a','r','g','e','t'], 0)
 }
 
+pub open spec fn spec_awaitable(tags: Tags) -> bool {
+    spec_targeted(tags)
+        || spec_timer(tags)
+        || spec_tag_is(tags, seq!['r','e','s','o','n','a','t','e',':','e','x','t','e','r','n','a','l'], seq!['t','r','u','e'], 0)
+        || spec_tag_is(tags, seq!['r','e','s','o','n','a','t','e',':','s','c','o','p','e'], seq!['g','l','o','b','a','l'], 0)
+}
+
 pub open spec fn spec_tag_is(tags: Tags, key: Seq<char>, value: Seq<char>, i: int) -> bool
     decreases tags@.len() - i,
 {
@@ -1008,7 +1015,7 @@ pub open spec fn spec_promise_get(doc: DocV, id: String, now: Time) -> (DocV, Re
         (doc, spec_promise_res(404, None))
     } else {
         let obj = spec_project_obj(map[id@], now);
-        (spec_with_origin(doc, map.insert(id@, obj)), spec_promise_res(200, Some(spec_record(id, obj.promise))))
+        (doc, spec_promise_res(200, Some(spec_record(id, obj.promise))))
     }
 }
 
@@ -1048,7 +1055,7 @@ pub open spec fn spec_promise_create(doc: DocV, req: PromiseCreateReq, now: Time
         let map = spec_origin_map(doc);
         if map.contains_key(req.id@) {
             let obj = spec_project_obj(map[req.id@], now);
-            (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+            (doc, spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
         } else {
             let obj = spec_new_obj(req.timeout_at, now, req.param, req.tags, spec_targeted(req.tags));
             (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
@@ -1065,18 +1072,18 @@ pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time
         if !map.contains_key(req.id@) {
             (doc, spec_promise_res(404, None))
         } else {
-            let mut_obj = spec_project_obj(map[req.id@], now);
-            let obj = if mut_obj.promise.state == PromiseState::Pending {
-                let promise = PromV { state: req.state, value: req.value, settled_at: Some(now), ..mut_obj.promise };
-                let task = match mut_obj.task {
+            let seen = spec_project_obj(map[req.id@], now);
+            if seen.promise.state != PromiseState::Pending {
+                (doc, spec_promise_res(200, Some(spec_record(req.id, seen.promise))))
+            } else {
+                let promise = PromV { state: req.state, value: req.value, settled_at: Some(now), ..seen.promise };
+                let task = match seen.task {
                     Some(t) if t.state != TaskState::Fulfilled => Some(spec_fulfill_task(t)),
                     other => other,
                 };
-                ObjV { promise, task }
-            } else {
-                mut_obj
-            };
-            (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+                let obj = ObjV { promise, task };
+                (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+            }
         }
     }
 }
@@ -1094,21 +1101,21 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
         } else {
             let awaited_obj = spec_project_obj(map[awaited@], now);
             let awaiter_obj = spec_project_obj(map[awaiter@], now);
-            if !spec_targeted(awaiter_obj.promise.tags) {
-                let map = map.insert(awaited@, awaited_obj).insert(awaiter@, awaiter_obj);
-                (spec_with_origin(doc, map), spec_promise_res(422, Some(spec_record(awaited, awaited_obj.promise))))
+            if !spec_targeted(awaiter_obj.promise.tags) || !spec_awaitable(awaited_obj.promise.tags) {
+                (doc, spec_promise_res(422, None))
             } else {
-                let callbacks = if awaited_obj.promise.state == PromiseState::Pending
-                    && awaiter_obj.promise.state == PromiseState::Pending
-                    && !awaited_obj.promise.callbacks.contains(awaiter@)
-                {
-                    awaited_obj.promise.callbacks.push(awaiter@)
+                let res = spec_promise_res(200, Some(spec_record(awaited, awaited_obj.promise)));
+                if awaited_obj.promise.state == PromiseState::Pending && awaiter_obj.promise.state == PromiseState::Pending {
+                    let callbacks = if awaited_obj.promise.callbacks.contains(awaiter@) {
+                        awaited_obj.promise.callbacks
+                    } else {
+                        awaited_obj.promise.callbacks.push(awaiter@)
+                    };
+                    let awaited_obj = ObjV { promise: PromV { callbacks, ..awaited_obj.promise }, ..awaited_obj };
+                    (spec_with_origin(doc, map.insert(awaited@, awaited_obj)), res)
                 } else {
-                    awaited_obj.promise.callbacks
-                };
-                let awaited_obj = ObjV { promise: PromV { callbacks, ..awaited_obj.promise }, ..awaited_obj };
-                let map = map.insert(awaited@, awaited_obj).insert(awaiter@, awaiter_obj);
-                (spec_with_origin(doc, map), spec_promise_res(200, Some(spec_record(awaited, awaited_obj.promise))))
+                    (doc, res)
+                }
             }
         }
     }
@@ -1121,13 +1128,22 @@ pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: Str
         (doc, spec_promise_res(404, None))
     } else {
         let obj = spec_project_obj(map[awaited@], now);
-        let listeners = if obj.promise.state == PromiseState::Pending && !obj.promise.listeners.contains(address@) {
-            obj.promise.listeners.push(address@)
+        if !spec_awaitable(obj.promise.tags) {
+            (doc, spec_promise_res(422, None))
         } else {
-            obj.promise.listeners
-        };
-        let obj = ObjV { promise: PromV { listeners, ..obj.promise }, ..obj };
-        (spec_with_origin(doc, map.insert(awaited@, obj)), spec_promise_res(200, Some(spec_record(awaited, obj.promise))))
+            let res = spec_promise_res(200, Some(spec_record(awaited, obj.promise)));
+            if obj.promise.state == PromiseState::Pending {
+                let listeners = if obj.promise.listeners.contains(address@) {
+                    obj.promise.listeners
+                } else {
+                    obj.promise.listeners.push(address@)
+                };
+                let obj = ObjV { promise: PromV { listeners, ..obj.promise }, ..obj };
+                (spec_with_origin(doc, map.insert(awaited@, obj)), res)
+            } else {
+                (doc, res)
+            }
+        }
     }
 }
 
@@ -1139,8 +1155,8 @@ pub open spec fn spec_task_get(doc: DocV, id: String, now: Time) -> (DocV, Respo
     } else {
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
-            None => (spec_with_origin(doc, map.insert(id@, obj)), Response::TaskGet(TaskGetRes { status: 404, task: None })),
-            Some(t) => (spec_with_origin(doc, map.insert(id@, obj)), Response::TaskGet(TaskGetRes { status: 200, task: Some(spec_task_record(id, t)) })),
+            None => (doc, Response::TaskGet(TaskGetRes { status: 404, task: None })),
+            Some(t) => (doc, Response::TaskGet(TaskGetRes { status: 200, task: Some(spec_task_record(id, t)) })),
         }
     }
 }
@@ -1172,29 +1188,34 @@ pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: Prom
                 if !map.contains_key(action.id@) {
                     (doc, Response::TaskClaim(TaskClaimRes { status: 422, task: None, promise: None }))
                 } else {
-                    match map[action.id@].task {
-                        None => (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None })),
-                        Some(t) if t.state == TaskState::Fulfilled => (
-                            doc,
-                            Response::TaskClaim(TaskClaimRes {
-                                status: 200,
-                                task: Some(spec_task_record(action.id, t)),
-                                promise: Some(spec_record(action.id, map[action.id@].promise)),
-                            }),
-                        ),
-                        Some(t) if t.state == TaskState::Pending => {
-                            let u = spec_acquire(t, pid@, ttl, now);
-                            let obj = ObjV { task: Some(u), ..map[action.id@] };
-                            (
-                                spec_with_origin(doc, map.insert(action.id@, obj)),
+                    let seen = spec_project_obj(map[action.id@], now);
+                    if !spec_targeted(seen.promise.tags) {
+                        (doc, Response::TaskClaim(TaskClaimRes { status: 422, task: None, promise: None }))
+                    } else {
+                        match seen.task {
+                            None => (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None })),
+                            Some(t) if t.state == TaskState::Fulfilled => (
+                                doc,
                                 Response::TaskClaim(TaskClaimRes {
                                     status: 200,
-                                    task: Some(spec_task_record(action.id, u)),
-                                    promise: Some(spec_record(action.id, obj.promise)),
+                                    task: Some(spec_task_record(action.id, t)),
+                                    promise: Some(spec_record(action.id, seen.promise)),
                                 }),
-                            )
-                        },
-                        _ => (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None })),
+                            ),
+                            Some(t) if t.state == TaskState::Pending => {
+                                let u = spec_acquire(t, pid@, ttl, now);
+                                let obj = ObjV { task: Some(u), ..seen };
+                                (
+                                    spec_with_origin(doc, map.insert(action.id@, obj)),
+                                    Response::TaskClaim(TaskClaimRes {
+                                        status: 200,
+                                        task: Some(spec_task_record(action.id, u)),
+                                        promise: Some(spec_record(action.id, obj.promise)),
+                                    }),
+                                )
+                            },
+                            _ => (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None })),
+                        }
                     }
                 }
             },
@@ -1209,7 +1230,6 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
         (map, Held::Missing)
     } else {
         let obj = spec_project_obj(map[id], now);
-        let map = map.insert(id, obj);
         match obj.task {
             None => (map, Held::Missing),
             Some(t) if t.state == TaskState::Acquired && t.version == version && obj.promise.state == PromiseState::Pending => (map, Held::Ok(obj)),
@@ -1226,9 +1246,9 @@ pub open spec fn spec_task_acquire(doc: DocV, id: String, version: u64, pid: Str
     } else {
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
-            None => (spec_with_origin(doc, map.insert(id@, obj)), Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
+            None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
             Some(t) if t.state != TaskState::Pending || t.version != version || obj.promise.state != PromiseState::Pending => {
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
+                (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
             },
             Some(t) => {
                 let u = spec_acquire(t, pid@, ttl, now);
@@ -1288,9 +1308,9 @@ pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Resp
     } else {
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
-            None => (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 404 })),
-            Some(t) if t.state == TaskState::Fulfilled => (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 409 })),
-            Some(t) if t.state == TaskState::Halted => (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 })),
+            None => (doc, Response::Status(StatusRes { status: 404 })),
+            Some(t) if t.state == TaskState::Fulfilled => (doc, Response::Status(StatusRes { status: 409 })),
+            Some(t) if t.state == TaskState::Halted => (doc, Response::Status(StatusRes { status: 200 })),
             Some(t) => {
                 let obj = ObjV { task: Some(spec_unlease(t, TaskState::Halted, None)), ..obj };
                 (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
@@ -1307,9 +1327,9 @@ pub open spec fn spec_task_continue(doc: DocV, id: String, now: Time) -> (DocV, 
     } else {
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
-            None => (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 404 })),
+            None => (doc, Response::Status(StatusRes { status: 404 })),
             Some(t) if t.state != TaskState::Halted || obj.promise.state != PromiseState::Pending => {
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 409 }))
+                (doc, Response::Status(StatusRes { status: 409 }))
             },
             Some(t) => {
                 let obj = ObjV { task: Some(TkV { state: TaskState::Pending, retry_timeout_at: Some(now), ..t }), ..obj };
@@ -1345,15 +1365,15 @@ pub open spec fn spec_extend(map: Map<Seq<char>, ObjV>, pid: Seq<char>, tasks: S
         spec_extend(map, pid, tasks, now, i + 1)
     } else {
         let obj = spec_project_obj(map[tasks[i].id@], now);
-        let obj = match obj.task {
+        match obj.task {
             Some(t) if t.state == TaskState::Acquired && t.version == tasks[i].version && t.pid == Some(pid) => {
                 let ttl = match t.ttl { Some(n) => n, None => 0 };
                 let at = spec_sat_add(now, ttl);
-                ObjV { task: Some(TkV { lease_timeout_at: Some(at), ..t }), ..obj }
+                let obj = ObjV { task: Some(TkV { lease_timeout_at: Some(at), ..t }), ..obj };
+                spec_extend(map.insert(tasks[i].id@, obj), pid, tasks, now, i + 1)
             },
-            _ => obj,
-        };
-        spec_extend(map.insert(tasks[i].id@, obj), pid, tasks, now, i + 1)
+            _ => spec_extend(map, pid, tasks, now, i + 1),
+        }
     }
 }
 
@@ -1366,9 +1386,9 @@ pub open spec fn spec_suspend(doc: DocV, id: String, version: u64, actions: Seq<
             Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
             Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
             Held::Ok(obj) => {
-                if spec_missing_awaited(map, actions, 0) {
+                if spec_missing_awaited(map, actions, 0) || spec_unawaitable(map, actions, 0) {
                     (spec_with_origin(doc, map), Response::Status(StatusRes { status: 422 }))
-                } else if spec_any_settled(map, actions, 0) {
+                } else if spec_any_settled(map, actions, now, 0) {
                     let task = match obj.task { Some(t) => Some(TkV { resumes: Seq::empty(), ..t }), None => None };
                     (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 300 }))
                 } else {
@@ -1413,13 +1433,23 @@ pub open spec fn spec_missing_awaited(map: Map<Seq<char>, ObjV>, actions: Seq<Pr
     else { !map.contains_key(actions[i].awaited@) || spec_missing_awaited(map, actions, i + 1) }
 }
 
-pub open spec fn spec_any_settled(map: Map<Seq<char>, ObjV>, actions: Seq<PromiseRegisterCallbackReq>, i: int) -> bool
+pub open spec fn spec_unawaitable(map: Map<Seq<char>, ObjV>, actions: Seq<PromiseRegisterCallbackReq>, i: int) -> bool
     decreases actions.len() - i,
 {
     if i < 0 || i >= actions.len() { false }
     else {
-        (map.contains_key(actions[i].awaited@) && map[actions[i].awaited@].promise.state != PromiseState::Pending)
-            || spec_any_settled(map, actions, i + 1)
+        (map.contains_key(actions[i].awaited@) && !spec_awaitable(map[actions[i].awaited@].promise.tags))
+            || spec_unawaitable(map, actions, i + 1)
+    }
+}
+
+pub open spec fn spec_any_settled(map: Map<Seq<char>, ObjV>, actions: Seq<PromiseRegisterCallbackReq>, now: Time, i: int) -> bool
+    decreases actions.len() - i,
+{
+    if i < 0 || i >= actions.len() { false }
+    else {
+        (map.contains_key(actions[i].awaited@) && spec_project_obj(map[actions[i].awaited@], now).promise.state != PromiseState::Pending)
+            || spec_any_settled(map, actions, now, i + 1)
     }
 }
 

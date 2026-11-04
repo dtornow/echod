@@ -119,13 +119,23 @@ pub enum Outbound {
     /// A pending task is offered again.
     Execute { id: String, version: u64 },
     /// A listener's promise has settled.
-    Unblock { address: String, promise: PromiseRecord },
+    Unblock {
+        address: String,
+        promise: PromiseRecord,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    ToStore { op: u64, call: StoreCall },
-    Reply { client: String, id: u64, response: Response },
+    ToStore {
+        op: u64,
+        call: StoreCall,
+    },
+    Reply {
+        client: String,
+        id: u64,
+        response: Response,
+    },
     Notify(Outbound),
 }
 
@@ -237,7 +247,13 @@ impl Plane {
         op
     }
 
-    fn begin(&mut self, key: String, job: Job, now: u64, caller: Option<(String, u64)>) -> Vec<Act> {
+    fn begin(
+        &mut self,
+        key: String,
+        job: Job,
+        now: u64,
+        caller: Option<(String, u64)>,
+    ) -> Vec<Act> {
         if let Some(cached) = self.cache.get(&key).cloned() {
             let flight = Flight {
                 op: 0,
@@ -338,10 +354,7 @@ impl Plane {
     fn committed(&mut self, _now: u64, flight: Flight, tag: Etag) -> Vec<Act> {
         self.flight = None;
         let Flight {
-            key,
-            decided,
-            born,
-            ..
+            key, decided, born, ..
         } = &flight;
         if let Some(doc) = decided.clone() {
             self.remember(key, doc, Some(tag));
@@ -361,7 +374,10 @@ impl Plane {
     }
 
     pub fn pending_ids(&self) -> Vec<String> {
-        self.pending.iter().map(|item| item.promise.clone()).collect()
+        self.pending
+            .iter()
+            .map(|item| item.promise.clone())
+            .collect()
     }
 
     fn pending_items(&self) -> Vec<Pending> {
@@ -429,7 +445,11 @@ impl Plane {
 fn sent(flight: &Flight) -> Vec<Act> {
     let mut acts = Vec::new();
     if let Some((client, id, response)) = flight.reply.clone() {
-        acts.push(Act::Reply { client, id, response });
+        acts.push(Act::Reply {
+            client,
+            id,
+            response,
+        });
     }
     for note in &flight.notify {
         acts.push(Act::Notify(note.clone()));
@@ -592,7 +612,11 @@ fn handle(doc: Doc, request: &Request, now: u64) -> (Doc, Response) {
 }
 
 fn promise_get(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
-    let Some(obj) = origin_mut(&mut doc).get_mut(id) else {
+    let Some(seen) = origin_mut(&mut doc)
+        .get(id)
+        .cloned()
+        .map(|obj| obj.project(now))
+    else {
         return (
             doc,
             Response::Promise(PromiseRes {
@@ -601,8 +625,7 @@ fn promise_get(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
             }),
         );
     };
-    obj.project_in_place(now);
-    let rec = obj.promise.record(id);
+    let rec = seen.promise.record(id);
     (
         doc,
         Response::Promise(PromiseRes {
@@ -622,10 +645,9 @@ fn promise_create(mut doc: Doc, req: &PromiseCreateReq, now: u64) -> (Doc, Respo
             }),
         );
     }
-    if origin_mut(&mut doc).contains_key(&req.id) {
-        let obj = origin_mut(&mut doc).get_mut(&req.id).unwrap();
-        obj.project_in_place(now);
-        let rec = obj.promise.record(&req.id);
+    if let Some(stored) = origin_mut(&mut doc).get(&req.id).cloned() {
+        let seen = stored.project(now);
+        let rec = seen.promise.record(&req.id);
         return (
             doc,
             Response::Promise(PromiseRes {
@@ -663,8 +685,7 @@ fn promise_settle(mut doc: Doc, req: &PromiseSettleReq, now: u64) -> (Doc, Respo
             }),
         );
     }
-    let map = origin_mut(&mut doc);
-    let Some(obj) = map.get_mut(&req.id) else {
+    let Some(stored) = origin_mut(&mut doc).get(&req.id).cloned() else {
         return (
             doc,
             Response::Promise(PromiseRes {
@@ -673,14 +694,15 @@ fn promise_settle(mut doc: Doc, req: &PromiseSettleReq, now: u64) -> (Doc, Respo
             }),
         );
     };
-    obj.project_in_place(now);
-    if obj.promise.state == PromiseState::Pending {
-        obj.promise.state = req.state;
-        obj.promise.value = req.value.clone();
-        obj.promise.settled_at = Some(now);
-        obj.fulfill_task();
+    let mut seen = stored.project(now);
+    if seen.promise.state == PromiseState::Pending {
+        seen.promise.state = req.state;
+        seen.promise.value = req.value.clone();
+        seen.promise.settled_at = Some(now);
+        seen.fulfill_task();
+        origin_mut(&mut doc).insert(req.id.clone(), seen.clone());
     }
-    let rec = obj.promise.record(&req.id);
+    let rec = seen.promise.record(&req.id);
     (
         doc,
         Response::Promise(PromiseRes {
@@ -717,27 +739,24 @@ fn register_callback(mut doc: Doc, awaited: &str, awaiter: &str, now: u64) -> (D
     };
     awaited_obj.project_in_place(now);
     awaiter_obj.project_in_place(now);
-    if !targeted(&awaiter_obj.promise.tags) {
-        let rec = awaited_obj.promise.record(awaited);
-        map.insert(awaited_s, awaited_obj);
-        map.insert(awaiter_s, awaiter_obj);
+    if !targeted(&awaiter_obj.promise.tags) || !awaitable(&awaited_obj.promise.tags) {
         return (
             doc,
             Response::Promise(PromiseRes {
                 status: 422,
-                promise: Some(rec),
+                promise: None,
             }),
         );
     }
+    let rec = awaited_obj.promise.record(awaited);
     if awaited_obj.promise.state == PromiseState::Pending
         && awaiter_obj.promise.state == PromiseState::Pending
-        && !awaited_obj.promise.callbacks.contains(&awaiter_s)
     {
-        awaited_obj.promise.callbacks.push(awaiter_s.clone());
+        if !awaited_obj.promise.callbacks.contains(&awaiter_s) {
+            awaited_obj.promise.callbacks.push(awaiter_s.clone());
+        }
+        map.insert(awaited_s, awaited_obj);
     }
-    let rec = awaited_obj.promise.record(awaited);
-    map.insert(awaited_s, awaited_obj);
-    map.insert(awaiter_s, awaiter_obj);
     (
         doc,
         Response::Promise(PromiseRes {
@@ -748,8 +767,7 @@ fn register_callback(mut doc: Doc, awaited: &str, awaiter: &str, now: u64) -> (D
 }
 
 fn register_listener(mut doc: Doc, awaited: &str, address: &str, now: u64) -> (Doc, Response) {
-    let map = origin_mut(&mut doc);
-    let Some(obj) = map.get_mut(awaited) else {
+    let Some(stored) = origin_mut(&mut doc).get(awaited).cloned() else {
         return (
             doc,
             Response::Promise(PromiseRes {
@@ -758,13 +776,23 @@ fn register_listener(mut doc: Doc, awaited: &str, address: &str, now: u64) -> (D
             }),
         );
     };
-    obj.project_in_place(now);
-    if obj.promise.state == PromiseState::Pending
-        && !obj.promise.listeners.iter().any(|a| a == address)
-    {
-        obj.promise.listeners.push(address.to_string());
+    let mut seen = stored.project(now);
+    if !awaitable(&seen.promise.tags) {
+        return (
+            doc,
+            Response::Promise(PromiseRes {
+                status: 422,
+                promise: None,
+            }),
+        );
     }
-    let rec = obj.promise.record(awaited);
+    let rec = seen.promise.record(awaited);
+    if seen.promise.state == PromiseState::Pending {
+        if !seen.promise.listeners.iter().any(|a| a == address) {
+            seen.promise.listeners.push(address.to_string());
+        }
+        origin_mut(&mut doc).insert(awaited.to_string(), seen);
+    }
     (
         doc,
         Response::Promise(PromiseRes {
@@ -775,7 +803,11 @@ fn register_listener(mut doc: Doc, awaited: &str, address: &str, now: u64) -> (D
 }
 
 fn task_get(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
-    let Some(obj) = origin_mut(&mut doc).get_mut(id) else {
+    let Some(seen) = origin_mut(&mut doc)
+        .get(id)
+        .cloned()
+        .map(|obj| obj.project(now))
+    else {
         return (
             doc,
             Response::TaskGet(TaskGetRes {
@@ -784,8 +816,7 @@ fn task_get(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
             }),
         );
     };
-    obj.project_in_place(now);
-    let Some(task) = obj.task.clone() else {
+    let Some(task) = seen.task else {
         return (
             doc,
             Response::TaskGet(TaskGetRes {
@@ -831,8 +862,7 @@ fn task_create(
             }),
         );
     }
-    let map = origin_mut(&mut doc);
-    let Some(obj) = map.get_mut(&action.id) else {
+    let Some(stored) = origin_mut(&mut doc).get(&action.id).cloned() else {
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
@@ -842,7 +872,18 @@ fn task_create(
             }),
         );
     };
-    let Some(task) = obj.task.as_mut() else {
+    let mut seen = stored.project(now);
+    if !targeted(&seen.promise.tags) {
+        return (
+            doc,
+            Response::TaskClaim(TaskClaimRes {
+                status: 422,
+                task: None,
+                promise: None,
+            }),
+        );
+    }
+    let Some(task) = seen.task.clone() else {
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
@@ -853,21 +894,20 @@ fn task_create(
         );
     };
     if task.state == TaskState::Fulfilled {
-        let rec = task.record(&action.id);
-        let promise = obj.promise.record(&action.id);
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
                 status: 200,
-                task: Some(rec),
-                promise: Some(promise),
+                task: Some(task.record(&action.id)),
+                promise: Some(seen.promise.record(&action.id)),
             }),
         );
     }
     if task.state == TaskState::Pending {
-        task.acquire(pid, ttl, now);
-        let rec = task.record(&action.id);
-        let promise = obj.promise.record(&action.id);
+        seen.task.as_mut().unwrap().acquire(pid, ttl, now);
+        let rec = seen.task.as_ref().unwrap().record(&action.id);
+        let promise = seen.promise.record(&action.id);
+        origin_mut(&mut doc).insert(action.id.clone(), seen);
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
@@ -895,8 +935,7 @@ fn task_acquire(
     ttl: u64,
     now: u64,
 ) -> (Doc, Response) {
-    let map = origin_mut(&mut doc);
-    let Some(obj) = map.get_mut(id) else {
+    let Some(stored) = origin_mut(&mut doc).get(id).cloned() else {
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
@@ -906,8 +945,8 @@ fn task_acquire(
             }),
         );
     };
-    obj.project_in_place(now);
-    let Some(task) = obj.task.as_mut() else {
+    let mut seen = stored.project(now);
+    let Some(task) = seen.task.clone() else {
         return (
             doc,
             Response::TaskClaim(TaskClaimRes {
@@ -919,7 +958,7 @@ fn task_acquire(
     };
     if task.state != TaskState::Pending
         || task.version != version
-        || obj.promise.state != PromiseState::Pending
+        || seen.promise.state != PromiseState::Pending
     {
         return (
             doc,
@@ -930,9 +969,10 @@ fn task_acquire(
             }),
         );
     }
-    task.acquire(pid, ttl, now);
-    let rec = task.record(id);
-    let promise = obj.promise.record(id);
+    seen.task.as_mut().unwrap().acquire(pid, ttl, now);
+    let rec = seen.task.as_ref().unwrap().record(id);
+    let promise = seen.promise.record(id);
+    origin_mut(&mut doc).insert(id.to_string(), seen);
     (
         doc,
         Response::TaskClaim(TaskClaimRes {
@@ -947,13 +987,13 @@ fn task_release(mut doc: Doc, id: &str, version: u64, now: u64) -> (Doc, Respons
     match held(origin_mut(&mut doc), id, version, now) {
         Err(code) => (doc, Response::Status(StatusRes { status: code })),
         Ok(()) => {
-            origin_mut(&mut doc)
-                .get_mut(id)
-                .unwrap()
-                .task
+            let mut obj = origin_mut(&mut doc).get(id).unwrap().clone();
+            obj.project_in_place(now);
+            obj.task
                 .as_mut()
                 .unwrap()
                 .unlease(TaskState::Pending, Some(now));
+            origin_mut(&mut doc).insert(id.to_string(), obj);
             (doc, Response::Status(StatusRes { status: 200 }))
         }
     }
@@ -1002,36 +1042,46 @@ fn task_fulfill(
 }
 
 fn task_halt(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
-    let Some(obj) = origin_mut(&mut doc).get_mut(id) else {
+    let Some(stored) = origin_mut(&mut doc).get(id).cloned() else {
         return (doc, Response::Status(StatusRes { status: 404 }));
     };
-    obj.project_in_place(now);
-    let Some(task) = obj.task.as_mut() else {
+    let mut seen = stored.project(now);
+    let Some(task) = seen.task.clone() else {
         return (doc, Response::Status(StatusRes { status: 404 }));
     };
     match task.state {
         TaskState::Fulfilled => (doc, Response::Status(StatusRes { status: 409 })),
         TaskState::Halted => (doc, Response::Status(StatusRes { status: 200 })),
         _ => {
-            task.unlease(TaskState::Halted, None);
+            seen.task.as_mut().unwrap().unlease(TaskState::Halted, None);
+            origin_mut(&mut doc).insert(id.to_string(), seen);
             (doc, Response::Status(StatusRes { status: 200 }))
         }
     }
 }
 
 fn task_continue(mut doc: Doc, id: &str, now: u64) -> (Doc, Response) {
-    let Some(obj) = origin_mut(&mut doc).get_mut(id) else {
+    let Some(stored) = origin_mut(&mut doc).get(id).cloned() else {
         return (doc, Response::Status(StatusRes { status: 404 }));
     };
-    obj.project_in_place(now);
-    let Some(task) = obj.task.as_mut() else {
-        return (doc, Response::Status(StatusRes { status: 404 }));
+    let mut seen = stored.project(now);
+    let continues = match seen.task.as_ref() {
+        None => {
+            return (doc, Response::Status(StatusRes { status: 404 }));
+        }
+        Some(task) => {
+            task.state == TaskState::Halted && seen.promise.state == PromiseState::Pending
+        }
     };
-    if task.state != TaskState::Halted || obj.promise.state != PromiseState::Pending {
+    if !continues {
         return (doc, Response::Status(StatusRes { status: 409 }));
     }
-    task.state = TaskState::Pending;
-    task.retry_timeout_at = Some(now);
+    {
+        let task = seen.task.as_mut().unwrap();
+        task.state = TaskState::Pending;
+        task.retry_timeout_at = Some(now);
+    }
+    origin_mut(&mut doc).insert(id.to_string(), seen);
     (doc, Response::Status(StatusRes { status: 200 }))
 }
 
@@ -1045,16 +1095,17 @@ fn heartbeat(mut doc: Doc, pid: &str, tasks: &[echod_types::TaskRef], now: u64) 
     }
     let map = origin_mut(&mut doc);
     for task_ref in tasks {
-        if let Some(obj) = map.get_mut(&task_ref.id) {
-            obj.project_in_place(now);
-            if let Some(task) = obj.task.as_mut() {
-                if task.state == TaskState::Acquired
+        if let Some(stored) = map.get(&task_ref.id).cloned() {
+            let mut seen = stored.project(now);
+            let extends = seen.task.as_ref().is_some_and(|task| {
+                task.state == TaskState::Acquired
                     && task.version == task_ref.version
                     && task.pid.as_deref() == Some(pid)
-                {
-                    let ttl = task.ttl.unwrap_or(0);
-                    task.lease_timeout_at = Some(now.saturating_add(ttl));
-                }
+            });
+            if extends {
+                let ttl = seen.task.as_ref().unwrap().ttl.unwrap_or(0);
+                seen.task.as_mut().unwrap().lease_timeout_at = Some(now.saturating_add(ttl));
+                map.insert(task_ref.id.clone(), seen);
             }
         }
     }
@@ -1091,7 +1142,11 @@ fn suspend(
                 let Some(awaited) = map.get(&action.awaited) else {
                     return (doc, Response::Status(StatusRes { status: 422 }));
                 };
-                if awaited.promise.state != PromiseState::Pending {
+                let seen = awaited.project(now);
+                if !awaitable(&seen.promise.tags) {
+                    return (doc, Response::Status(StatusRes { status: 422 }));
+                }
+                if seen.promise.state != PromiseState::Pending {
                     any_settled = true;
                 }
             }
@@ -1102,10 +1157,12 @@ fn suspend(
                 return (doc, Response::Status(StatusRes { status: 300 }));
             }
             for action in actions {
-                if let Some(awaited) = map.get_mut(&action.awaited) {
+                if let Some(stored) = map.get(&action.awaited).cloned() {
+                    let mut awaited = stored.project(now);
                     if !awaited.promise.callbacks.contains(&id.to_string()) {
                         awaited.promise.callbacks.push(id.to_string());
                     }
+                    map.insert(action.awaited.clone(), awaited);
                 }
             }
             if let Some(task) = map.get_mut(id).and_then(|o| o.task.as_mut()) {
@@ -1255,17 +1312,17 @@ fn schedule_delete(doc: Doc, id: &str) -> (Doc, Response) {
     }
 }
 
-fn held(map: &mut BTreeMap<String, Obj>, id: &str, version: u64, now: u64) -> Result<(), u16> {
-    let Some(obj) = map.get_mut(id) else {
+fn held(map: &BTreeMap<String, Obj>, id: &str, version: u64, now: u64) -> Result<(), u16> {
+    let Some(obj) = map.get(id) else {
         return Err(404);
     };
-    obj.project_in_place(now);
-    let Some(task) = &obj.task else {
+    let seen = obj.project(now);
+    let Some(task) = &seen.task else {
         return Err(404);
     };
     if task.state != TaskState::Acquired
         || task.version != version
-        || obj.promise.state != PromiseState::Pending
+        || seen.promise.state != PromiseState::Pending
     {
         Err(409)
     } else {
@@ -1426,6 +1483,18 @@ fn targeted(tags: &Tags) -> bool {
     tags.iter().any(|(k, _)| k == "resonate:target")
 }
 
+/// Lean's `otype.awaitable`: a target, global scope, an external tag, or a timer.
+fn awaitable(tags: &Tags) -> bool {
+    targeted(tags)
+        || timer(tags)
+        || tags
+            .iter()
+            .any(|(k, v)| k == "resonate:external" && v == "true")
+        || tags
+            .iter()
+            .any(|(k, v)| k == "resonate:scope" && v == "global")
+}
+
 fn delay_of(tags: &Tags) -> Option<u64> {
     tags.iter()
         .find(|(k, _)| k == "resonate:delay")
@@ -1510,8 +1579,13 @@ fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbo
     enum Found {
         Quiet,
         Callback(String),
-        Execute { version: u64 },
-        Unblock { address: String, promise: PromiseRecord },
+        Execute {
+            version: u64,
+        },
+        Unblock {
+            address: String,
+            promise: PromiseRecord,
+        },
     }
     let found = {
         let Some(obj) = map.get_mut(id) else {

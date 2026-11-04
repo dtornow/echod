@@ -1056,8 +1056,8 @@ impl<S: Engine> Checker<S> {
 
     /// Splits factor `i` back into independent factors once nothing links its
     /// partitions: no pending work spans them, and its candidates are exactly the
-    /// product of their projections. A merge for one request (a detached create)
-    /// then lasts only as long as that request does.
+    /// product of their projections. A merge for one request lasts only as
+    /// long as that request does.
     ///
     /// A factor that holds everything (after a step that touched everything,
     /// like moving the clock) splits into the partitions known so far, and the
