@@ -6,7 +6,7 @@
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
 use echod_types::{Request, TaskFenceAction};
 
-use super::exec::*;
+use super::machine::*;
 
 /// What a footprint names: a promise with its task, a schedule, or a whole
 /// origin (what a schedule's future occurrences will touch).
@@ -72,7 +72,7 @@ pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {
 impl Default for ServerConfig {
     /// Lean's `ServerConfig.retryTimeout`: 5000. Schedules fire at the instant.
     fn default() -> Self {
-        ServerConfig { retry_timeout: 5_000, fire_within: 0 }
+        ServerConfig { retry_timeout: 5_000 }
     }
 }
 

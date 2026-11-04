@@ -29,15 +29,15 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::{ProcessEvent, RoverModel};
 use echod_rover::Time;
 
-use super::abstract_model::{Pid, StateV};
+use super::model::{Pid, StateV};
 #[cfg(verus_keep_ghost)]
-use super::collections::origin;
+use super::trusted::origin;
 use echod_types::{PromiseState, TaskState};
-use super::exec::ServerConfig;
+use super::machine::ServerConfig;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
-use super::spec::distinct;
-use super::spec::{Chars, PromiseV, ScheduleV, TaskV};
+use super::view::distinct;
+use super::view::{Chars, PromiseV, ScheduleV, TaskV};
 
 verus! {
 
@@ -521,7 +521,7 @@ pub open spec fn step_catalogue(
 /// The exact obligation every allowed `on_event` outcome must discharge.
 pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
     forall|before: StateV, now: Time, event: ProcessEvent<Pid, Message>, i: int|
-        #![trigger super::abstract_model::Model.spec_on_event(
+        #![trigger super::model::Model.spec_on_event(
             config,
             Pid::Service,
             before,
@@ -530,7 +530,7 @@ pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
         )[i]]
         state_catalogue(now, before)
         && 0 <= i
-        && i < super::abstract_model::Model.spec_on_event(
+        && i < super::model::Model.spec_on_event(
             config,
             Pid::Service,
             before,
@@ -541,7 +541,7 @@ pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
             now,
             before,
             event,
-            super::abstract_model::Model.spec_on_event(
+            super::model::Model.spec_on_event(
                 config,
                 Pid::Service,
                 before,

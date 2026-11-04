@@ -86,16 +86,14 @@ pub enum Verdict {
 }
 
 /// The trace against the model, partitioned by origin, with `budget` nodes
-/// to explore at most. `retry_timeout`: the nodes' and the model's;
-/// `fire_within`: how long after its instant a schedule's occurrence is owed,
-/// the nodes' sweep.
-pub fn check(trace: &Trace, retry_timeout: u64, fire_within: u64, budget: u64) -> Verdict {
+/// to explore at most. `retry_timeout` is the nodes' and the model's.
+pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let mut cfg = Config { max_explore: budget as usize, ..Config::default() };
     // `ECHOD_SIM_WIDTH=n`: give up at a narrower profile, to see what it holds.
     if let Some(w) = std::env::var("ECHOD_SIM_WIDTH").ok().and_then(|v| v.parse().ok()) {
         cfg.max_width = w;
     }
-    let mut c: Checker<Grouped<ServerConfig>> = Checker::with_partitions(ServerConfig { retry_timeout, fire_within }, Store::default(), cfg);
+    let mut c: Checker<Grouped<ServerConfig>> = Checker::with_partitions(ServerConfig { retry_timeout }, Store::default(), cfg);
     // The history is whole: a call it never answers may have taken effect at
     // any point or never, and a candidate still holding it subsumes one that
     // applied it.

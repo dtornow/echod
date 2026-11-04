@@ -1,4 +1,5 @@
-//! One process. A request runs its handler. A timeout runs one queued
+//! One process. `handler` is one request, `run` puts its reply on the send
+//! list, and `process_work` is one work item. A timeout runs one queued
 //! occurrence or one step the handler will perform, or it does nothing.
 
 use vstd::prelude::*;
@@ -9,13 +10,15 @@ use echod_rover::rover::semantics::{Label, StepResultV};
 use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::{Sched, Time};
 
-use echod_types::Response;
+use echod_types::{Request, Response};
 
-use super::exec::{Dispatch, InOut, Out, ServerConfig, Store, Work};
+use super::machine::{
+    echo, mk, promise_res, schedule_res, status, task_get_res, Dispatch, InOut, Out, ServerConfig, Store, Work,
+};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
-use super::spec::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
-use super::spec::{InternalV, StoreV};
+use super::view::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
+use super::view::{InternalV, StoreV};
 
 verus! {
 
@@ -43,7 +46,7 @@ impl View for State {
     open spec fn view(&self) -> StateV {
         StateV {
             store: self.store@,
-            pending: self.pending@.map_values(|work: Work| super::spec::as_sched(work)),
+            pending: self.pending@.map_values(|work: Work| super::view::as_sched(work)),
         }
     }
 }
@@ -64,15 +67,15 @@ fn initial_store() -> (server: Store)
         server@ == empty_store(),
 {
     let server = Store {
-        promises: super::collections::PMap::empty(),
-        tasks: super::collections::PMap::empty(),
-        schedules: super::collections::PMap::empty(),
+        promises: super::trusted::PMap::empty(),
+        tasks: super::trusted::PMap::empty(),
+        schedules: super::trusted::PMap::empty(),
     };
     proof {
         broadcast use group_views;
-        assert(server.promises@.map_values(|p: super::exec::Promise| p@) =~= Map::empty());
-        assert(server.tasks@.map_values(|t: super::exec::Task| t@) =~= Map::empty());
-        assert(server.schedules@.map_values(|s: super::exec::Schedule| s@) =~= Map::empty());
+        assert(server.promises@.map_values(|p: super::machine::Promise| p@) =~= Map::empty());
+        assert(server.tasks@.map_values(|t: super::machine::Task| t@) =~= Map::empty());
+        assert(server.schedules@.map_values(|s: super::machine::Schedule| s@) =~= Map::empty());
     }
     server
 }
@@ -92,7 +95,7 @@ pub open spec fn spec_send(
     )] + dispatches.map_values(|dispatch: DispatchV| (
         Pid::Outside,
         Message::Output(Output::Dispatch(
-            super::spec::lift_dispatch(dispatch),
+            super::view::lift_dispatch(dispatch),
         )),
     ))
 }
@@ -194,7 +197,7 @@ fn send(
             Message::Output(Output::Dispatch(dispatch)),
         )));
         assert forall|i: int| 0 <= i < all.len() implies
-            super::spec::lift_dispatch(all[i]@) == all[i] by {
+            super::view::lift_dispatch(all[i]@) == all[i] by {
             lemma_lift_dispatch(all[i]);
         }
         assert(all.map_values(|dispatch: Dispatch| (
@@ -203,7 +206,7 @@ fn send(
         )) =~= all.map_values(|dispatch: Dispatch| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::spec::lift_dispatch(dispatch@),
+                super::view::lift_dispatch(dispatch@),
             )),
         )));
         assert(first == (
@@ -225,9 +228,9 @@ fn append_work(
     mut work: Vec<Work>,
 ) -> (result: Vec<Work>)
     ensures
-        result@.map_values(|item: Work| super::spec::as_sched(item))
-            == pending@.map_values(|item: Work| super::spec::as_sched(item))
-                + work@.map_values(|item: Work| super::spec::as_sched(item)),
+        result@.map_values(|item: Work| super::view::as_sched(item))
+            == pending@.map_values(|item: Work| super::view::as_sched(item))
+                + work@.map_values(|item: Work| super::view::as_sched(item)),
 {
     let mut result = copy(pending);
     result.append(&mut work);
@@ -351,7 +354,7 @@ pub open spec fn spec_internal_result(
         send: outcome.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::spec::lift_dispatch(dispatch),
+                super::view::lift_dispatch(dispatch),
             )),
         )),
     }
@@ -408,13 +411,13 @@ fn internal_result(
             =~= remove_at(before@.pending, i as int) + outv.work);
         assert(all.take(all.len() as int) =~= all);
         assert forall|j: int| 0 <= j < outv.send.len() implies
-            super::spec::lift_dispatch(outv.send[j]) == all[j] by {
+            super::view::lift_dispatch(outv.send[j]) == all[j] by {
             lemma_lift_dispatch(all[j]);
         }
         assert(send@ =~= outv.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::spec::lift_dispatch(dispatch),
+                super::view::lift_dispatch(dispatch),
             )),
         )));
     }
@@ -582,7 +585,7 @@ impl RoverModel for Model {
         };
         proof {
             assert(server@ == empty_store());
-            assert(pending@.map_values(|work: Work| super::spec::as_sched(work)) =~= Seq::empty());
+            assert(pending@.map_values(|work: Work| super::view::as_sched(work)) =~= Seq::empty());
             assert(state@ == StateV {
                 store: empty_store(),
                 pending: Seq::empty(),
@@ -661,6 +664,71 @@ impl RoverModel for Model {
                 ..
             } => seq![BoundaryEvent::Output { at, output }],
             _ => Seq::empty(),
+        }
+    }
+}
+
+} // verus!
+
+verus! {
+
+impl ServerConfig {
+    /// A request takes effect in `s` at time `now`: every allowed outcome.
+    pub fn handler(&self, op: &Request, s: &Store, now: Time) -> (outs: Vec<Out>)
+    {
+        broadcast use group_views;
+        match op {
+            Request::PromiseCreate(c) => self.promise_create(c, false, s, now),
+            Request::PromiseGet(q) => match s.promises.get(&q.id) {
+                None => status(promise_res(404, None), mk("get promise: none (404)"), s),
+                Some(p) => {
+                    let seen = p.project(now);
+                    echo(promise_res(200, Some(seen.to_record(&q.id))), mk("get promise"), s)
+                },
+            },
+            Request::PromiseSettle(st) => self.promise_settle(st, false, s, now),
+            Request::PromiseRegisterCallback(q) => self.promise_register_callback(&q.awaited, &q.awaiter, s, now),
+            Request::PromiseRegisterListener(q) => self.promise_register_listener(&q.awaited, &q.address, s, now),
+            Request::TaskGet(q) => match s.tasks.get(&q.id) {
+                None => status(task_get_res(404, None), mk("get task: none (404)"), s),
+                Some(t) => {
+                    let seen = match s.promises.get(&q.id) {
+                        Some(p) => t.project(&p.project(now)),
+                        None => copy(t),
+                    };
+                    echo(task_get_res(200, Some(seen.to_record(&q.id))), mk("get task"), s)
+                },
+            },
+            Request::TaskCreate(q) => self.task_create(&q.pid, q.ttl, &q.action, s, now),
+            Request::TaskAcquire(q) => self.task_acquire(&q.id, q.version, &q.pid, q.ttl, s, now),
+            Request::TaskRelease(q) => self.task_release(&q.id, q.version, s, now),
+            Request::TaskFulfill(q) => self.task_fulfill(&q.id, q.version, &q.action, s, now),
+            Request::TaskHeartbeat(q) => self.task_heartbeat(&q.pid, &q.tasks, s, now),
+            Request::TaskSuspend(q) => self.task_suspend(q, s, now),
+            Request::TaskFence(q) => self.task_fence(q, s, now),
+            Request::TaskFenceCheck(q) => self.task_fence_check(q, s, now),
+            Request::TaskHalt(q) => self.task_halt(&q.id, s, now),
+            Request::TaskContinue(q) => self.task_continue(&q.id, s, now),
+            Request::ScheduleCreate(c) => self.schedule_create(c, s, now),
+            Request::ScheduleGet(q) => match s.schedules.get(&q.id) {
+                None => status(schedule_res(404, None), mk("get schedule: none (404)"), s),
+                Some(c) => echo(schedule_res(200, Some(c.dup())), mk("get schedule"), s),
+            },
+            Request::ScheduleDelete(q) => self.schedule_delete(&q.id, s),
+        }
+    }
+
+    /// One due item at `now`: a deadline, a callback, a listener, a lease, a
+    /// retry, a schedule, or one queued occurrence.
+    pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut) {
+        match step {
+            Work::PromiseTimeout(id) => self.process_promise_timeout(id, s, now),
+            Work::Callback { awaited, awaiter } => self.process_callback(awaited, awaiter, s, now),
+            Work::Listener { awaited, address } => self.process_listener(awaited, address, s, now),
+            Work::TaskLeaseTimeout(id) => self.process_lease_timeout(id, s, now),
+            Work::TaskRetryTimeout(id) => self.process_retry_timeout(id, s, now),
+            Work::ScheduleTimeout { id, .. } => self.process_schedule(id, s, now),
+            Work::Occurrence { promise, at, timeout, param, tags } => self.create_if_absent(promise, *at, *timeout, param, tags, s, now),
         }
     }
 }

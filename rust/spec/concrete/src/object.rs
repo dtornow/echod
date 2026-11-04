@@ -113,27 +113,25 @@ impl ATask {
         }
     }
 
-    /// `task.release`, and the lease timeout.
-    pub open spec fn release(self, now: nat) -> ATask {
+    /// Lean's `unlease`: `state`, no lease, next offer at `retry`.
+    pub open spec fn unlease(self, state: TaskState, retry: Option<u64>) -> ATask {
         ATask {
-            state: TaskState::Pending,
+            state,
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: Some(now as u64),
+            retry_timeout_at: retry,
             ..self
         }
     }
 
+    /// `task.release`, and the lease timeout.
+    pub open spec fn release(self, now: nat) -> ATask {
+        self.unlease(TaskState::Pending, Some(now as u64))
+    }
+
     pub open spec fn halt(self) -> ATask {
-        ATask {
-            state: TaskState::Halted,
-            pid: None,
-            ttl: None,
-            lease_timeout_at: None,
-            retry_timeout_at: None,
-            ..self
-        }
+        self.unlease(TaskState::Halted, None)
     }
 
     pub open spec fn continue_(self, now: nat) -> ATask {
@@ -419,36 +417,31 @@ impl Promise {
         }
     }
 
+    fn task_unlease(&mut self, state: TaskState, retry: Option<u64>) {
+        match &mut self.task {
+            Some(t) => {
+                t.state = state;
+                t.pid = None;
+                t.ttl = None;
+                t.lease_timeout_at = None;
+                t.retry_timeout_at = retry;
+            }
+            None => {}
+        }
+    }
+
     pub fn task_release(&mut self, now: u64)
         requires old(self).task is Some,
         ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().release(now as nat)),
     {
-        match &mut self.task {
-            Some(t) => {
-                t.state = TaskState::Pending;
-                t.pid = None;
-                t.ttl = None;
-                t.lease_timeout_at = None;
-                t.retry_timeout_at = Some(now);
-            }
-            None => {}
-        }
+        self.task_unlease(TaskState::Pending, Some(now));
     }
 
     pub fn task_halt(&mut self)
         requires old(self).task is Some,
         ensures final(self)@ == old(self)@.with_task(old(self)@.task.unwrap().halt()),
     {
-        match &mut self.task {
-            Some(t) => {
-                t.state = TaskState::Halted;
-                t.pid = None;
-                t.ttl = None;
-                t.lease_timeout_at = None;
-                t.retry_timeout_at = None;
-            }
-            None => {}
-        }
+        self.task_unlease(TaskState::Halted, None);
     }
 
     pub fn task_continue(&mut self, now: u64)

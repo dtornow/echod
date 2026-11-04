@@ -22,7 +22,7 @@
 //!   `next_run_at` is `nextCron cron now`, computed in the handler.
 //! - A task's offers are on a grid anchored at the instant it came to be
 //!   pending (Lean's `nextOffer`). The dial is `ServerConfig::retry_timeout`.
-//! - Lean's `nextCron` and `expand` are trusted (`collections.rs`): the cron
+//! - Lean's `nextCron` and `expand` are trusted (`trusted.rs`): the cron
 //!   engine of the reference server.
 //! - Indefinite failures need no duplicated outcomes: an unanswered call is
 //!   already "maybe".
@@ -41,10 +41,10 @@
 //!
 //! What Verus checks here: no panics and no overflow anywhere, and the
 //! properties stated as `ensures` (see `promise_create`). What it trusts:
-//! `collections.rs`. The handlers are the protocol.
+//! `trusted.rs`. The handlers are the protocol.
 //!
 //! `external` is the request handlers. `internal` is one handler per work item.
-//! `system` is the match: a request calls `handler`, a work item calls `process_work`.
+//! `model` is the match: a request calls `handler`, a work item calls `process_work`.
 
 use vstd::prelude::*;
 
@@ -53,7 +53,7 @@ use echod_rover::Sched;
 
 use echod_types::{PromiseRecord, PromiseRes, PromiseState, Response, Schedule, ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value};
 
-use super::collections::*;
+use super::trusted::*;
 
 /// The first value of `key`, which is how a tag list is read.
 fn tag<'a>(tags: &'a Tags, key: &str) -> Option<&'a str> {
@@ -77,12 +77,11 @@ fn delay_of(tags: &Tags) -> Option<u64> {
     tag(tags, "resonate:delay").and_then(|d| d.parse().ok())
 }
 #[cfg(verus_keep_ghost)]
-use super::spec::{Chars, DispatchV, InternalV, PromiseV, StoreV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
+use super::view::{Chars, DispatchV, InternalV, PromiseV, StoreV, TaskV, all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works};
 
 
 mod external;
 mod internal;
-mod system;
 
 verus! {
 
@@ -117,7 +116,7 @@ impl Promise {
 
     /// The promise as a read at `now` sees it. A pending promise past its
     /// deadline is settled at the deadline.
-    fn project(&self, now: Time) -> (r: Promise) {
+    pub(crate) fn project(&self, now: Time) -> (r: Promise) {
         if self.state == PromiseState::Pending && now >= self.timeout_at {
             let mut q = copy(self);
             q.state = if is_timer(&self.tags) { PromiseState::Resolved } else { PromiseState::RejectedTimedout };
@@ -128,7 +127,7 @@ impl Promise {
         }
     }
 
-    fn to_record(&self, id: &Id) -> (r: PromiseRecord)
+    pub(crate) fn to_record(&self, id: &Id) -> (r: PromiseRecord)
         ensures
             r.state == self.state,
             r.timeout_at == self.timeout_at,
@@ -192,15 +191,15 @@ impl Task {
         }
     }
 
-    /// Back to pending, to be offered again at `at`.
-    fn release(&mut self, at: Time)
+    /// Lean's `unlease`: `state`, no lease, next offer at `retry`.
+    fn unlease(&mut self, state: TaskState, retry: Option<Time>)
         
     {
-        self.state = TaskState::Pending;
+        self.state = state;
         self.pid = None;
         self.ttl = None;
         self.acquired_at = 0;
-        self.retry_timeout_at = Some(at);
+        self.retry_timeout_at = retry;
     }
 
     pub fn lease_timeout_at(&self) -> (r: Time)
@@ -213,7 +212,7 @@ impl Task {
     }
 
     /// The task as its promise reads. A settled promise fulfills the task.
-    fn project(&self, promise: &Promise) -> (r: Task) {
+    pub(crate) fn project(&self, promise: &Promise) -> (r: Task) {
         if promise.state != PromiseState::Pending && self.state != TaskState::Fulfilled {
             let mut u = copy(self);
             u.fulfill();
@@ -223,7 +222,7 @@ impl Task {
         }
     }
 
-    fn to_record(&self, id: &Id) -> (r: TaskRecord) {
+    pub(crate) fn to_record(&self, id: &Id) -> (r: TaskRecord) {
         let resumes: u64 = if self.resumes.len() as u64 > u64::MAX { u64::MAX } else { self.resumes.len() as u64 };
         TaskRecord { id: id.clone(), state: self.state, version: self.version, resumes, ttl: self.ttl, pid: copy(&self.pid) }
     }
@@ -234,6 +233,54 @@ pub struct Store {
     pub promises: PMap<Promise>,
     pub tasks: PMap<Task>,
     pub schedules: PMap<Schedule>,
+}
+
+/// Lean's `newObject`. `at` is when the promise is created: the clock for a
+/// request, the occurrence instant for a schedule. A deadline already past
+/// `now` is born settled. `runnable` adds the task, offered at `at` or at
+/// its delay.
+fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags, runnable: bool) -> (born: (Promise, Option<Task>))
+    ensures
+        promise_ok(born.0),
+        born.0.timeout_at == timeout_at,
+{
+    let live_now = timeout_at > now;
+    let live_at = timeout_at > at;
+    let state = if live_now {
+        PromiseState::Pending
+    } else if is_timer(tags) {
+        PromiseState::Resolved
+    } else {
+        PromiseState::RejectedTimedout
+    };
+    let promise = Promise {
+        state,
+        value: Value::empty(),
+        param: param.dup(),
+        timeout_at,
+        created_at: if live_at { at } else { timeout_at },
+        settled_at: if live_now { None } else { Some(timeout_at) },
+        tags: echod_types::clone_tags(tags),
+        callbacks: PSet::empty(),
+        listeners: PSet::empty(),
+    };
+    let task = if runnable {
+        let due = match delay_of(tags) {
+            Some(d) => if d > at { d } else { at },
+            None => at,
+        };
+        let task_state = if live_now { TaskState::Pending } else { TaskState::Fulfilled };
+        let retry_timeout_at = if live_now { Some(due) } else { None };
+        Some(Task { state: task_state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_timeout_at, resumes: Vec::new() })
+    } else {
+        None
+    };
+    proof {
+        assert(promise.created_at <= timeout_at);
+        assert(promise.settled_at == if live_now { None } else { Some(timeout_at) });
+        assert(promise_ok(promise));
+    }
+    (promise, task)
 }
 
 fn copy_store(s: &Store) -> (r: Store)
@@ -255,11 +302,11 @@ pub enum Dispatch {
     Unblock { address: String, promise: PromiseRecord },
 }
 
-fn promise_res(status: u16, promise: Option<PromiseRecord>) -> Response {
+pub(crate) fn promise_res(status: u16, promise: Option<PromiseRecord>) -> Response {
     Response::Promise(PromiseRes { status, promise })
 }
 
-fn schedule_res(status: u16, schedule: Option<Schedule>) -> Response {
+pub(crate) fn schedule_res(status: u16, schedule: Option<Schedule>) -> Response {
     Response::Schedule(ScheduleRes { status, schedule })
 }
 
@@ -267,7 +314,7 @@ fn status_res(status: u16) -> Response {
     Response::Status(StatusRes { status })
 }
 
-fn task_get_res(status: u16, task: Option<TaskRecord>) -> Response {
+pub(crate) fn task_get_res(status: u16, task: Option<TaskRecord>) -> Response {
     Response::TaskGet(TaskGetRes { status, task })
 }
 
@@ -320,11 +367,9 @@ pub struct InOut {
 
 /// The server's dial: how long a pending task waits before it is offered
 /// again (Lean's `ServerConfig.retryTimeout`). A schedule is due at its
-/// `next_run_at`. `fire_within` is kept so a caller can still name a sweep
-/// bound; the due item does not read it.
+/// `next_run_at`.
 pub struct ServerConfig {
     pub retry_timeout: Time,
-    pub fire_within: Time,
 }
 
 fn one(o: Out) -> (r: Vec<Out>)
@@ -343,7 +388,7 @@ fn one(o: Out) -> (r: Vec<Out>)
 
 /// A mark: the name of a branch of the spec, for coverage. Every mark goes
 /// through `mk` with a string literal, so a test can list them from this module.
-fn mk(name: &'static str) -> &'static str {
+pub(crate) fn mk(name: &'static str) -> &'static str {
     name
 }
 
@@ -353,7 +398,7 @@ fn marked(name: &'static str) -> Vec<&'static str> {
     v
 }
 
-fn status(resp: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
+pub(crate) fn status(resp: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
         r[0].resp == resp,
@@ -366,7 +411,7 @@ fn status(resp: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
     one(Out { resp, next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: marked(mark) })
 }
 
-fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
+pub(crate) fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
         r[0].resp == res,

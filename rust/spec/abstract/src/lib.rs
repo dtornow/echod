@@ -1,7 +1,7 @@
 //! The complete standalone Resonate model interpreted by Rover.
 //!
-//! The protocol, the executable handlers, exploration hints, and the abstract
-//! process all live here.
+//! `machine` is the store and its handlers, `model` is one process's step,
+//! `view` is the ghost twin, and `trusted` is the maps and the cron engine.
 
 #![allow(
     clippy::ptr_arg,
@@ -13,19 +13,19 @@
     non_shorthand_field_patterns
 )]
 
-pub mod abstract_model;
-pub mod collections;
-pub mod exec;
+pub mod model;
+pub mod trusted;
+pub mod machine;
 mod explore;
 mod footprint;
 pub mod protocol;
 pub mod properties;
-pub mod spec;
+pub mod view;
 
-pub use abstract_model::Model;
-pub use collections::{PMap, PSet};
+pub use model::Model;
+pub use trusted::{PMap, PSet};
 pub use echod_types as types;
-pub use exec::*;
+pub use machine::*;
 pub use explore::{plain, IDS, MARKS, SCHEDULES};
 pub use footprint::{next_cron, Key};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

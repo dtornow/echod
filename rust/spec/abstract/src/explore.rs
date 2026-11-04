@@ -8,7 +8,7 @@ use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq, PromiseSettleReq, PromiseState, Request, ScheduleCreateReq, ScheduleDeleteReq, ScheduleGetReq, Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction, TaskFenceReq, TaskFulfillReq, TaskGetReq, TaskHaltReq, TaskHeartbeatReq, TaskRef, TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
 
-use super::exec::*;
+use super::machine::*;
 use super::footprint::{next_cron, origin};
 
 /// Every mark the spec can put on an outcome, so a coverage report can show

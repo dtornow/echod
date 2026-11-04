@@ -1002,11 +1002,11 @@ fn schedules_fire_on_their_cron() {
 
 /// A schedule is owed at `next_run_at`. That step records the run and queues
 /// the occurrence; the occurrence then creates the promise. A read at the
-/// instant sees both. `fire_within` is not a window on this step.
+/// instant sees both.
 #[test]
 fn a_schedule_is_owed_at_its_instant() {
     let now = 1_000_000;
-    let mut t = Trace::with(ServerConfig { fire_within: 2_500, ..ServerConfig::default() }, now);
+    let mut t = Trace::with(ServerConfig::default(), now);
     let tags = flag_tags(true, false, false, None);
     t.step("create s", schedule("s", "* * * * * *", "ex:run-{{.timestamp}}", 60_000, tags.clone(), now), |r| sched(r).is_some_and(|c| c.next_run_at == 1_001_000));
     t.tick(1_000_999);

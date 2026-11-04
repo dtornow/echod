@@ -9,14 +9,14 @@ use echod_types::{
     PromiseCreateReq, PromiseSettleReq, PromiseState, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq, TaskFenceInnerRes, TaskRef, TaskState, TaskSuspendReq, Value,
 };
 
-use super::super::collections::*;
-use super::super::spec::MAX_VERSION;
+use super::super::trusted::*;
+use super::super::view::MAX_VERSION;
 
 #[cfg(verus_keep_ghost)]
-use super::super::spec::{StoreV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
+use super::super::view::{StoreV, TaskV, all_in_origin, distinct, group_views, sends, strs, works};
 
 use super::{
-    claim_res, contains, copy_store, delay_of, echo, fence_res, has_target, is_timer, mk, marked, next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out, Promise, ServerConfig, Store, Task, Time,
+    claim_res, contains, copy_store, delay_of, echo, fence_res, has_target, is_timer, mk, marked, new_object, next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out, Promise, ServerConfig, Store, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -77,37 +77,11 @@ impl ServerConfig {
             None => {},
         }
         let live = req.timeout_at > now;
-        let born = if live {
-            PromiseState::Pending
-        } else if is_timer(&req.tags) {
-            PromiseState::Resolved
-        } else {
-            PromiseState::RejectedTimedout
-        };
-        let p = Promise {
-            state: born,
-            value: Value::empty(),
-            param: req.param.dup(),
-            timeout_at: req.timeout_at,
-            created_at: if live { now } else { req.timeout_at },
-            settled_at: if live { None } else { Some(req.timeout_at) },
-            tags: echod_types::clone_tags(&req.tags),
-            callbacks: PSet::empty(),
-            listeners: PSet::empty(),
-        };
+        let (p, task) = new_object(req.timeout_at, now, now, &req.param, &req.tags, has_target(&req.tags));
         let rec = p.to_record(&req.id);
         let mut n = copy_store(s);
         n.promises.insert(req.id.clone(), p);
-        if has_target(&req.tags) {
-            // A live targeted promise's task is runnable: offered to a worker
-            // at once, or at its delay.
-            let due = match delay_of(&req.tags) {
-                Some(d) => if d > now { d } else { now },
-                None => now,
-            };
-            let state = if live { TaskState::Pending } else { TaskState::Fulfilled };
-            let retry_timeout_at = if live { Some(due) } else { None };
-            let task = Task { state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_timeout_at, resumes: Vec::new() };
+        if let Some(task) = task {
             n.tasks.insert(req.id.clone(), task);
         }
         proof {
@@ -141,7 +115,7 @@ impl ServerConfig {
         outs
     }
 
-    pub(super) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -204,7 +178,7 @@ impl ServerConfig {
         Ok(t)
     }
 
-    pub(super) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -274,7 +248,7 @@ impl ServerConfig {
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
-    pub(super) fn task_suspend(&self, req: &TaskSuspendReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_suspend(&self, req: &TaskSuspendReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -412,7 +386,7 @@ impl ServerConfig {
         r
     }
 
-    pub(super) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -506,7 +480,7 @@ impl ServerConfig {
         }
     }
 
-    pub(super) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -577,7 +551,7 @@ impl ServerConfig {
         one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
     }
 
-    pub(super) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -618,14 +592,14 @@ impl ServerConfig {
     }
 
     /// `task.fence` with no action: the check alone, after a detached create.
-    pub(super) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>) {
+    pub(crate) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>) {
         match self.held(s, &req.id, req.version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("fence: no such task (404)") } else { mk("fence: not held, or stale version (409)") }, s),
             Ok(_) => status(status_res(200), mk("fence check"), s),
         }
     }
 
-    pub(super) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -656,7 +630,7 @@ impl ServerConfig {
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("callback registered")) })
     }
 
-    pub(super) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -682,7 +656,7 @@ impl ServerConfig {
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("listener registered")) })
     }
 
-    pub(super) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -707,7 +681,7 @@ impl ServerConfig {
         one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) })
     }
 
-    pub(super) fn task_release(&self, id: &Id, version: u64, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_release(&self, id: &Id, version: u64, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -716,14 +690,14 @@ impl ServerConfig {
             Ok(t) => {
                 let mut n = copy_store(s);
                 let mut u = copy(t);
-                u.release(now);
+                u.unlease(TaskState::Pending, Some(now));
                 n.tasks.insert(id.clone(), u);
                 one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task released")) })
             },
         }
     }
 
-    pub(super) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -743,7 +717,7 @@ impl ServerConfig {
         one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task fulfilled")) })
     }
 
-    pub(super) fn task_halt(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_halt(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -761,18 +735,14 @@ impl ServerConfig {
             _ => {
                 let mut n = copy_store(s);
                 let mut u = copy(t);
-                u.state = TaskState::Halted;
-                u.pid = None;
-                u.ttl = None;
-                u.acquired_at = 0;
-                u.retry_timeout_at = None;
+                u.unlease(TaskState::Halted, None);
                 n.tasks.insert(id.clone(), u);
                 one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) })
             },
         }
     }
 
-    pub(super) fn task_continue(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_continue(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;
@@ -795,7 +765,7 @@ impl ServerConfig {
         one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task continued")) })
     }
 
-    pub(super) fn schedule_delete(&self, id: &Id, s: &Store) -> (outs: Vec<Out>)
+    pub(crate) fn schedule_delete(&self, id: &Id, s: &Store) -> (outs: Vec<Out>)
         
     {
         broadcast use group_views;

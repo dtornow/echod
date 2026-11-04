@@ -1,14 +1,14 @@
 //! Views of the model state, and the lemmas that a value is its view.
 //!
 //! A request, a response, and a record are the shared types in `echod_types`.
-//! Their views live in `echod_types::spec`. The handlers in `exec` are the
+//! Their views live in `echod_types::spec`. The handlers in `machine` are the
 //! protocol.
 //!
 //! Ids and strings view as `Seq<char>`, the persistent maps as `Map`, the
 //! sets as `Set`. A dispatch with a given view is obtained by `choose`; that
 //! every dispatch view is realised by some value is the axiom this module
 //! adds (`axiom_realised`), true of the type as built; that a value is its
-//! view (`collections.rs`) makes the choice the value itself.
+//! view (`trusted.rs`) makes the choice the value itself.
 
 // Outside Verus (`cargo build`) the spec functions and proofs are erased, and
 // the imports they use with them.
@@ -20,8 +20,8 @@ use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
 
 use echod_types::{PromiseRecord, PromiseState, Request, Response, Tags, TaskRecord, TaskState, Value};
 
-use super::collections::*;
-use super::exec::*;
+use super::trusted::*;
+use super::machine::*;
 
 verus! {
 

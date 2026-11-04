@@ -247,7 +247,7 @@ enum Outcome {
 }
 
 fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
-    let m = ServerConfig { retry_timeout: model.retry_timeout, fire_within: 0 };
+    let m = ServerConfig { retry_timeout: model.retry_timeout };
     let mut c: Checker<Keyed<ServerConfig>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
     match Verdict::from(c.check_certified(trace.clone())) {
         Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
@@ -280,7 +280,7 @@ async fn main() {
     client.wait_ready(&echod).await;
     eprintln!("[model] echod at {}, worker at {worker}", echod.url);
     // `debug.tick` lets every due step land before the next request: fires are exact.
-    let model = ServerConfig { retry_timeout: cli.retry_timeout, fire_within: 0 };
+    let model = ServerConfig { retry_timeout: cli.retry_timeout };
     let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();

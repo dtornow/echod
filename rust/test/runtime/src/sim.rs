@@ -73,16 +73,6 @@ pub struct Options {
     pub budget: u64,
 }
 
-impl Options {
-    /// How long after its instant a schedule's occurrence is owed, for the
-    /// checker: a node gets to a deadline when its wheel reaches it, and to one
-    /// another node armed when it lists the bucket, so within a bucket or two,
-    /// as its clock reads them.
-    pub fn fire_within(&self) -> u64 {
-        2 * self.timer_bucket_ms + 2 * self.skew_ms + self.jump_ms
-    }
-}
-
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -571,7 +561,7 @@ async fn check(world: &World) -> Report {
     // The run as a trace of the model, checked by echod-rover.
     let trace = checker::trace(&entries, &world.history.marks(), &sent);
     report.events = trace.len();
-    match checker::check(&trace, opts.retry_timeout_ms, opts.fire_within(), opts.budget) {
+    match checker::check(&trace, opts.retry_timeout_ms, opts.budget) {
         Verdict::Ok { explored } => report.search_steps = explored as u64,
         Verdict::Ko(v) => {
             report.failures.push(format!("no execution of the model explains event {} of {}: {}: {}", v.index, trace.len(), v.event, v.reason));
