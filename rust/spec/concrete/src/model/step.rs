@@ -41,6 +41,12 @@ pub uninterp spec fn spec_decode_raw(body: Seq<u8>) -> Option<DocV>;
 
 pub uninterp spec fn spec_encode(doc: DocV) -> Seq<u8>;
 
+/// The codec round-trips: what `encode` wrote, `decode` reads back.
+pub axiom fn axiom_decode_encode(doc: DocV)
+    ensures
+        spec_decode_raw(spec_encode(doc)) == Some(doc),
+;
+
 pub open spec fn spec_read(key: Seq<char>, body: Seq<u8>) -> DocV {
     match spec_decode_raw(body) {
         Some(doc) => doc,
@@ -558,14 +564,20 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
     }
 }
 
+/// The store answers each `(sender, op)` once. A delivery it has answered
+/// is a stutter, the same arm as `Store::on_event`.
 pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
     match event {
         ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
-            let (next, outcome) = spec_apply(store, call);
-            spec_one(
-                LocalV::Store(next),
-                seq![(sender, Message::StoreReply { op, outcome })],
-            )
+            if store.seen.contains((sender, op)) {
+                spec_one(LocalV::Store(store), Seq::empty())
+            } else {
+                let (next, outcome) = spec_apply(store, call);
+                spec_one(
+                    LocalV::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
+                    seq![(sender, Message::StoreReply { op, outcome })],
+                )
+            }
         },
         _ => Seq::empty(),
     }

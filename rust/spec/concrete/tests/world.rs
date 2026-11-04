@@ -379,7 +379,13 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
             ..
         }
     ));
-    assert_eq!(rejected[0].state, created[0].state);
+    match (&rejected[0].state, &created[0].state) {
+        (Local::Store(after), Local::Store(before)) => {
+            assert_eq!(after.entries, before.entries);
+            assert!(after.seen.contains(&(Pid::Node(0), 10)));
+        }
+        _ => panic!("store"),
+    }
 
     let right = StoreCall::PutIfMatch {
         key: "doc".into(),
@@ -414,6 +420,41 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         }
         Local::Node(_) => panic!("store"),
     }
+}
+
+#[test]
+fn the_store_executes_each_op_once() {
+    let world = Model.world(&Fleet::new(1, false));
+    let store = world.process[1].1.clone();
+    let put = Incoming::Receive {
+        sender: Pid::Node(0),
+        message: Message::StoreReq {
+            op: 3,
+            call: StoreCall::PutIfNoneMatch {
+                key: "doc".into(),
+                body: b"one".to_vec(),
+            },
+        },
+    };
+    let first = Model.step(&Pid::Store, &store, 0, &put);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].send.len(), 1);
+
+    let again = Model.step(&Pid::Store, &first[0].state, 1, &put);
+    assert_eq!(again.len(), 1);
+    assert!(again[0].send.is_empty());
+    assert_eq!(again[0].state, first[0].state);
+
+    let other_node = Incoming::Receive {
+        sender: Pid::Node(1),
+        message: Message::StoreReq {
+            op: 3,
+            call: StoreCall::Get { key: "doc".into() },
+        },
+    };
+    let read = Model.step(&Pid::Store, &first[0].state, 2, &other_node);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].send.len(), 1);
 }
 
 #[test]

@@ -2,8 +2,10 @@
 //!
 //! A world is the nodes and one store, an empty network, and time 0. Each
 //! node is `plane`: its own documents and one flight. A request or a due
-//! document loads, is decided, and is written back. The store applies the
-//! call. The abstract model is a different machine. See `simulation`.
+//! document loads, is decided, and is written back. The store applies each
+//! call once; Rover may deliver an envelope again, and the store answers a
+//! `(node, op)` it has answered with a stutter. The abstract model is a
+//! different machine. See `simulation`.
 
 use vstd::prelude::*;
 
@@ -89,6 +91,9 @@ pub struct EntryV {
 pub struct StoreV {
     pub entries: Seq<EntryV>,
     pub appendable: bool,
+    /// The `(node, op)` pairs the store has answered. A second delivery of
+    /// one is a stutter.
+    pub seen: Seq<(Pid, u64)>,
 }
 
 pub struct NodeV {
@@ -135,6 +140,12 @@ pub struct Entry {
 pub struct Store {
     pub entries: Vec<Entry>,
     pub appendable: bool,
+    /// Each call a node makes carries a fresh `op`. The store executes each
+    /// `(node, op)` once; Rover may deliver the envelope again, and a real
+    /// HTTP exchange runs once. This is the counterpart of the version
+    /// compare-and-swap in the Lean physical store: a stale write is never
+    /// applied a second time, whatever the body's etag.
+    pub seen: Vec<(Pid, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,7 +191,11 @@ impl View for Entry {
 impl View for Store {
     type V = StoreV;
     open spec fn view(&self) -> StoreV {
-        StoreV { entries: self.entries@.map_values(|e: Entry| e@), appendable: self.appendable }
+        StoreV {
+            entries: self.entries@.map_values(|e: Entry| e@),
+            appendable: self.appendable,
+            seen: self.seen@,
+        }
     }
 }
 
@@ -236,7 +251,11 @@ pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
 pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, LocalV)> {
     spec_nodes(config, 0) + seq![(
         Pid::Store,
-        LocalV::Store(StoreV { entries: Seq::empty(), appendable: config.appendable }),
+        LocalV::Store(StoreV {
+            entries: Seq::empty(),
+            appendable: config.appendable,
+            seen: Seq::empty(),
+        }),
     )]
 }
 
@@ -293,6 +312,7 @@ impl Store {
         Self {
             entries: Vec::new(),
             appendable,
+            seen: Vec::new(),
         }
     }
 
@@ -624,7 +644,11 @@ impl Process<(), Pid, Message> for Store {
                 sender,
                 message: Message::StoreReq { op, call },
             } => {
-                let (next, outcome) = self.apply(call);
+                if self.seen.contains(&(*sender, *op)) {
+                    return vec![(self.clone(), Vec::new())];
+                }
+                let (mut next, outcome) = self.apply(call);
+                next.seen.push((*sender, *op));
                 vec![(
                     next,
                     vec![(*sender, Message::StoreReply { op: *op, outcome })],
