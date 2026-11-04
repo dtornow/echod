@@ -1,8 +1,9 @@
 //! The requests a run issues, and how they are generated.
 //!
-//! Every request kind the server serves, as the model types it
-//! (`resonate::Request`), over a small space of ids so that operations
-//! collide: a few origins, a few promises per origin, one child each.
+//! Every request kind the server serves but `promise.settle`, as the model
+//! types it (`resonate::Request`), over a small space of ids so that
+//! operations collide: a few origins, a few promises per origin, one child
+//! each. A promise is settled only through its task, or by its deadline.
 //! Versions and pids are drawn from what the client has seen, so that fenced
 //! operations sometimes carry the right version and sometimes not.
 
@@ -181,49 +182,51 @@ impl Generator {
             return self.schedule(rng);
         }
         let roll = rng.below(100);
-        let id = if roll >= 46 { self.task_id(seen, rng) } else { self.id(rng) };
+        let id = if roll >= 38 { self.task_id(seen, rng) } else { self.id(rng) };
         let pid = format!("p{}", rng.below(3));
         let ttl = rng.range(self.ttl_ms / 4, self.ttl_ms);
         let timeout_at = now + rng.range(1, self.timeout_ms);
         let data = Some(format!("d{}", rng.below(4)));
+        // No `promise.settle`: a promise is settled by its task (a fulfill, a
+        // fenced settle) or by its deadline, so the task path is what the
+        // run exercises.
         match roll {
             0..=11 => Request::GetPromise(id),
             12..=27 => Request::CreatePromise(Create { id, timeout_at, data, tags: self.tags(rng, false) }),
-            28..=35 => Request::SettlePromise(Settle { id, state: Self::settle_state(rng), data }),
-            36..=40 => {
+            28..=32 => {
                 let awaited = self.awaitable_sibling(&id, seen, rng);
                 Request::RegisterCallback { awaited, awaiter: id }
             }
-            41..=45 => Request::RegisterListener { awaited: id, address: WORKER.to_string() },
-            46..=51 => Request::GetTask(id),
-            52..=58 => Request::CreateTask { pid, ttl, action: Create { id, timeout_at, data: None, tags: self.tags(rng, true) } },
-            59..=68 => {
+            33..=37 => Request::RegisterListener { awaited: id, address: WORKER.to_string() },
+            38..=43 => Request::GetTask(id),
+            44..=50 => Request::CreateTask { pid, ttl, action: Create { id, timeout_at, data: None, tags: self.tags(rng, true) } },
+            51..=63 => {
                 let version = self.version(&id, seen, rng);
                 Request::AcquireTask { id, version, pid, ttl }
             }
-            69..=74 => {
+            64..=72 => {
                 let version = self.version(&id, seen, rng);
                 Request::FulfillTask { id, version, state: Self::settle_state(rng), data }
             }
-            75..=77 => {
+            73..=75 => {
                 let version = self.version(&id, seen, rng);
                 Request::ReleaseTask { id, version }
             }
-            78..=80 => {
+            76..=78 => {
                 let version = self.version(&id, seen, rng);
                 Request::HeartbeatTask { pid, tasks: vec![TaskRef { id, version }] }
             }
-            81..=85 => {
+            79..=83 => {
                 let version = self.version(&id, seen, rng);
                 let awaited = vec![self.awaitable_sibling(&id, seen, rng)];
                 Request::SuspendTask { id, version, awaited }
             }
-            86..=90 => {
+            84..=88 => {
                 let version = self.version(&id, seen, rng);
                 let child = format!("{id}.1");
                 Request::FenceTask { id, version, action: Fenced::Create(Create { id: child, timeout_at, data: None, tags: self.tags(rng, false) }) }
             }
-            91..=94 => {
+            89..=94 => {
                 let version = self.version(&id, seen, rng);
                 let target = if rng.percent(50) { format!("{id}.1") } else { self.sibling(&id, rng) };
                 Request::FenceTask { id, version, action: Fenced::Settle(Settle { id: target, state: Self::settle_state(rng), data }) }

@@ -544,9 +544,11 @@ async fn check(world: &World) -> Report {
         world.bus.sent.lock().unwrap().clone()
     };
 
-    // Coverage: every kind answered 200 at least once, and the history overlapped.
+    // Coverage: every kind the clients issue answered 200 at least once (not
+    // `promise.settle`, which they do not: a promise is settled through its
+    // task), and the history overlapped.
     let all_kinds: BTreeSet<String> = [
-        "promise.get", "promise.create", "promise.settle", "promise.register_callback", "promise.register_listener",
+        "promise.get", "promise.create", "promise.register_callback", "promise.register_listener",
         "task.get", "task.create", "task.acquire", "task.fulfill", "task.release", "task.heartbeat", "task.suspend", "task.fence", "task.halt", "task.continue",
         "schedule.get", "schedule.create", "schedule.delete",
     ].iter().map(|s| s.to_string()).collect();

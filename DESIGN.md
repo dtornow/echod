@@ -407,8 +407,10 @@ percentages and waits a seeded latency, and per node a store that can be cut
 off entirely; a bus that records every message as the model's dispatch and
 checks it against the bucket. A chaos task crashes nodes, stops them
 cleanly, starts new ones and cuts nodes off the store. Clients issue every
-request kind over a few origins, as the model types them; every attempt is
-a history entry, since an attempt that got no answer may have taken effect.
+request kind but `promise.settle` over a few origins, as the model types
+them, so that a promise is settled only through its task or by its
+deadline and the task path is what a run exercises; every attempt is a
+history entry, since an attempt that got no answer may have taken effect.
 Clients create, read and delete a few schedules firing every few seconds
 into the origins the clients work on, so fires collide with requests. The
 run ends with a read of every id, so what the bucket holds is what the
@@ -454,7 +456,7 @@ the clients or the worker with `iptables`, isolates it, or slows and loses
 its packets with `tc netem`. The store is left alone: it is where the truth
 is kept, and the faults are everything around it. `echod-chaos`
 (`src/main.rs`) is the clients, the worker and the check in one process:
-clients draw every request kind from the simulator's generator and send
+clients draw their requests from the simulator's generator and send
 them over HTTP to whichever node answers, moving to fresh origins every
 few seconds so a minute is many lifetimes; a chaos task rolls a fault
 every second or so. Then the faults are lifted, the fleet is given time to
