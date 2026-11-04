@@ -333,15 +333,26 @@ stale version are refused, a conditional read of the current version says
 so, listings page past a thousand keys and come back in order, keys with
 the characters ours use round-trip, and, on S3, a version is a function
 of the content — the same bytes are the same version, which is why every
-write of ours carries a nonce. The end-to-end tests run on the same store
-under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
-runs both against `s3s-fs`, a Rust S3 emulator, against RustFS, the other
-Rust S3 server, or against a bucket you name; the SDK examples run
-unchanged against a server on either. Both servers refuse conditional
-writes as S3 does. RustFS also honours conditional reads and makes
-versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
-on reads and sends the body where S3 sends 304, which the store treats as
-a revalidation that found the version current.
+write of ours carries a nonce; and, on a store that appends, an append
+lands only at the current size under the current version. The end-to-end
+tests run on the same store under a prefix of their own when `ECHOD_STORE`
+is set, and once more through `S3Store` when `ECHOD_EXPRESS_BUCKET` names
+a directory bucket.
+
+No emulator serves S3 Express appends (RustFS answers 501, MinIO's open
+build has none), so `rust/test/cli/fakes3` is one of our own: the S3
+surface echod uses and nothing else, in memory — conditional reads and
+writes, `ListObjectsV2`, `DeleteObjects`, and `PutObject` with
+`x-amz-write-offset-bytes`, refused with `InvalidWriteOffset` anywhere but
+the current size, as S3 Express refuses it. ETags are the MD5, conditions
+are decided atomically against the object as it is, keys round-trip byte
+for byte, and the SDK's `aws-chunked` bodies are unframed. `scripts/s3-tests.sh`
+runs both suites against it by default, with both clients; against RustFS
+or `s3s-fs`, a second implementation's reading of the conditional writes,
+without appends; or against a bucket you name. RustFS honours conditional
+reads and makes versions from content, as S3 does; `s3s-fs` 0.17 ignores
+`If-None-Match` on reads and sends the body where S3 sends 304, which the
+store treats as a revalidation that found the version current.
 
 ### Observability
 
@@ -396,8 +407,10 @@ percentages and waits a seeded latency, and per node a store that can be cut
 off entirely; a bus that records every message as the model's dispatch and
 checks it against the bucket. A chaos task crashes nodes, stops them
 cleanly, starts new ones and cuts nodes off the store. Clients issue every
-request kind over a few origins, as the model types them; every attempt is
-a history entry, since an attempt that got no answer may have taken effect.
+request kind but `promise.settle` over a few origins, as the model types
+them, so that a promise is settled only through its task or by its
+deadline and the task path is what a run exercises; every attempt is a
+history entry, since an attempt that got no answer may have taken effect.
 Clients create, read and delete a few schedules firing every few seconds
 into the origins the clients work on, so fires collide with requests. The
 run ends with a read of every id, so what the bucket holds is what the
@@ -429,6 +442,42 @@ not landed, whose stamp precedes the read, which one clock cannot show.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
+
+### Chaos
+
+The simulator's faults are the interpreter's: a store that answers nothing,
+a node that is dropped. `scripts/chaos.sh` inflicts the real ones on the
+system as deployed. `compose.yaml` is a fleet: three `echod` processes in
+containers over `fakes3`, each as the child of a `chaos-agent`
+(`rust/test/cli/chaos/src/agent.rs`), which on a control port of its own
+kills it, stops it, freezes it (`SIGSTOP`, sometimes past its TTL, so it
+comes back believing it still owns what it owned), cuts it off the store,
+the clients or the worker with `iptables`, isolates it, or slows and loses
+its packets with `tc netem`. The store is left alone: it is where the truth
+is kept, and the faults are everything around it. `echod-chaos`
+(`src/main.rs`) is the clients, the worker and the check in one process:
+clients draw their requests from the simulator's generator and send
+them over HTTP to whichever node answers, moving to fresh origins every
+few seconds so a minute is many lifetimes; a chaos task rolls a fault
+every second or so. Then the faults are lifted, the fleet is given time to
+settle, every id named is read once more, and the bucket is read directly.
+
+The check is black-box and holds whatever the faults, which is what
+distinguishes it from the simulator's: a promise's state never goes back
+between requests one of which was sent after the other was answered, and
+settles one way; a task's version never goes back and fulfilled is final;
+what a client was shown exists at the end; no promise is pending past its
+timeout once the fleet has had time, and no expired timer key is left in
+the bucket; every `unblock` names a promise settled the way it says and
+every `execute` a task that exists; a task still unclaimed at the end was
+offered again once the fleet healed; every document decodes and agrees
+with what the clients were last told; every node answers, acts and sees
+the whole fleet. Delivery is at most once by design, so a lost `unblock`
+is counted, not held against the system. The simulator's checker is not
+run here: it needs the instant each request was decided at, which a node
+on wall time does not tell the client, and the sweeps' instants besides.
+Giving it both — a header with the decision instant, the notes port over
+the wire — is what it would take to run the model against a real fleet.
 
 ### Differential
 

@@ -24,12 +24,12 @@ rust/spec/rover       the Rover world, replay, and refinement theorem
 rust/spec/abstract    the Resonate protocol as a Rover model
 rust/spec/concrete    the proof that on_event refines that model
 rust/test/runtime     the deterministic effect interpreter
-rust/test/cli         the simulator, the differential, the model driver, the store tests
+rust/test/cli         the simulator, the differential, the model driver, the store tests, fakes3, the chaos run
 lean/rover            the Rover world, for experiment
 lean/abstract         the Resonate model, for experiment
 lean/concrete         nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
-scripts               the store and end-to-end tests against a real S3 API
+scripts               the store and end-to-end tests against an S3 API; the fleet under faults
 ```
 
 `rust/impl/process/kernel` is proved. The process around it is the shim the
@@ -47,6 +47,8 @@ cargo test --workspace                  # unit and end-to-end tests, in memory
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001
 cargo run --release -p echod-diff -- --resonate <path to a resonate binary> --seeds 4   # the differential
+scripts/s3-tests.sh                     # the store contract and end-to-end tests over fakes3, both S3 clients
+scripts/chaos.sh --seed 7               # three nodes in containers, crashed, frozen and partitioned for a minute, checked
 ```
 
 The differential wants the reference server built from `resonatehq/resonate`
