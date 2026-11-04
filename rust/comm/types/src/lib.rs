@@ -84,6 +84,12 @@ impl Value {
         assert(v@.headers =~= Seq::empty());
         v
     }
+
+    /// The empty value, as a specification names it. Both models create
+    /// promises with this one value.
+    pub open spec fn spec_empty() -> Value {
+        choose|v: Value| v@ == AValue::empty()
+    }
 }
 // ---------------------------------------------------------------------------
 // Schedules

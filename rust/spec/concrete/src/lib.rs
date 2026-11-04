@@ -11,6 +11,7 @@
 //! ```text
 //! plane.rs            one node: its documents, one flight, the store round trip
 //! model.rs            the Rover model: nodes, one store, the initial world
+//! interpret.rs        the store read as the abstract store; handler agreement
 //! simulation.rs       the relation and the forward simulation
 //! refine.rs           the same statement, for the executable crate
 //! store.rs            store calls and their answers
@@ -21,6 +22,7 @@
     allow(unused_imports, dead_code, unused_variables)
 )]
 
+pub mod interpret;
 pub mod model;
 mod plane;
 pub mod simulation;

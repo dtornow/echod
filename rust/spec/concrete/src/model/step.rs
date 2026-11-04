@@ -89,7 +89,7 @@ pub open spec fn spec_bytes(body: Seq<u8>) -> Vec<u8> {
 }
 
 pub open spec fn spec_empty_value() -> Value {
-    choose|v: Value| v@ == echod_types::spec::AValue::empty()
+    Value::spec_empty()
 }
 
 pub open spec fn spec_wrap_mul(a: u64, b: u64) -> u64 {

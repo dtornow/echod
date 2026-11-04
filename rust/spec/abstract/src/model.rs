@@ -21,7 +21,7 @@ use super::protocol::{BoundaryEvent, Call, Message, Output};
 use super::view::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
 use super::view::{InternalV, StoreV};
 
-mod step;
+pub mod step;
 
 verus! {
 
