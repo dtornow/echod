@@ -1128,6 +1128,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-chaos"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "echod-abstract",
+ "echod-kernel",
+ "echod-process",
+ "echod-runtime",
+ "echod-test-runtime",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
