@@ -268,6 +268,18 @@ pub axiom fn axiom_vec_ext<T>(a: Vec<T>, b: Vec<T>)
         a == b,
 ;
 
+/// Any characters are some string's characters.
+pub axiom fn axiom_string_realised(chars: Seq<char>)
+    ensures
+        exists|s: String| s@ == chars,
+;
+
+/// Any bytes are some vector's bytes.
+pub axiom fn axiom_bytes_realised(bytes: Seq<u8>)
+    ensures
+        exists|v: Vec<u8>| v@ == bytes,
+;
+
 /// A map is its entries.
 pub axiom fn axiom_pmap_ext<V>(a: PMap<V>, b: PMap<V>)
     requires

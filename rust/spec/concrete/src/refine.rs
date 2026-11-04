@@ -3,19 +3,20 @@
 //! The concrete world is the nodes and the store. The abstract world is the
 //! one service. They share no handlers. Every boundary trace of the concrete
 //! world is a boundary trace of the abstract world.
-//! `simulation::lemma_refines` is that statement, once `output_simulation`
-//! holds, by `concrete_refines_abstract`. A 503 for a call still on the
-//! network is one abstract shed, and an empty-task heartbeat is one abstract
-//! serve of status 200. `output_simulation` is every other emitting step.
+//! `simulation::lemma_refines` is that statement, by
+//! `concrete_refines_abstract`, under `relation::agreement`: the handlers
+//! beyond promise get, create, and settle agree with the abstract ones on
+//! related documents. A 503 for a call still on the network is one abstract
+//! shed, and an empty-task heartbeat is one abstract serve of status 200.
 //!
 //! Both models observe `echod_abstract::BoundaryEvent`: a `Call` in, an
 //! `Output` out. An injected `Request` is one abstract input of that call
 //! to the service. `Stop` and store traffic observe as nothing, so the
 //! matching abstract execution is empty. An observed `Output` is one abstract
 //! outside step of that output. A process step observes nothing. One that
-//! sends no output to the outside is an empty abstract execution. One that
-//! sends an output is `output_simulation`: a finite abstract execution whose
-//! boundary projection is empty and which leaves the two worlds related.
+//! sends no output to the outside is an empty abstract execution. The step
+//! that begins a flight is one abstract step, taken on the owners' caches;
+//! the store steps and the reply that closes the flight are stutters.
 //! The trait's `ensures` on `on_event` states that the executable results
 //! equal `spec_on_event`. That proof is separate from this simulation.
 //!

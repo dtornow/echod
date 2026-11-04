@@ -1,32 +1,31 @@
-//! The concrete store, read as the abstract store.
+//! A concrete document, read as part of the abstract store.
 //!
-//! The abstract service holds promises, tasks, and schedules. The concrete
-//! store holds bytes under keys. A key `o/<origin>` decodes to the objects of
-//! that origin, a key `s/<id>` to one schedule. [`store_rel`] says the
-//! abstract store is exactly what those documents decode to. It is the Lean
-//! `StoreRep`: `Same abstract.store physical.toAbstract`. The abstract model
-//! does not change; the interpretation lives here, in the proof.
+//! The abstract service holds promises, tasks, and schedules. A concrete
+//! node holds documents under keys. A key `o/<origin>` decodes to the objects
+//! of that origin, a key `s/<id>` to one schedule. [`doc_rel`] says what one
+//! document asserts of the abstract store; `relation::store_interpreted`
+//! says it of every key. It is the Lean `StoreRep`: `Same abstract.store
+//! physical.toAbstract`. The abstract model does not change; the
+//! interpretation lives here, in the proof.
 //!
-//! [`handler_agrees`] is one request against the document it names, on both
-//! models: one abstract outcome, the same response, and stores that are
-//! still related. The Lean `refinement_handlers` proves this per handler.
-//! The promise handlers are proved below. Cargo erases these bodies; a Verus
-//! run is what checks them.
+//! [`request_agrees`] is one request against the document it names, on both
+//! models: one abstract outcome, the same response, the next document
+//! reading as the next store, every other key as before. The Lean
+//! `refinement_handlers` proves this per handler. The promise handlers are
+//! proved below. Cargo erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
 use crate::model::step::{
-    spec_delay as c_delay, spec_empty_doc, spec_find, spec_fulfill_task, spec_handle,
-    spec_is_empty, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key,
-    spec_origin_map, spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64,
-    spec_project_obj, spec_project_prom, spec_promise_create as c_promise_create,
-    spec_promise_get as c_promise_get, spec_promise_res as c_promise_res,
-    spec_promise_settle as c_promise_settle, spec_read, spec_record, spec_starts, spec_tag_is,
-    spec_tag_key, spec_targeted, spec_timer, spec_with_origin, DocV, ObjV, PromV, TkV,
+    spec_delay as c_delay, spec_fulfill_task, spec_handle, spec_key, spec_new_obj, spec_offer_at,
+    spec_opened, spec_origin_key, spec_origin_map, spec_parse_acc as c_parse_acc,
+    spec_parse_u64 as c_parse_u64, spec_project_obj, spec_project_prom,
+    spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
+    spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
+    spec_starts, spec_tag_is, spec_tag_key, spec_targeted, spec_timer, spec_with_origin, DocV, ObjV,
+    PromV, TkV,
 };
-#[cfg(verus_keep_ghost)]
-use crate::model::StoreV as CStore;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::step::{
     spec_delay as a_delay, spec_first, spec_fulfill, spec_handler, spec_has_key, spec_has_target,
@@ -153,7 +152,8 @@ pub open spec fn origin_prefix() -> Seq<char> {
     seq!['o', '/']
 }
 
-/// What the document under `key` says about the abstract store.
+/// What the document under `key` says about the abstract store. An origin
+/// document is a finite map; an empty one is then the empty document.
 pub open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
     if spec_starts(key, schedule_prefix()) {
         match doc {
@@ -162,52 +162,47 @@ pub open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
         }
     } else if spec_starts(key, origin_prefix()) {
         match doc {
-            DocV::Origin(map) => origin_rel(map, key.skip(2), s),
+            DocV::Origin(map) => map.dom().finite() && origin_rel(map, key.skip(2), s),
             DocV::Schedule(_) => false,
         }
     } else {
-        spec_is_empty(doc)
+        match doc {
+            DocV::Origin(map) => map.dom().finite() && map.dom().len() == 0,
+            DocV::Schedule(slot) => slot is None,
+        }
     }
-}
-
-/// The document the store holds under `key`. Absent is the empty document.
-pub open spec fn doc_at(store: CStore, key: Seq<char>) -> DocV {
-    match spec_find(store.entries, key, 0) {
-        Some(i) => spec_read(key, store.entries[i].body),
-        None => spec_empty_doc(key),
-    }
-}
-
-/// Lean's `StoreRep`: under every key, the concrete store reads as the
-/// abstract store.
-pub open spec fn store_rel(store: CStore, s: AStore) -> bool {
-    forall|key: Seq<char>| #[trigger] doc_rel(key, doc_at(store, key), s)
 }
 
 // ---------------------------------------------------------------------------
 // Handler agreement
 // ---------------------------------------------------------------------------
 
+/// What other keys said of `s`, they say of `next`.
+pub open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> bool {
+    forall|other: Seq<char>, doc: DocV|
+        other != key && doc_rel(other, doc, s) ==> #[trigger] doc_rel(other, doc, next)
+}
+
 /// One request, on the document it names and on the abstract store. The
 /// abstract handler has one outcome, it answers what the node answers, it
-/// queues and sends nothing, and the written document still reads as the
-/// abstract store while every other key still does too.
-pub open spec fn handler_agrees(
+/// queues and sends nothing, the next document reads as the next store,
+/// and every other key reads as before.
+pub open spec fn request_agrees(
     config: ServerConfig,
     request: Request,
     key: Seq<char>,
-    store: CStore,
+    doc: DocV,
     s: AStore,
     now: Time,
 ) -> bool {
-    let (next, response) = spec_handle(doc_at(store, key), request, now);
+    let (next, response) = spec_handle(doc, request, now);
     let outs = spec_handler(config, request, s, now);
     &&& outs.len() == 1
     &&& outs[0].resp == response
     &&& outs[0].work.len() == 0
     &&& outs[0].send.len() == 0
     &&& doc_rel(key, next, outs[0].next)
-    &&& forall|other: Seq<char>| other != key ==> #[trigger] doc_rel(other, doc_at(store, other), outs[0].next)
+    &&& others_kept(key, s, outs[0].next)
 }
 
 // ---------------------------------------------------------------------------
@@ -588,29 +583,21 @@ pub proof fn lemma_origin_rel_same(map: Map<Seq<char>, ObjV>, origin_chars: Seq<
     };
 }
 
-/// A store that changed only at ids of `changed` still reads the same under
-/// every key that is not that origin's key.
-pub proof fn lemma_other_keys(
-    store: CStore,
-    s: AStore,
-    next: AStore,
-    changed: Seq<char>,
-)
+/// A store that changed only at ids of `changed` reads the same under every
+/// key that is not that origin's key.
+pub proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char>)
     requires
-        store_rel(store, s),
         next.schedules == s.schedules,
         forall|other: Seq<char>| other != changed ==> #[trigger] same_at_origin(s, next, other),
     ensures
-        forall|other: Seq<char>|
-            other != spec_origin_key(changed) ==> #[trigger] doc_rel(other, doc_at(store, other), next),
+        others_kept(spec_origin_key(changed), s, next),
 {
-    assert forall|other: Seq<char>| other != spec_origin_key(changed) implies #[trigger] doc_rel(
+    assert forall|other: Seq<char>, doc: DocV|
+        other != spec_origin_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
         other,
-        doc_at(store, other),
+        doc,
         next,
     ) by {
-        let doc = doc_at(store, other);
-        assert(doc_rel(other, doc, s));
         if spec_starts(other, schedule_prefix()) {
         } else if spec_starts(other, origin_prefix()) {
             match doc {
@@ -627,6 +614,13 @@ pub proof fn lemma_other_keys(
         } else {
         }
     };
+}
+
+/// A store that did not change reads as before under every key.
+pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
+    ensures
+        others_kept(key, s, s),
+{
 }
 
 // ---------------------------------------------------------------------------
@@ -723,18 +717,18 @@ pub proof fn lemma_origin_insert(
 pub proof fn lemma_promise_get_agrees(
     config: ServerConfig,
     id: String,
-    store: CStore,
+    doc: DocV,
     s: AStore,
     now: Time,
 )
     requires
-        store_rel(store, s),
+        doc_rel(spec_origin_key(origin(id@)), doc, s),
     ensures
-        handler_agrees(
+        request_agrees(
             config,
             Request::PromiseGet(echod_types::PromiseGetReq { id }),
             spec_origin_key(origin(id@)),
-            store,
+            doc,
             s,
             now,
         ),
@@ -742,7 +736,6 @@ pub proof fn lemma_promise_get_agrees(
     let request = Request::PromiseGet(echod_types::PromiseGetReq { id });
     let o = origin(id@);
     let key = spec_origin_key(o);
-    let doc = doc_at(store, key);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_get(doc, id, now));
@@ -762,30 +755,24 @@ pub proof fn lemma_promise_get_agrees(
     }
     assert(outs[0].next == s);
     assert(doc_rel(key, doc, s));
-    assert forall|other: Seq<char>| other != key implies #[trigger] doc_rel(
-        other,
-        doc_at(store, other),
-        outs[0].next,
-    ) by {
-        assert(doc_rel(other, doc_at(store, other), s));
-    };
+    lemma_others_same(key, s);
 }
 
 pub proof fn lemma_promise_create_agrees(
     config: ServerConfig,
     req: echod_types::PromiseCreateReq,
-    store: CStore,
+    doc: DocV,
     s: AStore,
     now: Time,
 )
     requires
-        store_rel(store, s),
+        doc_rel(spec_origin_key(origin(req.id@)), doc, s),
     ensures
-        handler_agrees(
+        request_agrees(
             config,
             Request::PromiseCreate(req),
             spec_origin_key(origin(req.id@)),
-            store,
+            doc,
             s,
             now,
         ),
@@ -793,7 +780,6 @@ pub proof fn lemma_promise_create_agrees(
     let request = Request::PromiseCreate(req);
     let o = origin(req.id@);
     let key = spec_origin_key(o);
-    let doc = doc_at(store, key);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_create(doc, req, now));
@@ -804,13 +790,7 @@ pub proof fn lemma_promise_create_agrees(
     if spec_timer(req.tags) && spec_targeted(req.tags) {
         assert(outs[0].next == s);
         assert(c_promise_create(doc, req, now) == (doc, c_promise_res(400, None)));
-        assert forall|other: Seq<char>| other != key implies #[trigger] doc_rel(
-            other,
-            doc_at(store, other),
-            outs[0].next,
-        ) by {
-            assert(doc_rel(other, doc_at(store, other), s));
-        };
+        lemma_others_same(key, s);
     } else if map.contains_key(req.id@) {
         assert(s.promises.contains_key(req.id@));
         lemma_project_object(map[req.id@], s.promises[req.id@], abstract_task(s, req.id@), now);
@@ -819,13 +799,7 @@ pub proof fn lemma_promise_create_agrees(
         lemma_record(req.id, seen.promise, p);
         assert(outs[0].next == s);
         assert(outs[0].resp == c_promise_create(doc, req, now).1);
-        assert forall|other: Seq<char>| other != key implies #[trigger] doc_rel(
-            other,
-            doc_at(store, other),
-            outs[0].next,
-        ) by {
-            assert(doc_rel(other, doc_at(store, other), s));
-        };
+        lemma_others_same(key, s);
     } else {
         assert(!s.promises.contains_key(req.id@));
         assert(!s.tasks.contains_key(req.id@));
@@ -853,6 +827,7 @@ pub proof fn lemma_promise_create_agrees(
         assert(next == AStore { promises: s.promises.insert(req.id@, p), tasks, ..s });
         lemma_origin_insert(map, o, s, req.id@, obj, p, t);
         assert(spec_with_origin(doc, map.insert(req.id@, obj)) == DocV::Origin(map.insert(req.id@, obj)));
+        assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
         assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), next));
         assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, next, other) by {
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
@@ -864,25 +839,25 @@ pub proof fn lemma_promise_create_agrees(
                 assert(id != req.id@);
             };
         };
-        lemma_other_keys(store, s, next, o);
+        lemma_others_kept(s, next, o);
     }
 }
 
 pub proof fn lemma_promise_settle_agrees(
     config: ServerConfig,
     req: echod_types::PromiseSettleReq,
-    store: CStore,
+    doc: DocV,
     s: AStore,
     now: Time,
 )
     requires
-        store_rel(store, s),
+        doc_rel(spec_origin_key(origin(req.id@)), doc, s),
     ensures
-        handler_agrees(
+        request_agrees(
             config,
             Request::PromiseSettle(req),
             spec_origin_key(origin(req.id@)),
-            store,
+            doc,
             s,
             now,
         ),
@@ -890,7 +865,6 @@ pub proof fn lemma_promise_settle_agrees(
     let request = Request::PromiseSettle(req);
     let o = origin(req.id@);
     let key = spec_origin_key(o);
-    let doc = doc_at(store, key);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_settle(doc, req, now));
@@ -906,13 +880,7 @@ pub proof fn lemma_promise_settle_agrees(
             assert(outs[0].resp == a_promise_res(400, None));
             assert(c_promise_settle(doc, req, now) == (doc, c_promise_res(400, None)));
         }
-        assert forall|other: Seq<char>| other != key implies #[trigger] doc_rel(
-            other,
-            doc_at(store, other),
-            outs[0].next,
-        ) by {
-            assert(doc_rel(other, doc_at(store, other), s));
-        };
+        lemma_others_same(key, s);
     } else {
         assert(s.promises.contains_key(req.id@));
         let stored = s.promises[req.id@];
@@ -925,13 +893,7 @@ pub proof fn lemma_promise_settle_agrees(
             lemma_record(req.id, seen.promise, p);
             assert(outs[0].next == s);
             assert(outs[0].resp == c_promise_settle(doc, req, now).1);
-            assert forall|other: Seq<char>| other != key implies #[trigger] doc_rel(
-                other,
-                doc_at(store, other),
-                outs[0].next,
-            ) by {
-                assert(doc_rel(other, doc_at(store, other), s));
-            };
+            lemma_others_same(key, s);
         } else {
             // A pending projection is the stored promise itself.
             assert(seen.promise == map[req.id@].promise);
@@ -987,6 +949,7 @@ pub proof fn lemma_promise_settle_agrees(
             assert(c_promise_settle(doc, req, now).1 == c_promise_res(200, Some(spec_record(req.id, obj.promise))));
             assert(outs[0].next == n);
             assert(c_promise_settle(doc, req, now).0 == spec_with_origin(doc, map.insert(req.id@, obj)));
+            assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
             assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), n));
             assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, n, other) by {
                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
@@ -998,7 +961,7 @@ pub proof fn lemma_promise_settle_agrees(
                     assert(id != req.id@);
                 };
             };
-            lemma_other_keys(store, s, n, o);
+            lemma_others_kept(s, n, o);
         }
     }
 }
@@ -1007,24 +970,24 @@ pub proof fn lemma_promise_settle_agrees(
 pub proof fn lemma_promise_handlers_agree(
     config: ServerConfig,
     request: Request,
-    store: CStore,
+    doc: DocV,
     s: AStore,
     now: Time,
 )
     requires
-        store_rel(store, s),
+        spec_key(request) is Some,
+        doc_rel(spec_key(request).unwrap(), doc, s),
         match request {
             Request::PromiseGet(_) | Request::PromiseCreate(_) | Request::PromiseSettle(_) => true,
             _ => false,
         },
     ensures
-        spec_key(request) is Some,
-        handler_agrees(config, request, spec_key(request).unwrap(), store, s, now),
+        request_agrees(config, request, spec_key(request).unwrap(), doc, s, now),
 {
     match request {
-        Request::PromiseGet(q) => lemma_promise_get_agrees(config, q.id, store, s, now),
-        Request::PromiseCreate(q) => lemma_promise_create_agrees(config, q, store, s, now),
-        Request::PromiseSettle(q) => lemma_promise_settle_agrees(config, q, store, s, now),
+        Request::PromiseGet(q) => lemma_promise_get_agrees(config, q.id, doc, s, now),
+        Request::PromiseCreate(q) => lemma_promise_create_agrees(config, q, doc, s, now),
+        Request::PromiseSettle(q) => lemma_promise_settle_agrees(config, q, doc, s, now),
         _ => {},
     }
 }
