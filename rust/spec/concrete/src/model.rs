@@ -3,7 +3,7 @@
 //! A world is the nodes and one store, an empty network, and time 0. Each
 //! node is `plane`: its own documents and one flight. A request or a due
 //! document loads, is decided, and is written back. The store applies the
-//! call. The abstract model is a different machine. See `refine`.
+//! call. The abstract model is a different machine. See `simulation`.
 
 use vstd::prelude::*;
 
