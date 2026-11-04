@@ -1,0 +1,88 @@
+# echod as deployed: three nodes over one bucket, each behind a chaos-agent
+# that can crash, stop, freeze, partition or slow it. The store is fakes3.
+#
+#   docker compose up                                   # a fleet to poke at: nodes on 8001-8003, S3 on 9000
+#   docker compose --profile chaos up --exit-code-from chaos   # the fleet under faults, checked
+#   scripts/chaos.sh --seed 7 --duration-secs 120       # the same, built, run and torn down
+#
+# podman: `podman compose` in place of `docker compose`.
+name: echod
+
+x-node: &node
+  image: echod:chaos
+  build: .
+  entrypoint: ["chaos-agent", "--control", "0.0.0.0:7000", "--", "echod"]
+  cap_add: [NET_ADMIN]
+  depends_on: [s3]
+  stop_grace_period: 5s
+
+x-node-env: &node-env
+  ECHOD_STORE: s3://echod
+  ECHOD_ENDPOINT: http://s3:9000
+  ECHOD_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: k
+  AWS_SECRET_ACCESS_KEY: s
+  ECHOD_BIND: 0.0.0.0:8001
+  # Short enough that a run of a minute sees deadlines, retries, lost seats
+  # and buckets crossed many times over.
+  ECHOD_HEARTBEAT: "500"
+  ECHOD_NODE_TTL: "2000"
+  ECHOD_TIMER_BUCKET: "2000"
+  ECHOD_RETRY_TIMEOUT: "2000"
+  RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  s3:
+    image: echod:chaos
+    build: .
+    entrypoint: ["fakes3", "--address", "0.0.0.0:9000", "--bucket", "echod"]
+    ports: ["9000:9000"]
+
+  n1:
+    <<: *node
+    environment:
+      <<: *node-env
+      ECHOD_NODE_ID: n1
+      ECHOD_URL: http://n1:8001/
+    ports: ["8001:8001"]
+
+  n2:
+    <<: *node
+    environment:
+      <<: *node-env
+      ECHOD_NODE_ID: n2
+      ECHOD_URL: http://n2:8001/
+    ports: ["8002:8001"]
+
+  n3:
+    <<: *node
+    environment:
+      <<: *node-env
+      ECHOD_NODE_ID: n3
+      ECHOD_URL: http://n3:8001/
+    ports: ["8003:8001"]
+
+  chaos:
+    image: echod:chaos
+    build: .
+    profiles: [chaos]
+    entrypoint: ["echod-chaos"]
+    depends_on: [n1, n2, n3]
+    environment:
+      CHAOS_NODES: n1,n2,n3
+      CHAOS_STORE_HOST: s3
+      CHAOS_SELF_HOST: chaos
+      CHAOS_SEED: ${CHAOS_SEED:-1}
+      CHAOS_DURATION_SECS: ${CHAOS_DURATION_SECS:-60}
+      CHAOS_EVERY_MS: ${CHAOS_EVERY_MS:-1500}
+      CHAOS_NONE: ${CHAOS_NONE:-false}
+      CHAOS_REPORT: /report/chaos.json
+      ECHOD_STORE: s3://echod
+      ECHOD_ENDPOINT: http://s3:9000
+      ECHOD_REGION: us-east-1
+      ECHOD_TIMER_BUCKET: "2000"
+      ECHOD_NODE_TTL: "2000"
+      AWS_ACCESS_KEY_ID: k
+      AWS_SECRET_ACCESS_KEY: s
+    volumes:
+      - ./target/chaos:/report
