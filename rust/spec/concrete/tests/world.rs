@@ -1,11 +1,11 @@
 //! The concrete world: the nodes and the store Rover starts from, one node
 //! flight, and the store's conditional write.
 
-use echod_abstract::{Call, Output};
+use echod_abstract::{Call, Dispatch, Output};
 use echod_concrete::model::{Fleet, Incoming, Local, Message, Model, Pid, Store};
 use echod_concrete::{
-    Etag, PromiseCreateReq, PromiseGetReq, PromiseRes, Request, Response, StoreCall, StoreError,
-    StoreOutcome, Value,
+    Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
+    PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
 };
 use echod_rover::rover::{ProcessEvent, RoverModel};
 
@@ -438,4 +438,121 @@ fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
     assert!(Model
         .step(&Pid::Store, &world.process[1].1, 0, &client)
         .is_empty());
+}
+
+#[test]
+fn a_due_retry_offers_the_task() {
+    let world = Model.world(&Fleet::new(1, true));
+    let (pid, node_state) = world.process[0].clone();
+    let store_state = world.process[1].1.clone();
+    let create = call(
+        1,
+        Request::PromiseCreate(PromiseCreateReq {
+            id: "a:1".into(),
+            timeout_at: 10_000,
+            param: Value::empty(),
+            tags: vec![("resonate:target".into(), "worker".into())],
+        }),
+    );
+    let (node_state, store_state, _) = deliver(
+        pid,
+        node_state,
+        store_state,
+        5,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(create),
+        },
+    );
+    assert_eq!(node(&node_state).wake, Some(5));
+    let (node_state, _, send) = deliver(
+        pid,
+        node_state,
+        store_state,
+        5,
+        &Incoming::Timeout,
+    );
+    assert_eq!(
+        send,
+        vec![(
+            Pid::Outside,
+            Message::Output(Output::Dispatch(Dispatch::Execute {
+                id: "a:1".into(),
+                version: 0,
+            })),
+        )]
+    );
+    assert_eq!(node(&node_state).wake, Some(5_005));
+}
+
+#[test]
+fn a_settled_listener_is_told() {
+    let world = Model.world(&Fleet::new(1, true));
+    let (pid, node_state) = world.process[0].clone();
+    let store_state = world.process[1].1.clone();
+    let (node_state, store_state, _) = deliver(
+        pid,
+        node_state,
+        store_state,
+        5,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(call(
+                1,
+                Request::PromiseCreate(PromiseCreateReq {
+                    id: "a:1".into(),
+                    timeout_at: 10_000,
+                    param: Value::empty(),
+                    tags: Vec::new(),
+                }),
+            )),
+        },
+    );
+    let (node_state, store_state, _) = deliver(
+        pid,
+        node_state,
+        store_state,
+        6,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(call(
+                2,
+                Request::PromiseRegisterListener(PromiseRegisterListenerReq {
+                    awaited: "a:1".into(),
+                    address: "http://x".into(),
+                }),
+            )),
+        },
+    );
+    let (node_state, store_state, _) = deliver(
+        pid,
+        node_state,
+        store_state,
+        7,
+        &Incoming::Receive {
+            sender: Pid::Outside,
+            message: Message::Request(call(
+                3,
+                Request::PromiseSettle(PromiseSettleReq {
+                    id: "a:1".into(),
+                    state: PromiseState::Resolved,
+                    value: Value::empty(),
+                }),
+            )),
+        },
+    );
+    assert_eq!(node(&node_state).wake, Some(7));
+    let (_, _, send) = deliver(pid, node_state, store_state, 7, &Incoming::Timeout);
+    match &send[..] {
+        [(
+            Pid::Outside,
+            Message::Output(Output::Dispatch(Dispatch::Unblock { address, promise })),
+        )] => {
+            assert_eq!(address, "http://x");
+            assert_eq!(promise.id, "a:1");
+            assert_eq!(promise.state, PromiseState::Resolved);
+            assert_eq!(promise.settled_at, Some(7));
+        }
+        other => panic!("listener {other:?}"),
+    }
 }

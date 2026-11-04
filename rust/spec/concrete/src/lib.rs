@@ -9,7 +9,6 @@
 //! ```text
 //! plane.rs            one node: its documents, one flight, the store round trip
 //! model.rs            the Rover model: nodes, one store, the initial world
-//! rover_model.rs      RoverModel for that world
 //! refine.rs           the statement against the abstract Rover model
 //! store.rs            store calls and their answers
 //! ```
@@ -22,9 +21,6 @@
 pub mod model;
 mod plane;
 pub mod store;
-
-#[cfg(not(verus_keep_ghost))]
-mod rover_model;
 
 #[cfg(not(verus_keep_ghost))]
 pub mod refine;

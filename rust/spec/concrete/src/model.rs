@@ -7,8 +7,9 @@
 
 use vstd::prelude::*;
 
-use echod_abstract::{Call, Output};
-use echod_rover::rover::{Process, ProcessEvent};
+use echod_abstract::{BoundaryEvent, Call, Output};
+use echod_rover::rover::semantics::Label;
+use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
@@ -92,6 +93,7 @@ pub struct NodeV {
     pub logic: LogicV,
     pub wake: Option<nat>,
     pub next_request: u64,
+    pub plane: crate::plane::PlaneV,
 }
 
 pub enum LocalV {
@@ -183,11 +185,56 @@ impl View for Store {
 impl View for Node {
     type V = NodeV;
     open spec fn view(&self) -> NodeV {
-        NodeV { logic: self.logic@, wake: match self.wake {
-            Some(t) => Some(t as nat),
-            None => None,
-        }, next_request: self.next_request }
+        NodeV {
+            logic: self.logic@,
+            wake: match self.wake {
+                Some(t) => Some(t as nat),
+                None => None,
+            },
+            next_request: self.next_request,
+            plane: self.plane@,
+        }
     }
+}
+
+/// The nodes a fleet starts, then the store. The same world `Model::initial` builds.
+pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
+    decreases (config.nodes - id) as int
+{
+    if id >= config.nodes {
+        Seq::empty()
+    } else {
+        seq![(Pid::Node(id), LocalV::Node(spec_node(config, id)))]
+            + spec_nodes(config, (id + 1) as u64)
+    }
+}
+
+pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
+    NodeV {
+        logic: LogicV {
+            clock: 0,
+            loops: config.loops,
+            stopping: false,
+            stopped: false,
+            last_wake: None,
+        },
+        wake: None,
+        next_request: 1,
+        plane: crate::plane::PlaneV {
+            address: id as nat,
+            nodes: config.nodes as nat,
+            flight: None,
+            documents: Seq::empty(),
+            pending: Seq::empty(),
+        },
+    }
+}
+
+pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, LocalV)> {
+    spec_nodes(config, 0) + seq![(
+        Pid::Store,
+        LocalV::Store(StoreV { entries: Seq::empty(), appendable: config.appendable }),
+    )]
 }
 
 impl View for Local {
@@ -403,6 +450,23 @@ fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
                     response: response.clone(),
                 }),
             ),
+            crate::plane::Act::Notify(note) => (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(match note {
+                    crate::plane::Outbound::Execute { id, version } => {
+                        echod_abstract::Dispatch::Execute {
+                            id: id.clone(),
+                            version: *version,
+                        }
+                    }
+                    crate::plane::Outbound::Unblock { address, promise } => {
+                        echod_abstract::Dispatch::Unblock {
+                            address: address.clone(),
+                            promise: promise.clone(),
+                        }
+                    }
+                })),
+            ),
         })
         .collect()
 }
@@ -566,4 +630,82 @@ impl Process<(), Pid, Message> for Store {
             _ => Vec::new(),
         }
     }
+}
+
+verus! {
+
+impl RoverModel for Model {
+    type Config = Fleet;
+    type Pid = Pid;
+    type StateV = LocalV;
+    type State = Local;
+    type Message = Message;
+    type Boundary = BoundaryEvent;
+
+    fn outside(&self) -> Pid {
+        Pid::Outside
+    }
+
+    fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
+        self.world(config).process
+    }
+
+    fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
+        matches!(message, Message::Request(_) | Message::Stop)
+    }
+
+    fn on_event(
+        &self,
+        _config: &Fleet,
+        pid: &Pid,
+        state: &Local,
+        now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<StepResult<Self>> {
+        let incoming = match event {
+            ProcessEvent::Timeout => Incoming::Timeout,
+            ProcessEvent::Receive { sender, message } => Incoming::Receive {
+                sender: sender.clone(),
+                message: message.clone(),
+            },
+        };
+        self.step(pid, state, now, &incoming)
+            .into_iter()
+            .map(|transition| StepResult {
+                state: transition.state,
+                send: transition.send,
+            })
+            .collect()
+    }
+
+    open spec fn spec_outside(&self) -> Pid {
+        Pid::Outside
+    }
+
+    open spec fn spec_initial(&self, config: Fleet) -> Seq<(Pid, LocalV)> {
+        spec_world(config)
+    }
+
+    open spec fn spec_injectable(&self, _config: Fleet, message: Message) -> bool {
+        match message {
+            Message::Request(_) | Message::Stop => true,
+            Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
+        }
+    }
+
+    /// A call in and an output out. Store traffic and `Stop` stay off the boundary,
+    /// the same projection the abstract model uses for its own messages.
+    open spec fn spec_observe(&self, label: Label<Pid, Message>) -> Seq<BoundaryEvent> {
+        match label {
+            Label::Input { at, message: Message::Request(call), .. } => {
+                seq![BoundaryEvent::Input { at, call }]
+            }
+            Label::Outside { at, message: Message::Output(output), .. } => {
+                seq![BoundaryEvent::Output { at, output }]
+            }
+            _ => Seq::empty(),
+        }
+    }
+}
+
 }

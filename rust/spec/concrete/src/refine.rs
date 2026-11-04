@@ -14,9 +14,17 @@
 //! ```
 //!
 //! Both models observe `echod_abstract::BoundaryEvent`: a `Call` in, an
-//! `Output` out. The theorem needs a relation on the two initial worlds and
-//! a forward simulation. Neither is proved yet. The concrete view does not
-//! yet carry the node's documents.
+//! `Output` out. Store traffic and `Stop` observe as nothing. The concrete
+//! node view carries the cached documents, the open flight, and the
+//! occurrences still owed, so a relation can name them. A retry offers
+//! `Dispatch::Execute` and a settled listener sends `Dispatch::Unblock`, the
+//! same boundary outputs the abstract model sends.
+//!
+//! The simulation is not proved. `spec_on_event` is still the trait default
+//! on both models, so a step has no specification yet. Two state differences
+//! remain for the relation: a lease sets the next offer to the deadline on
+//! the abstract model and to `now` on this one, and an abstract retry lands
+//! on the `next_offer` grid while this plane uses `now + 5000`.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {

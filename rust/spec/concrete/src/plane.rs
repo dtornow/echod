@@ -4,6 +4,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use vstd::prelude::*;
+
 use echod_types::{
     origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRes, PromiseSettleReq,
     PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes, Tags, TaskClaimRes,
@@ -49,6 +51,8 @@ struct Flight {
     /// Occurrences a schedule step queued, delivered to the pending list when the write lands.
     born: Vec<Pending>,
     reply: Option<(String, u64, Response)>,
+    /// Boundary output of a due step, sent when that step's document is committed.
+    notify: Vec<Outbound>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,10 +113,20 @@ struct Tk {
     resumes: Vec<String>,
 }
 
+/// What a due step tells the outside, once the document that step wrote is the one in the cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outbound {
+    /// A pending task is offered again.
+    Execute { id: String, version: u64 },
+    /// A listener's promise has settled.
+    Unblock { address: String, promise: PromiseRecord },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     ToStore { op: u64, call: StoreCall },
     Reply { client: String, id: u64, response: Response },
+    Notify(Outbound),
 }
 
 impl Plane {
@@ -236,6 +250,7 @@ impl Plane {
                 decided: None,
                 born: Vec::new(),
                 reply: None,
+                notify: Vec::new(),
             };
             return self.decide(flight, cached.doc);
         }
@@ -252,6 +267,7 @@ impl Plane {
             decided: None,
             born: Vec::new(),
             reply: None,
+            notify: Vec::new(),
         });
         vec![Act::ToStore { op, call }]
     }
@@ -267,23 +283,24 @@ impl Plane {
 
     fn decide(&mut self, mut flight: Flight, doc: Doc) -> Vec<Act> {
         let now = flight.now;
-        let (next, reply, born) = match &flight.job {
+        let (next, reply, born, notify) = match &flight.job {
             Job::External { request } => {
                 let (next, response) = handle(doc, request, now);
-                (next, Some(response), Vec::new())
+                (next, Some(response), Vec::new(), Vec::new())
             }
             Job::Due => {
-                let (next, born) = run_due(doc, now);
-                (next, None, born)
+                let (next, born, notify) = run_due(doc, now);
+                (next, None, born, notify)
             }
             Job::Occurrence(pending) => {
                 let next = create_occurrence(doc, pending, now);
-                (next, None, Vec::new())
+                (next, None, Vec::new(), Vec::new())
             }
         };
         if let (Some((client, id)), Some(response)) = (flight.caller.clone(), reply) {
             flight.reply = Some((client, id, response));
         }
+        flight.notify = notify;
         let previous = self
             .cache
             .get(&flight.key)
@@ -291,12 +308,11 @@ impl Plane {
             .unwrap_or_else(|| empty_doc(&flight.key));
         if next == previous && born.is_empty() {
             self.flight = None;
-            self.remember(&flight.key, next, flight.etag.clone());
-            return flight
-                .reply
-                .into_iter()
-                .map(|(client, id, response)| Act::Reply { client, id, response })
-                .collect();
+            let key = flight.key.clone();
+            let etag = flight.etag.clone();
+            let acts = sent(&flight);
+            self.remember(&key, next, etag);
+            return acts;
         }
         let body = encode(&next);
         let op = self.alloc();
@@ -321,17 +337,38 @@ impl Plane {
 
     fn committed(&mut self, _now: u64, flight: Flight, tag: Etag) -> Vec<Act> {
         self.flight = None;
-        if let Some(doc) = flight.decided {
-            self.remember(&flight.key, doc, Some(tag));
+        let Flight {
+            key,
+            decided,
+            born,
+            ..
+        } = &flight;
+        if let Some(doc) = decided.clone() {
+            self.remember(key, doc, Some(tag));
         }
-        for item in flight.born {
+        for item in born.clone() {
             self.pending.push_back(item);
         }
-        flight
-            .reply
-            .into_iter()
-            .map(|(client, id, response)| Act::Reply { client, id, response })
+        sent(&flight)
+    }
+
+    /// Bytes of each cached document, and the occurrences still owed.
+    pub fn document_bodies(&self) -> Vec<(String, Vec<u8>)> {
+        self.cache
+            .iter()
+            .map(|(key, cached)| (key.clone(), encode(&cached.doc)))
             .collect()
+    }
+
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending.iter().map(|item| item.promise.clone()).collect()
+    }
+
+    /// The open flight's key, and whether it is writing the document back.
+    pub fn flight_key(&self) -> Option<(String, bool)> {
+        self.flight
+            .as_ref()
+            .map(|flight| (flight.key.clone(), matches!(flight.phase, Phase::Write)))
     }
 
     fn fail(&mut self, flight: Flight) -> Vec<Act> {
@@ -370,6 +407,17 @@ impl Plane {
         }
         best.map(|(_, key)| key)
     }
+}
+
+fn sent(flight: &Flight) -> Vec<Act> {
+    let mut acts = Vec::new();
+    if let Some((client, id, response)) = flight.reply.clone() {
+        acts.push(Act::Reply { client, id, response });
+    }
+    for note in &flight.notify {
+        acts.push(Act::Notify(note.clone()));
+    }
+    acts
 }
 
 fn key_of(request: &Request) -> Option<String> {
@@ -1208,7 +1256,7 @@ fn held(map: &mut BTreeMap<String, Obj>, id: &str, version: u64, now: u64) -> Re
     }
 }
 
-fn run_due(mut doc: Doc, now: u64) -> (Doc, Vec<Pending>) {
+fn run_due(mut doc: Doc, now: u64) -> (Doc, Vec<Pending>, Vec<Outbound>) {
     match &mut doc {
         Doc::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
@@ -1222,19 +1270,21 @@ fn run_due(mut doc: Doc, now: u64) -> (Doc, Vec<Pending>) {
             };
             schedule.last_run_at = Some(at);
             schedule.next_run_at = echod_cron::next_run_at(&schedule.cron, at);
-            (doc, vec![pending])
+            (doc, vec![pending], Vec::new())
         }
         Doc::Origin(map) => {
-            if let Some(id) = map
+            let notify = if let Some(id) = map
                 .keys()
                 .cloned()
                 .find(|id| map.get(id).is_some_and(|obj| obj.due(now).is_some()))
             {
-                step_object(map, &id, now);
-            }
-            (doc, Vec::new())
+                step_object(map, &id, now)
+            } else {
+                Vec::new()
+            };
+            (doc, Vec::new(), notify)
         }
-        _ => (doc, Vec::new()),
+        _ => (doc, Vec::new(), Vec::new()),
     }
 }
 
@@ -1414,7 +1464,7 @@ impl Obj {
         };
         if self.promise.state == PromiseState::Pending {
             consider(&mut best, self.promise.timeout_at);
-        } else if !self.promise.callbacks.is_empty() {
+        } else if !self.promise.callbacks.is_empty() || !self.promise.listeners.is_empty() {
             consider(&mut best, self.promise.settled_at.unwrap_or(0));
         }
         if let Some(task) = &self.task {
@@ -1436,41 +1486,66 @@ impl Obj {
 }
 
 /// One due step of one object: the promise's deadline, its lease, its retry,
-/// or one callback it owes. A read at `now` is what settles a promise past
-/// its deadline, and that write is the whole step.
-fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) {
-    let awaiter = {
-        let Some(obj) = map.get_mut(id) else { return };
+/// one callback it owes, or one listener. A retry offers the task. A listener
+/// is told the settled promise. Both are the same boundary outputs the
+/// abstract model sends.
+fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbound> {
+    enum Found {
+        Quiet,
+        Callback(String),
+        Execute { version: u64 },
+        Unblock { address: String, promise: PromiseRecord },
+    }
+    let found = {
+        let Some(obj) = map.get_mut(id) else {
+            return Vec::new();
+        };
         if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
             obj.project_in_place(now);
-            return;
-        }
-        if obj.promise.state == PromiseState::Pending {
+            Found::Quiet
+        } else if obj.promise.state == PromiseState::Pending {
             if let Some(task) = obj.task.as_mut() {
                 if task.state == TaskState::Acquired
                     && task.lease_timeout_at.is_some_and(|at| at <= now)
                 {
                     task.unlease(TaskState::Pending, Some(now));
-                    return;
-                }
-                if task.state == TaskState::Pending
+                    Found::Quiet
+                } else if task.state == TaskState::Pending
                     && task.retry_timeout_at.is_some_and(|at| at <= now)
                 {
+                    let version = task.version;
                     task.retry_timeout_at = Some(now.saturating_add(RETRY_TIMEOUT));
-                    return;
+                    Found::Execute { version }
+                } else {
+                    Found::Quiet
                 }
+            } else {
+                Found::Quiet
             }
-        }
-        if obj.promise.state != PromiseState::Pending && !obj.promise.callbacks.is_empty() {
-            Some(obj.promise.callbacks.remove(0))
+        } else if !obj.promise.callbacks.is_empty() {
+            Found::Callback(obj.promise.callbacks.remove(0))
+        } else if !obj.promise.listeners.is_empty() {
+            let address = obj.promise.listeners.remove(0);
+            let promise = obj.promise.record(id);
+            Found::Unblock { address, promise }
         } else {
-            None
+            Found::Quiet
         }
     };
-    let Some(awaiter) = awaiter else { return };
-    let awaited = id.to_string();
-    if let Some(task) = map.get_mut(&awaiter).and_then(|o| o.task.as_mut()) {
-        resume(task, &awaited, now);
+    match found {
+        Found::Quiet => Vec::new(),
+        Found::Execute { version } => vec![Outbound::Execute {
+            id: id.to_string(),
+            version,
+        }],
+        Found::Unblock { address, promise } => vec![Outbound::Unblock { address, promise }],
+        Found::Callback(awaiter) => {
+            let awaited = id.to_string();
+            if let Some(task) = map.get_mut(&awaiter).and_then(|o| o.task.as_mut()) {
+                resume(task, &awaited, now);
+            }
+            Vec::new()
+        }
     }
 }
 
@@ -1537,4 +1612,35 @@ impl Tk {
         self.lease_timeout_at = None;
         self.retry_timeout_at = retry;
     }
+}
+
+verus! {
+
+/// The node's documents, as a proof sees them. The relation to the abstract
+/// store reads these bytes; this view does not call the abstract model.
+pub struct PlaneV {
+    pub address: nat,
+    pub nodes: nat,
+    /// `Some` while a flight is open: the document key, and whether the flight is writing it back.
+    pub flight: Option<(Seq<char>, bool)>,
+    pub documents: Seq<(Seq<char>, Seq<u8>)>,
+    pub pending: Seq<Seq<char>>,
+}
+
+impl View for Plane {
+    type V = PlaneV;
+    open spec fn view(&self) -> PlaneV {
+        PlaneV {
+            address: self.address as nat,
+            nodes: self.nodes as nat,
+            flight: match self.flight_key() {
+                Some((key, writing)) => Some((key@, writing)),
+                None => None,
+            },
+            documents: self.document_bodies()@.map_values(|e: (String, Vec<u8>)| (e.0@, e.1@)),
+            pending: self.pending_ids()@.map_values(|s: String| s@),
+        }
+    }
+}
+
 }
