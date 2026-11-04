@@ -1,13 +1,13 @@
 //! The proved half of the process: one document, and what a node decides
 //! about membership, its cache, and the deadline keys it armed.
 //!
-//! `./verify.sh` loads this file as its crate root, then the concrete
+//! `./verify.sh` loads this file as its crate root, then the document
 //! specification. `cargo build` loads it as `echod_logic::verified`, with
 //! the ghost code erased. The modules beside this one run the store calls
 //! these functions decide between.
 //!
 //! `types`, `tags`, `object`, and the specification modules are
-//! `echod_concrete`. A handler ensures it computes its `spec_*`.
+//! `echod_document`. A handler ensures it computes its `spec_*`.
 //!
 //! ```text
 //! store.rs           State: three row vectors whose view is the concrete AState
@@ -29,24 +29,24 @@ pub mod steps;
 pub mod store;
 pub mod store_proof;
 
-pub use echod_concrete::object;
-pub use echod_concrete::tags;
-pub use echod_concrete::types;
+pub use echod_document::object;
+pub use echod_document::tags;
+pub use echod_document::types;
 
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::external_proof;
+pub use echod_document::external_proof;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::internal_proof;
+pub use echod_document::internal_proof;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::internal_spec;
+pub use echod_document::internal_spec;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::properties;
+pub use echod_document::properties;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::properties_proof;
+pub use echod_document::properties_proof;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::spec;
+pub use echod_document::spec;
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::steps_spec;
+pub use echod_document::steps_spec;
 
 pub use store::*;
 pub use types::*;

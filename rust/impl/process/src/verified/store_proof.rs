@@ -1,5 +1,5 @@
 //! A row of `State`, read through the fold. The fold's own lemmas are
-//! `echod_concrete::fold_proof`. These say the row at an index is the entry
+//! `echod_document::fold_proof`. These say the row at an index is the entry
 //! at its key.
 
 use vstd::prelude::*;
@@ -8,7 +8,7 @@ use super::store::*;
 use super::types::*;
 
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::fold_proof::*;
+pub use echod_document::fold_proof::*;
 
 verus! {
 

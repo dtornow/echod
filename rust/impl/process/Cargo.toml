@@ -14,6 +14,7 @@ path = "src/lib.rs"
 # src/verified/mod.rs, not this crate's other modules.
 [dependencies]
 echod-concrete = { path = "../../spec/concrete" }
+echod-document = { path = "../document" }
 echod-types = { path = "../../comm/types" }
 echod-cron = { path = "../../comm/cron" }
 vstd = "=0.0.0-2026-10-11-0230"

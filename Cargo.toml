@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "rust/impl/document",
   "rust/impl/process",
   "rust/impl/runtime",
   "rust/impl/cli",

@@ -3,7 +3,7 @@
 //! what a step left owed, and the nearest deadline a document owes a timer
 //! for.
 //!
-//! The specification of that composition is `echod_concrete::steps_spec`:
+//! The specification of that composition is `echod_document::steps_spec`:
 //! after a sweep at `now` nothing in the document is due (`no_due`), a sweep
 //! that fired nothing left the document as it was, and `next_deadline` is
 //! the least deadline (`is_next`). The functions here ensure they compute it.

@@ -139,7 +139,7 @@ impl KeySpace {
 
     /// The start of the bucket an instant falls in.
     pub fn bucket_of(&self, at: u64) -> u64 {
-        echod_concrete::timeouts::bucket_of(at, self.bucket_ms)
+        echod_document::timeouts::bucket_of(at, self.bucket_ms)
     }
 
     /// Every timer key lives under this.

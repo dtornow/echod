@@ -10,8 +10,8 @@
 //! `task.heartbeat`, which refreshes many leases, and `task.suspend`, which
 //! registers a task on many promises.
 //!
-//! The spec functions the contracts name are `echod_concrete::spec`. The
-//! lemmas the bodies invoke are `echod_concrete::external_proof`.
+//! The spec functions the contracts name are `echod_document::spec`. The
+//! lemmas the bodies invoke are `echod_document::external_proof`.
 
 use vstd::prelude::*;
 

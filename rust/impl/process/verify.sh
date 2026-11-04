@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Verify the concrete specification, then the proved modules of the process.
+# Verify the document specification, then the proved modules of the process.
 #
 # Verus does not read Cargo's dependency graph, and it does not load the
 # rest of this crate: the protocol, the cache, and the store-call machines
-# stay outside this run. This builds echod_types, then echod_concrete,
+# stay outside this run. This builds echod_types, then echod_document,
 # and passes those rlibs to src/verified/mod.rs, which is what a handler's
-# ensures names.
+# ensures names. The concrete Rover model is a separate crate and is not
+# loaded here.
 # `cargo build` is the other compiler: the same sources with the ghost
 # code erased. serde and the abstract model are cfg'd out of the Verus
 # run; cargo still typechecks both.
@@ -24,8 +25,8 @@ mkdir -p "$OUT"
   --out-dir "$OUT" \
   --triggers-mode silent --multiple-errors 12 --no-auto-recommends-check "$@"
 
-"$VERUS" --crate-type=lib --crate-name echod_concrete \
-  ../../spec/concrete/src/lib.rs \
+"$VERUS" --crate-type=lib --crate-name echod_document \
+  ../document/src/lib.rs \
   --extern "echod_types=$OUT/libechod_types.rlib" \
   --out-dir "$OUT" \
   --triggers-mode silent --multiple-errors 12 --no-auto-recommends-check "$@"
@@ -33,5 +34,5 @@ mkdir -p "$OUT"
 exec "$VERUS" --crate-type=lib --crate-name echod_logic \
   src/verified/mod.rs \
   --extern "echod_types=$OUT/libechod_types.rlib" \
-  --extern "echod_concrete=$OUT/libechod_concrete.rlib" \
+  --extern "echod_document=$OUT/libechod_document.rlib" \
   --triggers-mode silent --multiple-errors 12 --no-auto-recommends-check "$@"

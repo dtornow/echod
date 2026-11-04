@@ -1,8 +1,8 @@
-//! The concrete world: the nodes and the store Rover starts from, the shell
-//! around a node, and the store's conditional write.
+//! The concrete world: the nodes and the store Rover starts from, one node
+//! flight, and the store's conditional write.
 
 use echod_concrete::model::{
-    route_effects, ClientRequest, Effect, Fleet, Incoming, Local, Message, Model, Pid, Store,
+    ClientRequest, Fleet, Incoming, Local, Message, Model, Pid, Store,
 };
 use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRes, Request, Response, StoreCall, StoreError,
@@ -95,7 +95,6 @@ fn call(id: u64, request: Request) -> ClientRequest {
     ClientRequest {
         client: "c".into(),
         id,
-        kind: "request".into(),
         request,
     }
 }
@@ -289,7 +288,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
 }
 
 #[test]
-fn stop_ends_the_loop_and_a_wake_replaces_only_the_shell() {
+fn stop_ends_the_loop() {
     let world = Model.world(&Fleet::new(1, true));
     let (pid, state) = world.process[0].clone();
     let stopped = Model.step(
@@ -305,42 +304,7 @@ fn stop_ends_the_loop_and_a_wake_replaces_only_the_shell() {
     assert!(node.logic.stopping);
     assert!(!node.logic.loops);
     assert_eq!(node.logic.clock, 4);
-
-    let (wake, send) = route_effects(
-        &[
-            Effect::Wake { after_ms: 5 },
-            Effect::Note,
-            Effect::Reply { id: 1, status: 200 },
-            Effect::Wake { after_ms: 9 },
-            Effect::Store {
-                op: 3,
-                call: StoreCall::Delete { key: "n".into() },
-            },
-        ],
-        10,
-        Some(1),
-    );
-    assert_eq!(wake, Some(19));
-    assert_eq!(
-        send,
-        vec![
-            (
-                Pid::Outside,
-                Message::Reply {
-                    id: 1,
-                    status: 200,
-                    response: None,
-                },
-            ),
-            (
-                Pid::Store,
-                Message::StoreReq {
-                    op: 3,
-                    call: StoreCall::Delete { key: "n".into() }
-                }
-            ),
-        ]
-    );
+    assert!(stopped[0].send.is_empty());
 }
 
 #[test]

@@ -77,13 +77,9 @@ pub enum StoreOutcome {
     Failed(StoreError),
 }
 
-/// FNV-1a over the bytes. `echod_logic::verified::node::fnv1a` ensures this
-/// computes `node_spec::hash`.
+/// FNV-1a over the bytes. Ownership of a key is this hash modulo the fleet.
 #[verifier::external_body]
-pub fn fnv1a(s: &str) -> (r: u64)
-    ensures
-        r as nat == crate::node_spec::hash(s@),
-{
+pub fn fnv1a(s: &str) -> (r: u64) {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
         h ^= *b as u64;

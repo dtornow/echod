@@ -1,7 +1,7 @@
 //! The store: rows in a vector, a map in the specification.
 //!
 //! The object at `wf/<origin>` is a log of rows; the document is the fold of
-//! the rows by id, last row winning. The fold is `echod_concrete::state::fold_by`,
+//! the rows by id, last row winning. The fold is `echod_document::state::fold_by`,
 //! generic in the key, and this state is three row vectors whose
 //! abstract view is three maps. The lemmas tie a vector operation to a map
 //! operation:
@@ -17,13 +17,13 @@ use super::store_proof::*;
 use super::types::*;
 
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::state::{
+pub use echod_document::state::{
     distinct_by, fold_by, mentions, obj_key, obj_val, out_key, out_val, sched_key, sched_val, AState,
 };
 
 verus! {
 
-/// The rows of one document. Their view is `echod_concrete::state::AState`.
+/// The rows of one document. Their view is `echod_document::state::AState`.
 pub struct State {
     pub objects: Vec<Promise>,
     pub schedules: Vec<Schedule>,

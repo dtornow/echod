@@ -4,7 +4,7 @@
 //!
 //! Every function here is a pure step: it reads and updates this state and
 //! nothing else, and its `ensures` says it computes the specification in
-//! `echod_concrete::node_spec`. What stays outside, trusted: the control
+//! `echod_document::node_spec`. What stays outside, trusted: the control
 //! flow in the rest of this crate, which calls these functions in order
 //! against the bucket, and the bucket itself.
 
@@ -15,17 +15,22 @@ use vstd::prelude::*;
 pub use super::types::{clone_string, str_eq};
 
 #[cfg(verus_keep_ghost)]
-pub use echod_concrete::node_spec::*;
+pub use echod_document::node_spec::*;
 
 verus! {
 
-/// FNV-1a over the bytes. The body is `echod_concrete::fnv1a`. Trusted to
-/// be a function of the string.
+/// FNV-1a over the bytes. The concrete model's `fnv1a` is this function.
+/// Trusted to be a function of the string, and to compute `hash`.
 #[verifier::external_body]
 pub fn fnv1a(s: &str) -> (r: u64)
     ensures r as nat == hash(s@),
 {
-    echod_concrete::fnv1a(s)
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 // ---------------------------------------------------------------------------

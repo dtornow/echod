@@ -3,7 +3,7 @@
 //! An origin's document holds `Promise` rows; a schedule's holds its one
 //! `Schedule` row, or none. The object is JSON lines: a header, then one row
 //! per line, in commit order. Reading folds the rows by id, last row
-//! winning — `echod_concrete::state::fold_by`, which `verified::store` proves
+//! winning — `echod_document::state::fold_by`, which `verified::store` proves
 //! is what compaction preserves. Writing appends a header and the rows the
 //! step changed, or rewrites the whole object once enough rows are stale.
 //!

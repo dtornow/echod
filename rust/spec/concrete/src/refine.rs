@@ -1,12 +1,11 @@
-//! The statement this crate is for.
+//! Refinement of this model to the abstract one.
 //!
-//! Instantiate Rover with this crate's model — the nodes and the store,
-//! `spec_world` at the start, `spec_step` at every process — and with the
-//! abstract model, the one service. The concrete instantiation refines the
-//! abstract one:
+//! The concrete world is the nodes and the store. The abstract world is the
+//! one service. They share no handlers. The statement is that every boundary
+//! trace of the concrete world is a boundary trace of the abstract world:
 //!
 //! ```text
-//! echod_rover::rover::refinement::refines(
+//! echod_rover::rover::refinement::concrete_refines_abstract(
 //!     echod_concrete::Model,
 //!     concrete_config,
 //!     echod_abstract::Model,
@@ -14,13 +13,9 @@
 //! )
 //! ```
 //!
-//! That is every boundary trace of the concrete world is a boundary trace of
-//! the abstract world. `concrete_refines_abstract` is how it is proved, from
-//! a relation on the two initial worlds and a forward simulation. The
-//! theorem is stated at one boundary, `echod_abstract::BoundaryEvent`. The relation
-//! and the simulation are not proved yet. `spec_logic_on_event` is the node
-//! step inside the concrete instantiation; `spec_promise_create` is what that
-//! step cites for one request.
+//! That theorem needs a relation on the two initial worlds and a forward
+//! simulation. Neither is proved yet. The two boundaries are not the same
+//! type yet, and the concrete view does not yet carry the node's documents.
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {

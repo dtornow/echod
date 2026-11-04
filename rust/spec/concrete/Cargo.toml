@@ -1,6 +1,6 @@
 [package]
 name = "echod-concrete"
-description = "The concrete Rover model: the nodes and one store, and the handler specifications the process is proved against."
+description = "The concrete Rover model: the nodes and one store, each node a machine of its own."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

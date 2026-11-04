@@ -17,7 +17,7 @@
 //!   materialising (`viewTaskObject`). The kernel does the same: it tests
 //!   the stored object for the conditions the projected one would satisfy.
 //!
-//! The spec functions the contracts name are `echod_concrete::internal_spec`.
+//! The spec functions the contracts name are `echod_document::internal_spec`.
 //! The lemmas the bodies invoke are in `internal_proof`.
 
 use vstd::prelude::*;

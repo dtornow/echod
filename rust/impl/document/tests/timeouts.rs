@@ -1,6 +1,6 @@
 //! Every origin that owes a deadline has its key in the timeout bucket.
 
-use echod_concrete::timeouts::{bucket_of, TimeoutStore, HOUR_MS};
+use echod_document::timeouts::{bucket_of, TimeoutStore, HOUR_MS};
 
 #[test]
 fn an_origin_timeout_is_filed_in_the_bucket_it_falls_in() {
