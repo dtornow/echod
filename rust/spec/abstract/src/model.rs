@@ -13,7 +13,8 @@ use echod_rover::{Sched, Time};
 use echod_types::{Request, Response};
 
 use super::machine::{
-    echo, mk, promise_res, schedule_res, status, task_get_res, Dispatch, InOut, Out, ServerConfig, Store, Work,
+    echo, mk, promise_res, schedule_res, status, task_get_res, unavailable, Dispatch, InOut, Out,
+    ServerConfig, Store, Work,
 };
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
@@ -114,6 +115,151 @@ pub open spec fn spec_request_outcome(
         },
         send: spec_send(call, outcome.resp, outcome.send),
     }
+}
+
+/// 503, the same shape the concrete node sends.
+pub open spec fn spec_unavailable(request: Request) -> Response {
+    step::spec_unavailable(request)
+}
+
+/// Lean's `runShed`: the state stays, and the client is told 503.
+pub open spec fn spec_shed(before: StateV, call: Call) -> StepResultV<StateV, Pid, Message> {
+    StepResultV {
+        state: before,
+        send: spec_send(call, spec_unavailable(call.request), Seq::empty()),
+    }
+}
+
+/// Lean's `runLose`: the handler runs, and the client is told 503. Dispatches
+/// the handler emitted are still sent.
+pub open spec fn spec_lose(
+    before: StateV,
+    call: Call,
+    outcome: OutV,
+) -> StepResultV<StateV, Pid, Message> {
+    StepResultV {
+        state: StateV {
+            store: outcome.next,
+            pending: before.pending + outcome.work,
+        },
+        send: spec_send(call, spec_unavailable(call.request), outcome.send),
+    }
+}
+
+pub open spec fn spec_losses(
+    before: StateV,
+    call: Call,
+    outcomes: Seq<OutV>,
+) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases outcomes.len(),
+{
+    if outcomes.len() == 0 {
+        Seq::empty()
+    } else {
+        seq![spec_lose(before, call, outcomes[0])] + spec_losses(before, call, outcomes.skip(1))
+    }
+}
+
+/// A request's results end with the shed outcome.
+pub proof fn lemma_shed_is_last(
+    config: ServerConfig,
+    state: StateV,
+    now: Time,
+    call: Call,
+)
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            };
+            let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+            &&& outcomes.len() > 0
+            &&& outcomes[outcomes.len() as int - 1] == spec_shed(state, call)
+        }),
+{
+    let event = ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    };
+    let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+    let served = step::spec_run(config, state, call, now);
+    let lost = spec_losses(state, call, step::spec_handler(config, call.request, state.store, now));
+    let shed = seq![spec_shed(state, call)];
+    assert(outcomes == served + lost + shed);
+    let prefix = served + lost;
+    vstd::seq::lemma_seq_add_len(prefix, shed);
+    vstd::seq::lemma_seq_empty::<StepResultV<StateV, Pid, Message>>();
+    vstd::seq::lemma_seq_push_len(Seq::<StepResultV<StateV, Pid, Message>>::empty(), spec_shed(state, call));
+    assert(shed.len() == 1);
+    let j = prefix.len() as int;
+    vstd::seq::lemma_seq_add_index2(prefix, shed, j);
+    vstd::seq::lemma_seq_push_index_same(
+        Seq::<StepResultV<StateV, Pid, Message>>::empty(),
+        spec_shed(state, call),
+        0,
+    );
+    assert(shed[0] == spec_shed(state, call));
+    assert(outcomes[j] == spec_shed(state, call));
+    assert(j == outcomes.len() as int - 1);
+}
+
+/// An empty-task heartbeat is served as 200 and leaves the state in place.
+/// That result is the first request outcome.
+pub proof fn lemma_empty_heartbeat_is_first(
+    config: ServerConfig,
+    state: StateV,
+    now: Time,
+    call: Call,
+)
+    requires
+        match call.request {
+            Request::TaskHeartbeat(q) => q.tasks@.len() == 0,
+            _ => false,
+        },
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            };
+            let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+            &&& outcomes.len() > 0
+            &&& outcomes[0].state == state
+            &&& outcomes[0].send == spec_send(
+                call,
+                Response::Status(echod_types::StatusRes { status: 200 }),
+                Seq::empty(),
+            )
+        }),
+{
+    let event = ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    };
+    let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+    let handler = step::spec_handler(config, call.request, state.store, now);
+    assert(handler.len() == 1);
+    let outcome = handler[0];
+    assert(outcome.resp == step::spec_status_res(200));
+    assert(step::spec_status_res(200) == Response::Status(echod_types::StatusRes { status: 200 }));
+    assert(outcome.work =~= Seq::empty());
+    assert(outcome.send =~= Seq::empty());
+    assert(outcome.next == state.store);
+    let served = step::spec_run(config, state, call, now);
+    assert(served.len() == 1);
+    assert(served[0] == spec_request_outcome(state, call, outcome));
+    assert(served[0].state == state);
+    assert(served[0].send == spec_send(
+        call,
+        Response::Status(echod_types::StatusRes { status: 200 }),
+        Seq::empty(),
+    ));
+    let lost = spec_losses(state, call, handler);
+    let shed = seq![spec_shed(state, call)];
+    assert(outcomes == served + lost + shed);
+    vstd::seq::lemma_seq_add_index1(served, lost + shed, 0);
+    assert(outcomes[0] == served[0]);
 }
 
 fn send(
@@ -266,6 +412,34 @@ fn request_outcome(
     }
 }
 
+fn lose_outcome(
+    before: &State,
+    call: &Call,
+    outcome: Out,
+) -> (result: StepResult<Model>) {
+    let Out {
+        resp: _,
+        next,
+        work,
+        send: dispatches,
+        marks: _,
+    } = outcome;
+    StepResult {
+        state: State {
+            store: next,
+            pending: append_work(&before.pending, work),
+        },
+        send: send(call, unavailable(&call.request), dispatches),
+    }
+}
+
+fn shed_outcome(before: &State, call: &Call) -> (result: StepResult<Model>) {
+    StepResult {
+        state: copy(before),
+        send: send(call, unavailable(&call.request), Vec::new()),
+    }
+}
+
 fn run(
     config: &ServerConfig,
     state: &State,
@@ -319,6 +493,14 @@ fn run(
                 .map_values(|outcome: Out| spec_request_outcome(state@, *call, outcome@)));
         }
     }
+    let mut lost = config.handler(&call.request, &state.store, now);
+    while !lost.is_empty()
+        decreases lost.len(),
+    {
+        let outcome = lost.remove(0);
+        results.push(lose_outcome(state, call, outcome));
+    }
+    results.push(shed_outcome(state, call));
     results
 }
 

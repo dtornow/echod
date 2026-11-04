@@ -14,7 +14,7 @@ use echod_rover::Time;
 
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
-mod step;
+pub(crate) mod step;
 
 verus! {
 

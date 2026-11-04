@@ -12,9 +12,13 @@
 //! An observed output is one abstract outside step of that output. A process
 //! label observes nothing on both models. A process step that sends no output
 //! to the outside appends nothing the relation mentions, so the abstract
-//! execution is empty. A process step that sends one is [`output_simulation`]:
-//! some finite abstract execution has an empty boundary projection and leaves
-//! the worlds related. [`lemma_refines`] is trace inclusion once that holds.
+//! execution is empty. A process step whose send is one 503 for a call still
+//! on the network is one abstract shed: the service state stays and the same
+//! response is appended. An empty-task heartbeat is one abstract serve of
+//! status 200, and the service state stays. Every other process step that
+//! sends an output to the outside is [`output_simulation`]: some finite
+//! abstract execution has an empty boundary projection and leaves the worlds
+//! related. [`lemma_refines`] is trace inclusion once that holds.
 //!
 //! The node's documents and the service store are what a proof of
 //! [`output_simulation`] identifies. Inject and outside leave both process
@@ -32,6 +36,8 @@ use echod_abstract::model::Pid as APid;
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{BoundaryEvent, Call, Model as AModel, Output, ServerConfig};
+#[cfg(verus_keep_ghost)]
+use echod_types::Response;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
@@ -185,7 +191,53 @@ pub open spec fn sends_client_output(send: Seq<(CPid, CMessage)>) -> bool {
         0 <= k < send.len() && client_output_entry(send[k])
 }
 
-/// A concrete process step that emits a client output has a matching abstract
+/// `call` is still a client request on `network`. The network only grows.
+pub open spec fn request_carried(network: Seq<Envelope<CPid, CMessage>>, call: Call) -> bool {
+    exists|i: int|
+        #![trigger network[i]]
+        0 <= i < network.len() && network[i].sender == CPid::Outside && network[i].message
+            == CMessage::Request(call)
+}
+
+/// One output to the outside, the response to `call`. The client string is
+/// compared by its characters, which is what `spec_string` agrees on.
+pub open spec fn is_reply(send: Seq<(CPid, CMessage)>, call: Call, response: Response) -> bool {
+    send.len() == 1 && send[0].0 == CPid::Outside && match send[0].1 {
+        CMessage::Output(Output::Response { client, id, response: got }) => {
+            client@ == call.client@ && id == call.id && got == response
+        },
+        _ => false,
+    }
+}
+
+pub open spec fn empty_heartbeat(call: Call) -> bool {
+    match call.request {
+        echod_types::Request::TaskHeartbeat(q) => q.tasks@.len() == 0,
+        _ => false,
+    }
+}
+
+/// A client reply this file matches directly. Either the send is the 503
+/// shed of a call that is still on the network, or it is the 200 of an
+/// empty-task heartbeat of such a call.
+pub open spec fn client_reply(
+    network: Seq<Envelope<CPid, CMessage>>,
+    send: Seq<(CPid, CMessage)>,
+) -> bool {
+    exists|call: Call|
+        #![trigger request_carried(network, call)]
+        request_carried(network, call) && (
+            is_reply(send, call, echod_abstract::model::spec_unavailable(call.request))
+                || (empty_heartbeat(call) && is_reply(
+                    send,
+                    call,
+                    Response::Status(echod_types::StatusRes { status: 200 }),
+                ))
+        )
+}
+
+/// A concrete process step that emits a client output, and is not one of the
+/// replies [`client_reply`] already accounts for, has a matching abstract
 /// execution. The boundary projection is empty because a process label
 /// observes nothing. The execution restores [`related`], so each new output
 /// envelope is on the abstract network afterwards.
@@ -212,7 +264,9 @@ pub open spec fn output_simulation(fleet: Fleet, config: ServerConfig) -> bool {
             before_c,
             Label::Process { process, at, event, send },
             after_c,
-        ) && sends_client_output(send) ==> exists|after_a: World<AModel>|
+        ) && sends_client_output(send) && !client_reply(before_c.network, send) ==> exists|
+            after_a: World<AModel>,
+        |
             #[trigger] matches(
                 amodel(),
                 config,
@@ -1068,6 +1122,304 @@ pub proof fn lemma_silent_process(
     lemma_empty_matches(config, before_a);
 }
 
+/// One abstract process step that answers `call` with `response` and leaves
+/// the service state in place. The concrete send is that same response.
+pub proof fn lemma_one_abstract_reply(
+    config: ServerConfig,
+    before_c: World<CModel>,
+    process: CPid,
+    at: Time,
+    event: ProcessEvent<CPid, CMessage>,
+    send: Seq<(CPid, CMessage)>,
+    after_c: World<CModel>,
+    before_a: World<AModel>,
+    call: Call,
+    response: Response,
+    slot: int,
+    index: int,
+)
+    requires
+        related(before_c, before_a),
+        step(
+            cmodel(),
+            fleet,
+            before_c,
+            Label::Process { process, at, event, send },
+            after_c,
+        ),
+        request_carried(before_c.network, call),
+        is_reply(send, call, response),
+        0 <= slot < before_a.process.len(),
+        before_a.process[slot].0 == APid::Service,
+        ({
+            let state = before_a.process[slot].1;
+            let a_event = ProcessEvent::Receive {
+                sender: APid::Outside,
+                message: AMessage::Request(call),
+            };
+            let outcomes = amodel().spec_on_event(config, APid::Service, state, at, a_event);
+            &&& 0 <= index < outcomes.len()
+            &&& outcomes[index].state == state
+            &&& outcomes[index].send == echod_abstract::model::spec_send(
+                call,
+                response,
+                Seq::<echod_abstract::view::DispatchV>::empty(),
+            )
+        }),
+    ensures
+        exists|after_a: World<AModel>|
+            #[trigger] matches(
+                amodel(),
+                config,
+                before_a,
+                Seq::<BoundaryEvent>::empty(),
+                after_a,
+            ) && related(after_c, after_a),
+{
+    reveal(step);
+    let state = before_a.process[slot].1;
+    let a_event = ProcessEvent::Receive {
+        sender: APid::Outside,
+        message: AMessage::Request(call),
+    };
+    let outcomes = amodel().spec_on_event(config, APid::Service, state, at, a_event);
+    let outcome = outcomes[index];
+    let output = Output::Response { client: call.client, id: call.id, response };
+    assert(outcome.state == state);
+    assert(outcome.send == echod_abstract::model::spec_send(
+        call,
+        response,
+        Seq::<echod_abstract::view::DispatchV>::empty(),
+    ));
+    assert(outcome.send =~= seq![(APid::Outside, AMessage::Output(output))]);
+    assert(before_c.now <= at);
+    assert(before_a.now <= before_c.now);
+    assert(before_a.now <= at);
+    assert(amodel().spec_outside() == APid::Outside);
+    assert(APid::Service != APid::Outside);
+    assert(service_present(before_a));
+    assert(is_process(amodel(), before_a, APid::Service));
+    let carried = choose|i: int|
+        #![trigger before_c.network[i]]
+        0 <= i < before_c.network.len() && before_c.network[i].sender == CPid::Outside
+            && before_c.network[i].message == CMessage::Request(call);
+    assert(requests_covered(before_c.network, before_a.network));
+    assert(carried_request(before_c.network[carried], before_a.network));
+    assert(service_request(before_a.network, call));
+    assert(event_valid(before_a, APid::Service, a_event));
+    let a_label = Label::Process {
+        process: APid::Service,
+        at,
+        event: a_event,
+        send: outcome.send,
+    };
+    let after_a = land(before_a, slot, APid::Service, at, outcome);
+    assert(step(amodel(), config, before_a, a_label, after_a));
+    assert(amodel().spec_observe(a_label) =~= Seq::<BoundaryEvent>::empty());
+    lemma_matched_step(
+        config,
+        before_a,
+        a_label,
+        after_a,
+        Seq::<BoundaryEvent>::empty(),
+    );
+    assert(before_a.process[slot] == (APid::Service, state));
+    assert(after_a.process == before_a.process.update(slot, before_a.process[slot]));
+    assert forall|k: int| 0 <= k < before_a.process.len() implies #[trigger] after_a.process[k]
+        == before_a.process[k] by {
+        if k == slot {
+            vstd::seq::lemma_seq_update_same(before_a.process, slot, before_a.process[slot]);
+        } else {
+            vstd::seq::lemma_seq_update_different(
+                before_a.process,
+                k,
+                slot,
+                before_a.process[slot],
+            );
+        }
+    };
+    assert(after_a.process =~= before_a.process);
+    lemma_service_follows(before_a, after_a);
+    let a_suffix = envelopes(APid::Service, outcome.send);
+    assert(after_a.network == before_a.network + a_suffix);
+    assert(a_suffix.len() == 1);
+    assert(a_suffix[0] == Envelope {
+        sender: APid::Service,
+        recipient: APid::Outside,
+        message: AMessage::Output(output),
+    });
+    let j = before_a.network.len() as int;
+    vstd::seq::lemma_seq_add_len(before_a.network, a_suffix);
+    vstd::seq::lemma_seq_add_index2(before_a.network, a_suffix, j);
+    assert(after_a.network[j] == a_suffix[0]);
+    assert(service_output(after_a.network, output));
+    assert forall|k: int| 0 <= k < before_a.network.len() implies #[trigger] after_a.network[k]
+        == before_a.network[k] by {
+        vstd::seq::lemma_seq_add_index1(before_a.network, a_suffix, k);
+    };
+    assert(extends(after_a.network, before_a.network));
+    let c_i = choose|i: int|
+        #![trigger before_c.process[i]]
+        exists|j: int|
+            #![trigger cmodel().spec_on_event(fleet, process, before_c.process[i].1, at, event)[j]]
+            {
+                &&& 0 <= i < before_c.process.len()
+                &&& before_c.process[i].0 == process
+                &&& {
+                    let found = cmodel().spec_on_event(
+                        fleet,
+                        process,
+                        before_c.process[i].1,
+                        at,
+                        event,
+                    );
+                    &&& 0 <= j < found.len()
+                    &&& found[j].send == send
+                    &&& after_c == land(before_c, i, process, at, found[j])
+                }
+            };
+    let c_j = choose|j: int|
+        #![trigger cmodel().spec_on_event(fleet, process, before_c.process[c_i].1, at, event)[j]]
+        {
+            &&& 0 <= c_i < before_c.process.len()
+            &&& before_c.process[c_i].0 == process
+            &&& {
+                let found = cmodel().spec_on_event(
+                    fleet,
+                    process,
+                    before_c.process[c_i].1,
+                    at,
+                    event,
+                );
+                &&& 0 <= j < found.len()
+                &&& found[j].send == send
+                &&& after_c == land(before_c, c_i, process, at, found[j])
+            }
+        };
+    let c_outcome = cmodel().spec_on_event(fleet, process, before_c.process[c_i].1, at, event)[c_j];
+    assert(after_c == land(before_c, c_i, process, at, c_outcome));
+    let c_suffix = envelopes(process, send);
+    assert(after_c.network == before_c.network + c_suffix);
+    assert(c_suffix.len() == 1);
+    let (client_seen, id_seen, got) = match send[0].1 {
+        CMessage::Output(Output::Response { client, id, response: got }) => (client, id, got),
+        _ => (call.client, call.id, response),
+    };
+    echod_abstract::trusted::axiom_string_ext(client_seen, call.client);
+    let concrete_output = Output::Response { client: client_seen, id: id_seen, response: got };
+    assert(concrete_output == output);
+    assert(c_suffix[0] == sent(process, send[0]));
+    assert forall|k: int| 0 <= k < c_suffix.len() implies carried_request(
+        #[trigger] c_suffix[k],
+        after_a.network,
+    ) && carried_output(c_suffix[k], after_a.network) by {
+        assert(c_suffix[0].message == CMessage::Output(output));
+        assert(c_suffix[0].recipient == CPid::Outside);
+        assert(service_output(after_a.network, output));
+        assert(carried_output(c_suffix[0], after_a.network));
+        assert(carried_request(c_suffix[0], after_a.network));
+    };
+    lemma_append_keeps_coverage(before_c.network, c_suffix, before_a.network, after_a.network);
+    assert(after_a.now == at);
+    assert(after_c.now == at);
+    assert(before_a.now <= after_c.now);
+    assert(related(after_c, after_a));
+}
+
+/// A 503 for a call still on the network is one abstract shed. An empty-task
+/// heartbeat answered 200 is one abstract serve. Either way the service state
+/// stays and the boundary projection is empty.
+pub proof fn lemma_client_replies(
+    fleet: Fleet,
+    config: ServerConfig,
+    before_c: World<CModel>,
+    process: CPid,
+    at: Time,
+    event: ProcessEvent<CPid, CMessage>,
+    send: Seq<(CPid, CMessage)>,
+    after_c: World<CModel>,
+    before_a: World<AModel>,
+)
+    requires
+        related(before_c, before_a),
+        step(
+            cmodel(),
+            fleet,
+            before_c,
+            Label::Process { process, at, event, send },
+            after_c,
+        ),
+        client_reply(before_c.network, send),
+    ensures
+        exists|after_a: World<AModel>|
+            #[trigger] matches(
+                amodel(),
+                config,
+                before_a,
+                Seq::<BoundaryEvent>::empty(),
+                after_a,
+            ) && related(after_c, after_a),
+{
+    let call = choose|call: Call|
+        #![trigger request_carried(before_c.network, call)]
+        request_carried(before_c.network, call) && (
+            is_reply(send, call, echod_abstract::model::spec_unavailable(call.request)) || (
+                empty_heartbeat(call) && is_reply(
+                    send,
+                    call,
+                    Response::Status(echod_types::StatusRes { status: 200 }),
+                )
+            )
+        );
+    let slot = choose|slot: int|
+        0 <= slot < before_a.process.len() && #[trigger] before_a.process[slot].0 == APid::Service;
+    let state = before_a.process[slot].1;
+    let shed = echod_abstract::model::spec_unavailable(call.request);
+    if is_reply(send, call, shed) {
+        echod_abstract::model::lemma_shed_is_last(config, state, at, call);
+        let a_event = ProcessEvent::Receive {
+            sender: APid::Outside,
+            message: AMessage::Request(call),
+        };
+        let outcomes = amodel().spec_on_event(config, APid::Service, state, at, a_event);
+        let index = outcomes.len() as int - 1;
+        assert(outcomes[index] == echod_abstract::model::spec_shed(state, call));
+        lemma_one_abstract_reply(
+            config,
+            before_c,
+            process,
+            at,
+            event,
+            send,
+            after_c,
+            before_a,
+            call,
+            shed,
+            slot,
+            index,
+        );
+    } else {
+        let response = Response::Status(echod_types::StatusRes { status: 200 });
+        assert(empty_heartbeat(call));
+        assert(is_reply(send, call, response));
+        echod_abstract::model::lemma_empty_heartbeat_is_first(config, state, at, call);
+        lemma_one_abstract_reply(
+            config,
+            before_c,
+            process,
+            at,
+            event,
+            send,
+            after_c,
+            before_a,
+            call,
+            response,
+            slot,
+            0,
+        );
+    }
+}
+
 pub proof fn lemma_process_simulation(fleet: Fleet, config: ServerConfig)
     requires
         output_simulation(fleet, config),
@@ -1091,21 +1443,36 @@ pub proof fn lemma_process_simulation(fleet: Fleet, config: ServerConfig)
         match label {
             Label::Process { process, at, event, send } => {
                 if sends_client_output(send) {
-                    assert(step(
-                        cmodel(),
-                        fleet,
-                        before_c,
-                        Label::Process { process, at, event, send },
-                        after_c,
-                    ));
-                    assert(exists|after_a: World<AModel>|
-                        #[trigger] matches(
-                            amodel(),
+                    if client_reply(before_c.network, send) {
+                        lemma_client_replies(
+                            fleet,
                             config,
+                            before_c,
+                            process,
+                            at,
+                            event,
+                            send,
+                            after_c,
                             before_a,
-                            Seq::<BoundaryEvent>::empty(),
-                            after_a,
-                        ) && related(after_c, after_a));
+                        );
+                    } else {
+                        assert(step(
+                            cmodel(),
+                            fleet,
+                            before_c,
+                            Label::Process { process, at, event, send },
+                            after_c,
+                        ));
+                        assert(!client_reply(before_c.network, send));
+                        assert(exists|after_a: World<AModel>|
+                            #[trigger] matches(
+                                amodel(),
+                                config,
+                                before_a,
+                                Seq::<BoundaryEvent>::empty(),
+                                after_a,
+                            ) && related(after_c, after_a));
+                    }
                 } else {
                     lemma_silent_process(
                         fleet,
@@ -1242,7 +1609,8 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 }
 
 /// Concrete boundary traces are abstract boundary traces once every
-/// output-emitting process step has its abstract execution.
+/// output-emitting process step that is not a shed or an empty heartbeat
+/// has its abstract execution.
 pub proof fn lemma_refines(fleet: Fleet, config: ServerConfig)
     requires
         output_simulation(fleet, config),

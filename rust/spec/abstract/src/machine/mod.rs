@@ -45,7 +45,7 @@ use vstd::prelude::*;
 use echod_rover::Sched;
 
 use echod_types::{
-    PromiseRecord, PromiseRes, PromiseState, Response, Schedule, ScheduleRes, StatusRes, Tags,
+    PromiseRecord, PromiseRes, PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes, Tags,
     TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value,
 };
 
@@ -332,6 +332,25 @@ fn claim_res(status: u16, task: Option<TaskRecord>, promise: Option<PromiseRecor
 
 fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> Response {
     Response::TaskFence(TaskFenceRes { status, action })
+}
+
+/// The reply when a request is shed or the store does not answer. The shape
+/// follows the request, and the status is 503.
+pub(crate) fn unavailable(request: &Request) -> (response: Response) {
+    match request {
+        Request::PromiseGet(_) | Request::PromiseCreate(_) | Request::PromiseSettle(_)
+        | Request::PromiseRegisterCallback(_) | Request::PromiseRegisterListener(_) => {
+            promise_res(503, None)
+        },
+        Request::ScheduleGet(_) | Request::ScheduleCreate(_) => schedule_res(503, None),
+        Request::ScheduleDelete(_) | Request::TaskRelease(_) | Request::TaskHalt(_)
+        | Request::TaskContinue(_) | Request::TaskHeartbeat(_) | Request::TaskSuspend(_)
+        | Request::TaskFenceCheck(_) => status_res(503),
+        Request::TaskGet(_) => task_get_res(503, None),
+        Request::TaskCreate(_) | Request::TaskAcquire(_) => claim_res(503, None, None),
+        Request::TaskFulfill(_) => promise_res(503, None),
+        Request::TaskFence(_) => fence_res(503, None),
+    }
 }
 
 // ------------------------------------------------------------------ outcomes

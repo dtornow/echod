@@ -1,8 +1,9 @@
 //! The abstract step, as a specification.
 //!
 //! `spec_step` is what `RoverModel::spec_on_event` returns. A request is
-//! `spec_handler`. A timeout is one ready queued occurrence, or one step
-//! derived from the three maps. Anything else leaves the state as it was.
+//! served, lost, or shed, the three outcomes of the Lean step. A timeout is
+//! one ready queued occurrence, or one step derived from the three maps.
+//! Anything else leaves the state as it was.
 //!
 //! The executable `on_event` is obliged, by the trait, to return results
 //! whose views are exactly this sequence. That equality is not proved here.
@@ -35,7 +36,9 @@ use crate::view::{all_in_origin, distinct, lift_dispatch, sat_add};
 use crate::view::{DispatchV, InOutV, InternalV, OutV, PromiseV, ScheduleV, StoreV, TaskV};
 
 #[cfg(verus_keep_ghost)]
-use super::{spec_idle, spec_internal_result, spec_ready, spec_request_outcome};
+use super::{
+    spec_idle, spec_internal_result, spec_losses, spec_ready, spec_request_outcome, spec_shed,
+};
 use super::{Pid, StateV};
 
 verus! {
@@ -1284,10 +1287,32 @@ pub open spec fn spec_run_timeout(config: ServerConfig, state: StateV, now: Time
     spec_queue(config, state, now, 0) + spec_derived(config, state, now)
 }
 
+/// 503, shaped like the concrete node's `spec_unavailable`.
+pub open spec fn spec_unavailable(request: Request) -> Response {
+    match request {
+        Request::PromiseGet(_) | Request::PromiseCreate(_) | Request::PromiseSettle(_)
+        | Request::PromiseRegisterCallback(_) | Request::PromiseRegisterListener(_) => {
+            spec_promise_res(503, None)
+        },
+        Request::ScheduleGet(_) | Request::ScheduleCreate(_) => spec_schedule_res(503, None),
+        Request::ScheduleDelete(_) | Request::TaskRelease(_) | Request::TaskHalt(_)
+        | Request::TaskContinue(_) | Request::TaskHeartbeat(_) | Request::TaskSuspend(_)
+        | Request::TaskFenceCheck(_) => spec_status_res(503),
+        Request::TaskGet(_) => spec_task_get_res(503, None),
+        Request::TaskCreate(_) | Request::TaskAcquire(_) => spec_claim_res(503, None, None),
+        Request::TaskFulfill(_) => spec_promise_res(503, None),
+        Request::TaskFence(_) => spec_fence_res(503, None),
+    }
+}
+
 pub open spec fn spec_service(config: ServerConfig, state: StateV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<StateV, Pid, Message>> {
     match event {
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-            spec_run(config, state, call, now)
+            let outcomes = spec_handler(config, call.request, state.store, now);
+            spec_run(config, state, call, now) + spec_losses(state, call, outcomes) + seq![spec_shed(
+                state,
+                call,
+            )]
         },
         ProcessEvent::Timeout => {
             let results = spec_run_timeout(config, state, now);

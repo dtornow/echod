@@ -5,7 +5,8 @@
 //! This crate does not import its handlers, and the document specifications
 //! the process proves against live in `echod-document`. Refinement of this
 //! model to the abstract one is `simulation`: the relation, the injected call,
-//! the observed output, and the process step that still has to be matched.
+//! the observed output, the shed and the empty heartbeat, and the process
+//! step that still has to be matched.
 //!
 //! ```text
 //! plane.rs            one node: its documents, one flight, the store round trip

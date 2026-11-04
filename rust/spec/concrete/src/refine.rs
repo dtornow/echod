@@ -4,7 +4,9 @@
 //! one service. They share no handlers. Every boundary trace of the concrete
 //! world is a boundary trace of the abstract world.
 //! `simulation::lemma_refines` is that statement, once `output_simulation`
-//! holds, by `concrete_refines_abstract`.
+//! holds, by `concrete_refines_abstract`. A 503 for a call still on the
+//! network is one abstract shed, and an empty-task heartbeat is one abstract
+//! serve of status 200. `output_simulation` is every other emitting step.
 //!
 //! Both models observe `echod_abstract::BoundaryEvent`: a `Call` in, an
 //! `Output` out. An injected `Request` is one abstract input of that call
