@@ -700,8 +700,10 @@ pub open spec fn agreement(config: ServerConfig) -> bool {
     requests_agree(config) && dues_agree(config) && occurrences_agree()
 }
 
-/// The configuration the concrete node implements: its retry timeout.
-pub open spec fn implemented() -> ServerConfig {
+/// The abstract server's configuration the concrete node implements: the
+/// node retries every `spec_retry_timeout()`, so the service it refines
+/// does too.
+pub open spec fn abstract_config() -> ServerConfig {
     ServerConfig { retry_timeout: crate::model::step::spec_retry_timeout() }
 }
 

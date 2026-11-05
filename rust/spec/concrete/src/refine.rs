@@ -5,7 +5,7 @@
 //! world is a boundary trace of the abstract world.
 //! `simulation::lemma_refines` is that statement, by
 //! `concrete_refines_abstract`, at the configuration the node implements
-//! (`relation::implemented`). It assumes nothing: `relation::agreement`,
+//! (`relation::abstract_config`). It assumes nothing: `relation::agreement`,
 //! that every handler, the due step, and the occurrence do the same on a
 //! document and on the abstract store it reads as, is proved in `interpret`,
 //! `handlers`, and `timers`. A 503 for a call still on the network is one
