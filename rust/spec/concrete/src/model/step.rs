@@ -25,7 +25,7 @@ use echod_types::{
     TaskRecord, TaskRef, TaskState, Value,
 };
 
-use crate::plane::{CachedV, FlightV, JobV, NoteV, PendingV, PlaneV};
+use crate::node::{CachedV, FlightV, JobV, NoteV, PendingV};
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 use super::{EntryV, LocalV, LogicV, Message, NodeV, Pid, StoreV};
@@ -146,8 +146,8 @@ pub open spec fn spec_fnv(chars: Seq<char>) -> u64 {
     spec_fnv_acc(spec_utf8(chars), 0xcbf29ce484222325)
 }
 
-pub open spec fn spec_owns(plane: PlaneV, key: Seq<char>) -> bool {
-    plane.nodes != 0 && spec_fnv(key) % (plane.nodes as u64) == (plane.address as u64)
+pub open spec fn spec_owns(node: NodeV, key: Seq<char>) -> bool {
+    node.nodes != 0 && spec_fnv(key) % (node.nodes as u64) == (node.address as u64)
 }
 
 pub open spec fn spec_hex_digit(n: u64) -> char {
@@ -493,8 +493,8 @@ pub open spec fn spec_clock(logic: LogicV, now: Time) -> LogicV {
     LogicV { clock: now as nat, ..logic }
 }
 
-pub open spec fn spec_cached(plane: PlaneV, key: Seq<char>) -> Option<CachedV> {
-    spec_cached_from(plane.documents, key, 0)
+pub open spec fn spec_cached(node: NodeV, key: Seq<char>) -> Option<CachedV> {
+    spec_cached_from(node.documents, key, 0)
 }
 
 pub open spec fn spec_cached_from(docs: Seq<CachedV>, key: Seq<char>, i: int) -> Option<CachedV>
@@ -549,42 +549,39 @@ pub open spec fn spec_forget(docs: Seq<CachedV>, key: Seq<char>, i: int) -> Seq<
 pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
     match event {
         ProcessEvent::Timeout => match node.wake {
-            Some(at) if at <= now as nat && node.plane.flight is None && node.plane.next_op < u64::MAX => {
-                let (plane, send) = spec_timeout(node.plane, now);
+            Some(at) if at <= now as nat && node.flight is None && node.next_op < u64::MAX => {
+                let (next, send) = spec_timeout(node, now);
                 spec_one(LocalV::Node(NodeV {
                     logic: LogicV { clock: now as nat, last_wake: None, ..node.logic },
-                    wake: spec_wake(plane),
-                    plane,
-                    ..node
+                    wake: spec_wake(next),
+                    ..next
                 }), send)
             },
             Some(at) if at <= now as nat => spec_one(LocalV::Node(node), Seq::empty()),
             _ => Seq::empty(),
         },
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-            if node.plane.flight is Some || node.plane.next_op == u64::MAX {
+            if node.flight is Some || node.next_op == u64::MAX {
                 spec_one(LocalV::Node(node), Seq::empty())
             } else {
-                let (plane, send) = spec_request(node.plane, now, call);
+                let (next, send) = spec_request(node, now, call);
                 spec_one(LocalV::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     next_request: (node.next_request + 1) as u64,
-                    wake: spec_wake(plane),
-                    plane,
-                    ..node
+                    wake: spec_wake(next),
+                    ..next
                 }), send)
             }
         },
         ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
-            if node.plane.flight is None || node.plane.next_op == u64::MAX {
+            if node.flight is None || node.next_op == u64::MAX {
                 spec_one(LocalV::Node(node), Seq::empty())
             } else {
-                let (plane, send) = spec_store_reply(node.plane, op, outcome);
+                let (next, send) = spec_store_reply(node, op, outcome);
                 spec_one(LocalV::Node(NodeV {
                     logic: spec_clock(node.logic, now),
-                    wake: spec_wake(plane),
-                    plane,
-                    ..node
+                    wake: spec_wake(next),
+                    ..next
                 }), send)
             }
         },
@@ -654,45 +651,45 @@ pub open spec fn spec_notes(notes: Seq<NoteV>) -> Seq<(Pid, Message)>
     else { seq![spec_notify(notes[0])] + spec_notes(notes.drop_first()) }
 }
 
-pub open spec fn spec_request(plane: PlaneV, now: Time, call: Call) -> (PlaneV, Seq<(Pid, Message)>) {
+pub open spec fn spec_request(node: NodeV, now: Time, call: Call) -> (NodeV, Seq<(Pid, Message)>) {
     match spec_key(call.request) {
-        None => (plane, seq![spec_reply(call.client@, call.id, spec_pure(call.request))]),
+        None => (node, seq![spec_reply(call.client@, call.id, spec_pure(call.request))]),
         Some(key) => {
-            if !spec_owns(plane, key) {
-                (plane, seq![spec_reply(call.client@, call.id, spec_unavailable(call.request))])
+            if !spec_owns(node, key) {
+                (node, seq![spec_reply(call.client@, call.id, spec_unavailable(call.request))])
             } else {
-                spec_begin(plane, key, JobV::External(call.request), now, Some((call.client@, call.id)))
+                spec_begin(node, key, JobV::External(call.request), now, Some((call.client@, call.id)))
             }
         },
     }
 }
 
-pub open spec fn spec_timeout(plane: PlaneV, now: Time) -> (PlaneV, Seq<(Pid, Message)>) {
-    if plane.flight is Some {
-        (plane, Seq::empty())
-    } else if plane.pending.len() > 0 {
-        let pending = plane.pending[0];
-        let plane = PlaneV { pending: plane.pending.skip(1), ..plane };
+pub open spec fn spec_timeout(node: NodeV, now: Time) -> (NodeV, Seq<(Pid, Message)>) {
+    if node.flight is Some {
+        (node, Seq::empty())
+    } else if node.pending.len() > 0 {
+        let pending = node.pending[0];
+        let node = NodeV { pending: node.pending.skip(1), ..node };
         let key = spec_origin_key(origin(pending.promise));
-        if !spec_owns(plane, key) {
-            (plane, Seq::empty())
+        if !spec_owns(node, key) {
+            (node, Seq::empty())
         } else {
-            spec_begin(plane, key, JobV::Occurrence(pending), now, None)
+            spec_begin(node, key, JobV::Occurrence(pending), now, None)
         }
     } else {
-        match spec_earliest_key(plane, now) {
-            Some(key) => spec_begin(plane, key, JobV::Due, now, None),
-            None => (plane, Seq::empty()),
+        match spec_earliest_key(node, now) {
+            Some(key) => spec_begin(node, key, JobV::Due, now, None),
+            None => (node, Seq::empty()),
         }
     }
 }
 
-pub open spec fn spec_store_reply(plane: PlaneV, op: u64, outcome: StoreOutcome) -> (PlaneV, Seq<(Pid, Message)>) {
-    match plane.flight {
-        None => (plane, Seq::empty()),
+pub open spec fn spec_store_reply(node: NodeV, op: u64, outcome: StoreOutcome) -> (NodeV, Seq<(Pid, Message)>) {
+    match node.flight {
+        None => (node, Seq::empty()),
         Some(flight) => {
             if flight.op != op {
-                (plane, Seq::empty())
+                (node, Seq::empty())
             } else if !flight.writing {
                 match outcome {
                     StoreOutcome::Got(got) => {
@@ -701,16 +698,16 @@ pub open spec fn spec_store_reply(plane: PlaneV, op: u64, outcome: StoreOutcome)
                             None => (spec_empty_doc(flight.key), None),
                         };
                         let flight = FlightV { etag, ..flight };
-                        spec_decide(PlaneV { flight: None, ..plane }, flight, doc)
+                        spec_decide(NodeV { flight: None, ..node }, flight, doc)
                     },
-                    StoreOutcome::Failed(_) => spec_fail(PlaneV { flight: None, ..plane }, flight),
-                    _ => (plane, Seq::empty()),
+                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                    _ => (node, Seq::empty()),
                 }
             } else {
                 match outcome {
-                    StoreOutcome::Written(tag) => spec_commit(plane, flight, tag),
-                    StoreOutcome::Failed(_) => spec_fail(PlaneV { flight: None, ..plane }, flight),
-                    _ => (plane, Seq::empty()),
+                    StoreOutcome::Written(tag) => spec_commit(node, flight, tag),
+                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                    _ => (node, Seq::empty()),
                 }
             }
         },
@@ -733,47 +730,47 @@ pub open spec fn spec_flight(op: u64, key: Seq<char>, etag: Option<Seq<char>>, n
     }
 }
 
-pub open spec fn spec_begin(plane: PlaneV, key: Seq<char>, job: JobV, now: Time, caller: Option<(Seq<char>, u64)>) -> (PlaneV, Seq<(Pid, Message)>) {
-    match spec_cached(plane, key) {
-        Some(cached) => spec_decide(plane, spec_flight(0, key, cached.etag, now, caller, job), spec_read(key, cached.body)),
+pub open spec fn spec_begin(node: NodeV, key: Seq<char>, job: JobV, now: Time, caller: Option<(Seq<char>, u64)>) -> (NodeV, Seq<(Pid, Message)>) {
+    match spec_cached(node, key) {
+        Some(cached) => spec_decide(node, spec_flight(0, key, cached.etag, now, caller, job), spec_read(key, cached.body)),
         None => {
-            let op = plane.next_op;
+            let op = node.next_op;
             let flight = spec_flight(op, key, None, now, caller, job);
-            (PlaneV { flight: Some(flight), next_op: (op + 1) as u64, ..plane }, seq![spec_get(op, key)])
+            (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![spec_get(op, key)])
         },
     }
 }
 
-pub open spec fn spec_decide(plane: PlaneV, flight: FlightV, doc: DocV) -> (PlaneV, Seq<(Pid, Message)>) {
+pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV, Seq<(Pid, Message)>) {
     let (next, reply, born, notify) = match flight.job {
         JobV::External(request) => {
             let (next, response) = spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        JobV::Due => spec_run_due(doc, flight.now, plane.retry_timeout),
+        JobV::Due => spec_run_due(doc, flight.now, node.retry_timeout),
         JobV::Occurrence(pending) => (spec_occurrence(doc, pending, flight.now), None, Seq::empty(), Seq::empty()),
     };
     let reply = match (flight.caller, reply) {
         (Some((client, id)), Some(response)) => Some((client, id, response)),
         _ => None,
     };
-    let previous = match spec_cached(plane, flight.key) {
+    let previous = match spec_cached(node, flight.key) {
         Some(cached) => spec_read(flight.key, cached.body),
         None => spec_empty_doc(flight.key),
     };
     if next == previous && born.len() == 0 {
-        let plane = PlaneV {
+        let node = NodeV {
             flight: None,
-            documents: spec_keep(plane.documents, flight.key, next, flight.etag),
-            ..plane
+            documents: spec_keep(node.documents, flight.key, next, flight.etag),
+            ..node
         };
         let send = match reply {
             Some((client, id, response)) => seq![spec_reply(client, id, response)],
             None => Seq::empty(),
         };
-        (plane, send + spec_notes(notify))
+        (node, send + spec_notes(notify))
     } else {
-        let op = plane.next_op;
+        let op = node.next_op;
         let body = spec_encode(next);
         let call = match flight.etag {
             Some(chars) => StoreCall::PutIfMatch {
@@ -792,34 +789,34 @@ pub open spec fn spec_decide(plane: PlaneV, flight: FlightV, doc: DocV) -> (Plan
             decided: Some(body),
             ..flight
         };
-        (PlaneV { flight: Some(flight), next_op: (op + 1) as u64, ..plane }, seq![(Pid::Store, Message::StoreReq { op, call })])
+        (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![(Pid::Store, Message::StoreReq { op, call })])
     }
 }
 
-pub open spec fn spec_commit(plane: PlaneV, flight: FlightV, tag: Etag) -> (PlaneV, Seq<(Pid, Message)>) {
+pub open spec fn spec_commit(node: NodeV, flight: FlightV, tag: Etag) -> (NodeV, Seq<(Pid, Message)>) {
     let documents = match flight.decided {
-        Some(body) => spec_remember(plane.documents, flight.key, body, Some(tag.0@), 0),
-        None => plane.documents,
+        Some(body) => spec_remember(node.documents, flight.key, body, Some(tag.0@), 0),
+        None => node.documents,
     };
-    let plane = PlaneV {
+    let node = NodeV {
         flight: None,
         documents,
-        pending: plane.pending + flight.born,
-        ..plane
+        pending: node.pending + flight.born,
+        ..node
     };
     let send = match flight.reply {
         Some((client, id, response)) => seq![spec_reply(client, id, response)],
         None => Seq::empty(),
     };
-    (plane, send + spec_notes(flight.notify))
+    (node, send + spec_notes(flight.notify))
 }
 
-pub open spec fn spec_fail(plane: PlaneV, flight: FlightV) -> (PlaneV, Seq<(Pid, Message)>) {
+pub open spec fn spec_fail(node: NodeV, flight: FlightV) -> (NodeV, Seq<(Pid, Message)>) {
     match (flight.job, flight.caller) {
         (JobV::External(request), Some((client, id))) => {
-            (plane, seq![spec_reply(client, id, spec_unavailable(request))])
+            (node, seq![spec_reply(client, id, spec_unavailable(request))])
         },
-        _ => (plane, Seq::empty()),
+        _ => (node, Seq::empty()),
     }
 }
 
@@ -1793,13 +1790,13 @@ pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awai
     }
 }
 
-pub open spec fn spec_wake(plane: PlaneV) -> Option<nat> {
-    if plane.flight is Some { None } else { spec_next(plane) }
+pub open spec fn spec_wake(node: NodeV) -> Option<nat> {
+    if node.flight is Some { None } else { spec_next(node) }
 }
 
-pub open spec fn spec_next(plane: PlaneV) -> Option<nat> {
-    let from_pending = if plane.pending.len() == 0 { None } else { Some(plane.pending[0].at as nat) };
-    spec_min_nat(from_pending, spec_deadlines(plane, plane.documents, 0))
+pub open spec fn spec_next(node: NodeV) -> Option<nat> {
+    let from_pending = if node.pending.len() == 0 { None } else { Some(node.pending[0].at as nat) };
+    spec_min_nat(from_pending, spec_deadlines(node, node.documents, 0))
 }
 
 pub open spec fn spec_min_nat(a: Option<nat>, b: Option<nat>) -> Option<nat> {
@@ -1810,15 +1807,15 @@ pub open spec fn spec_min_nat(a: Option<nat>, b: Option<nat>) -> Option<nat> {
     }
 }
 
-pub open spec fn spec_deadlines(plane: PlaneV, docs: Seq<CachedV>, i: int) -> Option<nat>
+pub open spec fn spec_deadlines(node: NodeV, docs: Seq<CachedV>, i: int) -> Option<nat>
     decreases docs.len() - i,
 {
     if i < 0 || i >= docs.len() {
         None
-    } else if !spec_owns(plane, docs[i].key) {
-        spec_deadlines(plane, docs, i + 1)
+    } else if !spec_owns(node, docs[i].key) {
+        spec_deadlines(node, docs, i + 1)
     } else {
-        spec_min_nat(spec_doc_deadline(spec_read(docs[i].key, docs[i].body)), spec_deadlines(plane, docs, i + 1))
+        spec_min_nat(spec_doc_deadline(spec_read(docs[i].key, docs[i].body)), spec_deadlines(node, docs, i + 1))
     }
 }
 
@@ -1844,25 +1841,25 @@ pub open spec fn spec_obj_deadline(obj: ObjV) -> Option<nat> {
     }
 }
 
-pub open spec fn spec_earliest_key(plane: PlaneV, now: Time) -> Option<Seq<char>> {
-    spec_earliest_from(plane, plane.documents, 0, now, None)
+pub open spec fn spec_earliest_key(node: NodeV, now: Time) -> Option<Seq<char>> {
+    spec_earliest_from(node, node.documents, 0, now, None)
 }
 
-pub open spec fn spec_earliest_from(plane: PlaneV, docs: Seq<CachedV>, i: int, now: Time, best: Option<(u64, Seq<char>)>) -> Option<Seq<char>>
+pub open spec fn spec_earliest_from(node: NodeV, docs: Seq<CachedV>, i: int, now: Time, best: Option<(u64, Seq<char>)>) -> Option<Seq<char>>
     decreases docs.len() - i,
 {
     if i < 0 || i >= docs.len() {
         match best { Some((_, key)) => Some(key), None => None }
-    } else if !spec_owns(plane, docs[i].key) {
-        spec_earliest_from(plane, docs, i + 1, now, best)
+    } else if !spec_owns(node, docs[i].key) {
+        spec_earliest_from(node, docs, i + 1, now, best)
     } else {
         match spec_earliest_in(spec_read(docs[i].key, docs[i].body), now) {
             Some(at) => {
                 let better = match best { None => true, Some((b, _)) => at < b };
                 let best = if better { Some((at, docs[i].key)) } else { best };
-                spec_earliest_from(plane, docs, i + 1, now, best)
+                spec_earliest_from(node, docs, i + 1, now, best)
             },
-            None => spec_earliest_from(plane, docs, i + 1, now, best),
+            None => spec_earliest_from(node, docs, i + 1, now, best),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! The concrete Rover model.
 //!
 //! A world is the nodes and one store, an empty network, and time 0. Each
-//! node is `plane`: its own documents and one flight. A request or a due
+//! node keeps its own documents and one flight. A request or a due
 //! document loads, is decided, and is written back. The store applies each
 //! call once; Rover may deliver an envelope again, and the store answers a
 //! `(node, op)` it has answered with a stutter. The abstract model is a
@@ -16,6 +16,7 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
+pub use crate::node::{Node, NodeV};
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 pub(crate) mod step;
@@ -78,7 +79,7 @@ pub enum Incoming {
 // Local state
 // ---------------------------------------------------------------------------
 
-/// Clock and flags. The documents are the node's, on `Plane`.
+/// Clock and flags: the process shell of a node.
 pub struct LogicV {
     pub clock: nat,
     pub loops: bool,
@@ -99,13 +100,6 @@ pub struct StoreV {
     /// The `(node, op)` pairs the store has answered. A second delivery of
     /// one is a stutter.
     pub seen: Seq<(Pid, u64)>,
-}
-
-pub struct NodeV {
-    pub logic: LogicV,
-    pub wake: Option<nat>,
-    pub next_request: u64,
-    pub plane: crate::plane::PlaneV,
 }
 
 pub enum LocalV {
@@ -155,16 +149,6 @@ pub struct Store {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub struct Node {
-    pub logic: Logic,
-    pub wake: Option<u64>,
-    pub next_request: u64,
-    /// The node's own machine: documents, one flight, the pending occurrences.
-    pub(crate) plane: crate::plane::Plane,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Local {
     Node(Node),
     Store(Store),
@@ -204,21 +188,6 @@ impl View for Store {
     }
 }
 
-impl View for Node {
-    type V = NodeV;
-    closed spec fn view(&self) -> NodeV {
-        NodeV {
-            logic: self.logic@,
-            wake: match self.wake {
-                Some(t) => Some(t as nat),
-                None => None,
-            },
-            next_request: self.next_request,
-            plane: self.plane@,
-        }
-    }
-}
-
 /// The nodes a fleet starts, then the store. The same world `Model::initial` builds.
 pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
     decreases (config.nodes - id) as int
@@ -242,15 +211,13 @@ pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
         },
         wake: None,
         next_request: 1,
-        plane: crate::plane::PlaneV {
-            address: id as nat,
-            nodes: config.nodes as nat,
-            retry_timeout: config.retry_timeout,
-            flight: None,
-            documents: Seq::empty(),
-            pending: Seq::empty(),
-            next_op: 1,
-        },
+        address: id as nat,
+        nodes: config.nodes as nat,
+        retry_timeout: config.retry_timeout,
+        flight: None,
+        documents: Seq::empty(),
+        pending: Seq::empty(),
+        next_op: 1,
     }
 }
 
@@ -465,17 +432,17 @@ fn prefix_children(entries: &[Entry], prefix: &str) -> Vec<String> {
     out
 }
 
-fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
+fn route_acts(acts: &[crate::node::Act]) -> Vec<(Pid, Message)> {
     acts.iter()
         .map(|act| match act {
-            crate::plane::Act::ToStore { op, call } => (
+            crate::node::Act::ToStore { op, call } => (
                 Pid::Store,
                 Message::StoreReq {
                     op: *op,
                     call: call.clone(),
                 },
             ),
-            crate::plane::Act::Reply { client, id, response } => (
+            crate::node::Act::Reply { client, id, response } => (
                 Pid::Outside,
                 Message::Output(Output::Response {
                     client: client.clone(),
@@ -483,16 +450,16 @@ fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
                     response: response.clone(),
                 }),
             ),
-            crate::plane::Act::Notify(note) => (
+            crate::node::Act::Notify(note) => (
                 Pid::Outside,
                 Message::Output(Output::Dispatch(match note {
-                    crate::plane::Outbound::Execute { id, version } => {
+                    crate::node::Outbound::Execute { id, version } => {
                         echod_abstract::Dispatch::Execute {
                             id: id.clone(),
                             version: *version,
                         }
                     }
-                    crate::plane::Outbound::Unblock { address, promise } => {
+                    crate::node::Outbound::Unblock { address, promise } => {
                         echod_abstract::Dispatch::Unblock {
                             address: address.clone(),
                             promise: promise.clone(),
@@ -502,21 +469,6 @@ fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
             ),
         })
         .collect()
-}
-
-fn started_node(id: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Node {
-    Node {
-        logic: Logic {
-            clock: 0,
-            loops,
-            stopping: false,
-            stopped: false,
-            last_wake: None,
-        },
-        wake: None,
-        next_request: 1,
-        plane: crate::plane::Plane::new(id, nodes, retry_timeout),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -539,7 +491,7 @@ impl Model {
         for id in 0..config.nodes {
             process.push((
                 Pid::Node(id),
-                Local::Node(started_node(id, config.nodes, config.loops, config.retry_timeout)),
+                Local::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout)),
             ));
         }
         process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
@@ -613,12 +565,12 @@ impl Process<(), Pid, Message> for Node {
     ) -> Vec<(Self, Vec<(Pid, Message)>)> {
         match event {
             ProcessEvent::Timeout => match self.wake {
-                Some(at) if at <= now && !self.plane.busy() => {
+                Some(at) if at <= now && !self.busy() => {
                     let mut next = self.clone();
                     next.logic.clock = now;
                     next.logic.last_wake = None;
-                    let acts = next.plane.timeout(now);
-                    next.wake = next.plane.next_wake();
+                    let acts = next.timeout(now);
+                    next.wake = next.next_wake();
                     vec![(next, route_acts(&acts))]
                 }
                 Some(at) if at <= now => vec![(self.clone(), Vec::new())],
@@ -628,27 +580,27 @@ impl Process<(), Pid, Message> for Node {
                 sender: Pid::Outside,
                 message: Message::Request(request),
             } => {
-                if self.plane.busy() {
+                if self.busy() {
                     return vec![(self.clone(), Vec::new())];
                 }
                 let mut next = self.clone();
                 next.logic.clock = now;
                 next.next_request += 1;
-                let acts = next.plane.request(now, &request.client, request.id, &request.request);
-                next.wake = next.plane.next_wake();
+                let acts = next.request(now, &request.client, request.id, &request.request);
+                next.wake = next.next_wake();
                 vec![(next, route_acts(&acts))]
             }
             ProcessEvent::Receive {
                 sender: Pid::Store,
                 message: Message::StoreReply { op, outcome },
             } => {
-                if !self.plane.busy() {
+                if !self.busy() {
                     return vec![(self.clone(), Vec::new())];
                 }
                 let mut next = self.clone();
                 next.logic.clock = now;
-                let acts = next.plane.store(now, *op, outcome);
-                next.wake = next.plane.next_wake();
+                let acts = next.store(now, *op, outcome);
+                next.wake = next.next_wake();
                 vec![(next, route_acts(&acts))]
             }
             ProcessEvent::Receive {

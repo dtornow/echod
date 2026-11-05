@@ -1,6 +1,6 @@
-//! One node, as its own machine. A request or a due document is a flight:
-//! load the document, decide, write it back, then answer. The store keeps
-//! the bytes. Nothing here calls the abstract model.
+//! One node. A request or a due document is a flight: load the document,
+//! decide, write it back, then answer. The store keeps the bytes. Nothing
+//! here calls the abstract model.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -14,10 +14,16 @@ use echod_types::{
 #[cfg(not(verus_keep_ghost))]
 use serde::{Deserialize, Serialize};
 
+use crate::model::{Logic, LogicV};
 use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plane {
+pub struct Node {
+    /// The process shell: clock and flags.
+    pub logic: Logic,
+    /// When the next timeout is worth delivering.
+    pub wake: Option<u64>,
+    pub next_request: u64,
     address: u64,
     nodes: u64,
     /// How long a pending task waits before it is offered again.
@@ -142,9 +148,18 @@ pub enum Act {
     Notify(Outbound),
 }
 
-impl Plane {
-    pub fn new(address: u64, nodes: u64, retry_timeout: u64) -> Self {
+impl Node {
+    pub fn new(address: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Self {
         Self {
+            logic: Logic {
+                clock: 0,
+                loops,
+                stopping: false,
+                stopped: false,
+                last_wake: None,
+            },
+            wake: None,
+            next_request: 1,
             address,
             nodes: nodes.max(1),
             retry_timeout,
@@ -1794,8 +1809,11 @@ pub struct CachedV {
     pub etag: Option<Seq<char>>,
 }
 
-/// The node's documents, as a proof sees them.
-pub struct PlaneV {
+/// A node, as a proof sees it.
+pub struct NodeV {
+    pub logic: LogicV,
+    pub wake: Option<nat>,
+    pub next_request: u64,
     pub address: nat,
     pub nodes: nat,
     pub retry_timeout: u64,
@@ -1805,20 +1823,20 @@ pub struct PlaneV {
     pub next_op: u64,
 }
 
-/// The exec plane is opaque to Verus: its documents live in `BTreeMap`s and
+/// The exec node is opaque to Verus: its documents live in `BTreeMap`s and
 /// its bytes come from serde, neither of which Verus reads. Its view is
-/// uninterpreted; the proofs are about `PlaneV`, and the link from this
+/// uninterpreted; the proofs are about `NodeV`, and the link from this
 /// machine to that view is not claimed.
 #[verifier::external_type_specification]
 #[verifier::external_body]
-pub struct ExPlane(Plane);
+pub struct ExNode(Node);
 
-pub uninterp spec fn plane_view(plane: Plane) -> PlaneV;
+pub uninterp spec fn node_view(node: Node) -> NodeV;
 
-impl View for Plane {
-    type V = PlaneV;
-    closed spec fn view(&self) -> PlaneV {
-        plane_view(*self)
+impl View for Node {
+    type V = NodeV;
+    closed spec fn view(&self) -> NodeV {
+        node_view(*self)
     }
 }
 

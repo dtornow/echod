@@ -33,7 +33,7 @@ use crate::model::{
     Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
-use crate::plane::{CachedV, FlightV, JobV, NoteV, PendingV, PlaneV};
+use crate::node::{CachedV, FlightV, JobV, NoteV, PendingV};
 #[cfg(verus_keep_ghost)]
 use crate::store::{Etag, StoreCall, StoreOutcome};
 #[cfg(verus_keep_ghost)]
@@ -79,9 +79,9 @@ pub open spec fn shaped(fleet: Fleet, world: World<CModel>) -> bool {
         0 <= i < fleet.nodes ==> {
             &&& #[trigger] world.process[i].0 == CPid::Node(i as u64)
             &&& world.process[i].1 is Node
-            &&& node_at(world, i).plane.address == i
-            &&& node_at(world, i).plane.nodes == fleet.nodes
-            &&& node_at(world, i).plane.retry_timeout == fleet.retry_timeout
+            &&& node_at(world, i).address == i
+            &&& node_at(world, i).nodes == fleet.nodes
+            &&& node_at(world, i).retry_timeout == fleet.retry_timeout
         }
     &&& world.process[fleet.nodes as int].0 == CPid::Store
     &&& world.process[fleet.nodes as int].1 is Store
@@ -112,7 +112,7 @@ pub proof fn lemma_single_present(world: World<AModel>)
 
 /// The document a node decides from: its cache, or the empty document.
 pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
-    match spec_cached(node.plane, key) {
+    match spec_cached(node, key) {
         Some(cached) => spec_read(key, cached.body),
         None => spec_empty_doc(key),
     }
@@ -147,8 +147,8 @@ pub open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64) -> (
 /// The document a node stands for under `key`: what its flight on that key
 /// decides, else what it holds.
 pub open spec fn intended(node: NodeV, key: Seq<char>) -> DocV {
-    match node.plane.flight {
-        Some(flight) if flight.key == key => decision(flight, loaded(node, key), node.plane.retry_timeout).0,
+    match node.flight {
+        Some(flight) if flight.key == key => decision(flight, loaded(node, key), node.retry_timeout).0,
         _ => loaded(node, key),
     }
 }
@@ -179,15 +179,15 @@ pub open spec fn store_interpreted(fleet: Fleet, world: World<CModel>, s: AStore
 
 /// The occurrences a node's flight will append when its write lands.
 pub open spec fn born_of(node: NodeV) -> Seq<PendingV> {
-    match node.plane.flight {
-        Some(flight) => decision(flight, loaded(node, flight.key), node.plane.retry_timeout).2,
+    match node.flight {
+        Some(flight) => decision(flight, loaded(node, flight.key), node.retry_timeout).2,
         None => Seq::empty(),
     }
 }
 
 /// The occurrences a node owes: queued, or born in its flight.
 pub open spec fn occurrences(node: NodeV) -> Seq<PendingV> {
-    node.plane.pending + born_of(node)
+    node.pending + born_of(node)
 }
 
 /// A concrete occurrence, as the abstract queue holds it.
@@ -278,10 +278,10 @@ pub open spec fn flight_outputs_covered(
     node: NodeV,
     network: Seq<Envelope<APid, AMessage>>,
 ) -> bool {
-    match node.plane.flight {
+    match node.flight {
         None => true,
         Some(flight) => {
-            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
+            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.retry_timeout);
             &&& match flight_reply(flight, reply) {
                 Some((client, id, response)) => service_output(
                     network,
@@ -306,8 +306,8 @@ pub open spec fn job_keyed(flight: FlightV) -> bool {
     }
 }
 
-pub open spec fn cached_etag(plane: PlaneV, key: Seq<char>) -> Option<Seq<char>> {
-    match spec_cached(plane, key) {
+pub open spec fn cached_etag(node: NodeV, key: Seq<char>) -> Option<Seq<char>> {
+    match spec_cached(node, key) {
         Some(cached) => cached.etag,
         None => None,
     }
@@ -317,18 +317,18 @@ pub open spec fn cached_etag(plane: PlaneV, key: Seq<char>) -> Option<Seq<char>>
 /// and, once writing, carries what `spec_decide` computed from what the
 /// node holds. A reading flight is on a key the node does not hold.
 pub open spec fn flight_ok(node: NodeV) -> bool {
-    match node.plane.flight {
+    match node.flight {
         None => true,
         Some(flight) => {
-            let (next, reply, born, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
-            &&& spec_owns(node.plane, flight.key)
-            &&& flight.op < node.plane.next_op
+            let (next, reply, born, notes) = decision(flight, loaded(node, flight.key), node.retry_timeout);
+            &&& spec_owns(node, flight.key)
+            &&& flight.op < node.next_op
             &&& job_keyed(flight)
             &&& if !flight.writing {
                 &&& flight.etag is None
-                &&& spec_cached(node.plane, flight.key) is None
+                &&& spec_cached(node, flight.key) is None
             } else {
-                &&& flight.etag == cached_etag(node.plane, flight.key)
+                &&& flight.etag == cached_etag(node, flight.key)
                 &&& flight.decided == Some(spec_encode(next))
                 &&& flight.born == born
                 &&& flight.notify == notes
@@ -352,7 +352,7 @@ pub open spec fn physical(store: CStore, key: Seq<char>) -> Option<Seq<u8>> {
 
 /// Node `i`'s write on `key` has landed and the node has not yet heard.
 pub open spec fn applied_write(i: int, node: NodeV, store: CStore, key: Seq<char>) -> bool {
-    match node.plane.flight {
+    match node.flight {
         Some(flight) => {
             &&& flight.key == key
             &&& flight.writing
@@ -379,10 +379,10 @@ pub open spec fn cache_entry_ok(key: Seq<char>, cached: CachedV, store: CStore) 
 /// waiting to hear about, else agrees with the node's cache.
 pub open spec fn cache_ok(i: int, node: NodeV, store: CStore) -> bool {
     forall|key: Seq<char>|
-        spec_owns(node.plane, key) ==> if applied_write(i, node, store, key) {
-            physical(store, key) == node.plane.flight.unwrap().decided
+        spec_owns(node, key) ==> if applied_write(i, node, store, key) {
+            physical(store, key) == node.flight.unwrap().decided
         } else {
-            match #[trigger] spec_cached(node.plane, key) {
+            match #[trigger] spec_cached(node, key) {
                 Some(cached) => cache_entry_ok(key, cached, store),
                 None => physical(store, key) is None,
             }
@@ -392,13 +392,13 @@ pub open spec fn cache_ok(i: int, node: NodeV, store: CStore) -> bool {
 /// A node caches only keys it owns, each once.
 pub open spec fn cache_owned(node: NodeV) -> bool {
     &&& forall|k: int|
-        0 <= k < node.plane.documents.len() ==> spec_owns(
-            node.plane,
-            #[trigger] node.plane.documents[k].key,
+        0 <= k < node.documents.len() ==> spec_owns(
+            node,
+            #[trigger] node.documents[k].key,
         )
     &&& forall|j: int, k: int|
-        0 <= j < k < node.plane.documents.len() ==> #[trigger] node.plane.documents[j].key
-            != #[trigger] node.plane.documents[k].key
+        0 <= j < k < node.documents.len() ==> #[trigger] node.documents[j].key
+            != #[trigger] node.documents[k].key
 }
 
 /// The store's entries name each key once.
@@ -419,7 +419,7 @@ pub open spec fn node_ok(i: int, node: NodeV, store: CStore) -> bool {
 // ---------------------------------------------------------------------------
 
 pub open spec fn flight_op(node: NodeV) -> Option<u64> {
-    match node.plane.flight {
+    match node.flight {
         Some(flight) => Some(flight.op),
         None => None,
     }
@@ -469,8 +469,8 @@ pub open spec fn requests_ok(fleet: Fleet, world: World<CModel>) -> bool {
                     let i = env.sender->Node_0 as int;
                     let node = node_at(world, i);
                     &&& 0 <= i < fleet.nodes
-                    &&& op < node.plane.next_op
-                    &&& (flight_op(node) == Some(op) ==> call == request_of(node.plane.flight.unwrap()))
+                    &&& op < node.next_op
+                    &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
                     &&& (!store_at(fleet, world).seen.contains((env.sender, op)) ==> flight_op(node)
                         == Some(op))
                 }
@@ -495,7 +495,7 @@ pub open spec fn replies_ok(fleet: Fleet, world: World<CModel>) -> bool {
                     &&& 0 <= i < fleet.nodes
                     &&& store_at(fleet, world).seen.contains((env.recipient, op))
                     &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(
-                        node.plane.flight.unwrap(),
+                        node.flight.unwrap(),
                     ))
                 }
             },

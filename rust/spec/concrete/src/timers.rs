@@ -37,7 +37,7 @@ use crate::model::step::{
     spec_unlease as c_unlease, DocV, ObjV, PromV, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::plane::{NoteV, PendingV};
+use crate::node::{NoteV, PendingV};
 #[cfg(verus_keep_ghost)]
 use crate::relation::{
     agreement, as_item, due_agrees, dues_agree, items, note_sends, occurrence_agrees,

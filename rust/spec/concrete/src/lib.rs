@@ -9,7 +9,7 @@
 //! step that still has to be matched.
 //!
 //! ```text
-//! plane.rs            one node: its documents, one flight, the store round trip
+//! node.rs             one node: its documents, one flight, the store round trip
 //! model.rs            the Rover model: nodes, one store, the initial world
 //! interpret.rs        the documents read as the abstract store; the promise handlers agree
 //! handlers.rs         the remaining request handlers agree
@@ -27,7 +27,7 @@
 
 pub mod interpret;
 pub mod model;
-mod plane;
+pub mod node;
 pub mod handlers;
 pub mod relation;
 pub mod simulation;
