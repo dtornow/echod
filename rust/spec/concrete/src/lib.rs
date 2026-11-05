@@ -11,7 +11,8 @@
 //! ```text
 //! plane.rs            one node: its documents, one flight, the store round trip
 //! model.rs            the Rover model: nodes, one store, the initial world
-//! interpret.rs        the documents read as the abstract store; handler agreement
+//! interpret.rs        the documents read as the abstract store; the promise handlers agree
+//! handlers.rs         the remaining request handlers agree
 //! relation.rs         the invariant, the simulation relation, and agreement
 //! simulation.rs       the forward simulation and `lemma_refines`
 //! refine.rs           the same statement, for the executable crate
@@ -26,6 +27,7 @@
 pub mod interpret;
 pub mod model;
 mod plane;
+pub mod handlers;
 pub mod relation;
 pub mod simulation;
 pub mod store;
