@@ -4,10 +4,13 @@
 //! one service. They share no handlers. Every boundary trace of the concrete
 //! world is a boundary trace of the abstract world.
 //! `simulation::lemma_refines` is that statement, by
-//! `concrete_refines_abstract`, under `relation::agreement`: the handlers
-//! beyond promise get, create, and settle agree with the abstract ones on
-//! related documents. A 503 for a call still on the network is one abstract
-//! shed, and an empty-task heartbeat is one abstract serve of status 200.
+//! `concrete_refines_abstract`, at the configuration the node implements
+//! (`relation::implemented`). It assumes nothing: `relation::agreement`,
+//! that every handler, the due step, and the occurrence do the same on a
+//! document and on the abstract store it reads as, is proved in `interpret`,
+//! `handlers`, and `timers`. A 503 for a call still on the network is one
+//! abstract shed, and an empty-task heartbeat is one abstract serve of
+//! status 200.
 //!
 //! Both models observe `echod_abstract::BoundaryEvent`: a `Call` in, an
 //! `Output` out. An injected `Request` is one abstract input of that call

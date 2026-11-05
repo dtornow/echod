@@ -13,6 +13,7 @@
 //! model.rs            the Rover model: nodes, one store, the initial world
 //! interpret.rs        the documents read as the abstract store; the promise handlers agree
 //! handlers.rs         the remaining request handlers agree
+//! timers.rs           the due step and the occurrence agree; `lemma_agreement`
 //! relation.rs         the invariant, the simulation relation, and agreement
 //! simulation.rs       the forward simulation and `lemma_refines`
 //! refine.rs           the same statement, for the executable crate
@@ -30,6 +31,7 @@ mod plane;
 pub mod handlers;
 pub mod relation;
 pub mod simulation;
+pub mod timers;
 pub mod store;
 
 #[cfg(not(verus_keep_ghost))]

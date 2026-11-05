@@ -11,10 +11,12 @@
 //! execution: a read, a write, and the reply when the write lands change
 //! nothing the relation reads.
 //!
-//! [`lemma_refines`] is trace inclusion once [`agreement`] holds: the
+//! [`lemma_simulation`] is the simulation under [`agreement`]: the
 //! handlers, the due step, and the occurrence do the same on a document and
-//! on the abstract store it reads as. Cargo erases these bodies; a Verus run
-//! is what checks them.
+//! on the abstract store it reads as. `handlers` and `timers` prove that
+//! agreement at the configuration the node implements, and
+//! [`lemma_refines`] is trace inclusion there, with nothing assumed. Cargo
+//! erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
 
@@ -4537,13 +4539,15 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 }
 
 /// Trace inclusion: every boundary trace of the concrete world is one of
-/// the abstract world, once the handlers agree.
-pub proof fn lemma_refines(fleet: Fleet, config: ServerConfig)
-    requires
-        agreement(config),
+/// the abstract world, at the configuration the node implements. The
+/// handlers, the due step, and the occurrence agree by
+/// `timers::lemma_agreement`.
+pub proof fn lemma_refines(fleet: Fleet)
     ensures
-        refines(cmodel(), fleet, amodel(), config),
+        refines(cmodel(), fleet, amodel(), implemented()),
 {
+    let config = implemented();
+    crate::timers::lemma_agreement(config);
     lemma_initial(fleet, config);
     lemma_link(fleet, initial(cmodel(), fleet), initial(amodel(), config));
     lemma_simulation(fleet, config);
