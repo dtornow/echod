@@ -8,16 +8,20 @@
 //! the observed output, the shed and the empty heartbeat, and the process
 //! step that still has to be matched.
 //!
+//! Each file of the model holds the executable code and, below it, the same
+//! step as a specification (`spec_*`, over the view types `*V`). The proof
+//! files read the specifications.
+//!
 //! ```text
-//! node.rs             one node: its documents, one flight, the store round trip
-//! model.rs            the Rover model: nodes, one store, the initial world
+//! node.rs             one node: its documents, one flight, the handlers, the due step
+//! store.rs            the store: its calls and their answers, one call applied
+//! model.rs            the Rover model: nodes, one store, the initial world, one step
 //! interpret.rs        the documents read as the abstract store; the promise handlers agree
 //! handlers.rs         the remaining request handlers agree
 //! timers.rs           the due step and the occurrence agree; `lemma_agreement`
 //! relation.rs         the invariant, the simulation relation, and agreement
 //! simulation.rs       the forward simulation and `lemma_refines`
 //! refine.rs           the same statement, for the executable crate
-//! store.rs            store calls and their answers
 //! ```
 
 #![cfg_attr(
@@ -25,14 +29,14 @@
     allow(unused_imports, dead_code, unused_variables)
 )]
 
-pub mod interpret;
-pub mod model;
 pub mod node;
+pub mod store;
+pub mod model;
+pub mod interpret;
 pub mod handlers;
+pub mod timers;
 pub mod relation;
 pub mod simulation;
-pub mod timers;
-pub mod store;
 
 #[cfg(not(verus_keep_ghost))]
 pub mod refine;

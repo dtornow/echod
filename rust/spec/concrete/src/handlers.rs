@@ -15,52 +15,48 @@ use crate::interpret::{
     lemma_contains_to_set, lemma_empty_to_set, lemma_held, lemma_origin_doc, lemma_origin_reads,
     lemma_origin_update, lemma_others_kept_schedule, lemma_others_kept_within, lemma_others_same,
     lemma_project_object, lemma_promise_create_agrees, lemma_promise_handlers_agree,
-    lemma_promise_settle_agrees, lemma_push_to_set, lemma_record, lemma_sat_add,
-    lemma_schedule_doc, lemma_schedule_key, lemma_string_of, lemma_targeted, lemma_task_record,
-    lemma_timer, object_rel, origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel,
-    task_rel,
+    lemma_promise_settle_agrees, lemma_push_to_set, lemma_record, lemma_sat_add, lemma_schedule_doc,
+    lemma_schedule_key, lemma_string_of, lemma_targeted, lemma_task_record, lemma_timer, object_rel,
+    origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use crate::model::step::{
-    spec_acquire as c_acquire, spec_add_callbacks, spec_any_settled as c_any_settled,
-    spec_awaitable, spec_bad_suspend, spec_distinct_awaited, spec_extend as c_extend,
-    spec_fence as c_fence, spec_fence_check as c_fence_check, spec_fulfill_task, spec_handle,
-    spec_heartbeat as c_heartbeat, spec_held, spec_key, spec_missing_awaited, spec_new_obj,
-    spec_one_origin, spec_opened, spec_origin_key, spec_origin_map,
-    spec_project_obj, spec_promise_create as c_promise_create,
+use crate::node::{
+    DocV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
+    spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited,
+    spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check,
+    spec_fulfill_task, spec_handle, spec_heartbeat as c_heartbeat, spec_held, spec_key,
+    spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key,
+    spec_origin_map, spec_project_obj, spec_promise_create as c_promise_create,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle,
     spec_register_callback as c_register_callback, spec_register_listener as c_register_listener,
     spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete,
-    spec_schedule_get as c_schedule_get, spec_schedule_key, spec_seen,
-    spec_suspend as c_suspend, spec_targeted, spec_task_acquire as c_task_acquire,
-    spec_task_continue as c_task_continue, spec_task_create as c_task_create,
-    spec_task_fulfill as c_task_fulfill, spec_task_get as c_task_get,
-    spec_task_halt as c_task_halt, spec_task_release as c_task_release, spec_timer,
-    spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, DocV, Held, ObjV, PromV, TkV,
+    spec_schedule_get as c_schedule_get, spec_schedule_key, spec_seen, spec_suspend as c_suspend,
+    spec_targeted, spec_task_acquire as c_task_acquire, spec_task_continue as c_task_continue,
+    spec_task_create as c_task_create, spec_task_fulfill as c_task_fulfill,
+    spec_task_get as c_task_get, spec_task_halt as c_task_halt, spec_task_release as c_task_release,
+    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::step::{
+use echod_abstract::machine::{
     spec_acquire as a_acquire, spec_any_settled as a_any_settled, spec_awaited,
     spec_callbacks as a_callbacks, spec_claim_res, spec_extend as a_extend, spec_external,
     spec_fence as a_fence, spec_fence_res, spec_fulfill, spec_handler, spec_has_target,
     spec_heartbeat as a_heartbeat, spec_held as a_held, spec_is_timer, spec_out,
     spec_project_promise, spec_project_task, spec_promise_create as a_promise_create,
-    spec_promise_record, spec_promise_res as a_promise_res,
-    spec_promise_settle as a_promise_settle, spec_refs_one_origin,
-    spec_register_callback as a_register_callback,
+    spec_promise_record, spec_promise_res as a_promise_res, spec_promise_settle as a_promise_settle,
+    spec_refs_one_origin, spec_register_callback as a_register_callback,
     spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create,
-    spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res,
-    spec_suspend as a_suspend, spec_task_acquire as a_task_acquire,
-    spec_task_continue as a_task_continue, spec_task_create as a_task_create,
-    spec_task_fulfill as a_task_fulfill, spec_task_get_res, spec_task_halt as a_task_halt,
-    spec_task_record as a_task_record, spec_task_release as a_task_release,
-    spec_unlease as a_unlease, spec_wrap_fence, SpecHeld,
+    spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_suspend as a_suspend,
+    spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue,
+    spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_get_res,
+    spec_task_halt as a_task_halt, spec_task_record as a_task_record,
+    spec_task_release as a_task_release, spec_unlease as a_unlease, spec_wrap_fence, SpecHeld,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::trusted::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::{
-    all_in_origin, distinct, sat_add, OutV, PromiseV, ScheduleV, StoreV as AStore, TaskV,
+    all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
@@ -68,9 +64,9 @@ use echod_abstract::ServerConfig;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{
-    origin, same_origin_spec, PromiseRegisterCallbackReq, PromiseRes, PromiseState, Request,
-    Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, TaskClaimRes, TaskFenceAction,
-    TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRef, TaskState,
+    origin, PromiseRegisterCallbackReq, PromiseRes, PromiseState, Request, Response,
+    same_origin_spec, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, TaskClaimRes,
+    TaskFenceAction, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRef, TaskState,
 };
 
 verus! {
@@ -301,7 +297,7 @@ pub proof fn lemma_register_callback_agrees(
             } else {
                 lemma_record(awaited, ao.promise, p);
                 let res = a_promise_res(200, Some(spec_promise_record(awaited, p)));
-                assert(c_promise_res(200, Some(crate::model::step::spec_record(awaited, ao.promise))) == res);
+                assert(c_promise_res(200, Some(crate::node::spec_record(awaited, ao.promise))) == res);
                 if ao.promise.state == PromiseState::Pending && wo.promise.state == PromiseState::Pending {
                     assert(ao == map[awaited@]);
                     assert(p == p0);
@@ -652,7 +648,7 @@ pub proof fn lemma_task_create_agrees(
             let live = action.timeout_at > now;
             let p_a = PromiseV {
                 state: if live { PromiseState::Pending } else { PromiseState::RejectedTimedout },
-                value: echod_abstract::model::step::spec_empty_value(),
+                value: echod_abstract::machine::spec_empty_value(),
                 param: action.param,
                 timeout_at: action.timeout_at,
                 created_at: if live { now } else { action.timeout_at },
@@ -968,7 +964,7 @@ pub proof fn lemma_task_fulfill_agrees(
                 assert(n.promises[x] == q);
                 lemma_record(req.id, promise, q);
                 assert(outs == spec_out(a_promise_res(200, Some(spec_promise_record(req.id, q))), n));
-                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(crate::model::step::spec_record(req.id, promise))));
+                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(crate::node::spec_record(req.id, promise))));
                 lemma_held_update(key, o, map, s, x, obj2, q, u);
                 assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocV::Origin(map.insert(x, obj2)));
             },
@@ -1287,7 +1283,7 @@ pub proof fn lemma_extend(
                 Some(n) => n,
                 None => 0,
             };
-            let at = crate::model::step::spec_sat_add(now, ttl);
+            let at = crate::store::spec_sat_add(now, ttl);
             let t2 = TkV { lease_timeout_at: Some(at), ..t };
             let obj2 = ObjV { task: Some(t2), ..obj };
             let t_a = a->Ok_0;

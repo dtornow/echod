@@ -1,7 +1,9 @@
 //! The complete standalone Resonate model interpreted by Rover.
 //!
 //! `machine` is the store and its handlers, `model` is one process's step,
-//! `view` is the ghost twin, and `trusted` is the maps and the cron engine.
+//! `view` is the view types and their lemmas, and `trusted` is the maps and
+//! the cron engine. Each file holds the executable code and, below it, the
+//! same step as a specification (`spec_*`, over the view types).
 
 #![allow(
     clippy::ptr_arg,

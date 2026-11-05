@@ -2,6 +2,8 @@
 //! list, and `process_work` is one work item. A timeout runs one queued
 //! occurrence or one step the handler will perform, or it does nothing.
 
+#![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
+
 use vstd::prelude::*;
 
 use echod_rover::certificate::trusted::copy;
@@ -12,16 +14,18 @@ use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
 
-use super::machine::{
-    echo, mk, promise_res, schedule_res, status, task_get_res, unavailable, Dispatch, InOut, Out,
-    ServerConfig, Store, Work,
-};
+use super::machine::{unavailable, Dispatch, InOut, Out, ServerConfig, Store, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
-use super::view::{group_views, lemma_lift_dispatch, DispatchV, InOutV, OutV};
+use super::machine::{
+    spec_body, spec_claim_res, spec_fence_res, spec_handler, spec_process_work, spec_promise_res,
+    spec_schedule_res, spec_status_res, spec_task_get_res,
+};
+#[cfg(verus_keep_ghost)]
+use super::trusted::{pset_seq, spec_expand};
+#[cfg(verus_keep_ghost)]
+use super::view::{group_views, lemma_lift_dispatch, lift_dispatch, spec_keys, DispatchV, InOutV, OutV};
 use super::view::{InternalV, StoreV};
-
-pub mod step;
 
 verus! {
 
@@ -117,11 +121,6 @@ pub open spec fn spec_request_outcome(
     }
 }
 
-/// 503, the same shape the concrete node sends.
-pub open spec fn spec_unavailable(request: Request) -> Response {
-    step::spec_unavailable(request)
-}
-
 /// Lean's `runShed`: the state stays, and the client is told 503.
 pub open spec fn spec_shed(before: StateV, call: Call) -> StepResultV<StateV, Pid, Message> {
     StepResultV {
@@ -183,8 +182,8 @@ pub proof fn lemma_shed_is_last(
         message: Message::Request(call),
     };
     let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
-    let served = step::spec_run(config, state, call, now);
-    let lost = spec_losses(state, call, step::spec_handler(config, call.request, state.store, now));
+    let served = spec_run(config, state, call, now);
+    let lost = spec_losses(state, call, spec_handler(config, call.request, state.store, now));
     let shed = seq![spec_shed(state, call)];
     assert(outcomes == served + lost + shed);
     let prefix = served + lost;
@@ -237,15 +236,15 @@ pub proof fn lemma_empty_heartbeat_is_first(
         message: Message::Request(call),
     };
     let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
-    let handler = step::spec_handler(config, call.request, state.store, now);
+    let handler = spec_handler(config, call.request, state.store, now);
     assert(handler.len() == 1);
     let outcome = handler[0];
-    assert(outcome.resp == step::spec_status_res(200));
-    assert(step::spec_status_res(200) == Response::Status(echod_types::StatusRes { status: 200 }));
+    assert(outcome.resp == spec_status_res(200));
+    assert(spec_status_res(200) == Response::Status(echod_types::StatusRes { status: 200 }));
     assert(outcome.work =~= Seq::empty());
     assert(outcome.send =~= Seq::empty());
     assert(outcome.next == state.store);
-    let served = step::spec_run(config, state, call, now);
+    let served = spec_run(config, state, call, now);
     assert(served.len() == 1);
     assert(served[0] == spec_request_outcome(state, call, outcome));
     assert(served[0].state == state);
@@ -831,7 +830,7 @@ impl RoverModel for Model {
         }
     }
 
-    /// One local step. `step::spec_step` is that transition. The `ensures` on
+    /// One local step. `spec_step` is that transition. The `ensures` on
     /// `on_event` is the equality of the executable results with this function;
     /// that proof is not written yet.
     open spec fn spec_on_event(
@@ -842,7 +841,7 @@ impl RoverModel for Model {
         now: Time,
         event: ProcessEvent<Pid, Message>,
     ) -> Seq<StepResultV<StateV, Pid, Message>> {
-        step::spec_step(config, pid, state, now, event)
+        spec_step(config, pid, state, now, event)
     }
 
     open spec fn spec_observe(
@@ -865,68 +864,204 @@ impl RoverModel for Model {
     }
 }
 
-} // verus!
+// ---------------------------------------------------------------------------
+// The step, as a specification. `spec_step` is what
+// `RoverModel::spec_on_event` returns. A request is served, lost, or shed, the
+// three outcomes of the Lean step. A timeout is one ready queued occurrence, or
+// one step derived from the three maps. Anything else leaves the state as it
+// was. The executable `on_event` is obliged, by the trait, to return results
+// whose views are exactly this sequence. That equality is not proved here.
+// ---------------------------------------------------------------------------
 
-verus! {
+pub open spec fn spec_run(config: ServerConfig, state: StateV, call: Call, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+    spec_handler(config, call.request, state.store, now).map_values(|outcome: OutV|
+        spec_request_outcome(state, call, outcome)
+    )
+}
 
-impl ServerConfig {
-    /// A request takes effect in `s` at time `now`: every allowed outcome.
-    pub fn handler(&self, op: &Request, s: &Store, now: Time) -> (outs: Vec<Out>)
-    {
-        broadcast use group_views;
-        match op {
-            Request::PromiseCreate(c) => self.promise_create(c, false, s, now),
-            Request::PromiseGet(q) => match s.promises.get(&q.id) {
-                None => status(promise_res(404, None), mk("get promise: none (404)"), s),
-                Some(p) => {
-                    let seen = p.project(now);
-                    echo(promise_res(200, Some(seen.to_record(&q.id))), mk("get promise"), s)
-                },
-            },
-            Request::PromiseSettle(st) => self.promise_settle(st, false, s, now),
-            Request::PromiseRegisterCallback(q) => self.promise_register_callback(&q.awaited, &q.awaiter, s, now),
-            Request::PromiseRegisterListener(q) => self.promise_register_listener(&q.awaited, &q.address, s, now),
-            Request::TaskGet(q) => match s.tasks.get(&q.id) {
-                None => status(task_get_res(404, None), mk("get task: none (404)"), s),
-                Some(t) => {
-                    let seen = match s.promises.get(&q.id) {
-                        Some(p) => t.project(&p.project(now)),
-                        None => copy(t),
-                    };
-                    echo(task_get_res(200, Some(seen.to_record(&q.id))), mk("get task"), s)
-                },
-            },
-            Request::TaskCreate(q) => self.task_create(&q.pid, q.ttl, &q.action, s, now),
-            Request::TaskAcquire(q) => self.task_acquire(&q.id, q.version, &q.pid, q.ttl, s, now),
-            Request::TaskRelease(q) => self.task_release(&q.id, q.version, s, now),
-            Request::TaskFulfill(q) => self.task_fulfill(&q.id, q.version, &q.action, s, now),
-            Request::TaskHeartbeat(q) => self.task_heartbeat(&q.pid, &q.tasks, s, now),
-            Request::TaskSuspend(q) => self.task_suspend(q, s, now),
-            Request::TaskFence(q) => self.task_fence(q, s, now),
-            Request::TaskFenceCheck(q) => self.task_fence_check(q, s, now),
-            Request::TaskHalt(q) => self.task_halt(&q.id, s, now),
-            Request::TaskContinue(q) => self.task_continue(&q.id, s, now),
-            Request::ScheduleCreate(c) => self.schedule_create(c, s, now),
-            Request::ScheduleGet(q) => match s.schedules.get(&q.id) {
-                None => status(schedule_res(404, None), mk("get schedule: none (404)"), s),
-                Some(c) => echo(schedule_res(200, Some(c.dup())), mk("get schedule"), s),
-            },
-            Request::ScheduleDelete(q) => self.schedule_delete(&q.id, s),
+pub open spec fn spec_due_result(before: StateV, outcome: InOutV) -> StepResultV<StateV, Pid, Message> {
+    StepResultV {
+        state: StateV { store: outcome.next, pending: before.pending + outcome.work },
+        send: outcome.send.map_values(|dispatch: DispatchV| (
+            Pid::Outside,
+            Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
+        )),
+    }
+}
+
+pub open spec fn spec_queue(config: ServerConfig, state: StateV, now: Time, i: int) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases state.pending.len() - i,
+{
+    if i < 0 || i >= state.pending.len() {
+        Seq::empty()
+    } else {
+        let work = spec_body(state.pending[i]);
+        let outcome = spec_process_work(config, work, state.store, now);
+        let tail = spec_queue(config, state, now, i + 1);
+        if spec_ready(work, now) && !outcome.not_due {
+            seq![spec_internal_result(state, i, outcome)] + tail
+        } else {
+            tail
         }
     }
+}
 
-    /// One due item at `now`: a deadline, a callback, a listener, a lease, a
-    /// retry, a schedule, or one queued occurrence.
-    pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut) {
-        match step {
-            Work::PromiseTimeout(id) => self.process_promise_timeout(id, s, now),
-            Work::Callback { awaited, awaiter } => self.process_callback(awaited, awaiter, s, now),
-            Work::Listener { awaited, address } => self.process_listener(awaited, address, s, now),
-            Work::TaskLeaseTimeout(id) => self.process_lease_timeout(id, s, now),
-            Work::TaskRetryTimeout(id) => self.process_retry_timeout(id, s, now),
-            Work::ScheduleTimeout { id, .. } => self.process_schedule(id, s, now),
-            Work::Occurrence { promise, at, timeout, param, tags } => self.create_if_absent(promise, *at, *timeout, param, tags, s, now),
-        }
+pub open spec fn spec_keep(config: ServerConfig, state: StateV, now: Time, work: InternalV, rest: Seq<StepResultV<StateV, Pid, Message>>) -> Seq<StepResultV<StateV, Pid, Message>> {
+    let outcome = spec_process_work(config, work, state.store, now);
+    if outcome.not_due {
+        rest
+    } else {
+        seq![spec_due_result(state, outcome)] + rest
+    }
+}
+
+pub open spec fn spec_over_callbacks(
+    config: ServerConfig,
+    state: StateV,
+    now: Time,
+    awaited: Seq<char>,
+    awaiters: Seq<Seq<char>>,
+) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases awaiters.len(),
+{
+    if awaiters.len() == 0 {
+        Seq::empty()
+    } else {
+        spec_keep(
+            config,
+            state,
+            now,
+            InternalV::Callback { awaited, awaiter: awaiters[0] },
+            Seq::empty(),
+        ) + spec_over_callbacks(config, state, now, awaited, awaiters.drop_first())
+    }
+}
+
+pub open spec fn spec_over_listeners(
+    config: ServerConfig,
+    state: StateV,
+    now: Time,
+    awaited: Seq<char>,
+    addresses: Seq<Seq<char>>,
+) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases addresses.len(),
+{
+    if addresses.len() == 0 {
+        Seq::empty()
+    } else {
+        spec_keep(
+            config,
+            state,
+            now,
+            InternalV::Listener { awaited, address: addresses[0] },
+            Seq::empty(),
+        ) + spec_over_listeners(config, state, now, awaited, addresses.drop_first())
+    }
+}
+
+pub open spec fn spec_over_promises(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        Seq::empty()
+    } else {
+        let id = keys[0];
+        let p = state.store.promises[id];
+        spec_keep(config, state, now, InternalV::PromiseTimeout(id), Seq::empty())
+            + spec_over_callbacks(config, state, now, id, pset_seq(p.callbacks))
+            + spec_over_listeners(config, state, now, id, pset_seq(p.listeners))
+            + spec_over_promises(config, state, now, keys.drop_first())
+    }
+}
+
+pub open spec fn spec_over_tasks(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        Seq::empty()
+    } else {
+        let id = keys[0];
+        let t = state.store.tasks[id];
+        let lease = spec_keep(config, state, now, InternalV::TaskLeaseTimeout(id), Seq::empty());
+        let retry = match t.retry_timeout_at {
+            Some(_) => spec_keep(config, state, now, InternalV::TaskRetryTimeout(id), Seq::empty()),
+            None => Seq::empty(),
+        };
+        lease + retry + spec_over_tasks(config, state, now, keys.drop_first())
+    }
+}
+
+pub open spec fn spec_over_schedules(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        Seq::empty()
+    } else {
+        let id = keys[0];
+        let c = state.store.schedules[id];
+        let promise = spec_expand(c.promise_id, id, c.next_run_at);
+        spec_keep(config, state, now, InternalV::ScheduleTimeout { id, promise }, Seq::empty())
+            + spec_over_schedules(config, state, now, keys.drop_first())
+    }
+}
+
+pub open spec fn spec_derived(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+    spec_over_promises(config, state, now, spec_keys(state.store.promises))
+        + spec_over_tasks(config, state, now, spec_keys(state.store.tasks))
+        + spec_over_schedules(config, state, now, spec_keys(state.store.schedules))
+}
+
+pub open spec fn spec_run_timeout(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+    spec_queue(config, state, now, 0) + spec_derived(config, state, now)
+}
+
+/// 503, shaped like the concrete node's `spec_unavailable`.
+pub open spec fn spec_unavailable(request: Request) -> Response {
+    match request {
+        Request::PromiseGet(_) | Request::PromiseCreate(_) | Request::PromiseSettle(_)
+        | Request::PromiseRegisterCallback(_) | Request::PromiseRegisterListener(_) => {
+            spec_promise_res(503, None)
+        },
+        Request::ScheduleGet(_) | Request::ScheduleCreate(_) => spec_schedule_res(503, None),
+        Request::ScheduleDelete(_) | Request::TaskRelease(_) | Request::TaskHalt(_)
+        | Request::TaskContinue(_) | Request::TaskHeartbeat(_) | Request::TaskSuspend(_)
+        | Request::TaskFenceCheck(_) => spec_status_res(503),
+        Request::TaskGet(_) => spec_task_get_res(503, None),
+        Request::TaskCreate(_) | Request::TaskAcquire(_) => spec_claim_res(503, None, None),
+        Request::TaskFulfill(_) => spec_promise_res(503, None),
+        Request::TaskFence(_) => spec_fence_res(503, None),
+    }
+}
+
+pub open spec fn spec_service(config: ServerConfig, state: StateV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<StateV, Pid, Message>> {
+    match event {
+        ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
+            let outcomes = spec_handler(config, call.request, state.store, now);
+            spec_run(config, state, call, now) + spec_losses(state, call, outcomes) + seq![spec_shed(
+                state,
+                call,
+            )]
+        },
+        ProcessEvent::Timeout => {
+            let results = spec_run_timeout(config, state, now);
+            if results.len() == 0 { spec_idle(state) } else { results }
+        },
+        _ => spec_idle(state),
+    }
+}
+
+/// The results of one event at `pid`. A service runs the step. Any other
+/// process leaves its state and sends nothing.
+pub open spec fn spec_step(
+    config: ServerConfig,
+    pid: Pid,
+    state: StateV,
+    now: Time,
+    event: ProcessEvent<Pid, Message>,
+) -> Seq<StepResultV<StateV, Pid, Message>> {
+    match pid {
+        Pid::Service => spec_service(config, state, now, event),
+        Pid::Outside => spec_idle(state),
     }
 }
 

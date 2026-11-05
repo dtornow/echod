@@ -9,6 +9,9 @@
 //! every dispatch view is realised by some value is the axiom this module
 //! adds (`axiom_realised`), true of the type as built; that a value is its
 //! view (`trusted.rs`) makes the choice the value itself.
+//!
+//! The order the specification walks a map in, `spec_keys`, is at the end:
+//! the keys of a map view, sorted, the order `PMap::keys` returns.
 
 // Outside Verus (`cargo build`) the spec functions and proofs are erased, and
 // the imports they use with them.
@@ -531,6 +534,152 @@ impl Model for ServerConfig {
     fn due(&self, s: &Store, now: Time) -> (r: Vec<Sched<Work>>) {
         super::footprint::timeout_work(self, s, now)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The order `PMap::keys` walks: the keys of a map view, sorted
+// ---------------------------------------------------------------------------
+
+pub open spec fn spec_before(a: Seq<char>, b: Seq<char>) -> bool
+    decreases a.len() + b.len(),
+{
+    if a.len() == 0 {
+        b.len() != 0
+    } else if b.len() == 0 {
+        false
+    } else if a[0] != b[0] {
+        a[0] < b[0]
+    } else {
+        spec_before(a.drop_first(), b.drop_first())
+    }
+}
+
+/// Opaque: the choice is read through [`lemma_min_key`] alone.
+#[verifier::opaque]
+pub open spec fn spec_min_key(keys: Set<Seq<char>>) -> Seq<char> {
+    choose|k: Seq<char>|
+        keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k)
+}
+
+/// Keys of a map in the order the store yields them: lexicographic.
+pub open spec fn spec_sorted(keys: Set<Seq<char>>) -> Seq<Seq<char>>
+    decreases keys.len(),
+    via spec_sorted_decreases
+{
+    if !keys.finite() || keys.len() == 0 {
+        Seq::empty()
+    } else {
+        let k = spec_min_key(keys);
+        seq![k] + spec_sorted(keys.remove(k))
+    }
+}
+
+#[via_fn]
+proof fn spec_sorted_decreases(keys: Set<Seq<char>>) {
+    if keys.finite() && keys.len() > 0 {
+        lemma_min_key(keys);
+    }
+}
+
+pub proof fn lemma_before_irrefl(a: Seq<char>)
+    ensures
+        !spec_before(a, a),
+    decreases a.len(),
+{
+    if a.len() == 0 {
+    } else {
+        lemma_before_irrefl(a.drop_first());
+    }
+}
+
+pub proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
+    requires
+        spec_before(a, b),
+        spec_before(b, c),
+    ensures
+        spec_before(a, c),
+    decreases a.len() + b.len() + c.len(),
+{
+    if a.len() == 0 {
+    } else if b.len() == 0 {
+    } else if c.len() == 0 {
+    } else if a[0] != b[0] {
+    } else if b[0] != c[0] {
+    } else {
+        lemma_before_trans(a.drop_first(), b.drop_first(), c.drop_first());
+    }
+}
+
+/// `k` is the least of `keys`.
+pub open spec fn least(keys: Set<Seq<char>>, k: Seq<char>) -> bool {
+    keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k)
+}
+
+/// A finite set of keys has a least key.
+pub proof fn lemma_least_exists(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        exists|k: Seq<char>| least(keys, k),
+    decreases keys.len(),
+{
+    let x = keys.choose();
+    assert(keys.contains(x));
+    let rest = keys.remove(x);
+    assert(rest.len() == keys.len() - 1);
+    if rest.len() == 0 {
+        assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+            if o != x {
+                assert(rest.contains(o));
+            } else {
+                lemma_before_irrefl(x);
+            }
+        };
+        assert(least(keys, x));
+    } else {
+        lemma_least_exists(rest);
+        let m = choose|m: Seq<char>| least(rest, m);
+        assert(keys.contains(m));
+        if spec_before(x, m) {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+                if o == x {
+                    lemma_before_irrefl(x);
+                } else {
+                    assert(rest.contains(o));
+                    if spec_before(o, x) {
+                        lemma_before_trans(o, x, m);
+                    }
+                }
+            };
+            assert(least(keys, x));
+        } else {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, m) by {
+                if o != x {
+                    assert(rest.contains(o));
+                }
+            };
+            assert(least(keys, m));
+        }
+    }
+}
+
+/// The chosen minimum is a key.
+pub proof fn lemma_min_key(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        keys.contains(spec_min_key(keys)),
+{
+    reveal(spec_min_key);
+    lemma_least_exists(keys);
+    let k = choose|k: Seq<char>| least(keys, k);
+    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k));
+}
+
+pub open spec fn spec_keys<V>(m: Map<Seq<char>, V>) -> Seq<Seq<char>> {
+    spec_sorted(m.dom())
 }
 
 } // verus!

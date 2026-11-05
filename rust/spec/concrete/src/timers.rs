@@ -20,53 +20,53 @@ use crate::handlers::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::interpret::{
-    abstract_task, lemma_starts_split, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
+    abstract_task, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
     lemma_empty_to_set, lemma_offer, lemma_origin_doc, lemma_origin_reads, lemma_origin_update,
     lemma_others_kept_schedule, lemma_others_kept_within, lemma_project_object, lemma_record,
-    lemma_sat_add, lemma_schedule_key, lemma_string_view, lemma_targeted, lemma_timer,
-    object_rel, origin_prefix, origin_rel, promise_rel, schedule_prefix, schedule_rel, slot_rel,
-    task_rel,
+    lemma_sat_add, lemma_schedule_key, lemma_starts_split, lemma_string_view, lemma_targeted,
+    lemma_timer, object_rel, origin_prefix, origin_rel, promise_rel, schedule_prefix, schedule_rel,
+    slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use crate::model::step::{
-    spec_before as c_before, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
-    spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key,
-    spec_origin_map, spec_project_obj, spec_record, spec_resume,
-    spec_run_due, spec_sat_add, spec_schedule_key, spec_sorted as c_sorted, spec_starts,
-    spec_step_object, spec_string as c_string, spec_targeted, spec_timer,
-    spec_unlease as c_unlease, DocV, ObjV, PromV, TkV,
+use crate::model::{spec_string as c_string};
+#[cfg(verus_keep_ghost)]
+use crate::node::{
+    DocV, NoteV, ObjV, PendingV, PromV, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
+    spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
+    spec_project_obj, spec_record, spec_resume, spec_run_due, spec_schedule_key,
+    spec_sorted as c_sorted, spec_step_object, spec_targeted, spec_timer, spec_unlease as c_unlease,
+    TkV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{NoteV, PendingV};
+use crate::store::{spec_before as c_before, spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
 use crate::relation::{
     agreement, as_item, due_agrees, dues_agree, items, note_sends, occurrence_agrees,
     occurrences_agree,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::step::{
-    least as a_least, lemma_least_exists as a_lemma_least_exists,
-    lemma_min_key as a_lemma_min_key, spec_before as a_before, spec_callback,
-    spec_callback_apply, spec_create_if_absent,
-    spec_derived, spec_did, spec_due_result, spec_has_target,
-    spec_is_timer, spec_keep, spec_keys, spec_lease, spec_lease_at, spec_listener,
-    spec_min_key as a_min_key, spec_new_object, spec_over_callbacks, spec_over_listeners,
-    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_process_work,
-    spec_project_promise, spec_project_task, spec_promise_record, spec_queue, spec_retry,
-    spec_run_timeout, spec_schedule_step, spec_sorted as a_sorted, spec_string as a_string,
-    spec_unlease as a_unlease,
+use echod_abstract::machine::{
+    spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_has_target,
+    spec_is_timer, spec_lease, spec_lease_at, spec_listener, spec_new_object, spec_process_work,
+    spec_project_promise, spec_project_task, spec_promise_record, spec_retry, spec_schedule_step,
+    spec_string as a_string, spec_unlease as a_unlease,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{Pid as APid, StateV};
+use echod_abstract::model::{
+    Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
+    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, StateV,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::view::{
+    DispatchV, InOutV, InternalV, least as a_least, lemma_least_exists as a_lemma_least_exists,
+    lemma_lift_dispatch, lemma_min_key as a_lemma_min_key, lift_dispatch, PromiseV, sat_add,
+    ScheduleV, spec_before as a_before, spec_keys, spec_min_key as a_min_key,
+    spec_sorted as a_sorted, StoreV as AStore, TaskV,
+};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::trusted::{pset_seq, spec_expand, spec_next_cron};
-#[cfg(verus_keep_ghost)]
-use echod_abstract::view::{
-    lemma_lift_dispatch, lift_dispatch, sat_add, DispatchV, InOutV, InternalV, PromiseV,
-    ScheduleV, StoreV as AStore, TaskV,
-};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
@@ -115,7 +115,7 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
         keys.contains(c_min_key(keys)),
         keys.contains(a_min_key(keys)),
 {
-    reveal(crate::model::step::spec_min_key);
+    reveal(crate::node::spec_min_key);
     a_lemma_min_key(keys);
     a_lemma_least_exists(keys);
     let k = choose|k: Seq<char>| a_least(keys, k);

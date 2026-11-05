@@ -17,36 +17,38 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::model::step::{
-    spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle, spec_held, spec_key,
-    spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
+use crate::node::{
+    DocV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
+    spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
     spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
     spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
-    spec_sat_add, spec_schedule_key, spec_starts, spec_tag_is, spec_tag_key, spec_targeted,
-    spec_task_record, spec_timer, spec_with_origin, DocV, Held, ObjV, PromV, TkV,
+    spec_schedule_key, spec_tag_is, spec_tag_key, spec_targeted, spec_task_record, spec_timer,
+    spec_with_origin, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::step::{
+use crate::store::{spec_sat_add, spec_starts};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::machine::{
     spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_handler, spec_has_key,
     spec_has_target, spec_held as a_held, spec_is_external_tag, spec_is_global, spec_is_timer,
     spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64,
     spec_project_promise, spec_project_task, spec_promise_create as a_promise_create,
     spec_promise_record, spec_promise_res as a_promise_res, spec_promise_settle as a_promise_settle,
-    spec_settle, spec_task_record as a_task_record, tag_delay, tag_external, tag_global, tag_scope,
-    tag_target, tag_timer, tag_true, SpecHeld,
+    spec_settle, spec_task_record as a_task_record, SpecHeld, tag_delay, tag_external, tag_global,
+    tag_scope, tag_target, tag_timer, tag_true,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{sat_add, OutV, PromiseV, ScheduleV, StoreV as AStore, TaskV};
+use echod_abstract::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{
-    origin, same_origin_spec, PromiseState, Request, Response, Schedule, Tags, TaskState, Value,
+    origin, PromiseState, Request, Response, same_origin_spec, Schedule, Tags, TaskState, Value,
 };
 
 verus! {
@@ -691,24 +693,24 @@ pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
 /// The chosen string of some characters is the string of those characters.
 pub proof fn lemma_string_view(chars: Seq<char>)
     ensures
-        crate::model::step::spec_string(chars)@ == chars,
-        echod_abstract::model::step::spec_string(chars)@ == chars,
-        crate::model::step::spec_string(chars) == echod_abstract::model::step::spec_string(chars),
+        crate::model::spec_string(chars)@ == chars,
+        echod_abstract::machine::spec_string(chars)@ == chars,
+        crate::model::spec_string(chars) == echod_abstract::machine::spec_string(chars),
 {
-    reveal(crate::model::step::spec_string);
-    reveal(echod_abstract::model::step::spec_string);
+    reveal(crate::model::spec_string);
+    reveal(echod_abstract::machine::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(crate::model::step::spec_string(chars), echod_abstract::model::step::spec_string(chars));
+    axiom_string_ext(crate::model::spec_string(chars), echod_abstract::machine::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
 pub proof fn lemma_string_of(s: String)
     ensures
-        crate::model::step::spec_string(s@) == s,
-        echod_abstract::model::step::spec_string(s@) == s,
+        crate::model::spec_string(s@) == s,
+        echod_abstract::machine::spec_string(s@) == s,
 {
     lemma_string_view(s@);
-    axiom_string_ext(crate::model::step::spec_string(s@), s);
+    axiom_string_ext(crate::model::spec_string(s@), s);
 }
 
 pub proof fn lemma_task_record(id: String, c: TkV, a: TaskV)

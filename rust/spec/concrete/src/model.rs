@@ -6,6 +6,9 @@
 //! call once; Rover may deliver an envelope again, and the store answers a
 //! `(node, op)` it has answered with a stutter. The abstract model is a
 //! different machine. See `simulation`.
+//!
+//! The initial world and the step are here twice: as the Rover model the
+//! checker runs, and as `spec_world` and `spec_step`, the specification.
 
 use vstd::prelude::*;
 
@@ -16,10 +19,15 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
-pub use crate::node::{Node, NodeV};
-use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+use echod_types::Response;
 
-pub(crate) mod step;
+#[cfg(verus_keep_ghost)]
+use crate::node::{spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
+pub use crate::node::{Node, NodeV};
+#[cfg(verus_keep_ghost)]
+use crate::store::spec_apply;
+pub use crate::store::{Entry, EntryV, Store, StoreV};
+use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 verus! {
 
@@ -88,20 +96,6 @@ pub struct LogicV {
     pub last_wake: Option<nat>,
 }
 
-pub struct EntryV {
-    pub key: Seq<char>,
-    pub body: Seq<u8>,
-    pub version: nat,
-}
-
-pub struct StoreV {
-    pub entries: Seq<EntryV>,
-    pub appendable: bool,
-    /// The `(node, op)` pairs the store has answered. A second delivery of
-    /// one is a stutter.
-    pub seen: Seq<(Pid, u64)>,
-}
-
 pub enum LocalV {
     Node(NodeV),
     Store(StoreV),
@@ -128,27 +122,6 @@ pub struct Logic {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub struct Entry {
-    pub key: String,
-    pub body: Vec<u8>,
-    pub version: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct Store {
-    pub entries: Vec<Entry>,
-    pub appendable: bool,
-    /// Each call a node makes carries a fresh `op`. The store executes each
-    /// `(node, op)` once; Rover may deliver the envelope again, and a real
-    /// HTTP exchange runs once. This is the counterpart of the version
-    /// compare-and-swap in the Lean physical store: a stale write is never
-    /// applied a second time, whatever the body's etag.
-    pub seen: Vec<(Pid, u64)>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Local {
     Node(Node),
     Store(Store),
@@ -170,24 +143,6 @@ impl View for Logic {
     }
 }
 
-impl View for Entry {
-    type V = EntryV;
-    open spec fn view(&self) -> EntryV {
-        EntryV { key: self.key@, body: self.body@, version: self.version as nat }
-    }
-}
-
-impl View for Store {
-    type V = StoreV;
-    open spec fn view(&self) -> StoreV {
-        StoreV {
-            entries: self.entries@.map_values(|e: Entry| e@),
-            appendable: self.appendable,
-            seen: self.seen@,
-        }
-    }
-}
-
 /// The nodes a fleet starts, then the store. The same world `Model::initial` builds.
 pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
     decreases (config.nodes - id) as int
@@ -195,12 +150,12 @@ pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
     if id >= config.nodes {
         Seq::empty()
     } else {
-        seq![(Pid::Node(id), LocalV::Node(spec_node(config, id)))]
+        seq![(Pid::Node(id), LocalV::Node(spec_initial_node(config, id)))]
             + spec_nodes(config, (id + 1) as u64)
     }
 }
 
-pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
+pub open spec fn spec_initial_node(config: Fleet, id: u64) -> NodeV {
     NodeV {
         logic: LogicV {
             clock: 0,
@@ -242,10 +197,146 @@ impl View for Local {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The step, as a specification. `spec_step` is what
+// `RoverModel::spec_on_event` returns: a node runs one flight, the store
+// applies one call. The executable `on_event` is obliged, by the trait, to
+// return results whose views are this sequence. That equality is not proved.
+// ---------------------------------------------------------------------------
+
+/// Opaque: the choice is read through the string lemmas alone.
+#[verifier::opaque]
+pub open spec fn spec_string(chars: Seq<char>) -> String {
+    choose|s: String| s@ == chars
+}
+
+/// Opaque: the choice is read through [`crate::simulation::lemma_bytes`] alone.
+#[verifier::opaque]
+pub open spec fn spec_bytes(body: Seq<u8>) -> Vec<u8> {
+    choose|v: Vec<u8>| v@ == body
+}
+
+pub open spec fn spec_one(state: LocalV, send: Seq<(Pid, Message)>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    seq![StepResultV { state, send }]
+}
+
+pub open spec fn spec_clock(logic: LogicV, now: Time) -> LogicV {
+    LogicV { clock: now as nat, ..logic }
+}
+
+/// A node event, the same arms as `Node::on_event`. A node whose op counter
+/// is spent takes no step that could issue an op: it stutters. The
+/// executable node adds one there and would overflow; the model stops one
+/// short of that.
+pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    match event {
+        ProcessEvent::Timeout => match node.wake {
+            Some(at) if at <= now as nat && node.flight is None && node.next_op < u64::MAX => {
+                let (next, send) = spec_timeout(node, now);
+                spec_one(LocalV::Node(NodeV {
+                    logic: LogicV { clock: now as nat, last_wake: None, ..node.logic },
+                    wake: spec_wake(next),
+                    ..next
+                }), send)
+            },
+            Some(at) if at <= now as nat => spec_one(LocalV::Node(node), Seq::empty()),
+            _ => Seq::empty(),
+        },
+        ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
+            if node.flight is Some || node.next_op == u64::MAX {
+                spec_one(LocalV::Node(node), Seq::empty())
+            } else {
+                let (next, send) = spec_request(node, now, call);
+                spec_one(LocalV::Node(NodeV {
+                    logic: spec_clock(node.logic, now),
+                    next_request: (node.next_request + 1) as u64,
+                    wake: spec_wake(next),
+                    ..next
+                }), send)
+            }
+        },
+        ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
+            if node.flight is None || node.next_op == u64::MAX {
+                spec_one(LocalV::Node(node), Seq::empty())
+            } else {
+                let (next, send) = spec_store_reply(node, op, outcome);
+                spec_one(LocalV::Node(NodeV {
+                    logic: spec_clock(node.logic, now),
+                    wake: spec_wake(next),
+                    ..next
+                }), send)
+            }
+        },
+        ProcessEvent::Receive { sender: Pid::Outside, message: Message::Stop } => {
+            spec_one(LocalV::Node(NodeV {
+                logic: LogicV { clock: now as nat, loops: false, stopping: true, ..node.logic },
+                ..node
+            }), Seq::empty())
+        },
+        _ => Seq::empty(),
+    }
+}
+
+/// The store answers each `(sender, op)` once. A delivery it has answered
+/// is a stutter, the same arm as `Store::on_event`.
+pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    match event {
+        ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+            if store.seen.contains((sender, op)) {
+                spec_one(LocalV::Store(store), Seq::empty())
+            } else {
+                let (next, outcome) = spec_apply(store, call);
+                spec_one(
+                    LocalV::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
+                    seq![(sender, Message::StoreReply { op, outcome })],
+                )
+            }
+        },
+        _ => Seq::empty(),
+    }
+}
+
+pub open spec fn spec_step(
+    _config: Fleet,
+    pid: Pid,
+    state: LocalV,
+    now: Time,
+    event: ProcessEvent<Pid, Message>,
+) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    match (pid, state) {
+        (Pid::Node(_), LocalV::Node(node)) => spec_node(node, now, event),
+        (Pid::Store, LocalV::Store(store)) => spec_store(store, event),
+        _ => Seq::empty(),
+    }
+}
+
+pub open spec fn spec_reply(client: Seq<char>, id: u64, response: Response) -> (Pid, Message) {
+    (Pid::Outside, Message::Output(Output::Response { client: spec_string(client), id, response }))
+}
+
+pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
+    (Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key: spec_string(key) } })
+}
+
+pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
+    let dispatch = match note {
+        NoteV::Execute { id, version } => echod_abstract::Dispatch::Execute { id: spec_string(id), version },
+        NoteV::Unblock { address, promise } => echod_abstract::Dispatch::Unblock { address: spec_string(address), promise },
+    };
+    (Pid::Outside, Message::Output(Output::Dispatch(dispatch)))
+}
+
+pub open spec fn spec_notes(notes: Seq<NoteV>) -> Seq<(Pid, Message)>
+    decreases notes.len(),
+{
+    if notes.len() == 0 { Seq::empty() }
+    else { seq![spec_notify(notes[0])] + spec_notes(notes.drop_first()) }
+}
+
 } // verus!
 
 // ---------------------------------------------------------------------------
-// The store, and the world Rover steps.
+// The world Rover steps.
 // ---------------------------------------------------------------------------
 
 /// The retry timeout the kernel uses.
@@ -260,176 +351,6 @@ impl Fleet {
             retry_timeout: RETRY_TIMEOUT,
         }
     }
-}
-
-/// The content hash the in-memory store quotes, the same function as the
-/// runtime's memory store.
-pub fn etag(body: &[u8]) -> Etag {
-    crate::store::content_etag(body)
-}
-
-fn find_entry(entries: &[Entry], key: &str) -> Option<usize> {
-    entries.iter().position(|entry| entry.key == key)
-}
-
-fn put_entry(entries: &mut Vec<Entry>, entry: Entry) {
-    if let Some(i) = find_entry(entries, &entry.key) {
-        entries[i] = entry;
-    } else {
-        let i = entries
-            .iter()
-            .position(|old| old.key.as_str() > entry.key.as_str())
-            .unwrap_or(entries.len());
-        entries.insert(i, entry);
-    }
-}
-
-impl Store {
-    pub fn empty(appendable: bool) -> Self {
-        Self {
-            entries: Vec::new(),
-            appendable,
-            seen: Vec::new(),
-        }
-    }
-
-    pub fn apply(&self, call: &StoreCall) -> (Store, StoreOutcome) {
-        let mut next = self.clone();
-        let outcome = match call {
-            StoreCall::Get { key } => StoreOutcome::Got(find_entry(&self.entries, key).map(|i| {
-                let entry = &self.entries[i];
-                (entry.body.clone(), etag(&entry.body))
-            })),
-            StoreCall::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Read(Read::Absent),
-                Some(i) => {
-                    let entry = &self.entries[i];
-                    let have = etag(&entry.body);
-                    if &have == want {
-                        StoreOutcome::Read(Read::NotModified)
-                    } else {
-                        StoreOutcome::Read(Read::Body(entry.body.clone(), have))
-                    }
-                }
-            },
-            StoreCall::PutIfNoneMatch { key, body } => {
-                if find_entry(&self.entries, key).is_some() {
-                    StoreOutcome::Failed(StoreError::PreconditionFailed)
-                } else {
-                    put_entry(
-                        &mut next.entries,
-                        Entry {
-                            key: key.clone(),
-                            body: body.clone(),
-                            version: 1,
-                        },
-                    );
-                    StoreOutcome::Written(etag(body))
-                }
-            }
-            StoreCall::PutIfMatch {
-                key,
-                body,
-                etag: want,
-            } => match find_entry(&self.entries, key) {
-                Some(i) if etag(&self.entries[i].body) == *want => {
-                    let version = self.entries[i].version + 1;
-                    put_entry(
-                        &mut next.entries,
-                        Entry {
-                            key: key.clone(),
-                            body: body.clone(),
-                            version,
-                        },
-                    );
-                    StoreOutcome::Written(etag(body))
-                }
-                _ => StoreOutcome::Failed(StoreError::PreconditionFailed),
-            },
-            StoreCall::AppendIfMatch {
-                key,
-                offset,
-                body,
-                etag: want,
-            } => {
-                if !self.appendable {
-                    StoreOutcome::Failed(StoreError::Unavailable(
-                        "this store does not append".into(),
-                    ))
-                } else {
-                    match find_entry(&self.entries, key) {
-                        Some(i)
-                            if etag(&self.entries[i].body) == *want
-                                && self.entries[i].body.len() as u64 == *offset =>
-                        {
-                            let mut joined = self.entries[i].body.clone();
-                            joined.extend_from_slice(body);
-                            let version = self.entries[i].version + 1;
-                            let tag = etag(&joined);
-                            put_entry(
-                                &mut next.entries,
-                                Entry {
-                                    key: key.clone(),
-                                    body: joined,
-                                    version,
-                                },
-                            );
-                            StoreOutcome::Written(tag)
-                        }
-                        _ => StoreOutcome::Failed(StoreError::PreconditionFailed),
-                    }
-                }
-            }
-            StoreCall::Put { key, body } => {
-                let version = find_entry(&self.entries, key)
-                    .map(|i| self.entries[i].version + 1)
-                    .unwrap_or(1);
-                put_entry(
-                    &mut next.entries,
-                    Entry {
-                        key: key.clone(),
-                        body: body.clone(),
-                        version,
-                    },
-                );
-                StoreOutcome::Done
-            }
-            StoreCall::Delete { key } => {
-                if let Some(i) = find_entry(&next.entries, key) {
-                    next.entries.remove(i);
-                }
-                StoreOutcome::Done
-            }
-            StoreCall::List { prefix, max_keys } => {
-                let keys = self
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.key.starts_with(prefix))
-                    .take(*max_keys)
-                    .map(|entry| entry.key.clone())
-                    .collect();
-                StoreOutcome::Listed(keys)
-            }
-            StoreCall::ListPrefixes { prefix } => {
-                StoreOutcome::Listed(prefix_children(&self.entries, prefix))
-            }
-        };
-        (next, outcome)
-    }
-}
-
-fn prefix_children(entries: &[Entry], prefix: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in entries.iter().filter(|entry| entry.key.starts_with(prefix)) {
-        let tail = &entry.key[prefix.len()..];
-        if let Some(i) = tail.find('/') {
-            let child = entry.key[..=prefix.len() + i].to_string();
-            if out.last() != Some(&child) {
-                out.push(child);
-            }
-        }
-    }
-    out
 }
 
 fn route_acts(acts: &[crate::node::Act]) -> Vec<(Pid, Message)> {
@@ -724,7 +645,7 @@ impl RoverModel for Model {
         }
     }
 
-    /// One local step. `step::spec_step` is that transition. The trait's
+    /// One local step. `spec_step` is that transition. The trait's
     /// `ensures` on `on_event` is the equality with the executable results;
     /// that proof is not written yet.
     open spec fn spec_on_event(
@@ -735,7 +656,7 @@ impl RoverModel for Model {
         now: Time,
         event: ProcessEvent<Pid, Message>,
     ) -> Seq<StepResultV<LocalV, Pid, Message>> {
-        step::spec_step(config, pid, state, now, event)
+        spec_step(config, pid, state, now, event)
     }
 
     /// A call in and an output out. Store traffic and `Stop` stay off the boundary,

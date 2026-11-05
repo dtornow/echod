@@ -23,23 +23,21 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
-use crate::model::step::{
-    spec_cached, spec_empty_doc, spec_encode, spec_etag, spec_etag_chars, spec_find, spec_fnv,
-    spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
-    spec_string, DocV,
-};
-#[cfg(verus_keep_ghost)]
 use crate::model::{
-    Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, StoreV as CStore,
+    Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, spec_string,
+    StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{CachedV, FlightV, JobV, NoteV, PendingV};
+use crate::node::{
+    CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_doc, spec_encode,
+    spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
+};
 #[cfg(verus_keep_ghost)]
-use crate::store::{Etag, StoreCall, StoreOutcome};
+use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::step::{spec_create_if_absent, spec_handler, spec_run_timeout};
+use echod_abstract::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{Model as AModel, Pid as APid, StateV};
+use echod_abstract::model::{Model as AModel, Pid as APid, spec_run_timeout, StateV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
@@ -434,12 +432,12 @@ pub open spec fn request_of(flight: FlightV) -> StoreCall {
         match flight.etag {
             Some(chars) => StoreCall::PutIfMatch {
                 key: spec_string(flight.key),
-                body: crate::model::step::spec_bytes(flight.decided.unwrap()),
+                body: crate::model::spec_bytes(flight.decided.unwrap()),
                 etag: Etag(spec_string(chars)),
             },
             None => StoreCall::PutIfNoneMatch {
                 key: spec_string(flight.key),
-                body: crate::model::step::spec_bytes(flight.decided.unwrap()),
+                body: crate::model::spec_bytes(flight.decided.unwrap()),
             },
         }
     }
