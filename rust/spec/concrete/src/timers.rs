@@ -115,6 +115,7 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
         keys.contains(c_min_key(keys)),
         keys.contains(a_min_key(keys)),
 {
+    reveal(crate::model::step::spec_min_key);
     a_lemma_min_key(keys);
     a_lemma_least_exists(keys);
     let k = choose|k: Seq<char>| a_least(keys, k);
@@ -124,28 +125,24 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
     assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !c_before(o, k));
 }
 
-/// The sorted keys are the keys, on both sides.
-pub proof fn lemma_sorted(keys: Set<Seq<char>>)
+/// The concrete sorted keys are the keys.
+pub proof fn lemma_c_sorted(keys: Set<Seq<char>>)
     requires
         keys.finite(),
     ensures
         c_sorted(keys).len() == keys.len(),
-        a_sorted(keys).len() == keys.len(),
         forall|i: int| 0 <= i < keys.len() ==> keys.contains(#[trigger] c_sorted(keys)[i]),
-        forall|i: int| 0 <= i < keys.len() ==> keys.contains(#[trigger] a_sorted(keys)[i]),
         forall|id: Seq<char>| keys.contains(id) ==> c_sorted(keys).contains(id),
-        forall|id: Seq<char>| keys.contains(id) ==> a_sorted(keys).contains(id),
     decreases keys.len(),
 {
     if keys.len() == 0 {
         assert(c_sorted(keys) == Seq::<Seq<char>>::empty());
-        assert(a_sorted(keys) == Seq::<Seq<char>>::empty());
     } else {
         lemma_min_key(keys);
         let k = c_min_key(keys);
         let rest = keys.remove(k);
         assert(rest.len() == keys.len() - 1);
-        lemma_sorted(rest);
+        lemma_c_sorted(rest);
         let sorted = c_sorted(keys);
         assert(sorted == seq![k] + c_sorted(rest));
         assert forall|i: int| 0 <= i < keys.len() implies keys.contains(#[trigger] sorted[i]) by {
@@ -162,27 +159,60 @@ pub proof fn lemma_sorted(keys: Set<Seq<char>>)
                 assert(sorted[j + 1] == id);
             }
         };
-        let ka = a_min_key(keys);
-        let resta = keys.remove(ka);
-        assert(resta.len() == keys.len() - 1);
-        lemma_sorted(resta);
-        let sorteda = a_sorted(keys);
-        assert(sorteda == seq![ka] + a_sorted(resta));
-        assert forall|i: int| 0 <= i < keys.len() implies keys.contains(#[trigger] sorteda[i]) by {
+    }
+}
+
+/// The abstract sorted keys are the keys.
+pub proof fn lemma_a_sorted(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+    ensures
+        a_sorted(keys).len() == keys.len(),
+        forall|i: int| 0 <= i < keys.len() ==> keys.contains(#[trigger] a_sorted(keys)[i]),
+        forall|id: Seq<char>| keys.contains(id) ==> a_sorted(keys).contains(id),
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        assert(a_sorted(keys) == Seq::<Seq<char>>::empty());
+    } else {
+        lemma_min_key(keys);
+        let k = a_min_key(keys);
+        let rest = keys.remove(k);
+        assert(rest.len() == keys.len() - 1);
+        lemma_a_sorted(rest);
+        let sorted = a_sorted(keys);
+        assert(sorted == seq![k] + a_sorted(rest));
+        assert forall|i: int| 0 <= i < keys.len() implies keys.contains(#[trigger] sorted[i]) by {
             if i > 0 {
-                assert(sorteda[i] == a_sorted(resta)[i - 1]);
+                assert(sorted[i] == a_sorted(rest)[i - 1]);
             }
         };
-        assert forall|id: Seq<char>| keys.contains(id) implies sorteda.contains(id) by {
-            if id == ka {
-                assert(sorteda[0] == ka);
+        assert forall|id: Seq<char>| keys.contains(id) implies sorted.contains(id) by {
+            if id == k {
+                assert(sorted[0] == k);
             } else {
-                assert(resta.contains(id));
-                let j = choose|j: int| 0 <= j < a_sorted(resta).len() && a_sorted(resta)[j] == id;
-                assert(sorteda[j + 1] == id);
+                assert(rest.contains(id));
+                let j = choose|j: int| 0 <= j < a_sorted(rest).len() && a_sorted(rest)[j] == id;
+                assert(sorted[j + 1] == id);
             }
         };
     }
+}
+
+/// The sorted keys are the keys, on both sides.
+pub proof fn lemma_sorted(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+    ensures
+        c_sorted(keys).len() == keys.len(),
+        a_sorted(keys).len() == keys.len(),
+        forall|i: int| 0 <= i < keys.len() ==> keys.contains(#[trigger] c_sorted(keys)[i]),
+        forall|i: int| 0 <= i < keys.len() ==> keys.contains(#[trigger] a_sorted(keys)[i]),
+        forall|id: Seq<char>| keys.contains(id) ==> c_sorted(keys).contains(id),
+        forall|id: Seq<char>| keys.contains(id) ==> a_sorted(keys).contains(id),
+{
+    lemma_c_sorted(keys);
+    lemma_a_sorted(keys);
 }
 
 /// The first due id is an id of the document.
@@ -729,6 +759,57 @@ pub proof fn lemma_timeout_offered(config: ServerConfig, state: StateV, now: Tim
     };
 }
 
+/// `work` names objects the store holds, so the timeout step offers it.
+pub open spec fn work_known(s: AStore, work: InternalV) -> bool {
+    match work {
+        InternalV::PromiseTimeout(id) => s.promises.contains_key(id),
+        InternalV::Callback { awaited, awaiter } => s.promises.contains_key(awaited)
+            && s.promises[awaited].callbacks.contains(awaiter),
+        InternalV::Listener { awaited, address } => s.promises.contains_key(awaited)
+            && s.promises[awaited].listeners.contains(address),
+        InternalV::TaskLeaseTimeout(id) => s.tasks.contains_key(id),
+        InternalV::TaskRetryTimeout(id) => s.tasks.contains_key(id)
+            && s.tasks[id].retry_timeout_at is Some,
+        InternalV::ScheduleTimeout { id, promise } => s.schedules.contains_key(id)
+            && work == schedule_work(s, id),
+        InternalV::Occurrence { .. } => false,
+    }
+}
+
+/// One offer, read off [`lemma_timeout_offered`]. The universal facts stay
+/// inside this lemma.
+pub proof fn lemma_work_offered(config: ServerConfig, state: StateV, now: Time, work: InternalV)
+    requires
+        finite_store(state.store),
+        work_known(state.store, work),
+    ensures
+        offered(config, state, now, work, spec_run_timeout(config, state, now)),
+{
+    lemma_timeout_offered(config, state, now);
+    let results = spec_run_timeout(config, state, now);
+    match work {
+        InternalV::PromiseTimeout(id) => {
+            assert(promise_offers(config, state, now, id, results));
+        },
+        InternalV::Callback { awaited, awaiter } => {
+            assert(promise_offers(config, state, now, awaited, results));
+        },
+        InternalV::Listener { awaited, address } => {
+            assert(promise_offers(config, state, now, awaited, results));
+        },
+        InternalV::TaskLeaseTimeout(id) => {
+            assert(task_offers(config, state, now, id, results));
+        },
+        InternalV::TaskRetryTimeout(id) => {
+            assert(task_offers(config, state, now, id, results));
+        },
+        InternalV::ScheduleTimeout { id, promise } => {
+            assert(offered(config, state, now, schedule_work(state.store, id), results));
+        },
+        InternalV::Occurrence { .. } => {},
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatches and sends
 // ---------------------------------------------------------------------------
@@ -1011,6 +1092,7 @@ pub proof fn lemma_promise_due(
 )
     requires
         due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state == PromiseState::Pending,
         map[id].promise.timeout_at <= now,
     ensures
@@ -1022,9 +1104,9 @@ pub proof fn lemma_promise_due(
     let ta = abstract_task(s, id);
     assert(origin(id) == o);
     assert(object_rel(obj, p, ta));
-    lemma_timeout_offered(config, state, now);
     let work = InternalV::PromiseTimeout(id);
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     let q = spec_project_promise(p, now);
     assert(p.state == PromiseState::Pending);
@@ -1072,6 +1154,7 @@ pub proof fn lemma_lease_due(
 )
     requires
         due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state == PromiseState::Pending,
         map[id].promise.timeout_at > now,
         map[id].task is Some,
@@ -1093,9 +1176,9 @@ pub proof fn lemma_lease_due(
     assert(task_rel(t, t_a));
     assert(s.tasks.contains_key(id));
     assert(t_a == s.tasks[id]);
-    lemma_timeout_offered(config, state, now);
     let work = InternalV::TaskLeaseTimeout(id);
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now).state == PromiseState::Pending);
     assert(t_a.state == TaskState::Acquired);
@@ -1133,6 +1216,7 @@ pub proof fn lemma_retry_due(
     requires
         config.retry_timeout == spec_retry_timeout(),
         due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state == PromiseState::Pending,
         map[id].promise.timeout_at > now,
         map[id].task is Some,
@@ -1155,9 +1239,9 @@ pub proof fn lemma_retry_due(
     assert(s.tasks.contains_key(id));
     assert(t_a == s.tasks[id]);
     assert(t_a.retry_timeout_at == t.retry_timeout_at);
-    lemma_timeout_offered(config, state, now);
     let work = InternalV::TaskRetryTimeout(id);
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now).state == PromiseState::Pending);
     lemma_sat_add(now, spec_retry_timeout());
@@ -1194,6 +1278,7 @@ pub proof fn lemma_callback_due(
 )
     requires
         due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state != PromiseState::Pending,
         map[id].promise.callbacks.len() > 0,
     ensures
@@ -1216,9 +1301,9 @@ pub proof fn lemma_callback_due(
         Some(at) => at,
         None => 0,
     };
-    lemma_timeout_offered(config, state, now);
     let work = InternalV::Callback { awaited: id, awaiter };
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     // The awaited side.
     assert(spec_project_promise(p, now) == p);
@@ -1405,6 +1490,7 @@ pub proof fn lemma_listener_due(
 )
     requires
         due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state != PromiseState::Pending,
         map[id].promise.callbacks.len() == 0,
         map[id].promise.listeners.len() > 0,
@@ -1423,9 +1509,9 @@ pub proof fn lemma_listener_due(
     assert(listeners.contains(address));
     lemma_contains_to_set(listeners, address);
     assert(p.listeners.contains(address));
-    lemma_timeout_offered(config, state, now);
     let work = InternalV::Listener { awaited: id, address };
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now) == p);
     lemma_string_view(id);
@@ -1564,9 +1650,9 @@ pub proof fn lemma_schedule_due(
     assert(sch.id@ == id);
     let at = sch.next_run_at;
     assert(c.next_run_at == at);
-    lemma_timeout_offered(config, state, now);
     let work = schedule_work(s, id);
     let results = spec_run_timeout(config, state, now);
+    lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     let outcome = spec_process_work(config, work, s, now);
     assert(outcome == spec_schedule_step(s, id, now));

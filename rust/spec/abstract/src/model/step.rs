@@ -59,6 +59,8 @@ pub open spec fn spec_before(a: Seq<char>, b: Seq<char>) -> bool
     }
 }
 
+/// Opaque: the choice is read through [`lemma_min_key`] alone.
+#[verifier::opaque]
 pub open spec fn spec_min_key(keys: Set<Seq<char>>) -> Seq<char> {
     choose|k: Seq<char>|
         keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k)
@@ -175,6 +177,7 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
     ensures
         keys.contains(spec_min_key(keys)),
 {
+    reveal(spec_min_key);
     lemma_least_exists(keys);
     let k = choose|k: Seq<char>| least(keys, k);
     assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k));

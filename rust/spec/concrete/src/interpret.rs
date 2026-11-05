@@ -1231,6 +1231,8 @@ pub proof fn lemma_promise_create_agrees(
         assert(finite_store(next));
         assert(spec_with_origin(doc, map.insert(req.id@, obj)) == DocV::Origin(map.insert(req.id@, obj)));
         assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
+        lemma_origin_key(o);
+        assert(origin_rel(map.insert(req.id@, obj), key.skip(2), next));
         assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), next));
         assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, next, other) by {
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {

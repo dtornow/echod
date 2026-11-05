@@ -538,11 +538,14 @@ pub open spec fn spec_forget(docs: Seq<CachedV>, key: Seq<char>, i: int) -> Seq<
     else { spec_forget(docs, key, i + 1) }
 }
 
-/// A node event, the same arms as `Node::on_event`.
+/// A node event, the same arms as `Node::on_event`. A node whose op counter
+/// is spent takes no step that could issue an op: it stutters. The
+/// executable node adds one there and would overflow; the model stops one
+/// short of that.
 pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
     match event {
         ProcessEvent::Timeout => match node.wake {
-            Some(at) if at <= now as nat && node.plane.flight is None => {
+            Some(at) if at <= now as nat && node.plane.flight is None && node.plane.next_op < u64::MAX => {
                 let (plane, send) = spec_timeout(node.plane, now);
                 spec_one(LocalV::Node(NodeV {
                     logic: LogicV { clock: now as nat, last_wake: None, ..node.logic },
@@ -555,7 +558,7 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
             _ => Seq::empty(),
         },
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-            if node.plane.flight is Some {
+            if node.plane.flight is Some || node.plane.next_op == u64::MAX {
                 spec_one(LocalV::Node(node), Seq::empty())
             } else {
                 let (plane, send) = spec_request(node.plane, now, call);
@@ -569,7 +572,7 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
             }
         },
         ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
-            if node.plane.flight is None {
+            if node.plane.flight is None || node.plane.next_op == u64::MAX {
                 spec_one(LocalV::Node(node), Seq::empty())
             } else {
                 let (plane, send) = spec_store_reply(node.plane, op, outcome);
@@ -1648,6 +1651,8 @@ pub open spec fn spec_sorted_present(map: Map<Seq<char>, ObjV>) -> Seq<Seq<char>
     spec_sorted(map.dom())
 }
 
+/// Opaque: the choice is read through `timers::lemma_min_key` alone.
+#[verifier::opaque]
 pub open spec fn spec_min_key(keys: Set<Seq<char>>) -> Seq<char> {
     choose|k: Seq<char>| keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k)
 }

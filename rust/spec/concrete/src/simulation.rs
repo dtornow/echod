@@ -521,6 +521,59 @@ pub proof fn lemma_matches_same_visible(
     assert(project::<AModel>(amodel(), execution) == same);
 }
 
+/// A process step with the outcome at `j`, stated over the model's trait: the
+/// witness `step` asks for is in the form `step` names it.
+pub proof fn lemma_process_step<M: RoverModel>(
+    m: M,
+    config: M::Config,
+    world: World<M>,
+    i: int,
+    at: Time,
+    event: ProcessEvent<M::Pid, M::Message>,
+    j: int,
+)
+    requires
+        world.now <= at,
+        0 <= i < world.process.len(),
+        is_process(m, world, world.process[i].0),
+        event_valid(world, world.process[i].0, event),
+        0 <= j < m.spec_on_event(config, world.process[i].0, world.process[i].1, at, event).len(),
+    ensures
+        ({
+            let process = world.process[i].0;
+            let outcome = m.spec_on_event(config, process, world.process[i].1, at, event)[j];
+            step(
+                m,
+                config,
+                world,
+                Label::Process { process, at, event, send: outcome.send },
+                land(world, i, process, at, outcome),
+            )
+        }),
+{
+    let process = world.process[i].0;
+    let outcome = m.spec_on_event(config, process, world.process[i].1, at, event)[j];
+    let next = land(world, i, process, at, outcome);
+    assert(exists|i2: int, j2: int|
+        #![trigger m.spec_on_event(config, process, world.process[i2].1, at, event)[j2]]
+        {
+            &&& 0 <= i2 < world.process.len()
+            &&& world.process[i2].0 == process
+            &&& {
+                let outcomes = m.spec_on_event(config, process, world.process[i2].1, at, event);
+                &&& 0 <= j2 < outcomes.len()
+                &&& outcomes[j2].send == outcome.send
+                &&& next == land(world, i2, process, at, outcomes[j2])
+            }
+        }) by {
+        assert(0 <= i < world.process.len() && world.process[i].0 == process && 0 <= j
+            < m.spec_on_event(config, process, world.process[i].1, at, event).len()
+            && m.spec_on_event(config, process, world.process[i].1, at, event)[j].send == outcome.send
+            && next == land(world, i, process, at, m.spec_on_event(config, process, world.process[i].1, at, event)[j]));
+    };
+    assert(step(m, config, world, Label::Process { process, at, event, send: outcome.send }, next));
+}
+
 /// One abstract process step of the service, with the outcome at `index`.
 /// The world it lands in: the one slot holds the outcome's state, the
 /// network grew by the outcome's sends, the clock is `at`.
@@ -555,6 +608,7 @@ pub proof fn lemma_service_step(
     let label = Label::Process { process: APid::Service, at, event, send: outcome.send };
     let after_a = land(before_a, 0, APid::Service, at, outcome);
     assert(before_a.process[0].1 == astate(before_a));
+    lemma_process_step(amodel(), config, before_a, 0, at, event, index);
     assert(step(amodel(), config, before_a, label, after_a));
     assert(amodel().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
     lemma_matched_step(config, before_a, label, after_a, Seq::<BoundaryEvent>::empty());
@@ -1130,7 +1184,7 @@ pub proof fn lemma_owed_update(
         0 <= i < fleet.nodes,
         forall|j: int| 0 <= j < fleet.nodes && j != i ==> #[trigger] node_at(after_w, j) == node_at(before_w, j),
     ensures
-        k <= i ==> owed(fleet, after_w, item, k) + owed_by(node_at(before_w, i), item) == owed(
+        0 <= k <= i ==> owed(fleet, after_w, item, k) + owed_by(node_at(before_w, i), item) == owed(
             fleet,
             before_w,
             item,
@@ -1241,8 +1295,13 @@ pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::v
         },
         DocV::Schedule(slot) => {
             assert(slot is None);
-            assert(crate::model::step::spec_starts(key, crate::interpret::schedule_prefix()));
-            assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+            if crate::model::step::spec_starts(key, crate::interpret::schedule_prefix()) {
+                assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+            } else {
+                let map = Map::<Seq<char>, crate::model::step::ObjV>::empty();
+                assert(spec_empty_doc(key) == DocV::Origin(map));
+                assert(map.dom() =~= Set::<Seq<char>>::empty());
+            }
         },
     }
 }
@@ -1255,9 +1314,12 @@ pub proof fn lemma_owner(fleet: Fleet, world: World<CModel>, i: int, key: Seq<ch
     ensures
         spec_owns(node_at(world, i).plane, key) == (owner(fleet, key) == i),
 {
+    assert(world.process[i].0 == CPid::Node(i as u64));
     let plane = node_at(world, i).plane;
     assert(plane.nodes == fleet.nodes);
     assert(plane.address == i);
+    assert(plane.nodes as u64 == fleet.nodes);
+    assert(plane.address as u64 == i as u64);
 }
 
 /// The realised string and bytes.
@@ -1328,6 +1390,7 @@ pub proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocV)
     ensures
         decision(a, doc) == decision(b, doc),
 {
+    reveal(decision);
 }
 
 /// A flight that answers a caller answers the probe's caller.
@@ -1390,6 +1453,7 @@ pub proof fn lemma_decide(plane: PlaneV, flight: FlightV, doc: DocV)
             }
         }),
 {
+    reveal(decision);
     let (next, reply, born, notes) = decision(flight, doc);
     let (after, send) = spec_decide(plane, flight, doc);
     if next == held(plane, flight.key) && born.len() == 0 {
@@ -1844,6 +1908,120 @@ pub proof fn lemma_carry(fleet: Fleet, cb: World<CModel>, ab: World<AModel>, ca:
     };
 }
 
+/// What `related` says of node `i`, instantiated.
+pub proof fn lemma_node_facts(fleet: Fleet, cb: World<CModel>, ab: World<AModel>, i: int)
+    requires
+        related(fleet, cb, ab),
+        0 <= i < fleet.nodes,
+    ensures
+        shaped(fleet, cb),
+        cb.process[i].0 == CPid::Node(i as u64),
+        cb.process[i].1 is Node,
+        node_at(cb, i).plane.address == i,
+        node_at(cb, i).plane.nodes == fleet.nodes,
+        node_ok(i, node_at(cb, i), store_at(fleet, cb)),
+        flight_outputs_covered(node_at(cb, i), ab.network),
+{
+    assert(cb.process[i].0 == CPid::Node(i as u64));
+    assert(node_ok(i, node_at(cb, i), store_at(fleet, cb)));
+    assert(flight_outputs_covered(node_at(cb, i), ab.network));
+}
+
+/// `node_ok` reads nothing of the pending list.
+pub proof fn lemma_node_ok_pending(i: int, node0: NodeV, node2: NodeV, store: CStore)
+    requires
+        node_ok(i, node0, store),
+        node2.plane == (PlaneV { pending: node2.plane.pending, ..node0.plane }),
+    ensures
+        node_ok(i, node2, store),
+{
+    assert(node2.plane.flight == node0.plane.flight);
+    assert(node2.plane.documents == node0.plane.documents);
+    assert(node2.plane.next_op == node0.plane.next_op);
+    assert(node2.plane.address == node0.plane.address);
+    assert(node2.plane.nodes == node0.plane.nodes);
+    assert forall|key: Seq<char>| #[trigger] spec_cached(node2.plane, key) == spec_cached(node0.plane, key) by {
+    };
+    assert forall|key: Seq<char>| #[trigger] loaded(node2, key) == loaded(node0, key) by {
+    };
+    match node0.plane.flight {
+        None => {},
+        Some(flight) => {
+            assert(loaded(node2, flight.key) == loaded(node0, flight.key));
+            assert(decision(flight, loaded(node2, flight.key)) == decision(flight, loaded(node0, flight.key)));
+            assert(cached_etag(node2.plane, flight.key) == cached_etag(node0.plane, flight.key));
+        },
+    }
+    assert(flight_ok(node2));
+    assert(cache_owned(node2));
+    assert forall|key: Seq<char>| spec_owns(node2.plane, key) implies (if applied_write(i, node2, store, key) {
+        physical(store, key) == node2.plane.flight.unwrap().decided
+    } else {
+        match #[trigger] spec_cached(node2.plane, key) {
+            Some(cached) => cache_entry_ok(key, cached, store),
+            None => physical(store, key) is None,
+        }
+    }) by {
+        assert(spec_owns(node0.plane, key));
+        assert(applied_write(i, node2, store, key) == applied_write(i, node0, store, key));
+    };
+}
+
+/// A node without a flight that keeps a document it had cached still
+/// agrees with the store: `key` is cached again with the bytes it held,
+/// every other key is cached as before.
+pub proof fn lemma_cache_ok_keep(
+    i: int,
+    node0: NodeV,
+    node2: NodeV,
+    store: CStore,
+    key: Seq<char>,
+    c: CachedV,
+    next: DocV,
+)
+    requires
+        cache_ok(i, node0, store),
+        node0.plane.flight is None,
+        node2.plane.flight is None,
+        node2.plane.address == node0.plane.address,
+        node2.plane.nodes == node0.plane.nodes,
+        spec_cached(node0.plane, key) == Some(c),
+        cache_entry_ok(key, c, store),
+        c.body == spec_encode(next),
+        spec_is_empty(next) && c.etag is None ==> spec_cached(node2.plane, key) is None,
+        !(spec_is_empty(next) && c.etag is None) ==> spec_cached(node2.plane, key) == Some(
+            CachedV { key, body: spec_encode(next), etag: c.etag },
+        ),
+        forall|other: Seq<char>| other != key ==> #[trigger] spec_cached(node2.plane, other)
+            == spec_cached(node0.plane, other),
+    ensures
+        cache_ok(i, node2, store),
+{
+    assert forall|k: Seq<char>| spec_owns(node2.plane, k) implies (if applied_write(i, node2, store, k) {
+        physical(store, k) == node2.plane.flight.unwrap().decided
+    } else {
+        match #[trigger] spec_cached(node2.plane, k) {
+            Some(cc) => cache_entry_ok(k, cc, store),
+            None => physical(store, k) is None,
+        }
+    }) by {
+        assert(!applied_write(i, node2, store, k));
+        assert(spec_owns(node0.plane, k));
+        assert(!applied_write(i, node0, store, k));
+        if k == key {
+            if spec_is_empty(next) && c.etag is None {
+                assert(physical(store, key) is None);
+            } else {
+                lemma_cached_from(node0.plane.documents, key, 0);
+                assert(c.key == key);
+                assert(CachedV { key, body: spec_encode(next), etag: c.etag } == c);
+            }
+        } else {
+            assert(spec_cached(node2.plane, k) == spec_cached(node0.plane, k));
+        }
+    };
+}
+
 /// A node step that sent nothing and changed only its pending list, owing
 /// no more than before, is an empty abstract execution.
 pub proof fn lemma_silent(
@@ -1875,6 +2053,8 @@ pub proof fn lemma_silent(
     assert(node2.plane.next_op == node0.plane.next_op);
     assert(node2.plane.address == node0.plane.address);
     assert(node2.plane.nodes == node0.plane.nodes);
+    assert(shaped(fleet, cb));
+    assert(cb.process[i].0 == CPid::Node(i as u64));
     lemma_land_node(fleet, cb, i, at, node2, Seq::empty());
     assert(envelopes(node_pid(i), Seq::<(CPid, CMessage)>::empty()) =~= Seq::<Envelope<CPid, CMessage>>::empty());
     assert(ca.network =~= cb.network);
@@ -1882,19 +2062,7 @@ pub proof fn lemma_silent(
     assert forall|k: int| 0 <= k < fleet.nodes implies #[trigger] node_ok(k, node_at(ca, k), store_at(fleet, ca)) by {
         if k == i {
             assert(node_ok(i, node0, store));
-            assert(flight_ok(node2));
-            assert(cache_owned(node2));
-            assert forall|key: Seq<char>| spec_owns(node2.plane, key) implies (if applied_write(i, node2, store, key) {
-                physical(store, key) == node2.plane.flight.unwrap().decided
-            } else {
-                match #[trigger] spec_cached(node2.plane, key) {
-                    Some(cached) => cache_entry_ok(key, cached, store),
-                    None => physical(store, key) is None,
-                }
-            }) by {
-                assert(spec_owns(node0.plane, key));
-                assert(applied_write(i, node2, store, key) == applied_write(i, node0, store, key));
-            };
+            lemma_node_ok_pending(i, node0, node2, store);
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
@@ -1918,7 +2086,8 @@ pub proof fn lemma_silent(
             CMessage::StoreReq { op, call } => {
                 let n = cb.network[k].sender->Node_0 as int;
                 if n == i {
-                    assert(node_at(ca, n).plane == node_at(cb, n).plane);
+                    assert(node_at(ca, n).plane.flight == node_at(cb, n).plane.flight);
+                    assert(node_at(ca, n).plane.next_op == node_at(cb, n).plane.next_op);
                 }
             },
             _ => {},
@@ -1944,7 +2113,8 @@ pub proof fn lemma_silent(
             CMessage::StoreReply { op, outcome } => {
                 let n = cb.network[k].recipient->Node_0 as int;
                 if n == i {
-                    assert(node_at(ca, n).plane == node_at(cb, n).plane);
+                    assert(node_at(ca, n).plane.flight == node_at(cb, n).plane.flight);
+                    assert(node_at(ca, n).plane.next_op == node_at(cb, n).plane.next_op);
                 }
             },
             _ => {},
@@ -2341,6 +2511,7 @@ pub proof fn lemma_begin_related(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         plane1 == (PlaneV { pending: plane1.pending, ..node_at(cb, i).plane }),
         spec_owns(plane1, key),
         begin_keyed(key, job, caller),
@@ -2367,6 +2538,7 @@ pub proof fn lemma_begin_related(
     ensures
         related(fleet, ca, aa),
 {
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let store = store_at(fleet, cb);
@@ -2486,30 +2658,12 @@ pub proof fn lemma_begin_related(
                     }
                 };
                 assert(cache_owned(node2));
-                assert forall|k: Seq<char>| spec_owns(node2.plane, k) implies (if applied_write(i, node2, store, k) {
-                    physical(store, k) == node2.plane.flight.unwrap().decided
-                } else {
-                    match #[trigger] spec_cached(node2.plane, k) {
-                        Some(cc) => cache_entry_ok(k, cc, store),
-                        None => physical(store, k) is None,
-                    }
-                }) by {
-                    assert(!applied_write(i, node2, store, k));
-                    assert(spec_owns(plane0, k));
-                    assert(!applied_write(i, node0, store, k));
-                    if k == key {
-                        if spec_is_empty(next) && c.etag is None {
-                            assert(spec_cached(node2.plane, key) is None);
-                            assert(physical(store, key) is None);
-                        } else {
-                            assert(spec_cached(node2.plane, key) == Some(CachedV { key, body: spec_encode(next), etag: c.etag }));
-                            assert(spec_encode(next) == c.body);
-                            assert(CachedV { key, body: spec_encode(next), etag: c.etag } == c);
-                        }
-                    } else {
-                        assert(spec_cached(node2.plane, k) == spec_cached(plane0, k));
-                    }
+                assert(spec_cached(plane0, key) == Some(c));
+                assert forall|other: Seq<char>| other != key implies #[trigger] spec_cached(node2.plane, other)
+                    == spec_cached(plane0, other) by {
+                    assert(spec_cached_from(docs2, other, 0) == spec_cached_from(plane1.documents, other, 0));
                 };
+                lemma_cache_ok_keep(i, node0, node2, store, key, c, next);
                 assert(node_ok(i, node2, store));
                 // the envelopes are outputs
                 lemma_notes(notes);
@@ -2853,6 +3007,7 @@ pub proof fn lemma_request(
         cb.now <= at,
         event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(call) }),
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         (node2.plane, send) == spec_request(node_at(cb, i).plane, at, call),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
@@ -3537,6 +3692,7 @@ pub proof fn lemma_store_reply(
         cb.now <= at,
         event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } }),
         node_at(cb, i).plane.flight is Some,
+        node_at(cb, i).plane.next_op < u64::MAX,
         (node2.plane, send) == spec_store_reply(node_at(cb, i).plane, op, outcome),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
@@ -3981,7 +4137,7 @@ pub proof fn lemma_node(
         ProcessEvent::Timeout => {
             match node.wake {
                 Some(w) => {
-                    if w <= at as nat && node.plane.flight is None {
+                    if w <= at as nat && node.plane.flight is None && node.plane.next_op < u64::MAX {
                         let (plane2, send) = spec_timeout(node.plane, at);
                         let node2 = NodeV {
                             logic: crate::model::LogicV { clock: at as nat, last_wake: None, ..node.logic },
@@ -4013,7 +4169,7 @@ pub proof fn lemma_node(
             }
         },
         ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(call) } => {
-            if node.plane.flight is Some {
+            if node.plane.flight is Some || node.plane.next_op == u64::MAX {
                 assert(results == spec_one(LocalV::Node(node), Seq::empty()));
                 assert(j == 0);
                 assert(results[0] == node_result(node, Seq::empty()));
@@ -4035,7 +4191,7 @@ pub proof fn lemma_node(
             }
         },
         ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } } => {
-            if node.plane.flight is None {
+            if node.plane.flight is None || node.plane.next_op == u64::MAX {
                 assert(results == spec_one(LocalV::Node(node), Seq::empty()));
                 assert(j == 0);
                 assert(results[0] == node_result(node, Seq::empty()));
@@ -4479,6 +4635,7 @@ pub proof fn lemma_timeout(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         (node2.plane, send) == spec_timeout(node_at(cb, i).plane, at),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures

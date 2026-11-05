@@ -119,6 +119,8 @@ pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
 
 /// What `spec_decide` computes from a flight and the document it loaded:
 /// the next document, the reply, the occurrences born, the dispatches.
+/// Opaque: it holds the whole handler semantics, read where a proof needs it.
+#[verifier::opaque]
 pub open spec fn decision(flight: FlightV, doc: DocV) -> (
     DocV,
     Option<Response>,
