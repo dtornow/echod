@@ -18,7 +18,9 @@ use vstd::prelude::*;
 
 use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
 
-use echod_types::{PromiseRecord, PromiseState, Request, Response, Tags, TaskRecord, TaskState, Value};
+use echod_types::{
+    PromiseRecord, PromiseState, Request, Response, Schedule, Tags, TaskRecord, TaskState, Value,
+};
 
 use super::trusted::*;
 use super::machine::*;
@@ -129,6 +131,21 @@ impl View for Task {
     }
 }
 
+/// A stored schedule, as the spec holds it.
+pub open spec fn schedule_v(c: Schedule) -> ScheduleV {
+    ScheduleV {
+        id: c.id@,
+        cron: c.cron@,
+        promise_id: c.promise_id@,
+        promise_timeout: c.promise_timeout,
+        promise_param: c.promise_param,
+        promise_tags: c.promise_tags,
+        created_at: c.created_at,
+        next_run_at: c.next_run_at,
+        last_run_at: c.last_run_at,
+    }
+}
+
 impl View for Store {
     type V = StoreV;
 
@@ -136,7 +153,7 @@ impl View for Store {
         StoreV {
             promises: self.promises@.map_values(|p: Promise| p@),
             tasks: self.tasks@.map_values(|t: Task| t@),
-            schedules: self.schedules@.map_values(|c: Schedule| c@),
+            schedules: self.schedules@.map_values(|c: Schedule| schedule_v(c)),
         }
     }
 }
@@ -147,7 +164,7 @@ impl View for Dispatch {
     open spec fn view(&self) -> DispatchV {
         match self {
             Dispatch::Execute { id, version } => DispatchV::Execute { id: id@, version: *version },
-            Dispatch::Unblock { address, promise } => DispatchV::Unblock { address: address@, promise: promise@ },
+            Dispatch::Unblock { address, promise } => DispatchV::Unblock { address: address@, promise: *promise },
         }
     }
 }
@@ -227,7 +244,7 @@ impl View for Out {
     type V = OutV;
 
     open spec fn view(&self) -> OutV {
-        OutV { resp: self.resp@, next: self.next@, work: works(self.work@), send: sends(self.send@) }
+        OutV { resp: self.resp, next: self.next@, work: works(self.work@), send: sends(self.send@) }
     }
 }
 
@@ -313,7 +330,7 @@ pub broadcast proof fn lemma_works_index(v: Seq<Work>, i: int)
     requires
         0 <= i < v.len(),
     ensures
-        #[trigger] works(v)[i] == v[i]@,
+        #[trigger] works(v)[i] == as_sched(v[i]),
 {
 }
 
@@ -402,7 +419,7 @@ pub proof fn lemma_prec_ext(a: PromiseRecord, b: PromiseRecord)
     ensures
         a == b,
 {
-    axiom_string_ext(a.id, b.id);
+    axiom_record_ext(a, b);
 }
 
 pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)

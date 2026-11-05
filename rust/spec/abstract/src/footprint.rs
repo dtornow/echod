@@ -3,6 +3,8 @@
 //! to, and holds the cron engine the spec trusts. `timeout_work` is the list
 //! of steps a timeout may run; the handler decides which of them do anything.
 
+use vstd::prelude::*;
+
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
 use echod_types::{Request, TaskFenceAction};
 
@@ -187,10 +189,20 @@ impl Partitioned for ServerConfig {
     }
 }
 
+// The checker calls this from inside `verus!`; Verus sees the signature alone.
+verus! {
+
 /// The steps an object or schedule offers, keeping those the handler will
 /// perform. Occurrences are not here: a schedule step queues those, and the
 /// queue is the only one. The handler is the guard.
+#[verifier::external_body]
 pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
+    timeout_work_plain(m, s, now)
+}
+
+} // verus!
+
+fn timeout_work_plain(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
     let mut v = Vec::new();
     for (id, p) in s.promises.iter() {
         runs(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));

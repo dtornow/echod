@@ -56,26 +56,36 @@ fn tag<'a>(tags: &'a Tags, key: &str) -> Option<&'a str> {
     tags.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
+// The tag readers are plain Rust; Verus sees their signatures alone.
+verus! {
+
+#[verifier::external_body]
 fn has_target(tags: &Tags) -> bool {
     tag(tags, "resonate:target").is_some()
 }
 
+#[verifier::external_body]
 fn is_timer(tags: &Tags) -> bool {
     tag(tags, "resonate:timer") == Some("true")
 }
 
+#[verifier::external_body]
 fn is_external_tag(tags: &Tags) -> bool {
     tag(tags, "resonate:external") == Some("true")
 }
 
+#[verifier::external_body]
 fn is_global(tags: &Tags) -> bool {
     tag(tags, "resonate:scope") == Some("global")
 }
 
 /// `resonate:delay`, when it is a number of milliseconds.
+#[verifier::external_body]
 fn delay_of(tags: &Tags) -> Option<u64> {
     tag(tags, "resonate:delay").and_then(|d| d.parse().ok())
 }
+
+} // verus!
 #[cfg(verus_keep_ghost)]
 use super::view::{
     all_in_origin, distinct, group_views, outs_v, sat_add, sends, strs, works, Chars, DispatchV,
@@ -108,14 +118,7 @@ pub struct Promise {
 
 impl Promise {
     /// Awaitable: Lean's `otype.awaitable`, everything but an internal promise.
-    pub fn external(&self) -> (r: bool)
-        ensures
-            r == (has_target(&self.tags)
-                || is_global(&self.tags)
-                || is_external_tag(&self.tags)
-                || is_timer(&self.tags)),
-
-    {
+    pub fn external(&self) -> bool {
         has_target(&self.tags)
             || is_global(&self.tags)
             || is_external_tag(&self.tags)
@@ -464,7 +467,7 @@ fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
             q.state = state;
             q.value = value.dup();
             q.settled_at = Some(at);
-            assert(q@ == (PromiseV { state, value: value@, settled_at: Some(at), ..s0@.promises[id@] }));
+            assert(q@ == (PromiseV { state, value: *value, settled_at: Some(at), ..s0@.promises[id@] }));
             s.promises.insert(id.clone(), q);
             assert(s.promises@ == s0.promises@.insert(id@, q));
             assert(s.promises@.map_values(|p: Promise| p@) == s0.promises@.map_values(|p: Promise| p@).insert(id@, q@));

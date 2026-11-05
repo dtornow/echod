@@ -339,14 +339,25 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
     }
 }
 
+verus! {
+
 impl<T> Sched<T> {
     /// The op.
-    pub fn req(&self) -> &T {
+    pub fn req(&self) -> (r: &T)
+        ensures
+            *r == match *self {
+                Sched::Later(r) | Sched::Timer(_, r) => r,
+            },
+    {
         match self {
             Sched::Later(r) | Sched::Timer(_, r) => r,
         }
     }
+}
 
+} // verus!
+
+impl<T> Sched<T> {
     /// The time a timer is due; a `Later` has none.
     pub fn due(&self) -> Option<Time> {
         match self {

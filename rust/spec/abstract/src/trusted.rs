@@ -260,6 +260,14 @@ pub axiom fn axiom_string_ext(a: String, b: String)
         a == b,
 ;
 
+/// A promise record is its fields.
+pub axiom fn axiom_record_ext(a: echod_types::PromiseRecord, b: echod_types::PromiseRecord)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+;
+
 /// A vector is its elements.
 pub axiom fn axiom_vec_ext<T>(a: Vec<T>, b: Vec<T>)
     requires

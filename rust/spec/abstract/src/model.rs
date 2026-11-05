@@ -78,7 +78,7 @@ fn initial_store() -> (server: Store)
         broadcast use group_views;
         assert(server.promises@.map_values(|p: super::machine::Promise| p@) =~= Map::empty());
         assert(server.tasks@.map_values(|t: super::machine::Task| t@) =~= Map::empty());
-        assert(server.schedules@.map_values(|s: super::machine::Schedule| s@) =~= Map::empty());
+        assert(server.schedules@.map_values(|s: echod_types::Schedule| s@) =~= Map::empty());
     }
     server
 }
@@ -189,7 +189,6 @@ pub proof fn lemma_shed_is_last(
     assert(outcomes == served + lost + shed);
     let prefix = served + lost;
     vstd::seq::lemma_seq_add_len(prefix, shed);
-    vstd::seq::lemma_seq_empty::<StepResultV<StateV, Pid, Message>>();
     vstd::seq::lemma_seq_push_len(Seq::<StepResultV<StateV, Pid, Message>>::empty(), spec_shed(state, call));
     assert(shed.len() == 1);
     let j = prefix.len() as int;
@@ -591,7 +590,7 @@ fn internal_result(
         ));
     }
     proof {
-        assert(pending@.map_values(|item: Work| item@)
+        assert(pending@.map_values(|item: Work| super::view::as_sched(item))
             =~= remove_at(before@.pending, i as int) + outv.work);
         assert(all.take(all.len() as int) =~= all);
         assert forall|j: int| 0 <= j < outv.send.len() implies

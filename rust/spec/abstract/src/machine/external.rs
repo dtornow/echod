@@ -295,7 +295,6 @@ impl ServerConfig {
                 i <= ids.len(),
                 idv == strs(ids@),
                 idv.len() > 0 && !idv.contains(id@) && distinct(idv) && all_in_origin(idv, id@),
-                u16>(t@),
                 forall|a: int| 0 <= a < i ==> s@.promises.contains_key(#[trigger] idv[a]),
             decreases ids.len() - i,
         {
