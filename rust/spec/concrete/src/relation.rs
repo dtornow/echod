@@ -81,6 +81,7 @@ pub open spec fn shaped(fleet: Fleet, world: World<CModel>) -> bool {
             &&& world.process[i].1 is Node
             &&& node_at(world, i).plane.address == i
             &&& node_at(world, i).plane.nodes == fleet.nodes
+            &&& node_at(world, i).plane.retry_timeout == fleet.retry_timeout
         }
     &&& world.process[fleet.nodes as int].0 == CPid::Store
     &&& world.process[fleet.nodes as int].1 is Store
@@ -117,11 +118,12 @@ pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
     }
 }
 
-/// What `spec_decide` computes from a flight and the document it loaded:
-/// the next document, the reply, the occurrences born, the dispatches.
+/// What `spec_decide` computes from a flight and the document it loaded,
+/// at the node's retry timeout: the next document, the reply, the
+/// occurrences born, the dispatches.
 /// Opaque: it holds the whole handler semantics, read where a proof needs it.
 #[verifier::opaque]
-pub open spec fn decision(flight: FlightV, doc: DocV) -> (
+pub open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64) -> (
     DocV,
     Option<Response>,
     Seq<PendingV>,
@@ -132,7 +134,7 @@ pub open spec fn decision(flight: FlightV, doc: DocV) -> (
             let (next, response) = spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        JobV::Due => spec_run_due(doc, flight.now),
+        JobV::Due => spec_run_due(doc, flight.now, retry_timeout),
         JobV::Occurrence(pending) => (
             spec_occurrence(doc, pending, flight.now),
             None,
@@ -146,7 +148,7 @@ pub open spec fn decision(flight: FlightV, doc: DocV) -> (
 /// decides, else what it holds.
 pub open spec fn intended(node: NodeV, key: Seq<char>) -> DocV {
     match node.plane.flight {
-        Some(flight) if flight.key == key => decision(flight, loaded(node, key)).0,
+        Some(flight) if flight.key == key => decision(flight, loaded(node, key), node.plane.retry_timeout).0,
         _ => loaded(node, key),
     }
 }
@@ -178,7 +180,7 @@ pub open spec fn store_interpreted(fleet: Fleet, world: World<CModel>, s: AStore
 /// The occurrences a node's flight will append when its write lands.
 pub open spec fn born_of(node: NodeV) -> Seq<PendingV> {
     match node.plane.flight {
-        Some(flight) => decision(flight, loaded(node, flight.key)).2,
+        Some(flight) => decision(flight, loaded(node, flight.key), node.plane.retry_timeout).2,
         None => Seq::empty(),
     }
 }
@@ -279,7 +281,7 @@ pub open spec fn flight_outputs_covered(
     match node.plane.flight {
         None => true,
         Some(flight) => {
-            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key));
+            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
             &&& match flight_reply(flight, reply) {
                 Some((client, id, response)) => service_output(
                     network,
@@ -318,7 +320,7 @@ pub open spec fn flight_ok(node: NodeV) -> bool {
     match node.plane.flight {
         None => true,
         Some(flight) => {
-            let (next, reply, born, notes) = decision(flight, loaded(node, flight.key));
+            let (next, reply, born, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
             &&& spec_owns(node.plane, flight.key)
             &&& flight.op < node.plane.next_op
             &&& job_keyed(flight)
@@ -638,7 +640,7 @@ pub open spec fn due_agrees(
     state: StateV,
     now: u64,
 ) -> bool {
-    let (next, _, born, notes) = spec_run_due(doc, now);
+    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
     ||| next == doc && born.len() == 0 && notes.len() == 0
     ||| exists|j: int|
         #![trigger spec_run_timeout(config, state, now)[j]]
@@ -700,11 +702,10 @@ pub open spec fn agreement(config: ServerConfig) -> bool {
     requests_agree(config) && dues_agree(config) && occurrences_agree()
 }
 
-/// The abstract server's configuration the concrete node implements: the
-/// node retries every `spec_retry_timeout()`, so the service it refines
-/// does too.
-pub open spec fn abstract_config() -> ServerConfig {
-    ServerConfig { retry_timeout: crate::model::step::spec_retry_timeout() }
+/// The abstract server's configuration a fleet implements: the service it
+/// refines retries as the nodes do.
+pub open spec fn abstract_config(concrete_config: Fleet) -> ServerConfig {
+    ServerConfig { retry_timeout: concrete_config.retry_timeout }
 }
 
 } // verus!

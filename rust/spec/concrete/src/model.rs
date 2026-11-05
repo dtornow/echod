@@ -42,6 +42,9 @@ pub struct Fleet {
     pub loops: bool,
     /// Whether the store accepts an append.
     pub appendable: bool,
+    /// How long a pending task waits before it is offered again. The
+    /// abstract server's `ServerConfig.retry_timeout`, Lean's `retryTimeout`.
+    pub retry_timeout: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -242,6 +245,7 @@ pub open spec fn spec_node(config: Fleet, id: u64) -> NodeV {
         plane: crate::plane::PlaneV {
             address: id as nat,
             nodes: config.nodes as nat,
+            retry_timeout: config.retry_timeout,
             flight: None,
             documents: Seq::empty(),
             pending: Seq::empty(),
@@ -277,12 +281,16 @@ impl View for Local {
 // The store, and the world Rover steps.
 // ---------------------------------------------------------------------------
 
+/// The retry timeout the kernel uses.
+pub const RETRY_TIMEOUT: u64 = 5_000;
+
 impl Fleet {
     pub fn new(nodes: u64, loops: bool) -> Self {
         Self {
             nodes,
             loops,
             appendable: false,
+            retry_timeout: RETRY_TIMEOUT,
         }
     }
 }
@@ -496,7 +504,7 @@ fn route_acts(acts: &[crate::plane::Act]) -> Vec<(Pid, Message)> {
         .collect()
 }
 
-fn started_node(id: u64, nodes: u64, loops: bool) -> Node {
+fn started_node(id: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Node {
     Node {
         logic: Logic {
             clock: 0,
@@ -507,7 +515,7 @@ fn started_node(id: u64, nodes: u64, loops: bool) -> Node {
         },
         wake: None,
         next_request: 1,
-        plane: crate::plane::Plane::new(id, nodes),
+        plane: crate::plane::Plane::new(id, nodes, retry_timeout),
     }
 }
 
@@ -531,7 +539,7 @@ impl Model {
         for id in 0..config.nodes {
             process.push((
                 Pid::Node(id),
-                Local::Node(started_node(id, config.nodes, config.loops)),
+                Local::Node(started_node(id, config.nodes, config.loops, config.retry_timeout)),
             ));
         }
         process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));

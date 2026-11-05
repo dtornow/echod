@@ -31,7 +31,7 @@ use crate::interpret::{
 use crate::model::step::{
     spec_before as c_before, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
     spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key,
-    spec_origin_map, spec_project_obj, spec_record, spec_resume, spec_retry_timeout,
+    spec_origin_map, spec_project_obj, spec_record, spec_resume,
     spec_run_due, spec_sat_add, spec_schedule_key, spec_sorted as c_sorted, spec_starts,
     spec_step_object, spec_string as c_string, spec_targeted, spec_timer,
     spec_unlease as c_unlease, DocV, ObjV, PromV, TkV,
@@ -916,7 +916,7 @@ pub open spec fn due_matched(
     now: Time,
     r: AResult,
 ) -> bool {
-    let (next, _, born, notes) = spec_run_due(doc, now);
+    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
     &&& spec_run_timeout(config, state, now).contains(r)
     &&& r.send == note_sends(notes)
     &&& r.state.pending == state.pending + items(born)
@@ -971,7 +971,7 @@ pub proof fn lemma_origin_matched(
             &&& finite_store(outcome.next)
             &&& sends_of(outcome.send) == note_sends(notes)
         }),
-        spec_run_due(DocV::Origin(map), now) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
+        spec_run_due(DocV::Origin(map), now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
     ensures
         due_agrees(config, key, DocV::Origin(map), state, now),
 {
@@ -1137,7 +1137,7 @@ pub proof fn lemma_promise_due(
         },
     }
     lemma_one_changed(map, o, s, id, obj2, q, t2, n);
-    assert(spec_step_object(map, id, now) == (map.insert(id, obj2), Seq::<NoteV>::empty()));
+    assert(spec_step_object(map, id, now, config.retry_timeout) == (map.insert(id, obj2), Seq::<NoteV>::empty()));
     lemma_sends_none();
     lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), Seq::empty());
 }
@@ -1197,7 +1197,7 @@ pub proof fn lemma_lease_due(
     assert(object_rel(obj2, p, Some(u)));
     lemma_promises_kept(s, id);
     lemma_one_changed(map, o, s, id, obj2, p, Some(u), n);
-    assert(spec_step_object(map, id, now) == (map.insert(id, obj2), Seq::<NoteV>::empty()));
+    assert(spec_step_object(map, id, now, config.retry_timeout) == (map.insert(id, obj2), Seq::<NoteV>::empty()));
     lemma_sends_none();
     lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), Seq::empty());
 }
@@ -1214,7 +1214,6 @@ pub proof fn lemma_retry_due(
     id: Seq<char>,
 )
     requires
-        config.retry_timeout == spec_retry_timeout(),
         due_context(key, o, map, state.store, id),
         spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state == PromiseState::Pending,
@@ -1244,22 +1243,22 @@ pub proof fn lemma_retry_due(
     lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now).state == PromiseState::Pending);
-    lemma_sat_add(now, spec_retry_timeout());
+    lemma_sat_add(now, config.retry_timeout);
     let again = sat_add(now, config.retry_timeout);
-    assert(again == spec_sat_add(now, spec_retry_timeout()));
+    assert(again == spec_sat_add(now, config.retry_timeout));
     let u = TaskV { retry_timeout_at: Some(again), ..t_a };
     let n = AStore { tasks: s.tasks.insert(id, u), ..s };
     let outcome = spec_process_work(config, work, s, now);
     assert(outcome == spec_retry(config, s, id, now));
     assert(outcome == spec_did(n, Seq::empty(), seq![DispatchV::Execute { id, version: t_a.version }]));
-    let t2 = TkV { retry_timeout_at: Some(spec_sat_add(now, spec_retry_timeout())), ..t };
+    let t2 = TkV { retry_timeout_at: Some(spec_sat_add(now, config.retry_timeout)), ..t };
     let obj2 = ObjV { task: Some(t2), ..obj };
     assert(task_rel(t2, u));
     assert(object_rel(obj2, p, Some(u)));
     lemma_promises_kept(s, id);
     lemma_one_changed(map, o, s, id, obj2, p, Some(u), n);
     let notes = seq![NoteV::Execute { id, version: t.version }];
-    assert(spec_step_object(map, id, now) == (map.insert(id, obj2), notes));
+    assert(spec_step_object(map, id, now, config.retry_timeout) == (map.insert(id, obj2), notes));
     assert(t.version == t_a.version);
     lemma_sends_execute(id, t.version);
     lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), notes);
@@ -1339,7 +1338,7 @@ pub proof fn lemma_callback_due(
     lemma_tasks_kept(s, id);
     lemma_one_changed(map, o, s, id, obj1, q, ta, n1);
     let map2 = spec_resume(map1, awaiter, id, since, now);
-    assert(spec_step_object(map, id, now) == (map2, Seq::<NoteV>::empty()));
+    assert(spec_step_object(map, id, now, config.retry_timeout) == (map2, Seq::<NoteV>::empty()));
     lemma_sends_none();
     // The awaiter side.
     let n = AStore { promises: s.promises.insert(id, q), tasks: outcome.next.tasks, ..s };
@@ -1547,7 +1546,7 @@ pub proof fn lemma_listener_due(
     lemma_tasks_kept(s, id);
     lemma_one_changed(map, o, s, id, obj2, q, ta, n);
     let notes = seq![NoteV::Unblock { address, promise: rec }];
-    assert(spec_step_object(map, id, now) == (map.insert(id, obj2), notes));
+    assert(spec_step_object(map, id, now, config.retry_timeout) == (map.insert(id, obj2), notes));
     lemma_sends_unblock(address, rec);
     lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), notes);
 }
@@ -1562,7 +1561,6 @@ pub proof fn lemma_origin_due(
     now: Time,
 )
     requires
-        config.retry_timeout == spec_retry_timeout(),
         key == spec_origin_key(o),
         map.dom().finite(),
         origin_rel(map, o, state.store),
@@ -1579,14 +1577,14 @@ pub proof fn lemma_origin_due(
     lemma_due_id(map, keys, now);
     match spec_due_id(map, keys, now) {
         None => {
-            assert(spec_run_due(doc, now) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+            assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
         },
         Some(id) => {
             assert(map.contains_key(id));
             assert(due_context(key, o, map, state.store, id));
             let obj = map[id];
-            let (map2, notes) = spec_step_object(map, id, now);
-            assert(spec_run_due(doc, now) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
+            let (map2, notes) = spec_step_object(map, id, now, config.retry_timeout);
+            assert(spec_run_due(doc, now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
             if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
                 lemma_promise_due(config, key, o, map, state, now, id);
             } else if obj.promise.state == PromiseState::Pending {
@@ -1670,7 +1668,7 @@ pub proof fn lemma_schedule_due(
     let n = AStore { schedules: s.schedules.insert(id, d), ..s };
     assert(outcome == spec_did(n, seq![occ], Seq::empty()));
     let r = spec_due_result(state, outcome);
-    let (next, _, born, notes) = spec_run_due(doc, now);
+    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
     let pending = PendingV {
         promise: spec_expand(sch.promise_id@, sch.id@, at),
         at,
@@ -1708,7 +1706,6 @@ pub proof fn lemma_schedule_due(
 
 pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, state: StateV, now: Time)
     requires
-        config.retry_timeout == spec_retry_timeout(),
         doc_rel(key, doc, state.store),
         finite_store(state.store),
     ensures
@@ -1724,11 +1721,11 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, s
                 if sch.next_run_at <= now {
                     lemma_schedule_due(config, key, id, sch, state, now);
                 } else {
-                    assert(spec_run_due(doc, now) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                    assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
                 }
             },
             _ => {
-                assert(spec_run_due(doc, now) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
         }
     } else if spec_starts(key, origin_prefix()) {
@@ -1747,18 +1744,16 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, s
                 lemma_sorted(map.dom());
                 assert(c_sorted(map.dom()).len() == 0);
                 assert(spec_due_id(map, c_sorted(map.dom()), now) is None);
-                assert(spec_run_due(doc, now) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
             DocV::Schedule(_) => {
-                assert(spec_run_due(doc, now) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
         }
     }
 }
 
 pub proof fn lemma_dues_agree(config: ServerConfig)
-    requires
-        config.retry_timeout == spec_retry_timeout(),
     ensures
         dues_agree(config),
 {
@@ -1946,11 +1941,9 @@ pub proof fn lemma_occurrences_agree()
 // Agreement
 // ---------------------------------------------------------------------------
 
-/// Lean's `refinement_handlers`: at the configuration the node implements,
-/// every handler, the due step, and the occurrence agree.
+/// Lean's `refinement_handlers`: at every configuration, every handler,
+/// the due step, and the occurrence agree.
 pub proof fn lemma_agreement(config: ServerConfig)
-    requires
-        config.retry_timeout == spec_retry_timeout(),
     ensures
         agreement(config),
 {

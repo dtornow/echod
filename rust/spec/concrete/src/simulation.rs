@@ -141,7 +141,7 @@ pub open spec fn reply_send(reply: Option<(Seq<char>, u64, Response)>) -> Seq<(C
 
 /// The writing flight `spec_decide` opens from `flight` on `doc`.
 pub open spec fn written(plane: PlaneV, flight: FlightV, doc: DocV) -> FlightV {
-    let (next, reply, born, notes) = decision(flight, doc);
+    let (next, reply, born, notes) = decision(flight, doc, plane.retry_timeout);
     FlightV {
         op: plane.next_op,
         writing: true,
@@ -1387,12 +1387,12 @@ pub proof fn lemma_reply_is_output(call: Call, response: Response)
 }
 
 /// `decision` reads the job and the time of a flight.
-pub proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocV)
+pub proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocV, retry_timeout: u64)
     requires
         a.job == b.job,
         a.now == b.now,
     ensures
-        decision(a, doc) == decision(b, doc),
+        decision(a, doc, retry_timeout) == decision(b, doc, retry_timeout),
 {
     reveal(decision);
 }
@@ -1441,7 +1441,7 @@ pub proof fn lemma_decide(plane: PlaneV, flight: FlightV, doc: DocV)
         !flight.writing,
     ensures
         ({
-            let (next, reply, born, notes) = decision(flight, doc);
+            let (next, reply, born, notes) = decision(flight, doc, plane.retry_timeout);
             let (after, send) = spec_decide(plane, flight, doc);
             if next == held(plane, flight.key) && born.len() == 0 {
                 &&& after == PlaneV {
@@ -1458,7 +1458,7 @@ pub proof fn lemma_decide(plane: PlaneV, flight: FlightV, doc: DocV)
         }),
 {
     reveal(decision);
-    let (next, reply, born, notes) = decision(flight, doc);
+    let (next, reply, born, notes) = decision(flight, doc, plane.retry_timeout);
     let (after, send) = spec_decide(plane, flight, doc);
     if next == held(plane, flight.key) && born.len() == 0 {
     } else {
@@ -1713,6 +1713,7 @@ pub proof fn lemma_land_node(fleet: Fleet, cb: World<CModel>, i: int, at: Time, 
         0 <= i < fleet.nodes,
         node2.plane.address == i,
         node2.plane.nodes == fleet.nodes,
+        node2.plane.retry_timeout == fleet.retry_timeout,
     ensures
         ({
             let ca = land(cb, i, node_pid(i), at, node_result(node2, send));
@@ -1868,7 +1869,7 @@ pub proof fn lemma_flight_outputs_monotone(
     match node.plane.flight {
         None => {},
         Some(flight) => {
-            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key));
+            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
             match flight_reply(flight, reply) {
                 Some((client, id, response)) => {
                     lemma_service_output_monotone(earlier, later, reply_output(client, id, response));
@@ -1923,6 +1924,7 @@ pub proof fn lemma_node_facts(fleet: Fleet, cb: World<CModel>, ab: World<AModel>
         cb.process[i].1 is Node,
         node_at(cb, i).plane.address == i,
         node_at(cb, i).plane.nodes == fleet.nodes,
+        node_at(cb, i).plane.retry_timeout == fleet.retry_timeout,
         node_ok(i, node_at(cb, i), store_at(fleet, cb)),
         flight_outputs_covered(node_at(cb, i), ab.network),
 {
@@ -1944,6 +1946,7 @@ pub proof fn lemma_node_ok_pending(i: int, node0: NodeV, node2: NodeV, store: CS
     assert(node2.plane.next_op == node0.plane.next_op);
     assert(node2.plane.address == node0.plane.address);
     assert(node2.plane.nodes == node0.plane.nodes);
+    assert(node2.plane.retry_timeout == node0.plane.retry_timeout);
     assert forall|key: Seq<char>| #[trigger] spec_cached(node2.plane, key) == spec_cached(node0.plane, key) by {
     };
     assert forall|key: Seq<char>| #[trigger] loaded(node2, key) == loaded(node0, key) by {
@@ -1952,7 +1955,7 @@ pub proof fn lemma_node_ok_pending(i: int, node0: NodeV, node2: NodeV, store: CS
         None => {},
         Some(flight) => {
             assert(loaded(node2, flight.key) == loaded(node0, flight.key));
-            assert(decision(flight, loaded(node2, flight.key)) == decision(flight, loaded(node0, flight.key)));
+            assert(decision(flight, loaded(node2, flight.key), node2.plane.retry_timeout) == decision(flight, loaded(node0, flight.key), node0.plane.retry_timeout));
             assert(cached_etag(node2.plane, flight.key) == cached_etag(node0.plane, flight.key));
         },
     }
@@ -2527,7 +2530,7 @@ pub proof fn lemma_begin_related(
         finite_store(astate(aa).store),
         ({
             let doc = held(plane1, key);
-            let (next, reply, born, notes) = decision(probe(key, at, caller, job), doc);
+            let (next, reply, born, notes) = decision(probe(key, at, caller, job), doc, plane1.retry_timeout);
             &&& doc_rel(key, next, astate(aa).store)
             &&& others_kept(key, astate(ab).store, astate(aa).store)
             &&& forall|item: Sched<InternalV>|
@@ -2550,7 +2553,7 @@ pub proof fn lemma_begin_related(
     let next_store = astate(aa).store;
     let doc = held(plane1, key);
     let probe_flight = probe(key, at, caller, job);
-    let (next, reply, born, notes) = decision(probe_flight, doc);
+    let (next, reply, born, notes) = decision(probe_flight, doc, plane0.retry_timeout);
     let op = plane0.next_op;
     assert(plane1.documents == plane0.documents);
     assert(plane1.next_op == op);
@@ -2575,7 +2578,7 @@ pub proof fn lemma_begin_related(
             assert(node2.plane == PlaneV { flight: Some(r), next_op: (op + 1) as u64, ..plane1 });
             assert(send == seq![spec_get(op, key)]);
             assert(request_of(r) == StoreCall::Get { key: spec_string(key) });
-            lemma_decision_same(r, probe_flight, doc);
+            lemma_decision_same(r, probe_flight, doc, plane0.retry_timeout);
             lemma_reply_same(r, probe_flight, reply);
             assert(loaded(node2, key) == doc);
             assert(doc == spec_empty_doc(key));
@@ -2637,7 +2640,7 @@ pub proof fn lemma_begin_related(
             let f = spec_flight(0, key, c.etag, at, caller, job);
             assert(doc == spec_read(key, c.body));
             assert((node2.plane, send) == spec_decide(plane1, f, doc));
-            lemma_decision_same(f, probe_flight, doc);
+            lemma_decision_same(f, probe_flight, doc, plane0.retry_timeout);
             lemma_reply_same(f, probe_flight, reply);
             lemma_decide(plane1, f, doc);
             assert(held(plane1, key) == doc);
@@ -2744,7 +2747,7 @@ pub proof fn lemma_begin_related(
                 assert(w.now == at);
                 assert(w.caller == caller);
                 assert(w.etag == c.etag);
-                lemma_decision_same(w, probe_flight, doc);
+                lemma_decision_same(w, probe_flight, doc, plane0.retry_timeout);
                 lemma_reply_same(w, probe_flight, reply);
                 assert(loaded(node2, key) == doc);
                 assert(cached_etag(node2.plane, key) == c.etag);
@@ -2974,7 +2977,7 @@ pub proof fn lemma_request_served(
     lemma_send_is_reply(ab.network, call, response);
     // the decision the flight stands for
     let probe_flight = probe(key, at, caller, job);
-    let (dnext, dreply, born, notes) = decision(probe_flight, doc);
+    let (dnext, dreply, born, notes) = decision(probe_flight, doc, plane0.retry_timeout);
     assert(dnext == next);
     assert(dreply == Some(response));
     assert(born.len() == 0);
@@ -3161,7 +3164,7 @@ pub proof fn lemma_occurrence_begin(
     assert(doc_rel(key, doc, s));
     let next = spec_occurrence(doc, p, at);
     let probe_flight = probe(key, at, caller, job);
-    let (dnext, dreply, born, notes) = decision(probe_flight, doc);
+    let (dnext, dreply, born, notes) = decision(probe_flight, doc, plane1.retry_timeout);
     assert(dnext == next);
     assert(dreply is None);
     assert(born.len() == 0);
@@ -3261,6 +3264,7 @@ pub proof fn lemma_due_begin(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -3289,8 +3293,9 @@ pub proof fn lemma_due_begin(
     assert(effective(fleet, cb, key) == doc);
     assert(doc_rel(key, doc, s));
     let probe_flight = probe(key, at, caller, job);
-    let (next, reply, born, notes) = decision(probe_flight, doc);
-    assert((next, reply, born, notes) == spec_run_due(doc, at));
+    let (next, reply, born, notes) = decision(probe_flight, doc, plane0.retry_timeout);
+    assert(plane0.retry_timeout == config.retry_timeout);
+    assert((next, reply, born, notes) == spec_run_due(doc, at, config.retry_timeout));
     assert(flight_reply(probe_flight, reply) is None);
     assert(due_agrees(config, key, doc, state, at));
     assert(born_of(node0) =~= Seq::<PendingV>::empty());
@@ -3374,7 +3379,7 @@ pub proof fn lemma_closing_sends(
         flight_outputs_covered(node, network),
         ({
             let flight = node.plane.flight.unwrap();
-            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key));
+            let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
             send == reply_send(flight_reply(flight, reply)) + spec_notes(notes)
         }),
     ensures
@@ -3386,7 +3391,7 @@ pub proof fn lemma_closing_sends(
             ) && carried_output(envelopes(node_pid(i), send)[k], network),
 {
     let flight = node.plane.flight.unwrap();
-    let (_, reply, _, notes) = decision(flight, loaded(node, flight.key));
+    let (_, reply, _, notes) = decision(flight, loaded(node, flight.key), node.plane.retry_timeout);
     let head = reply_send(flight_reply(flight, reply));
     let sent = envelopes(node_pid(i), send);
     lemma_notes(notes);
@@ -3432,12 +3437,13 @@ pub proof fn lemma_flight_closed(
         node2.plane.next_op == node_at(cb, i).plane.next_op,
         node2.plane.address == node_at(cb, i).plane.address,
         node2.plane.nodes == node_at(cb, i).plane.nodes,
+        node2.plane.retry_timeout == node_at(cb, i).plane.retry_timeout,
         ({
             let node0 = node_at(cb, i);
             let plane0 = node0.plane;
             let flight = plane0.flight.unwrap();
             let key = flight.key;
-            let (next, reply, born, notes) = decision(flight, loaded(node0, key));
+            let (next, reply, born, notes) = decision(flight, loaded(node0, key), node0.plane.retry_timeout);
             let docs2 = node2.plane.documents;
             &&& node2.plane.pending == plane0.pending + born
             &&& forall|j: int, k: int| 0 <= j < k < docs2.len() ==> #[trigger] docs2[j].key != #[trigger] docs2[k].key
@@ -3464,7 +3470,7 @@ pub proof fn lemma_flight_closed(
     let key = flight.key;
     let store = store_at(fleet, cb);
     let s = astate(ab).store;
-    let (next, reply, born, notes) = decision(flight, loaded(node0, key));
+    let (next, reply, born, notes) = decision(flight, loaded(node0, key), node0.plane.retry_timeout);
     let docs2 = node2.plane.documents;
     assert(flight_ok(node0));
     assert(spec_owns(plane0, key));
@@ -3592,7 +3598,7 @@ pub proof fn lemma_write_after_read(
     assert(flight_ok(node0));
     assert(spec_cached(plane0, key) is None);
     assert(loaded(node0, key) == doc);
-    let (next, reply, born, notes) = decision(flight, doc);
+    let (next, reply, born, notes) = decision(flight, doc, plane0.retry_timeout);
     assert(spec_owns(plane0, key));
     lemma_owner(fleet, cb, i, key);
     lemma_land_node(fleet, cb, i, at, node2, send);
@@ -3609,9 +3615,9 @@ pub proof fn lemma_write_after_read(
     assert(w.born == born);
     assert(w.notify == notes);
     assert(w.reply == flight_reply(flight, reply));
-    lemma_decision_same(w, flight, doc);
+    lemma_decision_same(w, flight, doc, plane0.retry_timeout);
     lemma_reply_same(w, flight, reply);
-    assert(decision(w, doc) == decision(flight, doc));
+    assert(decision(w, doc, plane0.retry_timeout) == decision(flight, doc, plane0.retry_timeout));
     assert(flight_reply(w, reply) == flight_reply(flight, reply));
     assert(job_keyed(w));
     assert(node2.plane.documents == plane0.documents);
@@ -3743,7 +3749,7 @@ pub proof fn lemma_store_reply(
         assert(outcome == outcome_of(flight));
         assert(flight_ok(node0));
         let doc0 = loaded(node0, key);
-        let (next, reply, born, notes) = decision(flight, doc0);
+        let (next, reply, born, notes) = decision(flight, doc0, plane0.retry_timeout);
         if !flight.writing {
             assert(outcome == StoreOutcome::Got(None));
             assert(flight.etag is None);
@@ -4153,6 +4159,7 @@ pub proof fn lemma_node(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -4414,6 +4421,7 @@ pub proof fn lemma_process(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         step(concrete_model(), fleet, cb, Label::Process { process, at, event, send }, ca),
@@ -4485,6 +4493,7 @@ pub proof fn lemma_step(
     ab: World<AModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         step(concrete_model(), fleet, cb, label, ca),
@@ -4663,6 +4672,7 @@ pub proof fn lemma_timeout(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -4709,6 +4719,7 @@ pub proof fn lemma_timeout(
 /// Every concrete step is matched: the forward simulation.
 pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
     requires
+        config == abstract_config(fleet),
         agreement(config),
     ensures
         simulation(concrete_model(), fleet, abstract_model(), config, link(fleet)),
@@ -4726,15 +4737,15 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 }
 
 /// Trace inclusion: every boundary trace of the concrete world is one of
-/// the abstract world, at the configuration the node implements. The
-/// handlers, the due step, and the occurrence agree by
-/// `timers::lemma_agreement`.
+/// the abstract world, at the abstract configuration the fleet implements:
+/// the same retry timeout. The handlers, the due step, and the occurrence
+/// agree by `timers::lemma_agreement`.
 pub proof fn lemma_refines(concrete_config: Fleet)
     ensures
-        refines(concrete_model(), concrete_config, abstract_model(), abstract_config()),
+        refines(concrete_model(), concrete_config, abstract_model(), abstract_config(concrete_config)),
 {
     let fleet = concrete_config;
-    let config = abstract_config();
+    let config = abstract_config(fleet);
     crate::timers::lemma_agreement(config);
     lemma_initial(fleet, config);
     lemma_link(fleet, initial(concrete_model(), fleet), initial(abstract_model(), config));

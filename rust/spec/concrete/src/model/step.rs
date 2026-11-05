@@ -750,7 +750,7 @@ pub open spec fn spec_decide(plane: PlaneV, flight: FlightV, doc: DocV) -> (Plan
             let (next, response) = spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        JobV::Due => spec_run_due(doc, flight.now),
+        JobV::Due => spec_run_due(doc, flight.now, plane.retry_timeout),
         JobV::Occurrence(pending) => (spec_occurrence(doc, pending, flight.now), None, Seq::empty(), Seq::empty()),
     };
     let reply = match (flight.caller, reply) {
@@ -1591,7 +1591,7 @@ pub open spec fn spec_schedule_delete(doc: DocV, id: String) -> (DocV, Response)
     }
 }
 
-pub open spec fn spec_run_due(doc: DocV, now: Time) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match doc {
         DocV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
@@ -1612,7 +1612,7 @@ pub open spec fn spec_run_due(doc: DocV, now: Time) -> (DocV, Option<Response>, 
         DocV::Origin(map) => {
             match spec_due_id(map, spec_sorted_present(map), now) {
                 Some(id) => {
-                    let (map, notes) = spec_step_object(map, id, now);
+                    let (map, notes) = spec_step_object(map, id, now, retry_timeout);
                     (DocV::Origin(map), None, Seq::empty(), notes)
                 },
                 None => (doc, None, Seq::empty(), Seq::empty()),
@@ -1724,12 +1724,7 @@ pub open spec fn spec_obj_due(obj: ObjV, now: Time) -> Option<u64> {
     spec_earlier(spec_earlier(spec_promise_due(obj, now), spec_lease_due(obj, now)), spec_retry_due(obj, now))
 }
 
-/// `RETRY_TIMEOUT`: how long after an offer a pending task is offered again.
-pub open spec fn spec_retry_timeout() -> u64 {
-    5000
-}
-
-pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
+pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
     if !map.contains_key(id) {
         (map, Seq::empty())
     } else {
@@ -1743,7 +1738,7 @@ pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now:
                     (map.insert(id, obj), Seq::empty())
                 },
                 Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
-                    let obj = ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, spec_retry_timeout())), ..t }), ..obj };
+                    let obj = ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry_timeout)), ..t }), ..obj };
                     (map.insert(id, obj), seq![NoteV::Execute { id, version: t.version }])
                 },
                 _ => (map, Seq::empty()),

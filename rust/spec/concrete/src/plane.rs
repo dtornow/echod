@@ -16,14 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 
-/// How long a pending task waits before it is offered again. Lean's
-/// `ServerConfig.retryTimeout`.
-const RETRY_TIMEOUT: u64 = 5_000;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plane {
     address: u64,
     nodes: u64,
+    /// How long a pending task waits before it is offered again.
+    retry_timeout: u64,
     flight: Option<Flight>,
     cache: BTreeMap<String, Cached>,
     pending: VecDeque<Pending>,
@@ -145,10 +143,11 @@ pub enum Act {
 }
 
 impl Plane {
-    pub fn new(address: u64, nodes: u64) -> Self {
+    pub fn new(address: u64, nodes: u64, retry_timeout: u64) -> Self {
         Self {
             address,
             nodes: nodes.max(1),
+            retry_timeout,
             flight: None,
             cache: BTreeMap::new(),
             pending: VecDeque::new(),
@@ -310,7 +309,7 @@ impl Plane {
                 (next, Some(response), Vec::new(), Vec::new())
             }
             Job::Due => {
-                let (next, born, notify) = run_due(doc, now);
+                let (next, born, notify) = run_due(doc, now, self.retry_timeout);
                 (next, None, born, notify)
             }
             Job::Occurrence(pending) => {
@@ -1349,7 +1348,7 @@ fn held(map: &BTreeMap<String, Obj>, id: &str, version: u64, now: u64) -> Result
     }
 }
 
-fn run_due(mut doc: Doc, now: u64) -> (Doc, Vec<Pending>, Vec<Outbound>) {
+fn run_due(mut doc: Doc, now: u64, retry_timeout: u64) -> (Doc, Vec<Pending>, Vec<Outbound>) {
     match &mut doc {
         Doc::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
@@ -1371,7 +1370,7 @@ fn run_due(mut doc: Doc, now: u64) -> (Doc, Vec<Pending>, Vec<Outbound>) {
                 .cloned()
                 .find(|id| map.get(id).is_some_and(|obj| obj.due(now).is_some()))
             {
-                step_object(map, &id, now)
+                step_object(map, &id, now, retry_timeout)
             } else {
                 Vec::new()
             };
@@ -1604,7 +1603,7 @@ impl Obj {
 /// one callback it owes, or one listener. A retry offers the task. A listener
 /// is told the settled promise. Both are the same boundary outputs the
 /// abstract model sends.
-fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbound> {
+fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64, retry_timeout: u64) -> Vec<Outbound> {
     enum Found {
         Quiet,
         Callback(String, u64),
@@ -1634,7 +1633,7 @@ fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbo
                     && task.retry_timeout_at.is_some_and(|at| at <= now)
                 {
                     let version = task.version;
-                    task.retry_timeout_at = Some(now.saturating_add(RETRY_TIMEOUT));
+                    task.retry_timeout_at = Some(now.saturating_add(retry_timeout));
                     Found::Execute { version }
                 } else {
                     Found::Quiet
@@ -1799,6 +1798,7 @@ pub struct CachedV {
 pub struct PlaneV {
     pub address: nat,
     pub nodes: nat,
+    pub retry_timeout: u64,
     pub flight: Option<FlightV>,
     pub documents: Seq<CachedV>,
     pub pending: Seq<PendingV>,
