@@ -1379,10 +1379,15 @@ fn create_occurrence(mut doc: Doc, pending: &Pending, now: u64) -> Doc {
     );
     // A schedule occurrence is created as of its fire instant. `new_object`
     // anchors a request at `now`; shift the birth instant back to `at` when
-    // the deadline is still ahead of the fire.
+    // the deadline is still ahead of the fire, and offer the task from `at`.
     let mut obj = obj;
     if timeout_at > pending.at {
         obj.promise.created_at = pending.at;
+    }
+    if let Some(task) = obj.task.as_mut() {
+        if task.state == TaskState::Pending {
+            task.retry_timeout_at = Some(offer_at(&pending.tags, pending.at));
+        }
     }
     map.insert(pending.promise.clone(), obj);
     doc
@@ -1454,7 +1459,7 @@ fn new_object(
         listeners: Vec::new(),
     };
     let task = if runnable {
-        let due = delay_of(&tags).map(|d| d.max(now)).unwrap_or(now);
+        let due = offer_at(&tags, now);
         Some(Tk {
             state: if live {
                 TaskState::Pending
@@ -1493,6 +1498,11 @@ fn awaitable(tags: &Tags) -> bool {
         || tags
             .iter()
             .any(|(k, v)| k == "resonate:scope" && v == "global")
+}
+
+/// The first offer of a task born at `at`: its delay, or `at`.
+fn offer_at(tags: &Tags, at: u64) -> u64 {
+    delay_of(tags).map(|d| d.max(at)).unwrap_or(at)
 }
 
 fn delay_of(tags: &Tags) -> Option<u64> {
@@ -1578,7 +1588,7 @@ impl Obj {
 fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbound> {
     enum Found {
         Quiet,
-        Callback(String),
+        Callback(String, u64),
         Execute {
             version: u64,
         },
@@ -1614,7 +1624,8 @@ fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbo
                 Found::Quiet
             }
         } else if !obj.promise.callbacks.is_empty() {
-            Found::Callback(obj.promise.callbacks.remove(0))
+            let since = obj.promise.settled_at.unwrap_or(0);
+            Found::Callback(obj.promise.callbacks.remove(0), since)
         } else if !obj.promise.listeners.is_empty() {
             let address = obj.promise.listeners.remove(0);
             let promise = obj.promise.record(id);
@@ -1630,24 +1641,35 @@ fn step_object(map: &mut BTreeMap<String, Obj>, id: &str, now: u64) -> Vec<Outbo
             version,
         }],
         Found::Unblock { address, promise } => vec![Outbound::Unblock { address, promise }],
-        Found::Callback(awaiter) => {
+        Found::Callback(awaiter, since) => {
             let awaited = id.to_string();
-            if let Some(task) = map.get_mut(&awaiter).and_then(|o| o.task.as_mut()) {
-                resume(task, &awaited, now);
+            if let Some(obj) = map.get_mut(&awaiter) {
+                // The awaiter is read through its projection, as Lean's
+                // `readTaskObject`: once its own promise is settled its
+                // task reads as fulfilled and is left alone.
+                let settled = obj.promise.state != PromiseState::Pending
+                    || now >= obj.promise.timeout_at;
+                if let Some(task) = obj.task.as_mut() {
+                    if !settled {
+                        resume(task, &awaited, since);
+                    }
+                }
             }
             Vec::new()
         }
     }
 }
 
-fn resume(task: &mut Tk, awaited: &str, now: u64) {
+/// Resume the awaiter: a suspended task is offered again from `since`, the
+/// instant the awaited promise settled.
+fn resume(task: &mut Tk, awaited: &str, since: u64) {
     match task.state {
         TaskState::Suspended => {
             task.state = TaskState::Pending;
             task.pid = None;
             task.ttl = None;
             task.lease_timeout_at = None;
-            task.retry_timeout_at = Some(now);
+            task.retry_timeout_at = Some(since);
             task.resumes = vec![awaited.to_string()];
         }
         TaskState::Fulfilled => {}

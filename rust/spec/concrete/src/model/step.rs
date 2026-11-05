@@ -1596,12 +1596,16 @@ pub open spec fn spec_occurrence(doc: DocV, pending: PendingV, now: Time) -> Doc
     } else {
         let timeout_at = spec_sat_add(pending.at, pending.timeout);
         let born = spec_new_obj(timeout_at, now, pending.param, pending.tags, spec_targeted(pending.tags) && !spec_timer(pending.tags));
-        let obj = if timeout_at > pending.at {
-            ObjV { promise: PromV { created_at: pending.at, ..born.promise }, ..born }
+        let promise = if timeout_at > pending.at {
+            PromV { created_at: pending.at, ..born.promise }
         } else {
-            born
+            born.promise
         };
-        spec_with_origin(doc, map.insert(pending.promise, obj))
+        let task = match born.task {
+            Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)), ..t }),
+            other => other,
+        };
+        spec_with_origin(doc, map.insert(pending.promise, ObjV { promise, task }))
     }
 }
 
@@ -1676,6 +1680,11 @@ pub open spec fn spec_obj_due(obj: ObjV, now: Time) -> Option<u64> {
     spec_earlier(spec_earlier(spec_promise_due(obj, now), spec_lease_due(obj, now)), spec_retry_due(obj, now))
 }
 
+/// `RETRY_TIMEOUT`: how long after an offer a pending task is offered again.
+pub open spec fn spec_retry_timeout() -> u64 {
+    5000
+}
+
 pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
     if !map.contains_key(id) {
         (map, Seq::empty())
@@ -1690,16 +1699,17 @@ pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now:
                     (map.insert(id, obj), Seq::empty())
                 },
                 Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
-                    let obj = ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, 5000)), ..t }), ..obj };
+                    let obj = ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, spec_retry_timeout())), ..t }), ..obj };
                     (map.insert(id, obj), seq![NoteV::Execute { id, version: t.version }])
                 },
                 _ => (map, Seq::empty()),
             }
         } else if obj.promise.callbacks.len() > 0 {
             let awaiter = obj.promise.callbacks[0];
+            let since = match obj.promise.settled_at { Some(t) => t, None => 0 };
             let obj = ObjV { promise: PromV { callbacks: obj.promise.callbacks.skip(1), ..obj.promise }, ..obj };
             let map = map.insert(id, obj);
-            (spec_resume(map, awaiter, id, now), Seq::empty())
+            (spec_resume(map, awaiter, id, since, now), Seq::empty())
         } else if obj.promise.listeners.len() > 0 {
             let address = obj.promise.listeners[0];
             let promise = spec_record(spec_string(id), obj.promise);
@@ -1711,27 +1721,34 @@ pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now:
     }
 }
 
-pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awaited: Seq<char>, now: Time) -> Map<Seq<char>, ObjV> {
+/// `resume`: a suspended awaiter is offered again from `since`, the instant
+/// the awaited promise settled. The awaiter is read through its projection
+/// at `now`: a task whose own promise is settled reads as fulfilled.
+pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awaited: Seq<char>, since: Time, now: Time) -> Map<Seq<char>, ObjV> {
     if !map.contains_key(awaiter) {
         map
     } else {
-        match map[awaiter].task {
+        match spec_project_obj(map[awaiter], now).task {
             None => map,
-            Some(t) => {
-                let t = match t.state {
-                    TaskState::Suspended => TkV {
+            Some(t) => match t.state {
+                TaskState::Suspended => map.insert(awaiter, ObjV {
+                    task: Some(TkV {
                         state: TaskState::Pending,
                         pid: None,
                         ttl: None,
                         lease_timeout_at: None,
-                        retry_timeout_at: Some(now),
+                        retry_timeout_at: Some(since),
                         resumes: seq![awaited],
                         ..t
-                    },
-                    TaskState::Fulfilled => t,
-                    _ => if t.resumes.contains(awaited) { t } else { TkV { resumes: t.resumes.push(awaited), ..t } },
-                };
-                map.insert(awaiter, ObjV { task: Some(t), ..map[awaiter] })
+                    }),
+                    ..map[awaiter]
+                }),
+                TaskState::Fulfilled => map,
+                _ => if t.resumes.contains(awaited) {
+                    map
+                } else {
+                    map.insert(awaiter, ObjV { task: Some(TkV { resumes: t.resumes.push(awaited), ..t }), ..map[awaiter] })
+                },
             },
         }
     }
