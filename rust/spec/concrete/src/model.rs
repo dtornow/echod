@@ -7,8 +7,9 @@
 //! `(node, op)` it has answered with a stutter. The abstract model is a
 //! different machine. See `simulation`.
 //!
-//! The initial world and the step are here twice: as the Rover model the
-//! checker runs, and as `spec_world` and `spec_step`, the specification.
+//! The initial world and the step are here twice: as `initial` and
+//! `on_event`, the Rover model the checker runs, and as `spec_world` and
+//! `spec_step`, the specification.
 
 use vstd::prelude::*;
 
@@ -76,13 +77,6 @@ pub enum Message {
     Stop,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum Incoming {
-    Receive { sender: Pid, message: Message },
-    Timeout,
-}
-
 // ---------------------------------------------------------------------------
 // Local state
 // ---------------------------------------------------------------------------
@@ -99,15 +93,6 @@ pub struct LogicV {
 pub enum LocalV {
     Node(NodeV),
     Store(StoreV),
-}
-
-/// One envelope, as Rover stores it: sender, recipient, message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct Envelope {
-    pub sender: Pid,
-    pub recipient: Pid,
-    pub message: Message,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -392,92 +377,20 @@ fn route_acts(acts: &[crate::node::Act]) -> Vec<(Pid, Message)> {
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Transition {
-    pub state: Local,
-    pub send: Vec<(Pid, Message)>,
-}
+verus! {
 
-/// The executable world Rover assembles: these processes, no network, time 0.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct World {
-    pub process: Vec<(Pid, Local)>,
-    pub network: Vec<Envelope>,
-    pub now: u64,
-}
+/// `Node::new` and `Store::empty` are exec code outside `verus!`; Verus
+/// knows their shape and nothing else. The trait's `ensures` on `initial`
+/// and `on_event` below are the exec == spec link; they are not proved, and
+/// Verus reports them.
+pub assume_specification [Node::new](address: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Node;
 
-impl Model {
-    pub fn world(self, config: &Fleet) -> World {
-        let mut process = Vec::new();
-        for id in 0..config.nodes {
-            process.push((
-                Pid::Node(id),
-                Local::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout)),
-            ));
-        }
-        process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
-        World {
-            process,
-            network: Vec::new(),
-            now: 0,
-        }
-    }
+pub assume_specification [Store::empty](appendable: bool) -> Store;
 
-    /// `step`, as Rover asks for it.
-    pub fn results(
-        self,
-        pid: &Pid,
-        state: &Local,
-        now: u64,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<StepResult<Model>> {
-        let incoming = match event {
-            ProcessEvent::Timeout => Incoming::Timeout,
-            ProcessEvent::Receive { sender, message } => Incoming::Receive {
-                sender: sender.clone(),
-                message: message.clone(),
-            },
-        };
-        self.step(pid, state, now, &incoming)
-            .into_iter()
-            .map(|transition| StepResult {
-                state: transition.state,
-                send: transition.send,
-            })
-            .collect()
-    }
-
-    pub fn step(self, pid: &Pid, state: &Local, now: u64, event: &Incoming) -> Vec<Transition> {
-        let event = match event {
-            Incoming::Timeout => ProcessEvent::Timeout,
-            Incoming::Receive { sender, message } => ProcessEvent::Receive {
-                sender: *sender,
-                message: message.clone(),
-            },
-        };
-        match (pid, state) {
-            (Pid::Node(_), Local::Node(node)) => node
-                .on_event(&(), now, &event)
-                .into_iter()
-                .map(|(node, send)| Transition {
-                    state: Local::Node(node),
-                    send,
-                })
-                .collect(),
-            (Pid::Store, Local::Store(store)) => store
-                .on_event(&(), now, &event)
-                .into_iter()
-                .map(|(store, send)| Transition {
-                    state: Local::Store(store),
-                    send,
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-}
-
+/// A node's step. The body is a node machine, whose methods Verus does
+/// not read; `spec_node` is the step as a specification.
 impl Process<(), Pid, Message> for Node {
+    #[verifier::external_body]
     fn on_event(
         &self,
         _config: &(),
@@ -539,7 +452,9 @@ impl Process<(), Pid, Message> for Node {
     }
 }
 
+/// The store's step. `spec_store` is the same step as a specification.
 impl Process<(), Pid, Message> for Store {
+    #[verifier::external_body]
     fn on_event(
         &self,
         _config: &(),
@@ -566,36 +481,6 @@ impl Process<(), Pid, Message> for Store {
     }
 }
 
-verus! {
-
-/// The exec world, transitions, and steps are known to Verus by shape alone:
-/// nothing is claimed about `world`, `step`, or `results`. The trait's
-/// `ensures` on `initial` and `on_event` below are the exec == spec link; they
-/// are not proved, and Verus reports them.
-#[verifier::external_type_specification]
-pub struct ExWorld(World);
-
-#[verifier::external_type_specification]
-pub struct ExTransition(Transition);
-
-pub assume_specification [Model::world](m: Model, config: &Fleet) -> World;
-
-pub assume_specification [Model::step](
-    m: Model,
-    pid: &Pid,
-    state: &Local,
-    now: u64,
-    event: &Incoming,
-) -> Vec<Transition>;
-
-pub assume_specification [Model::results](
-    m: Model,
-    pid: &Pid,
-    state: &Local,
-    now: u64,
-    event: &ProcessEvent<Pid, Message>,
-) -> Vec<StepResult<Model>>;
-
 impl RoverModel for Model {
     type Config = Fleet;
     type Pid = Pid;
@@ -608,8 +493,23 @@ impl RoverModel for Model {
         Pid::Outside
     }
 
+    /// The nodes, then the store: `spec_world`.
     fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
-        self.world(config).process
+        let mut process: Vec<(Pid, Local)> = Vec::new();
+        let mut id: u64 = 0;
+        while id < config.nodes
+            invariant
+                id <= config.nodes,
+            decreases config.nodes - id,
+        {
+            process.push((
+                Pid::Node(id),
+                Local::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout)),
+            ));
+            id = id + 1;
+        }
+        process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
+        process
     }
 
     fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
@@ -627,7 +527,29 @@ impl RoverModel for Model {
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> Vec<StepResult<Self>> {
-        self.results(pid, state, now, event)
+        let mut results: Vec<StepResult<Model>> = Vec::new();
+        match (pid, state) {
+            (Pid::Node(_), Local::Node(node)) => {
+                let mut pairs = node.on_event(&(), now, event);
+                while !pairs.is_empty()
+                    decreases pairs@.len(),
+                {
+                    let (node, send) = pairs.remove(0);
+                    results.push(StepResult { state: Local::Node(node), send });
+                }
+            }
+            (Pid::Store, Local::Store(store)) => {
+                let mut pairs = store.on_event(&(), now, event);
+                while !pairs.is_empty()
+                    decreases pairs@.len(),
+                {
+                    let (store, send) = pairs.remove(0);
+                    results.push(StepResult { state: Local::Store(store), send });
+                }
+            }
+            _ => {}
+        }
+        results
     }
 
     open spec fn spec_outside(&self) -> Pid {

@@ -2,12 +2,12 @@
 //! flight, and the store's conditional write.
 
 use echod_abstract::{Call, Dispatch, Output};
-use echod_concrete::model::{Fleet, Incoming, Local, Message, Model, Pid, Store};
+use echod_concrete::model::{Fleet, Local, Message, Model, Pid, Store};
 use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
     PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
 };
-use echod_rover::rover::{ProcessEvent, RoverModel};
+use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {
@@ -23,34 +23,41 @@ fn store(local: &Local) -> &Store {
     }
 }
 
+/// One local step; the fleet does not enter it.
+fn step(
+    pid: &Pid,
+    state: &Local,
+    now: u64,
+    event: &ProcessEvent<Pid, Message>,
+) -> Vec<StepResult<Model>> {
+    Model.on_event(&Fleet::new(1, true), pid, state, now, event)
+}
+
 #[test]
 fn the_world_is_the_nodes_then_the_store() {
-    let world = Model.world(&Fleet::new(2, true));
-    assert_eq!(world.now, 0);
-    assert!(world.network.is_empty());
-    assert_eq!(world.process.len(), 3);
-    assert_eq!(world.process[0].0, Pid::Node(0));
-    assert_eq!(world.process[1].0, Pid::Node(1));
-    assert_eq!(world.process[2].0, Pid::Store);
-    assert!(world.process.iter().all(|(pid, _)| *pid != Pid::Outside));
+    let world = Model.initial(&Fleet::new(2, true));
+    assert_eq!(world.len(), 3);
+    assert_eq!(world[0].0, Pid::Node(0));
+    assert_eq!(world[1].0, Pid::Node(1));
+    assert_eq!(world[2].0, Pid::Store);
+    assert!(world.iter().all(|(pid, _)| *pid != Pid::Outside));
 
-    let first = node(&world.process[0].1);
-    let second = node(&world.process[1].1);
+    let first = node(&world[0].1);
+    let second = node(&world[1].1);
     assert!(first.logic.loops && second.logic.loops);
     assert_eq!(first.logic.clock, 0);
     assert!(!first.logic.stopping);
     assert_eq!(first.next_request, 1);
     assert_eq!(first.wake, None);
-    assert!(store(&world.process[2].1).entries.is_empty());
+    assert!(store(&world[2].1).entries.is_empty());
 
-    let quiet = Model.world(&Fleet::new(1, false));
-    assert!(!node(&quiet.process[0].1).logic.loops);
+    let quiet = Model.initial(&Fleet::new(1, false));
+    assert!(!node(&quiet[0].1).logic.loops);
 }
 
 #[test]
-fn rover_assembles_the_same_processes() {
+fn the_outside_injects_requests_and_stop() {
     let config = Fleet::new(2, true);
-    assert_eq!(Model.initial(&config), Model.world(&config).process);
     assert_eq!(Model.outside(), Pid::Outside);
     assert!(Model.injectable(&config, &Message::Stop));
     assert!(!Model.injectable(
@@ -64,30 +71,22 @@ fn rover_assembles_the_same_processes() {
 
 #[test]
 fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, state) = &world.process[0];
-    assert!(Model.step(pid, state, 5, &Incoming::Timeout).is_empty());
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, state) = &world[0];
+    assert!(step(pid, state, 5, &ProcessEvent::Timeout).is_empty());
 
     let mut armed = node(state).clone();
     armed.wake = Some(10);
-    let early = Model.step(pid, &Local::Node(armed.clone()), 9, &Incoming::Timeout);
+    let early = step(pid, &Local::Node(armed.clone()), 9, &ProcessEvent::Timeout);
     assert!(early.is_empty());
 
-    let due = Model.step(pid, &Local::Node(armed), 10, &Incoming::Timeout);
+    let due = step(pid, &Local::Node(armed), 10, &ProcessEvent::Timeout);
     assert_eq!(due.len(), 1);
     let stepped = node(&due[0].state);
     assert_eq!(stepped.logic.clock, 10);
     assert_eq!(stepped.wake, None);
     assert!(due[0].send.is_empty());
-
-    let through = Model.on_event(
-        &Fleet::new(1, true),
-        pid,
-        &due[0].state,
-        10,
-        &ProcessEvent::Timeout,
-    );
-    assert!(through.is_empty());
+    assert!(step(pid, &due[0].state, 10, &ProcessEvent::Timeout).is_empty());
 }
 
 fn call(id: u64, request: Request) -> Call {
@@ -103,20 +102,20 @@ fn deliver(
     node_state: Local,
     store_state: Local,
     now: u64,
-    event: &Incoming,
+    event: &ProcessEvent<Pid, Message>,
 ) -> (Local, Local, Vec<(Pid, Message)>) {
-    let stepped = Model.step(&node_pid, &node_state, now, event);
+    let stepped = step(&node_pid, &node_state, now, event);
     assert_eq!(stepped.len(), 1);
     let mut node_state = stepped[0].state.clone();
     let mut store_state = store_state;
     let mut send = stepped[0].send.clone();
     // A flight is one store round trip at a time. Answer it, then the node finishes.
     while let [(Pid::Store, Message::StoreReq { op, call })] = send.as_slice() {
-        let stored = Model.step(
+        let stored = step(
             &Pid::Store,
             &store_state,
             now,
-            &Incoming::Receive {
+            &ProcessEvent::Receive {
                 sender: node_pid,
                 message: Message::StoreReq {
                     op: *op,
@@ -127,11 +126,11 @@ fn deliver(
         assert_eq!(stored.len(), 1);
         store_state = stored[0].state.clone();
         let reply = stored[0].send[0].1.clone();
-        let answered = Model.step(
+        let answered = step(
             &node_pid,
             &node_state,
             now,
-            &Incoming::Receive {
+            &ProcessEvent::Receive {
                 sender: Pid::Store,
                 message: reply,
             },
@@ -145,8 +144,8 @@ fn deliver(
 
 #[test]
 fn a_promise_get_loads_the_document_and_a_miss_is_404() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, state) = world.process[0].clone();
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, state) = world[0].clone();
     let mut armed = node(&state).clone();
     armed.wake = Some(40);
     let request = call(
@@ -155,11 +154,11 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
             id: "a:missing".into(),
         }),
     );
-    let stepped = Model.step(
+    let stepped = step(
         &pid,
         &Local::Node(armed),
         3,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(request),
         },
@@ -183,9 +182,9 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
     let (node_state, _, send) = deliver(
         pid,
         stepped[0].state.clone(),
-        world.process[1].1.clone(),
+        world[1].1.clone(),
         3,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Store,
             message: Message::StoreReply {
                 op: 1,
@@ -212,9 +211,9 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
 
 #[test]
 fn a_promise_create_lands_and_the_next_get_reads_it() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, node_state) = world.process[0].clone();
-    let store_state = world.process[1].1.clone();
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, node_state) = world[0].clone();
+    let store_state = world[1].1.clone();
     let create = call(
         1,
         Request::PromiseCreate(PromiseCreateReq {
@@ -229,7 +228,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
         node_state,
         store_state,
         5,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(create),
         },
@@ -258,7 +257,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
         node_state,
         store_state,
         6,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(call(
                 2,
@@ -288,13 +287,13 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
 
 #[test]
 fn stop_ends_the_loop() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, state) = world.process[0].clone();
-    let stopped = Model.step(
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, state) = world[0].clone();
+    let stopped = step(
         &pid,
         &state,
         4,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Stop,
         },
@@ -308,17 +307,17 @@ fn stop_ends_the_loop() {
 
 #[test]
 fn the_store_commits_a_conditional_write_and_answers_the_node() {
-    let world = Model.world(&Fleet::new(1, false));
-    let store = world.process[1].1.clone();
+    let world = Model.initial(&Fleet::new(1, false));
+    let store = world[1].1.clone();
     let call = StoreCall::PutIfNoneMatch {
         key: "doc".into(),
         body: b"one".to_vec(),
     };
-    let created = Model.step(
+    let created = step(
         &Pid::Store,
         &store,
         0,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 8,
@@ -338,11 +337,11 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         other => panic!("reply {other:?}"),
     };
 
-    let again = Model.step(
+    let again = step(
         &Pid::Store,
         &created[0].state,
         1,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Node(0),
             message: Message::StoreReq { op: 9, call },
         },
@@ -360,11 +359,11 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         body: b"two".to_vec(),
         etag: Etag("nope".into()),
     };
-    let rejected = Model.step(
+    let rejected = step(
         &Pid::Store,
         &created[0].state,
         1,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 10,
@@ -392,11 +391,11 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         body: b"two".to_vec(),
         etag: tag,
     };
-    let wrote = Model.step(
+    let wrote = step(
         &Pid::Store,
         &created[0].state,
         2,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 11,
@@ -424,9 +423,9 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
 
 #[test]
 fn the_store_executes_each_op_once() {
-    let world = Model.world(&Fleet::new(1, false));
-    let store = world.process[1].1.clone();
-    let put = Incoming::Receive {
+    let world = Model.initial(&Fleet::new(1, false));
+    let store = world[1].1.clone();
+    let put = ProcessEvent::Receive {
         sender: Pid::Node(0),
         message: Message::StoreReq {
             op: 3,
@@ -436,56 +435,54 @@ fn the_store_executes_each_op_once() {
             },
         },
     };
-    let first = Model.step(&Pid::Store, &store, 0, &put);
+    let first = step(&Pid::Store, &store, 0, &put);
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].send.len(), 1);
 
-    let again = Model.step(&Pid::Store, &first[0].state, 1, &put);
+    let again = step(&Pid::Store, &first[0].state, 1, &put);
     assert_eq!(again.len(), 1);
     assert!(again[0].send.is_empty());
     assert_eq!(again[0].state, first[0].state);
 
-    let other_node = Incoming::Receive {
+    let other_node = ProcessEvent::Receive {
         sender: Pid::Node(1),
         message: Message::StoreReq {
             op: 3,
             call: StoreCall::Get { key: "doc".into() },
         },
     };
-    let read = Model.step(&Pid::Store, &first[0].state, 2, &other_node);
+    let read = step(&Pid::Store, &first[0].state, 2, &other_node);
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].send.len(), 1);
 }
 
 #[test]
 fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
-    let world = Model.world(&Fleet::new(1, false));
-    let (node_pid, node_state) = &world.process[0];
-    let ask = Incoming::Receive {
+    let world = Model.initial(&Fleet::new(1, false));
+    let (node_pid, node_state) = &world[0];
+    let ask = ProcessEvent::Receive {
         sender: Pid::Node(0),
         message: Message::StoreReq {
             op: 1,
             call: StoreCall::Get { key: "k".into() },
         },
     };
-    assert!(Model.step(node_pid, node_state, 0, &ask).is_empty());
-    let client = Incoming::Receive {
+    assert!(step(node_pid, node_state, 0, &ask).is_empty());
+    let client = ProcessEvent::Receive {
         sender: Pid::Outside,
         message: Message::Request(call(
             1,
             Request::PromiseGet(PromiseGetReq { id: "a:1".into() }),
         )),
     };
-    assert!(Model
-        .step(&Pid::Store, &world.process[1].1, 0, &client)
-        .is_empty());
+    assert!(step(&Pid::Store, &world[1].1, 0, &client).is_empty());
 }
 
 #[test]
 fn a_due_retry_offers_the_task() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, node_state) = world.process[0].clone();
-    let store_state = world.process[1].1.clone();
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, node_state) = world[0].clone();
+    let store_state = world[1].1.clone();
     let create = call(
         1,
         Request::PromiseCreate(PromiseCreateReq {
@@ -500,19 +497,13 @@ fn a_due_retry_offers_the_task() {
         node_state,
         store_state,
         5,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(create),
         },
     );
     assert_eq!(node(&node_state).wake, Some(5));
-    let (node_state, _, send) = deliver(
-        pid,
-        node_state,
-        store_state,
-        5,
-        &Incoming::Timeout,
-    );
+    let (node_state, _, send) = deliver(pid, node_state, store_state, 5, &ProcessEvent::Timeout);
     assert_eq!(
         send,
         vec![(
@@ -528,15 +519,15 @@ fn a_due_retry_offers_the_task() {
 
 #[test]
 fn a_settled_listener_is_told() {
-    let world = Model.world(&Fleet::new(1, true));
-    let (pid, node_state) = world.process[0].clone();
-    let store_state = world.process[1].1.clone();
+    let world = Model.initial(&Fleet::new(1, true));
+    let (pid, node_state) = world[0].clone();
+    let store_state = world[1].1.clone();
     let (node_state, store_state, _) = deliver(
         pid,
         node_state,
         store_state,
         5,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(call(
                 1,
@@ -554,7 +545,7 @@ fn a_settled_listener_is_told() {
         node_state,
         store_state,
         6,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(call(
                 2,
@@ -570,7 +561,7 @@ fn a_settled_listener_is_told() {
         node_state,
         store_state,
         7,
-        &Incoming::Receive {
+        &ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(call(
                 3,
@@ -583,7 +574,7 @@ fn a_settled_listener_is_told() {
         },
     );
     assert_eq!(node(&node_state).wake, Some(7));
-    let (_, _, send) = deliver(pid, node_state, store_state, 7, &Incoming::Timeout);
+    let (_, _, send) = deliver(pid, node_state, store_state, 7, &ProcessEvent::Timeout);
     match &send[..] {
         [(
             Pid::Outside,
