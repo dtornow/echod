@@ -285,6 +285,8 @@ pub open spec fn spec_external(p: PromiseV) -> bool {
     spec_has_target(p.tags) || spec_is_global(p.tags) || spec_is_external_tag(p.tags) || spec_is_timer(p.tags)
 }
 
+/// Opaque: the choice is read through the string lemmas alone.
+#[verifier::opaque]
 pub open spec fn spec_string(chars: Seq<char>) -> String {
     choose|s: String| s@ == chars
 }

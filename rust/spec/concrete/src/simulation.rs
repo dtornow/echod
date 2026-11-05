@@ -1327,6 +1327,7 @@ pub proof fn lemma_string(chars: Seq<char>)
     ensures
         spec_string(chars)@ == chars,
 {
+    reveal(crate::model::step::spec_string);
     axiom_string_realised(chars);
 }
 
@@ -1334,6 +1335,7 @@ pub proof fn lemma_bytes(bytes: Seq<u8>)
     ensures
         crate::model::step::spec_bytes(bytes)@ == bytes,
 {
+    reveal(crate::model::step::spec_bytes);
     echod_abstract::trusted::axiom_bytes_realised(bytes);
 }
 
@@ -2920,6 +2922,7 @@ pub proof fn lemma_request_served(
         cb.now <= at,
         service_request(ab.network, call),
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         spec_key(call.request) == Some(key),
         spec_owns(node_at(cb, i).plane, key),
         (node2.plane, send) == spec_begin(
@@ -2934,6 +2937,7 @@ pub proof fn lemma_request_served(
         matches(amodel(), config, ab, Seq::<BoundaryEvent>::empty(), aa),
         related(fleet, ca, aa),
 {
+    reveal(decision);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let state = astate(ab);
@@ -3120,6 +3124,7 @@ pub proof fn lemma_occurrence_begin(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         node_at(cb, i).plane.pending.len() > 0,
         ({
             let plane0 = node_at(cb, i).plane;
@@ -3134,6 +3139,8 @@ pub proof fn lemma_occurrence_begin(
         matches(amodel(), config, ab, Seq::<BoundaryEvent>::empty(), aa),
         related(fleet, ca, aa),
 {
+    reveal(decision);
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let pending = plane0.pending;
@@ -3257,6 +3264,7 @@ pub proof fn lemma_due_begin(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node_at(cb, i).plane.flight is None,
+        node_at(cb, i).plane.next_op < u64::MAX,
         node_at(cb, i).plane.pending.len() == 0,
         spec_earliest_key(node_at(cb, i).plane, at) == Some(key),
         (node2.plane, send) == spec_begin(node_at(cb, i).plane, key, JobV::Due, at, None),
@@ -3265,6 +3273,8 @@ pub proof fn lemma_due_begin(
         matches(amodel(), config, ab, Seq::<BoundaryEvent>::empty(), aa),
         related(fleet, ca, aa),
 {
+    reveal(decision);
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let state = astate(ab);
@@ -3445,6 +3455,7 @@ pub proof fn lemma_flight_closed(
         related(fleet, ca, ab),
 {
     lemma_empty_matches(config, ab);
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let flight = plane0.flight.unwrap();
@@ -3548,6 +3559,7 @@ pub proof fn lemma_write_after_read(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node_at(cb, i).plane.flight is Some,
+        node_at(cb, i).plane.next_op < u64::MAX,
         !node_at(cb, i).plane.flight.unwrap().writing,
         store_at(fleet, cb).seen.contains((node_pid(i), node_at(cb, i).plane.flight.unwrap().op)),
         ({
@@ -3564,6 +3576,7 @@ pub proof fn lemma_write_after_read(
         related(fleet, ca, ab),
 {
     lemma_empty_matches(config, ab);
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let flight = plane0.flight.unwrap();
@@ -3590,8 +3603,15 @@ pub proof fn lemma_write_after_read(
     assert(w.caller == flight.caller);
     assert(w.etag == flight.etag);
     assert(w.writing);
+    assert(w.decided == Some(spec_encode(next)));
+    assert(w.born == born);
+    assert(w.notify == notes);
+    assert(w.reply == flight_reply(flight, reply));
     lemma_decision_same(w, flight, doc);
     lemma_reply_same(w, flight, reply);
+    assert(decision(w, doc) == decision(flight, doc));
+    assert(flight_reply(w, reply) == flight_reply(flight, reply));
+    assert(job_keyed(w));
     assert(node2.plane.documents == plane0.documents);
     assert(loaded(node2, key) == doc);
     assert(cached_etag(node2.plane, key) is None);
@@ -3699,6 +3719,7 @@ pub proof fn lemma_store_reply(
         matches(amodel(), config, ab, Seq::<BoundaryEvent>::empty(), ab),
         related(fleet, ca, ab),
 {
+    lemma_node_facts(fleet, cb, ab, i);
     let node0 = node_at(cb, i);
     let plane0 = node0.plane;
     let flight = plane0.flight.unwrap();
@@ -3843,6 +3864,7 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
     let flight = plane.flight.unwrap();
     let key = flight.key;
     let store = store_at(fleet, world);
+    assert(node_ok(n, node, store));
     assert(flight_ok(node));
     assert(spec_owns(plane, key));
     assert(!applied_write(n, node, store, key));
@@ -3887,8 +3909,14 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
                 let idx = spec_find(store.entries, key, 0).unwrap();
                 assert(store.entries[idx].body == c.body);
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
+                assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
                 let entry = EntryV { key, body: decided, version: (store.entries[idx].version + 1) as nat };
+                let (next, outcome) = spec_apply(store, request_of(flight));
+                assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
+                assert(outcome == StoreOutcome::Written(spec_etag(decided)));
                 lemma_put(store, entry);
+                assert(physical(next, key) == Some(decided));
+                assert(entries_distinct(next));
             },
         }
     }
@@ -3945,6 +3973,9 @@ pub proof fn lemma_store(
                 assert(flight.op == op);
                 assert(call == request_of(flight));
                 let key = flight.key;
+                assert(node_ok(n, node, store));
+                assert(flight_ok(node));
+                assert(spec_owns(node.plane, key));
                 let (next, outcome) = spec_apply(store, call);
                 let store2 = CStore { seen: store.seen.push((sender, op)), ..next };
                 let send = seq![(sender, CMessage::StoreReply { op, outcome })];

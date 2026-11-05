@@ -695,6 +695,8 @@ pub proof fn lemma_string_view(chars: Seq<char>)
         echod_abstract::model::step::spec_string(chars)@ == chars,
         crate::model::step::spec_string(chars) == echod_abstract::model::step::spec_string(chars),
 {
+    reveal(crate::model::step::spec_string);
+    reveal(echod_abstract::model::step::spec_string);
     axiom_string_realised(chars);
     axiom_string_ext(crate::model::step::spec_string(chars), echod_abstract::model::step::spec_string(chars));
 }

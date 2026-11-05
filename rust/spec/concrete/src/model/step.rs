@@ -86,10 +86,14 @@ pub enum DocV {
     Schedule(Option<Schedule>),
 }
 
+/// Opaque: the choice is read through the string lemmas alone.
+#[verifier::opaque]
 pub open spec fn spec_string(chars: Seq<char>) -> String {
     choose|s: String| s@ == chars
 }
 
+/// Opaque: the choice is read through [`crate::simulation::lemma_bytes`] alone.
+#[verifier::opaque]
 pub open spec fn spec_bytes(body: Seq<u8>) -> Vec<u8> {
     choose|v: Vec<u8>| v@ == body
 }
