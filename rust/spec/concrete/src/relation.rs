@@ -21,7 +21,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{doc_rel, others_kept, request_agrees};
+use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::step::{
     spec_cached, spec_empty_doc, spec_encode, spec_etag, spec_etag_chars, spec_find, spec_fnv,
@@ -595,6 +595,7 @@ pub open spec fn related(fleet: Fleet, concrete: World<CModel>, abstract_world: 
     &&& coupled(concrete, abstract_world)
     &&& single(abstract_world)
     &&& inv(fleet, concrete)
+    &&& finite_store(astate(abstract_world).store)
     &&& store_interpreted(fleet, concrete, astate(abstract_world).store)
     &&& pending_covered(fleet, concrete, astate(abstract_world))
     &&& forall|i: int|
@@ -611,7 +612,7 @@ pub open spec fn related(fleet: Fleet, concrete: World<CModel>, abstract_world: 
 /// Every request on the document it names, by `interpret::request_agrees`.
 pub open spec fn requests_agree(config: ServerConfig) -> bool {
     forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
-        spec_key(request) == Some(key) && doc_rel(key, doc, s) ==> #[trigger] request_agrees(
+        spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) ==> #[trigger] request_agrees(
             config,
             request,
             key,
@@ -626,8 +627,8 @@ pub open spec fn note_sends(notes: Seq<NoteV>) -> Seq<(APid, AMessage)> {
 }
 
 /// The due step of one document: nothing is due, or one abstract timeout
-/// result does the same, sends the same dispatches, and queues the same
-/// occurrences.
+/// result does the same, sends the same dispatches, queues the same
+/// occurrences, and keeps the store finite.
 pub open spec fn due_agrees(
     config: ServerConfig,
     key: Seq<char>,
@@ -645,12 +646,19 @@ pub open spec fn due_agrees(
             &&& results[j].state.pending == state.pending + items(born)
             &&& doc_rel(key, next, results[j].state.store)
             &&& others_kept(key, state.store, results[j].state.store)
+            &&& finite_store(results[j].state.store)
         }
 }
 
 pub open spec fn dues_agree(config: ServerConfig) -> bool {
     forall|key: Seq<char>, doc: DocV, state: StateV, now: u64|
-        doc_rel(key, doc, state.store) ==> #[trigger] due_agrees(config, key, doc, state, now)
+        doc_rel(key, doc, state.store) && finite_store(state.store) ==> #[trigger] due_agrees(
+            config,
+            key,
+            doc,
+            state,
+            now,
+        )
 }
 
 /// One occurrence on its origin document: nothing happens, or the abstract
@@ -674,22 +682,24 @@ pub open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now:
         &&& out.send.len() == 0
         &&& doc_rel(key, next, out.next)
         &&& others_kept(key, s, out.next)
+        &&& finite_store(out.next)
     }
 }
 
 pub open spec fn occurrences_agree() -> bool {
     forall|pending: PendingV, doc: DocV, s: AStore, now: u64|
-        doc_rel(spec_origin_key(origin(pending.promise)), doc, s) ==> #[trigger] occurrence_agrees(
-            pending,
-            doc,
-            s,
-            now,
-        )
+        doc_rel(spec_origin_key(origin(pending.promise)), doc, s) && finite_store(s)
+            ==> #[trigger] occurrence_agrees(pending, doc, s, now)
 }
 
 /// Lean's `refinement_handlers`, as one statement.
 pub open spec fn agreement(config: ServerConfig) -> bool {
     requests_agree(config) && dues_agree(config) && occurrences_agree()
+}
+
+/// The configuration the concrete node implements: its retry timeout.
+pub open spec fn implemented() -> ServerConfig {
+    ServerConfig { retry_timeout: crate::model::step::spec_retry_timeout() }
 }
 
 } // verus!

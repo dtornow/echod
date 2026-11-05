@@ -19,7 +19,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{doc_rel, lemma_others_same, others_kept, request_agrees};
+use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::step::{
     axiom_decode_encode, spec_apply, spec_begin, spec_bytes, spec_cached, spec_cached_from,
@@ -2350,6 +2350,7 @@ pub proof fn lemma_begin_related(
         single(aa),
         aa.now <= at,
         extends(aa.network, ab.network),
+        finite_store(astate(aa).store),
         ({
             let doc = held(plane1, key);
             let (next, reply, born, notes) = decision(probe(key, at, caller, job), doc);
@@ -2809,6 +2810,7 @@ pub proof fn lemma_request_served(
     assert(outs[0].send =~= Seq::<echod_abstract::view::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
+    assert(finite_store(astate(aa).store));
     assert(outcome.send == spec_send(call, response, Seq::empty()));
     lemma_send_is_reply(ab.network, call, response);
     // the decision the flight stands for
@@ -3046,6 +3048,7 @@ pub proof fn lemma_occurrence_begin(
         let outcome = amodel().spec_on_event(config, APid::Service, state, at, ProcessEvent::Timeout)[j];
         assert(outcome == spec_internal_result(state, k, out));
         assert(astate(aa).store == out.next);
+        assert(finite_store(astate(aa).store));
         assert(astate(aa).pending == remove_at(state.pending, k) + out.work);
         assert(out.work =~= Seq::<Sched<InternalV>>::empty());
         assert(outcome.send =~= Seq::<(APid, AMessage)>::empty());
@@ -3151,10 +3154,12 @@ pub proof fn lemma_due_begin(
                 &&& results[j].state.pending == state.pending + items(born)
                 &&& doc_rel(key, next, results[j].state.store)
                 &&& others_kept(key, state.store, results[j].state.store)
+                &&& finite_store(results[j].state.store)
             };
         lemma_timeout_offers(config, state, at, j);
         let aa = lemma_service_step(config, ab, at, ProcessEvent::Timeout, j);
         assert(astate(aa) == results[j].state);
+        assert(finite_store(astate(aa).store));
         assert(aa.network == ab.network + envelopes(APid::Service, note_sends(notes)));
         lemma_note_sends(ab.network, notes);
         assert forall|item: Sched<InternalV>|
@@ -4381,6 +4386,10 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
     assert(aw.network =~= Seq::<Envelope<APid, AMessage>>::empty());
     assert(single(aw));
     assert(astate(aw) == StateV { store: empty_store(), pending: Seq::empty() });
+    assert(empty_store().promises.dom() =~= Set::<Seq<char>>::empty());
+    assert(empty_store().tasks.dom() =~= Set::<Seq<char>>::empty());
+    assert(empty_store().schedules.dom() =~= Set::<Seq<char>>::empty());
+    assert(finite_store(empty_store()));
     // shape
     lemma_spec_nodes(fleet, 0);
     let nodes = spec_nodes(fleet, 0);

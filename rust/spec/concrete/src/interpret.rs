@@ -18,25 +18,26 @@ use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
 use crate::model::step::{
-    spec_delay as c_delay, spec_fulfill_task, spec_handle, spec_key, spec_new_obj, spec_offer_at,
-    spec_opened, spec_origin_key, spec_origin_map, spec_parse_acc as c_parse_acc,
-    spec_parse_u64 as c_parse_u64, spec_project_obj, spec_project_prom,
-    spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
+    spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle, spec_held, spec_key,
+    spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
+    spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
+    spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
-    spec_starts, spec_tag_is, spec_tag_key, spec_targeted, spec_timer, spec_with_origin, DocV, ObjV,
-    PromV, TkV,
+    spec_sat_add, spec_schedule_key, spec_starts, spec_tag_is, spec_tag_key, spec_targeted,
+    spec_task_record, spec_timer, spec_with_origin, DocV, Held, ObjV, PromV, TkV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::step::{
-    spec_delay as a_delay, spec_first, spec_fulfill, spec_handler, spec_has_key, spec_has_target,
-    spec_is_timer, spec_new_object, spec_out, spec_parse_acc as a_parse_acc,
-    spec_parse_u64 as a_parse_u64, spec_project_promise, spec_project_task,
-    spec_promise_create as a_promise_create, spec_promise_record, spec_promise_res as a_promise_res,
-    spec_promise_settle as a_promise_settle, spec_settle, tag_delay, tag_target, tag_timer,
-    tag_true,
+    spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_handler, spec_has_key,
+    spec_has_target, spec_held as a_held, spec_is_external_tag, spec_is_global, spec_is_timer,
+    spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64,
+    spec_project_promise, spec_project_task, spec_promise_create as a_promise_create,
+    spec_promise_record, spec_promise_res as a_promise_res, spec_promise_settle as a_promise_settle,
+    spec_settle, spec_task_record as a_task_record, tag_delay, tag_external, tag_global, tag_scope,
+    tag_target, tag_timer, tag_true, SpecHeld,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
+use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::{sat_add, OutV, PromiseV, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
@@ -44,7 +45,9 @@ use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, PromiseState, Request, Response, Schedule, Tags, TaskState, Value};
+use echod_types::{
+    origin, same_origin_spec, PromiseState, Request, Response, Schedule, Tags, TaskState, Value,
+};
 
 verus! {
 
@@ -55,8 +58,8 @@ broadcast use vstd::seq::group_seq_lemmas;
 // ---------------------------------------------------------------------------
 
 /// A concrete promise and an abstract promise are the same promise. The
-/// concrete model keeps callbacks and listeners in the order they came; the
-/// abstract model keeps the set.
+/// concrete model keeps callbacks and listeners in the order they came, each
+/// once; the abstract model keeps the set.
 pub open spec fn promise_rel(c: PromV, a: PromiseV) -> bool {
     &&& a.state == c.state
     &&& a.value == c.value
@@ -67,12 +70,18 @@ pub open spec fn promise_rel(c: PromV, a: PromiseV) -> bool {
     &&& a.tags == c.tags
     &&& a.callbacks == c.callbacks.to_set()
     &&& a.listeners == c.listeners.to_set()
+    &&& c.callbacks.no_duplicates()
+    &&& c.listeners.no_duplicates()
 }
 
 /// The lease. The concrete task records when the lease ends; the abstract
 /// task records when it was acquired, and the deadline is `acquired_at + ttl`.
+/// An acquired task holds a lease and a ttl; every other task holds neither,
+/// and no pid.
 pub open spec fn lease_rel(c: TkV, a: TaskV) -> bool {
     &&& (c.lease_timeout_at is Some) == (c.ttl is Some)
+    &&& (c.state == TaskState::Acquired) == (c.ttl is Some)
+    &&& c.state != TaskState::Acquired ==> c.pid is None
     &&& match c.lease_timeout_at {
         Some(at) => sat_add(a.acquired_at, c.ttl.unwrap()) == at,
         None => true,
@@ -89,12 +98,22 @@ pub open spec fn task_rel(c: TkV, a: TaskV) -> bool {
     &&& lease_rel(c, a)
 }
 
+/// A settled promise's task is fulfilled.
+pub open spec fn settled_fulfilled(c: ObjV) -> bool {
+    c.promise.state != PromiseState::Pending ==> match c.task {
+        Some(t) => t.state == TaskState::Fulfilled,
+        None => true,
+    }
+}
+
 pub open spec fn object_rel(c: ObjV, promise: PromiseV, task: Option<TaskV>) -> bool {
-    promise_rel(c.promise, promise) && match (c.task, task) {
+    &&& promise_rel(c.promise, promise)
+    &&& match (c.task, task) {
         (None, None) => true,
         (Some(ct), Some(at)) => task_rel(ct, at),
         _ => false,
     }
+    &&& settled_fulfilled(c)
 }
 
 /// The abstract task of `id`, if the abstract store has one.
@@ -102,11 +121,17 @@ pub open spec fn abstract_task(s: AStore, id: Seq<char>) -> Option<TaskV> {
     if s.tasks.contains_key(id) { Some(s.tasks[id]) } else { None }
 }
 
+/// Every callback names a promise of the origin.
+pub open spec fn callbacks_in(callbacks: Seq<Seq<char>>, origin_chars: Seq<char>) -> bool {
+    forall|k: int| 0 <= k < callbacks.len() ==> origin(#[trigger] callbacks[k]) == origin_chars
+}
+
 /// The objects of one origin. Every id in the document belongs to the
-/// origin, and for every id of the origin the two sides agree on whether it
-/// exists and on what it is.
+/// origin, so does every callback, and for every id of the origin the two
+/// sides agree on whether it exists and on what it is.
 pub open spec fn origin_rel(map: Map<Seq<char>, ObjV>, origin_chars: Seq<char>, s: AStore) -> bool {
     &&& forall|id: Seq<char>| #[trigger] map.contains_key(id) ==> origin(id) == origin_chars
+    &&& forall|id: Seq<char>| #[trigger] map.contains_key(id) ==> callbacks_in(map[id].promise.callbacks, origin_chars)
     &&& forall|id: Seq<char>|
         #![trigger origin(id)]
         origin(id) == origin_chars ==> {
@@ -143,6 +168,13 @@ pub open spec fn slot_rel(slot: Option<Schedule>, id: Seq<char>, s: AStore) -> b
 // ---------------------------------------------------------------------------
 // Documents and the store
 // ---------------------------------------------------------------------------
+
+/// The abstract store holds finitely many objects.
+pub open spec fn finite_store(s: AStore) -> bool {
+    &&& s.promises.dom().finite()
+    &&& s.tasks.dom().finite()
+    &&& s.schedules.dom().finite()
+}
 
 pub open spec fn schedule_prefix() -> Seq<char> {
     seq!['s', '/']
@@ -186,7 +218,7 @@ pub open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> bool {
 /// One request, on the document it names and on the abstract store. The
 /// abstract handler has one outcome, it answers what the node answers, it
 /// queues and sends nothing, the next document reads as the next store,
-/// and every other key reads as before.
+/// every other key reads as before, and the store stays finite.
 pub open spec fn request_agrees(
     config: ServerConfig,
     request: Request,
@@ -203,6 +235,7 @@ pub open spec fn request_agrees(
     &&& outs[0].send.len() == 0
     &&& doc_rel(key, next, outs[0].next)
     &&& others_kept(key, s, outs[0].next)
+    &&& finite_store(outs[0].next)
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +657,334 @@ pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
 }
 
 // ---------------------------------------------------------------------------
+// Strings, records, tags: the two sides name the same things
+// ---------------------------------------------------------------------------
+
+/// The chosen string of some characters is the string of those characters.
+pub proof fn lemma_string_view(chars: Seq<char>)
+    ensures
+        crate::model::step::spec_string(chars)@ == chars,
+        echod_abstract::model::step::spec_string(chars)@ == chars,
+        crate::model::step::spec_string(chars) == echod_abstract::model::step::spec_string(chars),
+{
+    axiom_string_realised(chars);
+    axiom_string_ext(crate::model::step::spec_string(chars), echod_abstract::model::step::spec_string(chars));
+}
+
+/// A string is the chosen string of its characters.
+pub proof fn lemma_string_of(s: String)
+    ensures
+        crate::model::step::spec_string(s@) == s,
+        echod_abstract::model::step::spec_string(s@) == s,
+{
+    lemma_string_view(s@);
+    axiom_string_ext(crate::model::step::spec_string(s@), s);
+}
+
+pub proof fn lemma_task_record(id: String, c: TkV, a: TaskV)
+    requires
+        task_rel(c, a),
+    ensures
+        spec_task_record(id, c) == a_task_record(id, a),
+{
+    match c.pid {
+        Some(chars) => lemma_string_view(chars),
+        None => {},
+    }
+}
+
+pub proof fn lemma_external_tag(tags: Tags)
+    ensures
+        spec_tag_is(tags, seq!['r','e','s','o','n','a','t','e',':','e','x','t','e','r','n','a','l'], seq!['t','r','u','e'], 0)
+            == spec_is_external_tag(tags),
+{
+    lemma_tag_is(tags, tag_external(), tag_true(), 0);
+    assert(seq!['r','e','s','o','n','a','t','e',':','e','x','t','e','r','n','a','l'] =~= tag_external());
+    assert(seq!['t','r','u','e'] =~= tag_true());
+}
+
+pub proof fn lemma_global_tag(tags: Tags)
+    ensures
+        spec_tag_is(tags, seq!['r','e','s','o','n','a','t','e',':','s','c','o','p','e'], seq!['g','l','o','b','a','l'], 0)
+            == spec_is_global(tags),
+{
+    lemma_tag_is(tags, tag_scope(), tag_global(), 0);
+    assert(seq!['r','e','s','o','n','a','t','e',':','s','c','o','p','e'] =~= tag_scope());
+    assert(seq!['g','l','o','b','a','l'] =~= tag_global());
+}
+
+/// Awaitable on the node is external on the service.
+pub proof fn lemma_awaitable(c: PromV, a: PromiseV)
+    requires
+        promise_rel(c, a),
+    ensures
+        spec_awaitable(c.tags) == spec_external(a),
+{
+    lemma_targeted(c.tags);
+    lemma_timer(c.tags);
+    lemma_external_tag(c.tags);
+    lemma_global_tag(c.tags);
+}
+
+/// The two saturating additions are one.
+pub proof fn lemma_sat_add(a: u64, b: u64)
+    ensures
+        spec_sat_add(a, b) == sat_add(a, b),
+{
+}
+
+/// Two ids of one origin.
+pub proof fn lemma_same_origin(a: Seq<char>, b: Seq<char>)
+    ensures
+        same_origin_spec(a, b) == (origin(a) == origin(b)),
+{
+}
+
+// ---------------------------------------------------------------------------
+// The held task, on both sides
+// ---------------------------------------------------------------------------
+
+/// `spec_held` on the document and on the store answer alike. An `Ok` is the
+/// stored object, pending and acquired, related to the stored task.
+pub proof fn lemma_held(
+    map: Map<Seq<char>, ObjV>,
+    origin_chars: Seq<char>,
+    s: AStore,
+    id: Seq<char>,
+    version: u64,
+    now: Time,
+)
+    requires
+        origin_rel(map, origin_chars, s),
+        origin(id) == origin_chars,
+    ensures
+        ({
+            let (_, held) = spec_held(map, id, version, now);
+            let a = a_held(s, id, version, now);
+            &&& spec_held(map, id, version, now).0 == map
+            &&& (held is Missing) == (a is Missing)
+            &&& (held is Stale) == (a is Stale)
+            &&& (held is Ok) == (a is Ok)
+            &&& held is Ok ==> {
+                &&& map.contains_key(id)
+                &&& held->Ok_0 == map[id]
+                &&& spec_project_obj(map[id], now) == map[id]
+                &&& map[id].task is Some
+                &&& map[id].task.unwrap().state == TaskState::Acquired
+                &&& map[id].promise.state == PromiseState::Pending
+                &&& s.tasks.contains_key(id)
+                &&& s.promises.contains_key(id)
+                &&& a->Ok_0 == s.tasks[id]
+                &&& task_rel(map[id].task.unwrap(), s.tasks[id])
+                &&& promise_rel(map[id].promise, s.promises[id])
+                &&& spec_project_promise(s.promises[id], now) == s.promises[id]
+            }
+        }),
+{
+    if !map.contains_key(id) {
+        assert(!s.promises.contains_key(id));
+        assert(!s.tasks.contains_key(id));
+    } else {
+        let obj = map[id];
+        let p = s.promises[id];
+        let t = abstract_task(s, id);
+        assert(object_rel(obj, p, t));
+        lemma_project_object(obj, p, t, now);
+        let seen = spec_project_obj(obj, now);
+        let q = spec_project_promise(p, now);
+        assert(promise_rel(seen.promise, q));
+        match (obj.task, t) {
+            (None, None) => {
+                assert(!s.tasks.contains_key(id));
+            },
+            (Some(ct), Some(at)) => {
+                assert(s.tasks.contains_key(id));
+                assert(s.tasks[id] == at);
+                let seen_c = seen.task.unwrap();
+                let seen_a = spec_project_task(at, q);
+                assert(task_rel(seen_c, seen_a));
+                if seen_c.state == TaskState::Acquired && seen_c.version == version && seen.promise.state == PromiseState::Pending {
+                    assert(q.state == PromiseState::Pending);
+                    assert(p.state == PromiseState::Pending);
+                    assert(obj.promise.state == PromiseState::Pending);
+                    assert(seen.promise == obj.promise);
+                    assert(seen.task == obj.task);
+                    assert(seen == obj);
+                    assert(q == p);
+                    assert(seen_a == at);
+                } else {
+                }
+            },
+            _ => {
+                assert(false);
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keys of schedules; stores changed within one origin
+// ---------------------------------------------------------------------------
+
+pub proof fn lemma_schedule_key(id: Seq<char>)
+    ensures
+        spec_starts(spec_schedule_key(id), schedule_prefix()),
+        spec_schedule_key(id).skip(2) == id,
+{
+    assert(spec_schedule_key(id) == schedule_prefix() + id);
+    lemma_starts_prefix(schedule_prefix(), id);
+}
+
+/// A schedule key reads as a schedule slot, by [`doc_rel`].
+pub proof fn lemma_schedule_doc(key: Seq<char>, id: Seq<char>, doc: DocV, s: AStore)
+    requires
+        key == spec_schedule_key(id),
+        doc_rel(key, doc, s),
+    ensures
+        doc is Schedule,
+        slot_rel(doc->Schedule_0, id, s),
+{
+    lemma_schedule_key(id);
+}
+
+/// A store that changed only at one schedule reads the same under every
+/// other key.
+pub proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed: Seq<char>)
+    requires
+        next.promises == s.promises,
+        next.tasks == s.tasks,
+        forall|other: Seq<char>|
+            other != changed ==> #[trigger] next.schedules.contains_key(other) == s.schedules.contains_key(other)
+                && (s.schedules.contains_key(other) ==> next.schedules[other] == s.schedules[other]),
+    ensures
+        others_kept(spec_schedule_key(changed), s, next),
+{
+    lemma_schedule_key(changed);
+    assert forall|other: Seq<char>, doc: DocV|
+        other != spec_schedule_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
+        other,
+        doc,
+        next,
+    ) by {
+        if spec_starts(other, schedule_prefix()) {
+            let id = other.skip(2);
+            lemma_starts_prefix(schedule_prefix(), id);
+            assert(schedule_prefix() + id =~= other);
+            assert(id != changed);
+            assert(next.schedules.contains_key(id) == s.schedules.contains_key(id));
+        } else if spec_starts(other, origin_prefix()) {
+            match doc {
+                DocV::Origin(map) => {
+                    let o = other.skip(2);
+                    assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {
+                        &&& s.promises.contains_key(id) == next.promises.contains_key(id)
+                        &&& (s.promises.contains_key(id) ==> s.promises[id] == next.promises[id])
+                        &&& s.tasks.contains_key(id) == next.tasks.contains_key(id)
+                        &&& (s.tasks.contains_key(id) ==> s.tasks[id] == next.tasks[id])
+                    } by {};
+                    lemma_origin_rel_same(map, o, s, next);
+                },
+                DocV::Schedule(_) => {},
+            }
+        } else {
+        }
+    };
+}
+
+/// `next` agrees with `s` on every id outside `origin_chars`.
+pub open spec fn changed_within(s: AStore, next: AStore, origin_chars: Seq<char>) -> bool {
+    forall|id: Seq<char>|
+        #![trigger origin(id)]
+        origin(id) != origin_chars ==> {
+            &&& s.promises.contains_key(id) == next.promises.contains_key(id)
+            &&& (s.promises.contains_key(id) ==> s.promises[id] == next.promises[id])
+            &&& s.tasks.contains_key(id) == next.tasks.contains_key(id)
+            &&& (s.tasks.contains_key(id) ==> s.tasks[id] == next.tasks[id])
+        }
+}
+
+/// A store changed within one origin reads the same under every other key.
+pub proof fn lemma_others_kept_within(s: AStore, next: AStore, origin_chars: Seq<char>)
+    requires
+        next.schedules == s.schedules,
+        changed_within(s, next, origin_chars),
+    ensures
+        others_kept(spec_origin_key(origin_chars), s, next),
+{
+    assert forall|other: Seq<char>| other != origin_chars implies #[trigger] same_at_origin(s, next, other) by {
+        assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
+            &&& s.promises.contains_key(id) == next.promises.contains_key(id)
+            &&& (s.promises.contains_key(id) ==> s.promises[id] == next.promises[id])
+            &&& s.tasks.contains_key(id) == next.tasks.contains_key(id)
+            &&& (s.tasks.contains_key(id) ==> s.tasks[id] == next.tasks[id])
+        } by {
+            assert(origin(id) != origin_chars);
+        };
+    };
+    lemma_others_kept(s, next, origin_chars);
+}
+
+/// An origin document whose map is related reads as the store.
+pub proof fn lemma_origin_reads(key: Seq<char>, origin_chars: Seq<char>, map: Map<Seq<char>, ObjV>, s: AStore)
+    requires
+        key == spec_origin_key(origin_chars),
+        map.dom().finite(),
+        origin_rel(map, origin_chars, s),
+    ensures
+        doc_rel(key, DocV::Origin(map), s),
+{
+    lemma_origin_key(origin_chars);
+}
+
+/// Replacing one object on both sides, with the abstract task kept, removed,
+/// or inserted as the concrete task says.
+pub proof fn lemma_origin_update(
+    map: Map<Seq<char>, ObjV>,
+    origin_chars: Seq<char>,
+    s: AStore,
+    id: Seq<char>,
+    obj: ObjV,
+    p: PromiseV,
+    t: Option<TaskV>,
+    next: AStore,
+)
+    requires
+        origin_rel(map, origin_chars, s),
+        origin(id) == origin_chars,
+        object_rel(obj, p, t),
+        callbacks_in(obj.promise.callbacks, origin_chars),
+        next.promises == s.promises.insert(id, p),
+        next.tasks == match t {
+            Some(task) => s.tasks.insert(id, task),
+            None => s.tasks.remove(id),
+        },
+    ensures
+        origin_rel(map.insert(id, obj), origin_chars, next),
+{
+    lemma_origin_insert(map, origin_chars, s, id, obj, p, t);
+    let built = AStore {
+        promises: s.promises.insert(id, p),
+        tasks: match t {
+            Some(task) => s.tasks.insert(id, task),
+            None => s.tasks.remove(id),
+        },
+        ..s
+    };
+    assert(origin_rel(map.insert(id, obj), origin_chars, built));
+    assert forall|other: Seq<char>| #![trigger origin(other)] origin(other) == origin_chars implies {
+        &&& next.promises.contains_key(other) == map.insert(id, obj).contains_key(other)
+        &&& (map.insert(id, obj).contains_key(other) ==> object_rel(
+            map.insert(id, obj)[other],
+            next.promises[other],
+            abstract_task(next, other),
+        ))
+        &&& (!map.insert(id, obj).contains_key(other) ==> !next.tasks.contains_key(other))
+    } by {
+        assert(abstract_task(next, other) == abstract_task(built, other));
+    };
+}
+
+// ---------------------------------------------------------------------------
 // The promise handlers
 // ---------------------------------------------------------------------------
 
@@ -661,6 +1022,7 @@ pub proof fn lemma_origin_insert(
         origin_rel(map, origin_chars, s),
         origin(id) == origin_chars,
         object_rel(obj, p, t),
+        callbacks_in(obj.promise.callbacks, origin_chars),
     ensures
         ({
             let next = AStore {
@@ -687,6 +1049,15 @@ pub proof fn lemma_origin_insert(
         == origin_chars by {
         if other != id {
             assert(map.contains_key(other));
+        }
+    };
+    assert forall|other: Seq<char>| #[trigger] inserted.contains_key(other) implies callbacks_in(
+        inserted[other].promise.callbacks,
+        origin_chars,
+    ) by {
+        if other != id {
+            assert(map.contains_key(other));
+            assert(inserted[other] == map[other]);
         }
     };
     assert forall|other: Seq<char>| #![trigger origin(other)] origin(other) == origin_chars implies {
@@ -723,6 +1094,7 @@ pub proof fn lemma_promise_get_agrees(
 )
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
+        finite_store(s),
     ensures
         request_agrees(
             config,
@@ -767,6 +1139,7 @@ pub proof fn lemma_promise_create_agrees(
 )
     requires
         doc_rel(spec_origin_key(origin(req.id@)), doc, s),
+        finite_store(s),
     ensures
         request_agrees(
             config,
@@ -825,7 +1198,10 @@ pub proof fn lemma_promise_create_agrees(
         }
         assert(next.tasks =~= tasks);
         assert(next == AStore { promises: s.promises.insert(req.id@, p), tasks, ..s });
+        assert(callbacks_in(obj.promise.callbacks, o));
         lemma_origin_insert(map, o, s, req.id@, obj, p, t);
+        assert(next.promises.dom() == s.promises.dom().insert(req.id@));
+        assert(finite_store(next));
         assert(spec_with_origin(doc, map.insert(req.id@, obj)) == DocV::Origin(map.insert(req.id@, obj)));
         assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
         assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), next));
@@ -852,6 +1228,7 @@ pub proof fn lemma_promise_settle_agrees(
 )
     requires
         doc_rel(spec_origin_key(origin(req.id@)), doc, s),
+        finite_store(s),
     ensures
         request_agrees(
             config,
@@ -941,7 +1318,11 @@ pub proof fn lemma_promise_settle_agrees(
             }
             assert(n.tasks =~= tasks);
             assert(n == AStore { promises: s.promises.insert(req.id@, q), tasks, ..s });
+            assert(obj.promise.callbacks == map[req.id@].promise.callbacks);
+            assert(callbacks_in(obj.promise.callbacks, o));
             lemma_origin_insert(map, o, s, req.id@, obj, q, a_task);
+            assert(n.promises.dom() == s.promises.dom().insert(req.id@));
+            assert(finite_store(n));
             lemma_record(req.id, obj.promise, q);
             assert(n.promises.contains_key(req.id@));
             assert(n.promises[req.id@] == q);
@@ -977,6 +1358,7 @@ pub proof fn lemma_promise_handlers_agree(
     requires
         spec_key(request) is Some,
         doc_rel(spec_key(request).unwrap(), doc, s),
+        finite_store(s),
         match request {
             Request::PromiseGet(_) | Request::PromiseCreate(_) | Request::PromiseSettle(_) => true,
             _ => false,
