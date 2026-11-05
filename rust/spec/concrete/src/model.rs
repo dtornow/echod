@@ -11,6 +11,8 @@ use vstd::prelude::*;
 
 use echod_abstract::{BoundaryEvent, Call, Output};
 use echod_rover::rover::semantics::Label;
+#[cfg(verus_keep_ghost)]
+use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::Time;
 
@@ -201,7 +203,7 @@ impl View for Store {
 
 impl View for Node {
     type V = NodeV;
-    open spec fn view(&self) -> NodeV {
+    closed spec fn view(&self) -> NodeV {
         NodeV {
             logic: self.logic@,
             wake: match self.wake {
@@ -540,6 +542,30 @@ impl Model {
         }
     }
 
+    /// `step`, as Rover asks for it.
+    pub fn results(
+        self,
+        pid: &Pid,
+        state: &Local,
+        now: u64,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<StepResult<Model>> {
+        let incoming = match event {
+            ProcessEvent::Timeout => Incoming::Timeout,
+            ProcessEvent::Receive { sender, message } => Incoming::Receive {
+                sender: sender.clone(),
+                message: message.clone(),
+            },
+        };
+        self.step(pid, state, now, &incoming)
+            .into_iter()
+            .map(|transition| StepResult {
+                state: transition.state,
+                send: transition.send,
+            })
+            .collect()
+    }
+
     pub fn step(self, pid: &Pid, state: &Local, now: u64, event: &Incoming) -> Vec<Transition> {
         let event = match event {
             Incoming::Timeout => ProcessEvent::Timeout,
@@ -661,6 +687,34 @@ impl Process<(), Pid, Message> for Store {
 
 verus! {
 
+/// The exec world, transitions, and steps are known to Verus by shape alone:
+/// nothing is claimed about `world`, `step`, or `results`. The trait's
+/// `ensures` on `initial` and `on_event` below are the exec == spec link; they
+/// are not proved, and Verus reports them.
+#[verifier::external_type_specification]
+pub struct ExWorld(World);
+
+#[verifier::external_type_specification]
+pub struct ExTransition(Transition);
+
+pub assume_specification [Model::world](m: Model, config: &Fleet) -> World;
+
+pub assume_specification [Model::step](
+    m: Model,
+    pid: &Pid,
+    state: &Local,
+    now: u64,
+    event: &Incoming,
+) -> Vec<Transition>;
+
+pub assume_specification [Model::results](
+    m: Model,
+    pid: &Pid,
+    state: &Local,
+    now: u64,
+    event: &ProcessEvent<Pid, Message>,
+) -> Vec<StepResult<Model>>;
+
 impl RoverModel for Model {
     type Config = Fleet;
     type Pid = Pid;
@@ -678,7 +732,10 @@ impl RoverModel for Model {
     }
 
     fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
-        matches!(message, Message::Request(_) | Message::Stop)
+        match message {
+            Message::Request(_) | Message::Stop => true,
+            _ => false,
+        }
     }
 
     fn on_event(
@@ -689,20 +746,7 @@ impl RoverModel for Model {
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> Vec<StepResult<Self>> {
-        let incoming = match event {
-            ProcessEvent::Timeout => Incoming::Timeout,
-            ProcessEvent::Receive { sender, message } => Incoming::Receive {
-                sender: sender.clone(),
-                message: message.clone(),
-            },
-        };
-        self.step(pid, state, now, &incoming)
-            .into_iter()
-            .map(|transition| StepResult {
-                state: transition.state,
-                send: transition.send,
-            })
-            .collect()
+        self.results(pid, state, now, event)
     }
 
     open spec fn spec_outside(&self) -> Pid {

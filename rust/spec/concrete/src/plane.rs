@@ -11,6 +11,7 @@ use echod_types::{
     PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes, Tags, TaskClaimRes,
     TaskFenceAction, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value,
 };
+#[cfg(not(verus_keep_ghost))]
 use serde::{Deserialize, Serialize};
 
 use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
@@ -77,19 +78,22 @@ struct Pending {
     tags: Tags,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
 enum Doc {
     Origin(BTreeMap<String, Obj>),
     Schedule(Option<Schedule>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
 struct Obj {
     promise: Prom,
     task: Option<Tk>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
 struct Prom {
     state: PromiseState,
     param: Value,
@@ -102,7 +106,8 @@ struct Prom {
     listeners: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
 struct Tk {
     state: TaskState,
     version: u64,
@@ -514,12 +519,26 @@ fn is_empty(doc: &Doc) -> bool {
     }
 }
 
+#[cfg(not(verus_keep_ghost))]
 fn encode(doc: &Doc) -> Vec<u8> {
     serde_json::to_vec(doc).unwrap_or_default()
 }
 
+#[cfg(not(verus_keep_ghost))]
 fn decode(key: &str, body: &[u8]) -> Doc {
     serde_json::from_slice(body).unwrap_or_else(|_| empty_doc(key))
+}
+
+/// Serialization is uninterpreted under Verus (`spec_encode`, `spec_decode_raw`);
+/// the records carry no serde there, so the exec codec is a stub.
+#[cfg(verus_keep_ghost)]
+fn encode(_doc: &Doc) -> Vec<u8> {
+    Vec::new()
+}
+
+#[cfg(verus_keep_ghost)]
+fn decode(key: &str, _body: &[u8]) -> Doc {
+    empty_doc(key)
 }
 
 fn pure(request: &Request) -> Response {
@@ -1786,79 +1805,20 @@ pub struct PlaneV {
     pub next_op: u64,
 }
 
+/// The exec plane is opaque to Verus: its documents live in `BTreeMap`s and
+/// its bytes come from serde, neither of which Verus reads. Its view is
+/// uninterpreted; the proofs are about `PlaneV`, and the link from this
+/// machine to that view is not claimed.
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExPlane(Plane);
+
+pub uninterp spec fn plane_view(plane: Plane) -> PlaneV;
+
 impl View for Plane {
     type V = PlaneV;
-    open spec fn view(&self) -> PlaneV {
-        PlaneV {
-            address: self.address as nat,
-            nodes: self.nodes as nat,
-            flight: match &self.flight {
-                None => None,
-                Some(flight) => Some(FlightV {
-                    op: flight.op,
-                    key: flight.key@,
-                    writing: flight.phase == Phase::Write,
-                    etag: match &flight.etag {
-                        None => None,
-                        Some(tag) => Some(tag.0@),
-                    },
-                    now: flight.now,
-                    caller: match &flight.caller {
-                        None => None,
-                        Some((client, id)) => Some((client@, *id)),
-                    },
-                    job: match &flight.job {
-                        Job::External { request } => JobV::External(*request),
-                        Job::Due => JobV::Due,
-                        Job::Occurrence(pending) => JobV::Occurrence(PendingV {
-                            promise: pending.promise@,
-                            at: pending.at,
-                            timeout: pending.timeout,
-                            param: pending.param,
-                            tags: pending.tags,
-                        }),
-                    },
-                    born: flight.born@.map_values(|pending: Pending| PendingV {
-                        promise: pending.promise@,
-                        at: pending.at,
-                        timeout: pending.timeout,
-                        param: pending.param,
-                        tags: pending.tags,
-                    }),
-                    reply: match &flight.reply {
-                        None => None,
-                        Some((client, id, response)) => Some((client@, *id, *response)),
-                    },
-                    decided: match &flight.decided {
-                        None => None,
-                        Some(doc) => Some(encode(doc)@),
-                    },
-                    notify: flight.notify@.map_values(|note: Outbound| match note {
-                        Outbound::Execute { id, version } => NoteV::Execute { id: id@, version: *version },
-                        Outbound::Unblock { address, promise } => NoteV::Unblock {
-                            address: address@,
-                            promise: *promise,
-                        },
-                    }),
-                }),
-            },
-            documents: self.cached_entries()@.map_values(|e: (String, Vec<u8>, Option<String>)| CachedV {
-                key: e.0@,
-                body: e.1@,
-                etag: match e.2 {
-                    None => None,
-                    Some(tag) => Some(tag@),
-                },
-            }),
-            pending: self.pending_items()@.map_values(|pending: Pending| PendingV {
-                promise: pending.promise@,
-                at: pending.at,
-                timeout: pending.timeout,
-                param: pending.param,
-                tags: pending.tags,
-            }),
-            next_op: self.next_op,
-        }
+    closed spec fn view(&self) -> PlaneV {
+        plane_view(*self)
     }
 }
 

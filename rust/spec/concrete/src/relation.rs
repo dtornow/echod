@@ -49,7 +49,7 @@ use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::{is_process, World};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::Envelope;
+use echod_rover::rover::{Envelope, RoverModel};
 #[cfg(verus_keep_ghost)]
 use echod_rover::Sched;
 #[cfg(verus_keep_ghost)]
@@ -639,10 +639,11 @@ pub open spec fn due_agrees(
     let (next, _, born, notes) = spec_run_due(doc, now);
     ||| next == doc && born.len() == 0 && notes.len() == 0
     ||| exists|j: int|
+        #![trigger spec_run_timeout(config, state, now)[j]]
         {
             let results = spec_run_timeout(config, state, now);
             &&& 0 <= j < results.len()
-            &&& (#[trigger] results[j]).send == note_sends(notes)
+            &&& results[j].send == note_sends(notes)
             &&& results[j].state.pending == state.pending + items(born)
             &&& doc_rel(key, next, results[j].state.store)
             &&& others_kept(key, state.store, results[j].state.store)

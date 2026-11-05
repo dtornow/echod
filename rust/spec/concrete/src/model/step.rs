@@ -225,6 +225,32 @@ pub open spec fn spec_utf8_ok(lead: u8, pos: nat, b: u8) -> bool {
     }
 }
 
+/// `spec_prefix` stays within the bytes it reads.
+pub proof fn lemma_prefix_bounds(bytes: Seq<u8>, width: nat, pos: nat)
+    requires
+        pos <= bytes.len(),
+        pos <= width,
+    ensures
+        pos <= spec_prefix(bytes, width, pos) <= bytes.len(),
+    decreases width - pos,
+{
+    if pos >= width {
+    } else if pos >= bytes.len() || !spec_utf8_ok(bytes[0], pos, bytes[pos as int]) {
+    } else {
+        lemma_prefix_bounds(bytes, width, pos + 1);
+    }
+}
+
+#[via_fn]
+proof fn spec_lossy_decreases(bytes: Seq<u8>) {
+    if bytes.len() > 0 {
+        let width = spec_utf8_width(bytes[0]);
+        if width >= 2 {
+            lemma_prefix_bounds(bytes, width, 1);
+        }
+    }
+}
+
 /// How many leading bytes form one UTF-8 character, or the maximal subpart
 /// of one ill-formed sequence. The same split `String::from_utf8_lossy` uses.
 pub open spec fn spec_prefix(bytes: Seq<u8>, width: nat, pos: nat) -> nat
@@ -232,7 +258,7 @@ pub open spec fn spec_prefix(bytes: Seq<u8>, width: nat, pos: nat) -> nat
 {
     if pos >= width {
         width
-    } else if pos >= bytes.len() || !spec_utf8_ok(bytes[0], pos, bytes[pos]) {
+    } else if pos >= bytes.len() || !spec_utf8_ok(bytes[0], pos, bytes[pos as int]) {
         pos
     } else {
         spec_prefix(bytes, width, pos + 1)
@@ -241,6 +267,7 @@ pub open spec fn spec_prefix(bytes: Seq<u8>, width: nat, pos: nat) -> nat
 
 pub open spec fn spec_lossy(bytes: Seq<u8>) -> Seq<u8>
     decreases bytes.len(),
+    via spec_lossy_decreases
 {
     if bytes.len() == 0 {
         Seq::empty()
@@ -534,7 +561,7 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
                 let (plane, send) = spec_request(node.plane, now, call);
                 spec_one(LocalV::Node(NodeV {
                     logic: spec_clock(node.logic, now),
-                    next_request: node.next_request + 1,
+                    next_request: (node.next_request + 1) as u64,
                     wake: spec_wake(plane),
                     plane,
                     ..node
@@ -705,7 +732,7 @@ pub open spec fn spec_begin(plane: PlaneV, key: Seq<char>, job: JobV, now: Time,
         None => {
             let op = plane.next_op;
             let flight = spec_flight(op, key, None, now, caller, job);
-            (PlaneV { flight: Some(flight), next_op: op + 1, ..plane }, seq![spec_get(op, key)])
+            (PlaneV { flight: Some(flight), next_op: (op + 1) as u64, ..plane }, seq![spec_get(op, key)])
         },
     }
 }
@@ -758,7 +785,7 @@ pub open spec fn spec_decide(plane: PlaneV, flight: FlightV, doc: DocV) -> (Plan
             decided: Some(body),
             ..flight
         };
-        (PlaneV { flight: Some(flight), next_op: op + 1, ..plane }, seq![(Pid::Store, Message::StoreReq { op, call })])
+        (PlaneV { flight: Some(flight), next_op: (op + 1) as u64, ..plane }, seq![(Pid::Store, Message::StoreReq { op, call })])
     }
 }
 
@@ -1627,11 +1654,19 @@ pub open spec fn spec_min_key(keys: Set<Seq<char>>) -> Seq<char> {
 
 pub open spec fn spec_sorted(keys: Set<Seq<char>>) -> Seq<Seq<char>>
     decreases keys.len(),
+    via spec_sorted_decreases
 {
     if !keys.finite() || keys.len() == 0 { Seq::empty() }
     else {
         let k = spec_min_key(keys);
         seq![k] + spec_sorted(keys.remove(k))
+    }
+}
+
+#[via_fn]
+proof fn spec_sorted_decreases(keys: Set<Seq<char>>) {
+    if keys.finite() && keys.len() > 0 {
+        crate::timers::lemma_min_key(keys);
     }
 }
 

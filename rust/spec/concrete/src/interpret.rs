@@ -550,6 +550,35 @@ pub proof fn lemma_starts_prefix(prefix: Seq<char>, rest: Seq<char>)
     }
 }
 
+/// A key with a prefix is the prefix and the rest.
+pub proof fn lemma_starts_split(key: Seq<char>, prefix: Seq<char>)
+    requires
+        spec_starts(key, prefix),
+    ensures
+        key == prefix + key.skip(prefix.len() as int),
+    decreases prefix.len(),
+{
+    let n = prefix.len() as int;
+    if prefix.len() == 0 {
+        assert(key =~= prefix + key.skip(0));
+    } else {
+        lemma_starts_split(key.drop_first(), prefix.drop_first());
+        let whole = prefix + key.skip(n);
+        assert(key.len() == whole.len());
+        assert forall|i: int| 0 <= i < key.len() implies key[i] == whole[i] by {
+            if i == 0 {
+            } else if i < n {
+                assert(key[i] == key.drop_first()[i - 1]);
+                assert(key.drop_first()[i - 1] == (prefix.drop_first() + key.drop_first().skip(n - 1))[i - 1]);
+                assert(prefix.drop_first()[i - 1] == prefix[i]);
+            } else {
+                assert(whole[i] == key.skip(n)[i - n]);
+            }
+        };
+        assert(key =~= whole);
+    }
+}
+
 pub proof fn lemma_origin_key(origin_chars: Seq<char>)
     ensures
         spec_starts(spec_origin_key(origin_chars), origin_prefix()),
@@ -636,8 +665,7 @@ pub proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char>)
             match doc {
                 DocV::Origin(map) => {
                     let o = other.skip(2);
-                    lemma_starts_prefix(origin_prefix(), o);
-                    assert(origin_prefix() + o =~= other);
+                    lemma_starts_split(other, origin_prefix());
                     assert(o != changed);
                     assert(same_at_origin(s, next, o));
                     lemma_origin_rel_same(map, o, s, next);
@@ -868,8 +896,7 @@ pub proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed: Seq<ch
     ) by {
         if spec_starts(other, schedule_prefix()) {
             let id = other.skip(2);
-            lemma_starts_prefix(schedule_prefix(), id);
-            assert(schedule_prefix() + id =~= other);
+            lemma_starts_split(other, schedule_prefix());
             assert(id != changed);
             assert(next.schedules.contains_key(id) == s.schedules.contains_key(id));
         } else if spec_starts(other, origin_prefix()) {

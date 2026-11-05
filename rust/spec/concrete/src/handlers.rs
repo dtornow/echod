@@ -1139,11 +1139,13 @@ pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: D
 // ---------------------------------------------------------------------------
 
 pub proof fn lemma_one_origin_from(refs: Seq<TaskRef>, o: Seq<char>, i: int)
+    requires
+        0 <= i,
     ensures
         spec_one_origin(refs, o, i) == forall|k: int| i <= k < refs.len() ==> origin(#[trigger] refs[k].id@) == o,
     decreases refs.len() - i,
 {
-    if i < 0 || i >= refs.len() {
+    if i >= refs.len() {
     } else {
         lemma_one_origin_from(refs, o, i + 1);
     }
@@ -1374,24 +1376,28 @@ pub proof fn lemma_heartbeat_agrees(
 // ---------------------------------------------------------------------------
 
 pub proof fn lemma_bad_suspend_from(actions: Seq<PromiseRegisterCallbackReq>, x: Seq<char>, i: int)
+    requires
+        0 <= i,
     ensures
         spec_bad_suspend(actions, x, i) == exists|j: int|
             i <= j < actions.len() && ((#[trigger] actions[j]).awaited@ == x || origin(actions[j].awaited@) != origin(x)),
     decreases actions.len() - i,
 {
-    if i < 0 || i >= actions.len() {
+    if i >= actions.len() {
     } else {
         lemma_bad_suspend_from(actions, x, i + 1);
     }
 }
 
 pub proof fn lemma_seen_from(actions: Seq<PromiseRegisterCallbackReq>, id: Seq<char>, j: int, stop: int)
+    requires
+        0 <= j,
     ensures
         spec_seen(actions, id, j, stop) == exists|k: int|
             j <= k < stop && k < actions.len() && (#[trigger] actions[k]).awaited@ == id,
     decreases stop - j,
 {
-    if j < 0 || j >= stop || j >= actions.len() {
+    if j >= stop || j >= actions.len() {
     } else {
         lemma_seen_from(actions, id, j + 1, stop);
     }
@@ -1414,25 +1420,29 @@ pub proof fn lemma_distinct_from(actions: Seq<PromiseRegisterCallbackReq>, i: in
 }
 
 pub proof fn lemma_missing_from(map: Map<Seq<char>, ObjV>, actions: Seq<PromiseRegisterCallbackReq>, i: int)
+    requires
+        0 <= i,
     ensures
         spec_missing_awaited(map, actions, i) == exists|j: int|
             i <= j < actions.len() && !map.contains_key((#[trigger] actions[j]).awaited@),
     decreases actions.len() - i,
 {
-    if i < 0 || i >= actions.len() {
+    if i >= actions.len() {
     } else {
         lemma_missing_from(map, actions, i + 1);
     }
 }
 
 pub proof fn lemma_unawaitable_from(map: Map<Seq<char>, ObjV>, actions: Seq<PromiseRegisterCallbackReq>, i: int)
+    requires
+        0 <= i,
     ensures
         spec_unawaitable(map, actions, i) == exists|j: int|
             i <= j < actions.len() && map.contains_key((#[trigger] actions[j]).awaited@)
                 && !spec_awaitable(map[actions[j].awaited@].promise.tags),
     decreases actions.len() - i,
 {
-    if i < 0 || i >= actions.len() {
+    if i >= actions.len() {
     } else {
         lemma_unawaitable_from(map, actions, i + 1);
     }
@@ -1444,13 +1454,15 @@ pub proof fn lemma_c_any_settled_from(
     now: Time,
     i: int,
 )
+    requires
+        0 <= i,
     ensures
         c_any_settled(map, actions, now, i) == exists|j: int|
             i <= j < actions.len() && map.contains_key((#[trigger] actions[j]).awaited@)
                 && spec_project_obj(map[actions[j].awaited@], now).promise.state != PromiseState::Pending,
     decreases actions.len() - i,
 {
-    if i < 0 || i >= actions.len() {
+    if i >= actions.len() {
     } else {
         lemma_c_any_settled_from(map, actions, now, i + 1);
     }
@@ -1458,13 +1470,14 @@ pub proof fn lemma_c_any_settled_from(
 
 pub proof fn lemma_a_any_settled_from(s: AStore, ids: Seq<Seq<char>>, now: Time, i: int)
     requires
+        0 <= i,
         forall|k: int| 0 <= k < ids.len() ==> s.promises.contains_key(#[trigger] ids[k]),
     ensures
         a_any_settled(s, ids, now, i) == exists|j: int|
             i <= j < ids.len() && spec_project_promise(s.promises[#[trigger] ids[j]], now).state != PromiseState::Pending,
     decreases ids.len() - i,
 {
-    if i < 0 || i >= ids.len() {
+    if i >= ids.len() {
     } else {
         lemma_a_any_settled_from(s, ids, now, i + 1);
     }

@@ -45,15 +45,15 @@ use crate::relation::*;
 use crate::store::{Etag, StoreCall, StoreOutcome};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::step::{
-    spec_body, spec_create_if_absent, spec_handler, spec_internal_result, spec_process_work,
-    spec_queue, spec_ready, spec_run, spec_run_timeout, spec_service,
+    spec_body, spec_create_if_absent, spec_handler, spec_process_work, spec_queue, spec_run,
+    spec_run_timeout, spec_service,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
-    spec_request_outcome, spec_send, spec_shed, StateV,
+    spec_internal_result, spec_ready, spec_request_outcome, spec_send, spec_shed, StateV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
@@ -73,17 +73,20 @@ use echod_rover::rover::semantics::{
     step, Execution, Label, StepResultV, World, WorldV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, ProcessEvent};
+use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]
-use echod_types::Response;
+use echod_types::{origin, Response};
+#[cfg(verus_keep_ghost)]
+use vstd::multiset::Multiset;
 
 verus! {
 
-broadcast use vstd::seq::group_seq_lemmas;
-broadcast use vstd::seq_lib::group_to_multiset_ensures;
-broadcast use vstd::multiset::group_multiset_axioms;
+broadcast use
+    vstd::seq::group_seq_lemmas,
+    vstd::seq_lib::group_to_multiset_ensures,
+    vstd::multiset::group_multiset_axioms;
 
 pub open spec fn cmodel() -> CModel {
     CModel
@@ -237,25 +240,19 @@ pub proof fn lemma_push_eq_add<A>(s: Seq<A>, x: A)
     assert(s.push(x) =~= s.add(suffix));
 }
 
-pub proof fn lemma_extends_refl(network: Seq<Envelope<APid, AMessage>>)
+pub proof fn lemma_extends_refl<P, M>(network: Seq<Envelope<P, M>>)
     ensures
         extends(network, network),
 {
 }
 
-pub proof fn lemma_extends_push(
-    earlier: Seq<Envelope<APid, AMessage>>,
-    added: Envelope<APid, AMessage>,
-)
+pub proof fn lemma_extends_push<P, M>(earlier: Seq<Envelope<P, M>>, added: Envelope<P, M>)
     ensures
         extends(earlier.push(added), earlier),
 {
 }
 
-pub proof fn lemma_extends_add(
-    earlier: Seq<Envelope<APid, AMessage>>,
-    suffix: Seq<Envelope<APid, AMessage>>,
-)
+pub proof fn lemma_extends_add<P, M>(earlier: Seq<Envelope<P, M>>, suffix: Seq<Envelope<P, M>>)
     ensures
         extends(earlier + suffix, earlier),
 {
@@ -456,7 +453,7 @@ pub proof fn lemma_empty_matches(config: ServerConfig, before: World<AModel>)
     assert forall|i: int| 0 <= i < execution.len() implies #[trigger] step(
         amodel(),
         config,
-        before::<AModel>(before, execution, i),
+        echod_rover::rover::semantics::before::<AModel>(before, execution, i),
         execution[i].0,
         execution[i].1,
     ) by {
@@ -493,12 +490,12 @@ pub proof fn lemma_matched_step(
     assert forall|i: int| 0 <= i < execution.len() implies #[trigger] step(
         amodel(),
         config,
-        before::<AModel>(before, execution, i),
+        echod_rover::rover::semantics::before::<AModel>(before, execution, i),
         execution[i].0,
         execution[i].1,
     ) by {
         assert(i == 0);
-        assert(before::<AModel>(before, execution, 0) == before);
+        assert(echod_rover::rover::semantics::before::<AModel>(before, execution, 0) == before);
     };
     assert(legal(amodel(), config, before, execution));
     assert(end::<AModel>(before, execution) == after);
@@ -1351,7 +1348,7 @@ pub proof fn lemma_empty_is_empty(key: Seq<char>)
     } else {
         let map = Map::<Seq<char>, crate::model::step::ObjV>::empty();
         assert(map.dom() =~= Set::<Seq<char>>::empty());
-        vstd::set_lib::lemma_set_empty_len::<Seq<char>>();
+        assert(Set::<Seq<char>>::empty().len() == 0);
     }
 }
 
@@ -1388,7 +1385,7 @@ pub proof fn lemma_decide(plane: PlaneV, flight: FlightV, doc: DocV)
                 &&& send == reply_send(flight_reply(flight, reply)) + spec_notes(notes)
             } else {
                 let w = written(plane, flight, doc);
-                &&& after == PlaneV { flight: Some(w), next_op: plane.next_op + 1, ..plane }
+                &&& after == PlaneV { flight: Some(w), next_op: (plane.next_op + 1) as u64, ..plane }
                 &&& send == seq![(CPid::Store, CMessage::StoreReq { op: plane.next_op, call: request_of(w) })]
             }
         }),
@@ -2399,7 +2396,7 @@ pub proof fn lemma_begin_related(
     match cached {
         None => {
             let r = spec_flight(op, key, None, at, caller, job);
-            assert(node2.plane == PlaneV { flight: Some(r), next_op: op + 1, ..plane1 });
+            assert(node2.plane == PlaneV { flight: Some(r), next_op: (op + 1) as u64, ..plane1 });
             assert(send == seq![spec_get(op, key)]);
             assert(request_of(r) == StoreCall::Get { key: spec_string(key) });
             lemma_decision_same(r, probe_flight, doc);
@@ -2581,7 +2578,7 @@ pub proof fn lemma_begin_related(
             } else {
                 // the node opens the write
                 let w = written(plane1, f, doc);
-                assert(node2.plane == PlaneV { flight: Some(w), next_op: op + 1, ..plane1 });
+                assert(node2.plane == PlaneV { flight: Some(w), next_op: (op + 1) as u64, ..plane1 });
                 assert(send == seq![(CPid::Store, CMessage::StoreReq { op, call: request_of(w) })]);
                 assert(w.op == op);
                 assert(w.key == key);
@@ -3403,7 +3400,7 @@ pub proof fn lemma_write_after_read(
             let flight = plane0.flight.unwrap();
             let rest = PlaneV { flight: None, ..plane0 };
             let w = written(rest, flight, spec_empty_doc(flight.key));
-            &&& node2.plane == PlaneV { flight: Some(w), next_op: plane0.next_op + 1, ..rest }
+            &&& node2.plane == PlaneV { flight: Some(w), next_op: (plane0.next_op + 1) as u64, ..rest }
             &&& send == seq![(CPid::Store, CMessage::StoreReq { op: plane0.next_op, call: request_of(w) })]
         }),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
@@ -4026,7 +4023,7 @@ pub proof fn lemma_node(
                 let (plane2, send) = spec_request(node.plane, at, call);
                 let node2 = NodeV {
                     logic: crate::model::step::spec_clock(node.logic, at),
-                    next_request: node.next_request + 1,
+                    next_request: (node.next_request + 1) as u64,
                     wake: crate::model::step::spec_wake(plane2),
                     plane: plane2,
                     ..node
@@ -4355,7 +4352,7 @@ pub proof fn lemma_empty_reads(key: Seq<char>)
         let map = Map::<Seq<char>, crate::model::step::ObjV>::empty();
         assert(spec_empty_doc(key) == DocV::Origin(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
-        vstd::set_lib::lemma_set_empty_len::<Seq<char>>();
+        assert(Set::<Seq<char>>::empty().len() == 0);
         if crate::model::step::spec_starts(key, crate::interpret::origin_prefix()) {
             let o = key.skip(2);
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {

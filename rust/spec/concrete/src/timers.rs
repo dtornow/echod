@@ -20,7 +20,7 @@ use crate::handlers::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::interpret::{
-    abstract_task, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
+    abstract_task, lemma_starts_split, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
     lemma_empty_to_set, lemma_offer, lemma_origin_doc, lemma_origin_reads, lemma_origin_update,
     lemma_others_kept_schedule, lemma_others_kept_within, lemma_project_object, lemma_record,
     lemma_sat_add, lemma_schedule_key, lemma_string_view, lemma_targeted, lemma_timer,
@@ -45,7 +45,9 @@ use crate::relation::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::step::{
-    spec_before as a_before, spec_callback, spec_callback_apply, spec_create_if_absent,
+    least as a_least, lemma_least_exists as a_lemma_least_exists,
+    lemma_min_key as a_lemma_min_key, spec_before as a_before, spec_callback,
+    spec_callback_apply, spec_create_if_absent,
     spec_derived, spec_did, spec_due_result, spec_has_target,
     spec_is_timer, spec_keep, spec_keys, spec_lease, spec_lease_at, spec_listener,
     spec_min_key as a_min_key, spec_new_object, spec_over_callbacks, spec_over_listeners,
@@ -76,9 +78,10 @@ use echod_types::{origin, PromiseRecord, PromiseState, Response, Schedule, TaskS
 
 verus! {
 
-broadcast use vstd::seq::group_seq_lemmas;
-broadcast use vstd::set::group_set_lemmas;
-broadcast use echod_abstract::view::group_views;
+broadcast use
+    vstd::seq::group_seq_lemmas,
+    vstd::set::group_set_lemmas,
+    echod_abstract::view::group_views;
 
 /// One abstract step result.
 #[cfg(verus_keep_ghost)]
@@ -102,115 +105,8 @@ pub proof fn lemma_before_same(a: Seq<char>, b: Seq<char>)
     }
 }
 
-pub proof fn lemma_before_irrefl(a: Seq<char>)
-    ensures
-        !c_before(a, a),
-    decreases a.len(),
-{
-    if a.len() == 0 {
-    } else {
-        lemma_before_irrefl(a.drop_first());
-    }
-}
-
-pub proof fn lemma_before_total(a: Seq<char>, b: Seq<char>)
-    ensures
-        a == b || c_before(a, b) || c_before(b, a),
-    decreases a.len() + b.len(),
-{
-    if a.len() == 0 {
-        if b.len() == 0 {
-            assert(a =~= b);
-        }
-    } else if b.len() == 0 {
-    } else if a[0] != b[0] {
-    } else {
-        lemma_before_total(a.drop_first(), b.drop_first());
-        if a.drop_first() == b.drop_first() {
-            assert forall|i: int| 0 <= i < a.len() implies a[i] == b[i] by {
-                if i > 0 {
-                    assert(a[i] == a.drop_first()[i - 1]);
-                    assert(b[i] == b.drop_first()[i - 1]);
-                }
-            };
-            assert(a =~= b);
-        }
-    }
-}
-
-pub proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
-    requires
-        c_before(a, b),
-        c_before(b, c),
-    ensures
-        c_before(a, c),
-    decreases a.len() + b.len() + c.len(),
-{
-    if a.len() == 0 {
-    } else if b.len() == 0 {
-    } else if c.len() == 0 {
-    } else if a[0] != b[0] {
-    } else if b[0] != c[0] {
-    } else {
-        lemma_before_trans(a.drop_first(), b.drop_first(), c.drop_first());
-    }
-}
-
-/// `k` is the least of `keys`.
-pub open spec fn least(keys: Set<Seq<char>>, k: Seq<char>) -> bool {
-    keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !c_before(o, k)
-}
-
-/// A finite set of keys has a least key.
-pub proof fn lemma_least_exists(keys: Set<Seq<char>>)
-    requires
-        keys.finite(),
-        keys.len() > 0,
-    ensures
-        exists|k: Seq<char>| least(keys, k),
-    decreases keys.len(),
-{
-    let x = keys.choose();
-    assert(keys.contains(x));
-    let rest = keys.remove(x);
-    assert(rest.len() == keys.len() - 1);
-    if rest.len() == 0 {
-        assert forall|o: Seq<char>| keys.contains(o) implies !c_before(o, x) by {
-            if o != x {
-                assert(rest.contains(o));
-            } else {
-                lemma_before_irrefl(x);
-            }
-        };
-        assert(least(keys, x));
-    } else {
-        lemma_least_exists(rest);
-        let m = choose|m: Seq<char>| least(rest, m);
-        assert(keys.contains(m));
-        if c_before(x, m) {
-            assert forall|o: Seq<char>| keys.contains(o) implies !c_before(o, x) by {
-                if o == x {
-                    lemma_before_irrefl(x);
-                } else {
-                    assert(rest.contains(o));
-                    if c_before(o, x) {
-                        lemma_before_trans(o, x, m);
-                    }
-                }
-            };
-            assert(least(keys, x));
-        } else {
-            assert forall|o: Seq<char>| keys.contains(o) implies !c_before(o, m) by {
-                if o != x {
-                    assert(rest.contains(o));
-                }
-            };
-            assert(least(keys, m));
-        }
-    }
-}
-
-/// Both chosen minimums are least keys.
+/// The chosen minimums, both of them, are keys. The abstract order has a
+/// least key; by [`lemma_before_same`] it is least in the concrete order too.
 pub proof fn lemma_min_key(keys: Set<Seq<char>>)
     requires
         keys.finite(),
@@ -219,15 +115,13 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
         keys.contains(c_min_key(keys)),
         keys.contains(a_min_key(keys)),
 {
-    lemma_least_exists(keys);
-    let k = choose|k: Seq<char>| least(keys, k);
-    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !c_before(o, k));
-    assert(keys.contains(c_min_key(keys)));
-    assert forall|o: Seq<char>| keys.contains(o) implies !a_before(o, k) by {
+    a_lemma_min_key(keys);
+    a_lemma_least_exists(keys);
+    let k = choose|k: Seq<char>| a_least(keys, k);
+    assert forall|o: Seq<char>| keys.contains(o) implies !c_before(o, k) by {
         lemma_before_same(o, k);
     };
-    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !a_before(o, k));
-    assert(keys.contains(a_min_key(keys)));
+    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !c_before(o, k));
 }
 
 /// The sorted keys are the keys, on both sides.
@@ -313,35 +207,6 @@ pub proof fn lemma_due_id(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: 
     }
 }
 
-/// A key with a prefix is the prefix and the rest.
-pub proof fn lemma_starts_split(key: Seq<char>, prefix: Seq<char>)
-    requires
-        spec_starts(key, prefix),
-    ensures
-        key == prefix + key.skip(prefix.len() as int),
-    decreases prefix.len(),
-{
-    let n = prefix.len() as int;
-    if prefix.len() == 0 {
-        assert(key =~= prefix + key.skip(0));
-    } else {
-        lemma_starts_split(key.drop_first(), prefix.drop_first());
-        let whole = prefix + key.skip(n);
-        assert(key.len() == whole.len());
-        assert forall|i: int| 0 <= i < key.len() implies key[i] == whole[i] by {
-            if i == 0 {
-            } else if i < n {
-                assert(key[i] == key.drop_first()[i - 1]);
-                assert(key.drop_first()[i - 1] == (prefix.drop_first() + key.drop_first().skip(n - 1))[i - 1]);
-                assert(prefix.drop_first()[i - 1] == prefix[i]);
-            } else {
-                assert(whole[i] == key.skip(n)[i - n]);
-            }
-        };
-        assert(key =~= whole);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Membership in the offers
 // ---------------------------------------------------------------------------
@@ -424,7 +289,7 @@ pub proof fn lemma_keep_offered(config: ServerConfig, state: StateV, now: Time, 
     if !outcome.not_due {
         let r = spec_due_result(state, outcome);
         let kept = spec_keep(config, state, now, work, Seq::empty());
-        assert(kept == seq![r] + Seq::<Result>::empty());
+        assert(kept == seq![r] + Seq::<AResult>::empty());
         assert(kept[0] == r);
     }
 }
@@ -714,7 +579,7 @@ pub proof fn lemma_over_tasks_offered(
     let lease = spec_keep(config, state, now, InternalV::TaskLeaseTimeout(head), Seq::empty());
     let retry = match t.retry_timeout_at {
         Some(_) => spec_keep(config, state, now, InternalV::TaskRetryTimeout(head), Seq::empty()),
-        None => Seq::<Result>::empty(),
+        None => Seq::<AResult>::empty(),
     };
     let rest = spec_over_tasks(config, state, now, keys.drop_first());
     assert(spec_over_tasks(config, state, now, keys) == lease + retry + rest);
