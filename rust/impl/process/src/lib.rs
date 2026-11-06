@@ -27,15 +27,19 @@
 //! reason.rs          the words a refusal carries
 //! cache.rs           documents this node remembers, by LRU under a byte budget
 //! debug.rs           debug.reset, debug.snap, debug.tick
-//! verified/          the node's proved bookkeeping: membership, cache, keys
+//! verified/          the node's proved bookkeeping: membership, cache, keys, the commit sequence
 //! ```
 //!
 //! The concrete Rover model decides: a request is `echod_concrete::handle`,
 //! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
 //! `create_occurrence`, each proved there to compute its specification.
 //! The handlers turn a document's rows into the model's `Doc`, run the
-//! step, and order the store calls around it. The runtime admits a protocol
-//! envelope and performs what comes out.
+//! step by `verified::flight::decide`, and commit by `verified::flight::
+//! Sequence`, which orders the store calls around it — key, document,
+//! previous key, fired key — and is proved to: `flight_spec::lemma_sequence`
+//! is that order, `lemma_step_is_decide` ties the document written and the
+//! write's condition to the concrete model's `spec_decide`. The runtime
+//! admits a protocol envelope and performs what comes out.
 
 // Under Verus only `verified` is loaded and checked; the modules around it
 // are plain Rust, compiled by cargo.

@@ -17,12 +17,17 @@
 //! node_spec.rs       what each of those decisions means
 //! commit.rs          which key to arm, which to remove, which to remember
 //! commit_spec.rs     what each of those decisions means
+//! flight.rs          the step on a document, and the commit: one store call after another
+//! flight_spec.rs     the step as the model's; the sequence, and lemma_sequence: its calls in order
 //! ```
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 
 pub mod commit;
 pub mod commit_spec;
+pub mod flight;
+#[cfg(verus_keep_ghost)]
+pub mod flight_spec;
 pub mod node;
 pub mod node_spec;
 

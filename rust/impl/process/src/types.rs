@@ -11,7 +11,6 @@
 use crate::doc::Promise;
 use crate::target::Target;
 use crate::verified;
-use crate::verified::node::Key;
 
 /// Names a store call the executor was asked to make.
 pub type OpId = u64;
@@ -145,12 +144,7 @@ pub enum Fired {
     Kept,
 }
 
-/// The key that fired a sweep, and the node that armed it.
-#[derive(Debug, Clone)]
-pub struct FiredKey {
-    pub key: Key,
-    pub by: String,
-}
+pub use crate::verified::flight::FiredKey;
 
 // ---------------------------------------------------------------------------
 // Notes: the closed sets an operator sees
