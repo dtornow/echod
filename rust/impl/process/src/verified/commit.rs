@@ -1,9 +1,9 @@
 //! A commit, as the node decides it: which deadline key to arm before the
 //! document is written, which to remove after, and which to remember.
 //!
-//! `flight` runs the store calls; this is the
-//! decision between them. Each function ensures it computes the specification
-//! in `echod_document::commit_spec`.
+//! `handler_docs` runs the store calls; this is the decision between
+//! them. Each function ensures it computes the specification in
+//! `commit_spec`.
 //!
 //! The rules: a key is armed for the document's nearest deadline unless the
 //! node remembers a key for that very instant, armed with the very version
@@ -17,10 +17,9 @@
 use vstd::prelude::*;
 
 use super::node::*;
-use super::types::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_document::commit_spec::*;
+use super::commit_spec::*;
 
 verus! {
 

@@ -8,6 +8,7 @@
 //! in this file: that is `State` in the crate root and the machines beside
 //! it.
 
+use crate::doc::Promise;
 use crate::target::Target;
 use crate::verified;
 use crate::verified::node::Key;
@@ -20,6 +21,14 @@ pub type RequestId = u64;
 pub type FlightId = u64;
 
 pub use echod_concrete::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+
+/// What a node pushes to a worker: a task to run, or a promise a listener
+/// waited on, settled. The concrete model's `Outbound`, addressed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Message {
+    Execute { task_id: String, version: u64 },
+    Unblock(verified::PromiseRecord),
+}
 
 // ---------------------------------------------------------------------------
 // In
@@ -96,7 +105,7 @@ pub enum DebugBody {
     /// A short refusal.
     Message(String),
     /// The documents a `debug.snap` read.
-    Snap { promises: Vec<verified::Promise>, schedules: Vec<verified::Schedule> },
+    Snap { promises: Vec<Promise>, schedules: Vec<verified::Schedule> },
 }
 
 /// Which loop a physical wake was armed for. The runtime sleeps, then hands
@@ -118,7 +127,7 @@ pub enum Effect {
     /// could not serve it.
     Reply { id: RequestId, response: Result<Answer, String> },
     /// Push a message to a worker. At most once; nothing is reported back.
-    Send { address: String, message: verified::Message },
+    Send { address: String, message: Message },
     /// Send `Event::Due` for `armed` once `after_ms` have passed, replacing
     /// any wake asked for before.
     Wake { after_ms: u64, armed: Armed },

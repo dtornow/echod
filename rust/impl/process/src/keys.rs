@@ -81,6 +81,13 @@ pub fn fnv1a(s: &str) -> u64 {
     crate::verified::node::fnv1a(s)
 }
 
+/// The start of the bucket `at` falls in. `bucket_ms` is at least 1, as
+/// `KeySpace::new` stores it.
+pub fn bucket_of(at: u64, bucket_ms: u64) -> u64 {
+    let width = bucket_ms.max(1);
+    at / width * width
+}
+
 /// The version a body quotes, as an S3 ETag: the same bytes are the same version.
 pub fn content_etag(body: &[u8]) -> crate::types::Etag {
     echod_concrete::content_etag(body)
@@ -139,7 +146,7 @@ impl KeySpace {
 
     /// The start of the bucket an instant falls in.
     pub fn bucket_of(&self, at: u64) -> u64 {
-        echod_document::timeouts::bucket_of(at, self.bucket_ms)
+        bucket_of(at, self.bucket_ms)
     }
 
     /// Every timer key lives under this.

@@ -1,6 +1,6 @@
 [package]
 name = "echod-process"
-description = "The decision core of echod: a pure state machine from events to effects, no I/O, no clock, no runtime. The proved document machine is src/verified."
+description = "The decision core of echod: a pure state machine from events to effects, no I/O, no clock, no runtime. The document machine is echod-concrete's; src/verified is the node's own proved bookkeeping."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,18 +10,19 @@ name = "echod_logic"
 path = "src/lib.rs"
 
 # Verus is not needed to build this crate: `verus_builtin_macros` erases every
-# spec, proof, requires and ensures under plain rustc. `./verify.sh` verifies
-# src/verified/mod.rs, not this crate's other modules.
+# spec, proof, requires and ensures under plain rustc. `cargo verus verify`
+# checks src/verified; the modules outside its `verus!` blocks are external.
 [dependencies]
 echod-concrete = { path = "../../spec/concrete" }
-echod-document = { path = "../document" }
 echod-types = { path = "../../comm/types" }
-echod-cron = { path = "../../comm/cron" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[package.metadata.verus]
+verify = true
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

@@ -4,20 +4,33 @@
 //!
 //! Every function here is a pure step: it reads and updates this state and
 //! nothing else, and its `ensures` says it computes the specification in
-//! `echod_document::node_spec`. What stays outside, trusted: the control
-//! flow in the rest of this crate, which calls these functions in order
-//! against the bucket, and the bucket itself.
+//! `node_spec`. What stays outside, trusted: the control flow in the rest
+//! of this crate, which calls these functions in order against the bucket,
+//! and the bucket itself.
 
 use vstd::hash_map::StringHashMap;
 use vstd::prelude::*;
 
-// `str == str` and `String::clone` are trusted primitives.
-pub use super::types::{clone_string, str_eq};
-
 #[cfg(verus_keep_ghost)]
-pub use echod_document::node_spec::*;
+pub use super::node_spec::*;
 
 verus! {
+
+/// `String::clone`, with its meaning stated.
+#[verifier::external_body]
+pub fn clone_string(s: &String) -> (r: String)
+    ensures r@ == s@,
+{
+    s.clone()
+}
+
+/// `str == str`, with its meaning stated.
+#[verifier::external_body]
+pub fn str_eq(a: &str, b: &str) -> (r: bool)
+    ensures r == (a@ == b@),
+{
+    a == b
+}
 
 /// FNV-1a over the bytes. The concrete model's `fnv1a` is this function.
 /// Trusted to be a function of the string, and to compute `hash`.

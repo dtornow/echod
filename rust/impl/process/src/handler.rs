@@ -4,7 +4,6 @@
 
 use crate::handler_docs::{Stage, Work};
 use crate::types::*;
-use crate::verified::Request;
 use crate::{Owner, State};
 
 impl State {
@@ -74,10 +73,6 @@ impl State {
         // The fleet's time, unless the request named its own instant.
         if !call.pinned {
             call.now = call.now.max(self.node.fleet_at);
-        }
-        // A schedule's next run is that instant, the same one the step uses.
-        if let Request::ScheduleCreate(q) = &mut call.request {
-            q.next_run_at = echod_cron::next_run_at(&q.cron, call.now);
         }
         let Call { id, kind, corr, target, request, action_kind, now, pinned: _, then } = call;
         let stage = match then {

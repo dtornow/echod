@@ -284,8 +284,7 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     let fired = m["data"]["task"]["id"].as_str().unwrap().to_string();
     let (status, _, data) = node.send("promise.get", json!({ "id": fired })).await;
     assert_eq!(status, 200);
-    assert_eq!(data["promise"]["tags"]["resonate:schedule"], "tick");
-    assert_eq!(data["promise"]["tags"]["resonate:origin"], fired);
+    assert_eq!(data["promise"]["tags"]["resonate:target"], worker.url);
     let (status, _, data) = node.send("schedule.get", json!({ "id": "tick" })).await;
     assert_eq!(status, 200);
     assert!(data["schedule"]["lastRunAt"].is_i64() || data["schedule"]["lastRunAt"].is_u64(), "{data}");
@@ -350,7 +349,7 @@ async fn one_node_appending() {
     one_node(Arc::clone(&store) as Arc<dyn Store>, 64, "").await;
     // the document is a log: more rows than promises
     let (bytes, _) = store.get("wf/a").await.unwrap().unwrap();
-    let loaded = echod_logic::doc::decode::<echod_logic::verified::Promise>(&bytes).unwrap();
+    let loaded = echod_logic::doc::decode::<echod_logic::doc::Promise>(&bytes).unwrap();
     assert_eq!(loaded.rows.len(), 2);
     assert!(loaded.row_count > 2, "{} rows", loaded.row_count);
 }

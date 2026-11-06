@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use echod_logic::doc::Promise;
 use echod_logic::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};
@@ -132,8 +133,8 @@ pub fn settle_in_req(d: &w::PromiseSettleData) -> rows::PromiseSettleReq {
     rows::PromiseSettleReq { id: d.id.clone(), state: settle_in(d.state), value: value_in(&d.value) }
 }
 
-/// The record a kernel promise exposes, as the wire carries it.
-pub fn promise_record(p: &rows::Promise) -> w::PromiseRecord {
+/// The record a promise's row exposes, as the wire carries it.
+pub fn promise_record(p: &Promise) -> w::PromiseRecord {
     promise_out(&rows::PromiseRecord {
         id: p.id.clone(),
         state: p.state,
@@ -238,14 +239,6 @@ pub fn response_out(kind: &str, corr: &str, action_kind: Option<&str>, r: &rows:
     }
 }
 
-/// A kernel response rendered with its reason: what the node answers, and
-/// what the simulator's model answers, so the two compare as equal.
-pub fn render(kind: &str, corr: &str, action_kind: Option<&str>, req: &rows::Request, r: &rows::Response, after: &rows::State) -> w::ResponseEnvelope {
-    let status = echod_logic::reason::status_of(r);
-    let why = (status >= 400).then(|| echod_logic::reason::reason_for(kind, req, status, after));
-    response_out(kind, corr, action_kind, r, why.as_deref())
-}
-
 /// An answer from the core as the protocol's envelope.
 pub fn envelope(answer: &echod_logic::Answer) -> w::ResponseEnvelope {
     match answer {
@@ -272,11 +265,11 @@ pub fn envelope(answer: &echod_logic::Answer) -> w::ResponseEnvelope {
 /// The protocol's `Snapshot` of a set of promise rows: the records, the
 /// callbacks and listeners they hold, their tasks, and the deadlines they
 /// owe. Messages are never queued here: they are routed as they arise.
-fn snapshot(promises: &[rows::Promise], schedules: &[rows::Schedule]) -> Value {
+fn snapshot(promises: &[Promise], schedules: &[rows::Schedule]) -> Value {
     let mut schedules: Vec<&rows::Schedule> = schedules.iter().collect();
     schedules.sort_by(|a, b| a.id.cmp(&b.id));
     let schedules: Vec<Value> = schedules.iter().map(|c| serde_json::to_value(schedule_out(c)).unwrap_or(Value::Null)).collect();
-    let mut promises: Vec<&rows::Promise> = promises.iter().collect();
+    let mut promises: Vec<&Promise> = promises.iter().collect();
     promises.sort_by(|a, b| a.id.cmp(&b.id));
     let records: Vec<Value> = promises.iter().map(|p| serde_json::to_value(promise_record(p)).unwrap_or(Value::Null)).collect();
     let mut callbacks: Vec<Value> = Vec::new();
@@ -291,7 +284,7 @@ fn snapshot(promises: &[rows::Promise], schedules: &[rows::Schedule]) -> Value {
         for address in &p.listeners {
             listeners.push(json!({ "id": p.id, "address": address }));
         }
-        if p.state == rows::PromiseState::Pending && rows::tags::exec_otype(&p.tags) != rows::tags::OType::Internal {
+        if p.state == rows::PromiseState::Pending && awaitable(&p.tags) {
             promise_timeouts.push(json!({ "id": p.id, "timeout": p.timeout_at }));
         }
         if let Some(t) = &p.task {
@@ -315,4 +308,11 @@ fn snapshot(promises: &[rows::Promise], schedules: &[rows::Schedule]) -> Value {
         "schedules": schedules,
         "messages": [],
     })
+}
+
+/// A promise another may wait on: targeted, global in scope, marked
+/// external, or a timer. Its timeout is a deadline the document owes.
+fn awaitable(tags: &rows::Tags) -> bool {
+    let is = |k: &str, v: &str| tags.iter().any(|(a, b)| a == k && b == v);
+    tags.iter().any(|(k, _)| k == "resonate:target") || is("resonate:scope", "global") || is("resonate:external", "true") || is("resonate:timer", "true")
 }

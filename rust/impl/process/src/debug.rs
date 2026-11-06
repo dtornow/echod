@@ -13,9 +13,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::verified::{self as rows, Promise, Schedule};
+use crate::verified::{self as rows, Schedule};
 
-use crate::doc;
+use crate::doc::{self, Promise};
 use crate::handler_docs::Work;
 use crate::target::Target;
 use crate::types::*;

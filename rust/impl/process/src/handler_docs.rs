@@ -1,24 +1,25 @@
 //! One origin: its promises, the task inside each, and a sweep of it.
 //!
 //! One step runs on a document at a time; the rest queue behind it. The step
-//! loads the document, sweeps it, runs the proved handler, drains what it
-//! left owed, and commits by `verified::commit`: the deadline key, then the
-//! document, then the key that key replaced. A lost race re-reads and
-//! decides again. A schedule's run uses the same commit; the decision itself
-//! is `handler_sched`.
+//! loads the document, runs the concrete model's step on it — `handle` for
+//! a request, `sweep` for a due key — and commits by `verified::commit`:
+//! the deadline key, then the document, then the key that key replaced. A
+//! lost race re-reads and decides again. A schedule's run uses the same
+//! commit; the decision itself is `handler_sched`.
 //!
 //! The cache holds the last document this process read or wrote for an
 //! origin, and is never used without asking the store.
 
 use std::collections::{HashMap, VecDeque};
 
+use echod_concrete::{doc_deadline, handle, peek, sweep, Doc, Outbound, Pending};
+
 use crate::verified::commit::Commit as Plan;
 use crate::verified::node::Key;
-use crate::verified::steps;
-use crate::verified::{OutboxEntry, Promise, Request, Response, Schedule, TaskFenceInnerRes, TaskFenceRes};
+use crate::verified::{Request, Response, Schedule, TaskFenceInnerRes, TaskFenceRes};
 
 use crate::cache::{Cache, Cached};
-use crate::doc::{self, Header, Loaded, Row};
+use crate::doc::{self, Header, Loaded, Promise, Row};
 use crate::target::Target;
 use crate::types::*;
 use crate::{Owner, State};
@@ -111,25 +112,47 @@ pub(crate) enum Progress {
     Failed(StoreError),
 }
 
+/// How many due steps one sweep runs before it commits. A document with
+/// more due is committed with its nearest deadline past, which arms a key
+/// that fires at once.
+pub(crate) const SWEEP_STEPS: u64 = 256;
+
 /// What a committed step answers with.
 pub(crate) struct Done {
     response: Option<Response>,
     /// Why the request was refused, in the protocol's words, if it was.
     why: Option<String>,
-    outbox: Vec<OutboxEntry>,
+    /// What the step tells workers once its write lands.
+    outbox: Vec<(String, Message)>,
     did: bool,
 }
 
-/// A fire past its decision: the schedule as loaded, the occurrence, and
-/// what the handler is asked.
+/// A fire past its decision: the schedule as loaded and as advanced, the
+/// occurrence due, and the origin it is born in.
 pub(crate) struct FireCtx {
     pub(crate) ws: Working<Schedule>,
     pub(crate) row: Schedule,
+    pub(crate) advanced: Vec<Schedule>,
+    pub(crate) pending: Pending,
     pub(crate) t1: u64,
-    pub(crate) at: u64,
-    pub(crate) promise_id: String,
     pub(crate) origin: String,
     pub(crate) next: u64,
+}
+
+/// What a step's notes say to whom: an `Execute` goes to the address the
+/// task's promise is targeted at; an `Unblock` to the listener's.
+pub(crate) fn dispatches(doc: &Doc, notes: Vec<Outbound>) -> Vec<(String, Message)> {
+    notes
+        .into_iter()
+        .filter_map(|n| match n {
+            Outbound::Execute { id, version } => {
+                let obj = peek(doc, &id)?;
+                let address = crate::reason::target_of(&obj.promise.tags)?.to_string();
+                Some((address, Message::Execute { task_id: id, version }))
+            }
+            Outbound::Unblock { address, promise } => Some((address, Message::Unblock(promise))),
+        })
+        .collect()
 }
 
 pub(crate) enum Phase {
@@ -141,7 +164,7 @@ pub(crate) enum Phase {
     FireWaitingOrigin(FireCtx),
     FireLoadingOrigin { op: OpId, revalidating: Option<Cached>, ctx: FireCtx },
     FireIdle { commit: Committing<Schedule> },
-    FireOrigin { commit: Committing<Promise>, ctx: FireCtx, schedules: Vec<Schedule>, outbox: Vec<OutboxEntry>, t: u64 },
+    FireOrigin { commit: Committing<Promise>, ctx: FireCtx, t: u64 },
     FireSchedule { commit: Committing<Schedule> },
 }
 
@@ -351,19 +374,16 @@ impl State {
                     self.commit_failed(f, e);
                 }
             },
-            Phase::FireOrigin { mut commit, ctx, schedules, outbox, t } => match self.commit_advance(fid, &mut commit, Some(outcome)) {
+            Phase::FireOrigin { mut commit, ctx, t } => match self.commit_advance(fid, &mut commit, Some(outcome)) {
                 Progress::Issued => {
-                    f.phase = Phase::FireOrigin { commit, ctx, schedules, outbox, t };
+                    f.phase = Phase::FireOrigin { commit, ctx, t };
                     self.flights.inflight.insert(fid, f);
                 }
                 Progress::Done(_) => {
                     self.note(Note::FireEnd { flight: fid, committed: true });
                     self.note(Note::Commit(CommitOutcome::Committed));
-                    for e in &outbox {
-                        self.send(e);
-                    }
                     self.release(&ctx.origin);
-                    self.fire_advance(f, ctx, schedules, t);
+                    self.fire_advance(f, ctx, t);
                 }
                 Progress::Failed(e) => {
                     self.note(Note::FireEnd { flight: fid, committed: false });
@@ -463,49 +483,44 @@ impl State {
         }
     }
 
-    /// The step: decided no earlier than the last step on the document,
-    /// the kernel being proved for an instant at or after it; then the
-    /// drain. A lost race runs this again on what it re-read, so the step
-    /// decides from the state it is given, which every kernel handler does.
+    /// The step: the concrete model's, on the document the rows make,
+    /// decided no earlier than the last step on the document. A request is
+    /// `handle`; a due key is `sweep`, every due step on the document up
+    /// to `SWEEP_STEPS`. A lost race runs this again on what it re-read.
     pub(crate) fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
-        let mut state = R::state_of(&w.loaded.rows);
-        let now = steps::clamp_now(w.loaded.stamp, work.now());
-        let (response, why, did) = match work {
+        let doc = R::doc_of(&w.loaded.rows);
+        let now = doc::clamp_now(w.loaded.stamp, work.now());
+        let (doc, response, why, outbox) = match work {
             Work::Request { req, kind, .. } => {
-                // Every request first sweeps its document: every lease and
-                // deadline on it is read against the clock, as the Lean
-                // specification's `Object.project` reads them, so the handler
-                // sees a document on which nothing is due. A client never sees
-                // a lease held past its end. The sweep's changes ride the
-                // request's write; an idle sweep writes nothing.
-                let _ = steps::sweep(&mut state, now, self.cfg.retry_timeout);
-                let r = state.handle(req, now, self.cfg.retry_timeout);
+                let (doc, r) = handle(doc, req, now);
                 let status = crate::reason::status_of(&r);
-                let why = (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &state));
-                (Some(r), why, false)
+                let why = (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &doc));
+                (doc, Some(r), why, Vec::new())
             }
             Work::Sweep { .. } => {
-                let did = steps::sweep(&mut state, now, self.cfg.retry_timeout);
-                (None, None, did)
+                let (doc, _, notes) = sweep(doc, now, self.cfg.retry_timeout, SWEEP_STEPS);
+                let outbox = dispatches(&doc, notes);
+                (doc, None, None, outbox)
             }
-            Work::Fire { .. } => (None, None, false),
+            Work::Fire { .. } => (doc, None, None, Vec::new()),
         };
-        steps::drain(&mut state, now, self.cfg.retry_timeout);
-        let rows = R::rows_of(&state);
+        let deadline = doc_deadline(&doc);
+        let rows = R::rows_of(doc);
         let fired = match work {
             Work::Sweep { fired, .. } => fired.clone(),
             _ => None,
         };
-        let commit = self.commit_new(w, rows, now, did, fired);
-        (commit, Done { response, why, outbox: state.outbox, did })
+        let commit = self.commit_new(w, rows, deadline, now, fired);
+        let did = matches!(work, Work::Sweep { .. }) && commit.changed_any;
+        (commit, Done { response, why, outbox, did })
     }
 
     /// A committed step: the messages out, the answer back.
     pub(crate) fn committed(&mut self, f: Flight, done: Done, fired: Fired) {
         self.note(Note::Commit(CommitOutcome::Committed));
         let Done { response, why, outbox, did } = done;
-        for e in &outbox {
-            self.send(e);
+        for (address, message) in outbox {
+            self.send(address, message);
         }
         let mut f = f;
         match &mut f.work {
@@ -596,8 +611,8 @@ impl State {
         }
     }
 
-    pub(crate) fn send(&mut self, e: &OutboxEntry) {
-        self.emit(Effect::Send { address: e.address.clone(), message: e.message.clone() });
+    pub(crate) fn send(&mut self, address: String, message: Message) {
+        self.emit(Effect::Send { address, message });
     }
 
     // -----------------------------------------------------------------------
@@ -605,12 +620,11 @@ impl State {
     // -----------------------------------------------------------------------
 
     /// The decisions before the first store call: the rows that changed,
-    /// the nearest deadline, and the verified `prepare`. `did` is whether a
-    /// sweep fired anything; `fired` the key whose firing this is.
-    pub(crate) fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, now: u64, did: bool, fired: Option<FiredKey>) -> Committing<R> {
+    /// and the verified `prepare` given the document's nearest deadline.
+    /// `fired` is the key whose firing this is.
+    pub(crate) fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> Committing<R> {
         let changed = doc::changed(&w.loaded.rows, &rows);
-        let changed_any = did || !changed.is_empty() || rows.len() != w.loaded.rows.len();
-        let deadline = steps::next_deadline(&R::state_of(&rows));
+        let changed_any = !changed.is_empty() || rows.len() != w.loaded.rows.len();
         let etag = w.etag.as_ref().map(|e| e.0.clone());
         let plan = self.node.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
         Committing { w, rows, changed, changed_any, now, fired, plan, step: Step::Start }

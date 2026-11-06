@@ -18,49 +18,70 @@
 //! handler_timers.rs  which keys are due; an origin to docs, a schedule to sched
 //! state.rs           the node, the timers, the cache, the steps in progress
 //! state_node.rs      the members and the epoch, the versions of origins seen
-//! state_docs.rs      the promise rows of one origin
-//! state_sched.rs     one schedule's rows
 //! state_timers.rs    deadline keys ordered by when they fall due
 //! types.rs           events, store calls and outcomes, effects, notes
 //! config.rs          the dials
 //! keys.rs            where everything lives under the bucket
-//! doc.rs             a document: rows in, rows out, the fold between
+//! doc.rs             a document: rows in, the model's Doc, rows out
 //! target.rs          an origin's document, or a schedule's
 //! reason.rs          the words a refusal carries
 //! cache.rs           documents this node remembers, by LRU under a byte budget
 //! debug.rs           debug.reset, debug.snap, debug.tick
-//! verified/          the proved document machine
+//! verified/          the node's proved bookkeeping: membership, cache, keys
 //! ```
 //!
-//! `verified` decides. The handlers order the store calls around those
-//! decisions. The runtime admits a protocol envelope and performs what comes
-//! out. `./verify.sh` proves `verified`; it does not load the rest.
+//! The concrete Rover model decides: a request is `echod_concrete::handle`,
+//! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
+//! `create_occurrence`, each proved there to compute its specification.
+//! The handlers turn a document's rows into the model's `Doc`, run the
+//! step, and order the store calls around it. The runtime admits a protocol
+//! envelope and performs what comes out.
 
+// Under Verus only `verified` is loaded and checked; the modules around it
+// are plain Rust, compiled by cargo.
+#[cfg(not(verus_keep_ghost))]
 pub mod cache;
+#[cfg(not(verus_keep_ghost))]
 pub mod config;
+#[cfg(not(verus_keep_ghost))]
 mod debug;
+#[cfg(not(verus_keep_ghost))]
 pub mod doc;
+#[cfg(not(verus_keep_ghost))]
 mod handler;
+#[cfg(not(verus_keep_ghost))]
 mod handler_docs;
+#[cfg(not(verus_keep_ghost))]
 mod handler_node;
+#[cfg(not(verus_keep_ghost))]
 mod handler_sched;
+#[cfg(not(verus_keep_ghost))]
 mod handler_timers;
+#[cfg(not(verus_keep_ghost))]
 pub mod keys;
+#[cfg(not(verus_keep_ghost))]
 pub mod reason;
+#[cfg(not(verus_keep_ghost))]
 mod state;
-mod state_docs;
+#[cfg(not(verus_keep_ghost))]
 mod state_node;
-mod state_sched;
+#[cfg(not(verus_keep_ghost))]
 mod state_timers;
+#[cfg(not(verus_keep_ghost))]
 pub mod target;
+#[cfg(not(verus_keep_ghost))]
 pub mod types;
 pub mod verified;
 
+#[cfg(not(verus_keep_ghost))]
 pub use config::Config;
+#[cfg(not(verus_keep_ghost))]
 pub use state::{Snapshot, State};
+#[cfg(not(verus_keep_ghost))]
 pub use state_node::{Announcement, Configuration, Membership};
+#[cfg(not(verus_keep_ghost))]
 pub use target::Target;
-pub use types::{Answer, Armed, Call, DebugBody, DebugCall, Effect, Event, Note};
-pub use verified::Message;
-
+#[cfg(not(verus_keep_ghost))]
+pub use types::{Answer, Armed, Call, DebugBody, DebugCall, Effect, Event, Message, Note};
+#[cfg(not(verus_keep_ghost))]
 pub(crate) use state::Owner;

@@ -1,52 +1,29 @@
-//! The proved half of the process: one document, and what a node decides
-//! about membership, its cache, and the deadline keys it armed.
+//! The proved half of the process's own bookkeeping: what a node decides
+//! about the membership, its cache, and the deadline keys it armed, and
+//! which key a commit arms, removes, and remembers. Each function ensures
+//! it computes its `spec_*`.
 //!
-//! `./verify.sh` loads this file as its crate root, then the document
-//! specification. `cargo build` loads it as `echod_logic::verified`, with
-//! the ghost code erased. The modules beside this one run the store calls
-//! these functions decide between.
+//! The document machine is `echod_concrete`: `handle`, `sweep`, `run_due`
+//! and `create_occurrence` are proved there to compute `spec_handle`,
+//! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
+//! concrete Rover model. `doc.rs` turns a document's rows into its `Doc`
+//! and back; the handlers order the store calls around those steps.
 //!
-//! `types`, `tags`, `object`, and the specification modules are
-//! `echod_document`. A handler ensures it computes its `spec_*`.
+//! `cargo verus verify -p echod-process` checks this module. `cargo build`
+//! compiles it with the ghost code erased.
 //!
 //! ```text
-//! store.rs           State: three row vectors whose view is the concrete AState
-//! store_proof.rs     a row at an index is the entry at its key
-//! external.rs        the 18 request handlers; each ensures it computes its spec_*
-//! internal.rs        the 6 internal steps; each ensures it computes its spec
-//! steps.rs           sweep, drain, next_deadline, clamp_now, schedule_due
 //! node.rs            membership, cache versions, armed keys
+//! node_spec.rs       what each of those decisions means
 //! commit.rs          which key to arm, which to remove, which to remember
+//! commit_spec.rs     what each of those decisions means
 //! ```
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code, unused_variables))]
 
 pub mod commit;
-pub mod external;
-pub mod internal;
+pub mod commit_spec;
 pub mod node;
-pub mod steps;
-pub mod store;
-pub mod store_proof;
+pub mod node_spec;
 
-pub use echod_document::object;
-pub use echod_document::tags;
-pub use echod_document::types;
-
-#[cfg(verus_keep_ghost)]
-pub use echod_document::external_proof;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::internal_proof;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::internal_spec;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::properties;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::properties_proof;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::spec;
-#[cfg(verus_keep_ghost)]
-pub use echod_document::steps_spec;
-
-pub use store::*;
-pub use types::*;
+pub use echod_types::*;
