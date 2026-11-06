@@ -21,8 +21,11 @@
 //! sends no output to the outside is an empty abstract execution. The step
 //! that begins a flight is one abstract step, taken on the owners' caches;
 //! the store steps and the reply that closes the flight are stutters.
-//! The trait's `ensures` on `on_event` states that the executable results
-//! equal `spec_on_event`. That proof is separate from this simulation.
+//! The trait's `ensures` on `initial` and `on_event` states that the
+//! executable results equal `spec_initial` and `spec_on_event`: the
+//! executable models are the ones this theorem is about. That holds, checked
+//! by Verus, for the abstract model and for the concrete store; the concrete
+//! node's side is open, since the executable `Node` is outside `verus!`.
 //!
 //! The concrete node view carries the cached documents, the open flight, and
 //! the occurrences still owed. A retry offers `Dispatch::Execute` and a
