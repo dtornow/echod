@@ -11,8 +11,9 @@ path = "src/lib.rs"
 
 # Verus is not needed to build this crate: `verus_builtin_macros` erases every
 # spec, proof, requires and ensures under plain rustc. `cargo verus verify`
-# checks src/verified; the modules outside its `verus!` blocks are external.
+# checks the whole crate: `State::on_event` computes `spec_on_event`.
 [dependencies]
+echod-abstract = { path = "../../spec/abstract" }
 echod-concrete = { path = "../../spec/concrete" }
 echod-types = { path = "../../comm/types" }
 vstd = "=0.0.0-2026-10-11-0230"

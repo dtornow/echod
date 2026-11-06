@@ -1,7 +1,14 @@
 //! The dials the core decides with. No flags, no environment: the
 //! executor fills these in from wherever it takes its configuration.
 
+use vstd::contrib::make_spec_type;
+use vstd::prelude::*;
+
+verus! {
+
+#[make_spec_type]
 #[derive(Debug, Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Config {
     /// This node's id, as the other nodes and the bucket know it.
     pub node_id: String,
@@ -31,6 +38,8 @@ pub struct Config {
     /// and a request may name the instant it is decided at.
     pub debug: bool,
 }
+
+} // verus!
 
 impl Config {
     /// A node on an in-memory store, for tests.

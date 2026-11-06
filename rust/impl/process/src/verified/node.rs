@@ -67,6 +67,22 @@ impl View for Key {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+impl DeepView for Key {
+    type V = AKey;
+    open spec fn deep_view(&self) -> AKey {
+        self.view()
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for NodeCore {
+    type V = ANode;
+    open spec fn deep_view(&self) -> ANode {
+        self.view()
+    }
+}
+
 pub open spec fn opt_key(o: Option<Key>) -> Option<AKey> {
     match o {
         Some(k) => Some(k@),

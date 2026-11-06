@@ -108,6 +108,22 @@ impl View for FiredKey {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+impl DeepView for FiredKey {
+    type V = AFired;
+    open spec fn deep_view(&self) -> AFired {
+        self.view()
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Sequence {
+    type V = ASequence;
+    open spec fn deep_view(&self) -> ASequence {
+        self.view()
+    }
+}
+
 pub open spec fn opt_fired(o: Option<FiredKey>) -> Option<AFired> {
     match o {
         Some(f) => Some(f@),

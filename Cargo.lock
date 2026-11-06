@@ -1156,6 +1156,7 @@ dependencies = [
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
+ "echod-abstract",
  "echod-concrete",
  "echod-types",
  "serde",
