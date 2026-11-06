@@ -1102,6 +1102,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-bridge"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract",
+ "echod-concrete",
+ "echod-document",
+ "echod-types",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
