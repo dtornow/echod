@@ -27,8 +27,15 @@
 //! reason.rs          the words a refusal carries
 //! cache.rs           documents this node remembers, by LRU under a byte budget
 //! debug.rs           debug.reset, debug.snap, debug.tick
-//! verified/          the node's proved bookkeeping: membership, cache, keys, the commit sequence
+//! verified/          the node's bookkeeping: membership, cache, keys, the commit sequence, and the trust list
 //! ```
+//!
+//! The whole crate is proved: `State::on_event` ensures it computes
+//! `handler::spec_on_event`, the step of the process as a specification
+//! over `StateSpec`, and every function beneath it ensures its own
+//! `spec_*` the same way. `cargo verus verify -p echod-process` checks it;
+//! `cargo build` compiles the same sources with the ghost code erased.
+//! What is assumed is listed in `verified/mod.rs`.
 //!
 //! The concrete Rover model decides: a request is `echod_concrete::handle`,
 //! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
@@ -41,51 +48,32 @@
 //! write's condition to the concrete model's `spec_decide`. The runtime
 //! admits a protocol envelope and performs what comes out.
 
-// Under Verus only `verified` is loaded and checked; the modules around it
-// are plain Rust, compiled by cargo.
-#[cfg(not(verus_keep_ghost))]
+// The `verus!` macro writes a destructuring `let` with every field named
+// twice; the lint on that is noise here.
+#![allow(non_shorthand_field_patterns)]
+
+// Every module is inside `verus!`: cargo compiles the code, cargo-verus
+// checks that `State::on_event` computes `spec_on_event`.
 pub mod cache;
-#[cfg(not(verus_keep_ghost))]
 pub mod config;
-#[cfg(not(verus_keep_ghost))]
-mod debug;
-#[cfg(not(verus_keep_ghost))]
+pub mod debug;
 pub mod doc;
-#[cfg(not(verus_keep_ghost))]
-mod handler;
-#[cfg(not(verus_keep_ghost))]
-mod handler_docs;
-#[cfg(not(verus_keep_ghost))]
-mod handler_node;
-#[cfg(not(verus_keep_ghost))]
-mod handler_sched;
-#[cfg(not(verus_keep_ghost))]
-mod handler_timers;
-#[cfg(not(verus_keep_ghost))]
+pub mod handler;
+pub mod handler_docs;
+pub mod handler_node;
+pub mod handler_sched;
+pub mod handler_timers;
 pub mod keys;
-#[cfg(not(verus_keep_ghost))]
 pub mod reason;
-#[cfg(not(verus_keep_ghost))]
-mod state;
-#[cfg(not(verus_keep_ghost))]
-mod state_node;
-#[cfg(not(verus_keep_ghost))]
-mod state_timers;
-#[cfg(not(verus_keep_ghost))]
+pub mod state;
+pub mod state_node;
+pub mod state_timers;
 pub mod target;
-#[cfg(not(verus_keep_ghost))]
 pub mod types;
 pub mod verified;
 
-#[cfg(not(verus_keep_ghost))]
 pub use config::Config;
-#[cfg(not(verus_keep_ghost))]
 pub use state::{Snapshot, State};
-#[cfg(not(verus_keep_ghost))]
 pub use state_node::{Announcement, Configuration, Membership};
-#[cfg(not(verus_keep_ghost))]
 pub use target::Target;
-#[cfg(not(verus_keep_ghost))]
 pub use types::{Answer, Armed, Call, DebugBody, DebugCall, Effect, Event, Message, Note};
-#[cfg(not(verus_keep_ghost))]
-pub(crate) use state::Owner;
