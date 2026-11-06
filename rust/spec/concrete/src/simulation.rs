@@ -3972,7 +3972,7 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
                 assert(store.entries[idx].body == c.body);
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
                 assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
-                let entry = EntryV { key, body: decided, version: (store.entries[idx].version + 1) as nat };
+                let entry = EntryV { key, body: decided, version: crate::store::spec_bump(store.entries[idx].version) };
                 let (next, outcome) = spec_apply(store, request_of(flight));
                 assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
                 assert(outcome == StoreOutcome::Written(spec_etag(decided)));

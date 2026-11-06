@@ -186,7 +186,9 @@ impl View for Local {
 // The step, as a specification. `spec_step` is what
 // `RoverModel::spec_on_event` returns: a node runs one flight, the store
 // applies one call. The executable `on_event` is obliged, by the trait, to
-// return results whose views are this sequence. That equality is not proved.
+// return results whose views are this sequence. The store's arm is proved
+// (`Store::step` computes `spec_store`); the node's arm is open, since the
+// executable `Node` is outside `verus!` and its view is uninterpreted.
 // ---------------------------------------------------------------------------
 
 /// Opaque: the choice is read through the string lemmas alone.
@@ -379,13 +381,11 @@ fn route_acts(acts: &[crate::node::Act]) -> Vec<(Pid, Message)> {
 
 verus! {
 
-/// `Node::new` and `Store::empty` are exec code outside `verus!`; Verus
-/// knows their shape and nothing else. The trait's `ensures` on `initial`
-/// and `on_event` below are the exec == spec link; they are not proved, and
-/// Verus reports them.
+/// `Node::new` is exec code outside `verus!`; Verus knows its shape and
+/// nothing else. The trait's `ensures` on `initial` and `on_event` below are
+/// the exec == spec link; the store's side is proved (`Store::empty`,
+/// `Store::step`), the node's side is not, and Verus reports them.
 pub assume_specification [Node::new](address: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Node;
-
-pub assume_specification [Store::empty](appendable: bool) -> Store;
 
 /// A node's step. The body is a node machine, whose methods Verus does
 /// not read; `spec_node` is the step as a specification.
@@ -452,32 +452,91 @@ impl Process<(), Pid, Message> for Node {
     }
 }
 
-/// The store's step. `spec_store` is the same step as a specification.
+/// The store's results, as the specification sees them.
+pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| StepResultV { state: LocalV::Store(pair.0@), send: pair.1@ })
+}
+
+fn same_pid(a: Pid, b: Pid) -> (r: bool)
+    ensures
+        r == (a == b),
+{
+    match (a, b) {
+        (Pid::Outside, Pid::Outside) => true,
+        (Pid::Store, Pid::Store) => true,
+        (Pid::Node(x), Pid::Node(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Whether the store has answered `(sender, op)`.
+fn seen_has(seen: &Vec<(Pid, u64)>, sender: Pid, op: u64) -> (r: bool)
+    ensures
+        r == seen@.contains((sender, op)),
+{
+    let mut i = 0;
+    while i < seen.len()
+        invariant
+            i <= seen.len(),
+            forall|j: int| 0 <= j < i ==> seen@[j] != (sender, op),
+        decreases seen.len() - i,
+    {
+        let (p, o) = seen[i];
+        if same_pid(p, sender) && o == op {
+            assert(seen@[i as int] == (sender, op));
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+impl Store {
+    /// The store's step: `spec_store`. Each `(sender, op)` is answered once;
+    /// a delivery it has answered is a stutter.
+    pub fn step(&self, event: &ProcessEvent<Pid, Message>) -> (r: Vec<(Store, Vec<(Pid, Message)>)>)
+        ensures
+            store_results_v(r@) == spec_store(self@, *event),
+    {
+        let mut r: Vec<(Store, Vec<(Pid, Message)>)> = Vec::new();
+        match event {
+            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+                if seen_has(&self.seen, *sender, *op) {
+                    r.push((self.copy(), Vec::new()));
+                    proof {
+                        assert(store_results_v(r@) =~~= spec_store(self@, *event));
+                    }
+                    return r;
+                }
+                let (mut next, outcome) = self.apply(call);
+                next.seen.push((*sender, *op));
+                let mut send: Vec<(Pid, Message)> = Vec::new();
+                send.push((*sender, Message::StoreReply { op: *op, outcome }));
+                r.push((next, send));
+                proof {
+                    assert(store_results_v(r@) =~~= spec_store(self@, *event));
+                }
+                r
+            },
+            _ => {
+                proof {
+                    assert(store_results_v(r@) =~~= Seq::<StepResultV<LocalV, Pid, Message>>::empty());
+                }
+                r
+            },
+        }
+    }
+}
+
+/// The store's step, as a process.
 impl Process<(), Pid, Message> for Store {
-    #[verifier::external_body]
     fn on_event(
         &self,
         _config: &(),
         _now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> Vec<(Self, Vec<(Pid, Message)>)> {
-        match event {
-            ProcessEvent::Receive {
-                sender,
-                message: Message::StoreReq { op, call },
-            } => {
-                if self.seen.contains(&(*sender, *op)) {
-                    return vec![(self.clone(), Vec::new())];
-                }
-                let (mut next, outcome) = self.apply(call);
-                next.seen.push((*sender, *op));
-                vec![(
-                    next,
-                    vec![(*sender, Message::StoreReply { op: *op, outcome })],
-                )]
-            }
-            _ => Vec::new(),
-        }
+        self.step(event)
     }
 }
 
@@ -539,11 +598,23 @@ impl RoverModel for Model {
                 }
             }
             (Pid::Store, Local::Store(store)) => {
-                let mut pairs = store.on_event(&(), now, event);
-                while !pairs.is_empty()
+                let mut pairs = store.step(event);
+                let ghost all = pairs@;
+                while pairs.len() > 0
+                    invariant
+                        results@.len() + pairs@.len() == all.len(),
+                        pairs@ == all.skip(results@.len() as int),
+                        forall|i: int| 0 <= i < results@.len() ==> {
+                            let result = #[trigger] results@[i];
+                            StepResultV { state: result.state@, send: result.send@ } == store_results_v(all)[i]
+                        },
                     decreases pairs@.len(),
                 {
+                    let ghost k = results@.len() as int;
                     let (store, send) = pairs.remove(0);
+                    proof {
+                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+                    }
                     results.push(StepResult { state: Local::Store(store), send });
                 }
             }
@@ -569,7 +640,7 @@ impl RoverModel for Model {
 
     /// One local step. `spec_step` is that transition. The trait's
     /// `ensures` on `on_event` is the equality with the executable results;
-    /// that proof is not written yet.
+    /// it holds for the store's arm and is open for the node's.
     open spec fn spec_on_event(
         &self,
         config: Fleet,
