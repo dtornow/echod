@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use echod_logic::doc::Promise;
+use echod_logic::doc::codec::{self, Promise};
 use echod_logic::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};
@@ -255,7 +255,10 @@ pub fn envelope(answer: &echod_logic::Answer) -> w::ResponseEnvelope {
                 echod_logic::DebugBody::Object => json!({}),
                 echod_logic::DebugBody::List => json!([]),
                 echod_logic::DebugBody::Message(s) => Value::String(s.clone()),
-                echod_logic::DebugBody::Snap { promises, schedules } => snapshot(promises, schedules),
+                echod_logic::DebugBody::Snap { origins, schedules } => {
+                    let promises: Vec<Promise> = origins.iter().flat_map(codec::promises).collect();
+                    snapshot(&promises, schedules)
+                },
             };
             w::ResponseEnvelope::new(kind.clone(), corr.clone(), *status as i32, data)
         }

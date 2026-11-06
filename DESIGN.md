@@ -7,7 +7,7 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. `src/verified` is the proved document machine: one transition per request, and what a node decides about membership, cache versions and deadline keys, the commit, and the sweep and drain. No I/O, no clock, no runtime |
+| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover` (library `echod_rover`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
@@ -17,7 +17,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
-`src/verified` is proved equal to the concrete specification, the commit sequence included: `flight_spec::lemma_sequence` is the order of store calls around each step. The rest of the process names keys, builds bytes and makes the calls. The runtime performs what the
+The process is proved equal to its specification, `State::on_event` to `spec_on_event`, the commit sequence included: `flight_spec::lemma_sequence` is the order of store calls around each step. The text of keys and the bytes of documents are assumed, stated as specifications (`src/verified/mod.rs`). The runtime performs what the
 process asks. The simulator is the evidence. The core and the node depend
 on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
@@ -55,11 +55,15 @@ the `Doc` a step leaves as rows again (`into_entries`); `handler_docs`
 decides a request by `handle` and a fired key by `sweep`; `handler_sched`
 runs a schedule by `run_due` and `create_occurrence`. Once the write lands,
 an `Execute` note goes to the address of the task's `resonate:target` tag,
-an `Unblock` to its listener. `src/verified` in the process is the node's
-own proved bookkeeping: membership, cache versions, the deadline keys it
+an `Unblock` to its listener. Every module of the process is inside
+`verus!`: each exec function ensures it computes its `spec_*` twin over the
+state's view, up to `State::on_event == spec_on_event`. `src/verified` is
+the node's own bookkeeping: membership, cache versions, the deadline keys it
 armed, and which key a commit arms, removes and remembers (`node.rs`,
-`commit.rs`, each ensuring its `spec_*` in `node_spec.rs`,
-`commit_spec.rs`). Trusted there: `fnv1a`, `str_eq`, `clone_string`.
+`commit.rs`, each ensuring its `spec_*` in `node_spec.rs`, `commit_spec.rs`).
+What is assumed is listed in `src/verified/mod.rs`: the text of keys, the
+bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
+`clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
 -p echod-concrete` and `-p echod-process` run Verus. Verus pins its own
@@ -88,7 +92,7 @@ rust/impl/process/src/
   reason.rs          the words a refusal carries
   cache.rs           documents this node remembers, by LRU under a byte budget
   debug.rs           debug.reset, debug.snap, debug.tick, once the runtime has accepted them
-  verified/          the node's proved bookkeeping: membership, cache, keys
+  verified/          the node's bookkeeping: membership, cache, keys, the commit sequence, the trust list
 rust/impl/runtime/src/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
