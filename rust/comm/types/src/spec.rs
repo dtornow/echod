@@ -179,6 +179,21 @@ pub enum AResponse {
     TaskFence(ATaskFenceRes),
 }
 
+/// A request is a value the models take as it is: its deep view is itself.
+impl DeepView for Request {
+    type V = Request;
+    open spec fn deep_view(&self) -> Request {
+        *self
+    }
+}
+
+impl DeepView for Response {
+    type V = AResponse;
+    open spec fn deep_view(&self) -> AResponse {
+        self.view()
+    }
+}
+
 impl View for Response {
     type V = AResponse;
     open spec fn view(&self) -> AResponse {

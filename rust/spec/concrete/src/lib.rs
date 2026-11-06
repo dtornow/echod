@@ -48,7 +48,10 @@ pub use refine::abstract_model;
 
 pub use echod_types::*;
 pub use model::Model;
+#[cfg(verus_keep_ghost)]
+pub use node::{lemma_doc_view, lemma_obj_view, lemma_outbound_view, lemma_pending_view};
 pub use node::{
+    clone_doc, doc_len, empty_origin, empty_schedule, keys_within, same_doc,
     create_occurrence, doc_deadline, empty_doc, handle, peek, run_due, sweep, Doc, Obj, Objects,
     Outbound, Pending, Prom, Tk,
 };

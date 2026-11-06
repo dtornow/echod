@@ -355,6 +355,20 @@ impl View for Pending {
     }
 }
 
+impl DeepView for Doc {
+    type V = DocV;
+    open spec fn deep_view(&self) -> DocV {
+        self.view()
+    }
+}
+
+impl DeepView for Pending {
+    type V = PendingV;
+    open spec fn deep_view(&self) -> PendingV {
+        self.view()
+    }
+}
+
 impl View for Outbound {
     type V = NoteV;
     closed spec fn view(&self) -> NoteV {
@@ -1012,7 +1026,7 @@ fn same_schedule(a: &Schedule, b: &Schedule) -> (r: bool)
 }
 
 /// `next == previous`, on documents.
-fn same_doc(a: &Doc, b: &Doc) -> (r: bool)
+pub fn same_doc(a: &Doc, b: &Doc) -> (r: bool)
     ensures
         r == (a@ == b@),
 {
@@ -1022,6 +1036,132 @@ fn same_doc(a: &Doc, b: &Doc) -> (r: bool)
         (Doc::Schedule(None), Doc::Schedule(None)) => true,
         _ => false,
     }
+}
+
+/// A copy of a document, equal to its source.
+pub fn clone_doc(d: &Doc) -> (r: Doc)
+    ensures
+        r == *d,
+{
+    match d {
+        Doc::Origin(objs) => Doc::Origin(objs.clone()),
+        Doc::Schedule(slot) => Doc::Schedule(echod_abstract::trusted::copy(slot)),
+    }
+}
+
+/// What a document's view is, variant by variant, for code outside this
+/// crate that matches on a `Doc`.
+pub proof fn lemma_doc_view(d: &Doc)
+    ensures
+        d@ == match d {
+            Doc::Origin(objs) => DocV::Origin(objs@),
+            Doc::Schedule(slot) => DocV::Schedule(*slot),
+        },
+{
+}
+
+/// What an object's view says of its tags and its task, for code outside
+/// this crate that reads an object it peeked.
+pub proof fn lemma_obj_view(o: &Obj)
+    ensures
+        o@.promise.tags == o.promise.tags,
+        (o@.task is Some) == (o.task is Some),
+        o.task is Some ==> o@.task->Some_0.state == o.task->Some_0.state,
+{
+}
+
+/// How many rows a document holds: its objects, or its one schedule.
+pub open spec fn spec_doc_len(d: DocV) -> nat {
+    match d {
+        DocV::Origin(m) => m.dom().len(),
+        DocV::Schedule(Some(_)) => 1,
+        DocV::Schedule(None) => 0,
+    }
+}
+
+pub fn doc_len(d: &Doc) -> (r: usize)
+    ensures
+        r as nat == spec_doc_len(d@),
+{
+    match d {
+        Doc::Origin(objs) => {
+            proof {
+                use_type_invariant(objs);
+                lemma_sorted_keys(objs.entries@);
+            }
+            objs.entries.len()
+        },
+        Doc::Schedule(Some(_)) => 1,
+        Doc::Schedule(None) => 0,
+    }
+}
+
+/// What a note's view is, variant by variant.
+pub proof fn lemma_outbound_view(n: &Outbound)
+    ensures
+        n@ == match n {
+            Outbound::Execute { id, version } => NoteV::Execute { id: id@, version: *version },
+            Outbound::Unblock { address, promise } => NoteV::Unblock { address: address@, promise: *promise },
+        },
+{
+}
+
+/// What an occurrence's view is, field by field.
+pub proof fn lemma_pending_view(p: &Pending)
+    ensures
+        p@ == (PendingV { promise: p.promise@, at: p.at, timeout: p.timeout, param: p.param, tags: p.tags }),
+{
+}
+
+/// An origin's empty document.
+pub fn empty_origin() -> (r: Doc)
+    ensures
+        r@ == DocV::Origin(Map::<Seq<char>, ObjV>::empty()),
+{
+    Doc::Origin(Objects::empty())
+}
+
+/// A schedule's empty document.
+pub fn empty_schedule() -> (r: Doc)
+    ensures
+        r@ == DocV::Schedule(None),
+{
+    Doc::Schedule(None)
+}
+
+/// Every id of `a` is an id of `b`: nothing was removed between them.
+pub fn keys_within(a: &Objects, b: &Objects) -> (r: bool)
+    ensures
+        r == a@.dom().subset_of(b@.dom()),
+{
+    proof {
+        use_type_invariant(a);
+    }
+    let mut i = 0;
+    while i < a.entries.len()
+        invariant
+            i <= a.entries.len(),
+            forall|j: int| 0 <= j < i ==> b@.contains_key(#[trigger] a.entries@[j].0@),
+        decreases a.entries.len() - i,
+    {
+        if !b.contains(&a.entries[i].0) {
+            proof {
+                lemma_key_set(a.entries@, a.entries@[i as int].0@);
+                assert(spec_has_key(a.entries@, a.entries@[i as int].0@));
+                assert(a@.contains_key(a.entries@[i as int].0@));
+            }
+            return false;
+        }
+        i += 1;
+    }
+    proof {
+        assert forall|k: Seq<char>| a@.dom().contains(k) implies b@.dom().contains(k) by {
+            lemma_key_set(a.entries@, k);
+            let j = spec_index(a.entries@, k);
+            assert(a.entries@[j].0@ == k);
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

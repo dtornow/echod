@@ -8,6 +8,7 @@
 //! characters (`chars_of`, `string_of`).
 
 use vstd::pervasive::VecAdditionalExecFns;
+use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
@@ -16,6 +17,7 @@ use crate::model::Pid;
 
 verus! {
 
+#[make_spec_type]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub struct Etag(pub String);
@@ -84,6 +86,84 @@ pub enum StoreOutcome {
     /// `List` or `ListPrefixes`.
     Listed(Vec<String>),
     Failed(StoreError),
+}
+
+// ---------------------------------------------------------------------------
+// The calls and outcomes as views: strings as their characters
+// ---------------------------------------------------------------------------
+
+pub ghost enum StoreErrorSpec {
+    PreconditionFailed,
+    Unavailable(Seq<char>),
+}
+
+impl DeepView for StoreError {
+    type V = StoreErrorSpec;
+    open spec fn deep_view(&self) -> StoreErrorSpec {
+        match self {
+            StoreError::PreconditionFailed => StoreErrorSpec::PreconditionFailed,
+            StoreError::Unavailable(m) => StoreErrorSpec::Unavailable(m@),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub ghost enum ReadSpec {
+    Body(Seq<u8>, EtagSpec),
+    NotModified,
+    Absent,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Read {
+    type V = ReadSpec;
+    open spec fn deep_view(&self) -> ReadSpec {
+        match self {
+            Read::Body(b, e) => ReadSpec::Body(b@, e.deep_view()),
+            Read::NotModified => ReadSpec::NotModified,
+            Read::Absent => ReadSpec::Absent,
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub ghost enum StoreCallSpec {
+    Get { key: Seq<char> },
+    GetIfNoneMatch { key: Seq<char>, etag: EtagSpec },
+    PutIfMatch { key: Seq<char>, body: Seq<u8>, etag: EtagSpec },
+    PutIfNoneMatch { key: Seq<char>, body: Seq<u8> },
+    AppendIfMatch { key: Seq<char>, offset: u64, body: Seq<u8>, etag: EtagSpec },
+    Put { key: Seq<char>, body: Seq<u8> },
+    Delete { key: Seq<char> },
+    List { prefix: Seq<char>, max_keys: usize },
+    ListPrefixes { prefix: Seq<char> },
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for StoreCall {
+    type V = StoreCallSpec;
+    open spec fn deep_view(&self) -> StoreCallSpec {
+        match self {
+            StoreCall::Get { key } => StoreCallSpec::Get { key: key@ },
+            StoreCall::GetIfNoneMatch { key, etag } => StoreCallSpec::GetIfNoneMatch { key: key@, etag: etag.deep_view() },
+            StoreCall::PutIfMatch { key, body, etag } => StoreCallSpec::PutIfMatch { key: key@, body: body@, etag: etag.deep_view() },
+            StoreCall::PutIfNoneMatch { key, body } => StoreCallSpec::PutIfNoneMatch { key: key@, body: body@ },
+            StoreCall::AppendIfMatch { key, offset, body, etag } => StoreCallSpec::AppendIfMatch { key: key@, offset: *offset, body: body@, etag: etag.deep_view() },
+            StoreCall::Put { key, body } => StoreCallSpec::Put { key: key@, body: body@ },
+            StoreCall::Delete { key } => StoreCallSpec::Delete { key: key@ },
+            StoreCall::List { prefix, max_keys } => StoreCallSpec::List { prefix: prefix@, max_keys: *max_keys },
+            StoreCall::ListPrefixes { prefix } => StoreCallSpec::ListPrefixes { prefix: prefix@ },
+        }
+    }
+}
+
+/// A store's answer is a value a process takes as it is: its deep view is
+/// itself.
+impl DeepView for StoreOutcome {
+    type V = StoreOutcome;
+    open spec fn deep_view(&self) -> StoreOutcome {
+        *self
+    }
 }
 
 /// FNV-1a over the bytes. Ownership of a key is this hash modulo the fleet.
@@ -567,7 +647,7 @@ pub fn etag(body: &Vec<u8>) -> (r: Etag)
 
 /// A string's characters. Trusted: the view of a `String` is its characters.
 #[verifier::external_body]
-fn chars_of(text: &String) -> (r: Vec<char>)
+pub fn chars_of(text: &String) -> (r: Vec<char>)
     ensures
         r@ == text@,
 {
@@ -576,7 +656,7 @@ fn chars_of(text: &String) -> (r: Vec<char>)
 
 /// The string of some characters. Trusted, as `chars_of`.
 #[verifier::external_body]
-fn string_of(chars: &Vec<char>) -> (r: String)
+pub fn string_of(chars: &Vec<char>) -> (r: String)
     ensures
         r@ == chars@,
 {
@@ -668,7 +748,7 @@ fn copy_entries(v: &Vec<Entry>) -> (r: Vec<Entry>)
 
 /// Character order: `spec_before`. Byte order of UTF-8 is code point
 /// order, so this is the order `str` compares in.
-fn before(a: &String, b: &String) -> (r: bool)
+pub fn before(a: &String, b: &String) -> (r: bool)
     ensures
         r == spec_before(a@, b@),
 {
