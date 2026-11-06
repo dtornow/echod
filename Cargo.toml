@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "rust/impl/document",
   "rust/impl/process",
   "rust/impl/runtime",
   "rust/impl/cli",
@@ -10,7 +9,6 @@ members = [
   "rust/comm/cron",
   "rust/spec/abstract",
   "rust/spec/concrete",
-  "rust/spec/bridge",
   "rust/test/runtime",
   "rust/test/cli/sim",
   "rust/test/cli/diff",

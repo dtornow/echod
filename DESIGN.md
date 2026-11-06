@@ -25,95 +25,45 @@ on `resonate-core` for the traits and protocol types. Origin:
 The Anvil cluster model and the earlier refinement of the store machine
 against the previous-generation `Model` are not in this tree. Catalogue,
 deadline keys, cache revalidation, and fired occurrences
-are to be restated as Rover concrete theorems. The catalogue and the
-handler specifications already live in `rust/spec/concrete`; `src/verified` is
-proved equal to them.
+are to be restated as Rover concrete theorems. The document machine is
+`rust/spec/concrete`'s, proved equal to its specification there; the process
+runs it.
 The sections below that name `echod-system` or `refine/` describe that
 earlier proof.
 
 ## The document machine
 
-`echod_logic::verified` (`rust/impl/process/src/verified`). `./verify.sh` in
-that crate loads `src/verified/mod.rs` as its root; it does not load the
-store-call machines.
+`echod_concrete::node` (`rust/spec/concrete/src/node.rs`). A document is
+`Doc`: an origin's objects, sorted by id, or a schedule. `handle` runs one
+request on it; `run_due` one due step — a promise's timeout, a lease or a
+retry timeout, one callback resumed, one listener told, or a schedule's
+occurrence; `sweep` runs `run_due` until a step changes nothing or a step
+limit is reached; `create_occurrence` births an occurrence in its origin.
+Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
+`spec_sweep`, `spec_occurrence` — and those are the steps of the concrete
+Rover model, which `simulation.rs` proves refines the abstract one.
 
-The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
-objects, schedules and an outbox; 18 request handlers and 6 internal steps
-(`debug.*` and `*.search` left out), plus one of this design's own, the
-fence's check with no action, for the detached create; a catalogue of 92
-properties. `verified` is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
-on the state it leaves, `legal` on the pair, and for an internal step the two
-sweeper entries.
+The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
+models under `lean/` state it: 18 request handlers, the fence's check with
+no action for the detached create, and the due steps. Trusted there: the
+JSON codec (`assume_specification`), the key hash, `copy`, and the abstract
+crate's `expand` and `next_cron`.
 
-The catalogue and the `spec_*` functions are `rust/spec/concrete`. The executable modules are `src/verified`: `store`, `external`, `internal`, `steps`, `node`, `commit`.
+The process (`rust/impl/process`) runs that machine. `doc.rs` folds an
+object's rows into the model's `Doc` (`Objects::from_entries`) and writes
+the `Doc` a step leaves as rows again (`into_entries`); `handler_docs`
+decides a request by `handle` and a fired key by `sweep`; `handler_sched`
+runs a schedule by `run_due` and `create_occurrence`. Once the write lands,
+an `Execute` note goes to the address of the task's `resonate:target` tag,
+an `Unblock` to its listener. `src/verified` in the process is the node's
+own proved bookkeeping: membership, cache versions, the deadline keys it
+armed, and which key a commit arms, removes and remembers (`node.rs`,
+`commit.rs`, each ensuring its `spec_*` in `node_spec.rs`,
+`commit_spec.rs`). Trusted there: `fnv1a`, `str_eq`, `clone_string`.
 
-```text
-types.rs        rows, records, requests, responses, ids; the twins, derived; the trusted string primitives
-tags.rs         tags: first match wins; otype, timer, target
-tags_proof.rs   what `get` returns
-store.rs        State: row vectors whose view is three maps, via the fold
-store_proof.rs  the fold lemmas and the row readers
-object.rs       projection, the per-object edits, birth
-object_proof.rs its two lemmas on `without`
-properties.rs   the catalogue, entry for entry, same names
-properties_proof.rs  its theorems: the frame every step ends with, and the folds
-external.rs     the 18 request handlers, and the fence's check
-external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
-internal.rs     the 6 internal steps
-internal_proof.rs  their lemmas
-```
-
-Every exec type with a string or a list in it has an abstract twin, which
-`vstd::contrib::make_spec_type` derives: strings become `Seq<char>`, vectors
-`Seq`, numbers stay `u64`. The machine and the catalogue are stated over the
-twins, whose equality is structural. The twins exist only under the verifier;
-`cargo build` sees the exec types alone.
-
-The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
-Its abstract view is three maps, the fold of the rows by key, so the
-catalogue is stated over maps and the compaction lemma is the view. Each
-handler takes the state, the request, `now`, and a `Config`, and is a
-function: `spec_promise_create(a, req, now)` and its seventeen siblings
-give the abstract state each handler leaves, and each handler `ensures` it
-computes its function. `handle` takes a `Request`, one enum over the
-nineteen, and returns the `Response`; `spec_handle` is its function, state
-and response at once. That is the one name the system model uses for a
-request, and the one call the node makes.
-
-Proved: every catalogue entry, at every step, over the whole store. A step
-proves the entries at the ids it wrote; the frame lemma proves the rest. One
-entry is proved in an amended form, and one internal step departs from the
-Lean text, both because the text is wrong:
-
-- `consistent_suspension_registers_callback` demands that a task suspending
-  gains a callback it did not have. A task that suspended on `P1` and `P2`,
-  was woken by `P1` settling, ran again and suspended on `P2` alone, gains
-  nothing: `P2` still held it. Seven steps; the sweep goes to three. Proved
-  without the freshness conjunct.
-- `processSchedule` creates a promise as of its occurrence `t`. For
-  `t + promiseTimeout <= now` that is a pending task beside a promise stored
-  pending but dead at `now`, which `preserved_no_dead_dispatch` as first
-  written forbade; the specification now admits a birth whose stored promise
-  is pending, and the kernel stores it as Lean does, `created_at` the
-  occurrence, for every read to project (the reference server stamps the
-  same). An earlier kernel birthed it dead at its deadline, which a client
-  could tell apart.
-
-`processSchedule` is also a function, `spec_fire`: each occurrence's object
-left as it is if it exists, else born of the occurrence, then the schedule
-advanced; the system model fires a schedule by it. The promise an occurrence
-is born with carries the schedule and its own lineage in its tags
-(`spec_stamp`), and a lemma shows the stamp changes neither the timer axis
-nor the type of the tags.
-
-Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `types.rs`
-(bodies are plain Rust, their `ensures` assumed), and the cron arithmetic,
-which the caller supplies as a request's occurrences and next run. Doors the
-kernel adds: instants and durations at most `MAX_TIME` (2^62 ms), versions
-below it, so that no `u64` sum overflows.
-
-`cargo build` compiles the kernel with the ghost code erased; `verify.sh`
-runs Verus. Verus pins its own rustc, so the two are separate toolchains.
+`cargo build` compiles both with the ghost code erased; `cargo verus verify
+-p echod-concrete` and `-p echod-process` run Verus. Verus pins its own
+rustc, so the two are separate toolchains.
 
 ## echod-logic and echod
 
@@ -129,19 +79,16 @@ rust/impl/process/src/
   handler_timers.rs  which keys are due; an origin goes to docs, a schedule to sched
   state.rs           the node, the timers, the cache, and the steps in progress
   state_node.rs      the members and the epoch, the version last seen of each origin
-  state_docs.rs      the promise rows of one origin
-  state_sched.rs     one schedule's rows
   state_timers.rs    deadline keys ordered by when they fall due
   types.rs           events, store calls and outcomes, effects, notes
   config.rs          the dials
   keys.rs            where everything lives under the bucket
-  doc.rs             a document: rows in, rows out, the fold between
+  doc.rs             a document: rows in, the model's Doc, rows out
   target.rs          an origin's document, or a schedule's
   reason.rs          the words a refusal carries
-  cron.rs            the next time a schedule is due
   cache.rs           documents this node remembers, by LRU under a byte budget
   debug.rs           debug.reset, debug.snap, debug.tick, once the runtime has accepted them
-  verified/          the proved document machine
+  verified/          the node's proved bookkeeping: membership, cache, keys
 rust/impl/runtime/src/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
