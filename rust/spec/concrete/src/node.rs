@@ -119,18 +119,18 @@ enum Job {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
-struct Pending {
-    promise: String,
-    at: u64,
-    timeout: u64,
-    param: Value,
-    tags: Tags,
+pub struct Pending {
+    pub promise: String,
+    pub at: u64,
+    pub timeout: u64,
+    pub param: Value,
+    pub tags: Tags,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-enum Doc {
+pub enum Doc {
     Origin(Objects),
     Schedule(Option<Schedule>),
 }
@@ -140,7 +140,7 @@ enum Doc {
 /// lookup and the first due object is the first in `spec_sorted`.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-struct Objects {
+pub struct Objects {
     entries: Vec<(String, Obj)>,
 }
 
@@ -158,37 +158,37 @@ impl Clone for Objects {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-struct Obj {
-    promise: Prom,
-    task: Option<Tk>,
+pub struct Obj {
+    pub promise: Prom,
+    pub task: Option<Tk>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-struct Prom {
-    state: PromiseState,
-    param: Value,
-    value: Value,
-    tags: Tags,
-    timeout_at: u64,
-    created_at: u64,
-    settled_at: Option<u64>,
-    callbacks: Vec<String>,
-    listeners: Vec<String>,
+pub struct Prom {
+    pub state: PromiseState,
+    pub param: Value,
+    pub value: Value,
+    pub tags: Tags,
+    pub timeout_at: u64,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
+    pub callbacks: Vec<String>,
+    pub listeners: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-struct Tk {
-    state: TaskState,
-    version: u64,
-    pid: Option<String>,
-    ttl: Option<u64>,
-    lease_timeout_at: Option<u64>,
-    retry_timeout_at: Option<u64>,
-    resumes: Vec<String>,
+pub struct Tk {
+    pub state: TaskState,
+    pub version: u64,
+    pub pid: Option<String>,
+    pub ttl: Option<u64>,
+    pub lease_timeout_at: Option<u64>,
+    pub retry_timeout_at: Option<u64>,
+    pub resumes: Vec<String>,
 }
 
 /// What a due step tells the outside, once the document that step wrote is the one in the cache.
@@ -269,6 +269,57 @@ spec fn spec_objs(entries: Seq<(String, Obj)>) -> Map<Seq<char>, ObjV> {
 }
 
 /// Strictly increasing keys.
+/// The entries put in turn, a later id replacing an earlier one.
+pub open spec fn spec_from_entries(entries: Seq<(String, Obj)>) -> Map<Seq<char>, ObjV>
+    decreases entries.len(),
+{
+    if entries.len() == 0 {
+        Map::empty()
+    } else {
+        spec_from_entries(entries.drop_last()).insert(entries.last().0@, entries.last().1@)
+    }
+}
+
+proof fn lemma_from_entries_prefix(entries: Seq<(String, Obj)>, i: int)
+    requires
+        i == 0,
+    ensures
+        spec_from_entries(entries.take(i)) == Map::<Seq<char>, ObjV>::empty(),
+{
+    assert(entries.take(0).len() == 0);
+}
+
+proof fn lemma_from_entries_step(entries: Seq<(String, Obj)>, i: int)
+    requires
+        0 <= i < entries.len(),
+    ensures
+        spec_from_entries(entries.take(i + 1)) == spec_from_entries(entries.take(i)).insert(entries[i].0@, entries[i].1@),
+{
+    assert(entries.take(i + 1).drop_last() =~= entries.take(i));
+    assert(entries.take(i + 1).last() == entries[i]);
+}
+
+/// A table with distinct keys is the put of its entries.
+proof fn lemma_from_entries_sorted(entries: Seq<(String, Obj)>)
+    requires
+        spec_sorted_entries(entries),
+    ensures
+        spec_from_entries(entries) == spec_objs(entries),
+    decreases entries.len(),
+{
+    if entries.len() == 0 {
+        assert(spec_keys_of(entries) =~= Seq::<Seq<char>>::empty());
+        assert(spec_keys_of(entries).to_set() =~= Set::<Seq<char>>::empty());
+        assert(spec_objs(entries) =~= Map::<Seq<char>, ObjV>::empty());
+    } else {
+        let front = entries.drop_last();
+        let e = entries.last();
+        lemma_from_entries_sorted(front);
+        lemma_objs_insert(front, front.len() as int, e);
+        assert(front.insert(front.len() as int, e) =~= entries);
+    }
+}
+
 spec fn spec_sorted_entries(entries: Seq<(String, Obj)>) -> bool {
     forall|i: int, j: int| 0 <= i < j < entries.len() ==> spec_before(#[trigger] entries[i].0@, #[trigger] entries[j].0@)
 }
@@ -337,11 +388,11 @@ spec fn reply_v(reply: Option<(String, u64, Response)>) -> Option<(Seq<char>, u6
     match reply { Some((client, id, response)) => Some((client@, id, response)), None => None }
 }
 
-spec fn pend_v(v: Seq<Pending>) -> Seq<PendingV> {
+pub open spec fn pend_v(v: Seq<Pending>) -> Seq<PendingV> {
     v.map_values(|p: Pending| p@)
 }
 
-spec fn notes_v(v: Seq<Outbound>) -> Seq<NoteV> {
+pub open spec fn notes_v(v: Seq<Outbound>) -> Seq<NoteV> {
     v.map_values(|n: Outbound| n@)
 }
 
@@ -1373,7 +1424,7 @@ fn insert_at(entries: &Vec<(String, Obj)>, id: &String) -> (i: usize)
 }
 
 impl Objects {
-    fn empty() -> (r: Objects)
+    pub fn empty() -> (r: Objects)
         ensures
             r@ == Map::<Seq<char>, ObjV>::empty(),
     {
@@ -1388,7 +1439,7 @@ impl Objects {
     }
 
     /// `map[id]`, copied out.
-    fn get(&self, id: &String) -> (r: Option<Obj>)
+    pub fn get(&self, id: &String) -> (r: Option<Obj>)
         ensures
             match r {
                 Some(o) => self@.contains_key(id@) && o@ == self@[id@],
@@ -1429,7 +1480,7 @@ impl Objects {
     }
 
     /// `map.insert(id, obj)`.
-    fn put(self, id: &String, obj: Obj) -> (r: Objects)
+    pub fn put(self, id: &String, obj: Obj) -> (r: Objects)
         ensures
             r@ == self@.insert(id@, obj@),
     {
@@ -1468,6 +1519,48 @@ impl Objects {
             lemma_sorted_keys(self.entries@);
         }
         self.entries.len() == 0
+    }
+
+    /// The table of `entries`, each put in turn: `spec_from_entries`. A
+    /// later entry with an id already seen replaces the earlier one.
+    pub fn from_entries(entries: Vec<(String, Obj)>) -> (r: Objects)
+        ensures
+            r@ == spec_from_entries(entries@),
+    {
+        let mut objs = Objects::empty();
+        let mut i: usize = 0;
+        proof {
+            lemma_from_entries_prefix(entries@, 0);
+        }
+        while i < entries.len()
+            invariant
+                i <= entries@.len(),
+                objs@ == spec_from_entries(entries@.take(i as int)),
+            decreases entries@.len() - i,
+        {
+            let (id, obj) = copy(&entries[i]);
+            objs = objs.put(&id, obj);
+            proof {
+                lemma_from_entries_step(entries@, i as int);
+            }
+            i += 1;
+        }
+        proof {
+            assert(entries@.take(entries@.len() as int) =~= entries@);
+        }
+        objs
+    }
+
+    /// The entries, in key order: the table as a map, entry by entry.
+    pub fn into_entries(self) -> (r: Vec<(String, Obj)>)
+        ensures
+            spec_from_entries(r@) == self@,
+    {
+        proof {
+            use_type_invariant(&self);
+            lemma_from_entries_sorted(self.entries@);
+        }
+        self.entries
     }
 
     /// `spec_due_id` over the keys in order: the first object with something due.
@@ -1597,7 +1690,7 @@ impl Objects {
     }
 }
 
-spec fn nat_v(o: Option<u64>) -> Option<nat> {
+pub open spec fn nat_v(o: Option<u64>) -> Option<nat> {
     match o { Some(x) => Some(x as nat), None => None }
 }
 
@@ -1870,7 +1963,7 @@ fn obj_deadline(obj: &Obj) -> (r: Option<u64>)
 // ---------------------------------------------------------------------------
 
 /// `spec_empty_doc`.
-fn empty_doc(key: &String) -> (r: Doc)
+pub fn empty_doc(key: &String) -> (r: Doc)
     ensures
         r@ == spec_empty_doc(key@),
 {
@@ -1900,7 +1993,7 @@ fn open(doc: Doc) -> (r: Objects)
 }
 
 /// `spec_origin_map(doc)[id]`, copied out, without opening the document.
-fn peek(doc: &Doc, id: &String) -> (r: Option<Obj>)
+pub fn peek(doc: &Doc, id: &String) -> (r: Option<Obj>)
     ensures
         match r {
             Some(o) => spec_origin_map(doc@).contains_key(id@) && o@ == spec_origin_map(doc@)[id@],
@@ -1914,7 +2007,7 @@ fn peek(doc: &Doc, id: &String) -> (r: Option<Obj>)
 }
 
 /// `spec_doc_deadline`.
-fn doc_deadline(doc: &Doc) -> (r: Option<u64>)
+pub fn doc_deadline(doc: &Doc) -> (r: Option<u64>)
     ensures
         nat_v(r) == spec_doc_deadline(doc@),
 {
@@ -2876,7 +2969,7 @@ fn schedule_delete(doc: Doc, id: &String) -> (r: (Doc, Response))
 }
 
 /// `spec_handle`: the same match.
-fn handle(doc: Doc, request: &Request, now: u64) -> (r: (Doc, Response))
+pub fn handle(doc: Doc, request: &Request, now: u64) -> (r: (Doc, Response))
     ensures
         (r.0@, r.1) == spec_handle(doc@, *request, now),
 {
@@ -3058,7 +3151,7 @@ fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: 
 }
 
 /// `spec_run_due`: a schedule fires, or the first due object steps.
-fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+pub fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
     ensures
         spec_run_due(doc@, now, retry_timeout) == (r.0@, None::<Response>, pend_v(r.1@), notes_v(r.2@)),
 {
@@ -3104,7 +3197,7 @@ fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Ve
 }
 
 /// `spec_occurrence`: the promise a schedule occurrence creates, once it is due.
-fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
+pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
     ensures
         r@ == spec_occurrence(doc@, pending@, now),
 {
@@ -3133,6 +3226,78 @@ fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
         None => None,
     };
     Doc::Origin(objs.put(&pending.promise, Obj { promise, task }))
+}
+
+/// `spec_sweep`: `run_due` again and again, until a step leaves the document
+/// as it was or `limit` steps have run. What the steps queue and tell, in order.
+pub fn sweep(from: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+    ensures
+        (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout, limit as nat),
+{
+    let ghost start = from@;
+    let mut doc = from;
+    let mut born: Vec<Pending> = Vec::new();
+    let mut notes: Vec<Outbound> = Vec::new();
+    let mut left: u64 = limit;
+    proof {
+        lemma_pend_empty();
+        lemma_notes_empty();
+        assert(Seq::<PendingV>::empty() + spec_sweep(doc@, now, retry_timeout, left as nat).1 =~= spec_sweep(doc@, now, retry_timeout, left as nat).1);
+        assert(Seq::<NoteV>::empty() + spec_sweep(doc@, now, retry_timeout, left as nat).2 =~= spec_sweep(doc@, now, retry_timeout, left as nat).2);
+    }
+    while left > 0
+        invariant
+            start == from@,
+            ({
+                let (d, p, n) = spec_sweep(doc@, now, retry_timeout, left as nat);
+                spec_sweep(start, now, retry_timeout, limit as nat) == (d, pend_v(born@) + p, notes_v(notes@) + n)
+            }),
+        decreases left,
+    {
+        let (next, mut p, mut n) = run_due(copy(&doc), now, retry_timeout);
+        if same_doc(&next, &doc) {
+            proof {
+                assert(spec_run_due(doc@, now, retry_timeout).0 == doc@);
+                assert(left as nat != 0);
+                assert(spec_sweep(doc@, now, retry_timeout, left as nat) == (doc@, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(pend_v(born@) + Seq::<PendingV>::empty() =~= pend_v(born@));
+                assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
+            }
+            return (doc, born, notes);
+        }
+        let ghost (p0, n0) = (p@, n@);
+        let ghost (b0, s0) = (born@, notes@);
+        born.append(&mut p);
+        notes.append(&mut n);
+        proof {
+            lemma_map_values_add(b0, p0);
+            lemma_notes_add(s0, n0);
+            let (d, pp, nn) = spec_sweep(next@, now, retry_timeout, (left - 1) as nat);
+            assert(pend_v(b0) + (pend_v(p0) + pp) =~= (pend_v(b0) + pend_v(p0)) + pp);
+            assert(notes_v(s0) + (notes_v(n0) + nn) =~= (notes_v(s0) + notes_v(n0)) + nn);
+        }
+        doc = next;
+        left = left - 1;
+    }
+    proof {
+        assert(pend_v(born@) + Seq::<PendingV>::empty() =~= pend_v(born@));
+        assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
+    }
+    (doc, born, notes)
+}
+
+proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
+    ensures
+        pend_v(a + b) == pend_v(a) + pend_v(b),
+{
+    assert(pend_v(a + b) =~= pend_v(a) + pend_v(b));
+}
+
+proof fn lemma_notes_add(a: Seq<Outbound>, b: Seq<Outbound>)
+    ensures
+        notes_v(a + b) == notes_v(a) + notes_v(b),
+{
+    assert(notes_v(a + b) =~= notes_v(a) + notes_v(b));
 }
 
 } // verus!
@@ -5236,6 +5401,24 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
             }
         },
         other => (other, None, Seq::empty(), Seq::empty()),
+    }
+}
+
+/// `spec_run_due` iterated: it stops at a step that leaves the document as it
+/// was, or after `limit` steps. The occurrences queued and the notes, in order.
+pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64, limit: nat) -> (DocV, Seq<PendingV>, Seq<NoteV>)
+    decreases limit,
+{
+    if limit == 0 {
+        (doc, Seq::empty(), Seq::empty())
+    } else {
+        let (next, _, born, notes) = spec_run_due(doc, now, retry_timeout);
+        if next == doc {
+            (doc, Seq::empty(), Seq::empty())
+        } else {
+            let (last, more_born, more_notes) = spec_sweep(next, now, retry_timeout, (limit - 1) as nat);
+            (last, born + more_born, notes + more_notes)
+        }
     }
 }
 

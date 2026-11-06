@@ -2,11 +2,12 @@
 //!
 //! A world is the nodes and one store. Each node keeps its own documents
 //! and takes one flight at a time. The abstract model is a separate machine.
-//! This crate does not import its handlers, and the document specifications
-//! the process proves against live in `echod-document`. Refinement of this
-//! model to the abstract one is `simulation`: the relation, the injected call,
-//! the observed output, the shed and the empty heartbeat, and the process
-//! step that still has to be matched.
+//! This crate does not import its handlers. The document machine of `node.rs`
+//! (`handle`, `run_due`, `sweep`, `create_occurrence`) is the one the process
+//! runs: each is proved equal to its specification here, and the process
+//! wraps it in flights and commits. Refinement of this model to the abstract
+//! one is `simulation`: the relation, the injected call, the observed output,
+//! the shed and the empty heartbeat.
 //!
 //! Each file of the model holds the executable code and, below it, the same
 //! step as a specification (`spec_*`, over the view types `*V`). The proof
@@ -47,4 +48,8 @@ pub use refine::abstract_model;
 
 pub use echod_types::*;
 pub use model::Model;
+pub use node::{
+    create_occurrence, doc_deadline, empty_doc, handle, peek, run_due, sweep, Doc, Obj, Objects,
+    Outbound, Pending, Prom, Tk,
+};
 pub use store::{content_etag, fnv1a, Etag, Read, StoreCall, StoreError, StoreOutcome};
