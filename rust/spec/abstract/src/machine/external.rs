@@ -17,14 +17,15 @@ use echod_rover::certificate::trusted::copy;
 use echod_types::{origin, same_origin_spec};
 #[cfg(verus_keep_ghost)]
 use super::super::view::{
-    all_in_origin, distinct, group_views, lift_dispatch, sat_add, sends, strs, works, DispatchV,
-    InOutV, OutV, PromiseV, ScheduleV,
+    all_in_origin, distinct, group_views, lift_dispatch, outs_v, sat_add, sends, strs, works,
+    DispatchV, InOutV, OutV, PromiseV, ScheduleV,
 };
 use super::super::view::{StoreV, TaskV};
 #[cfg(verus_keep_ghost)]
 use super::super::view::spec_keys;
 #[cfg(verus_keep_ghost)]
 use super::{
+    lemma_schedule_ext, lemma_schedule_value, lemma_tags_ext, lemma_value_ext,
     spec_acquire, spec_claim_res, spec_empty_value, spec_has_target, spec_is_timer,
     spec_external, spec_fence_res, spec_fulfill, spec_is_global, spec_new_object, spec_out,
     spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res,
@@ -69,7 +70,7 @@ impl ServerConfig {
                     &&& (s.promises@.contains_key(req.id@) ==> outs[i].next.promises@ == s.promises@
                         && outs[i].next.tasks@ == s.tasks@)
                 },
-
+            outs_v(outs@) == spec_promise_create(*req, s@, now),
     {
         broadcast use group_views;
         if is_timer(&req.tags) && has_target(&req.tags) {
@@ -122,12 +123,13 @@ impl ServerConfig {
             marks.push(mk("task created pending"));
         }
         let outs = one(Out { resp: promise_res(200, Some(rec)), next: n, work: Vec::new(), send: Vec::new(), marks });
-
+        proof { assert(outs_v(outs@) =~~= spec_promise_create(*req, s@, now)); }
         outs
     }
 
     pub(crate) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_promise_settle(*req, s@, now),
     {
         broadcast use group_views;
         if !req.state.settable() {
@@ -153,7 +155,9 @@ impl ServerConfig {
         if noted {
             marks.push(mk("settled with callbacks or listeners"));
         }
-        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks })
+        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks });
+        proof { assert(outs_v(outs@) =~~= spec_promise_settle(*req, s@, now)); }
+        outs
     }
 
     /// The checks every task.* mutation shares: exists, acquired, own promise live,
@@ -161,7 +165,13 @@ impl ServerConfig {
     /// Acquired, own promise still pending as of `now`, version matches.
     /// `Ok` is the stored task, which agrees with its projection.
     fn held<'a>(&self, s: &'a Store, id: &Id, version: u64, now: Time) -> (r: Result<&'a Task, u16>)
-
+        ensures
+            match r {
+                Ok(t) => spec_held(s@, id@, version, now) == SpecHeld::Ok(t@),
+                Err(404) => spec_held(s@, id@, version, now) is Missing,
+                Err(409) => spec_held(s@, id@, version, now) is Stale,
+                Err(_) => false,
+            },
     {
         let t = match s.tasks.get(id) {
             Some(t) => t,
@@ -190,7 +200,8 @@ impl ServerConfig {
     }
 
     pub(crate) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_create(*pid, ttl, *req, s@, now),
     {
         broadcast use group_views;
         if !has_target(&req.tags) || is_timer(&req.tags) {
@@ -217,7 +228,9 @@ impl ServerConfig {
                         n.tasks.insert(req.id.clone(), u);
 
                         assert(n@ == (StoreV { tasks: s@.tasks.insert(req.id@, u@), ..s@ }));
-                        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) })
+                        let outs = one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task.create: pending task acquired")) });
+                        proof { assert(outs_v(outs@) =~~= spec_task_create(*pid, ttl, *req, s@, now)); }
+                        outs
                     },
                     _ => status(claim_res(409, None, None), mk("task.create: task held, suspended or halted (409)"), s),
                 };
@@ -225,14 +238,23 @@ impl ServerConfig {
             None => {},
         }
         let live = req.timeout_at > now;
+        let empty = Value::empty();
+        let param = req.param.dup();
+        let tags = echod_types::clone_tags(&req.tags);
+        proof {
+            assert(exists|v: Value| v@ == echod_types::AValue::empty());
+            lemma_value_ext(empty, spec_empty_value());
+            lemma_value_ext(param, req.param);
+            lemma_tags_ext(tags, req.tags);
+        }
         let p = Promise {
             state: if live { PromiseState::Pending } else { PromiseState::RejectedTimedout },
-            value: Value::empty(),
-            param: req.param.dup(),
+            value: empty,
+            param,
             timeout_at: req.timeout_at,
             created_at: if live { now } else { req.timeout_at },
             settled_at: if live { None } else { Some(req.timeout_at) },
-            tags: echod_types::clone_tags(&req.tags),
+            tags,
             callbacks: PSet::empty(),
             listeners: PSet::empty(),
         };
@@ -250,18 +272,22 @@ impl ServerConfig {
         n.tasks.insert(req.id.clone(), t);
         assert(n@ == (StoreV { promises: s@.promises.insert(req.id@, pv), tasks: s@.tasks.insert(req.id@, tv), ..s@ }));
         let mark = if live { mk("task created") } else { mk("task created past its deadline") };
-        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
+        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) });
+        proof { assert(outs_v(outs@) =~~= spec_task_create(*pid, ttl, *req, s@, now)); }
+        outs
     }
 
     pub(crate) fn task_suspend(&self, req: &TaskSuspendReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_suspend(req.id, req.version, req.actions@, s@, now),
     {
         broadcast use group_views;
         let id = &req.id;
         let version = req.version;
-        let ids: Vec<Id> = req.actions.iter().map(|a| a.awaited.clone()).collect();
+        let ids: Vec<Id> = awaited_ids(&req.actions);
         let ghost idv = strs(ids@);
         assert(idv.len() == ids@.len());
+        assert(idv == spec_awaited(req.actions@));
         if ids.len() == 0 || contains(&ids, id) {
             return status(status_res(400), mk("suspend: no awaited, or itself (400)"), s);
         }
@@ -270,6 +296,8 @@ impl ServerConfig {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
+                idv == spec_awaited(req.actions@),
+                *id == req.id && version == req.version,
                 forall|a: int, b: int| 0 <= a < b < idv.len() && a < i ==> idv[a] != idv[b],
                 forall|a: int| 0 <= a < i ==> origin(#[trigger] idv[a]) == origin(id@),
             decreases ids.len() - i,
@@ -279,6 +307,8 @@ impl ServerConfig {
                 invariant
                     i < j <= ids.len(),
                     idv == strs(ids@),
+                    idv == spec_awaited(req.actions@),
+                    *id == req.id && version == req.version,
                     forall|b: int| i < b < j ==> idv[i as int] != idv[b],
                 decreases ids.len() - j,
             {
@@ -311,25 +341,30 @@ impl ServerConfig {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
+                idv == spec_awaited(req.actions@),
+                *id == req.id && version == req.version,
+                spec_held(s@, id@, version, now) == SpecHeld::Ok(t@),
                 idv.len() > 0 && !idv.contains(id@) && distinct(idv) && all_in_origin(idv, id@),
                 forall|a: int| 0 <= a < i ==> s@.promises.contains_key(#[trigger] idv[a]),
+                forall|a: int| 0 <= a < i ==> spec_external(s@.promises[#[trigger] idv[a]]),
+                spec_any_settled(s@, idv, now, 0) == (settled || spec_any_settled(s@, idv, now, i as int)),
             decreases ids.len() - i,
         {
             assert(idv[i as int] == ids@[i as int]@);
             match s.promises.get(&ids[i]) {
                 None => {
                     assert(!s@.promises.contains_key(idv[i as int]));
-
+                    assert(exists|k: int| 0 <= k < idv.len() && !s@.promises.contains_key(idv[k]));
                     return status(status_res(422), mk("suspend: awaited missing (422)"), s);
                 },
                 Some(p) => {
                     assert(s@.promises[idv[i as int]] == p@);
                     if !p.external() {
+                        assert(!spec_external(s@.promises[idv[i as int]]));
+                        assert(exists|k: int| 0 <= k < idv.len() && !spec_external(s@.promises[idv[k]]));
                         return status(status_res(422), mk("suspend: awaited not awaitable (422)"), s);
                     }
-                    let ghost was = settled;
                     settled = settled || p.project(now).state != PromiseState::Pending;
-
                 },
             }
             i += 1;
@@ -347,7 +382,7 @@ impl ServerConfig {
             n.tasks.insert(id.clone(), u);
             assert(n@ == (StoreV { tasks: s@.tasks.insert(id@, TaskV { resumes: Seq::empty(), ..t@ }), ..s@ }));
             let r = one(Out { resp: status_res(300), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("suspend: awaited already settled (300)")) });
-
+            proof { assert(outs_v(r@) =~~= spec_suspend(req.id, req.version, req.actions@, s@, now)); }
             return r;
         }
         u.state = TaskState::Suspended;
@@ -362,36 +397,46 @@ impl ServerConfig {
             invariant
                 i <= ids.len(),
                 idv == strs(ids@),
+                idv == spec_awaited(req.actions@),
+                *id == req.id && version == req.version,
+                spec_held(s@, id@, version, now) == SpecHeld::Ok(t@),
+                idv.len() > 0 && !idv.contains(id@) && distinct(idv) && all_in_origin(idv, id@),
+                !settled && !spec_any_settled(s@, idv, now, 0),
+                forall|a: int| 0 <= a < idv.len() ==> spec_external(s@.promises[#[trigger] idv[a]]),
                 n@.tasks == s@.tasks.insert(id@, TaskV { state: TaskState::Suspended, pid: None, ttl: None, acquired_at: 0, retry_timeout_at: None, resumes: Seq::empty(), ..t@ }),
                 n@.schedules == s@.schedules,
+                forall|a: int| 0 <= a < idv.len() ==> s@.promises.contains_key(#[trigger] idv[a]),
+                n@.promises.dom() == s@.promises.dom(),
+                spec_callbacks(s@.promises, idv, id@, 0) == spec_callbacks(n@.promises, idv, id@, i as int),
             decreases ids.len() - i,
         {
-            proof {
-                assert(idv.take(i + 1) =~= idv.take(i as int).push(idv[i as int]));
-                assert(idv.take(i + 1).drop_last() =~= idv.take(i as int));
-            }
             assert(idv[i as int] == ids@[i as int]@);
+            let ghost before = n@.promises;
             match n.promises.get(&ids[i]) {
                 Some(p) => {
                     let mut q = copy(p);
                     q.callbacks.insert(id.clone());
                     n.promises.insert(ids[i].clone(), q);
+                    proof {
+                        assert(n@.promises =~= before.insert(idv[i as int], q@));
+                        assert(n@.promises.dom() =~= s@.promises.dom());
+                    }
                 },
-                None => {},
+                None => {
+                    assert(false);
+                },
             }
             i += 1;
         }
-        proof {
-            assert(idv.take(ids.len() as int) =~= idv);
-        }
 
         let r = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task suspended")) });
-
+        proof { assert(outs_v(r@) =~~= spec_suspend(req.id, req.version, req.actions@, s@, now)); }
         r
     }
 
     pub(crate) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_fence(*req, s@, now),
     {
         broadcast use group_views;
         let id = &req.id;
@@ -400,7 +445,7 @@ impl ServerConfig {
             TaskFenceAction::Create(c) => &c.id,
             TaskFenceAction::Settle(st) => &st.id,
         };
-        if target == id {
+        if *target == *id {
             return status(fence_res(400, None), mk("fence: targets its own task (400)"), s);
         }
         match &req.action {
@@ -428,8 +473,14 @@ impl ServerConfig {
     }
 
     /// The action's promise response, inside a fence that held.
-    fn wrap_fence(&self, mut outs: Vec<Out>, create: bool) -> (r: Vec<Out>) {
+    fn wrap_fence(&self, outs: Vec<Out>, create: bool) -> (r: Vec<Out>)
+        ensures
+            outs_v(r@) == spec_wrap_fence(outs_v(outs@), create),
+    {
+        broadcast use group_views;
+        let mut outs = outs;
         if outs.len() == 1 {
+            let ghost before = outs_v(outs@);
             let o = outs.remove(0);
             let Out { resp, next, work, send, marks } = o;
             let resp = match resp {
@@ -439,32 +490,35 @@ impl ServerConfig {
                 },
                 other => other,
             };
-            return one(Out { resp, next, work, send, marks });
+            let r = one(Out { resp, next, work, send, marks });
+            proof { assert(outs_v(r@) =~~= spec_wrap_fence(before, create)); }
+            return r;
         }
         outs
     }
 
     pub(crate) fn task_heartbeat(&self, pid: &String, refs: &Vec<TaskRef>, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_heartbeat(*pid, refs@, s@, now),
     {
         broadcast use group_views;
-        let ghost rv = refs@.map_values(|r: TaskRef| r@);
         let mut i = 1;
         while i < refs.len()
             invariant
                 1 <= i,
-                rv == refs@.map_values(|r: TaskRef| r@),
-                forall|j: int| 1 <= j < i ==> origin(#[trigger] rv[j].id) == origin(rv[0].id),
+                forall|j: int| 1 <= j < i ==> origin(#[trigger] refs@[j].id@) == origin(refs@[0].id@),
             decreases refs.len() - i,
         {
             if !same_origin(&refs[i].id, &refs[0].id) {
-                assert(rv[i as int] == refs@[i as int]@);
-                assert(rv[0] == refs@[0]@);
-                assert(origin(rv[i as int].id) != origin(rv[0].id));
-
+                proof { lemma_refs_one_origin(refs@, 1); }
                 return status(status_res(400), mk("heartbeat: tasks in several origins (400)"), s);
             }
             i += 1;
+        }
+        proof {
+            if refs.len() > 0 {
+                lemma_refs_one_origin(refs@, 1);
+            }
         }
 
         let mut n = copy_store(s);
@@ -473,81 +527,98 @@ impl ServerConfig {
         while i < refs.len()
             invariant
                 i <= refs.len(),
-                rv == refs@.map_values(|r: TaskRef| r@),
+                n@.promises == s@.promises,
+                n@.schedules == s@.schedules,
+                spec_extend(s@, pid@, refs@, now, 0, s@.tasks) == spec_extend(s@, pid@, refs@, now, i as int, n@.tasks),
             decreases refs.len() - i,
         {
-            proof {
-                assert(rv.take(i + 1) =~= rv.take(i as int).push(rv[i as int]));
-                assert(rv.take(i + 1).drop_last() =~= rv.take(i as int));
-            }
             let r = &refs[i];
-            assert(rv[i as int] == r@);
-
+            let ghost before = n@.tasks;
             match self.held(s, &r.id, r.version, now) {
                 Ok(t) => {
                     let mine = match &t.pid {
                         Some(holder) => *holder == *pid,
                         None => false,
                     };
-                    assert(mine == (t@.pid is Some && t@.pid.unwrap() == pid@));
+                    assert(mine == (t@.pid == Some(pid@)));
                     if mine {
                         let mut u = copy(t);
                         u.acquired_at = now;
                         assert(u@ == (TaskV { acquired_at: now, ..t@ }));
-
-                        let ghost nt = n.tasks@;
                         n.tasks.insert(r.id.clone(), u);
-                        assert(n.tasks@ == nt.insert(r.id@, u));
-                        assert(n.tasks@.map_values(|t: Task| t@) == nt.map_values(|t: Task| t@).insert(r.id@, u@));
+                        assert(n@.tasks == before.insert(r.id@, u@));
                         extended = true;
-
                     }
                 },
                 Err(_) => {},
             }
             i += 1;
         }
-        proof {
-            assert(rv.take(refs.len() as int) =~= rv);
-        }
         // Always 200: a heartbeat says nothing about what it kept.
         let mark = if extended { mk("lease extended") } else { mk("heartbeat: nothing held by this worker") };
-        one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) })
+        let outs = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mark) });
+        proof { assert(outs_v(outs@) =~~= spec_heartbeat(*pid, refs@, s@, now)); }
+        outs
     }
 
     pub(crate) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_views;
         if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
         match s.schedules.get(&req.id) {
-            Some(c) => return echo(schedule_res(200, Some(c.dup())), mk("schedule: id exists (echo)"), s),
+            Some(c) => {
+                let d = c.dup();
+                proof {
+                    lemma_schedule_ext(d, *c);
+                    lemma_schedule_value(*c);
+                }
+                return echo(schedule_res(200, Some(d)), mk("schedule: id exists (echo)"), s);
+            },
             None => {},
         }
         // `next_run_at` is the server's: the first instant the cron names
         // strictly after now. The request does not carry it.
         let next_run_at = next_cron(&req.cron, now);
+        let promise_param = req.promise_param.dup();
+        let promise_tags = echod_types::clone_tags(&req.promise_tags);
+        proof {
+            lemma_value_ext(promise_param, req.promise_param);
+            lemma_tags_ext(promise_tags, req.promise_tags);
+        }
         let c = Schedule {
             id: req.id.clone(),
             cron: req.cron.clone(),
             promise_id: req.promise_id.clone(),
             promise_timeout: req.promise_timeout,
-            promise_param: req.promise_param.dup(),
-            promise_tags: echod_types::clone_tags(&req.promise_tags),
+            promise_param,
+            promise_tags,
             created_at: now,
             next_run_at,
             last_run_at: None,
         };
-        let rec = schedule_res(200, Some(c.dup()));
+        let d = c.dup();
+        proof { lemma_schedule_ext(d, c); }
+        let rec = schedule_res(200, Some(d));
         let mut n = copy_store(s);
         n.schedules.insert(req.id.clone(), c);
-        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) })
+        let outs = one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) });
+        proof { assert(outs_v(outs@) =~~= spec_schedule_create(*req, s@, now)); }
+        outs
     }
 
     /// `task.fence` with no action: the check alone.
-    pub(crate) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>) {
+    pub(crate) fn task_fence_check(&self, req: &TaskFenceCheckReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+        ensures
+            outs_v(outs@) == match spec_held(s@, req.id@, req.version, now) {
+                SpecHeld::Missing => spec_out(spec_status_res(404), s@),
+                SpecHeld::Stale => spec_out(spec_status_res(409), s@),
+                SpecHeld::Ok(_) => spec_out(spec_status_res(200), s@),
+            },
+    {
         match self.held(s, &req.id, req.version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("fence: no such task (404)") } else { mk("fence: not held, or stale version (409)") }, s),
             Ok(_) => status(status_res(200), mk("fence check"), s),
@@ -555,7 +626,8 @@ impl ServerConfig {
     }
 
     pub(crate) fn promise_register_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_register_callback(*awaited, *awaiter, s@, now),
     {
         broadcast use group_views;
         if *awaited == *awaiter || !same_origin(awaited, awaiter) {
@@ -582,11 +654,14 @@ impl ServerConfig {
         let mut q = p;
         q.callbacks.insert(awaiter.clone());
         n.promises.insert(awaited.clone(), q);
-        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("callback registered")) })
+        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("callback registered")) });
+        proof { assert(outs_v(outs@) =~~= spec_register_callback(*awaited, *awaiter, s@, now)); }
+        outs
     }
 
     pub(crate) fn promise_register_listener(&self, awaited: &Id, address: &String, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_register_listener(*awaited, *address, s@, now),
     {
         broadcast use group_views;
         let stored = match s.promises.get(awaited) {
@@ -605,11 +680,14 @@ impl ServerConfig {
         let mut q = p;
         q.listeners.insert(address.clone());
         n.promises.insert(awaited.clone(), q);
-        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("listener registered")) })
+        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("listener registered")) });
+        proof { assert(outs_v(outs@) =~~= spec_register_listener(*awaited, *address, s@, now)); }
+        outs
     }
 
     pub(crate) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_acquire(*id, version, *pid, ttl, s@, now),
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -630,11 +708,14 @@ impl ServerConfig {
         u.acquire(t.version.saturating_add(1), pid.clone(), ttl, now);
         let rec = claim_res(200, Some(u.to_record(id)), Some(p.to_record(id)));
         n.tasks.insert(id.clone(), u);
-        one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) })
+        let outs = one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task acquired")) });
+        proof { assert(outs_v(outs@) =~~= spec_task_acquire(*id, version, *pid, ttl, s@, now)); }
+        outs
     }
 
     pub(crate) fn task_release(&self, id: &Id, version: u64, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_release(*id, version, s@, now),
     {
         broadcast use group_views;
         match self.held(s, id, version, now) {
@@ -644,13 +725,16 @@ impl ServerConfig {
                 let mut u = copy(t);
                 u.unlease(TaskState::Pending, Some(now));
                 n.tasks.insert(id.clone(), u);
-                one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task released")) })
+                let outs = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task released")) });
+                proof { assert(outs_v(outs@) =~~= spec_task_release(*id, version, s@, now)); }
+                outs
             },
         }
     }
 
     pub(crate) fn task_fulfill(&self, id: &Id, version: u64, action: &PromiseSettleReq, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_fulfill(*id, version, *action, s@, now),
     {
         broadcast use group_views;
         if !action.state.settable() {
@@ -666,11 +750,14 @@ impl ServerConfig {
             Some(q) => promise_res(200, Some(q.to_record(id))),
             None => promise_res(500, None), // unreachable: held checked the promise
         };
-        one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task fulfilled")) })
+        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task fulfilled")) });
+        proof { assert(outs_v(outs@) =~~= spec_task_fulfill(*id, version, *action, s@, now)); }
+        outs
     }
 
     pub(crate) fn task_halt(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_halt(*id, s@, now),
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -689,13 +776,16 @@ impl ServerConfig {
                 let mut u = copy(t);
                 u.unlease(TaskState::Halted, None);
                 n.tasks.insert(id.clone(), u);
-                one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) })
+                let outs = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task halted")) });
+                proof { assert(outs_v(outs@) =~~= spec_task_halt(*id, s@, now)); }
+                outs
             },
         }
     }
 
     pub(crate) fn task_continue(&self, id: &Id, s: &Store, now: Time) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == spec_task_continue(*id, s@, now),
     {
         broadcast use group_views;
         let t = match s.tasks.get(id) {
@@ -714,11 +804,18 @@ impl ServerConfig {
         u.state = TaskState::Pending;
         u.retry_timeout_at = Some(now);
         n.tasks.insert(id.clone(), u);
-        one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task continued")) })
+        let outs = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("task continued")) });
+        proof { assert(outs_v(outs@) =~~= spec_task_continue(*id, s@, now)); }
+        outs
     }
 
     pub(crate) fn schedule_delete(&self, id: &Id, s: &Store) -> (outs: Vec<Out>)
-
+        ensures
+            outs_v(outs@) == if !s@.schedules.contains_key(id@) {
+                spec_out(spec_status_res(404), s@)
+            } else {
+                spec_out(spec_status_res(200), StoreV { schedules: s@.schedules.remove(id@), ..s@ })
+            },
     {
         broadcast use group_views;
         match s.schedules.get(id) {
@@ -726,13 +823,18 @@ impl ServerConfig {
             Some(_) => {
                 let mut n = copy_store(s);
                 n.schedules.remove(id);
-                one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule deleted")) })
+                let outs = one(Out { resp: status_res(200), next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule deleted")) });
+                proof { assert(outs_v(outs@) =~~= spec_out(spec_status_res(200), StoreV { schedules: s@.schedules.remove(id@), ..s@ })); }
+                outs
             },
         }
     }
 
     /// A request takes effect in `s` at time `now`: every allowed outcome.
+    /// One request: `spec_handler`, the same outcomes in the same order.
     pub fn handler(&self, op: &Request, s: &Store, now: Time) -> (outs: Vec<Out>)
+        ensures
+            outs_v(outs@) == spec_handler(*self, *op, s@, now),
     {
         broadcast use group_views;
         match op {
@@ -770,7 +872,14 @@ impl ServerConfig {
             Request::ScheduleCreate(c) => self.schedule_create(c, s, now),
             Request::ScheduleGet(q) => match s.schedules.get(&q.id) {
                 None => status(schedule_res(404, None), mk("get schedule: none (404)"), s),
-                Some(c) => echo(schedule_res(200, Some(c.dup())), mk("get schedule"), s),
+                Some(c) => {
+                    let d = c.dup();
+                    proof {
+                        lemma_schedule_ext(d, *c);
+                        lemma_schedule_value(*c);
+                    }
+                    echo(schedule_res(200, Some(d)), mk("get schedule"), s)
+                },
             },
             Request::ScheduleDelete(q) => self.schedule_delete(&q.id, s),
         }
@@ -913,6 +1022,51 @@ pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq,
 
 pub open spec fn spec_awaited(actions: Seq<PromiseRegisterCallbackReq>) -> Seq<Seq<char>> {
     actions.map_values(|a: PromiseRegisterCallbackReq| a.awaited@)
+}
+
+/// The awaited ids of a suspend's actions: `spec_awaited`.
+fn awaited_ids(actions: &Vec<PromiseRegisterCallbackReq>) -> (r: Vec<Id>)
+    ensures
+        strs(r@) == spec_awaited(actions@),
+{
+    broadcast use group_views;
+    let mut r: Vec<Id> = Vec::new();
+    let mut i = 0;
+    while i < actions.len()
+        invariant
+            i <= actions.len(),
+            strs(r@) == spec_awaited(actions@).take(i as int),
+        decreases actions.len() - i,
+    {
+        let a = &actions[i];
+        let w = a.awaited.clone();
+        assert(w@ == actions@[i as int].awaited@);
+        let ghost before = r@;
+        r.push(w);
+        proof {
+            assert(r@ == before.push(w));
+            assert(strs(r@) =~= strs(before).push(w@));
+            assert(spec_awaited(actions@).take(i + 1) =~= spec_awaited(actions@).take(i as int).push(actions@[i as int].awaited@));
+        }
+        i += 1;
+    }
+    proof {
+        assert(spec_awaited(actions@).take(actions.len() as int) =~= spec_awaited(actions@));
+    }
+    r
+}
+
+/// `spec_refs_one_origin` from `j` is the pointwise statement.
+pub proof fn lemma_refs_one_origin(refs: Seq<TaskRef>, j: int)
+    requires
+        1 <= j,
+    ensures
+        spec_refs_one_origin(refs, j) <==> (forall|k: int| j <= k < refs.len() ==> origin(#[trigger] refs[k].id@) == origin(refs[0].id@)),
+    decreases refs.len() - j,
+{
+    if j < refs.len() {
+        lemma_refs_one_origin(refs, j + 1);
+    }
 }
 
 pub open spec fn spec_callbacks(

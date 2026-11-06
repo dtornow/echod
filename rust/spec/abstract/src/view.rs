@@ -351,6 +351,33 @@ pub broadcast proof fn lemma_sends_index(v: Seq<Dispatch>, i: int)
 {
 }
 
+pub broadcast proof fn lemma_works_empty(v: Seq<Work>)
+    requires
+        v.len() == 0,
+    ensures
+        #[trigger] works(v) == Seq::<Sched<InternalV>>::empty(),
+{
+    assert(works(v) =~= Seq::<Sched<InternalV>>::empty());
+}
+
+pub broadcast proof fn lemma_sends_empty(v: Seq<Dispatch>)
+    requires
+        v.len() == 0,
+    ensures
+        #[trigger] sends(v) == Seq::<DispatchV>::empty(),
+{
+    assert(sends(v) =~= Seq::<DispatchV>::empty());
+}
+
+pub broadcast proof fn lemma_strs_empty(v: Seq<String>)
+    requires
+        v.len() == 0,
+    ensures
+        #[trigger] strs(v) == Seq::<Chars>::empty(),
+{
+    assert(strs(v) =~= Seq::<Chars>::empty());
+}
+
 pub broadcast proof fn lemma_outs_len(v: Seq<Out>)
     ensures
         #[trigger] outs_v(v).len() == v.len(),
@@ -372,6 +399,9 @@ pub broadcast group group_views {
     lemma_works_index,
     lemma_sends_len,
     lemma_sends_index,
+    lemma_works_empty,
+    lemma_sends_empty,
+    lemma_strs_empty,
     lemma_outs_len,
     lemma_outs_index,
     lemma_mv_empty,

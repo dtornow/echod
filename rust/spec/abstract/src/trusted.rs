@@ -89,10 +89,13 @@ impl<V: Clone + std::hash::Hash> PMap<V> {
         PMap { inner: self.inner.clone() }
     }
 
-    /// Every key, in order, each once.
+    /// Every key, in order, each once: `spec_keys` of the map, the keys
+    /// sorted. `String`'s order is its bytes', which for UTF-8 is its
+    /// characters' (`spec_before`).
     #[verifier::external_body]
     pub fn keys(&self) -> (r: Vec<String>)
         ensures
+            r@.map_values(|s: String| s@) == super::view::spec_keys(self@),
             forall|i: int| 0 <= i < r.len() ==> #[trigger] self@.contains_key(r[i]@),
             forall|k: Seq<char>| #[trigger] self@.contains_key(k) ==> exists|i: int| 0 <= i < r.len() && #[trigger] r[i]@ == k,
     {

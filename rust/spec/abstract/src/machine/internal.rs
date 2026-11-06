@@ -14,13 +14,14 @@ use echod_types::{PromiseState, TaskState, Value};
 use super::super::trusted::*;
 #[cfg(verus_keep_ghost)]
 use super::super::view::{
-    lift_dispatch, sat_add, spec_keys, DispatchV, InOutV, InternalV, PromiseV, ScheduleV, StoreV,
-    TaskV,
+    group_views, lift_dispatch, sat_add, sends, spec_keys, strs, DispatchV, InOutV, InternalV,
+    PromiseV, ScheduleV, StoreV, TaskV,
 };
 #[cfg(verus_keep_ghost)]
 use super::{
-    spec_has_target, spec_is_timer, spec_lease_at, spec_new_object, spec_project_promise,
-    spec_project_task, spec_promise_record, spec_string, spec_unlease,
+    lemma_string_of, lemma_tags_ext, lemma_value_ext, spec_has_target, spec_is_timer,
+    spec_lease_at, spec_new_object, spec_project_promise, spec_project_task, spec_promise_record,
+    spec_string, spec_unlease,
 };
 use super::{
     contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, Dispatch, Id, InOut, Promise, ServerConfig, Store, Task, Time, Work,
@@ -32,12 +33,22 @@ impl ServerConfig {
 
     /// Not due. `pending` keeps the checker from treating it as a step that
     /// ran and changed nothing, which a derived item would otherwise repeat.
-    fn noop(&self, s: &Store) -> (r: InOut) {
-        InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), not_due: true }
+    fn noop(&self, s: &Store) -> (r: InOut)
+        ensures
+            r@ == spec_noop(s@),
+    {
+        broadcast use group_views;
+        let r = InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), not_due: true };
+        proof { assert(r@ =~~= spec_noop(s@)); }
+        r
     }
 
     /// Write the promise back as a read at `now` sees it.
-    pub(crate) fn process_promise_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_promise_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_process_work(*self, InternalV::PromiseTimeout(id@), s@, now),
+    {
+        broadcast use group_views;
         let Some(stored) = s.promises.get(id) else { return self.noop(s) };
         let q = stored.project(now);
         if q.state == stored.state && q.settled_at == stored.settled_at {
@@ -47,15 +58,21 @@ impl ServerConfig {
         if let Some(t) = s.tasks.get(id) {
             n.tasks.insert(id.clone(), t.project(&q));
         }
-        n.promises.insert(id.clone(), q.clone());
+        n.promises.insert(id.clone(), copy(&q));
         let mark = if is_timer(&q.tags) { mk("timer promise resolved") } else { mk("promise timed out") };
-        InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mark], not_due: false }
+        let r = InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mark], not_due: false };
+        proof { assert(r@ =~~= spec_process_work(*self, InternalV::PromiseTimeout(id@), s@, now)); }
+        r
     }
 
     /// A suspended task resumes when a promise it awaits has settled; any
     /// other task is told. The callback is spent either way. The awaited
     /// promise is written as it reads, with the callback removed.
-    pub(crate) fn process_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_callback(s@, awaited@, awaiter@, now),
+    {
+        broadcast use group_views;
         let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
         let projected = stored.project(now);
         if projected.state == PromiseState::Pending || !projected.callbacks.contains(awaiter) {
@@ -74,16 +91,17 @@ impl ServerConfig {
         }
         n.promises.insert(awaited.clone(), q);
         if let Some(stored_task) = s.tasks.get(awaiter) {
-            let awaiter_promise = s.promises.get(awaiter).map(|w| w.project(now));
-            let t = match &awaiter_promise {
-                Some(w) => stored_task.project(w),
+            let t = match s.promises.get(awaiter) {
+                Some(w) => stored_task.project(&w.project(now)),
                 None => copy(stored_task),
             };
             match t.state {
                 TaskState::Suspended => {
                     let mut u = t;
                     u.state = TaskState::Pending;
-                    u.resumes = vec![awaited.clone()];
+                    u.resumes = Vec::new();
+                    u.resumes.push(awaited.clone());
+                    assert(strs(u.resumes@) =~= seq![awaited@]);
                     u.retry_timeout_at = Some(since);
                     n.tasks.insert(awaiter.clone(), u);
                     marks.push(mk("task resumed"));
@@ -99,17 +117,24 @@ impl ServerConfig {
                 },
             }
         }
-        InOut { next: n, work: Vec::new(), send: Vec::new(), marks, not_due: false }
+        let r = InOut { next: n, work: Vec::new(), send: Vec::new(), marks, not_due: false };
+        proof { assert(r@ =~~= spec_callback(s@, awaited@, awaiter@, now)); }
+        r
     }
 
-    pub(crate) fn process_listener(&self, awaited: &Id, address: &str, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_listener(&self, awaited: &Id, address: &str, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_listener(s@, awaited@, address@, now),
+    {
+        broadcast use group_views;
         let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
         let projected = stored.project(now);
-        let addr = address.to_string();
+        let addr = address.to_owned();
         if projected.state == PromiseState::Pending || !projected.listeners.contains(&addr) {
             return self.noop(s);
         }
         let rec = projected.to_record(awaited);
+        proof { lemma_string_of(*awaited); }
         let mut n = copy_store(s);
         let mut q = projected;
         q.listeners.remove(&addr);
@@ -117,11 +142,19 @@ impl ServerConfig {
             n.tasks.insert(awaited.clone(), t.project(&q));
         }
         n.promises.insert(awaited.clone(), q);
-        let send = vec![Dispatch::Unblock { address: addr, promise: rec }];
-        InOut { next: n, work: Vec::new(), send, marks: vec![mk("listeners told")], not_due: false }
+        let mut send = Vec::new();
+        send.push(Dispatch::Unblock { address: addr, promise: rec });
+        assert(sends(send@) =~= seq![DispatchV::Unblock { address: address@, promise: rec }]);
+        let r = InOut { next: n, work: Vec::new(), send, marks: vec![mk("listeners told")], not_due: false };
+        proof { assert(r@ =~~= spec_listener(s@, awaited@, address@, now)); }
+        r
     }
 
-    pub(crate) fn process_lease_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_lease_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_lease(s@, id@, now),
+    {
+        broadcast use group_views;
         let Some(t) = s.tasks.get(id) else { return self.noop(s) };
         let pending = match s.promises.get(id) {
             Some(p) => p.project(now).state == PromiseState::Pending,
@@ -134,10 +167,16 @@ impl ServerConfig {
         let mut u = copy(t);
         u.unlease(TaskState::Pending, Some(now));
         n.tasks.insert(id.clone(), u);
-        InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mk("lease expired")], not_due: false }
+        let r = InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mk("lease expired")], not_due: false };
+        proof { assert(r@ =~~= spec_lease(s@, id@, now)); }
+        r
     }
 
-    pub(crate) fn process_retry_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_retry_timeout(&self, id: &Id, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_retry(*self, s@, id@, now),
+    {
+        broadcast use group_views;
         let live = match s.promises.get(id) {
             Some(p) => p.project(now).state == PromiseState::Pending,
             None => false,
@@ -156,16 +195,24 @@ impl ServerConfig {
         u.retry_timeout_at = Some(again);
         let version = u.version;
         n.tasks.insert(id.clone(), u);
-        let send = vec![Dispatch::Execute { id: id.clone(), version }];
-        InOut { next: n, work: Vec::new(), send, marks: vec![mk("task dispatched")], not_due: false }
+        let mut send = Vec::new();
+        send.push(Dispatch::Execute { id: id.clone(), version });
+        assert(sends(send@) =~= seq![DispatchV::Execute { id: id@, version }]);
+        let r = InOut { next: n, work: Vec::new(), send, marks: vec![mk("task dispatched")], not_due: false };
+        proof { assert(r@ =~~= spec_retry(*self, s@, id@, now)); }
+        r
     }
 
     /// Record the run at `next_run_at` and queue the occurrence. The promise
     /// is a later item, on its own origin.
-    pub(crate) fn process_schedule(&self, id: &Id, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn process_schedule(&self, id: &Id, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_schedule_step(s@, id@, now),
+    {
+        broadcast use group_views;
         let Some(c) = s.schedules.get(id) else { return self.noop(s) };
         if c.next_run_at > now {
-            return InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), not_due: true };
+            return self.noop(s);
         }
         let at_ = c.next_run_at;
         let promise = expand(&c.promise_id, id, at_);
@@ -174,26 +221,34 @@ impl ServerConfig {
         d.last_run_at = Some(at_);
         d.next_run_at = next_cron(&c.cron, at_);
         n.schedules.insert(id.clone(), d);
-        let occ = Work::Occurrence {
-            promise,
-            at: at_,
-            timeout: c.promise_timeout,
-            param: c.promise_param.dup(),
-            tags: echod_types::clone_tags(&c.promise_tags),
-        };
+        let param = c.promise_param.dup();
+        let tags = echod_types::clone_tags(&c.promise_tags);
+        proof {
+            lemma_value_ext(param, c.promise_param);
+            lemma_tags_ext(tags, c.promise_tags);
+        }
+        let occ = Work::Occurrence { promise, at: at_, timeout: c.promise_timeout, param, tags };
         let mut work = Vec::new();
         work.push(occ);
-        InOut { next: n, work, send: Vec::new(), marks: vec![mk("schedule advanced")], not_due: false }
+        let r = InOut { next: n, work, send: Vec::new(), marks: vec![mk("schedule advanced")], not_due: false };
+        proof { assert(r@ =~~= spec_schedule_step(s@, id@, now)); }
+        r
     }
 
     /// Create the occurrence's promise as of `at`. A promise already there is
     /// left as it is. One whose deadline has passed by `now` is born settled.
-    pub(crate) fn create_if_absent(&self, promise: &Id, at_: Time, timeout: Time, param: &Value, tags: &echod_types::Tags, s: &Store, now: Time) -> (r: InOut) {
+    pub(crate) fn create_if_absent(&self, promise: &Id, at_: Time, timeout: Time, param: &Value, tags: &echod_types::Tags, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_create_if_absent(s@, promise@, at_, timeout, *param, *tags, now),
+    {
+        broadcast use group_views;
         if now < at_ {
-            return InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), not_due: true };
+            return self.noop(s);
         }
         if s.promises.contains_key(promise) {
-            return InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: vec![mk("schedule: occurrence exists")], not_due: false };
+            let r = InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: vec![mk("schedule: occurrence exists")], not_due: false };
+            proof { assert(r@ =~~= spec_unchanged(s@)); }
+            return r;
         }
         let timeout_at = at_.saturating_add(timeout);
         let live_now = timeout_at > now;
@@ -204,12 +259,18 @@ impl ServerConfig {
             n.tasks.insert(promise.clone(), task);
         }
         let mark = if live_now { mk("schedule fired") } else { mk("schedule fired past the occurrence's deadline") };
-        InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mark], not_due: false }
+        let r = InOut { next: n, work: Vec::new(), send: Vec::new(), marks: vec![mark], not_due: false };
+        proof { assert(r@ =~~= spec_create_if_absent(s@, promise@, at_, timeout, *param, *tags, now)); }
+        r
     }
 
     /// One due item at `now`: a deadline, a callback, a listener, a lease, a
     /// retry, a schedule, or one queued occurrence.
-    pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut) {
+    /// One work item: `spec_process_work`.
+    pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut)
+        ensures
+            r@ == spec_process_work(*self, step@, s@, now),
+    {
         match step {
             Work::PromiseTimeout(id) => self.process_promise_timeout(id, s, now),
             Work::Callback { awaited, awaiter } => self.process_callback(awaited, awaiter, s, now),
