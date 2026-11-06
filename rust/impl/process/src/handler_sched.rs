@@ -78,7 +78,7 @@ pub open spec fn spec_schedule_row(doc: DocV) -> Option<crate::verified::Schedul
 pub open spec fn spec_fire_decide(s: S, f: FlightSpec, ws: WorkingSpec) -> S {
     match f.work {
         WorkSpec::Fire { fired, now, .. } => {
-            let t1 = doc::spec_clamp_now(ws.loaded.stamp, now);
+            let t1 = doc::spec_clamp_now(ws.loaded.committed_at, now);
             let (advanced, _response, born, _notes) = spec_step(AJob::Fire, ws.loaded.doc, t1, s.cfg.retry_timeout, 0);
             let due = match (spec_schedule_row(ws.loaded.doc), born.len() > 0) {
                 (Some(row), true) => Some((row, born.last())),
@@ -146,7 +146,7 @@ pub open spec fn spec_fire_load_origin(s: S, f: FlightSpec, ctx: FireCtxSpec) ->
 /// document, committed first.
 #[verifier::opaque]
 pub open spec fn spec_fire_run(s: S, f: FlightSpec, ctx: FireCtxSpec, wo: WorkingSpec) -> S {
-    let t = doc::spec_clamp_now(wo.loaded.stamp, ctx.t1);
+    let t = doc::spec_clamp_now(wo.loaded.committed_at, ctx.t1);
     let (after, _r, _b, _n) = spec_step(AJob::Occurrence(ctx.pending), wo.loaded.doc, t, s.cfg.retry_timeout, 0);
     let deadline = spec_doc_deadline(after);
     let s = spec_note(s, NoteSpec::FireBegin { flight: f.id, origin: ctx.origin, now: t, row: ctx.row, at: ctx.pending.at, promise_id: ctx.pending.promise, next: ctx.next });
@@ -268,7 +268,7 @@ impl State {
             Work::Fire { fired, now, .. } => (copy_fired(fired), *now),
             _ => return self.fail(f, text("not a fire")),
         };
-        let t1 = doc::clamp_now(ws.loaded.stamp, now);
+        let t1 = doc::clamp_now(ws.loaded.committed_at, now);
         // the decision is the model's: the occurrence due at the instant, or none
         let Decided { doc: advanced, response: _, born, notes: _ } = flight::decide(Job::Fire, clone_doc(&ws.loaded.doc), t1, self.cfg.retry_timeout, 0);
         let mut born = born;
@@ -387,7 +387,7 @@ impl State {
         proof {
             reveal(spec_fire_run);
         }
-        let t = doc::clamp_now(wo.loaded.stamp, ctx.t1);
+        let t = doc::clamp_now(wo.loaded.committed_at, ctx.t1);
         let Decided { doc: after, response: _, born: _, notes: _ } = flight::decide(Job::Occurrence(copy(&ctx.pending)), clone_doc(&wo.loaded.doc), t, self.cfg.retry_timeout, 0);
         let deadline = doc::deadline(&after);
         let flight = f.id;

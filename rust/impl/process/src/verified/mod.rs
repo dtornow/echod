@@ -30,9 +30,10 @@
 //!   their arguments; `text::*` is assumed to compute them. A key is some
 //!   function of prefix, origin, instant and token; which string it is
 //!   stays outside the proof.
-//! - The bytes of a document, `doc.rs`: `spec_encode`, `spec_encode_delta`,
-//!   `spec_decode_origin`, `spec_decode_schedule`; `codec::*` (serde) is
-//!   assumed to compute them. Likewise an announcement's and a
+//! - The bytes of a document, `doc.rs`: partial boundaries and metadata,
+//!   `spec_encode`, `spec_encode_delta`, `spec_decode_origin`,
+//!   `spec_decode_schedule`; `codec::*` (serde) is assumed to compute them.
+//!   Likewise an announcement's and a
 //!   configuration's bytes, `state_node.rs`.
 //! - Strings as characters: `text::strip_prefix`, `text::starts_with`,
 //!   `text::u64_text`, `node::clone_string`, `node::str_eq`.

@@ -907,7 +907,7 @@ pub open spec fn spec_run_origin(s: S, f: FlightSpec, w: WorkingSpec) -> S {
 /// than the last step on it.
 #[verifier::opaque]
 pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, CommittingSpec, DoneSpec) {
-    let now = doc::spec_clamp_now(w.loaded.stamp, work.now());
+    let now = doc::spec_clamp_now(w.loaded.committed_at, work.now());
     let job = match work {
         WorkSpec::Request { req, .. } => AJob::Request(req),
         WorkSpec::Sweep { .. } => AJob::Sweep,
@@ -1106,7 +1106,18 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
             Some(StoreOutcome::Written(etag)) => {
                 let s = spec_note(s, NoteSpec::DocumentWrite { mode, bytes: len });
                 let s = if c.after is Origin {
-                    spec_remember(s, c.w.target, CachedSpec { loaded: LoadedSpec { doc: c.after, row_count, bytes, stamp: c.now }, etag: etag.deep_view(), filled_at: spec_now(s) })
+                    spec_remember(s, c.w.target, CachedSpec {
+                        loaded: LoadedSpec {
+                            doc: c.after,
+                            row_count,
+                            bytes,
+                            version: c.w.loaded.version.saturating_add(1),
+                            committed_at: c.now,
+                            next_wake_at: doc::spec_deadline_time(c.after),
+                        },
+                        etag: etag.deep_view(),
+                        filled_at: spec_now(s),
+                    })
                 } else {
                     s
                 };
@@ -1123,7 +1134,14 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
 #[verifier::opaque]
 pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec) {
     let (s, nonce) = spec_token(s);
-    let header = HeaderSpec { stamp: c.now, nonce };
+    let header = HeaderSpec {
+        document: c.w.target,
+        basever: c.w.loaded.version,
+        version: c.w.loaded.version.saturating_add(1),
+        committed_at: c.now,
+        next_wake_at: doc::spec_deadline_time(c.after),
+        nonce,
+    };
     let (call, mode, row_count, bytes) = match cond {
         None => {
             let body = doc::spec_encode(header, c.after);
@@ -1135,7 +1153,7 @@ pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: 
             let removed = doc::spec_removed_any(c.w.loaded.doc, c.after);
             let after_len = echod_concrete::node::spec_doc_len(c.after) as usize;
             let stale_after = c.w.loaded.row_count.saturating_add(changed).saturating_sub(after_len);
-            let append = !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
+            let append = c.w.loaded.version > 0 && !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
             if append {
                 let n = c.w.loaded.row_count.saturating_add(changed);
                 let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
@@ -1732,7 +1750,7 @@ impl State {
         proof {
             reveal(spec_decide);
         }
-        let now = doc::clamp_now(w.loaded.stamp, work.now());
+        let now = doc::clamp_now(w.loaded.committed_at, work.now());
         let job = match work {
             Work::Request { req, .. } => Job::Request(copy(req)),
             Work::Sweep { .. } => Job::Sweep,
@@ -2032,7 +2050,18 @@ impl State {
                     if is_origin(&c.after) {
                         let filled_at = self.now();
                         let target = copy_string(&c.w.target);
-                        let cached = Cached { loaded: Loaded { doc: clone_doc(&c.after), row_count, bytes, stamp: c.now }, etag: Etag(copy_string(&etag.0)), filled_at };
+                        let cached = Cached {
+                            loaded: Loaded {
+                                doc: clone_doc(&c.after),
+                                row_count,
+                                bytes,
+                                version: c.w.loaded.version.saturating_add(1),
+                                committed_at: c.now,
+                                next_wake_at: doc::deadline(&c.after),
+                            },
+                            etag: Etag(copy_string(&etag.0)),
+                            filled_at,
+                        };
                         self.remember(target.as_str(), cached);
                     }
                     c.w.etag = Some(Etag(copy_string(&etag.0)));
@@ -2053,7 +2082,14 @@ impl State {
             reveal(spec_issue_write);
         }
         let nonce = self.token();
-        let header = Header { stamp: c.now, nonce };
+        let header = Header {
+            document: copy_string(&c.w.target),
+            basever: c.w.loaded.version,
+            version: c.w.loaded.version.saturating_add(1),
+            committed_at: c.now,
+            next_wake_at: doc::deadline(&c.after),
+            nonce,
+        };
         let (call, mode, row_count, bytes) = match cond {
             None => {
                 let body = doc::encode(&header, &c.after);
@@ -2069,7 +2105,7 @@ impl State {
                 let removed = doc::removed_any(&c.w.loaded.doc, &c.after);
                 let after_len = doc_len(&c.after);
                 let stale_after = c.w.loaded.row_count.saturating_add(changed).saturating_sub(after_len);
-                let append = !removed && self.cfg.appendable && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
+                let append = c.w.loaded.version > 0 && !removed && self.cfg.appendable && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
                 if append {
                     let n = c.w.loaded.row_count.saturating_add(changed);
                     let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
