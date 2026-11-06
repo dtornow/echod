@@ -25,8 +25,6 @@ use echod_types::{
     ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
     TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
 };
-#[cfg(not(verus_keep_ghost))]
-use serde::{Deserialize, Serialize};
 
 use echod_abstract::trusted::{copy, expand, next_cron};
 #[cfg(verus_keep_ghost)]
@@ -47,6 +45,7 @@ use crate::model::{
     spec_one, spec_reply, spec_string, LocalV,
 };
 use crate::model::{Fleet, Logic, LogicV, Message, Pid};
+pub use crate::document::{Doc, Obj, Objects, Prom, Tk};
 #[cfg(verus_keep_ghost)]
 use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Read, StoreError};
 use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
@@ -127,23 +126,6 @@ pub struct Pending {
     pub tags: Tags,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub enum Doc {
-    Origin(Objects),
-    Schedule(Option<Schedule>),
-}
-
-/// The objects of one origin, by id, in key order. The order is a type
-/// invariant: every `Objects` Verus sees is sorted, so a lookup is a map
-/// lookup and the first due object is the first in `spec_sorted`.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Objects {
-    entries: Vec<(String, Obj)>,
-}
-
 /// A copy of a sorted table is sorted: the derived clone, with its invariant kept.
 impl Clone for Objects {
     #[verifier::external_body]
@@ -153,42 +135,6 @@ impl Clone for Objects {
     {
         Objects { entries: self.entries.clone() }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Obj {
-    pub promise: Prom,
-    pub task: Option<Tk>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Prom {
-    pub state: PromiseState,
-    pub param: Value,
-    pub value: Value,
-    pub tags: Tags,
-    pub timeout_at: u64,
-    pub created_at: u64,
-    pub settled_at: Option<u64>,
-    pub callbacks: Vec<String>,
-    pub listeners: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Tk {
-    pub state: TaskState,
-    pub version: u64,
-    pub pid: Option<String>,
-    pub ttl: Option<u64>,
-    pub lease_timeout_at: Option<u64>,
-    pub retry_timeout_at: Option<u64>,
-    pub resumes: Vec<String>,
 }
 
 /// What a due step tells the outside, once the document that step wrote is the one in the cache.
