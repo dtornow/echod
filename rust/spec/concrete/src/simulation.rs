@@ -31,9 +31,9 @@ use crate::model::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    axiom_decode_encode, CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
+    axiom_decode_encode_body, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
     spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
-    spec_empty_doc, spec_encode, spec_flight, spec_forget, spec_handle, spec_is_empty, spec_keep,
+    spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep,
     spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
     spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
 };
@@ -117,10 +117,10 @@ pub open spec fn extends<P, M>(later: Seq<Envelope<P, M>>, earlier: Seq<Envelope
 
 /// The document a node holds under `key`: its cache, or the empty document.
 /// `relation::loaded` is this.
-pub open spec fn held(node: NodeV, key: Seq<char>) -> DocV {
+pub open spec fn held(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match spec_cached(node, key) {
         Some(cached) => spec_read(key, cached.body),
-        None => spec_empty_doc(key),
+        None => spec_empty_body(key),
     }
 }
 
@@ -145,7 +145,7 @@ pub open spec fn reply_send(reply: Option<(Seq<char>, u64, Response)>) -> Seq<(C
 }
 
 /// The writing flight `spec_decide` opens from `flight` on `doc`.
-pub open spec fn written(node: NodeV, flight: FlightV, doc: DocV) -> FlightV {
+pub open spec fn written(node: NodeV, flight: FlightV, doc: DocumentBodyV) -> FlightV {
     let (next, reply, born, notes) = decision(flight, doc, node.retry_timeout);
     FlightV {
         op: node.next_op,
@@ -153,7 +153,7 @@ pub open spec fn written(node: NodeV, flight: FlightV, doc: DocV) -> FlightV {
         born,
         reply: flight_reply(flight, reply),
         notify: notes,
-        decided: Some(spec_encode(next)),
+        decided: Some(spec_encode_body(next)),
         ..flight
     }
 }
@@ -960,7 +960,7 @@ pub proof fn lemma_forget(docs: Seq<CachedV>, key: Seq<char>, i: int)
 pub proof fn lemma_keep(
     docs: Seq<CachedV>,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     etag: Option<Seq<char>>,
 )
     requires
@@ -969,9 +969,9 @@ pub proof fn lemma_keep(
         ({
             let next = spec_keep(docs, key, doc, etag);
             &&& forall|j: int, k: int| 0 <= j < k < next.len() ==> #[trigger] next[j].key != #[trigger] next[k].key
-            &&& (spec_is_empty(doc) && etag is None ==> spec_cached_from(next, key, 0) is None)
-            &&& (!(spec_is_empty(doc) && etag is None) ==> spec_cached_from(next, key, 0) == Some(
-                CachedV { key, body: spec_encode(doc), etag },
+            &&& (spec_body_is_empty(doc) && etag is None ==> spec_cached_from(next, key, 0) is None)
+            &&& (!(spec_body_is_empty(doc) && etag is None) ==> spec_cached_from(next, key, 0) == Some(
+                CachedV { key, body: spec_encode_body(doc), etag },
             ))
             &&& forall|other: Seq<char>| other != key ==> #[trigger] spec_cached_from(next, other, 0)
                 == spec_cached_from(docs, other, 0)
@@ -979,7 +979,7 @@ pub proof fn lemma_keep(
                 0 <= m < docs.len() && #[trigger] docs[m] == next[k]
         }),
 {
-    if spec_is_empty(doc) && etag is None {
+    if spec_body_is_empty(doc) && etag is None {
         lemma_forget(docs, key, 0);
         let next = spec_forget(docs, key, 0);
         assert forall|k: int| 0 <= k < next.len() implies #[trigger] next[k].key == key || exists|m: int|
@@ -988,7 +988,7 @@ pub proof fn lemma_keep(
             assert(docs[m] == next[k]);
         };
     } else {
-        lemma_remember(docs, key, spec_encode(doc), etag, 0);
+        lemma_remember(docs, key, spec_encode_body(doc), etag, 0);
     }
 }
 
@@ -1284,29 +1284,29 @@ pub proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
 // ---------------------------------------------------------------------------
 
 /// An empty document that reads as `s` under `key` is the empty document.
-pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::view::StoreV)
+pub proof fn lemma_empty_body_rel(key: Seq<char>, doc: DocumentBodyV, s: echod_abstract::view::StoreV)
     requires
         doc_rel(key, doc, s),
-        spec_is_empty(doc),
+        spec_body_is_empty(doc),
     ensures
-        doc_rel(key, spec_empty_doc(key), s),
+        doc_rel(key, spec_empty_body(key), s),
 {
     match doc {
-        DocV::Workflow(map) => {
+        DocumentBodyV::Workflow(map) => {
             assert(!crate::store::spec_starts(key, crate::interpret::schedule_prefix()));
             assert(map.dom().finite());
             assert(map.dom().len() == 0);
             assert(map.dom() =~= Set::<Seq<char>>::empty());
             assert(map =~= Map::<Seq<char>, crate::node::ObjV>::empty());
-            assert(spec_empty_doc(key) == DocV::Workflow(Map::<Seq<char>, crate::node::ObjV>::empty()));
+            assert(spec_empty_body(key) == DocumentBodyV::Workflow(Map::<Seq<char>, crate::node::ObjV>::empty()));
         },
-        DocV::Schedule(slot) => {
+        DocumentBodyV::Schedule(slot) => {
             assert(slot is None);
             if crate::store::spec_starts(key, crate::interpret::schedule_prefix()) {
-                assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+                assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
             } else {
                 let map = Map::<Seq<char>, crate::node::ObjV>::empty();
-                assert(spec_empty_doc(key) == DocV::Workflow(map));
+                assert(spec_empty_body(key) == DocumentBodyV::Workflow(map));
                 assert(map.dom() =~= Set::<Seq<char>>::empty());
             }
         },
@@ -1392,7 +1392,7 @@ pub proof fn lemma_reply_is_output(call: Call, response: Response)
 }
 
 /// `decision` reads the job and the time of a flight.
-pub proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocV, retry_timeout: u64)
+pub proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocumentBodyV, retry_timeout: u64)
     requires
         a.job == b.job,
         a.now == b.now,
@@ -1414,7 +1414,7 @@ pub proof fn lemma_reply_same(a: FlightV, b: FlightV, reply: Option<Response>)
 /// The empty document is empty.
 pub proof fn lemma_empty_is_empty(key: Seq<char>)
     ensures
-        spec_is_empty(spec_empty_doc(key)),
+        spec_body_is_empty(spec_empty_body(key)),
 {
     if crate::store::spec_starts(key, seq!['s', '/']) {
     } else {
@@ -1441,7 +1441,7 @@ pub proof fn lemma_forget_absent(docs: Seq<CachedV>, key: Seq<char>, i: int)
 
 /// `spec_decide` from a reading flight: the node keeps the document and
 /// answers, or opens the write of what it decided.
-pub proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
+pub proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV)
     requires
         !flight.writing,
     ensures
@@ -1468,20 +1468,20 @@ pub proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
     if next == held(node, flight.key) && born.len() == 0 {
     } else {
         let w = written(node, flight, doc);
-        assert(w.decided == Some(spec_encode(next)));
+        assert(w.decided == Some(spec_encode_body(next)));
         assert(w.writing);
         match flight.etag {
             Some(chars) => {
                 assert(request_of(w) == StoreCall::PutIfMatch {
                     key: spec_string(flight.key),
-                    body: spec_bytes(spec_encode(next)),
+                    body: spec_bytes(spec_encode_body(next)),
                     etag: Etag(spec_string(chars)),
                 });
             },
             None => {
                 assert(request_of(w) == StoreCall::PutIfNoneMatch {
                     key: spec_string(flight.key),
-                    body: spec_bytes(spec_encode(next)),
+                    body: spec_bytes(spec_encode_body(next)),
                 });
             },
         }
@@ -1989,7 +1989,7 @@ pub proof fn lemma_cache_ok_keep(
     store: CStore,
     key: Seq<char>,
     c: CachedV,
-    next: DocV,
+    next: DocumentBodyV,
 )
     requires
         cache_ok(i, node0, store),
@@ -1999,10 +1999,10 @@ pub proof fn lemma_cache_ok_keep(
         node2.nodes == node0.nodes,
         spec_cached(node0, key) == Some(c),
         cache_entry_ok(key, c, store),
-        c.body == spec_encode(next),
-        spec_is_empty(next) && c.etag is None ==> spec_cached(node2, key) is None,
-        !(spec_is_empty(next) && c.etag is None) ==> spec_cached(node2, key) == Some(
-            CachedV { key, body: spec_encode(next), etag: c.etag },
+        c.body == spec_encode_body(next),
+        spec_body_is_empty(next) && c.etag is None ==> spec_cached(node2, key) is None,
+        !(spec_body_is_empty(next) && c.etag is None) ==> spec_cached(node2, key) == Some(
+            CachedV { key, body: spec_encode_body(next), etag: c.etag },
         ),
         forall|other: Seq<char>| other != key ==> #[trigger] spec_cached(node2, other)
             == spec_cached(node0, other),
@@ -2021,12 +2021,12 @@ pub proof fn lemma_cache_ok_keep(
         assert(spec_owns(node0, k));
         assert(!applied_write(i, node0, store, k));
         if k == key {
-            if spec_is_empty(next) && c.etag is None {
+            if spec_body_is_empty(next) && c.etag is None {
                 assert(physical(store, key) is None);
             } else {
                 lemma_cached_from(node0.documents, key, 0);
                 assert(c.key == key);
-                assert(CachedV { key, body: spec_encode(next), etag: c.etag } == c);
+                assert(CachedV { key, body: spec_encode_body(next), etag: c.etag } == c);
             }
         } else {
             assert(spec_cached(node2, k) == spec_cached(node0, k));
@@ -2644,7 +2644,7 @@ pub proof fn lemma_begin_related(
             lemma_decision_same(r, probe_flight, doc, node0.retry_timeout);
             lemma_reply_same(r, probe_flight, reply);
             assert(loaded(node2, key) == doc);
-            assert(doc == spec_empty_doc(key));
+            assert(doc == spec_empty_body(key));
             // facts of the node
             assert(flight_ok(node2));
             assert(cache_owned(node2));
@@ -2708,7 +2708,7 @@ pub proof fn lemma_begin_related(
             lemma_decide(node1, f, doc);
             assert(held(node1, key) == doc);
             assert(cache_entry_ok(key, c, store));
-            assert(c.body == spec_encode(doc));
+            assert(c.body == spec_encode_body(doc));
             if next == doc && born.len() == 0 {
                 // the node keeps the document and answers
                 assert(node2 == NodeV {
@@ -2761,12 +2761,12 @@ pub proof fn lemma_begin_related(
                 };
                 lemma_traffic_ok(fleet, cb, ca, i, node2);
                 // the store, read through the nodes
-                if spec_is_empty(next) && c.etag is None {
-                    assert(intended(node2, key) == spec_empty_doc(key));
-                    lemma_empty_doc_rel(key, next, next_store);
+                if spec_body_is_empty(next) && c.etag is None {
+                    assert(intended(node2, key) == spec_empty_body(key));
+                    lemma_empty_body_rel(key, next, next_store);
                 } else {
-                    axiom_decode_encode(next);
-                    assert(intended(node2, key) == spec_read(key, spec_encode(next)));
+                    axiom_decode_encode_body(next);
+                    assert(intended(node2, key) == spec_read(key, spec_encode_body(next)));
                     assert(intended(node2, key) == next);
                 }
                 assert(doc_rel(key, effective(fleet, ca, key), next_store));
@@ -3631,7 +3631,7 @@ pub proof fn lemma_write_after_read(
             let node0 = node_at(cb, i);
             let flight = node0.flight.unwrap();
             let rest = NodeV { flight: None, ..node0 };
-            let w = written(rest, flight, spec_empty_doc(flight.key));
+            let w = written(rest, flight, spec_empty_body(flight.key));
             &&& node2 == NodeV { flight: Some(w), next_op: (node0.next_op + 1) as u64, ..rest }
             &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node0.next_op, call: request_of(w) })]
         }),
@@ -3649,7 +3649,7 @@ pub proof fn lemma_write_after_read(
     let s = astate(ab).store;
     let op = node0.next_op;
     let rest = NodeV { flight: None, ..node0 };
-    let doc = spec_empty_doc(key);
+    let doc = spec_empty_body(key);
     let w = written(rest, flight, doc);
     assert(flight_ok(node0));
     assert(spec_cached(node0, key) is None);
@@ -3667,7 +3667,7 @@ pub proof fn lemma_write_after_read(
     assert(w.caller == flight.caller);
     assert(w.etag == flight.etag);
     assert(w.writing);
-    assert(w.decided == Some(spec_encode(next)));
+    assert(w.decided == Some(spec_encode_body(next)));
     assert(w.born == born);
     assert(w.notify == notes);
     assert(w.reply == flight_reply(flight, reply));
@@ -3809,7 +3809,7 @@ pub proof fn lemma_store_reply(
             assert(outcome == StoreOutcome::Got(None));
             assert(flight.etag is None);
             assert(spec_cached(node0, key) is None);
-            assert(doc0 == spec_empty_doc(key));
+            assert(doc0 == spec_empty_body(key));
             let rest = NodeV { flight: None, ..node0 };
             assert(FlightV { etag: None, ..flight } == flight);
             assert((node2, send) == spec_decide(rest, flight, doc0));
@@ -3817,7 +3817,7 @@ pub proof fn lemma_store_reply(
             assert(held(rest, key) == doc0);
             if next == doc0 && born.len() == 0 {
                 lemma_empty_is_empty(key);
-                assert(spec_is_empty(next));
+                assert(spec_body_is_empty(next));
                 assert(spec_keep(rest.documents, key, next, None) == spec_forget(rest.documents, key, 0));
                 lemma_cached_from(node0.documents, key, 0);
                 lemma_forget_absent(node0.documents, key, 0);
@@ -3844,7 +3844,7 @@ pub proof fn lemma_store_reply(
             }
         } else {
             let decided = flight.decided.unwrap();
-            assert(decided == spec_encode(next));
+            assert(decided == spec_encode_body(next));
             let tag = spec_etag(decided);
             assert(outcome == StoreOutcome::Written(tag));
             assert((node2, send) == spec_commit(node0, flight, tag));
@@ -3856,7 +3856,7 @@ pub proof fn lemma_store_reply(
             lemma_remember(node0.documents, key, decided, Some(chars), 0);
             let entry = CachedV { key, body: decided, etag: Some(chars) };
             assert(spec_cached(node2, key) == Some(entry));
-            axiom_decode_encode(next);
+            axiom_decode_encode_body(next);
             assert(spec_read(key, decided) == next);
             assert(loaded(node2, key) == next);
             assert(applied_write(i, node0, store, key));
@@ -4598,15 +4598,15 @@ pub proof fn lemma_owed_zero(fleet: Fleet, world: World<CModel>, item: Sched<Int
 /// The empty document reads as the empty store under every key.
 pub proof fn lemma_empty_reads(key: Seq<char>)
     ensures
-        doc_rel(key, spec_empty_doc(key), empty_store()),
+        doc_rel(key, spec_empty_body(key), empty_store()),
 {
     let s = empty_store();
     if crate::store::spec_starts(key, seq!['s', '/']) {
-        assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+        assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
         assert(!s.schedules.contains_key(key.skip(2)));
     } else {
         let map = Map::<Seq<char>, crate::node::ObjV>::empty();
-        assert(spec_empty_doc(key) == DocV::Workflow(map));
+        assert(spec_empty_body(key) == DocumentBodyV::Workflow(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
         if crate::store::spec_starts(key, crate::interpret::origin_prefix()) {
@@ -4695,7 +4695,7 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
             let node = node_at(cw, o);
             assert(node.flight is None);
             assert(spec_cached(node, key) is None);
-            assert(effective(fleet, cw, key) == spec_empty_doc(key));
+            assert(effective(fleet, cw, key) == spec_empty_body(key));
         }
         lemma_empty_reads(key);
     };

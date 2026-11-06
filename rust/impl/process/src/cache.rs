@@ -10,13 +10,13 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::doc::Loaded;
+use crate::document::Loaded;
 use crate::types::Etag;
 use crate::verified::node::str_eq;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
-use crate::doc::LoadedSpec;
+use crate::document::LoadedSpec;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::EtagSpec;
 

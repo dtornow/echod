@@ -6,8 +6,8 @@
 //! The document machine is `echod_concrete`: `handle`, `sweep`, `run_due`
 //! and `create_occurrence` are proved there to compute `spec_handle`,
 //! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
-//! concrete Rover model. `doc.rs` turns a document's rows into its `Doc`
-//! and back; the handlers order the store calls around those steps.
+//! concrete Rover model. `document.rs` states the shared partial codec; the
+//! handlers order the store calls around those steps.
 //!
 //! ```text
 //! node.rs            membership, cache versions, armed keys
@@ -30,7 +30,7 @@
 //!   their arguments; `text::*` is assumed to compute them. A key is some
 //!   function of prefix, origin, instant and token; which string it is
 //!   stays outside the proof.
-//! - The bytes of a document, `doc.rs`: partial boundaries and metadata,
+//! - The bytes of a document, `document.rs`: partial boundaries and metadata,
 //!   `spec_encode`, `spec_encode_delta`, `spec_decode_workflow`,
 //!   `spec_decode_schedule`; `codec::*` (serde) is assumed to compute them.
 //!   Likewise an announcement's and a

@@ -22,7 +22,7 @@
 //! types.rs           events, store calls and outcomes, effects, notes
 //! config.rs          the dials
 //! keys.rs            where everything lives under the bucket
-//! doc.rs             a document: rows in, the model's Doc, rows out
+//! document.rs        verified facade over the shared partial document codec
 //! target.rs          a workflow document, or a schedule's
 //! reason.rs          the words a refusal carries
 //! cache.rs           documents this node remembers, by LRU under a byte budget
@@ -40,7 +40,7 @@
 //! The concrete Rover model decides: a request is `echod_concrete::handle`,
 //! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
 //! `create_occurrence`, each proved there to compute its specification.
-//! The handlers turn a document's rows into the model's `Doc`, run the
+//! The handlers turn a document's rows into the model's `DocumentBody`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::
 //! Sequence`, which orders the store calls around it — key, document,
 //! previous key, fired key — and is proved to: `flight_spec::lemma_sequence`
@@ -57,7 +57,7 @@
 pub mod cache;
 pub mod config;
 pub mod debug;
-pub mod doc;
+pub mod document;
 pub mod handler;
 pub mod handler_docs;
 pub mod handler_node;

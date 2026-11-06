@@ -18,7 +18,7 @@ use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    DocV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
+    DocumentBodyV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
     spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map,
     spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
     spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
@@ -188,21 +188,21 @@ pub open spec fn origin_prefix() -> Seq<char> {
 
 /// What the document under `key` says about the abstract store. An origin
 /// document is a finite map; an empty one is then the empty document.
-pub open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
+pub open spec fn doc_rel(key: Seq<char>, doc: DocumentBodyV, s: AStore) -> bool {
     if spec_starts(key, schedule_prefix()) {
         match doc {
-            DocV::Schedule(slot) => slot_rel(slot, key.skip(2), s),
-            DocV::Workflow(_) => false,
+            DocumentBodyV::Schedule(slot) => slot_rel(slot, key.skip(2), s),
+            DocumentBodyV::Workflow(_) => false,
         }
     } else if spec_starts(key, origin_prefix()) {
         match doc {
-            DocV::Workflow(map) => map.dom().finite() && origin_rel(map, key.skip(2), s),
-            DocV::Schedule(_) => false,
+            DocumentBodyV::Workflow(map) => map.dom().finite() && origin_rel(map, key.skip(2), s),
+            DocumentBodyV::Schedule(_) => false,
         }
     } else {
         match doc {
-            DocV::Workflow(map) => map.dom().finite() && map.dom().len() == 0,
-            DocV::Schedule(slot) => slot is None,
+            DocumentBodyV::Workflow(map) => map.dom().finite() && map.dom().len() == 0,
+            DocumentBodyV::Schedule(slot) => slot is None,
         }
     }
 }
@@ -213,7 +213,7 @@ pub open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
 
 /// What other keys said of `s`, they say of `next`.
 pub open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> bool {
-    forall|other: Seq<char>, doc: DocV|
+    forall|other: Seq<char>, doc: DocumentBodyV|
         other != key && doc_rel(other, doc, s) ==> #[trigger] doc_rel(other, doc, next)
 }
 
@@ -225,7 +225,7 @@ pub open spec fn request_agrees(
     config: ServerConfig,
     request: Request,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 ) -> bool {
@@ -595,7 +595,7 @@ pub proof fn lemma_origin_key(origin_chars: Seq<char>)
 }
 
 /// An origin key reads as an workflow document, by [`doc_rel`].
-pub proof fn lemma_origin_doc(key: Seq<char>, origin_chars: Seq<char>, doc: DocV, s: AStore)
+pub proof fn lemma_origin_doc(key: Seq<char>, origin_chars: Seq<char>, doc: DocumentBodyV, s: AStore)
     requires
         key == spec_origin_key(origin_chars),
         doc_rel(key, doc, s),
@@ -606,10 +606,10 @@ pub proof fn lemma_origin_doc(key: Seq<char>, origin_chars: Seq<char>, doc: DocV
 {
     lemma_origin_key(origin_chars);
     match doc {
-        DocV::Workflow(map) => {
-            assert(spec_opened(doc) == DocV::Workflow(map));
+        DocumentBodyV::Workflow(map) => {
+            assert(spec_opened(doc) == DocumentBodyV::Workflow(map));
         },
-        DocV::Schedule(_) => {
+        DocumentBodyV::Schedule(_) => {
             assert(false);
         },
     }
@@ -656,7 +656,7 @@ pub proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char>)
     ensures
         others_kept(spec_origin_key(changed), s, next),
 {
-    assert forall|other: Seq<char>, doc: DocV|
+    assert forall|other: Seq<char>, doc: DocumentBodyV|
         other != spec_origin_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
         other,
         doc,
@@ -665,14 +665,14 @@ pub proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char>)
         if spec_starts(other, schedule_prefix()) {
         } else if spec_starts(other, origin_prefix()) {
             match doc {
-                DocV::Workflow(map) => {
+                DocumentBodyV::Workflow(map) => {
                     let o = other.skip(2);
                     lemma_starts_split(other, origin_prefix());
                     assert(o != changed);
                     assert(same_at_origin(s, next, o));
                     lemma_origin_rel_same(map, o, s, next);
                 },
-                DocV::Schedule(_) => {},
+                DocumentBodyV::Schedule(_) => {},
             }
         } else {
         }
@@ -868,7 +868,7 @@ pub proof fn lemma_schedule_key(id: Seq<char>)
 }
 
 /// A schedule key reads as a schedule slot, by [`doc_rel`].
-pub proof fn lemma_schedule_doc(key: Seq<char>, id: Seq<char>, doc: DocV, s: AStore)
+pub proof fn lemma_schedule_doc(key: Seq<char>, id: Seq<char>, doc: DocumentBodyV, s: AStore)
     requires
         key == spec_schedule_key(id),
         doc_rel(key, doc, s),
@@ -892,7 +892,7 @@ pub proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed: Seq<ch
         others_kept(spec_schedule_key(changed), s, next),
 {
     lemma_schedule_key(changed);
-    assert forall|other: Seq<char>, doc: DocV|
+    assert forall|other: Seq<char>, doc: DocumentBodyV|
         other != spec_schedule_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
         other,
         doc,
@@ -905,7 +905,7 @@ pub proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed: Seq<ch
             assert(next.schedules.contains_key(id) == s.schedules.contains_key(id));
         } else if spec_starts(other, origin_prefix()) {
             match doc {
-                DocV::Workflow(map) => {
+                DocumentBodyV::Workflow(map) => {
                     let o = other.skip(2);
                     assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {
                         &&& s.promises.contains_key(id) == next.promises.contains_key(id)
@@ -915,7 +915,7 @@ pub proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed: Seq<ch
                     } by {};
                     lemma_origin_rel_same(map, o, s, next);
                 },
-                DocV::Schedule(_) => {},
+                DocumentBodyV::Schedule(_) => {},
             }
         } else {
         }
@@ -962,7 +962,7 @@ pub proof fn lemma_origin_reads(key: Seq<char>, origin_chars: Seq<char>, map: Ma
         map.dom().finite(),
         origin_rel(map, origin_chars, s),
     ensures
-        doc_rel(key, DocV::Workflow(map), s),
+        doc_rel(key, DocumentBodyV::Workflow(map), s),
 {
     lemma_origin_key(origin_chars);
 }
@@ -1119,7 +1119,7 @@ pub proof fn lemma_origin_insert(
 pub proof fn lemma_promise_get_agrees(
     config: ServerConfig,
     id: String,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1164,7 +1164,7 @@ pub proof fn lemma_promise_get_agrees(
 pub proof fn lemma_promise_create_agrees(
     config: ServerConfig,
     req: echod_types::PromiseCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1233,11 +1233,11 @@ pub proof fn lemma_promise_create_agrees(
         lemma_origin_insert(map, o, s, req.id@, obj, p, t);
         assert(next.promises.dom() == s.promises.dom().insert(req.id@));
         assert(finite_store(next));
-        assert(spec_with_workflow(doc, map.insert(req.id@, obj)) == DocV::Workflow(map.insert(req.id@, obj)));
+        assert(spec_with_workflow(doc, map.insert(req.id@, obj)) == DocumentBodyV::Workflow(map.insert(req.id@, obj)));
         assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
         lemma_origin_key(o);
         assert(origin_rel(map.insert(req.id@, obj), key.skip(2), next));
-        assert(doc_rel(key, DocV::Workflow(map.insert(req.id@, obj)), next));
+        assert(doc_rel(key, DocumentBodyV::Workflow(map.insert(req.id@, obj)), next));
         assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, next, other) by {
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
                 &&& s.promises.contains_key(id) == next.promises.contains_key(id)
@@ -1255,7 +1255,7 @@ pub proof fn lemma_promise_create_agrees(
 pub proof fn lemma_promise_settle_agrees(
     config: ServerConfig,
     req: echod_types::PromiseSettleReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1364,7 +1364,7 @@ pub proof fn lemma_promise_settle_agrees(
             assert(outs[0].next == n);
             assert(c_promise_settle(doc, req, now).0 == spec_with_workflow(doc, map.insert(req.id@, obj)));
             assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
-            assert(doc_rel(key, DocV::Workflow(map.insert(req.id@, obj)), n));
+            assert(doc_rel(key, DocumentBodyV::Workflow(map.insert(req.id@, obj)), n));
             assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, n, other) by {
                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
                     &&& s.promises.contains_key(id) == n.promises.contains_key(id)
@@ -1384,7 +1384,7 @@ pub proof fn lemma_promise_settle_agrees(
 pub proof fn lemma_promise_handlers_agree(
     config: ServerConfig,
     request: Request,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )

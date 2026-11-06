@@ -33,9 +33,10 @@ earlier proof.
 
 ## The document machine
 
-`echod_concrete::node` (`rust/spec/concrete/src/node.rs`). A document is
-`Doc`: an origin's objects, sorted by id, or a schedule. `handle` runs one
-request on it; `run_due` one due step — a promise's timeout, a lease or a
+`echod_concrete::document` owns `WorkflowDocument`, `ScheduleDocument`, and
+the partials whose fold is either document. `echod_concrete::node` runs the
+business machine on their `DocumentBody`: workflow objects sorted by id, or a
+schedule. `handle` runs one request on it; `run_due` one due step — a promise's timeout, a lease or a
 retry timeout, one callback resumed, one listener told, or a schedule's
 occurrence; `sweep` runs `run_due` until a step changes nothing or a step
 limit is reached; `create_occurrence` births an occurrence in its origin.
@@ -49,9 +50,9 @@ no action for the detached create, and the due steps. Trusted there: the
 JSON codec (`assume_specification`), the key hash, `copy`, and the abstract
 crate's `expand` and `next_cron`.
 
-The process (`rust/impl/process`) runs that machine. `doc.rs` folds an
-object's rows into the model's `Doc` (`Objects::from_entries`) and writes
-the `Doc` a step leaves as rows again (`into_entries`); `handler_docs`
+The process (`rust/impl/process`) runs that machine. `document.rs` states the
+shared partial codec for process verification; the executable codec and
+document values live in `echod_concrete::document`. `handler_docs`
 decides a request by `handle` and a fired key by `sweep`; `handler_sched`
 runs a schedule by `run_due` and `create_occurrence`. Once the write lands,
 an `Execute` note goes to the address of the task's `resonate:target` tag,
@@ -87,8 +88,8 @@ rust/impl/process/src/
   types.rs           events, store calls and outcomes, effects, notes
   config.rs          the dials
   keys.rs            where everything lives under the bucket
-  doc.rs             a document: rows in, the model's Doc, rows out
-  target.rs          an origin's document, or a schedule's
+  document.rs        verified facade over the shared partial document codec
+  target.rs          a workflow document, or a schedule document
   reason.rs          the words a refusal carries
   cache.rs           documents this node remembers, by LRU under a byte budget
   debug.rs           debug.reset, debug.snap, debug.tick, once the runtime has accepted them
@@ -146,7 +147,7 @@ supplies is the store.
 ### The bucket
 
 ```text
-wf/<origin>                              an origin's document: promise rows
+wf/<origin>                              a workflow document: promise objects
 sched/<id>                               a schedule's document: its row, or none
 t/<bucket>/<deadline>_<origin>@<token>   a deadline for an origin, empty
 t/<bucket>/<deadline>_sched:<id>@<token> a schedule's next run, empty
@@ -585,7 +586,7 @@ Proved, 251 items, no admits:
 
 - **Occurrences.** Every occurrence a schedule has fired has its promise:
   a row whose last run is `t` has the promise its template expands to at
-  `t` in the bucket, in its origin's document. The expansion is a function
+  `t` in the bucket, in its workflow document. The expansion is a function
   of template, schedule and instant, trusted to be the node's.
 
 The Catalogue and Timers theorems cover both kinds of document; in

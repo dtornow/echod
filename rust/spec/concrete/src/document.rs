@@ -53,7 +53,7 @@ pub struct Partial<R> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Document<R> {
+struct Folded<R> {
     pub document: String,
     pub version: u64,
     pub committed_at: u64,
@@ -62,7 +62,7 @@ pub struct Document<R> {
 }
 
 #[cfg(not(verus_keep_ghost))]
-impl<R> Document<R> {
+impl<R> Folded<R> {
     pub fn empty(document: String) -> Self {
         Self {
             document,
@@ -75,7 +75,7 @@ impl<R> Document<R> {
 }
 
 #[cfg(not(verus_keep_ghost))]
-impl<R: Clone> Document<R> {
+impl<R: Clone> Folded<R> {
     /// Apply one partial.  The checks are representation checks, not store
     /// concurrency control: S3's conditional write still decides which
     /// writer commits.
@@ -145,14 +145,6 @@ impl<R: Clone> Partial<R> {
     }
 }
 
-/// The document values used by the two physical document families.
-pub type WorkflowDocument = Document<Obj>;
-pub type ScheduleDocument = Document<Schedule>;
-
-/// Their stored units.
-pub type WorkflowPartial = Partial<Obj>;
-pub type SchedulePartial = Partial<Schedule>;
-
 // The mathematical partial algebra.  The executable codec is deliberately
 // separate: serde is a trusted byte boundary, while these equations are what
 // handlers and compaction are proved against.
@@ -174,7 +166,7 @@ pub struct PartialV<V> {
 }
 
 #[cfg(verus_keep_ghost)]
-pub struct DocumentV<V> {
+pub struct FoldedV<V> {
     pub document: Seq<char>,
     pub version: nat,
     pub committed_at: nat,
@@ -202,8 +194,8 @@ pub open spec fn spec_apply_changes<V>(entries: Map<Seq<char>, V>, changes: Seq<
 }
 
 #[cfg(verus_keep_ghost)]
-pub open spec fn spec_apply<V>(document: DocumentV<V>, partial: PartialV<V>) -> DocumentV<V> {
-    DocumentV {
+pub open spec fn spec_apply<V>(document: FoldedV<V>, partial: PartialV<V>) -> FoldedV<V> {
+    FoldedV {
         document: document.document,
         version: partial.version,
         committed_at: partial.committed_at,
@@ -249,7 +241,7 @@ pub proof fn lemma_apply_changes_append<V>(
 /// Compacting adjacent partials preserves their logical effect.
 #[cfg(verus_keep_ghost)]
 pub proof fn lemma_compose_preserves_apply<V>(
-    document: DocumentV<V>,
+    document: FoldedV<V>,
     first: PartialV<V>,
     second: PartialV<V>,
 )
@@ -272,9 +264,105 @@ pub proof fn lemma_compose_preserves_apply<V>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub enum Doc {
+pub enum DocumentBody {
     Workflow(Objects),
     Schedule(Option<Schedule>),
+}
+
+/// The complete logical value of a workflow document.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkflowDocument {
+    pub document: String,
+    pub version: u64,
+    pub committed_at: u64,
+    pub next_wake_at: Option<u64>,
+    pub objects: Objects,
+}
+
+/// The complete logical value of a schedule document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct ScheduleDocument {
+    pub document: String,
+    pub version: u64,
+    pub committed_at: u64,
+    pub next_wake_at: Option<u64>,
+    pub schedule: Option<Schedule>,
+}
+
+/// A loaded document. The variants are deliberately the two physical
+/// document families; there is no unversioned document representation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoredDocument {
+    Workflow(WorkflowDocument),
+    Schedule(ScheduleDocument),
+}
+
+/// A decoded document and the byte accounting needed to append or compact it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LoadedDocument {
+    pub document: StoredDocument,
+    pub change_count: usize,
+    pub bytes: u64,
+}
+
+pub struct PromV {
+    pub state: PromiseState,
+    pub param: Value,
+    pub value: Value,
+    pub tags: Tags,
+    pub timeout_at: u64,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
+    pub callbacks: Seq<Seq<char>>,
+    pub listeners: Seq<Seq<char>>,
+}
+
+pub struct TkV {
+    pub state: TaskState,
+    pub version: u64,
+    pub pid: Option<Seq<char>>,
+    pub ttl: Option<u64>,
+    pub lease_timeout_at: Option<u64>,
+    pub retry_timeout_at: Option<u64>,
+    pub resumes: Seq<Seq<char>>,
+}
+
+pub struct ObjV {
+    pub promise: PromV,
+    pub task: Option<TkV>,
+}
+
+pub enum DocumentBodyV {
+    Workflow(Map<Seq<char>, ObjV>),
+    Schedule(Option<Schedule>),
+}
+
+pub struct WorkflowDocumentV {
+    pub document: Seq<char>,
+    pub version: u64,
+    pub committed_at: u64,
+    pub next_wake_at: Option<u64>,
+    pub objects: Map<Seq<char>, ObjV>,
+}
+
+pub struct ScheduleDocumentV {
+    pub document: Seq<char>,
+    pub version: u64,
+    pub committed_at: u64,
+    pub next_wake_at: Option<u64>,
+    pub schedule: Option<Schedule>,
+}
+
+pub enum StoredDocumentV {
+    Workflow(WorkflowDocumentV),
+    Schedule(ScheduleDocumentV),
+}
+
+pub struct LoadedDocumentV {
+    pub document: StoredDocumentV,
+    pub change_count: usize,
+    pub bytes: u64,
 }
 
 /// A workflow document: the promises of one workflow, by id, in key order.
@@ -335,7 +423,7 @@ pub struct Tk {
 /// The task fields nested in a persisted workflow row.
 #[cfg(not(verus_keep_ghost))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRow {
+pub struct Task {
     pub state: TaskState,
     pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,7 +441,7 @@ pub struct TaskRow {
 /// One persisted promise row in a workflow document.
 #[cfg(not(verus_keep_ghost))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowRow {
+pub struct Promise {
     pub id: String,
     pub state: PromiseState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -371,13 +459,13 @@ pub struct WorkflowRow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<TaskRow>,
+    pub task: Option<Task>,
 }
 
 #[cfg(not(verus_keep_ghost))]
-impl WorkflowRow {
+impl Promise {
     pub fn into_entry(self) -> (String, Obj) {
-        let WorkflowRow {
+        let Promise {
             id,
             state,
             tags,
@@ -415,7 +503,7 @@ impl WorkflowRow {
 
     pub fn from_entry(id: String, obj: Obj) -> Self {
         let Obj { promise: p, task } = obj;
-        let task = task.map(|t| TaskRow {
+        let task = task.map(|t| Task {
             state: t.state,
             version: t.version,
             ttl: t.ttl,
@@ -424,7 +512,7 @@ impl WorkflowRow {
             retry_timeout_at: t.retry_timeout_at,
             resumes: t.resumes,
         });
-        WorkflowRow {
+        Promise {
             id,
             state: p.state,
             tags: p.tags,
@@ -440,6 +528,31 @@ impl WorkflowRow {
     }
 }
 
+#[cfg(not(verus_keep_ghost))]
+pub type WorkflowPartial = Partial<Promise>;
+pub type SchedulePartial = Partial<Schedule>;
+
+#[cfg(not(verus_keep_ghost))]
+pub fn promises(body: &DocumentBody) -> Vec<Promise> {
+    match body {
+        DocumentBody::Workflow(objects) => objects
+            .clone()
+            .into_entries()
+            .into_iter()
+            .map(|(id, object)| Promise::from_entry(id, object))
+            .collect(),
+        DocumentBody::Schedule(_) => Vec::new(),
+    }
+}
+
+#[cfg(not(verus_keep_ghost))]
+pub fn schedules(body: &DocumentBody) -> Vec<Schedule> {
+    match body {
+        DocumentBody::Schedule(Some(schedule)) => vec![schedule.clone()],
+        _ => Vec::new(),
+    }
+}
+
 /// Each partial is one JSON line.  JSON escapes embedded newlines, so a
 /// successful parse recovers exactly the stored partial boundaries.
 #[cfg(not(verus_keep_ghost))]
@@ -447,7 +560,10 @@ pub mod codec {
     use serde::de::DeserializeOwned;
     use serde::Serialize;
 
-    use super::Partial;
+    use super::{
+        Change, DocumentBody, Folded, Objects, Partial, Promise, Schedule, ScheduleDocument,
+        StoredDocument, WorkflowDocument,
+    };
 
     pub fn encode_partial<R: Serialize>(partial: &Partial<R>) -> Result<Vec<u8>, String> {
         let mut bytes = serde_json::to_vec(partial).map_err(|e| e.to_string())?;
@@ -473,11 +589,238 @@ pub mod codec {
         }
         Ok(partials)
     }
+
+    fn fold_bytes<R: Clone + DeserializeOwned>(bytes: &[u8]) -> Result<(Folded<R>, usize), String> {
+        let partials = decode_partials::<R>(bytes)?;
+        let Some(first) = partials.first() else {
+            return Err("a stored document has no partials".to_string());
+        };
+        let change_count = partials.iter().map(|p| p.changes.len()).sum();
+        Ok((
+            super::fold(first.document.clone(), &partials)?,
+            change_count,
+        ))
+    }
+
+    pub fn decode_workflow(bytes: &[u8]) -> Result<(WorkflowDocument, usize), String> {
+        let (folded, change_count) = fold_bytes::<Promise>(bytes)?;
+        if folded
+            .entries
+            .iter()
+            .any(|(id, row)| id != &row.id || echod_types::origin_of(id) != folded.document)
+        {
+            return Err("promise id does not belong to its workflow document".to_string());
+        }
+        let mut entries: Vec<_> = folded
+            .entries
+            .into_iter()
+            .map(|(_, row)| row.into_entry())
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let objects = Objects { entries };
+        let body = super::DocumentBody::Workflow(objects.clone());
+        if crate::node::body_deadline(&body) != folded.next_wake_at {
+            return Err("stored next_wake_at does not match the workflow document".to_string());
+        }
+        Ok((
+            WorkflowDocument {
+                document: folded.document,
+                version: folded.version,
+                committed_at: folded.committed_at,
+                next_wake_at: folded.next_wake_at,
+                objects,
+            },
+            change_count,
+        ))
+    }
+
+    pub fn decode_schedule(bytes: &[u8]) -> Result<(ScheduleDocument, usize), String> {
+        let (folded, change_count) = fold_bytes::<Schedule>(bytes)?;
+        if folded.entries.len() > 1 {
+            return Err("a schedule document contains more than one schedule".to_string());
+        }
+        let schedule = folded
+            .entries
+            .into_iter()
+            .next()
+            .map(|(_, schedule)| schedule);
+        if let Some(row) = &schedule {
+            if row.id != folded.document {
+                return Err("schedule id does not match its document".to_string());
+            }
+        }
+        let body = super::DocumentBody::Schedule(schedule.clone());
+        if crate::node::body_deadline(&body) != folded.next_wake_at {
+            return Err("stored next_wake_at does not match the schedule document".to_string());
+        }
+        Ok((
+            ScheduleDocument {
+                document: folded.document,
+                version: folded.version,
+                committed_at: folded.committed_at,
+                next_wake_at: folded.next_wake_at,
+                schedule,
+            },
+            change_count,
+        ))
+    }
+
+    fn partial<R>(
+        document: &str,
+        basever: u64,
+        version: u64,
+        committed_at: u64,
+        next_wake_at: Option<u64>,
+        changes: Vec<Change<R>>,
+    ) -> Partial<R> {
+        Partial {
+            document: document.to_string(),
+            basever,
+            version,
+            committed_at,
+            next_wake_at,
+            changes,
+        }
+    }
+
+    fn workflow_entries(body: &DocumentBody) -> Vec<(String, Promise)> {
+        super::promises(body)
+            .into_iter()
+            .map(|promise| (promise.id.clone(), promise))
+            .collect()
+    }
+
+    fn schedule_entries(body: &DocumentBody) -> Vec<(String, Schedule)> {
+        super::schedules(body)
+            .into_iter()
+            .map(|schedule| (schedule.id.clone(), schedule))
+            .collect()
+    }
+
+    fn changed<R: Serialize + Clone>(
+        before: &[(String, R)],
+        after: &[(String, R)],
+    ) -> Vec<(String, R)> {
+        let mut out = Vec::new();
+        for (id, value) in after {
+            let same = before
+                .iter()
+                .find(|(candidate, _)| candidate == id)
+                .map(|(_, previous)| {
+                    serde_json::to_vec(previous).ok() == serde_json::to_vec(value).ok()
+                })
+                .unwrap_or(false);
+            if !same {
+                out.push((id.clone(), value.clone()));
+            }
+        }
+        out
+    }
+
+    fn changes<R: Serialize + Clone>(
+        before: &[(String, R)],
+        after: &[(String, R)],
+    ) -> Vec<Change<R>> {
+        let mut changes: Vec<_> = changed(before, after)
+            .into_iter()
+            .map(|(id, value)| Change::Upsert { id, value })
+            .collect();
+        for (id, _) in before {
+            if !after.iter().any(|(candidate, _)| candidate == id) {
+                changes.push(Change::Remove { id: id.clone() });
+            }
+        }
+        changes
+    }
+
+    pub fn encode(document: &StoredDocument) -> Result<Vec<u8>, String> {
+        match document {
+            StoredDocument::Workflow(doc) => {
+                let body = DocumentBody::Workflow(doc.objects.clone());
+                let changes = workflow_entries(&body)
+                    .into_iter()
+                    .map(|(id, value)| Change::Upsert { id, value })
+                    .collect();
+                encode_partial(&partial(
+                    &doc.document,
+                    0,
+                    doc.version,
+                    doc.committed_at,
+                    doc.next_wake_at,
+                    changes,
+                ))
+            }
+            StoredDocument::Schedule(doc) => {
+                let body = DocumentBody::Schedule(doc.schedule.clone());
+                let changes = schedule_entries(&body)
+                    .into_iter()
+                    .map(|(id, value)| Change::Upsert { id, value })
+                    .collect();
+                encode_partial(&partial(
+                    &doc.document,
+                    0,
+                    doc.version,
+                    doc.committed_at,
+                    doc.next_wake_at,
+                    changes,
+                ))
+            }
+        }
+    }
+
+    pub fn encode_delta(
+        before: &StoredDocument,
+        after: &StoredDocument,
+    ) -> Result<(Vec<u8>, usize), String> {
+        match (before, after) {
+            (StoredDocument::Workflow(before), StoredDocument::Workflow(after)) => {
+                let before_body = DocumentBody::Workflow(before.objects.clone());
+                let after_body = DocumentBody::Workflow(after.objects.clone());
+                let changes = changes(
+                    &workflow_entries(&before_body),
+                    &workflow_entries(&after_body),
+                );
+                let count = changes.len();
+                Ok((
+                    encode_partial(&partial(
+                        &after.document,
+                        before.version,
+                        after.version,
+                        after.committed_at,
+                        after.next_wake_at,
+                        changes,
+                    ))?,
+                    count,
+                ))
+            }
+            (StoredDocument::Schedule(before), StoredDocument::Schedule(after)) => {
+                let before_body = DocumentBody::Schedule(before.schedule.clone());
+                let after_body = DocumentBody::Schedule(after.schedule.clone());
+                let changes = changes(
+                    &schedule_entries(&before_body),
+                    &schedule_entries(&after_body),
+                );
+                let count = changes.len();
+                Ok((
+                    encode_partial(&partial(
+                        &after.document,
+                        before.version,
+                        after.version,
+                        after.committed_at,
+                        after.next_wake_at,
+                        changes,
+                    ))?,
+                    count,
+                ))
+            }
+            _ => Err("document kind changed".to_string()),
+        }
+    }
 }
 
 #[cfg(not(verus_keep_ghost))]
-pub fn fold<R: Clone>(document: String, partials: &[Partial<R>]) -> Result<Document<R>, String> {
-    let mut folded = Document::empty(document);
+fn fold<R: Clone>(document: String, partials: &[Partial<R>]) -> Result<Folded<R>, String> {
+    let mut folded = Folded::empty(document);
     for partial in partials {
         folded = folded.apply(partial)?;
     }
@@ -498,7 +841,7 @@ pub fn compact<R: Clone>(partials: &[Partial<R>]) -> Result<Option<Partial<R>>, 
 
 #[cfg(all(test, not(verus_keep_ghost)))]
 mod tests {
-    use super::{codec, compact, fold, Change, Document, Partial};
+    use super::{codec, compact, fold, Change, Folded, Partial};
 
     fn partial(basever: u64, version: u64, value: &str) -> Partial<String> {
         Partial {
@@ -535,7 +878,7 @@ mod tests {
         let first = partial(0, 1, "one");
         let second = partial(1, 2, "two");
         let compacted = compact(&[first.clone(), second.clone()]).unwrap().unwrap();
-        let empty = Document::empty("wf".to_string());
+        let empty = Folded::empty("wf".to_string());
         assert_eq!(
             empty.apply(&compacted).unwrap(),
             empty.apply(&first).unwrap().apply(&second).unwrap(),
