@@ -5,12 +5,16 @@
 //! config.rs     the dials
 //! store.rs      the object store port: `object_store` behind it, S3 Express on the SDK for appends, an in-memory model
 //! env.rs        the clock and the listener, as ports
+//! admit.rs      a protocol envelope to a call the core already accepts
+//! codec.rs      an answer, or a message, back to the protocol
 //! node.rs       the executor: the core's effects, performed; the `ResonateServer`
 //! push.rs       messages out: HTTP push, and the router in front of it
 //! gateway.rs    `POST /`, `GET /ready` and `GET /metrics`
 //! metrics.rs    what an operator sees: OpenMetrics, with labels from closed sets only
 //! ```
 
+pub mod admit;
+pub mod codec;
 pub mod config;
 pub mod env;
 pub mod gateway;

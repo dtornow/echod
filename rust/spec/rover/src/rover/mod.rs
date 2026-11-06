@@ -153,6 +153,20 @@ pub trait RoverModel {
     }
 }
 
+/// One process in a [`RoverModel`].
+///
+/// Every process in a model shares that model's `Pid` and `Message`. `on_event`
+/// returns the next instance and the messages it sends. `Config` is the model's
+/// configuration; a process that already holds what it needs takes `()`.
+pub trait Process<Config, Pid, Message> {
+    fn on_event(
+        &self,
+        config: &Config,
+        now: crate::Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> (r: Vec<(Self, Vec<(Pid, Message)>)>) where Self: Sized;
+}
+
 } // verus!
 
 /// A boundary event for `M`.

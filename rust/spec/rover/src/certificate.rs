@@ -134,21 +134,12 @@ fn due_le<I>(w: &Sched<I>, v: &Sched<I>) -> (r: bool)
     }
 }
 
-fn max(a: Time, b: Time) -> (r: Time)
-    ensures
-        r == semantics::max(a, b),
-{
-    if a >= b { a } else { b }
-}
-
 fn schedule<I>(now: Time, s: Sched<I>) -> (w: Sched<I>)
     ensures
         w == semantics::schedule(now, s),
 {
-    match s {
-        Sched::Later(req) => Sched::Later(req),
-        Sched::Timer(t, req) => Sched::Timer(max(t, now), req),
-    }
+    let _ = now;
+    s
 }
 
 fn req_of<I>(s: &Sched<I>) -> (r: &I)
@@ -341,12 +332,51 @@ impl<'m, M: Model> Config<'m, M> {
         Ok(())
     }
 
+    /// Append what [`Model::due`] reads off the state, unless it is already
+    /// queued. The checker's search does not store these; a certificate names
+    /// them by their place in this list, so replay builds the same list.
+    pub(crate) fn augmented(&self) -> (v: Vec<Sched<M::Internal>>) {
+        let mut v = self.internals.clone();
+        let due = self.m.due(&self.state, self.now);
+        let mut k = 0;
+        while k < due.len()
+            invariant
+                k <= due.len(),
+            decreases due.len() - k,
+        {
+            let sched = due[k].clone();
+            let mut found = false;
+            let mut i = 0;
+            while i < v.len()
+                invariant
+                    i <= v.len(),
+                decreases v.len() - i,
+            {
+                if v[i] == sched {
+                    found = true;
+                }
+                i += 1;
+            }
+            if !found {
+                v.push(sched);
+            }
+            k += 1;
+        }
+        v
+    }
+
+    fn sync_due(&mut self) {
+        let full = self.augmented();
+        self.internals = full;
+    }
+
     /// A silent step. `Err(())`: the system can't take it now.
     pub(crate) fn silent(&mut self, s: Silent) -> (r: Result<(), ()>)
         ensures
             r is Ok ==> semantics::step(*old(self).m, old(self)@, Label::Silent, final(self)@),
             final(self).m == old(self).m,
     {
+        self.sync_due();
         match s {
             Silent::Effect { call, j } => {
                 let Some(op) = self.externals.get(&call) else { return Err(()) };
@@ -454,7 +484,7 @@ impl<M: Model> Config<'_, M> {
                 Some(res) => out.push(Next::Deliver(Event::Return { call: *call, res: res.clone() })),
             }
         }
-        for (i, w) in self.internals.iter().enumerate() {
+        for (i, w) in self.augmented().iter().enumerate() {
             let n = self.m.internal(w.req(), &self.state, self.now).len();
             out.extend((0..n).map(|j| Next::Silent(Silent::Run { i, j })));
         }
@@ -481,7 +511,7 @@ impl<M: Model> Config<'_, M> {
                 Some(ExternalOp { req, res: None }) => self.m.external(req, &self.state, self.now).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 _ => Vec::new(),
             },
-            Silent::Run { i, j } => match self.internals.get(i) {
+            Silent::Run { i, j } => match self.augmented().get(i) {
                 Some(w) => self.m.internal(w.req(), &self.state, self.now).get(j).map(|o| o.marks.clone()).unwrap_or_default(),
                 None => Vec::new(),
             },

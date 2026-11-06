@@ -1,7 +1,7 @@
 //! Driving a model and recording the choices: a run is valid, and replaying
 //! its choices reproduces it.
 
-use accordant::{certify, drive, Action, Checker, Choice, Choices, Config, Drive, Explore, ExternalOutcome, InternalOutcome, Model, Time, Tried};
+use echod_rover::{certify, drive, Action, Checker, Choice, Choices, Config, Drive, Explore, ExternalOutcome, InternalOutcome, Model, Time, Tried};
 
 /// A mailbox: `Put(v)` stores `v` and, later, sends it to a client; `Get`
 /// reads what is stored.

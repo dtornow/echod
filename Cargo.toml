@@ -1,17 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-  "rust/impl/process/kernel",
   "rust/impl/process",
   "rust/impl/runtime",
   "rust/impl/cli",
   "rust/spec/rover",
+  "rust/comm/types",
+  "rust/comm/cron",
   "rust/spec/abstract",
   "rust/spec/concrete",
   "rust/test/runtime",
   "rust/test/cli/sim",
   "rust/test/cli/diff",
-  "rust/test/cli/diff/accordant",
+  "rust/test/cli/model",
   "rust/test/cli/store",
 ]
 

@@ -6,13 +6,13 @@ edition.workspace = true
 license = "MIT"
 
 [lib]
-name = "resonate"
+name = "echod_abstract"
 path = "src/lib.rs"
 
 [dependencies]
-accordant = { package = "echod-rover", path = "../rover" }
-chrono = "0.4.45"
-cron = "0.17.0"
+echod-types = { path = "../../comm/types" }
+echod-cron = { path = "../../comm/cron" }
+echod-rover = { path = "../rover" }
 vstd = "=0.0.0-2026-10-11-0230"
 
 [package.metadata.verus]

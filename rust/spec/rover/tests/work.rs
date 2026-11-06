@@ -5,7 +5,7 @@
 mod certified;
 use certified::Certified;
 
-use accordant::{Checker, Config, ExternalOutcome, InternalOutcome, Keyed, Model, Plain, Time};
+use echod_rover::{Checker, Config, ExternalOutcome, InternalOutcome, Keyed, Model, Plain, Time};
 
 /// `Bump` starts the same increment twice; `Read` answers the counter.
 struct Twice;
@@ -35,15 +35,15 @@ impl Model for Twice {
     }
 }
 
-impl accordant::Footprint for Twice {
+impl echod_rover::Footprint for Twice {
     type Key = ();
 
-    fn external_touches(&self, _: &Req) -> accordant::Touches<()> {
-        accordant::Touches::one(())
+    fn external_touches(&self, _: &Req) -> echod_rover::Touches<()> {
+        echod_rover::Touches::one(())
     }
 
-    fn internal_touches(&self, _: &()) -> accordant::Touches<()> {
-        accordant::Touches::one(())
+    fn internal_touches(&self, _: &()) -> echod_rover::Touches<()> {
+        echod_rover::Touches::one(())
     }
 }
 

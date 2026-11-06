@@ -1,14 +1,58 @@
-//! The tie from the running process down to the Rover abstract model.
+//! The concrete Rover model.
 //!
-//! `echod_logic::State::on_event` is the process. `resonate` is the abstract
-//! model. What belongs here, and is not written yet, is a view of that state,
-//! a proof that `on_event` implements the concrete transition, and the
-//! boundary-trace refinement that follows from Rover's theorem.
+//! A world is the nodes and one store. Each node keeps its own documents
+//! and takes one flight at a time. The abstract model is a separate machine.
+//! This crate does not import its handlers. The document machine of `node.rs`
+//! (`handle`, `run_due`, `sweep`, `create_occurrence`) is the one the process
+//! runs: each is proved equal to its specification here, and the process
+//! wraps it in flights and commits. Refinement of this model to the abstract
+//! one is `simulation`: the relation, the injected call, the observed output,
+//! the shed and the empty heartbeat.
+//!
+//! Each file of the model holds the executable code and, below it, the same
+//! step as a specification (`spec_*`, over the view types `*V`). The proof
+//! files read the specifications.
+//!
+//! ```text
+//! node.rs             one node: its documents, one flight, the handlers, the due step
+//! store.rs            the store: its calls and their answers, one call applied
+//! model.rs            the Rover model: nodes, one store, the initial world, one step
+//! interpret.rs        the documents read as the abstract store; the promise handlers agree
+//! handlers.rs         the remaining request handlers agree
+//! timers.rs           the due step and the occurrence agree; `lemma_agreement`
+//! relation.rs         the invariant, the simulation relation, and agreement
+//! simulation.rs       the forward simulation and `lemma_refines`
+//! refine.rs           the same statement, for the executable crate
+//! ```
 
-use echod_logic::State;
-use resonate::Resonate;
+#![cfg_attr(
+    not(verus_keep_ghost),
+    allow(unused_imports, dead_code, unused_variables)
+)]
+#![allow(non_shorthand_field_patterns)]
 
-/// Names the two ends of the refinement so the dependency is real.
-pub fn endpoints() -> (&'static str, &'static str) {
-    (std::any::type_name::<State>(), std::any::type_name::<Resonate>())
-}
+pub mod node;
+pub mod store;
+pub mod model;
+pub mod interpret;
+pub mod handlers;
+pub mod timers;
+pub mod relation;
+pub mod simulation;
+
+#[cfg(not(verus_keep_ghost))]
+pub mod refine;
+
+#[cfg(not(verus_keep_ghost))]
+pub use refine::abstract_model;
+
+pub use echod_types::*;
+pub use model::Model;
+#[cfg(verus_keep_ghost)]
+pub use node::{lemma_doc_view, lemma_obj_view, lemma_outbound_view, lemma_pending_view};
+pub use node::{
+    clone_doc, doc_len, empty_origin, empty_schedule, keys_within, same_doc,
+    create_occurrence, doc_deadline, empty_doc, handle, peek, run_due, sweep, Doc, Obj, Objects,
+    Outbound, Pending, Prom, Tk,
+};
+pub use store::{content_etag, fnv1a, Etag, Read, StoreCall, StoreError, StoreOutcome};

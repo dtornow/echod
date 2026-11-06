@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use echod_logic::members::Membership;
-use echod_logic::types::{Effect, Event, Note, RequestId};
-use echod_logic::State;
+use echod_logic::Membership;
+use echod_logic::types::{Armed, Effect, Event, Note, RequestId};
+use echod_logic::{Call, DebugCall, State};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
 use tokio::sync::{oneshot, watch};
@@ -44,8 +44,8 @@ pub struct Node {
     metrics: Arc<Metrics>,
     replies: Mutex<HashMap<RequestId, oneshot::Sender<Reply>>>,
     next_request: AtomicU64,
-    /// When the core next wants a tick, as the wake task reads it.
-    wake: watch::Sender<Option<tokio::time::Instant>>,
+    /// When the core next wants a wake, and what that wake is for.
+    wake: watch::Sender<Option<(tokio::time::Instant, Armed)>>,
     stopped: watch::Sender<bool>,
     crashed: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -200,15 +200,21 @@ impl Node {
             }
             Effect::Reply { id, response } => {
                 if let Some(tx) = self.replies.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    let response = match response {
+                        Ok(answer) => Ok(crate::codec::envelope(&answer)),
+                        Err(msg) => Err(Unavailable::new(msg)),
+                    };
                     let _ = tx.send(response);
                 }
             }
             Effect::Send { address, message } => {
+                let (address, message) = crate::codec::message(&address, &message, &self.url());
                 let node = self.me();
                 tokio::spawn(async move { node.send(address, message).await });
             }
-            Effect::Wake { after_ms } => {
-                let _ = self.wake.send(Some(tokio::time::Instant::now() + Duration::from_millis(after_ms)));
+            Effect::Wake { after_ms, armed } => {
+                let at = tokio::time::Instant::now() + Duration::from_millis(after_ms);
+                let _ = self.wake.send(Some((at, armed)));
             }
             Effect::Note(n) => {
                 self.metrics.note(&n);
@@ -244,14 +250,14 @@ impl Node {
         let mut rx = self.wake.subscribe();
         tokio::spawn(async move {
             loop {
-                let at = *rx.borrow_and_update();
-                match at {
+                let due = rx.borrow_and_update().clone();
+                match due {
                     None => {
                         if rx.changed().await.is_err() {
                             return;
                         }
                     }
-                    Some(at) => {
+                    Some((at, armed)) => {
                         tokio::select! {
                             biased;
                             r = rx.changed() => {
@@ -262,7 +268,7 @@ impl Node {
                             _ = tokio::time::sleep_until(at) => {
                                 let _ = node.wake.send_replace(None);
                                 let clock = node.clock.now();
-                                node.apply(Event::Tick { clock });
+                                node.apply(Event::Due { clock, armed });
                             }
                         }
                     }
@@ -329,11 +335,44 @@ impl ResonateServer for Node {
 
     async fn process(&self, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
         let started = std::time::Instant::now();
+        let clock = self.clock.now();
+        match crate::admit::admit(req, clock, self.cfg.debug) {
+            crate::admit::Admission::Rejected(resp) => {
+                let status = resp.head.status.clamp(0, u16::MAX as i32) as u16;
+                self.metrics.request(&req.kind, status, started);
+                Ok(resp)
+            }
+            crate::admit::Admission::Request(d) => {
+                let (id, rx) = self.begin();
+                self.apply(Event::Request {
+                    clock,
+                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
+                });
+                self.finish(&req.kind, started, rx).await
+            }
+            crate::admit::Admission::Debug { kind, corr, op } => {
+                let (id, rx) = self.begin();
+                let call = match op {
+                    crate::admit::DebugOp::Reset => DebugCall::Reset { id, kind, corr },
+                    crate::admit::DebugOp::Snap => DebugCall::Snap { id, kind, corr },
+                    crate::admit::DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
+                };
+                self.apply(Event::Debug { clock, call });
+                self.finish(&req.kind, started, rx).await
+            }
+        }
+    }
+}
+
+impl Node {
+    fn begin(&self) -> (RequestId, oneshot::Receiver<Reply>) {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.replies.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
-        let clock = self.clock.now();
-        self.apply(Event::Request { id, envelope: req.clone(), clock });
+        (id, rx)
+    }
+
+    async fn finish(&self, kind: &str, started: std::time::Instant, rx: oneshot::Receiver<Reply>) -> Result<ResponseEnvelope, Unavailable> {
         let r = match rx.await {
             Ok(r) => r,
             Err(_) => Err(Unavailable::new("node crashed")),
@@ -342,7 +381,7 @@ impl ResonateServer for Node {
             Ok(resp) => resp.head.status.clamp(0, u16::MAX as i32) as u16,
             Err(_) => 503,
         };
-        self.metrics.request(&req.kind, status, started);
+        self.metrics.request(kind, status, started);
         r
     }
 }

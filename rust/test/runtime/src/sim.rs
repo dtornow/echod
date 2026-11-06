@@ -14,7 +14,7 @@ use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
 use resonate_core::ResonateServer;
 use serde::Serialize;
 
-use resonate::Request;
+use echod_abstract::types::{PromiseGetReq, Request, ScheduleGetReq, TaskGetReq};
 
 use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};
@@ -71,16 +71,6 @@ pub struct Options {
     pub settle_ms: u64,
     /// The checker's budget: nodes to explore, at most.
     pub budget: u64,
-}
-
-impl Options {
-    /// How long after its instant a schedule's occurrence is owed, for the
-    /// checker: a node gets to a deadline when its wheel reaches it, and to one
-    /// another node armed when it lists the bucket, so within a bucket or two,
-    /// as its clock reads them.
-    pub fn fire_within(&self) -> u64 {
-        2 * self.timer_bucket_ms + 2 * self.skew_ms + self.jump_ms
-    }
 }
 
 impl Default for Options {
@@ -414,12 +404,12 @@ impl World {
         let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
         let mut reads = Vec::new();
         for id in gen.ids() {
-            reads.push(Request::GetPromise(id.clone()));
-            reads.push(Request::GetTask(id));
+            reads.push(Request::PromiseGet(PromiseGetReq { id: id.clone() }));
+            reads.push(Request::TaskGet(TaskGetReq { id }));
         }
         if self.opts.schedules {
             for id in SCHEDULES {
-                reads.push(Request::GetSchedule(id.to_string()));
+                reads.push(Request::ScheduleGet(ScheduleGetReq { id: id.to_string() }));
             }
         }
         for req in reads {
@@ -568,10 +558,10 @@ async fn check(world: &World) -> Report {
         report.failures.push("the history never overlapped: nothing concurrent was checked".into());
     }
 
-    // The run as a trace of the model, checked by accordant.
+    // The run as a trace of the model, checked by echod-rover.
     let trace = checker::trace(&entries, &world.history.marks(), &sent);
     report.events = trace.len();
-    match checker::check(&trace, opts.retry_timeout_ms, opts.fire_within(), opts.budget) {
+    match checker::check(&trace, opts.retry_timeout_ms, opts.budget) {
         Verdict::Ok { explored } => report.search_steps = explored as u64,
         Verdict::Ko(v) => {
             report.failures.push(format!("no execution of the model explains event {} of {}: {}: {}", v.index, trace.len(), v.event, v.reason));
@@ -607,10 +597,10 @@ async fn check(world: &World) -> Report {
         .collect();
     for key in world.inner.list("wf/", usize::MAX).await.unwrap_or_default() {
         let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let rows = echod_logic::doc::decode::<echod_kernel::Promise>(&bytes).map(|l| l.rows).unwrap_or_default();
+        let Ok(loaded) = echod_logic::doc::decode_origin(&bytes) else { continue };
         let origin = key.trim_start_matches("wf/");
         let origin = echod_logic::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
-        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: rows, schedules: Vec::new(), outbox: Vec::new() }) {
+        if let Some(d) = echod_logic::doc::deadline(&loaded.doc) {
             if !armed.contains(&(origin.clone(), d)) {
                 report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
             }
@@ -618,10 +608,10 @@ async fn check(world: &World) -> Report {
     }
     for key in world.inner.list("sched/", usize::MAX).await.unwrap_or_default() {
         let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let rows = echod_logic::doc::decode::<echod_kernel::Schedule>(&bytes).map(|l| l.rows).unwrap_or_default();
+        let Ok(loaded) = echod_logic::doc::decode_schedule(&bytes) else { continue };
         let id = key.trim_start_matches("sched/");
         let id = echod_logic::keys::decode_key(id).unwrap_or_else(|| id.to_string());
-        if let Some(d) = echod_kernel::steps::next_deadline(&echod_kernel::State { objects: Vec::new(), schedules: rows, outbox: Vec::new() }) {
+        if let Some(d) = echod_logic::doc::deadline(&loaded.doc) {
             if !armed.contains(&(format!("sched:{id}"), d)) {
                 report.failures.push(format!("schedule {id}: owes its next run at {d} and the bucket holds no key for it"));
             }

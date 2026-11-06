@@ -1,4 +1,4 @@
-//! A run as a trace of the Resonate model, checked by `accordant`.
+//! A run as a trace of the Resonate model, checked by `echod-rover`.
 //!
 //! The history becomes the checker's trace: every request a client made is
 //! an `Invoke` at the instant it was sent (its `head.debug_time`, the
@@ -19,8 +19,9 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use accordant::{Checker, Config, Event, Grouped, Violation};
-use resonate::{Dispatch, Request, Resonate, Response, Server};
+use echod_rover::{Checker, Config, Event, Grouped, Violation};
+use echod_abstract::types::{Request, Response};
+use echod_abstract::{Dispatch, ServerConfig, Store};
 
 use crate::bus::Sent;
 use crate::history::Entry;
@@ -85,16 +86,14 @@ pub enum Verdict {
 }
 
 /// The trace against the model, partitioned by origin, with `budget` nodes
-/// to explore at most. `retry_timeout`: the nodes' and the model's;
-/// `fire_within`: how long after its instant a schedule's occurrence is owed,
-/// the nodes' sweep.
-pub fn check(trace: &Trace, retry_timeout: u64, fire_within: u64, budget: u64) -> Verdict {
+/// to explore at most. `retry_timeout` is the nodes' and the model's.
+pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let mut cfg = Config { max_explore: budget as usize, ..Config::default() };
     // `ECHOD_SIM_WIDTH=n`: give up at a narrower profile, to see what it holds.
     if let Some(w) = std::env::var("ECHOD_SIM_WIDTH").ok().and_then(|v| v.parse().ok()) {
         cfg.max_width = w;
     }
-    let mut c: Checker<Grouped<Resonate>> = Checker::with_partitions(Resonate { retry_timeout, fire_within }, Server::default(), cfg);
+    let mut c: Checker<Grouped<ServerConfig>> = Checker::with_partitions(ServerConfig { retry_timeout }, Store::default(), cfg);
     // The history is whole: a call it never answers may have taken effect at
     // any point or never, and a candidate still holding it subsumes one that
     // applied it.

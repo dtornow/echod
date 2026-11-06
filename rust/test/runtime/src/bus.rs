@@ -10,11 +10,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use echod_kernel::PromiseState;
+use echod_logic::verified::PromiseState;
 use echod::env::Clock;
 use echod::store::{MemoryStore, Store};
 use echod_logic::keys::{origin_of, KeySpace};
-use resonate::Dispatch;
+use echod_abstract::Dispatch;
 use resonate_core::types::Message;
 use resonate_core::{ResonateRouter, Unavailable};
 
@@ -50,9 +50,9 @@ impl RecordingBus {
         Self { store, keys, clock, sent: Mutex::new(Vec::new()), tally: Mutex::new(Tally::default()) }
     }
 
-    async fn rows(&self, origin: &str) -> Vec<echod_kernel::Promise> {
+    async fn rows(&self, origin: &str) -> Vec<echod_logic::doc::codec::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_logic::doc::decode(&bytes).map(|l| l.rows).unwrap_or_default(),
+            Ok(Some((bytes, _))) => echod_logic::doc::decode_origin(&bytes).map(|l| echod_logic::doc::codec::promises(&l.doc)).unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -63,7 +63,7 @@ impl ResonateRouter for RecordingBus {
     async fn route(&self, address: &str, msg: &Message) -> Result<(), Unavailable> {
         let now = self.clock.now();
         let (kind, id, dispatch) = match msg {
-            Message::Execute(m) => ("execute", m.data.task.id.clone(), Dispatch::Execute { id: m.data.task.id.clone(), version: m.data.task.version as u32 }),
+            Message::Execute(m) => ("execute", m.data.task.id.clone(), Dispatch::Execute { id: m.data.task.id.clone(), version: m.data.task.version as u64 }),
             Message::Unblock(m) => {
                 let promise = serde_json::to_value(&m.data.promise).ok().and_then(|v| prec(&v)).unwrap_or_else(|| panic!("an unblock with a promise record: {msg:?}"));
                 ("unblock", m.data.promise.id.clone(), Dispatch::Unblock { address: address.to_string(), promise })

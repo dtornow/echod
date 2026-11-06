@@ -474,7 +474,7 @@ impl MeteredStore {
     }
 
     fn object(&self, key: &str) -> Object {
-        match self.keys.class_of(key) {
+        match self.keys.class_of(key).as_deref() {
             Some("wf") => Object::Document,
             Some("sched") => Object::Schedule,
             Some("t") => Object::Timer,

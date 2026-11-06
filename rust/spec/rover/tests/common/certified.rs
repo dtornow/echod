@@ -1,9 +1,9 @@
 //! A checker that, when dropped, backs everything it accepted with a
-//! certificate that `accordant::certify` replays.
+//! certificate that `echod_rover::certify` replays.
 
 use std::ops::{Deref, DerefMut};
 
-use accordant::{Checker, Engine};
+use echod_rover::{Checker, Engine};
 
 pub struct Certified<S: Engine>(pub Checker<S>);
 

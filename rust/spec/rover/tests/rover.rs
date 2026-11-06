@@ -1,9 +1,9 @@
 //! Executable examples for the Rust + Verus Rover world.
 
-use accordant::rover::{
+use echod_rover::rover::{
     check, replay, Action, BoundaryEvent, CheckConfig, ProcessEvent, RoverModel, StepResult,
 };
-use accordant::Time;
+use echod_rover::Time;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Pid {

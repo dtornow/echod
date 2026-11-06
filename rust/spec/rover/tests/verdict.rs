@@ -1,7 +1,7 @@
 //! The checker's three answers: a valid trace is `Ok`, an invalid one `Ko`, and
 //! one it couldn't decide within its budget `Unknown`.
 
-use accordant::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time, Verdict};
+use echod_rover::{Checker, Config, Event, ExternalOutcome, InternalOutcome, Model, Time, Verdict};
 
 /// A register: `Write(v)` sets it, `Read` answers it.
 struct Register;

@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-use resonate::Request;
+use echod_abstract::types::Request;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]

@@ -1,4 +1,4 @@
-//! Executable behavioral specifications, after Microsoft Accordant.
+//! Executable behavioral specifications.
 //!
 //! A [`Model`] says, for any state and time, what the system does: how it answers
 //! an **external** request from a client, and what **internal** work it does on
@@ -6,7 +6,7 @@
 //! replays an observed history against it and keeps every explanation of that
 //! history that is still possible.
 //!
-//! What differs from Accordant:
+//! How a trace is read:
 //!
 //! * **Request and response are separate events.** A call is `Invoke`, then a
 //!   point where it takes effect that the checker places, then `Return`. A call
@@ -54,7 +54,7 @@ use vstd::prelude::*;
 
 // What the proofs talk about is written in Verus: the model's interface and
 // what a client observes. `cargo build` compiles it as ordinary Rust, the
-// specifications erased; `cargo verus verify -p accordant` checks the proofs
+// specifications erased; `cargo verus verify -p echod-rover` checks the proofs
 // (`semantics`, `certificate`).
 verus! {
 
@@ -178,6 +178,13 @@ pub trait Model {
     > {
         arbitrary()
     }
+
+    /// Work the state and the clock already imply, without anything having
+    /// queued it. Empty unless a model derives its timers from its state.
+    /// The checker offers these alongside pending work and does not store them.
+    fn due(&self, _state: &Self::State, _now: Time) -> (r: Vec<Sched<Self::Internal>>) {
+        Vec::new()
+    }
 }
 
 } // verus!
@@ -229,6 +236,12 @@ pub trait Footprint: Model {
     fn external_touches(&self, req: &Self::External) -> Touches<Self::Key>;
 
     fn internal_touches(&self, step: &Self::Internal) -> Touches<Self::Key>;
+
+    /// Keys the state itself keeps in one factor, with nothing pending. A
+    /// schedule and the origin its occurrences will touch, for example.
+    fn state_spans(&self, _state: &Self::State) -> Vec<Touches<Self::Key>> {
+        Vec::new()
+    }
 
     /// The keys a server-sent message is about: receiving it can only be
     /// explained by internal work on these keys.
@@ -326,14 +339,25 @@ impl<M: Model + ?Sized> InternalOutcome<M> {
     }
 }
 
+verus! {
+
 impl<T> Sched<T> {
     /// The op.
-    pub fn req(&self) -> &T {
+    pub fn req(&self) -> (r: &T)
+        ensures
+            *r == match *self {
+                Sched::Later(r) | Sched::Timer(_, r) => r,
+            },
+    {
         match self {
             Sched::Later(r) | Sched::Timer(_, r) => r,
         }
     }
+}
 
+} // verus!
+
+impl<T> Sched<T> {
     /// The time a timer is due; a `Later` has none.
     pub fn due(&self) -> Option<Time> {
         match self {
@@ -350,12 +374,10 @@ impl<T> Sched<T> {
         }
     }
 
-    /// Started at `now`: a timer in the past fires now.
+    /// The instant it already names. A timer in the past is overdue.
     pub fn at(self, now: Time) -> Self {
-        match self {
-            Sched::Later(r) => Sched::Later(r),
-            Sched::Timer(t, r) => Sched::Timer(t.max(now), r),
-        }
+        let _ = now;
+        self
     }
 }
 
@@ -393,6 +415,10 @@ pub trait Engine {
 
     fn dispatch_keys(&self, _msg: &<Self::M as Model>::Dispatch) -> Touches<Self::Key> {
         Touches::Everything
+    }
+
+    fn state_spans(&self, _state: &<Self::M as Model>::State) -> Vec<Touches<Self::Key>> {
+        Vec::new()
     }
 
     fn part(&self, _key: &Self::Key) -> Option<Self::Part> {
@@ -453,6 +479,10 @@ impl<M: Footprint> Engine for Keyed<M> {
     fn dispatch_keys(&self, msg: &M::Dispatch) -> Touches<M::Key> {
         self.0.dispatch_touches(msg)
     }
+
+    fn state_spans(&self, state: &M::State) -> Vec<Touches<M::Key>> {
+        self.0.state_spans(state)
+    }
 }
 
 /// A model checked with its footprints and partitions.
@@ -477,6 +507,10 @@ impl<M: Partitioned> Engine for Grouped<M> {
 
     fn dispatch_keys(&self, msg: &M::Dispatch) -> Touches<M::Key> {
         self.0.dispatch_touches(msg)
+    }
+
+    fn state_spans(&self, state: &M::State) -> Vec<Touches<M::Key>> {
+        self.0.state_spans(state)
     }
 
     fn partitioned(&self) -> bool {

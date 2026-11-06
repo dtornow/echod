@@ -5,7 +5,7 @@ The consolidation this note describes has landed. The tree is the layout in
 
 ## Mission
 
-The echod and Accordant/Rover repositories will be placed together before any
+The echod and Rover repositories will be placed together before any
 restructure. Explore the resulting checkout first, establish green baselines,
 and then consolidate the generic Rover framework, the independent abstract
 Resonate model, the concrete specification of the real process, and their
@@ -35,7 +35,7 @@ layout.
 Locate the two original repository roots rather than assuming their names.
 Produce an inventory containing exact paths for the following.
 
-### Rover / Accordant
+### Rover
 
 - Rust `RoverModel`, world semantics, checker, certificate replay, and generic
   refinement theorem.
@@ -162,11 +162,17 @@ It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
 
 ### `spec/concrete`
 
-Proof code about the actual process, not another implementation:
+The specification the kernel is proved against, not another implementation
+and not a dependent of the process:
 
-- mathematical views of implementation state, events, and effects
-- concrete `Model::spec_on_event`
-- proof that real `State::on_event` implements that transition
+- the document catalogue and the `spec_*` handler functions
+- the one step, `on_event`, which cites those functions
+- the Rover model in `model.rs`: nodes and one store, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`
+- the abstract model, which that step refines
+
+Still open, and the reason concrete depends on the abstract model:
+
+- the handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`, `spec_completed`, `spec_tick`, `spec_stop`)
 - concrete/abstract world relation
 - per-step forward simulation
 - final `concrete_refines_abstract` theorem
@@ -189,18 +195,15 @@ The production and test runtimes must drive the exact same
 ## Dependency direction
 
 ```text
-impl/process ----------------> impl/runtime ----> impl/cli
-     |
-     +-----------------------> spec/concrete
-
-spec/rover ---> spec/abstract ---> spec/concrete
+spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process ---> impl/runtime ---> impl/cli
 
 impl + spec -----------------> test/*
 ```
 
-Production code must never depend on test code. If the executable process
-needs proof-only concrete definitions to state Verus contracts, document that
-dependency and ensure it erases from runtime behavior.
+Concrete depends on the Rover world and on the abstract model. The process depends on concrete,
+because a handler's `ensures` names `spec_promise_create`. Concrete depends on neither the process nor the runtime. Production code must
+never depend on test code. The ghost half of the concrete crate erases
+under `cargo build`.
 
 ## Semantic decisions already made
 
@@ -259,12 +262,20 @@ insufficient. Acceptance is sound only after verified certificate replay.
 ```text
 impl/process::State::on_event
     implements
-spec/concrete::Model::spec_on_event
-    simulates
-spec/abstract::Model::spec_on_event
-    therefore
-Concrete Boundary traces are a subset of Abstract Boundary traces
+spec/concrete::spec_logic_on_event
+    which is the node step of
+Rover instantiated with the concrete model
+    refines
+Rover instantiated with the abstract model
 ```
+
+The statement is `echod_rover::rover::refinement::refines` of
+`echod_concrete::Model` against `resonate::abstract_model::Model`: every
+boundary trace of the concrete world is a boundary trace of the abstract
+world. `concrete_refines_abstract` proves it from a relation on the two
+initial worlds and a forward simulation, at one boundary,
+`resonate::BoundaryEvent`. The relation and the simulation are the open
+proof.
 
 The actual process contract should look like:
 

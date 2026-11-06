@@ -1,7 +1,14 @@
 //! The dials the core decides with. No flags, no environment: the
 //! executor fills these in from wherever it takes its configuration.
 
+use vstd::contrib::make_spec_type;
+use vstd::prelude::*;
+
+verus! {
+
+#[make_spec_type]
 #[derive(Debug, Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Config {
     /// This node's id, as the other nodes and the bucket know it.
     pub node_id: String,
@@ -27,10 +34,12 @@ pub struct Config {
     pub cache_entries: usize,
     /// Bytes of documents held in the read cache, at most.
     pub cache_bytes: u64,
-    /// The clock a request is decided at is the request's
-    /// `resonate:debug_time` when it carries one.
+    /// Debug mode, as the runtime reads it: it admits debug operations,
+    /// and a request may name the instant it is decided at.
     pub debug: bool,
 }
+
+} // verus!
 
 impl Config {
     /// A node on an in-memory store, for tests.
@@ -49,9 +58,5 @@ impl Config {
             cache_bytes: 16 * 1024 * 1024,
             debug: false,
         }
-    }
-
-    pub fn kernel(&self) -> echod_kernel::Config {
-        echod_kernel::Config { retry_timeout: self.retry_timeout, compact: self.compact }
     }
 }
