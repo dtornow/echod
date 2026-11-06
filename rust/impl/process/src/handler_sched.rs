@@ -7,8 +7,9 @@
 //! fired it is deleted. The schedule holds its own slot the whole time and
 //! takes the origin's slot for the first commit.
 
-use echod_concrete::{create_occurrence, doc_deadline, run_due};
+use echod_concrete::doc_deadline;
 
+use crate::verified::flight::{self, Decided, Job};
 use crate::verified::Schedule;
 
 use crate::doc::{self, Loaded, Promise, Row};
@@ -61,7 +62,7 @@ impl State {
         let (fired, now) = (fired.clone(), *now);
         let t1 = doc::clamp_now(ws.loaded.stamp, now);
         // the decision is the model's: the occurrence due at the instant, or none
-        let (advanced, mut born, _) = run_due(Schedule::doc_of(&ws.loaded.rows), t1, self.cfg.retry_timeout);
+        let Decided { doc: advanced, mut born, .. } = flight::decide(Job::Fire, Schedule::doc_of(&ws.loaded.rows), t1, self.cfg.retry_timeout, 0);
         let due = match (ws.loaded.rows.last().cloned(), born.pop()) {
             (Some(row), Some(pending)) => Some((row, pending)),
             _ => None,
@@ -116,7 +117,7 @@ impl State {
     /// origin's document, committed first.
     pub(crate) fn fire_run(&mut self, mut f: Flight, ctx: FireCtx, wo: Working<Promise>) {
         let t = doc::clamp_now(wo.loaded.stamp, ctx.t1);
-        let doc = create_occurrence(Promise::doc_of(&wo.loaded.rows), &ctx.pending, t);
+        let Decided { doc, .. } = flight::decide(Job::Occurrence(ctx.pending.clone()), Promise::doc_of(&wo.loaded.rows), t, self.cfg.retry_timeout, 0);
         let deadline = doc_deadline(&doc);
         let rows = Promise::rows_of(doc);
         self.note(Note::FireBegin { flight: f.id, origin: ctx.origin.clone(), now: t, row: Box::new(ctx.row.clone()), at: ctx.pending.at, promise_id: ctx.pending.promise.clone(), next: ctx.next });

@@ -17,7 +17,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
-`src/verified` is proved equal to the concrete specification. The rest of the process is the order of calls around those decisions. The runtime performs what the
+`src/verified` is proved equal to the concrete specification, the commit sequence included: `flight_spec::lemma_sequence` is the order of store calls around each step. The rest of the process names keys, builds bytes and makes the calls. The runtime performs what the
 process asks. The simulator is the evidence. The core and the node depend
 on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.

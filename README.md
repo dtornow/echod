@@ -9,11 +9,12 @@ origin is one document in the bucket, committed with a conditional write;
 deadlines are keys; nodes find each other in the bucket. What the server does
 to a document is `echod_concrete`'s document machine, each step proved to
 compute its specification, and that concrete model is proved to refine the
-abstract Resonate model. What a node decides about membership, its cache and
-its deadline keys is `echod_logic::verified`, each decision proved to compute
-its specification. What the proof stops at, the order of store calls between
-that and S3, a deterministic simulator holds to the Resonate model under
-crashes, outages and lost acks.
+abstract Resonate model. What a node decides about membership, its cache, its
+deadline keys, and the order of the store calls that commit a step — key,
+document, previous key, fired key — is `echod_logic::verified`, each decision
+proved to compute its specification. What the proof stops at, the bytes of
+each call and S3 itself, a deterministic simulator holds to the Resonate model
+under crashes, outages and lost acks.
 
 ## Layout
 
@@ -35,8 +36,9 @@ scripts               the store and end-to-end tests against a real S3 API
 
 The process's document steps are `rust/spec/concrete`'s, each proved equal to
 its specification; `rust/impl/process/src/verified` proves the node's own
-bookkeeping. Concrete depends on the abstract model; it does not depend on the
-process. The rest of the process is the order of calls, and its tests feed it
+bookkeeping and the sequence of store calls around each step. Concrete depends
+on the abstract model; it does not depend on the process. The rest of the
+process names keys, builds bytes and makes the calls, and its tests feed it
 events by hand. The runtime performs what it asks. The simulator is the
 evidence. [DESIGN.md](DESIGN.md) is the design; [BACKLOG.md](BACKLOG.md) is
 what is next. Each crate's `lib.rs` opens with a map of its files.

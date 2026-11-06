@@ -1,9 +1,12 @@
 //! One origin: its promises, the task inside each, and a sweep of it.
 //!
 //! One step runs on a document at a time; the rest queue behind it. The step
-//! loads the document, runs the concrete model's step on it — `handle` for
-//! a request, `sweep` for a due key — and commits by `verified::commit`:
-//! the deadline key, then the document, then the key that key replaced. A
+//! loads the document, decides by `verified::flight::decide` — the concrete
+//! model's `handle` for a request, `sweep` for a due key — and commits by
+//! `verified::flight::Sequence`: the deadline key, then the document, then
+//! the key that key replaced, then the key that fired. This file names the
+//! keys, builds the bytes, makes each call the sequence asks for, and
+//! brings the answer back; the wheel and the cache follow the answers. A
 //! lost race re-reads and decides again. A schedule's run uses the same
 //! commit; the decision itself is `handler_sched`.
 //!
@@ -12,9 +15,9 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use echod_concrete::{doc_deadline, handle, peek, sweep, Doc, Outbound, Pending};
+use echod_concrete::{doc_deadline, peek, Doc, Outbound, Pending};
 
-use crate::verified::commit::Commit as Plan;
+use crate::verified::flight::{self, Act, Decided, Job, Outcome, Sequence};
 use crate::verified::node::Key;
 use crate::verified::{Request, Response, Schedule, TaskFenceInnerRes, TaskFenceRes};
 
@@ -74,34 +77,31 @@ pub(crate) struct Working<R: Row> {
     pub etag: Option<Etag>,
 }
 
-/// A commit in progress: the verified plan, and the store call between
-/// its decisions that is waited on.
+/// A commit in progress: the verified sequence, and the store call it
+/// asked for that is waited on.
 pub(crate) struct Committing<R: Row> {
     w: Working<R>,
     rows: Vec<R>,
     changed: Vec<R>,
-    changed_any: bool,
     now: u64,
-    fired: Option<FiredKey>,
-    plan: Plan,
-    step: Step,
+    seq: Sequence,
+    issued: Option<Issued>,
 }
 
-enum Step {
-    Start,
-    PuttingKey { op: OpId, key: Key, name: String },
-    Writing { op: OpId, mode: WriteMode, row_count: usize, bytes: u64, len: usize, idle: bool },
-    DeletingPrevious { op: OpId, key: Key, name: String },
-    DeletingFired { op: OpId, key: Key, name: String },
-    Over,
+/// The call made for the sequence's last act, with what the answer needs.
+enum Issued {
+    /// A key put or deleted: the wheel follows the answer.
+    Key { op: OpId, key: Key, name: String, arm: bool },
+    /// The document written: the cache follows the answer.
+    Write { op: OpId, mode: WriteMode, row_count: usize, bytes: u64, len: usize },
 }
 
-impl Step {
-    /// The store call the step waits on.
+impl<R: Row> Committing<R> {
+    /// The store call the commit waits on.
     fn expects(&self) -> Option<OpId> {
-        match self {
-            Step::PuttingKey { op, .. } | Step::Writing { op, .. } | Step::DeletingPrevious { op, .. } | Step::DeletingFired { op, .. } => Some(*op),
-            Step::Start | Step::Over => None,
+        match &self.issued {
+            Some(Issued::Key { op, .. }) | Some(Issued::Write { op, .. }) => Some(*op),
+            None => None,
         }
     }
 }
@@ -174,8 +174,8 @@ impl Phase {
         match self {
             Phase::Idle | Phase::FireWaitingOrigin(_) => None,
             Phase::Loading { op, .. } | Phase::FireLoadingSchedule { op } | Phase::FireLoadingOrigin { op, .. } => Some(*op),
-            Phase::Origin { commit, .. } | Phase::FireOrigin { commit, .. } => commit.step.expects(),
-            Phase::Schedule { commit, .. } | Phase::FireIdle { commit } | Phase::FireSchedule { commit } => commit.step.expects(),
+            Phase::Origin { commit, .. } | Phase::FireOrigin { commit, .. } => commit.expects(),
+            Phase::Schedule { commit, .. } | Phase::FireIdle { commit } | Phase::FireSchedule { commit } => commit.expects(),
         }
     }
 }
@@ -483,27 +483,28 @@ impl State {
         }
     }
 
-    /// The step: the concrete model's, on the document the rows make,
-    /// decided no earlier than the last step on the document. A request is
-    /// `handle`; a due key is `sweep`, every due step on the document up
-    /// to `SWEEP_STEPS`. A lost race runs this again on what it re-read.
+    /// The step: `verified::flight::decide`, the concrete model's step on
+    /// the document the rows make, decided no earlier than the last step
+    /// on the document. A request is `handle`; a due key is `sweep`, every
+    /// due step on the document up to `SWEEP_STEPS`. A lost race runs this
+    /// again on what it re-read.
     pub(crate) fn decide<R: Row>(&mut self, work: &Work, w: Working<R>) -> (Committing<R>, Done) {
         let doc = R::doc_of(&w.loaded.rows);
         let now = doc::clamp_now(w.loaded.stamp, work.now());
-        let (doc, response, why, outbox) = match work {
-            Work::Request { req, kind, .. } => {
-                let (doc, r) = handle(doc, req, now);
-                let status = crate::reason::status_of(&r);
-                let why = (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &doc));
-                (doc, Some(r), why, Vec::new())
-            }
-            Work::Sweep { .. } => {
-                let (doc, _, notes) = sweep(doc, now, self.cfg.retry_timeout, SWEEP_STEPS);
-                let outbox = dispatches(&doc, notes);
-                (doc, None, None, outbox)
-            }
-            Work::Fire { .. } => (doc, None, None, Vec::new()),
+        let job = match work {
+            Work::Request { req, .. } => Job::Request(req.clone()),
+            Work::Sweep { .. } => Job::Sweep,
+            Work::Fire { .. } => Job::Fire,
         };
+        let Decided { doc, response, notes, .. } = flight::decide(job, doc, now, self.cfg.retry_timeout, SWEEP_STEPS);
+        let why = match (work, &response) {
+            (Work::Request { req, kind, .. }, Some(r)) => {
+                let status = crate::reason::status_of(r);
+                (status >= 400).then(|| crate::reason::reason_for(kind, req, status, &doc))
+            }
+            _ => None,
+        };
+        let outbox = dispatches(&doc, notes);
         let deadline = doc_deadline(&doc);
         let rows = R::rows_of(doc);
         let fired = match work {
@@ -511,7 +512,7 @@ impl State {
             _ => None,
         };
         let commit = self.commit_new(w, rows, deadline, now, fired);
-        let did = matches!(work, Work::Sweep { .. }) && commit.changed_any;
+        let did = matches!(work, Work::Sweep { .. }) && commit.seq.changed;
         (commit, Done { response, why, outbox, did })
     }
 
@@ -620,130 +621,84 @@ impl State {
     // -----------------------------------------------------------------------
 
     /// The decisions before the first store call: the rows that changed,
-    /// and the verified `prepare` given the document's nearest deadline.
-    /// `fired` is the key whose firing this is.
+    /// and the verified sequence, planned from the document's nearest
+    /// deadline. `fired` is the key whose firing this is.
     pub(crate) fn commit_new<R: Row>(&mut self, w: Working<R>, rows: Vec<R>, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> Committing<R> {
         let changed = doc::changed(&w.loaded.rows, &rows);
         let changed_any = !changed.is_empty() || rows.len() != w.loaded.rows.len();
         let etag = w.etag.as_ref().map(|e| e.0.clone());
-        let plan = self.node.core.prepare(&w.target, etag.as_ref(), deadline, changed_any, fired.as_ref().map(|f| f.key.clone()));
-        Committing { w, rows, changed, changed_any, now, fired, plan, step: Step::Start }
+        let token = self.token();
+        let seq = Sequence::new(&self.node.core, &w.target, etag.as_ref(), deadline, changed_any, fired, token);
+        Committing { w, rows, changed, now, seq, issued: None }
     }
 
     /// Drive a commit: `answer` is the store's answer to the call the
-    /// commit waits on, if it waits on one. Returns with the next call
-    /// issued, or the commit over.
+    /// commit waits on, if it waits on one. The wheel and the cache follow
+    /// the answer; the sequence decides the next call; this makes it.
+    /// Returns with that call issued, or the commit over.
     pub(crate) fn commit_advance<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, answer: Option<StoreOutcome>) -> Progress {
-        let me = self.cfg.node_id.clone();
-        match std::mem::replace(&mut c.step, Step::Over) {
-            Step::Start => {
-                if c.changed_any {
-                    // (1) the key for the new deadline, before the state that arms it
-                    if let Some(at) = c.plan.arm_at() {
-                        let key = Key { origin: c.w.target.clone(), at, token: self.token() };
-                        let name = self.key_name(&key, &me);
-                        let op = self.store(StoreCall::Put { key: name.clone(), body: Vec::new() }, Owner::Flight(fid));
-                        c.step = Step::PuttingKey { op, key, name };
-                        return Progress::Issued;
-                    }
-                    self.issue_write(fid, c, false);
-                    Progress::Issued
-                } else if c.fired.is_some() {
-                    // Nothing was due: rewrite the document at a new version,
-                    // so that no commit in flight that armed this key can
-                    // land on the version it loaded; then the key goes.
-                    self.issue_write(fid, c, true);
-                    Progress::Issued
-                } else {
-                    Progress::Done(Fired::Kept)
-                }
+        if let Some(issued) = c.issued.take() {
+            self.answered(c, issued, answer.as_ref());
+        }
+        match c.seq.advance(&mut self.node.core, answer.as_ref()) {
+            Outcome::Act(Act::PutKey(key)) => {
+                let name = self.key_name(&key, &self.cfg.node_id.clone());
+                let op = self.store(StoreCall::Put { key: name.clone(), body: Vec::new() }, Owner::Flight(fid));
+                c.issued = Some(Issued::Key { op, key, name, arm: true });
+                Progress::Issued
             }
-            Step::PuttingKey { key, name, .. } => match answer {
-                Some(StoreOutcome::Done) => {
-                    self.timers.wheel.arm(key.at, name);
-                    c.plan.armed(key);
-                    // (2) the document
-                    self.issue_write(fid, c, false);
-                    Progress::Issued
-                }
-                Some(StoreOutcome::Failed(e)) => Progress::Failed(e),
-                _ => Progress::Failed(unexpected()),
-            },
-            Step::Writing { mode, row_count, bytes, len, idle, .. } => match answer {
-                Some(StoreOutcome::Written(etag)) => {
-                    self.note(Note::DocumentWrite { mode, bytes: len });
-                    // an origin's document is remembered as written; a schedule's is not cached
-                    if let Some(rows) = R::promises(&c.rows) {
-                        let filled_at = self.now();
-                        self.remember(&c.w.target, Cached { loaded: Loaded { rows, row_count, bytes, stamp: c.now }, etag: etag.clone(), filled_at });
-                    }
-                    c.w.etag = Some(etag.clone());
-                    if idle {
-                        return self.delete_fired(fid, c);
-                    }
-                    // (3) the key replaced, or no longer needed
-                    if let Some(key) = c.plan.to_disarm() {
-                        let name = self.key_name(&key, &me);
-                        let op = self.store(StoreCall::Delete { key: name.clone() }, Owner::Flight(fid));
-                        c.step = Step::DeletingPrevious { op, key, name };
-                        return Progress::Issued;
-                    }
-                    // (4) the key kept, with the version written
-                    self.node.core.finish(&c.plan, &etag.0);
-                    self.delete_fired(fid, c)
-                }
-                Some(StoreOutcome::Failed(e)) => Progress::Failed(e),
-                _ => Progress::Failed(unexpected()),
-            },
-            Step::DeletingPrevious { key, name, .. } => {
-                // Best effort: a key that stays fires again and is collected then.
-                match answer {
-                    Some(StoreOutcome::Done) => self.timers.wheel.disarm(key.at, &name),
-                    Some(StoreOutcome::Failed(e)) => self.note(Note::KeyNotDeleted { key: name, error: e.to_string() }),
-                    _ => {}
-                }
-                let etag = c.w.etag.clone().unwrap_or_else(|| Etag(String::new()));
-                self.node.core.finish(&c.plan, &etag.0);
-                self.delete_fired(fid, c)
+            Outcome::Act(Act::Write { cond, idle }) => {
+                self.issue_write(fid, c, cond, idle);
+                Progress::Issued
             }
-            Step::DeletingFired { key, name, .. } => match answer {
-                Some(StoreOutcome::Done) => {
-                    self.timers.wheel.disarm(key.at, &name);
-                    Progress::Done(Fired::Deleted)
-                }
-                Some(StoreOutcome::Failed(e)) => {
-                    self.note(Note::KeyNotDeleted { key: name, error: e.to_string() });
-                    Progress::Done(Fired::Kept)
-                }
-                _ => Progress::Done(Fired::Kept),
-            },
-            Step::Over => Progress::Done(Fired::Kept),
+            Outcome::Act(Act::DeleteKey { key, by }) => {
+                let name = self.key_name(&key, &by);
+                let op = self.store(StoreCall::Delete { key: name.clone() }, Owner::Flight(fid));
+                c.issued = Some(Issued::Key { op, key, name, arm: false });
+                Progress::Issued
+            }
+            Outcome::Act(Act::Done { deleted }) => Progress::Done(if deleted { Fired::Deleted } else { Fired::Kept }),
+            Outcome::Failed(Some(e)) => Progress::Failed(e),
+            Outcome::Failed(None) => Progress::Failed(unexpected()),
         }
     }
 
-    /// (5) the key fired: the write that just landed fences every commit
-    /// that armed it and has not written yet.
-    fn delete_fired<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>) -> Progress {
-        let Some(f) = c.fired.clone() else { return Progress::Done(Fired::Kept) };
-        self.node.core.collected(&c.w.target, &f.key);
-        let name = self.key_name(&f.key, &f.by);
-        let op = self.store(StoreCall::Delete { key: name.clone() }, Owner::Flight(fid));
-        c.step = Step::DeletingFired { op, key: f.key, name };
-        Progress::Issued
+    /// What follows from the answer to the last call, outside the sequence:
+    /// a key put is armed in the wheel, a key deleted leaves it (a delete
+    /// that failed is noted; the key fires again and is collected then), a
+    /// document written is remembered.
+    fn answered<R: Row>(&mut self, c: &mut Committing<R>, issued: Issued, answer: Option<&StoreOutcome>) {
+        match (issued, answer) {
+            (Issued::Key { key, name, arm: true, .. }, Some(StoreOutcome::Done)) => self.timers.wheel.arm(key.at, name),
+            (Issued::Key { key, name, arm: false, .. }, Some(StoreOutcome::Done)) => self.timers.wheel.disarm(key.at, &name),
+            (Issued::Key { name, arm: false, .. }, Some(StoreOutcome::Failed(e))) => self.note(Note::KeyNotDeleted { key: name, error: e.to_string() }),
+            (Issued::Write { mode, row_count, bytes, len, .. }, Some(StoreOutcome::Written(etag))) => {
+                self.note(Note::DocumentWrite { mode, bytes: len });
+                // an origin's document is remembered as written; a schedule's is not cached
+                if let Some(rows) = R::promises(&c.rows) {
+                    let filled_at = self.now();
+                    self.remember(&c.w.target, Cached { loaded: Loaded { rows, row_count, bytes, stamp: c.now }, etag: etag.clone(), filled_at });
+                }
+                c.w.etag = Some(etag.clone());
+            }
+            _ => {}
+        }
     }
 
-    /// Write the document at a new version, conditionally on the version
-    /// loaded: the rows the step changed appended, or the whole document.
-    fn issue_write<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, idle: bool) {
+    /// Write the document at a new version, conditionally on `cond`, the
+    /// version loaded: the rows the step changed appended, or the whole
+    /// document.
+    fn issue_write<R: Row>(&mut self, fid: FlightId, c: &mut Committing<R>, cond: Option<String>, idle: bool) {
         let header = Header { stamp: c.now, nonce: self.token() };
         let changed: &[R] = if idle { &[] } else { &c.changed };
-        let (call, mode, row_count, bytes) = match &c.w.etag {
+        let (call, mode, row_count, bytes) = match cond {
             None => {
                 let body = doc::encode(&header, &c.rows);
                 let (n, b) = (c.rows.len(), body.len() as u64);
                 (StoreCall::PutIfNoneMatch { key: c.w.key.clone(), body }, WriteMode::Create, n, b)
             }
             Some(etag) => {
+                let etag = Etag(etag);
                 // a row gone — a schedule deleted — cannot be appended; the
                 // document is rewritten without it
                 let removed = c.w.loaded.rows.iter().any(|q| !c.rows.iter().any(|p| p.id() == q.id()));
@@ -752,11 +707,11 @@ impl State {
                 if append {
                     let body = doc::encode(&header, changed);
                     let (n, b) = (c.w.loaded.row_count + changed.len(), c.w.loaded.bytes + body.len() as u64);
-                    (StoreCall::AppendIfMatch { key: c.w.key.clone(), offset: c.w.loaded.bytes, body, etag: etag.clone() }, WriteMode::Append, n, b)
+                    (StoreCall::AppendIfMatch { key: c.w.key.clone(), offset: c.w.loaded.bytes, body, etag }, WriteMode::Append, n, b)
                 } else {
                     let body = doc::encode(&header, &c.rows);
                     let (n, b) = (c.rows.len(), body.len() as u64);
-                    (StoreCall::PutIfMatch { key: c.w.key.clone(), body, etag: etag.clone() }, WriteMode::Rewrite, n, b)
+                    (StoreCall::PutIfMatch { key: c.w.key.clone(), body, etag }, WriteMode::Rewrite, n, b)
                 }
             }
         };
@@ -765,6 +720,6 @@ impl State {
             _ => 0,
         };
         let op = self.store(call, Owner::Flight(fid));
-        c.step = Step::Writing { op, mode, row_count, bytes, len, idle };
+        c.issued = Some(Issued::Write { op, mode, row_count, bytes, len });
     }
 }
