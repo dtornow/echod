@@ -23,7 +23,7 @@ use echod_rover::Time;
 use echod_types::Response;
 
 #[cfg(verus_keep_ghost)]
-use crate::node::{spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
+use crate::node::{node_results_v, spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
 pub use crate::node::{Node, NodeV};
 #[cfg(verus_keep_ghost)]
 use crate::store::spec_apply;
@@ -186,9 +186,8 @@ impl View for Local {
 // The step, as a specification. `spec_step` is what
 // `RoverModel::spec_on_event` returns: a node runs one flight, the store
 // applies one call. The executable `on_event` is obliged, by the trait, to
-// return results whose views are this sequence. The store's arm is proved
-// (`Store::step` computes `spec_store`); the node's arm is open, since the
-// executable `Node` is outside `verus!` and its view is uninterpreted.
+// return results whose views are this sequence: `Node::step` computes
+// `spec_node` and `Store::step` computes `spec_store`.
 // ---------------------------------------------------------------------------
 
 /// Opaque: the choice is read through the string lemmas alone.
@@ -340,116 +339,11 @@ impl Fleet {
     }
 }
 
-fn route_acts(acts: &[crate::node::Act]) -> Vec<(Pid, Message)> {
-    acts.iter()
-        .map(|act| match act {
-            crate::node::Act::ToStore { op, call } => (
-                Pid::Store,
-                Message::StoreReq {
-                    op: *op,
-                    call: call.clone(),
-                },
-            ),
-            crate::node::Act::Reply { client, id, response } => (
-                Pid::Outside,
-                Message::Output(Output::Response {
-                    client: client.clone(),
-                    id: *id,
-                    response: response.clone(),
-                }),
-            ),
-            crate::node::Act::Notify(note) => (
-                Pid::Outside,
-                Message::Output(Output::Dispatch(match note {
-                    crate::node::Outbound::Execute { id, version } => {
-                        echod_abstract::Dispatch::Execute {
-                            id: id.clone(),
-                            version: *version,
-                        }
-                    }
-                    crate::node::Outbound::Unblock { address, promise } => {
-                        echod_abstract::Dispatch::Unblock {
-                            address: address.clone(),
-                            promise: promise.clone(),
-                        }
-                    }
-                })),
-            ),
-        })
-        .collect()
-}
-
 verus! {
 
-/// `Node::new` is exec code outside `verus!`; Verus knows its shape and
-/// nothing else. The trait's `ensures` on `initial` and `on_event` below are
-/// the exec == spec link; the store's side is proved (`Store::empty`,
-/// `Store::step`), the node's side is not, and Verus reports them.
-pub assume_specification [Node::new](address: u64, nodes: u64, loops: bool, retry_timeout: u64) -> Node;
-
-/// A node's step. The body is a node machine, whose methods Verus does
-/// not read; `spec_node` is the step as a specification.
-impl Process<(), Pid, Message> for Node {
-    #[verifier::external_body]
-    fn on_event(
-        &self,
-        _config: &(),
-        now: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<(Self, Vec<(Pid, Message)>)> {
-        match event {
-            ProcessEvent::Timeout => match self.wake {
-                Some(at) if at <= now && !self.busy() => {
-                    let mut next = self.clone();
-                    next.logic.clock = now;
-                    next.logic.last_wake = None;
-                    let acts = next.timeout(now);
-                    next.wake = next.next_wake();
-                    vec![(next, route_acts(&acts))]
-                }
-                Some(at) if at <= now => vec![(self.clone(), Vec::new())],
-                _ => Vec::new(),
-            },
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Request(request),
-            } => {
-                if self.busy() {
-                    return vec![(self.clone(), Vec::new())];
-                }
-                let mut next = self.clone();
-                next.logic.clock = now;
-                next.next_request += 1;
-                let acts = next.request(now, &request.client, request.id, &request.request);
-                next.wake = next.next_wake();
-                vec![(next, route_acts(&acts))]
-            }
-            ProcessEvent::Receive {
-                sender: Pid::Store,
-                message: Message::StoreReply { op, outcome },
-            } => {
-                if !self.busy() {
-                    return vec![(self.clone(), Vec::new())];
-                }
-                let mut next = self.clone();
-                next.logic.clock = now;
-                let acts = next.store(now, *op, outcome);
-                next.wake = next.next_wake();
-                vec![(next, route_acts(&acts))]
-            }
-            ProcessEvent::Receive {
-                sender: Pid::Outside,
-                message: Message::Stop,
-            } => {
-                let mut next = self.clone();
-                next.logic.clock = now;
-                next.logic.loops = false;
-                next.logic.stopping = true;
-                vec![(next, Vec::new())]
-            }
-            _ => Vec::new(),
-        }
-    }
+/// The world, as the specification sees it.
+pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
+    v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
 }
 
 /// The store's results, as the specification sees them.
@@ -556,18 +450,45 @@ impl RoverModel for Model {
     fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
         let mut process: Vec<(Pid, Local)> = Vec::new();
         let mut id: u64 = 0;
+        proof {
+            assert(world_v(process@) =~= Seq::<(Pid, LocalV)>::empty());
+        }
         while id < config.nodes
             invariant
                 id <= config.nodes,
+                process@.len() == id,
+                forall|i: int| 0 <= i < process@.len() ==> #[trigger] process@[i].0 == Pid::Node(i as u64),
+                world_v(process@) + spec_nodes(*config, id) == spec_nodes(*config, 0),
             decreases config.nodes - id,
         {
-            process.push((
-                Pid::Node(id),
-                Local::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout)),
-            ));
+            let node = Node::new(id, config.nodes, config.loops, config.retry_timeout);
+            let ghost before = world_v(process@);
+            process.push((Pid::Node(id), Local::Node(node)));
+            proof {
+                assert(world_v(process@) =~= before.push((Pid::Node(id), LocalV::Node(node@))));
+                assert(spec_nodes(*config, id) == seq![(Pid::Node(id), LocalV::Node(spec_initial_node(*config, id)))] + spec_nodes(*config, (id + 1) as u64));
+                assert(world_v(process@) + spec_nodes(*config, (id + 1) as u64) =~= before + spec_nodes(*config, id));
+            }
             id = id + 1;
         }
+        let ghost before = world_v(process@);
         process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
+        proof {
+            assert(spec_nodes(*config, id) =~= Seq::<(Pid, LocalV)>::empty());
+            assert(before =~= spec_nodes(*config, 0));
+            assert(world_v(process@) =~= spec_world(*config));
+            assert(process@.map_values(|entry: (Pid, Local)| (entry.0, entry.1@)) =~= spec_world(*config));
+            let pids = process@.map_values(|entry: (Pid, Local)| entry.0);
+            assert forall|i: int, j: int| 0 <= i < pids.len() && 0 <= j < pids.len() && i != j implies pids[i] != pids[j] by {
+                assert(pids[i] == process@[i].0);
+                assert(pids[j] == process@[j].0);
+                if i < pids.len() - 1 && j < pids.len() - 1 {
+                    assert(process@[i].0 == Pid::Node(i as u64));
+                    assert(process@[j].0 == Pid::Node(j as u64));
+                }
+            };
+            assert(pids.no_duplicates());
+        }
         process
     }
 
@@ -589,11 +510,23 @@ impl RoverModel for Model {
         let mut results: Vec<StepResult<Model>> = Vec::new();
         match (pid, state) {
             (Pid::Node(_), Local::Node(node)) => {
-                let mut pairs = node.on_event(&(), now, event);
-                while !pairs.is_empty()
+                let mut pairs = node.step(now, event);
+                let ghost all = pairs@;
+                while pairs.len() > 0
+                    invariant
+                        results@.len() + pairs@.len() == all.len(),
+                        pairs@ == all.skip(results@.len() as int),
+                        forall|i: int| 0 <= i < results@.len() ==> {
+                            let result = #[trigger] results@[i];
+                            StepResultV { state: result.state@, send: result.send@ } == node_results_v(all)[i]
+                        },
                     decreases pairs@.len(),
                 {
+                    let ghost k = results@.len() as int;
                     let (node, send) = pairs.remove(0);
+                    proof {
+                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+                    }
                     results.push(StepResult { state: Local::Node(node), send });
                 }
             }
@@ -639,8 +572,7 @@ impl RoverModel for Model {
     }
 
     /// One local step. `spec_step` is that transition. The trait's
-    /// `ensures` on `on_event` is the equality with the executable results;
-    /// it holds for the store's arm and is open for the node's.
+    /// `ensures` on `on_event` is the equality with the executable results.
     open spec fn spec_on_event(
         &self,
         config: Fleet,

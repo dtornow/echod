@@ -28,6 +28,7 @@
     not(verus_keep_ghost),
     allow(unused_imports, dead_code, unused_variables)
 )]
+#![allow(non_shorthand_field_patterns)]
 
 pub mod node;
 pub mod store;
