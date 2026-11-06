@@ -32,7 +32,7 @@ use crate::model::{spec_string as c_string};
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     DocV, NoteV, ObjV, PendingV, PromV, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
-    spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
+    spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map,
     spec_project_obj, spec_record, spec_resume, spec_run_due, spec_schedule_key,
     spec_sorted as c_sorted, spec_step_object, spec_targeted, spec_timer, spec_unlease as c_unlease,
     TkV,
@@ -943,7 +943,7 @@ pub proof fn lemma_matched(
     assert(results[j] == r);
 }
 
-/// An origin document whose due step changed the store within its origin.
+/// An workflow document whose due step changed the store within its origin.
 pub proof fn lemma_origin_matched(
     config: ServerConfig,
     key: Seq<char>,
@@ -971,9 +971,9 @@ pub proof fn lemma_origin_matched(
             &&& finite_store(outcome.next)
             &&& sends_of(outcome.send) == note_sends(notes)
         }),
-        spec_run_due(DocV::Origin(map), now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
+        spec_run_due(DocV::Workflow(map), now, config.retry_timeout) == (DocV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let outcome = spec_process_work(config, work, s, now);
@@ -987,8 +987,8 @@ pub proof fn lemma_origin_matched(
     assert(r.send == sends_of(outcome.send));
     lemma_origin_reads(key, o, map2, n);
     lemma_others_kept_within(s, n, o);
-    assert(due_matched(config, key, DocV::Origin(map), state, now, r));
-    lemma_matched(config, key, DocV::Origin(map), state, now, r);
+    assert(due_matched(config, key, DocV::Workflow(map), state, now, r));
+    lemma_matched(config, key, DocV::Workflow(map), state, now, r);
 }
 
 /// The store changed at one id of the origin: the next document reads as
@@ -1061,7 +1061,7 @@ pub proof fn lemma_within_two(s: AStore, n: AStore, id: Seq<char>, y: Seq<char>)
 }
 
 // ---------------------------------------------------------------------------
-// The due branches of an origin document
+// The due branches of an workflow document
 // ---------------------------------------------------------------------------
 
 /// The context of one due object: the document, its origin, the store, and
@@ -1096,7 +1096,7 @@ pub proof fn lemma_promise_due(
         map[id].promise.state == PromiseState::Pending,
         map[id].promise.timeout_at <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -1162,7 +1162,7 @@ pub proof fn lemma_lease_due(
         map[id].task.unwrap().lease_timeout_at is Some,
         map[id].task.unwrap().lease_timeout_at.unwrap() <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -1223,7 +1223,7 @@ pub proof fn lemma_retry_due(
         map[id].task.unwrap().retry_timeout_at is Some,
         map[id].task.unwrap().retry_timeout_at.unwrap() <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -1281,7 +1281,7 @@ pub proof fn lemma_callback_due(
         map[id].promise.state != PromiseState::Pending,
         map[id].promise.callbacks.len() > 0,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -1494,7 +1494,7 @@ pub proof fn lemma_listener_due(
         map[id].promise.callbacks.len() == 0,
         map[id].promise.listeners.len() > 0,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -1551,7 +1551,7 @@ pub proof fn lemma_listener_due(
     lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), notes);
 }
 
-/// The due step of an origin document.
+/// The due step of an workflow document.
 pub proof fn lemma_origin_due(
     config: ServerConfig,
     key: Seq<char>,
@@ -1566,9 +1566,9 @@ pub proof fn lemma_origin_due(
         origin_rel(map, o, state.store),
         finite_store(state.store),
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocV::Workflow(map), state, now),
 {
-    let doc = DocV::Origin(map);
+    let doc = DocV::Workflow(map);
     let keys = c_sorted(map.dom());
     lemma_sorted(map.dom());
     assert forall|i: int| 0 <= i < keys.len() implies map.contains_key(#[trigger] keys[i]) by {
@@ -1584,7 +1584,7 @@ pub proof fn lemma_origin_due(
             assert(due_context(key, o, map, state.store, id));
             let obj = map[id];
             let (map2, notes) = spec_step_object(map, id, now, config.retry_timeout);
-            assert(spec_run_due(doc, now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
+            assert(spec_run_due(doc, now, config.retry_timeout) == (DocV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
             if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
                 lemma_promise_due(config, key, o, map, state, now, id);
             } else if obj.promise.state == PromiseState::Pending {
@@ -1733,14 +1733,14 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, s
         lemma_starts_split(key, origin_prefix());
         assert(key == spec_origin_key(o));
         match doc {
-            DocV::Origin(map) => {
+            DocV::Workflow(map) => {
                 lemma_origin_due(config, key, o, map, state, now);
             },
             _ => {},
         }
     } else {
         match doc {
-            DocV::Origin(map) => {
+            DocV::Workflow(map) => {
                 lemma_sorted(map.dom());
                 assert(c_sorted(map.dom()).len() == 0);
                 assert(spec_due_id(map, c_sorted(map.dom()), now) is None);
@@ -1858,8 +1858,8 @@ pub proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, no
     let o = origin(x);
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocV::Workflow(map));
     assert(spec_opened(doc) == doc);
     let next = spec_occurrence(doc, pending, now);
     if map.contains_key(x) || now < pending.at {
@@ -1884,7 +1884,7 @@ pub proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, no
             other => other,
         };
         let obj = ObjV { promise, task };
-        assert(next == DocV::Origin(map.insert(x, obj)));
+        assert(next == DocV::Workflow(map.insert(x, obj)));
         let (p, t) = spec_new_object(
             sat_add(pending.at, pending.timeout),
             pending.at,

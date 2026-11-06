@@ -55,7 +55,7 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::PromiseResSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{notes_v, spec_doc_deadline, spec_origin_map, DocV, NoteV};
+use echod_concrete::node::{notes_v, spec_doc_deadline, spec_workflow_map, DocV, NoteV};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
@@ -467,8 +467,8 @@ pub open spec fn spec_take_flight(s: S, fid: FlightId) -> S {
 pub open spec fn spec_dispatch(doc: DocV, n: NoteV) -> Option<(Seq<char>, MessageSpec)> {
     match n {
         NoteV::Execute { id, version } => {
-            if spec_origin_map(doc).contains_key(id) {
-                match crate::reason::spec_target_of(spec_origin_map(doc)[id].promise.tags@) {
+            if spec_workflow_map(doc).contains_key(id) {
+                match crate::reason::spec_target_of(spec_workflow_map(doc)[id].promise.tags@) {
                     Some(address) => Some((address, MessageSpec::Execute { task_id: id, version })),
                     None => None,
                 }
@@ -558,15 +558,15 @@ pub fn dispatches(doc: &Doc, notes: &Vec<Outbound>) -> (r: Vec<(String, Message)
 }
 
 /// Whether a document is an origin's.
-pub fn is_origin(d: &Doc) -> (r: bool)
+pub fn is_workflow(d: &Doc) -> (r: bool)
     ensures
-        r == (d@ is Origin),
+        r == (d@ is Workflow),
 {
     proof {
         echod_concrete::lemma_doc_view(d);
     }
     match d {
-        Doc::Origin(_) => true,
+        Doc::Workflow(_) => true,
         Doc::Schedule(_) => false,
     }
 }
@@ -821,7 +821,7 @@ pub open spec fn spec_answered_fire_schedule(s: S, fid: FlightId, f0: FlightSpec
     }
 }
 
-/// Ask for an origin's document: revalidated against the store when the
+/// Ask for a workflow document: revalidated against the store when the
 /// cache holds a version, read in full otherwise.
 #[verifier::opaque]
 pub open spec fn spec_load_origin(s: S, fid: FlightId, origin: Seq<char>) -> (S, OpId, Option<CachedSpec>) {
@@ -861,11 +861,11 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
             StoreOutcome::Read(Read::Absent) => {
                 let s = spec_note(s, NoteSpec::Cache(CacheResult::Absent));
                 let s = spec_forget_origin(s, origin);
-                (s, Ok(spec_working(origin, key, doc::spec_empty_origin(), None)))
+                (s, Ok(spec_working(origin, key, doc::spec_empty_workflow(), None)))
             },
             StoreOutcome::Read(Read::Body(bytes, etag)) => {
                 let s = spec_note(s, NoteSpec::Cache(CacheResult::Refreshed));
-                match doc::spec_decode_origin(bytes@) {
+                match doc::spec_decode_workflow(bytes@) {
                     Ok(loaded) => {
                         let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
                         (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
@@ -877,8 +877,8 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
             _ => (s, Err(spec_error_text(spec_unexpected()))),
         },
         None => match outcome {
-            StoreOutcome::Got(None) => (s, Ok(spec_working(origin, key, doc::spec_empty_origin(), None))),
-            StoreOutcome::Got(Some((bytes, etag))) => match doc::spec_decode_origin(bytes@) {
+            StoreOutcome::Got(None) => (s, Ok(spec_working(origin, key, doc::spec_empty_workflow(), None))),
+            StoreOutcome::Got(Some((bytes, etag))) => match doc::spec_decode_workflow(bytes@) {
                 Ok(loaded) => {
                     let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
                     (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
@@ -891,7 +891,7 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
     }
 }
 
-/// Run the flight's step on an origin's document and start its commit.
+/// Run the flight's step on a workflow document and start its commit.
 #[verifier::opaque]
 pub open spec fn spec_run_origin(s: S, f: FlightSpec, w: WorkingSpec) -> S {
     let (s, commit, done) = spec_decide(s, f.work, w);
@@ -1105,7 +1105,7 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
         IssuedSpec::Write { mode, row_count, bytes, len, .. } => match answer {
             Some(StoreOutcome::Written(etag)) => {
                 let s = spec_note(s, NoteSpec::DocumentWrite { mode, bytes: len });
-                let s = if c.after is Origin {
+                let s = if c.after is Workflow {
                     spec_remember(s, c.w.target, CachedSpec {
                         loaded: LoadedSpec {
                             doc: c.after,
@@ -1133,14 +1133,12 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
 /// document.
 #[verifier::opaque]
 pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec) {
-    let (s, nonce) = spec_token(s);
     let header = HeaderSpec {
         document: c.w.target,
         basever: c.w.loaded.version,
         version: c.w.loaded.version.saturating_add(1),
         committed_at: c.now,
         next_wake_at: doc::spec_deadline_time(c.after),
-        nonce,
     };
     let (call, mode, row_count, bytes) = match cond {
         None => {
@@ -1634,7 +1632,7 @@ impl State {
     // Loading
     // -----------------------------------------------------------------------
 
-    /// Ask for an origin's document: revalidated against the store when
+    /// Ask for a workflow document: revalidated against the store when
     /// the cache holds a version, read in full otherwise.
     pub fn load_origin(&mut self, fid: FlightId, origin: &str) -> (r: (OpId, Option<Cached>))
         ensures
@@ -1682,11 +1680,11 @@ impl State {
                 StoreOutcome::Read(Read::Absent) => {
                     self.note(Note::Cache(CacheResult::Absent));
                     self.forget(origin);
-                    Ok(Working { target, key, loaded: Loaded::empty_origin(), etag: None })
+                    Ok(Working { target, key, loaded: Loaded::empty_workflow(), etag: None })
                 },
                 StoreOutcome::Read(Read::Body(bytes, etag)) => {
                     self.note(Note::Cache(CacheResult::Refreshed));
-                    match doc::decode_origin(bytes.as_slice()) {
+                    match doc::decode_workflow(bytes.as_slice()) {
                         Ok(loaded) => {
                             self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
                             Ok(Working { target, key, loaded, etag: Some(etag) })
@@ -1698,8 +1696,8 @@ impl State {
                 _ => Err(error_text(&unexpected())),
             },
             None => match outcome {
-                StoreOutcome::Got(None) => Ok(Working { target, key, loaded: Loaded::empty_origin(), etag: None }),
-                StoreOutcome::Got(Some((bytes, etag))) => match doc::decode_origin(bytes.as_slice()) {
+                StoreOutcome::Got(None) => Ok(Working { target, key, loaded: Loaded::empty_workflow(), etag: None }),
+                StoreOutcome::Got(Some((bytes, etag))) => match doc::decode_workflow(bytes.as_slice()) {
                     Ok(loaded) => {
                         self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
                         Ok(Working { target, key, loaded, etag: Some(etag) })
@@ -1716,7 +1714,7 @@ impl State {
     // The step
     // -----------------------------------------------------------------------
 
-    /// Run the flight's step on an origin's document and start its commit.
+    /// Run the flight's step on a workflow document and start its commit.
     fn run_origin(&mut self, f: Flight, w: Working)
         ensures
             final(self).deep_view() == spec_run_origin(old(self).deep_view(), f.deep_view(), w.deep_view()),
@@ -2047,7 +2045,7 @@ impl State {
             Issued::Write { mode, row_count, bytes, len, .. } => match answer {
                 Some(StoreOutcome::Written(etag)) => {
                     self.note(Note::DocumentWrite { mode, bytes: len });
-                    if is_origin(&c.after) {
+                    if is_workflow(&c.after) {
                         let filled_at = self.now();
                         let target = copy_string(&c.w.target);
                         let cached = Cached {
@@ -2081,14 +2079,12 @@ impl State {
         proof {
             reveal(spec_issue_write);
         }
-        let nonce = self.token();
         let header = Header {
             document: copy_string(&c.w.target),
             basever: c.w.loaded.version,
             version: c.w.loaded.version.saturating_add(1),
             committed_at: c.now,
             next_wake_at: doc::deadline(&c.after),
-            nonce,
         };
         let (call, mode, row_count, bytes) = match cond {
             None => {

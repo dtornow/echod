@@ -23,7 +23,7 @@
 //! config.rs          the dials
 //! keys.rs            where everything lives under the bucket
 //! doc.rs             a document: rows in, the model's Doc, rows out
-//! target.rs          an origin's document, or a schedule's
+//! target.rs          a workflow document, or a schedule's
 //! reason.rs          the words a refusal carries
 //! cache.rs           documents this node remembers, by LRU under a byte budget
 //! debug.rs           debug.reset, debug.snap, debug.tick

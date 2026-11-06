@@ -31,7 +31,7 @@
 //!   function of prefix, origin, instant and token; which string it is
 //!   stays outside the proof.
 //! - The bytes of a document, `doc.rs`: partial boundaries and metadata,
-//!   `spec_encode`, `spec_encode_delta`, `spec_decode_origin`,
+//!   `spec_encode`, `spec_encode_delta`, `spec_decode_workflow`,
 //!   `spec_decode_schedule`; `codec::*` (serde) is assumed to compute them.
 //!   Likewise an announcement's and a
 //!   configuration's bytes, `state_node.rs`.

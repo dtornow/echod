@@ -664,7 +664,7 @@ pub open spec fn dues_agree(config: ServerConfig) -> bool {
         )
 }
 
-/// One occurrence on its origin document: nothing happens, or the abstract
+/// One occurrence on its workflow document: nothing happens, or the abstract
 /// occurrence step does the same.
 pub open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now: u64) -> bool {
     let key = spec_origin_key(origin(pending.promise));

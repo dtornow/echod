@@ -273,7 +273,7 @@ pub proof fn lemma_compose_preserves_apply<V>(
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
 pub enum Doc {
-    Origin(Objects),
+    Workflow(Objects),
     Schedule(Option<Schedule>),
 }
 

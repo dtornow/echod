@@ -379,7 +379,7 @@ impl State {
     }
 
     /// Both documents loaded: the model's `create_occurrence` on the
-    /// origin's document, committed first.
+    /// workflow document, committed first.
     pub fn fire_run(&mut self, f: Flight, ctx: FireCtx, wo: Working)
         ensures
             final(self).deep_view() == spec_fire_run(old(self).deep_view(), f.deep_view(), ctx.deep_view(), wo.deep_view()),

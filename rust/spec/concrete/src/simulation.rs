@@ -1292,13 +1292,13 @@ pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::v
         doc_rel(key, spec_empty_doc(key), s),
 {
     match doc {
-        DocV::Origin(map) => {
+        DocV::Workflow(map) => {
             assert(!crate::store::spec_starts(key, crate::interpret::schedule_prefix()));
             assert(map.dom().finite());
             assert(map.dom().len() == 0);
             assert(map.dom() =~= Set::<Seq<char>>::empty());
             assert(map =~= Map::<Seq<char>, crate::node::ObjV>::empty());
-            assert(spec_empty_doc(key) == DocV::Origin(Map::<Seq<char>, crate::node::ObjV>::empty()));
+            assert(spec_empty_doc(key) == DocV::Workflow(Map::<Seq<char>, crate::node::ObjV>::empty()));
         },
         DocV::Schedule(slot) => {
             assert(slot is None);
@@ -1306,7 +1306,7 @@ pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::v
                 assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
             } else {
                 let map = Map::<Seq<char>, crate::node::ObjV>::empty();
-                assert(spec_empty_doc(key) == DocV::Origin(map));
+                assert(spec_empty_doc(key) == DocV::Workflow(map));
                 assert(map.dom() =~= Set::<Seq<char>>::empty());
             }
         },
@@ -4606,7 +4606,7 @@ pub proof fn lemma_empty_reads(key: Seq<char>)
         assert(!s.schedules.contains_key(key.skip(2)));
     } else {
         let map = Map::<Seq<char>, crate::node::ObjV>::empty();
-        assert(spec_empty_doc(key) == DocV::Origin(map));
+        assert(spec_empty_doc(key) == DocV::Workflow(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
         if crate::store::spec_starts(key, crate::interpret::origin_prefix()) {

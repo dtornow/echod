@@ -597,7 +597,7 @@ async fn check(world: &World) -> Report {
         .collect();
     for key in world.inner.list("wf/", usize::MAX).await.unwrap_or_default() {
         let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let Ok(loaded) = echod_logic::doc::decode_origin(&bytes) else { continue };
+        let Ok(loaded) = echod_logic::doc::decode_workflow(&bytes) else { continue };
         let origin = key.trim_start_matches("wf/");
         let origin = echod_logic::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
         if let Some(d) = echod_logic::doc::deadline(&loaded.doc) {

@@ -393,7 +393,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreOutcome) -> 
                                                 Err(e) => Err(StoreErrorSpec::Unavailable(e)),
                                             }
                                         } else {
-                                            match doc::spec_decode_origin(bytes@) {
+                                            match doc::spec_decode_workflow(bytes@) {
                                                 Ok(loaded) => Ok((s, ops, pending, origins.push(loaded.doc), schedules)),
                                                 Err(e) => Err(StoreErrorSpec::Unavailable(e)),
                                             }
@@ -914,7 +914,7 @@ impl State {
                                         Err(e) => Some(StoreError::Unavailable(e)),
                                     }
                                 } else {
-                                    match doc::decode_origin(bytes.as_slice()) {
+                                    match doc::decode_workflow(bytes.as_slice()) {
                                         Ok(loaded) => {
                                             let ghost ov = origins.deep_view();
                                             let ghost dv = loaded.doc@;

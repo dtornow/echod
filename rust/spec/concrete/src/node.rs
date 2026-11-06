@@ -288,7 +288,7 @@ impl View for Doc {
     type V = DocV;
     closed spec fn view(&self) -> DocV {
         match self {
-            Doc::Origin(objs) => DocV::Origin(objs@),
+            Doc::Workflow(objs) => DocV::Workflow(objs@),
             Doc::Schedule(slot) => DocV::Schedule(*slot),
         }
     }
@@ -977,7 +977,7 @@ pub fn same_doc(a: &Doc, b: &Doc) -> (r: bool)
         r == (a@ == b@),
 {
     match (a, b) {
-        (Doc::Origin(x), Doc::Origin(y)) => same_objects(x, y),
+        (Doc::Workflow(x), Doc::Workflow(y)) => same_objects(x, y),
         (Doc::Schedule(Some(x)), Doc::Schedule(Some(y))) => same_schedule(x, y),
         (Doc::Schedule(None), Doc::Schedule(None)) => true,
         _ => false,
@@ -990,7 +990,7 @@ pub fn clone_doc(d: &Doc) -> (r: Doc)
         r == *d,
 {
     match d {
-        Doc::Origin(objs) => Doc::Origin(objs.clone()),
+        Doc::Workflow(objs) => Doc::Workflow(objs.clone()),
         Doc::Schedule(slot) => Doc::Schedule(echod_abstract::trusted::copy(slot)),
     }
 }
@@ -1000,7 +1000,7 @@ pub fn clone_doc(d: &Doc) -> (r: Doc)
 pub proof fn lemma_doc_view(d: &Doc)
     ensures
         d@ == match d {
-            Doc::Origin(objs) => DocV::Origin(objs@),
+            Doc::Workflow(objs) => DocV::Workflow(objs@),
             Doc::Schedule(slot) => DocV::Schedule(*slot),
         },
 {
@@ -1019,7 +1019,7 @@ pub proof fn lemma_obj_view(o: &Obj)
 /// How many rows a document holds: its objects, or its one schedule.
 pub open spec fn spec_doc_len(d: DocV) -> nat {
     match d {
-        DocV::Origin(m) => m.dom().len(),
+        DocV::Workflow(m) => m.dom().len(),
         DocV::Schedule(Some(_)) => 1,
         DocV::Schedule(None) => 0,
     }
@@ -1030,7 +1030,7 @@ pub fn doc_len(d: &Doc) -> (r: usize)
         r as nat == spec_doc_len(d@),
 {
     match d {
-        Doc::Origin(objs) => {
+        Doc::Workflow(objs) => {
             proof {
                 use_type_invariant(objs);
                 lemma_sorted_keys(objs.entries@);
@@ -1059,12 +1059,12 @@ pub proof fn lemma_pending_view(p: &Pending)
 {
 }
 
-/// An origin's empty document.
-pub fn empty_origin() -> (r: Doc)
+/// An workflow's empty document.
+pub fn empty_workflow() -> (r: Doc)
     ensures
-        r@ == DocV::Origin(Map::<Seq<char>, ObjV>::empty()),
+        r@ == DocV::Workflow(Map::<Seq<char>, ObjV>::empty()),
 {
-    Doc::Origin(Objects::empty())
+    Doc::Workflow(Objects::empty())
 }
 
 /// A schedule's empty document.
@@ -2053,7 +2053,7 @@ pub fn empty_doc(key: &String) -> (r: Doc)
     ensures
         r@ == spec_empty_doc(key@),
 {
-    if is_schedule_key(key) { Doc::Schedule(None) } else { Doc::Origin(Objects::empty()) }
+    if is_schedule_key(key) { Doc::Schedule(None) } else { Doc::Workflow(Objects::empty()) }
 }
 
 /// `spec_is_empty`.
@@ -2062,32 +2062,32 @@ fn is_empty(doc: &Doc) -> (r: bool)
         r == spec_is_empty(doc@),
 {
     match doc {
-        Doc::Origin(objs) => objs.is_empty(),
+        Doc::Workflow(objs) => objs.is_empty(),
         Doc::Schedule(slot) => slot.is_none(),
     }
 }
 
-/// `spec_origin_map`: the objects of an origin document; none for a schedule.
+/// `spec_workflow_map`: the objects of an workflow document; none for a schedule.
 fn open(doc: Doc) -> (r: Objects)
     ensures
-        r@ == spec_origin_map(doc@),
+        r@ == spec_workflow_map(doc@),
 {
     match doc {
-        Doc::Origin(objs) => objs,
+        Doc::Workflow(objs) => objs,
         Doc::Schedule(_) => Objects::empty(),
     }
 }
 
-/// `spec_origin_map(doc)[id]`, copied out, without opening the document.
+/// `spec_workflow_map(doc)[id]`, copied out, without opening the document.
 pub fn peek(doc: &Doc, id: &String) -> (r: Option<Obj>)
     ensures
         match r {
-            Some(o) => spec_origin_map(doc@).contains_key(id@) && o@ == spec_origin_map(doc@)[id@],
-            None => !spec_origin_map(doc@).contains_key(id@),
+            Some(o) => spec_workflow_map(doc@).contains_key(id@) && o@ == spec_workflow_map(doc@)[id@],
+            None => !spec_workflow_map(doc@).contains_key(id@),
         },
 {
     match doc {
-        Doc::Origin(objs) => objs.get(id),
+        Doc::Workflow(objs) => objs.get(id),
         Doc::Schedule(_) => None,
     }
 }
@@ -2099,7 +2099,7 @@ pub fn doc_deadline(doc: &Doc) -> (r: Option<u64>)
 {
     match doc {
         Doc::Schedule(Some(schedule)) => Some(schedule.next_run_at),
-        Doc::Origin(objs) => objs.deadline(),
+        Doc::Workflow(objs) => objs.deadline(),
         Doc::Schedule(None) => None,
     }
 }
@@ -2111,7 +2111,7 @@ fn earliest_in(doc: &Doc, now: u64) -> (r: Option<u64>)
 {
     match doc {
         Doc::Schedule(Some(schedule)) => if schedule.next_run_at <= now { Some(schedule.next_run_at) } else { None },
-        Doc::Origin(objs) => objs.earliest(now),
+        Doc::Workflow(objs) => objs.earliest(now),
         Doc::Schedule(None) => None,
     }
 }
@@ -2286,11 +2286,11 @@ fn promise_get(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (Doc::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let obj = project_obj(&found, now);
             let res = promise_res(200, Some(record(id, &obj.promise)));
-            (Doc::Origin(objs), res)
+            (Doc::Workflow(objs), res)
         },
     }
 }
@@ -2313,7 +2313,7 @@ fn promise_create(doc: Doc, req: &PromiseCreateReq, now: u64) -> (r: (Doc, Respo
             let obj = new_obj(req.timeout_at, now, copy(&req.param), copy(&req.tags), runnable);
             let res = promise_res(200, Some(record(&req.id, &obj.promise)));
             let objs = open(doc).put(&req.id, obj);
-            (Doc::Origin(objs), res)
+            (Doc::Workflow(objs), res)
         },
     }
 }
@@ -2327,16 +2327,16 @@ fn promise_settle(doc: Doc, req: &PromiseSettleReq, now: u64) -> (r: (Doc, Respo
     }
     let objs = open(doc);
     match objs.get(&req.id) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (Doc::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let seen = project_obj(&found, now);
             if !(seen.promise.state == PromiseState::Pending) {
                 let res = promise_res(200, Some(record(&req.id, &seen.promise)));
-                (Doc::Origin(objs), res)
+                (Doc::Workflow(objs), res)
             } else {
                 let obj = settle_obj(seen, req.state, copy(&req.value), now);
                 let res = promise_res(200, Some(record(&req.id, &obj.promise)));
-                (Doc::Origin(objs.put(&req.id, obj)), res)
+                (Doc::Workflow(objs.put(&req.id, obj)), res)
             }
         },
     }
@@ -2351,21 +2351,21 @@ fn register_callback(doc: Doc, awaited: &String, awaiter: &String, now: u64) -> 
     }
     let objs = open(doc);
     match objs.get(awaited) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (Doc::Workflow(objs), promise_res(404, None)),
         Some(a) => match objs.get(awaiter) {
-            None => (Doc::Origin(objs), promise_res(422, None)),
+            None => (Doc::Workflow(objs), promise_res(422, None)),
             Some(b) => {
                 let awaited_obj = project_obj(&a, now);
                 let awaiter_obj = project_obj(&b, now);
                 if !targeted(&awaiter_obj.promise.tags) || !awaitable(&awaited_obj.promise.tags) {
-                    (Doc::Origin(objs), promise_res(422, None))
+                    (Doc::Workflow(objs), promise_res(422, None))
                 } else {
                     let res = promise_res(200, Some(record(awaited, &awaited_obj.promise)));
                     if awaited_obj.promise.state == PromiseState::Pending && awaiter_obj.promise.state == PromiseState::Pending {
                         let obj = add_callback(awaited_obj, awaiter);
-                        (Doc::Origin(objs.put(awaited, obj)), res)
+                        (Doc::Workflow(objs.put(awaited, obj)), res)
                     } else {
-                        (Doc::Origin(objs), res)
+                        (Doc::Workflow(objs), res)
                     }
                 }
             },
@@ -2379,18 +2379,18 @@ fn register_listener(doc: Doc, awaited: &String, address: &String, now: u64) -> 
 {
     let objs = open(doc);
     match objs.get(awaited) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (Doc::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let obj = project_obj(&found, now);
             if !awaitable(&obj.promise.tags) {
-                (Doc::Origin(objs), promise_res(422, None))
+                (Doc::Workflow(objs), promise_res(422, None))
             } else {
                 let res = promise_res(200, Some(record(awaited, &obj.promise)));
                 if obj.promise.state == PromiseState::Pending {
                     let obj = add_listener(obj, address);
-                    (Doc::Origin(objs.put(awaited, obj)), res)
+                    (Doc::Workflow(objs.put(awaited, obj)), res)
                 } else {
-                    (Doc::Origin(objs), res)
+                    (Doc::Workflow(objs), res)
                 }
             }
         },
@@ -2403,14 +2403,14 @@ fn task_get(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
+        None => (Doc::Workflow(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
         Some(found) => {
             let obj = project_obj(&found, now);
             match &obj.task {
-                None => (Doc::Origin(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
+                None => (Doc::Workflow(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
                 Some(t) => {
                     let res = Response::TaskGet(TaskGetRes { status: 200, task: Some(task_record(id, t)) });
-                    (Doc::Origin(objs), res)
+                    (Doc::Workflow(objs), res)
                 },
             }
         },
@@ -2449,7 +2449,7 @@ fn task_create(doc: Doc, pid: &String, ttl: u64, action: &PromiseCreateReq, now:
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(&action.id, &u)), Some(record(&action.id, &promise)));
                         let objs = open(doc).put(&action.id, Obj { promise, task: Some(u) });
-                        (Doc::Origin(objs), res)
+                        (Doc::Workflow(objs), res)
                     } else {
                         (doc, claim_res(409, None, None))
                     }
@@ -2501,18 +2501,18 @@ fn task_acquire(doc: Doc, id: &String, version: u64, pid: &String, ttl: u64, now
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), claim_res(404, None, None)),
+        None => (Doc::Workflow(objs), claim_res(404, None, None)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), claim_res(404, None, None)),
+                None => (Doc::Workflow(objs), claim_res(404, None, None)),
                 Some(t) => {
                     if !(t.state == TaskState::Pending) || t.version != version || !(promise.state == PromiseState::Pending) {
-                        (Doc::Origin(objs), claim_res(409, None, None))
+                        (Doc::Workflow(objs), claim_res(409, None, None))
                     } else {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(id, &u)), Some(record(id, &promise)));
-                        (Doc::Origin(objs.put(id, Obj { promise, task: Some(u) })), res)
+                        (Doc::Workflow(objs.put(id, Obj { promise, task: Some(u) })), res)
                     }
                 },
             }
@@ -2526,15 +2526,15 @@ fn task_release(doc: Doc, id: &String, version: u64, now: u64) -> (r: (Doc, Resp
 {
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
+        Lease::Missing => (Doc::Workflow(objs), status_res(404)),
+        Lease::Stale => (Doc::Workflow(objs), status_res(409)),
         Lease::Ok(obj) => {
             let Obj { promise, task } = obj;
             let task = match task {
                 Some(t) => Some(unlease(&t, TaskState::Pending, Some(now))),
                 None => None,
             };
-            (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(200))
+            (Doc::Workflow(objs.put(id, Obj { promise, task })), status_res(200))
         },
     }
 }
@@ -2548,12 +2548,12 @@ fn task_fulfill(doc: Doc, id: &String, version: u64, action: &PromiseSettleReq, 
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), promise_res(404, None)),
-        Lease::Stale => (Doc::Origin(objs), promise_res(409, None)),
+        Lease::Missing => (Doc::Workflow(objs), promise_res(404, None)),
+        Lease::Stale => (Doc::Workflow(objs), promise_res(409, None)),
         Lease::Ok(obj) => {
             let obj = settle_obj(obj, action.state, copy(&action.value), now);
             let res = promise_res(200, Some(record(id, &obj.promise)));
-            (Doc::Origin(objs.put(id, obj)), res)
+            (Doc::Workflow(objs.put(id, obj)), res)
         },
     }
 }
@@ -2564,19 +2564,19 @@ fn task_halt(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), status_res(404)),
+        None => (Doc::Workflow(objs), status_res(404)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), status_res(404)),
+                None => (Doc::Workflow(objs), status_res(404)),
                 Some(t) => {
                     if t.state == TaskState::Fulfilled {
-                        (Doc::Origin(objs), status_res(409))
+                        (Doc::Workflow(objs), status_res(409))
                     } else if t.state == TaskState::Halted {
-                        (Doc::Origin(objs), status_res(200))
+                        (Doc::Workflow(objs), status_res(200))
                     } else {
                         let obj = Obj { promise, task: Some(unlease(&t, TaskState::Halted, None)) };
-                        (Doc::Origin(objs.put(id, obj)), status_res(200))
+                        (Doc::Workflow(objs.put(id, obj)), status_res(200))
                     }
                 },
             }
@@ -2590,19 +2590,19 @@ fn task_continue(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), status_res(404)),
+        None => (Doc::Workflow(objs), status_res(404)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), status_res(404)),
+                None => (Doc::Workflow(objs), status_res(404)),
                 Some(t) => {
                     if !(t.state == TaskState::Halted) || !(promise.state == PromiseState::Pending) {
-                        (Doc::Origin(objs), status_res(409))
+                        (Doc::Workflow(objs), status_res(409))
                     } else {
                         let mut u = t;
                         u.state = TaskState::Pending;
                         u.retry_timeout_at = Some(now);
-                        (Doc::Origin(objs.put(id, Obj { promise, task: Some(u) })), status_res(200))
+                        (Doc::Workflow(objs.put(id, Obj { promise, task: Some(u) })), status_res(200))
                     }
                 },
             }
@@ -2683,7 +2683,7 @@ fn heartbeat(doc: Doc, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: (Doc
         return (doc, status_res(400));
     }
     let objs = extend(open(doc), pid, tasks, now);
-    (Doc::Origin(objs), status_res(200))
+    (Doc::Workflow(objs), status_res(200))
 }
 
 /// `spec_bad_suspend`: an action awaits the task itself, or another origin.
@@ -2873,11 +2873,11 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
+        Lease::Missing => (Doc::Workflow(objs), status_res(404)),
+        Lease::Stale => (Doc::Workflow(objs), status_res(409)),
         Lease::Ok(obj) => {
             if missing_awaited(&objs, actions) || unawaitable(&objs, actions) {
-                (Doc::Origin(objs), status_res(422))
+                (Doc::Workflow(objs), status_res(422))
             } else if any_settled(&objs, actions, now) {
                 let Obj { promise, task } = obj;
                 let task = match task {
@@ -2891,7 +2891,7 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
                     },
                     None => None,
                 };
-                (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(300))
+                (Doc::Workflow(objs.put(id, Obj { promise, task })), status_res(300))
             } else {
                 proof {
                     lemma_add_callbacks_dom(objs@, id@, actions@, 0);
@@ -2911,13 +2911,13 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
                             },
                             None => None,
                         };
-                        (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(200))
+                        (Doc::Workflow(objs.put(id, Obj { promise, task })), status_res(200))
                     },
                     None => {
                         proof {
                             assert(false);
                         }
-                        (Doc::Origin(objs), status_res(500))
+                        (Doc::Workflow(objs), status_res(500))
                     },
                 }
             }
@@ -2938,10 +2938,10 @@ fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), fence_res(404, None)),
-        Lease::Stale => (Doc::Origin(objs), fence_res(409, None)),
+        Lease::Missing => (Doc::Workflow(objs), fence_res(404, None)),
+        Lease::Stale => (Doc::Workflow(objs), fence_res(409, None)),
         Lease::Ok(_) => {
-            let doc = Doc::Origin(objs);
+            let doc = Doc::Workflow(objs);
             match action {
                 TaskFenceAction::Create(req) => {
                     let (doc, response) = promise_create(doc, req, now);
@@ -2970,9 +2970,9 @@ fn fence_check(doc: Doc, id: &String, version: u64, now: u64) -> (r: (Doc, Respo
 {
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
-        Lease::Ok(_) => (Doc::Origin(objs), status_res(200)),
+        Lease::Missing => (Doc::Workflow(objs), status_res(404)),
+        Lease::Stale => (Doc::Workflow(objs), status_res(409)),
+        Lease::Ok(_) => (Doc::Workflow(objs), status_res(200)),
     }
 }
 
@@ -3269,13 +3269,13 @@ pub fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>
                 (Doc::Schedule(Some(schedule)), Vec::new(), Vec::new())
             }
         },
-        Doc::Origin(objs) => {
+        Doc::Workflow(objs) => {
             match objs.first_due(now) {
                 Some(id) => {
                     let (objs, notes) = step_object(objs, &id, now, retry_timeout);
-                    (Doc::Origin(objs), Vec::new(), notes)
+                    (Doc::Workflow(objs), Vec::new(), notes)
                 },
-                None => (Doc::Origin(objs), Vec::new(), Vec::new()),
+                None => (Doc::Workflow(objs), Vec::new(), Vec::new()),
             }
         },
         Doc::Schedule(None) => (Doc::Schedule(None), Vec::new(), Vec::new()),
@@ -3289,7 +3289,7 @@ pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
 {
     let objs = open(doc);
     if objs.contains(&pending.promise) || now < pending.at {
-        return Doc::Origin(objs);
+        return Doc::Workflow(objs);
     }
     let timeout_at = sat_add(pending.at, pending.timeout);
     let runnable = targeted(&pending.tags) && !timer(&pending.tags);
@@ -3311,7 +3311,7 @@ pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
         },
         None => None,
     };
-    Doc::Origin(objs.put(&pending.promise, Obj { promise, task }))
+    Doc::Workflow(objs.put(&pending.promise, Obj { promise, task }))
 }
 
 /// `spec_sweep`: `run_due` again and again, until a step leaves the document
@@ -3402,7 +3402,7 @@ fn encode(doc: &Doc) -> Vec<u8> {
 #[cfg(not(verus_keep_ghost))]
 fn decode(key: &String, body: &Vec<u8>) -> Doc {
     match serde_json::from_slice::<Doc>(body) {
-        Ok(Doc::Origin(objs)) => Doc::Origin(objs.in_order()),
+        Ok(Doc::Workflow(objs)) => Doc::Workflow(objs.in_order()),
         Ok(doc) => doc,
         Err(_) => empty_doc(key),
     }
@@ -4461,7 +4461,7 @@ pub struct ObjV {
 }
 
 pub enum DocV {
-    Origin(Map<Seq<char>, ObjV>),
+    Workflow(Map<Seq<char>, ObjV>),
     Schedule(Option<Schedule>),
 }
 
@@ -4487,7 +4487,7 @@ pub open spec fn spec_cached_from(docs: Seq<CachedV>, key: Seq<char>, i: int) ->
 
 pub open spec fn spec_is_empty(doc: DocV) -> bool {
     match doc {
-        DocV::Origin(map) => map.dom().len() == 0,
+        DocV::Workflow(map) => map.dom().len() == 0,
         DocV::Schedule(slot) => slot is None,
     }
 }
@@ -4700,7 +4700,7 @@ pub open spec fn spec_schedule_key(id: Seq<char>) -> Seq<char> {
 }
 
 pub open spec fn spec_empty_doc(key: Seq<char>) -> DocV {
-    if spec_starts(key, seq!['s', '/']) { DocV::Schedule(None) } else { DocV::Origin(Map::empty()) }
+    if spec_starts(key, seq!['s', '/']) { DocV::Schedule(None) } else { DocV::Workflow(Map::empty()) }
 }
 
 pub open spec fn spec_key(request: Request) -> Option<Seq<char>> {
@@ -4780,22 +4780,22 @@ pub open spec fn spec_handle(doc: DocV, request: Request, now: Time) -> (DocV, R
     }
 }
 
-pub open spec fn spec_origin_map(doc: DocV) -> Map<Seq<char>, ObjV> {
+pub open spec fn spec_workflow_map(doc: DocV) -> Map<Seq<char>, ObjV> {
     match doc {
-        DocV::Origin(map) => map,
+        DocV::Workflow(map) => map,
         DocV::Schedule(_) => Map::empty(),
     }
 }
 
-/// `origin_mut` replaces a schedule document with an empty origin map before it looks anything up.
+/// `workflow_mut` replaces a schedule document with an empty origin map before it looks anything up.
 pub open spec fn spec_opened(doc: DocV) -> DocV {
-    DocV::Origin(spec_origin_map(doc))
+    DocV::Workflow(spec_workflow_map(doc))
 }
 
-pub open spec fn spec_with_origin(doc: DocV, map: Map<Seq<char>, ObjV>) -> DocV {
+pub open spec fn spec_with_workflow(doc: DocV, map: Map<Seq<char>, ObjV>) -> DocV {
     match doc {
-        DocV::Schedule(_) => DocV::Origin(map),
-        DocV::Origin(_) => DocV::Origin(map),
+        DocV::Schedule(_) => DocV::Workflow(map),
+        DocV::Workflow(_) => DocV::Workflow(map),
     }
 }
 
@@ -4924,7 +4924,7 @@ pub open spec fn spec_parse_acc(s: Seq<char>, i: int, acc: nat) -> Option<u64>
 
 pub open spec fn spec_promise_get(doc: DocV, id: String, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, spec_promise_res(404, None))
     } else {
@@ -4966,13 +4966,13 @@ pub open spec fn spec_promise_create(doc: DocV, req: PromiseCreateReq, now: Time
     if spec_timer(req.tags) && spec_targeted(req.tags) {
         (doc, spec_promise_res(400, None))
     } else {
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if map.contains_key(req.id@) {
             let obj = spec_project_obj(map[req.id@], now);
             (doc, spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
         } else {
             let obj = spec_new_obj(req.timeout_at, now, req.param, req.tags, spec_targeted(req.tags));
-            (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+            (spec_with_workflow(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
         }
     }
 }
@@ -4982,7 +4982,7 @@ pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time
         (doc, spec_promise_res(400, None))
     } else {
         let doc = spec_opened(doc);
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if !map.contains_key(req.id@) {
             (doc, spec_promise_res(404, None))
         } else {
@@ -4996,7 +4996,7 @@ pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time
                     other => other,
                 };
                 let obj = ObjV { promise, task };
-                (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+                (spec_with_workflow(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
             }
         }
     }
@@ -5007,7 +5007,7 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
         (doc, spec_promise_res(400, None))
     } else {
         let doc = spec_opened(doc);
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if !map.contains_key(awaited@) {
             (doc, spec_promise_res(404, None))
         } else if !map.contains_key(awaiter@) {
@@ -5026,7 +5026,7 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
                         awaited_obj.promise.callbacks.push(awaiter@)
                     };
                     let awaited_obj = ObjV { promise: PromV { callbacks, ..awaited_obj.promise }, ..awaited_obj };
-                    (spec_with_origin(doc, map.insert(awaited@, awaited_obj)), res)
+                    (spec_with_workflow(doc, map.insert(awaited@, awaited_obj)), res)
                 } else {
                     (doc, res)
                 }
@@ -5037,7 +5037,7 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
 
 pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: String, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(awaited@) {
         (doc, spec_promise_res(404, None))
     } else {
@@ -5053,7 +5053,7 @@ pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: Str
                     obj.promise.listeners.push(address@)
                 };
                 let obj = ObjV { promise: PromV { listeners, ..obj.promise }, ..obj };
-                (spec_with_origin(doc, map.insert(awaited@, obj)), res)
+                (spec_with_workflow(doc, map.insert(awaited@, obj)), res)
             } else {
                 (doc, res)
             }
@@ -5063,7 +5063,7 @@ pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: Str
 
 pub open spec fn spec_task_get(doc: DocV, id: String, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::TaskGet(TaskGetRes { status: 404, task: None }))
     } else {
@@ -5098,7 +5098,7 @@ pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: Prom
                 (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
             },
             _ => {
-                let map = spec_origin_map(doc);
+                let map = spec_workflow_map(doc);
                 if !map.contains_key(action.id@) {
                     (doc, Response::TaskClaim(TaskClaimRes { status: 422, task: None, promise: None }))
                 } else {
@@ -5120,7 +5120,7 @@ pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: Prom
                                 let u = spec_acquire(t, pid@, ttl, now);
                                 let obj = ObjV { task: Some(u), ..seen };
                                 (
-                                    spec_with_origin(doc, map.insert(action.id@, obj)),
+                                    spec_with_workflow(doc, map.insert(action.id@, obj)),
                                     Response::TaskClaim(TaskClaimRes {
                                         status: 200,
                                         task: Some(spec_task_record(action.id, u)),
@@ -5154,7 +5154,7 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
 
 pub open spec fn spec_task_acquire(doc: DocV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None }))
     } else {
@@ -5168,7 +5168,7 @@ pub open spec fn spec_task_acquire(doc: DocV, id: String, version: u64, pid: Str
                 let u = spec_acquire(t, pid@, ttl, now);
                 let obj = ObjV { task: Some(u), ..obj };
                 (
-                    spec_with_origin(doc, map.insert(id@, obj)),
+                    spec_with_workflow(doc, map.insert(id@, obj)),
                     Response::TaskClaim(TaskClaimRes {
                         status: 200,
                         task: Some(spec_task_record(id, u)),
@@ -5185,13 +5185,13 @@ pub open spec fn spec_unlease(t: TkV, state: TaskState, retry: Option<u64>) -> T
 }
 
 pub open spec fn spec_task_release(doc: DocV, id: String, version: u64, now: Time) -> (DocV, Response) {
-    let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+    let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
     match held {
-        Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-        Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
+        Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+        Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
         Held::Ok(obj) => {
             let task = match obj.task { Some(t) => Some(spec_unlease(t, TaskState::Pending, Some(now))), None => None };
-            (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
+            (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
         },
     }
 }
@@ -5200,15 +5200,15 @@ pub open spec fn spec_task_fulfill(doc: DocV, id: String, version: u64, action: 
     if !action.state.spec_settable() {
         (doc, spec_promise_res(400, None))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), spec_promise_res(404, None)),
-            Held::Stale => (spec_with_origin(doc, map), spec_promise_res(409, None)),
+            Held::Missing => (spec_with_workflow(doc, map), spec_promise_res(404, None)),
+            Held::Stale => (spec_with_workflow(doc, map), spec_promise_res(409, None)),
             Held::Ok(obj) => {
                 let promise = PromV { state: action.state, value: action.value, settled_at: Some(now), ..obj.promise };
                 let task = match obj.task { Some(t) if t.state != TaskState::Fulfilled => Some(spec_fulfill_task(t)), other => other };
                 let obj = ObjV { promise, task };
-                (spec_with_origin(doc, map.insert(id@, obj)), spec_promise_res(200, Some(spec_record(id, obj.promise))))
+                (spec_with_workflow(doc, map.insert(id@, obj)), spec_promise_res(200, Some(spec_record(id, obj.promise))))
             },
         }
     }
@@ -5216,7 +5216,7 @@ pub open spec fn spec_task_fulfill(doc: DocV, id: String, version: u64, action: 
 
 pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::Status(StatusRes { status: 404 }))
     } else {
@@ -5227,7 +5227,7 @@ pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Resp
             Some(t) if t.state == TaskState::Halted => (doc, Response::Status(StatusRes { status: 200 })),
             Some(t) => {
                 let obj = ObjV { task: Some(spec_unlease(t, TaskState::Halted, None)), ..obj };
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
+                (spec_with_workflow(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
             },
         }
     }
@@ -5235,7 +5235,7 @@ pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Resp
 
 pub open spec fn spec_task_continue(doc: DocV, id: String, now: Time) -> (DocV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::Status(StatusRes { status: 404 }))
     } else {
@@ -5247,7 +5247,7 @@ pub open spec fn spec_task_continue(doc: DocV, id: String, now: Time) -> (DocV, 
             },
             Some(t) => {
                 let obj = ObjV { task: Some(TkV { state: TaskState::Pending, retry_timeout_at: Some(now), ..t }), ..obj };
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
+                (spec_with_workflow(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
             },
         }
     }
@@ -5259,7 +5259,7 @@ pub open spec fn spec_heartbeat(doc: DocV, pid: String, tasks: Seq<TaskRef>, now
     } else if !spec_one_origin(tasks, origin(tasks[0].id@), 0) {
         (doc, Response::Status(StatusRes { status: 400 }))
     } else {
-        (spec_with_origin(doc, spec_extend(spec_origin_map(doc), pid@, tasks, now, 0)), Response::Status(StatusRes { status: 200 }))
+        (spec_with_workflow(doc, spec_extend(spec_workflow_map(doc), pid@, tasks, now, 0)), Response::Status(StatusRes { status: 200 }))
     }
 }
 
@@ -5295,16 +5295,16 @@ pub open spec fn spec_suspend(doc: DocV, id: String, version: u64, actions: Seq<
     if actions.len() == 0 || spec_bad_suspend(actions, id@, 0) || !spec_distinct_awaited(actions, 0) {
         (doc, Response::Status(StatusRes { status: 400 }))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-            Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
+            Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+            Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
             Held::Ok(obj) => {
                 if spec_missing_awaited(map, actions, 0) || spec_unawaitable(map, actions, 0) {
-                    (spec_with_origin(doc, map), Response::Status(StatusRes { status: 422 }))
+                    (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 422 }))
                 } else if spec_any_settled(map, actions, now, 0) {
                     let task = match obj.task { Some(t) => Some(TkV { resumes: Seq::empty(), ..t }), None => None };
-                    (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 300 }))
+                    (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 300 }))
                 } else {
                     let map = spec_add_callbacks(map, id@, actions, 0);
                     let obj = map[id@];
@@ -5312,7 +5312,7 @@ pub open spec fn spec_suspend(doc: DocV, id: String, version: u64, actions: Seq<
                         Some(t) => Some(TkV { resumes: Seq::empty(), ..spec_unlease(t, TaskState::Suspended, None) }),
                         None => None,
                     };
-                    (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
+                    (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
                 }
             },
         }
@@ -5389,12 +5389,12 @@ pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFen
     if target@ == id@ || !same_origin_spec(target@, id@) {
         (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None })),
-            Held::Stale => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None })),
+            Held::Missing => (spec_with_workflow(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None })),
+            Held::Stale => (spec_with_workflow(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None })),
             Held::Ok(_) => {
-                let doc = spec_with_origin(doc, map);
+                let doc = spec_with_workflow(doc, map);
                 match action {
                     TaskFenceAction::Create(req) => {
                         let (doc, response) = spec_promise_create(doc, req, now);
@@ -5413,11 +5413,11 @@ pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFen
 }
 
 pub open spec fn spec_fence_check(doc: DocV, id: String, version: u64, now: Time) -> (DocV, Response) {
-    let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+    let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
     match held {
-        Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-        Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
-        Held::Ok(_) => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 200 })),
+        Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+        Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
+        Held::Ok(_) => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 200 })),
     }
 }
 
@@ -5477,11 +5477,11 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
             };
             (DocV::Schedule(Some(schedule)), None, seq![pending], Seq::empty())
         },
-        DocV::Origin(map) => {
+        DocV::Workflow(map) => {
             match spec_due_id(map, spec_sorted_present(map), now) {
                 Some(id) => {
                     let (map, notes) = spec_step_object(map, id, now, retry_timeout);
-                    (DocV::Origin(map), None, Seq::empty(), notes)
+                    (DocV::Workflow(map), None, Seq::empty(), notes)
                 },
                 None => (doc, None, Seq::empty(), Seq::empty()),
             }
@@ -5510,7 +5510,7 @@ pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64, limit: nat
 
 pub open spec fn spec_occurrence(doc: DocV, pending: PendingV, now: Time) -> DocV {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if map.contains_key(pending.promise) || now < pending.at {
         doc
     } else {
@@ -5525,7 +5525,7 @@ pub open spec fn spec_occurrence(doc: DocV, pending: PendingV, now: Time) -> Doc
             Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)), ..t }),
             other => other,
         };
-        spec_with_origin(doc, map.insert(pending.promise, ObjV { promise, task }))
+        spec_with_workflow(doc, map.insert(pending.promise, ObjV { promise, task }))
     }
 }
 
@@ -5711,7 +5711,7 @@ pub open spec fn spec_deadlines(node: NodeV, docs: Seq<CachedV>, i: int) -> Opti
 pub open spec fn spec_doc_deadline(doc: DocV) -> Option<nat> {
     match doc {
         DocV::Schedule(Some(schedule)) => Some(schedule.next_run_at as nat),
-        DocV::Origin(map) => spec_map_deadline(map, spec_sorted(map.dom())),
+        DocV::Workflow(map) => spec_map_deadline(map, spec_sorted(map.dom())),
         DocV::Schedule(None) => None,
     }
 }
@@ -5756,7 +5756,7 @@ pub open spec fn spec_earliest_from(node: NodeV, docs: Seq<CachedV>, i: int, now
 pub open spec fn spec_earliest_in(doc: DocV, now: Time) -> Option<u64> {
     match doc {
         DocV::Schedule(Some(schedule)) if schedule.next_run_at <= now => Some(schedule.next_run_at),
-        DocV::Origin(map) => spec_map_due(map, spec_sorted(map.dom()), now),
+        DocV::Workflow(map) => spec_map_due(map, spec_sorted(map.dom()), now),
         _ => None,
     }
 }

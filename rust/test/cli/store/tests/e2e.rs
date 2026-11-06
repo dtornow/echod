@@ -349,7 +349,7 @@ async fn one_node_appending() {
     one_node(Arc::clone(&store) as Arc<dyn Store>, 64, "").await;
     // the document is a log: more rows than promises
     let (bytes, _) = store.get("wf/a").await.unwrap().unwrap();
-    let loaded = echod_logic::doc::decode_origin(&bytes).unwrap();
+    let loaded = echod_logic::doc::decode_workflow(&bytes).unwrap();
     assert_eq!(echod_logic::doc::codec::promises(&loaded.doc).len(), 2);
     assert!(loaded.row_count > 2, "{} rows", loaded.row_count);
 }

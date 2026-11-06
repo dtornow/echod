@@ -192,7 +192,7 @@ impl Generator {
     }
 
     /// A schedule: a few ids, firing every few seconds into one origin, so
-    /// that fires and client requests collide on the origin's document.
+    /// that fires and client requests collide on the workflow document.
     fn schedule(&self, rng: &mut Rng, now: u64) -> Request {
         let id = (*rng.pick(&SCHEDULES)).to_string();
         match rng.below(10) {

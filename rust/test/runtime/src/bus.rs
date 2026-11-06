@@ -52,7 +52,7 @@ impl RecordingBus {
 
     async fn rows(&self, origin: &str) -> Vec<echod_logic::doc::codec::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_logic::doc::decode_origin(&bytes).map(|l| echod_logic::doc::codec::promises(&l.doc)).unwrap_or_default(),
+            Ok(Some((bytes, _))) => echod_logic::doc::decode_workflow(&bytes).map(|l| echod_logic::doc::codec::promises(&l.doc)).unwrap_or_default(),
             _ => Vec::new(),
         }
     }

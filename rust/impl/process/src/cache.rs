@@ -1,7 +1,7 @@
 //! What a node remembers between requests: the documents it read or wrote.
 //!
 //! Everything is in memory, least recently used first out, bounded by entry
-//! count and by bytes, since an origin's document grows with every promise
+//! count and by bytes, since a workflow document grows with every promise
 //! in it and a count alone bounds nothing. The entries sit in recency
 //! order, least recent first: a hit moves its entry to the end, a put adds
 //! at the end, eviction takes from the front. Each operation ensures it

@@ -1,7 +1,7 @@
 //! A document: a log of partials in the object, the concrete model's `Doc`
 //! in memory.
 //!
-//! An origin's document holds `Promise` rows, a task inside each; a
+//! A workflow document holds `Promise` rows, a task inside each; a
 //! schedule's holds its one `Schedule` row, or none. Each JSON line is one
 //! partial and therefore one recoverable commit boundary. Reading folds the
 //! partials and their edits by id, last edit winning; the rows then make the
@@ -23,7 +23,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::{clone_doc, doc_deadline, empty_origin, empty_schedule, keys_within, same_doc, Doc};
+use echod_concrete::{clone_doc, doc_deadline, empty_workflow, empty_schedule, keys_within, same_doc, Doc};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::lemma_doc_view;
 
@@ -46,12 +46,12 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// Nothing read: an origin's empty document.
-    pub fn empty_origin() -> (r: Loaded)
+    /// Nothing read: an workflow's empty document.
+    pub fn empty_workflow() -> (r: Loaded)
         ensures
-            r.deep_view() == spec_empty_origin(),
+            r.deep_view() == spec_empty_workflow(),
     {
-        Loaded { doc: empty_origin(), row_count: 0, bytes: 0, version: 0, committed_at: 0, next_wake_at: None }
+        Loaded { doc: empty_workflow(), row_count: 0, bytes: 0, version: 0, committed_at: 0, next_wake_at: None }
     }
 
     /// Nothing read: a schedule's empty document.
@@ -77,8 +77,8 @@ impl Loaded {
     }
 }
 
-pub open spec fn spec_empty_origin() -> LoadedSpec {
-    LoadedSpec { doc: DocV::Origin(Map::empty()), row_count: 0, bytes: 0, version: 0, committed_at: 0, next_wake_at: None }
+pub open spec fn spec_empty_workflow() -> LoadedSpec {
+    LoadedSpec { doc: DocV::Workflow(Map::empty()), row_count: 0, bytes: 0, version: 0, committed_at: 0, next_wake_at: None }
 }
 
 pub open spec fn spec_empty_schedule() -> LoadedSpec {
@@ -92,7 +92,6 @@ pub struct Header {
     pub version: u64,
     pub committed_at: u64,
     pub next_wake_at: Option<u64>,
-    pub nonce: u64,
 }
 
 /// The nearest deadline of a document.
@@ -136,7 +135,7 @@ pub fn changed(before: &Doc, after: &Doc) -> (r: bool)
 /// schedule deleted. Such a document cannot be appended to.
 pub open spec fn spec_removed_any(before: DocV, after: DocV) -> bool {
     match (before, after) {
-        (DocV::Origin(b), DocV::Origin(a)) => !b.dom().subset_of(a.dom()),
+        (DocV::Workflow(b), DocV::Workflow(a)) => !b.dom().subset_of(a.dom()),
         (DocV::Schedule(Some(_)), DocV::Schedule(None)) => true,
         (DocV::Schedule(_), DocV::Schedule(_)) => false,
         _ => true,
@@ -152,7 +151,7 @@ pub fn removed_any(before: &Doc, after: &Doc) -> (r: bool)
         lemma_doc_view(after);
     }
     match (before, after) {
-        (Doc::Origin(b), Doc::Origin(a)) => !keys_within(b, a),
+        (Doc::Workflow(b), Doc::Workflow(a)) => !keys_within(b, a),
         (Doc::Schedule(Some(_)), Doc::Schedule(None)) => true,
         (Doc::Schedule(_), Doc::Schedule(_)) => false,
         _ => true,
@@ -165,7 +164,7 @@ pub fn removed_any(before: &Doc, after: &Doc) -> (r: bool)
 
 /// What the bytes of an origin's object say: the folded rows as a
 /// document, or why they cannot be read.
-pub uninterp spec fn spec_decode_origin(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
+pub uninterp spec fn spec_decode_workflow(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
 /// What the bytes of a schedule's object say.
 pub uninterp spec fn spec_decode_schedule(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
 /// The header, then every row of the document, one line each.
@@ -174,9 +173,9 @@ pub uninterp spec fn spec_encode(header: HeaderSpec, doc: DocV) -> Seq<u8>;
 /// many rows that is.
 pub uninterp spec fn spec_encode_delta(header: HeaderSpec, before: DocV, after: DocV) -> (Seq<u8>, usize);
 
-pub assume_specification [codec::decode_origin](bytes: &[u8]) -> (r: Result<Loaded, String>)
+pub assume_specification [codec::decode_workflow](bytes: &[u8]) -> (r: Result<Loaded, String>)
     ensures
-        r.deep_view() == spec_decode_origin(bytes@);
+        r.deep_view() == spec_decode_workflow(bytes@);
 
 pub assume_specification [codec::decode_schedule](bytes: &[u8]) -> (r: Result<Loaded, String>)
     ensures
@@ -190,11 +189,11 @@ pub assume_specification [codec::encode_delta](header: &Header, before: &Doc, af
     ensures
         (r.0@, r.1) == spec_encode_delta(header.deep_view(), before@, after@);
 
-pub fn decode_origin(bytes: &[u8]) -> (r: Result<Loaded, String>)
+pub fn decode_workflow(bytes: &[u8]) -> (r: Result<Loaded, String>)
     ensures
-        r.deep_view() == spec_decode_origin(bytes@),
+        r.deep_view() == spec_decode_workflow(bytes@),
 {
-    codec::decode_origin(bytes)
+    codec::decode_workflow(bytes)
 }
 
 pub fn decode_schedule(bytes: &[u8]) -> (r: Result<Loaded, String>)
@@ -228,7 +227,7 @@ pub mod codec {
     use echod_concrete::{Doc, Objects};
     use echod_types::Schedule;
     use serde::de::DeserializeOwned;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     use super::{Header, Loaded};
 
@@ -249,11 +248,11 @@ pub mod codec {
             &self.id
         }
         fn doc_of(rows: &[Self]) -> Doc {
-            Doc::Origin(Objects::from_entries(rows.iter().cloned().map(WorkflowRow::into_entry).collect()))
+            Doc::Workflow(Objects::from_entries(rows.iter().cloned().map(WorkflowRow::into_entry).collect()))
         }
         fn rows_of(doc: &Doc) -> Vec<Self> {
             match doc {
-                Doc::Origin(objs) => objs.clone().into_entries().into_iter().map(|(id, obj)| WorkflowRow::from_entry(id, obj)).collect(),
+                Doc::Workflow(objs) => objs.clone().into_entries().into_iter().map(|(id, obj)| WorkflowRow::from_entry(id, obj)).collect(),
                 Doc::Schedule(_) => Vec::new(),
             }
         }
@@ -274,7 +273,7 @@ pub mod codec {
         }
     }
 
-    /// The rows of an origin's document: its promises.
+    /// The rows of a workflow document: its promises.
     pub fn promises(doc: &Doc) -> Vec<WorkflowRow> {
         WorkflowRow::rows_of(doc)
     }
@@ -282,21 +281,6 @@ pub mod codec {
     /// The rows of a schedule's document: its schedule, if any.
     pub fn schedules(doc: &Doc) -> Vec<Schedule> {
         Schedule::rows_of(doc)
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyHeader {
-        stamp: u64,
-        #[serde(rename = "nonce")]
-        _nonce: u64,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(untagged, bound = "R: DeserializeOwned")]
-    enum LegacyLine<R> {
-        Header(LegacyHeader),
-        Row(R),
     }
 
     struct Decoded<R> {
@@ -307,34 +291,11 @@ pub mod codec {
         next_wake_at: Option<u64>,
     }
 
-    /// The old header/row stream, accepted so an existing document is
-    /// compacted into partials on its next write.
-    fn decode_legacy<R: Row>(bytes: &[u8]) -> Result<(Vec<R>, usize, u64), String> {
-        let mut rows: Vec<R> = Vec::new();
-        let mut count = 0usize;
-        let mut stamp = 0u64;
-        for line in bytes.split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_slice::<LegacyLine<R>>(line).map_err(|e| format!("bad row: {e}"))? {
-                LegacyLine::Header(h) => stamp = stamp.max(h.stamp),
-                LegacyLine::Row(p) => {
-                    count += 1;
-                    match rows.iter().position(|q| q.id() == p.id()) {
-                        Some(i) => rows[i] = p,
-                        None => rows.push(p),
-                    }
-                }
-            }
-        }
-        Ok((rows, count, stamp))
-    }
-
     fn decode<R: Row>(bytes: &[u8]) -> Result<Decoded<R>, String> {
-        match echod_concrete::document::codec::decode_partials::<R>(bytes) {
-            Ok(partials) if !partials.is_empty() => {
-                let document = partials[0].document.clone();
+        let partials = echod_concrete::document::codec::decode_partials::<R>(bytes)?;
+        match partials.first() {
+            Some(first) => {
+                let document = first.document.clone();
                 let row_count = partials.iter().map(|p| p.changes.len()).sum();
                 let folded = echod_concrete::document::fold(document, &partials)?;
                 for (id, row) in &folded.entries {
@@ -350,27 +311,17 @@ pub mod codec {
                     next_wake_at: folded.next_wake_at,
                 })
             }
-            Ok(_) if bytes.is_empty() => Ok(Decoded {
+            None => Ok(Decoded {
                 rows: Vec::new(),
                 row_count: 0,
                 version: 0,
                 committed_at: 0,
                 next_wake_at: None,
             }),
-            Ok(_) | Err(_) => {
-                let (rows, row_count, committed_at) = decode_legacy::<R>(bytes)?;
-                Ok(Decoded {
-                    rows,
-                    row_count,
-                    version: 0,
-                    committed_at,
-                    next_wake_at: None,
-                })
-            }
         }
     }
 
-    pub fn decode_origin(bytes: &[u8]) -> Result<Loaded, String> {
+    pub fn decode_workflow(bytes: &[u8]) -> Result<Loaded, String> {
         let Decoded { rows, row_count, version, committed_at, next_wake_at } = decode::<WorkflowRow>(bytes)?;
         let doc = WorkflowRow::doc_of(&rows);
         if version > 0 && echod_concrete::doc_deadline(&doc) != next_wake_at {
@@ -416,7 +367,7 @@ pub mod codec {
     /// A compacted partial from the empty document to `doc`.
     pub fn encode(header: &Header, doc: &Doc) -> Vec<u8> {
         match doc {
-            Doc::Origin(_) => {
+            Doc::Workflow(_) => {
                 let changes = promises(doc).into_iter().map(|row| {
                     let id = row.id.clone();
                     echod_concrete::document::Change::Upsert { id, value: row }
@@ -461,7 +412,7 @@ pub mod codec {
     /// One partial carrying exactly the rows changed or removed.
     pub fn encode_delta(header: &Header, before: &Doc, after: &Doc) -> (Vec<u8>, usize) {
         match (before, after) {
-            (Doc::Origin(_), Doc::Origin(_)) => {
+            (Doc::Workflow(_), Doc::Workflow(_)) => {
                 let changes = changes(&promises(before), &promises(after));
                 let n = changes.len();
                 let bytes = echod_concrete::document::codec::encode_partial(&partial(header, header.basever, changes)).expect("a workflow partial serialises");
@@ -484,7 +435,7 @@ pub mod codec {
 
     use super::{Header, Loaded};
 
-    pub fn decode_origin(_bytes: &[u8]) -> Result<Loaded, String> {
+    pub fn decode_workflow(_bytes: &[u8]) -> Result<Loaded, String> {
         unimplemented!()
     }
 
@@ -529,7 +480,6 @@ mod tests {
             version,
             committed_at,
             next_wake_at,
-            nonce: version,
         }
     }
 
