@@ -11,6 +11,8 @@
 
 use vstd::prelude::*;
 
+#[cfg(verus_keep_ghost)]
+use echod_types::origin;
 use echod_types::{PromiseState, Schedule, Tags, TaskState, Value};
 
 #[cfg(not(verus_keep_ghost))]
@@ -359,24 +361,179 @@ pub enum StoredDocumentV {
     Schedule(ScheduleDocumentV),
 }
 
-/// The wake cached in document metadata is exactly the body's least
-/// deadline. More document-local clauses can be conjoined here.
+pub open spec fn unique<T>(values: Seq<T>) -> bool {
+    forall|i: int, j: int|
+        0 <= i < values.len() && 0 <= j < values.len()
+            && values[i] == values[j] ==> i == j
+}
+
+pub open spec fn value_empty(value: Value) -> bool {
+    value@.data is None && value@.headers.len() == 0
+}
+
+pub open spec fn task_cleared(task: TkV) -> bool {
+    task.pid is None
+        && task.ttl is None
+        && task.lease_timeout_at is None
+        && task.retry_timeout_at is None
+}
+
+pub open spec fn strict_descendant(parent: Seq<char>, child: Seq<char>) -> bool {
+    child.len() > parent.len() + 1
+        && child.take(parent.len() as int + 1) == parent + seq!['.']
+}
+
+pub open spec fn promise_well_formed(
+    id: Seq<char>,
+    object: ObjV,
+    committed_at: u64,
+) -> bool {
+    let promise = object.promise;
+    &&& promise.created_at <= promise.timeout_at
+    &&& promise.created_at <= committed_at
+    &&& (promise.state == PromiseState::Pending) == (promise.settled_at is None)
+    &&& match promise.settled_at {
+        Some(at) => promise.created_at <= at <= promise.timeout_at && at <= committed_at,
+        None => true,
+    }
+    &&& promise.state == PromiseState::Pending ==> {
+        &&& promise.timeout_at > committed_at
+        &&& value_empty(promise.value)
+    }
+    &&& promise.state == PromiseState::RejectedTimedout ==>
+        promise.settled_at == Some(promise.timeout_at)
+    &&& promise.settled_at == Some(promise.timeout_at) ==>
+        value_empty(promise.value)
+    &&& unique(promise.callbacks)
+    &&& unique(promise.listeners)
+    &&& !promise.callbacks.contains(id)
+    &&& forall|i: int| 0 <= i < promise.callbacks.len() ==>
+        origin(promise.callbacks[i]) == origin(id)
+    &&& (promise.callbacks.len() > 0 || promise.listeners.len() > 0) ==>
+        crate::node::spec_awaitable(promise.tags)
+    &&& promise.state != PromiseState::Pending ==>
+        promise.callbacks.len() == 0 && promise.listeners.len() == 0
+}
+
+pub open spec fn task_well_formed(
+    object: ObjV,
+    committed_at: u64,
+) -> bool {
+    (object.task is Some) == crate::node::spec_targeted(object.promise.tags)
+        && match object.task {
+            None => true,
+            Some(task) => {
+                &&& (task.state == TaskState::Acquired) == (task.pid is Some)
+                &&& (task.state == TaskState::Acquired) == (task.ttl is Some)
+                &&& (task.state == TaskState::Acquired) == (task.lease_timeout_at is Some)
+                &&& (task.state == TaskState::Pending) == (task.retry_timeout_at is Some)
+                &&& task.state == TaskState::Acquired ==> {
+                    &&& task.version > 0
+                    &&& task.lease_timeout_at.unwrap() > committed_at
+                }
+                &&& task.state == TaskState::Pending ==>
+                    task.retry_timeout_at.unwrap() > committed_at
+                &&& task.state == TaskState::Fulfilled ==> {
+                    &&& task_cleared(task)
+                    &&& task.resumes.len() == 0
+                    &&& object.promise.state != PromiseState::Pending
+                }
+                &&& task.state == TaskState::Suspended ==> {
+                    &&& task_cleared(task)
+                    &&& task.resumes.len() == 0
+                }
+                &&& task.state == TaskState::Halted ==> task_cleared(task)
+                &&& object.promise.state != PromiseState::Pending ==>
+                    task.state == TaskState::Fulfilled
+                &&& unique(task.resumes)
+                &&& task.version <= u32::MAX as u64
+            },
+        }
+}
+
+pub open spec fn callback_targets_well_formed(
+    objects: Map<Seq<char>, ObjV>,
+    object: ObjV,
+) -> bool {
+    forall|i: int| 0 <= i < object.promise.callbacks.len() ==> {
+        let awaiter = #[trigger] object.promise.callbacks[i];
+        objects.contains_key(awaiter)
+            && objects[awaiter].task is Some
+            && crate::node::spec_targeted(objects[awaiter].promise.tags)
+    }
+}
+
+pub open spec fn suspended_rung_well_formed(
+    objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    object: ObjV,
+) -> bool {
+    match object.task {
+        Some(task) if task.state == TaskState::Suspended
+            && object.promise.state == PromiseState::Pending =>
+                exists|awaited: Seq<char>|
+                    objects.contains_key(awaited)
+                        && objects[awaited].promise.callbacks.contains(id),
+        _ => true,
+    }
+}
+
+pub open spec fn descendants_well_formed(
+    objects: Map<Seq<char>, ObjV>,
+) -> bool {
+    forall|parent: Seq<char>, child: Seq<char>|
+        objects.contains_key(parent)
+            && objects.contains_key(child)
+            && objects[parent].promise.state != PromiseState::Pending
+            && strict_descendant(parent, child)
+                ==> objects[child].promise.state != PromiseState::Pending
+}
+
+pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
+    &&& forall|id: Seq<char>| workflow.objects.contains_key(id) ==> {
+        &&& origin(id) == workflow.document
+        &&& promise_well_formed(id, workflow.objects[id], workflow.committed_at)
+        &&& task_well_formed(workflow.objects[id], workflow.committed_at)
+        &&& callback_targets_well_formed(workflow.objects, workflow.objects[id])
+        &&& suspended_rung_well_formed(workflow.objects, id, workflow.objects[id])
+    }
+    &&& descendants_well_formed(workflow.objects)
+    &&& workflow.next_wake_at == match crate::node::spec_body_deadline(
+        DocumentBodyV::Workflow(workflow.objects),
+    ) {
+        Some(at) => Some(at as u64),
+        None => None,
+    }
+}
+
+pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
+    &&& match schedule.schedule {
+        Some(row) => {
+            &&& row.id@ == schedule.document
+            &&& row.created_at <= schedule.committed_at
+            &&& row.created_at <= row.next_run_at
+            &&& match row.last_run_at {
+                Some(last) => row.created_at <= last < row.next_run_at,
+                None => true,
+            }
+            &&& !(crate::node::spec_targeted(row.promise_tags)
+                && crate::node::spec_timer(row.promise_tags))
+        },
+        None => true,
+    }
+    &&& schedule.next_wake_at == match crate::node::spec_body_deadline(
+        DocumentBodyV::Schedule(schedule.schedule),
+    ) {
+        Some(at) => Some(at as u64),
+        None => None,
+    }
+}
+
+/// The full local invariant of a stored workflow or schedule document.
 pub open spec fn well_formed(document: StoredDocumentV) -> bool {
     match document {
-        StoredDocumentV::Workflow(workflow) =>
-            workflow.next_wake_at == match crate::node::spec_body_deadline(
-                DocumentBodyV::Workflow(workflow.objects),
-            ) {
-                Some(at) => Some(at as u64),
-                None => None,
-            },
-        StoredDocumentV::Schedule(schedule) =>
-            schedule.next_wake_at == match crate::node::spec_body_deadline(
-                DocumentBodyV::Schedule(schedule.schedule),
-            ) {
-                Some(at) => Some(at as u64),
-                None => None,
-            },
+        StoredDocumentV::Workflow(workflow) => workflow_well_formed(workflow),
+        StoredDocumentV::Schedule(schedule) => schedule_well_formed(schedule),
     }
 }
 

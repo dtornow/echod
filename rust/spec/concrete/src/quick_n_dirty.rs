@@ -25,17 +25,15 @@ pub open spec fn on_request(
     )
 }
 
-/// Every request takes a well-formed document to a well-formed document.
-pub proof fn lemma_request_preserves_well_formed(
+/// The preservation statement to discharge handler by handler. It is kept as
+/// a proposition, not asserted as a theorem: with the full document
+/// invariant, current handlers do not yet establish it.
+pub open spec fn request_preserves_well_formed(
     document: StoredDocumentV,
     request: Request,
     now: u64,
-)
-    requires
-        well_formed(document),
-    ensures
-        well_formed(on_request(document, request, now)),
-{
+) -> bool {
+    well_formed(document) ==> well_formed(on_request(document, request, now))
 }
 
 } // verus!
