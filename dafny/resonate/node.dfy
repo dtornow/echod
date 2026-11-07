@@ -15,7 +15,9 @@ include "../framework/order.dfy"
 // a timer that is also targeted. An id already present is answered as it
 // stands, projected at `now`, and not written back. A new id is inserted,
 // and a schedule document becomes an origin to hold it. Settle writes only
-// a promise the projection still shows as pending, and fulfills its task.
+// a promise the projection still shows as pending, fulfills its task, and
+// resumes the tasks registered on it. A listener of that promise is told,
+// and a task resumed at this instant is offered, in that same step.
 // A callback is recorded only while both promises are still pending, and
 // only for another id of the same origin. A listener is recorded only while
 // the promise is still pending. A schedule is opened into an empty origin
@@ -88,7 +90,7 @@ module Node {
     | PromiseRegisterCallback(callback: CallbackReq)
     | PromiseRegisterListener(listener: ListenerReq)
   datatype Answer = Answer(status: nat, promise: Opt<Promise>)
-  datatype Applied = Applied(doc: Doc, answer: Answer)
+  datatype Applied = Applied(doc: Doc, answer: Answer, notes: seq<Note>)
 
   datatype Occurrence = Occurrence(promise: string, at: nat, timeout: nat, param: Value, tags: Tags)
   datatype Note = Execute(id: string, version: nat) | Unblock(address: string, id: string, promise: Promise)
@@ -289,19 +291,19 @@ module Node {
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
     if Timer(req.tags) && Targeted(req.tags) then
-      Applied(doc, Answer(400, None))
+      Applied(doc, Answer(400, None), [])
     else
       var objects := ObjectsOf(doc);
       if req.id in objects then
         var seen := Project(objects[req.id], now);
-        Applied(doc, Answer(200, Some(seen.promise)))
+        Applied(doc, Answer(200, Some(seen.promise)), [])
       else
         var obj := NewObj(req.timeoutAt, now, req.param, req.tags, Targeted(req.tags));
         var doc' := Origin(objects[req.id := obj]);
         assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
           if WellFormed(doc, now) { InsertOk(doc, req.id, obj, now); }
         }
-        Applied(doc', Answer(200, Some(obj.promise)))
+        Applied(doc', Answer(200, Some(obj.promise)), [])
   }
 
   // A schedule has no rows. Looking one up is the empty origin.
@@ -317,8 +319,8 @@ module Node {
       if WellFormed(doc, now) { OpenOk(doc, now); }
     }
     var objects := ObjectsOf(shown);
-    if id !in objects then Applied(shown, Answer(404, None))
-    else Applied(shown, Answer(200, Some(Project(objects[id], now).promise)))
+    if id !in objects then Applied(shown, Answer(404, None), [])
+    else Applied(shown, Answer(200, Some(Project(objects[id], now).promise)), [])
   }
 
   function Settled(o: Obj, state: PromiseState, value: Value, now: nat): Obj {
@@ -330,32 +332,48 @@ module Node {
     Obj(promise, task)
   }
 
-  function Settle(doc: Doc, req: SettleReq, now: nat): (r: Applied)
+  function Settle(doc: Doc, req: SettleReq, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
-    if !Settable(req.state) then Applied(doc, Answer(400, None))
+    if !Settable(req.state) then Applied(doc, Answer(400, None), [])
     else
       var shown := Opened(doc);
       assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
         if WellFormed(doc, now) { OpenOk(doc, now); }
       }
       var objects := ObjectsOf(shown);
-      if req.id !in objects then Applied(shown, Answer(404, None))
+      if req.id !in objects then Applied(shown, Answer(404, None), [])
       else
         var seen := Project(objects[req.id], now);
         if seen.promise.state != PromiseState.Pending then
-          Applied(shown, Answer(200, Some(seen.promise)))
+          Applied(shown, Answer(200, Some(seen.promise)), [])
         else
           var obj := Settled(seen, req.state, req.value, now);
-          var doc' := Origin(objects[req.id := obj]);
+          var placed := objects[req.id := obj];
+          var resumed := Callbacks(placed, req.id, now);
+          var told := Listeners(resumed, req.id);
+          var waiting := obj.promise.callbacks;
+          SortedProps(waiting);
+          var ids := Sorted(waiting);
+          forall i, j | 0 <= i < j < |ids|
+            ensures ids[i] != ids[j]
+          {
+            assert Lt(ids[i], ids[j]);
+          }
+          var armed := Offer(placed, told.objects, ids, now, retry);
+          var doc' := Origin(armed.objects);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               StillPending(objects[req.id], now);
               SettledOk(req.id, seen, req.state, req.value, now);
               ReplaceOk(objects, req.id, obj, now);
+              CallbacksOk(placed, req.id, now);
+              ListenersOk(resumed, req.id, now);
+              assert placed.Keys == resumed.Keys == told.objects.Keys;
+              OfferOk(placed, told.objects, ids, now, retry);
             }
           }
-          Applied(doc', Answer(200, Some(obj.promise)))
+          Applied(doc', Answer(200, Some(obj.promise)), told.notes + armed.notes)
   }
 
   function AddCallback(o: Obj, awaiter: string): Obj {
@@ -367,20 +385,20 @@ module Node {
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
     if req.awaited == req.awaiter || OriginOf(req.awaited) != OriginOf(req.awaiter) then
-      Applied(doc, Answer(400, None))
+      Applied(doc, Answer(400, None), [])
     else
       var shown := Opened(doc);
       assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
         if WellFormed(doc, now) { OpenOk(doc, now); }
       }
       var objects := ObjectsOf(shown);
-      if req.awaited !in objects then Applied(shown, Answer(404, None))
-      else if req.awaiter !in objects then Applied(shown, Answer(422, None))
+      if req.awaited !in objects then Applied(shown, Answer(404, None), [])
+      else if req.awaiter !in objects then Applied(shown, Answer(422, None), [])
       else
         var awaited := Project(objects[req.awaited], now);
         var awaiter := Project(objects[req.awaiter], now);
         if !Targeted(awaiter.promise.tags) || !Awaitable(awaited.promise.tags) then
-          Applied(shown, Answer(422, None))
+          Applied(shown, Answer(422, None), [])
         else if awaited.promise.state == PromiseState.Pending && awaiter.promise.state == PromiseState.Pending then
           var obj := AddCallback(awaited, req.awaiter);
           var doc' := Origin(objects[req.awaited := obj]);
@@ -391,9 +409,9 @@ module Node {
               ReplaceOk(objects, req.awaited, obj, now);
             }
           }
-          Applied(doc', Answer(200, Some(awaited.promise)))
+          Applied(doc', Answer(200, Some(awaited.promise)), [])
         else
-          Applied(shown, Answer(200, Some(awaited.promise)))
+          Applied(shown, Answer(200, Some(awaited.promise)), [])
   }
 
   function AddListener(o: Obj, address: string): Obj {
@@ -409,11 +427,11 @@ module Node {
       if WellFormed(doc, now) { OpenOk(doc, now); }
     }
     var objects := ObjectsOf(shown);
-    if req.awaited !in objects then Applied(shown, Answer(404, None))
+    if req.awaited !in objects then Applied(shown, Answer(404, None), [])
     else
       var awaited := Project(objects[req.awaited], now);
       if !Awaitable(awaited.promise.tags) then
-        Applied(shown, Answer(422, None))
+        Applied(shown, Answer(422, None), [])
       else if awaited.promise.state == PromiseState.Pending then
         var obj := AddListener(awaited, req.address);
         var doc' := Origin(objects[req.awaited := obj]);
@@ -424,9 +442,9 @@ module Node {
             ReplaceOk(objects, req.awaited, obj, now);
           }
         }
-        Applied(doc', Answer(200, Some(awaited.promise)))
+        Applied(doc', Answer(200, Some(awaited.promise)), [])
       else
-        Applied(shown, Answer(200, Some(awaited.promise)))
+        Applied(shown, Answer(200, Some(awaited.promise)), [])
   }
 
   function Unlease(t: Task, at: nat): Task {
@@ -480,6 +498,13 @@ module Node {
           Obj(o.promise, Some(Unlease(t, now)))
         else o
       case None => o
+  }
+
+  predicate DueRetry(o: Obj, now: nat) {
+    && o.promise.state == PromiseState.Pending
+    && (match o.task
+        case Some(t) => t.state == TaskState.Pending && t.retryTimeoutAt.Some? && t.retryTimeoutAt.value <= now
+        case None => false)
   }
 
   function RetryOf(o: Obj, id: string, now: nat, retry: nat): Noted {
@@ -654,6 +679,31 @@ module Node {
       TailKeys(objects, objects', keys);
       var rest := Retries(objects', keys[1..], now, retry);
       Passed(rest.objects, armed.notes + rest.notes)
+  }
+
+  // Offer a task this settlement woke. A retry the sweep already armed stays where it is.
+  function Offer(before: map<string, Obj>, objects: map<string, Obj>, ids: seq<string>, now: nat, retry: nat): (s: Passed)
+    requires before.Keys == objects.Keys
+    requires forall i, j | 0 <= i < j < |ids| :: ids[i] != ids[j]
+    ensures s.objects.Keys == objects.Keys
+    decreases |ids|
+  {
+    if |ids| == 0 then Passed(objects, [])
+    else
+      var id := ids[0];
+      var tail := ids[1..];
+      forall i, j | 0 <= i < j < |tail|
+        ensures tail[i] != tail[j]
+      {
+        assert tail[i] == ids[i + 1] && tail[j] == ids[j + 1];
+      }
+      if id in objects && DueRetry(objects[id], now) && !DueRetry(before[id], now) then
+        var armed := RetryOf(objects[id], id, now, retry);
+        var objects' := objects[id := armed.obj];
+        var rest := Offer(before, objects', tail, now, retry);
+        Passed(rest.objects, armed.notes + rest.notes)
+      else
+        Offer(before, objects, tail, now, retry)
   }
 
   function Sweep(doc: Doc, now: nat, retry: nat): (s: Ran)
@@ -838,6 +888,37 @@ module Node {
       ReplaceOk(objects, id, armed.obj, now);
       TailKeys(objects, objects', keys);
       RetriesOk(objects', keys[1..], now, retry);
+    }
+  }
+
+  lemma OfferOk(before: map<string, Obj>, objects: map<string, Obj>, ids: seq<string>, now: nat, retry: nat)
+    requires MapOk(objects, now)
+    requires before.Keys == objects.Keys
+    requires forall i, j | 0 <= i < j < |ids| :: ids[i] != ids[j]
+    ensures MapOk(Offer(before, objects, ids, now, retry).objects, now)
+    decreases |ids|
+  {
+    if |ids| != 0 {
+      var id := ids[0];
+      var tail := ids[1..];
+      forall i, j | 0 <= i < j < |tail|
+        ensures tail[i] != tail[j]
+      {
+        assert tail[i] == ids[i + 1] && tail[j] == ids[j + 1];
+      }
+      if id in objects && DueRetry(objects[id], now) && !DueRetry(before[id], now) {
+        var o := objects[id];
+        match o.task
+        case Some(t) =>
+          assert t.state == TaskState.Pending && t.retryTimeoutAt.Some?;
+          var armed := RetryOf(o, id, now, retry);
+          RearmOk(t, now + retry);
+          assert armed.obj.promise == o.promise && armed.obj.task == Some(Rearm(t, now + retry));
+          ReplaceOk(objects, id, armed.obj, now);
+          var objects' := objects[id := armed.obj];
+          OfferOk(before, objects', tail, now, retry);
+        case None =>
+      }
     }
   }
 
@@ -1069,12 +1150,14 @@ module Node {
   {
     var swept := Sweep(doc, now, retry);
     assert WellFormed(doc, now) ==> WellFormed(swept.doc, now);
-    match request
-    case PromiseGet(id) => Get(swept.doc, id, now)
-    case PromiseCreate(req) => Create(swept.doc, req, now)
-    case PromiseSettle(req) => Settle(swept.doc, req, now)
-    case PromiseRegisterCallback(req) => RegisterCallback(swept.doc, req, now)
-    case PromiseRegisterListener(req) => RegisterListener(swept.doc, req, now)
+    var done :=
+      match request
+      case PromiseGet(id) => Get(swept.doc, id, now)
+      case PromiseCreate(req) => Create(swept.doc, req, now)
+      case PromiseSettle(req) => Settle(swept.doc, req, now, retry)
+      case PromiseRegisterCallback(req) => RegisterCallback(swept.doc, req, now)
+      case PromiseRegisterListener(req) => RegisterListener(swept.doc, req, now);
+    Applied(done.doc, done.answer, swept.notes + done.notes)
   }
 
   lemma HandlerPreservesWellFormed(doc: Doc, request: Request, now: nat, retry: nat)
