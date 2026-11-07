@@ -22,11 +22,13 @@ use crate::document::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     spec_advance_stored, spec_awaitable, spec_body_deadline, spec_earliest_in,
-    spec_due_id, spec_handle, spec_obj_due, spec_project_obj, spec_request_transition,
+    spec_due_id, spec_handle, spec_key, spec_obj_due, spec_project_obj, spec_request_document, spec_request_transition,
     spec_resume, spec_run_due, spec_sorted, spec_sorted_present, spec_stored_body, spec_sweep,
     spec_stored_committed_at, spec_stored_name, spec_targeted, spec_unavailable,
     spec_unlease, DocumentBodyV, REQUEST_SWEEP_STEPS,
 };
+#[cfg(verus_keep_ghost)]
+use crate::interpret::{lemma_origin_key, lemma_schedule_key};
 
 verus! {
 
@@ -2061,13 +2063,14 @@ pub open spec fn on_request(
     request: Request,
     now: u64,
     retry_timeout: u64,
+    limit: nat,
 ) -> StoredDocumentV {
     let (body, response, _, _) = spec_request_transition(
         spec_stored_body(document),
         request,
         now,
         retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
+        limit,
     );
     if response == spec_unavailable(request) {
         document
@@ -2117,6 +2120,66 @@ pub open spec fn request_matches(document: StoredDocumentV, request: Request) ->
     }
 }
 
+pub open spec fn routed(document: StoredDocumentV, request: Request) -> bool {
+    request_matches(document, request)
+}
+
+proof fn lemma_key_names_document(request: Request)
+    ensures
+        match (spec_key(request), spec_request_document(request)) {
+            (Some(key), Some(document)) => key.skip(2) == document,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    match request {
+        Request::PromiseGet(_)
+        | Request::PromiseCreate(_)
+        | Request::PromiseSettle(_)
+        | Request::PromiseRegisterCallback(_)
+        | Request::PromiseRegisterListener(_)
+        | Request::TaskGet(_)
+        | Request::TaskCreate(_)
+        | Request::TaskAcquire(_)
+        | Request::TaskFulfill(_)
+        | Request::TaskRelease(_)
+        | Request::TaskHalt(_)
+        | Request::TaskContinue(_)
+        | Request::TaskFence(_)
+        | Request::TaskFenceCheck(_)
+        | Request::TaskSuspend(_) => {
+            lemma_origin_key(spec_request_document(request)->0);
+        },
+        Request::TaskHeartbeat(q) => {
+            if q.tasks@.len() > 0 {
+                lemma_origin_key(spec_request_document(request)->0);
+            }
+        },
+        Request::ScheduleGet(_)
+        | Request::ScheduleCreate(_)
+        | Request::ScheduleDelete(_) => {
+            lemma_schedule_key(spec_request_document(request)->0);
+        },
+    }
+}
+
+proof fn lemma_routed_document(document: StoredDocumentV, request: Request)
+    requires
+        routed(document, request),
+    ensures
+        spec_request_document(request) == Some(spec_stored_name(document)),
+{
+    lemma_key_names_document(request);
+    match document {
+        StoredDocumentV::Workflow(workflow) => {
+            lemma_origin_key(workflow.document);
+        },
+        StoredDocumentV::Schedule(schedule) => {
+            lemma_schedule_key(schedule.document);
+        },
+    }
+}
+
 /// A complete request transition preserves the full stored-document
 /// invariant.  The process clamps `now` to the previous commit instant and
 /// validates client time values against `MAX_TIME`; the explicit hypotheses
@@ -2134,7 +2197,7 @@ pub proof fn request_preserves_well_formed(
         now <= MAX_TIME,
         0 < retry_timeout <= MAX_TIME,
     ensures
-        well_formed(on_request(document, request, now, retry_timeout)),
+        well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)),
 {
     let transition = spec_request_transition(
         spec_stored_body(document),
@@ -2144,26 +2207,26 @@ pub proof fn request_preserves_well_formed(
         REQUEST_SWEEP_STEPS as nat,
     );
     if transition.1 == spec_unavailable(request) {
-        assert(on_request(document, request, now, retry_timeout) == document);
+        assert(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat) == document);
         return;
     }
     if transition.0 == spec_stored_body(document) {
-        assert(on_request(document, request, now, retry_timeout) == document);
+        assert(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat) == document);
         return;
     }
     match document {
         StoredDocumentV::Schedule(_) => {
             match request {
                 Request::ScheduleGet(_) => {
-                    assert(well_formed(on_request(document, request, now, retry_timeout)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
                 },
                 Request::ScheduleCreate(q) => {
                     reveal(echod_types::spec_deadline_bounded);
                     echod_abstract::trusted::axiom_next_cron_after(q.cron@, now);
-                    assert(well_formed(on_request(document, request, now, retry_timeout)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
                 },
                 Request::ScheduleDelete(_) => {
-                    assert(well_formed(on_request(document, request, now, retry_timeout)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
                 },
                 _ => {},
             }
@@ -2205,7 +2268,7 @@ pub proof fn request_preserves_well_formed(
                 closed->Workflow_0,
                 now,
             );
-            assert(well_formed(on_request(document, request, now, retry_timeout)));
+            assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
         },
     }
 }
