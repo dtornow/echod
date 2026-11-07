@@ -1,7 +1,7 @@
 //! Where everything lives under the bucket.
 //!
 //! ```text
-//! <prefix>wf/<origin>                                    an origin's document: rows
+//! <prefix>wf/<origin>                                    a workflow document: rows
 //! <prefix>sched/<id>                                     a schedule: one row
 //! <prefix>t/<bucket>/<deadline>_<origin>@<token>         a deadline for an origin, empty
 //! <prefix>t/<bucket>/<deadline>_sched:<id>@<token>       a schedule's next run, empty

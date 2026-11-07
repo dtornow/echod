@@ -12,7 +12,7 @@
 use vstd::prelude::*;
 
 use echod_concrete::node::{
-    notes_v, pend_v, spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocV,
+    notes_v, pend_v, spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocumentBodyV,
     FlightV, JobV, NodeV, NoteV, PendingV,
 };
 use echod_concrete::store::{StoreCall, StoreError, StoreOutcome};
@@ -42,7 +42,7 @@ pub enum AJob {
 
 /// The document a step leaves, its answer, the occurrences it queued, and
 /// the notes it will send once the document is committed.
-pub open spec fn spec_step(job: AJob, doc: DocV, now: u64, retry_timeout: u64, limit: nat) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
             let (next, response) = spec_handle(doc, request, now);
@@ -70,7 +70,7 @@ pub open spec fn job_of(job: JobV) -> AJob {
 /// the condition of the version the flight loaded: `PutIfMatch` on that
 /// version, `PutIfNoneMatch` when the document was absent. The commit below
 /// writes under the same condition.
-pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit: nat)
+pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
     ensures
         ({
             let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
@@ -78,7 +78,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit
             match after.flight {
                 Some(open) => {
                     &&& open.writing
-                    &&& open.decided == Some(echod_concrete::node::spec_encode(next))
+                    &&& open.decided == Some(echod_concrete::node::spec_encode_body(next))
                     &&& sent.len() == 1
                     &&& match sent[0].1 {
                         Message::StoreReq { call, .. } => match flight.etag {

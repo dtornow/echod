@@ -11,7 +11,7 @@
 use vstd::prelude::*;
 
 use echod_concrete::store::{StoreError, StoreOutcome};
-use echod_concrete::{create_occurrence, handle, run_due, sweep, Doc, Outbound, Pending};
+use echod_concrete::{create_occurrence, handle, run_due, sweep, DocumentBody, Outbound, Pending};
 use echod_types::{Request, Response};
 
 use super::commit::Commit;
@@ -54,14 +54,14 @@ impl View for Job {
 /// What a step left: the document, its answer, the occurrences it queued,
 /// and the notes to send once the document is committed.
 pub struct Decided {
-    pub doc: Doc,
+    pub doc: DocumentBody,
     pub response: Option<Response>,
     pub born: Vec<Pending>,
     pub notes: Vec<Outbound>,
 }
 
 /// The step: the concrete model's, by the job.
-pub fn decide(job: Job, doc: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: Decided)
+pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r: Decided)
     ensures
         (r.doc@, r.response, pend_v(r.born@), notes_v(r.notes@)) == spec_step(job@, doc@, now, retry_timeout, limit as nat),
 {

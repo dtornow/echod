@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use echod_logic::doc::codec::{self, Promise};
+use echod_logic::document::codec::{self, Promise};
 use echod_logic::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};

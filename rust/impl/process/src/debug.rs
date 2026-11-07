@@ -14,7 +14,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::Doc;
+use echod_concrete::DocumentBody;
 
 use crate::verified::node::{str_eq, NodeCore};
 use crate::verified::table::Table;
@@ -22,7 +22,7 @@ use crate::verified::text::{concat, copy_string};
 use crate::verified::Schedule;
 
 use crate::cache::Cache;
-use crate::doc;
+use crate::document;
 use crate::handler_docs::{take_opt, Work};
 use crate::state::{Owner, State};
 use crate::state_node::copy_members;
@@ -49,7 +49,7 @@ use crate::verified::node_spec::{spec_read_config, ANode};
 #[cfg(verus_keep_ghost)]
 use crate::verified::ScheduleSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::DocV;
+use echod_concrete::node::DocumentBodyV;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{StoreCallSpec, StoreErrorSpec};
 
@@ -107,12 +107,12 @@ impl DeepView for Reset {
 pub enum Snap {
     /// The listings out (origins and schedules), the document reads out
     /// (`true` marks a schedule's), and the documents read so far.
-    Gathering { ops: Table<OpId, bool>, pending: Table<OpId, bool>, origins: Vec<Doc>, schedules: Vec<Schedule> },
+    Gathering { ops: Table<OpId, bool>, pending: Table<OpId, bool>, origins: Vec<DocumentBody>, schedules: Vec<Schedule> },
 }
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum SnapSpec {
-    Gathering { ops: Map<OpId, bool>, pending: Map<OpId, bool>, origins: Seq<DocV>, schedules: Seq<ScheduleSpec> },
+    Gathering { ops: Map<OpId, bool>, pending: Map<OpId, bool>, origins: Seq<DocumentBodyV>, schedules: Seq<ScheduleSpec> },
 }
 
 #[cfg(verus_keep_ghost)]
@@ -373,7 +373,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreOutcome) -> 
                         _ => spec_debug_fail(s, id, kind, corr, spec_unexpected()),
                     },
                     OpSpec::Snap { id, kind, corr, phase: SnapSpec::Gathering { ops, pending, origins, schedules } } => {
-                        let gathered: Result<(S, Map<OpId, bool>, Map<OpId, bool>, Seq<DocV>, Seq<ScheduleSpec>), StoreErrorSpec> = match outcome {
+                        let gathered: Result<(S, Map<OpId, bool>, Map<OpId, bool>, Seq<DocumentBodyV>, Seq<ScheduleSpec>), StoreErrorSpec> = match outcome {
                             StoreOutcome::Listed(keys) => {
                                 let ops = ops.remove(op);
                                 let (s, pending) = spec_get_keys(s, keys.deep_view(), pending);
@@ -385,16 +385,16 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreOutcome) -> 
                                 match got {
                                     Some((bytes, _)) => {
                                         if schedule {
-                                            match doc::spec_decode_schedule(bytes@) {
-                                                Ok(loaded) => match loaded.doc {
-                                                    DocV::Schedule(Some(row)) => Ok((s, ops, pending, origins, schedules.push(row.deep_view()))),
+                                            match document::spec_decode_schedule(bytes@) {
+                                                Ok(loaded) => match document::spec_loaded_body(loaded) {
+                                                    DocumentBodyV::Schedule(Some(row)) => Ok((s, ops, pending, origins, schedules.push(row.deep_view()))),
                                                     _ => Ok((s, ops, pending, origins, schedules)),
                                                 },
                                                 Err(e) => Err(StoreErrorSpec::Unavailable(e)),
                                             }
                                         } else {
-                                            match doc::spec_decode_origin(bytes@) {
-                                                Ok(loaded) => Ok((s, ops, pending, origins.push(loaded.doc), schedules)),
+                                            match document::spec_decode_workflow(bytes@) {
+                                                Ok(loaded) => Ok((s, ops, pending, origins.push(document::spec_loaded_body(loaded)), schedules)),
                                                 Err(e) => Err(StoreErrorSpec::Unavailable(e)),
                                             }
                                         }
@@ -601,7 +601,7 @@ impl State {
                 let ops = self.list_docs();
                 let phase = Snap::Gathering { ops, pending: Table::new(), origins: Vec::new(), schedules: Vec::new() };
                 proof {
-                    assert(phase.deep_view()->Gathering_origins =~= Seq::<DocV>::empty());
+                    assert(phase.deep_view()->Gathering_origins =~= Seq::<DocumentBodyV>::empty());
                     assert(phase.deep_view()->Gathering_schedules =~= Seq::<ScheduleSpec>::empty());
                 }
                 self.debug.current = Some(Op::Snap { id, kind, corr, phase });
@@ -893,13 +893,14 @@ impl State {
                         match got {
                             Some((bytes, _)) => {
                                 if schedule {
-                                    match doc::decode_schedule(bytes.as_slice()) {
+                                    match document::decode_schedule(bytes.as_slice()) {
                                         Ok(loaded) => {
+                                            let body = document::loaded_body(&loaded);
                                             proof {
-                                                echod_concrete::lemma_doc_view(&loaded.doc);
+                                                echod_concrete::lemma_doc_view(&body);
                                             }
-                                            match loaded.doc {
-                                                Doc::Schedule(Some(row)) => {
+                                            match body {
+                                                DocumentBody::Schedule(Some(row)) => {
                                                     let ghost cv = schedules.deep_view();
                                                     let ghost rv = row.deep_view();
                                                     schedules.push(row);
@@ -914,11 +915,12 @@ impl State {
                                         Err(e) => Some(StoreError::Unavailable(e)),
                                     }
                                 } else {
-                                    match doc::decode_origin(bytes.as_slice()) {
+                                    match document::decode_workflow(bytes.as_slice()) {
                                         Ok(loaded) => {
                                             let ghost ov = origins.deep_view();
-                                            let ghost dv = loaded.doc@;
-                                            origins.push(loaded.doc);
+                                            let body = document::loaded_body(&loaded);
+                                            let ghost dv = body@;
+                                            origins.push(body);
                                             proof {
                                                 assert(origins.deep_view() =~= ov.push(dv));
                                             }

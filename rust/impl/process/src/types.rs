@@ -26,7 +26,7 @@ use echod_types::{PromiseRecordSpec, ScheduleSpec, AResponse};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{StoreCallSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::DocV;
+use echod_concrete::node::DocumentBodyV;
 #[cfg(verus_keep_ghost)]
 use crate::target::TargetSpec;
 
@@ -225,7 +225,7 @@ pub enum DebugBody {
     /// A short refusal.
     Message(String),
     /// The documents a `debug.snap` read: every origin's, and every schedule.
-    Snap { origins: Vec<echod_concrete::Doc>, schedules: Vec<Schedule> },
+    Snap { origins: Vec<echod_concrete::DocumentBody>, schedules: Vec<Schedule> },
 }
 
 #[cfg(verus_keep_ghost)]
@@ -233,7 +233,7 @@ pub ghost enum DebugBodySpec {
     Object,
     List,
     Message(Seq<char>),
-    Snap { origins: Seq<DocV>, schedules: Seq<ScheduleSpec> },
+    Snap { origins: Seq<DocumentBodyV>, schedules: Seq<ScheduleSpec> },
 }
 
 #[cfg(verus_keep_ghost)]

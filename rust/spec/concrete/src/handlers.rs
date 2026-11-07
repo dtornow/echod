@@ -21,12 +21,12 @@ use crate::interpret::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    DocV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
+    DocumentBodyV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
     spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited,
     spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check,
     spec_fulfill_task, spec_handle, spec_heartbeat as c_heartbeat, spec_held, spec_key,
     spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key,
-    spec_origin_map, spec_project_obj, spec_promise_create as c_promise_create,
+    spec_workflow_map, spec_project_obj, spec_promise_create as c_promise_create,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle,
     spec_register_callback as c_register_callback, spec_register_listener as c_register_listener,
     spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete,
@@ -34,7 +34,7 @@ use crate::node::{
     spec_targeted, spec_task_acquire as c_task_acquire, spec_task_continue as c_task_continue,
     spec_task_create as c_task_create, spec_task_fulfill as c_task_fulfill,
     spec_task_get as c_task_get, spec_task_halt as c_task_halt, spec_task_release as c_task_release,
-    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, TkV,
+    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_workflow, TkV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{
@@ -234,7 +234,7 @@ pub proof fn lemma_finite_at(s: AStore, next: AStore, id: Seq<char>)
 pub proof fn lemma_register_callback_agrees(
     config: ServerConfig,
     req: PromiseRegisterCallbackReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -266,8 +266,8 @@ pub proof fn lemma_register_callback_agrees(
     } else {
         assert(origin(awaiter@) == o);
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         if !map.contains_key(awaited@) {
             assert(!s.promises.contains_key(awaited@));
             assert(outs == spec_out(a_promise_res(404, None), s));
@@ -324,7 +324,7 @@ pub proof fn lemma_register_callback_agrees(
                     lemma_origin_update(map, o, s, awaited@, obj2, q, ta, next);
                     assert(map.insert(awaited@, obj2).dom() == map.dom().insert(awaited@));
                     lemma_origin_reads(key, o, map.insert(awaited@, obj2), next);
-                    assert(c_register_callback(doc, awaited, awaiter, now).0 == DocV::Origin(map.insert(awaited@, obj2)));
+                    assert(c_register_callback(doc, awaited, awaiter, now).0 == DocumentBodyV::Workflow(map.insert(awaited@, obj2)));
                     lemma_within_one(s, next, awaited@);
                     lemma_others_kept_within(s, next, o);
                     assert(next.promises.dom() == s.promises.dom().insert(awaited@));
@@ -341,7 +341,7 @@ pub proof fn lemma_register_callback_agrees(
 pub proof fn lemma_register_listener_agrees(
     config: ServerConfig,
     req: echod_types::PromiseRegisterListenerReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -367,8 +367,8 @@ pub proof fn lemma_register_listener_agrees(
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_register_listener(awaited, address, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(awaited@) {
         assert(!s.promises.contains_key(awaited@));
         assert(outs == spec_out(a_promise_res(404, None), s));
@@ -407,7 +407,7 @@ pub proof fn lemma_register_listener_agrees(
                 lemma_origin_update(map, o, s, awaited@, obj2, q, ta, next);
                 assert(map.insert(awaited@, obj2).dom() == map.dom().insert(awaited@));
                 lemma_origin_reads(key, o, map.insert(awaited@, obj2), next);
-                assert(c_register_listener(doc, awaited, address, now).0 == DocV::Origin(map.insert(awaited@, obj2)));
+                assert(c_register_listener(doc, awaited, address, now).0 == DocumentBodyV::Workflow(map.insert(awaited@, obj2)));
                 lemma_within_one(s, next, awaited@);
                 lemma_others_kept_within(s, next, o);
                 assert(next.promises.dom() == s.promises.dom().insert(awaited@));
@@ -466,7 +466,7 @@ pub proof fn lemma_acquire_rel(ct: TkV, at: TaskV, pid: Seq<char>, ttl: u64, now
     lemma_sat_add(now, ttl);
 }
 
-pub proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -486,8 +486,8 @@ pub proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocV, 
     assert(spec_handle(doc, request, now) == c_task_get(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(id@) {
         assert(!s.promises.contains_key(id@));
         assert(!s.tasks.contains_key(id@));
@@ -522,7 +522,7 @@ pub proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocV, 
 pub proof fn lemma_task_create_agrees(
     config: ServerConfig,
     req: echod_types::TaskCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -557,8 +557,8 @@ pub proof fn lemma_task_create_agrees(
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         let (doc1, created) = c_promise_create(doc, action, now);
         if map.contains_key(x) {
             assert(doc1 == doc);
@@ -615,7 +615,7 @@ pub proof fn lemma_task_create_agrees(
                                 spec_claim_res(200, Some(a_task_record(action.id, u_a)), Some(spec_promise_record(action.id, seen_p))),
                                 n,
                             ));
-                            assert(c_task_create(doc, pid, ttl, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                            assert(c_task_create(doc, pid, ttl, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                             lemma_within_one(s, n, x);
                             lemma_others_kept_within(s, n, o);
                             assert(n.tasks.dom() == s.tasks.dom().insert(x));
@@ -635,8 +635,8 @@ pub proof fn lemma_task_create_agrees(
             assert(!s.tasks.contains_key(x));
             let obj = spec_new_obj(action.timeout_at, now, action.param, action.tags, true);
             assert(spec_targeted(action.tags));
-            assert(doc1 == spec_with_origin(doc, map.insert(x, obj)));
-            assert(doc1 == DocV::Origin(map.insert(x, obj)));
+            assert(doc1 == spec_with_workflow(doc, map.insert(x, obj)));
+            assert(doc1 == DocumentBodyV::Workflow(map.insert(x, obj)));
             let map1 = map.insert(x, obj);
             assert(map1.contains_key(x));
             assert(map1[x] == obj);
@@ -689,7 +689,7 @@ pub proof fn lemma_task_create_agrees(
                 lemma_record(action.id, obj2.promise, p_a);
                 lemma_origin_update(map, o, s, x, obj2, p_a, Some(t_a), n);
                 assert(map1.insert(x, obj2) =~= map.insert(x, obj2));
-                assert(c_task_create(doc, pid, ttl, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                assert(c_task_create(doc, pid, ttl, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 assert(map.insert(x, obj2).dom() == map.dom().insert(x));
                 lemma_origin_reads(key, o, map.insert(x, obj2), n);
                 lemma_within_one(s, n, x);
@@ -728,7 +728,7 @@ pub proof fn lemma_task_create_agrees(
 pub proof fn lemma_task_acquire_agrees(
     config: ServerConfig,
     req: echod_types::TaskAcquireReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -746,8 +746,8 @@ pub proof fn lemma_task_acquire_agrees(
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_acquire(req.id, req.version, req.pid, req.ttl, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.promises.contains_key(x));
         assert(!s.tasks.contains_key(x));
@@ -796,7 +796,7 @@ pub proof fn lemma_task_acquire_agrees(
                         spec_claim_res(200, Some(a_task_record(req.id, u_a)), Some(spec_promise_record(req.id, p))),
                         n,
                     ));
-                    assert(c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                     lemma_within_one(s, n, x);
                     lemma_others_kept_within(s, n, o);
                     assert(n.tasks.dom() == s.tasks.dom().insert(x));
@@ -835,7 +835,7 @@ pub proof fn lemma_held_update(
     ensures
         ({
             let n = AStore { promises: s.promises.insert(x, q), tasks: s.tasks.insert(x, u), ..s };
-            &&& doc_rel(key, DocV::Origin(map.insert(x, obj2)), n)
+            &&& doc_rel(key, DocumentBodyV::Workflow(map.insert(x, obj2)), n)
             &&& crate::interpret::others_kept(key, s, n)
             &&& finite_store(n)
         }),
@@ -854,7 +854,7 @@ pub proof fn lemma_held_update(
 pub proof fn lemma_task_release_agrees(
     config: ServerConfig,
     req: echod_types::TaskReleaseReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -872,11 +872,11 @@ pub proof fn lemma_task_release_agrees(
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_release(req.id, req.version, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     lemma_held(map, o, s, x, req.version, now);
     let (_, held) = spec_held(map, x, req.version, now);
-    assert(spec_with_origin(doc, map) == doc);
+    assert(spec_with_workflow(doc, map) == doc);
     match held {
         Held::Missing => {
             assert(outs == spec_out(spec_status_res(404), s));
@@ -900,7 +900,7 @@ pub proof fn lemma_task_release_agrees(
             assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
             assert(outs == spec_out(spec_status_res(200), n));
             lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-            assert(c_task_release(doc, req.id, req.version, now).0 == DocV::Origin(map.insert(x, obj2)));
+            assert(c_task_release(doc, req.id, req.version, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
         },
     }
 }
@@ -908,7 +908,7 @@ pub proof fn lemma_task_release_agrees(
 pub proof fn lemma_task_fulfill_agrees(
     config: ServerConfig,
     req: echod_types::TaskFulfillReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -931,11 +931,11 @@ pub proof fn lemma_task_fulfill_agrees(
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(a_promise_res(404, None), s));
@@ -966,13 +966,13 @@ pub proof fn lemma_task_fulfill_agrees(
                 assert(outs == spec_out(a_promise_res(200, Some(spec_promise_record(req.id, q))), n));
                 assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(crate::node::spec_record(req.id, promise))));
                 lemma_held_update(key, o, map, s, x, obj2, q, u);
-                assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
             },
         }
     }
 }
 
-pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -994,8 +994,8 @@ pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV,
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_halt(id, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.tasks.contains_key(x));
         assert(outs == spec_out(spec_status_res(404), s));
@@ -1038,7 +1038,7 @@ pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV,
                     assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
                     assert(outs == spec_out(spec_status_res(200), n));
                     lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-                    assert(c_task_halt(doc, id, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_halt(doc, id, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 }
             },
             _ => {
@@ -1048,7 +1048,7 @@ pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV,
     }
 }
 
-pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -1070,8 +1070,8 @@ pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: D
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_continue(id, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.tasks.contains_key(x));
         assert(outs == spec_out(spec_status_res(404), s));
@@ -1119,7 +1119,7 @@ pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: D
                     assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
                     assert(outs == spec_out(spec_status_res(200), n));
                     lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-                    assert(c_task_continue(doc, id, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_continue(doc, id, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 }
             },
             _ => {
@@ -1315,7 +1315,7 @@ pub proof fn lemma_extend(
 pub proof fn lemma_heartbeat_agrees(
     config: ServerConfig,
     req: echod_types::TaskHeartbeatReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1349,15 +1349,15 @@ pub proof fn lemma_heartbeat_agrees(
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         assert(extending(map, o, s, map, s.tasks));
         lemma_extend(map, o, s, pid@, refs, now, 0, map, s.tasks);
         let map2 = c_extend(map, pid@, refs, now, 0);
         let tasks2 = a_extend(s, pid@, refs, now, 0, s.tasks);
         let n = AStore { tasks: tasks2, ..s };
         assert(outs == spec_out(spec_status_res(200), n));
-        assert(c_heartbeat(doc, pid, refs, now) == (DocV::Origin(map2), Response::Status(StatusRes { status: 200 })));
+        assert(c_heartbeat(doc, pid, refs, now) == (DocumentBodyV::Workflow(map2), Response::Status(StatusRes { status: 200 })));
         assert(map2.dom() =~= map.dom());
         lemma_origin_reads(key, o, map2, n);
         assert(changed_within(s, n, o));
@@ -1570,7 +1570,7 @@ pub proof fn lemma_add_callbacks(
 pub proof fn lemma_suspend_agrees(
     config: ServerConfig,
     req: echod_types::TaskSuspendReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1644,11 +1644,11 @@ pub proof fn lemma_suspend_agrees(
             }
         };
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(spec_status_res(404), s));
@@ -1730,7 +1730,7 @@ pub proof fn lemma_suspend_agrees(
                             assert(n == AStore { tasks: s.tasks.insert(x, u), ..s });
                             assert(outs == spec_out(spec_status_res(300), n));
                             lemma_held_update(key, o, map, s, x, obj2, p, u);
-                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocV::Origin(map.insert(x, obj2)), Response::Status(StatusRes { status: 300 })));
+                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocumentBodyV::Workflow(map.insert(x, obj2)), Response::Status(StatusRes { status: 300 })));
                         } else {
                             assert(adding(map, o, s, x, map, s.promises));
                             lemma_add_callbacks(map, o, s, x, actions, 0, map, s.promises);
@@ -1762,7 +1762,7 @@ pub proof fn lemma_suspend_agrees(
                             assert(map2.dom() =~= map.dom());
                             assert(map2.insert(x, obj3).dom() == map2.dom().insert(x));
                             lemma_origin_reads(key, o, map2.insert(x, obj3), n);
-                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocV::Origin(map2.insert(x, obj3)), Response::Status(StatusRes { status: 200 })));
+                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocumentBodyV::Workflow(map2.insert(x, obj3)), Response::Status(StatusRes { status: 200 })));
                             assert(changed_within(s, n, o)) by {
                                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) != o implies {
                                     &&& s.promises.contains_key(id) == n.promises.contains_key(id)
@@ -1790,7 +1790,7 @@ pub proof fn lemma_suspend_agrees(
 // ---------------------------------------------------------------------------
 
 /// The promise handlers answer a promise response.
-pub proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, now: Time)
+pub proof fn lemma_promise_answers(doc: DocumentBodyV, action: TaskFenceAction, now: Time)
     ensures
         match action {
             TaskFenceAction::Create(c) => c_promise_create(doc, c, now).1 is Promise,
@@ -1802,7 +1802,7 @@ pub proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, now: Time
 pub proof fn lemma_fence_agrees(
     config: ServerConfig,
     req: echod_types::TaskFenceReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1831,11 +1831,11 @@ pub proof fn lemma_fence_agrees(
     } else {
         assert(origin(target@) == o);
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(spec_fence_res(404, None), s));
@@ -1885,7 +1885,7 @@ pub proof fn lemma_fence_agrees(
 pub proof fn lemma_fence_check_agrees(
     config: ServerConfig,
     req: echod_types::TaskFenceCheckReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1902,10 +1902,10 @@ pub proof fn lemma_fence_check_agrees(
     assert(spec_handle(doc, request, now) == c_fence_check(doc, req.id, req.version, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     lemma_held(map, o, s, x, req.version, now);
-    assert(spec_with_origin(doc, map) == doc);
+    assert(spec_with_workflow(doc, map) == doc);
     assert(outs[0].next == s);
     lemma_others_same(key, s);
 }
@@ -1926,7 +1926,7 @@ pub proof fn lemma_schedule_value(c: Schedule, a: ScheduleV)
     lemma_string_of(c.promise_id);
 }
 
-pub proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -1966,7 +1966,7 @@ pub proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, doc: Do
 pub proof fn lemma_schedule_create_agrees(
     config: ServerConfig,
     req: ScheduleCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2025,10 +2025,10 @@ pub proof fn lemma_schedule_create_agrees(
                 };
                 let next = AStore { schedules: s.schedules.insert(req.id@, c), ..s };
                 assert(outs == spec_out(spec_schedule_res(200, Some(schedule)), next));
-                assert(c_schedule_create(doc, req, now) == (DocV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })));
+                assert(c_schedule_create(doc, req, now) == (DocumentBodyV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })));
                 assert(schedule_rel(schedule, c));
                 assert(slot_rel(Some(schedule), req.id@, next));
-                assert(doc_rel(key, DocV::Schedule(Some(schedule)), next));
+                assert(doc_rel(key, DocumentBodyV::Schedule(Some(schedule)), next));
                 lemma_others_kept_schedule(s, next, req.id@);
                 assert(next.schedules.dom() == s.schedules.dom().insert(req.id@));
                 assert(finite_store(next));
@@ -2037,7 +2037,7 @@ pub proof fn lemma_schedule_create_agrees(
     }
 }
 
-pub proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -2065,10 +2065,10 @@ pub proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: String, doc:
             assert(s.schedules.contains_key(id@));
             let next = AStore { schedules: s.schedules.remove(id@), ..s };
             assert(outs == spec_out(spec_status_res(200), next));
-            assert(c_schedule_delete(doc, id) == (DocV::Schedule(None), Response::Status(StatusRes { status: 200 })));
+            assert(c_schedule_delete(doc, id) == (DocumentBodyV::Schedule(None), Response::Status(StatusRes { status: 200 })));
             assert(!next.schedules.contains_key(id@));
             assert(slot_rel(None, id@, next));
-            assert(doc_rel(key, DocV::Schedule(None), next));
+            assert(doc_rel(key, DocumentBodyV::Schedule(None), next));
             lemma_others_kept_schedule(s, next, id@);
             assert(next.schedules.dom() == s.schedules.dom().remove(id@));
             assert(finite_store(next));
@@ -2090,7 +2090,7 @@ pub proof fn lemma_request_agrees(
     config: ServerConfig,
     request: Request,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2132,7 +2132,7 @@ pub proof fn lemma_requests_agree(config: ServerConfig)
     ensures
         crate::relation::requests_agree(config),
 {
-    assert forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
+    assert forall|request: Request, key: Seq<char>, doc: DocumentBodyV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) implies #[trigger] request_agrees(
         config,
         request,

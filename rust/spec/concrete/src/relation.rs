@@ -29,7 +29,7 @@ use crate::model::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_doc, spec_encode,
+    CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_body, spec_encode_body,
     spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
 };
 #[cfg(verus_keep_ghost)]
@@ -109,10 +109,10 @@ pub proof fn lemma_single_present(world: World<AModel>)
 // ---------------------------------------------------------------------------
 
 /// The document a node decides from: its cache, or the empty document.
-pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
+pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match spec_cached(node, key) {
         Some(cached) => spec_read(key, cached.body),
-        None => spec_empty_doc(key),
+        None => spec_empty_body(key),
     }
 }
 
@@ -121,8 +121,8 @@ pub open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
 /// occurrences born, the dispatches.
 /// Opaque: it holds the whole handler semantics, read where a proof needs it.
 #[verifier::opaque]
-pub open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64) -> (
-    DocV,
+pub open spec fn decision(flight: FlightV, doc: DocumentBodyV, retry_timeout: u64) -> (
+    DocumentBodyV,
     Option<Response>,
     Seq<PendingV>,
     Seq<NoteV>,
@@ -144,7 +144,7 @@ pub open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64) -> (
 
 /// The document a node stands for under `key`: what its flight on that key
 /// decides, else what it holds.
-pub open spec fn intended(node: NodeV, key: Seq<char>) -> DocV {
+pub open spec fn intended(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match node.flight {
         Some(flight) if flight.key == key => decision(flight, loaded(node, key), node.retry_timeout).0,
         _ => loaded(node, key),
@@ -157,9 +157,9 @@ pub open spec fn owner(fleet: Fleet, key: Seq<char>) -> int {
 }
 
 /// The document the concrete world stands for under `key`.
-pub open spec fn effective(fleet: Fleet, world: World<CModel>, key: Seq<char>) -> DocV {
+pub open spec fn effective(fleet: Fleet, world: World<CModel>, key: Seq<char>) -> DocumentBodyV {
     if fleet.nodes == 0 {
-        spec_empty_doc(key)
+        spec_empty_body(key)
     } else {
         intended(node_at(world, owner(fleet, key)), key)
     }
@@ -327,7 +327,7 @@ pub open spec fn flight_ok(node: NodeV) -> bool {
                 &&& spec_cached(node, flight.key) is None
             } else {
                 &&& flight.etag == cached_etag(node, flight.key)
-                &&& flight.decided == Some(spec_encode(next))
+                &&& flight.decided == Some(spec_encode_body(next))
                 &&& flight.born == born
                 &&& flight.notify == notes
                 &&& flight.reply == flight_reply(flight, reply)
@@ -364,7 +364,7 @@ pub open spec fn applied_write(i: int, node: NodeV, store: CStore, key: Seq<char
 /// the etag the cache quotes. A cache entry without an etag is a key the
 /// store holds absent.
 pub open spec fn cache_entry_ok(key: Seq<char>, cached: CachedV, store: CStore) -> bool {
-    &&& cached.body == spec_encode(spec_read(key, cached.body))
+    &&& cached.body == spec_encode_body(spec_read(key, cached.body))
     &&& match cached.etag {
         Some(etag) => physical(store, key) == Some(cached.body) && etag == spec_etag_chars(
             cached.body,
@@ -613,7 +613,7 @@ pub open spec fn related(fleet: Fleet, concrete: World<CModel>, abstract_world: 
 
 /// Every request on the document it names, by `interpret::request_agrees`.
 pub open spec fn requests_agree(config: ServerConfig) -> bool {
-    forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
+    forall|request: Request, key: Seq<char>, doc: DocumentBodyV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) ==> #[trigger] request_agrees(
             config,
             request,
@@ -634,7 +634,7 @@ pub open spec fn note_sends(notes: Seq<NoteV>) -> Seq<(APid, AMessage)> {
 pub open spec fn due_agrees(
     config: ServerConfig,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     state: StateV,
     now: u64,
 ) -> bool {
@@ -654,7 +654,7 @@ pub open spec fn due_agrees(
 }
 
 pub open spec fn dues_agree(config: ServerConfig) -> bool {
-    forall|key: Seq<char>, doc: DocV, state: StateV, now: u64|
+    forall|key: Seq<char>, doc: DocumentBodyV, state: StateV, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) ==> #[trigger] due_agrees(
             config,
             key,
@@ -664,9 +664,9 @@ pub open spec fn dues_agree(config: ServerConfig) -> bool {
         )
 }
 
-/// One occurrence on its origin document: nothing happens, or the abstract
+/// One occurrence on its workflow document: nothing happens, or the abstract
 /// occurrence step does the same.
-pub open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now: u64) -> bool {
+pub open spec fn occurrence_agrees(pending: PendingV, doc: DocumentBodyV, s: AStore, now: u64) -> bool {
     let key = spec_origin_key(origin(pending.promise));
     let next = spec_occurrence(doc, pending, now);
     ||| next == doc
@@ -690,7 +690,7 @@ pub open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now:
 }
 
 pub open spec fn occurrences_agree() -> bool {
-    forall|pending: PendingV, doc: DocV, s: AStore, now: u64|
+    forall|pending: PendingV, doc: DocumentBodyV, s: AStore, now: u64|
         doc_rel(spec_origin_key(origin(pending.promise)), doc, s) && finite_store(s)
             ==> #[trigger] occurrence_agrees(pending, doc, s, now)
 }

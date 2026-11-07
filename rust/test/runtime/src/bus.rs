@@ -50,9 +50,11 @@ impl RecordingBus {
         Self { store, keys, clock, sent: Mutex::new(Vec::new()), tally: Mutex::new(Tally::default()) }
     }
 
-    async fn rows(&self, origin: &str) -> Vec<echod_logic::doc::codec::Promise> {
+    async fn rows(&self, origin: &str) -> Vec<echod_logic::document::codec::Promise> {
         match self.store.get(&self.keys.doc_key(origin)).await {
-            Ok(Some((bytes, _))) => echod_logic::doc::decode_origin(&bytes).map(|l| echod_logic::doc::codec::promises(&l.doc)).unwrap_or_default(),
+            Ok(Some((bytes, _))) => echod_logic::document::decode_workflow(&bytes)
+                .map(|loaded| echod_logic::document::codec::promises(&echod_logic::document::loaded_body(&loaded)))
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
