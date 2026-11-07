@@ -53,18 +53,19 @@ pub struct Node {
 
 impl Node {
     /// A node over `store` with HTTP push as its only transport.
-    pub fn new(cfg: Config, store: Arc<dyn Store>) -> Arc<Self> {
+    pub fn new(cfg: Config, store: Arc<dyn Store>) -> Result<Arc<Self>, String> {
         let router: Arc<dyn ResonateRouter> = Arc::new(Router::http_push());
         Self::with_router(cfg, store, router)
     }
 
-    pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Arc<Self> {
+    pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Result<Arc<Self>, String> {
         Self::with_env(cfg, store, router, Arc::new(SystemClock), Arc::new(NoNotes))
     }
 
     /// A node whose clock and listener are supplied: what a simulation
     /// builds.
-    pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, notes: Arc<dyn Notes>) -> Arc<Self> {
+    pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, notes: Arc<dyn Notes>) -> Result<Arc<Self>, String> {
+        cfg.validate()?;
         let keys = echod_logic::keys::KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
         // Every call on the bucket goes through the meter.
         let metrics = Metrics::new();
@@ -95,7 +96,7 @@ impl Node {
         // The gauges: read when scraped, from the state as it is then.
         let weak = Arc::downgrade(&node);
         node.metrics.set_snapshot(move || weak.upgrade().map(|n| n.lock().snapshot()).unwrap_or_default());
-        node
+        Ok(node)
     }
 
     fn me(&self) -> Arc<Node> {

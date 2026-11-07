@@ -42,6 +42,20 @@ pub struct Config {
 } // verus!
 
 impl Config {
+    /// Validate dials whose arithmetic is used by the protocol core.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.retry_timeout == 0 {
+            return Err("retry timeout must be greater than zero".to_string());
+        }
+        if self.retry_timeout > echod_types::MAX_TIME {
+            return Err(format!(
+                "retry timeout must be at most {}",
+                echod_types::MAX_TIME
+            ));
+        }
+        Ok(())
+    }
+
     /// A node on an in-memory store, for tests.
     pub fn memory(node_id: &str) -> Self {
         Self {
@@ -58,5 +72,23 @@ impl Config {
             cache_bytes: 16 * 1024 * 1024,
             debug: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn retry_timeout_respects_protocol_bounds() {
+        let mut cfg = Config::memory("node");
+        cfg.retry_timeout = 0;
+        assert!(cfg.validate().is_err());
+
+        cfg.retry_timeout = echod_types::MAX_TIME + 1;
+        assert!(cfg.validate().is_err());
+
+        cfg.retry_timeout = echod_types::MAX_TIME;
+        assert!(cfg.validate().is_ok());
     }
 }

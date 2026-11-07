@@ -20,7 +20,7 @@ use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
 use echod_types::{
-    origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
+    deadline_bounded, origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
     PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
     ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
     TaskGetRes, TaskRecord, TaskRef, TaskState, Value, MAX_TIME, MAX_VERSION,
@@ -37,7 +37,7 @@ use echod_rover::rover::ProcessEvent;
 use echod_rover::rover::semantics::StepResultV;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec, AValue};
+use echod_types::{origin, same_origin_spec, spec_deadline_bounded, AValue};
 
 #[cfg(verus_keep_ghost)]
 use crate::model::{
@@ -3333,7 +3333,10 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    if req.promise_timeout > MAX_TIME || (targeted(&req.promise_tags) && timer(&req.promise_tags)) {
+    let next_run_at = next_cron(&req.cron, now);
+    if !deadline_bounded(next_run_at, req.promise_timeout)
+        || (targeted(&req.promise_tags) && timer(&req.promise_tags))
+    {
         return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
     }
     let existing = match &doc {
@@ -3350,7 +3353,7 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
                 promise_timeout: req.promise_timeout,
                 promise_param: copy(&req.promise_param),
                 promise_tags: copy(&req.promise_tags),
-                next_run_at: next_cron(&req.cron, now),
+                next_run_at,
                 last_run_at: None,
                 created_at: now,
             };
@@ -5982,7 +5985,10 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if req.promise_timeout > MAX_TIME || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
+    let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
+    {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
         match doc {
@@ -5995,7 +6001,7 @@ pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq
                     promise_timeout: req.promise_timeout,
                     promise_param: req.promise_param,
                     promise_tags: req.promise_tags,
-                    next_run_at: echod_abstract::trusted::spec_next_cron(req.cron@, now),
+                next_run_at,
                     last_run_at: None,
                     created_at: now,
                 };

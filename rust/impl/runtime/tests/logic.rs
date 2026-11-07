@@ -392,3 +392,51 @@ fn a_detached_create_lands_before_the_fence_is_checked() {
     assert_eq!(status, 400, "{data}");
     assert_eq!(data, json!("Action must belong to the task's origin"));
 }
+
+#[test]
+fn admission_rejects_protocol_bounds_before_any_core_effect() {
+    let mut h = Harness::new("n1");
+    let max = echod_logic::verified::MAX_TIME;
+
+    let (status, _) = h.request(
+        "promise.create",
+        json!({ "id": "a:too-late", "timeoutAt": max + 1, "tags": {} }),
+    );
+    assert_eq!(status, 400);
+
+    for ttl in [0, max + 1] {
+        let (status, _) = h.request(
+            "task.acquire",
+            json!({ "id": "a:task", "version": 0, "pid": "worker", "ttl": ttl }),
+        );
+        assert_eq!(status, 400);
+    }
+
+    let (status, _) = h.request(
+        "schedule.create",
+        json!({
+            "id": "tick",
+            "cron": "* * * * * *",
+            "promiseId": "tick-{{.timestamp}}",
+            "promiseTimeout": max,
+            "promiseTags": {}
+        }),
+    );
+    assert_eq!(status, 400);
+
+    let action = json!({
+        "kind": "promise.create",
+        "head": {},
+        "data": { "id": "detached:x", "timeoutAt": max + 1, "tags": {} }
+    });
+    let (status, _) = h.request(
+        "task.fence",
+        json!({ "id": "a:task", "version": 0, "action": action }),
+    );
+    assert_eq!(status, 400);
+
+    assert!(h.bucket.objects.is_empty());
+    assert!(h.sent.is_empty());
+    assert!(h.notes.is_empty());
+    assert!(h.wake_after.is_none());
+}

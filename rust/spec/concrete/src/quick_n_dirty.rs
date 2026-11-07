@@ -2158,6 +2158,7 @@ pub proof fn request_preserves_well_formed(
                     assert(well_formed(on_request(document, request, now, retry_timeout)));
                 },
                 Request::ScheduleCreate(q) => {
+                    reveal(echod_types::spec_deadline_bounded);
                     echod_abstract::trusted::axiom_next_cron_after(q.cron@, now);
                     assert(well_formed(on_request(document, request, now, retry_timeout)));
                 },

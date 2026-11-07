@@ -21,6 +21,41 @@ pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
 /// The largest task fencing version representable by the protocol wire.
 pub const MAX_VERSION: u64 = u32::MAX as u64;
 
+pub fn time_bounded(value: u64) -> (bounded: bool)
+    ensures
+        bounded == (value <= MAX_TIME),
+{
+    value <= MAX_TIME
+}
+
+pub fn ttl_valid(ttl: u64) -> (valid: bool)
+    ensures
+        valid == (0 < ttl && ttl <= MAX_TIME),
+{
+    0 < ttl && ttl <= MAX_TIME
+}
+
+/// A client-supplied duration produces another bounded protocol instant.
+#[verifier::opaque]
+pub open spec fn spec_deadline_bounded(at: u64, duration: u64) -> bool {
+    at <= MAX_TIME && duration <= MAX_TIME && at + duration <= MAX_TIME
+}
+
+pub fn deadline_bounded(at: u64, duration: u64) -> (bounded: bool)
+    ensures
+        bounded == spec_deadline_bounded(at, duration),
+{
+    reveal(spec_deadline_bounded);
+    at <= MAX_TIME && duration <= MAX_TIME && at <= MAX_TIME - duration
+}
+
+pub fn version_can_increment(version: u64) -> (can_increment: bool)
+    ensures
+        can_increment == (version < MAX_VERSION),
+{
+    version < MAX_VERSION
+}
+
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------

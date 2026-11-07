@@ -6,7 +6,7 @@
 use vstd::prelude::*;
 
 use echod_types::{
-    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
+    deadline_bounded, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
     Request, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq,
     TaskFenceInnerRes, TaskFenceReq, TaskRecord, TaskRef, TaskState, TaskSuspendReq, Value,
     MAX_TIME, MAX_VERSION,
@@ -15,7 +15,7 @@ use echod_types::{
 use super::super::trusted::*;
 use echod_rover::certificate::trusted::copy;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec};
+use echod_types::{origin, same_origin_spec, spec_deadline_bounded};
 #[cfg(verus_keep_ghost)]
 use super::super::view::{
     all_in_origin, distinct, group_views, lift_dispatch, outs_v, sat_add, sends, strs, works,
@@ -571,7 +571,10 @@ impl ServerConfig {
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_views;
-        if req.promise_timeout > MAX_TIME || (is_timer(&req.promise_tags) && has_target(&req.promise_tags)) {
+        let next_run_at = next_cron(&req.cron, now);
+        if !deadline_bounded(next_run_at, req.promise_timeout)
+            || (is_timer(&req.promise_tags) && has_target(&req.promise_tags))
+        {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
         match s.schedules.get(&req.id) {
@@ -587,7 +590,6 @@ impl ServerConfig {
         }
         // `next_run_at` is the server's: the first instant the cron names
         // strictly after now. The request does not carry it.
-        let next_run_at = next_cron(&req.cron, now);
         let promise_param = req.promise_param.dup();
         let promise_tags = echod_types::clone_tags(&req.promise_tags);
         proof {
@@ -1243,12 +1245,14 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if req.promise_timeout > MAX_TIME || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags)) {
+    let next_run_at = spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
+    {
         spec_out(spec_schedule_res(400, None), s)
     } else if s.schedules.contains_key(req.id@) {
         spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
     } else {
-        let next_run_at = spec_next_cron(req.cron@, now);
         let c = ScheduleV {
             id: req.id@,
             cron: req.cron@,

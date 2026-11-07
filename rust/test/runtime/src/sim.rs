@@ -224,7 +224,8 @@ impl World {
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
         cfg.debug = true; // the clock is the request's
         let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
-        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>);
+        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>)
+            .expect("simulation configuration is valid");
         // A node that cannot reach the store keeps trying on its own.
         server.init(false).await.expect("a node starts");
         tracing::info!(node = %id, skew, drift, at = self.clock.now(), "started");

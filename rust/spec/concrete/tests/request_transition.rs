@@ -1,10 +1,10 @@
 use echod_concrete::node::REQUEST_SWEEP_STEPS;
 use echod_concrete::{
-    clone_body, empty_workflow, peek, request_transition, DocumentBody, Outbound,
+    clone_body, empty_schedule, empty_workflow, peek, request_transition, DocumentBody, Outbound,
 };
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
-    PromiseSettleReq, PromiseState, Request, Response, TaskAcquireReq, TaskContinueReq,
+    PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq, TaskAcquireReq, TaskContinueReq,
     TaskHaltReq, TaskReleaseReq, TaskState, TaskSuspendReq, Value, MAX_TIME, MAX_VERSION,
 };
 
@@ -294,5 +294,21 @@ fn client_bounds_and_stored_version_exhaustion_are_rejected() {
     });
     let (_, response, notes) = step(exhausted, acquire, NOW + 2);
     assert_eq!(status(&response), 409);
+    assert!(notes.is_empty());
+
+    let schedule = Request::ScheduleCreate(ScheduleCreateReq {
+        id: "schedule".into(),
+        cron: "* * * * * *".into(),
+        promise_id: "wf:{{.timestamp}}".into(),
+        promise_timeout: MAX_TIME,
+        promise_param: Value::default(),
+        promise_tags: Vec::new(),
+        next_run_at: 0,
+    });
+    let (doc, response, born, notes) =
+        request_transition(empty_schedule(), &schedule, NOW, RETRY, REQUEST_SWEEP_STEPS);
+    assert_eq!(status(&response), 400);
+    assert_eq!(doc, empty_schedule());
+    assert!(born.is_empty());
     assert!(notes.is_empty());
 }
