@@ -9,6 +9,13 @@ module Keys {
 
   predicate Lt(a: string, b: string) { a != b && Leq(a, b) }
 
+  lemma LeqRefl(a: string)
+    ensures Leq(a, a)
+    decreases |a|
+  {
+    if |a| != 0 { LeqRefl(a[1..]); }
+  }
+
   lemma LeqTotal(a: string, b: string)
     ensures Leq(a, b) || Leq(b, a)
     decreases |a| + |b|
@@ -54,5 +61,65 @@ module Keys {
     ensures Lt(b, a)
   {
     LeqTotal(a, b);
+  }
+
+  lemma MinExists(keys: set<string>)
+    requires keys != {}
+    ensures exists k :: k in keys && forall k' :: k' in keys ==> Leq(k, k')
+    decreases |keys|
+  {
+    var x :| x in keys;
+    var rest := keys - {x};
+    if rest == {} {
+      LeqRefl(x);
+    } else {
+      MinExists(rest);
+      var m :| m in rest && forall k' :: k' in rest ==> Leq(m, k');
+      if Leq(x, m) {
+        LeqRefl(x);
+        forall k' | k' in keys
+          ensures Leq(x, k')
+        {
+          if k' != x {
+            assert k' in rest;
+            LeqTrans(x, m, k');
+          }
+        }
+      } else {
+        LeqTotal(x, m);
+        forall k' | k' in keys
+          ensures Leq(m, k')
+        {
+          if k' == x {
+          } else {
+            assert k' in rest;
+          }
+        }
+      }
+    }
+  }
+
+  function MinKey(keys: set<string>): string
+    requires keys != {}
+    ensures MinKey(keys) in keys
+    ensures forall k :: k in keys ==> Leq(MinKey(keys), k)
+  {
+    MinExists(keys);
+    assert forall a, b ::
+      a in keys && b in keys &&
+      (forall k' :: k' in keys ==> Leq(a, k')) &&
+      (forall k' :: k' in keys ==> Leq(b, k')) ==>
+      a == b
+    by {
+      forall a, b | a in keys && b in keys &&
+        (forall k' :: k' in keys ==> Leq(a, k')) &&
+        (forall k' :: k' in keys ==> Leq(b, k'))
+        ensures a == b
+      {
+        LeqAntisym(a, b);
+      }
+    }
+    var k :| k in keys && forall k' :: k' in keys ==> Leq(k, k');
+    k
   }
 }
