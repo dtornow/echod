@@ -32,6 +32,174 @@ pub(crate) fn origin(id: &str) -> &str {
     echod_types::origin_of(id)
 }
 
+fn workflow_origin(request: &Request) -> Option<&str> {
+    let id = match request {
+        Request::PromiseCreate(q) => &q.id,
+        Request::PromiseGet(q) => &q.id,
+        Request::PromiseSettle(q) => &q.id,
+        Request::PromiseRegisterCallback(q) => &q.awaited,
+        Request::PromiseRegisterListener(q) => &q.awaited,
+        Request::TaskGet(q) => &q.id,
+        Request::TaskCreate(q) => &q.action.id,
+        Request::TaskAcquire(q) => &q.id,
+        Request::TaskRelease(q) => &q.id,
+        Request::TaskFulfill(q) => &q.id,
+        Request::TaskSuspend(q) => &q.id,
+        Request::TaskFence(q) => &q.id,
+        Request::TaskFenceCheck(q) => &q.id,
+        Request::TaskHalt(q) => &q.id,
+        Request::TaskContinue(q) => &q.id,
+        Request::TaskHeartbeat(q) => return q.tasks.first().map(|task| origin(&task.id)),
+        Request::ScheduleCreate(_) | Request::ScheduleGet(_) | Request::ScheduleDelete(_) => {
+            return None;
+        }
+    };
+    Some(origin(id))
+}
+
+fn belongs_to_workflow(want: &str, work: &Work) -> bool {
+    match work {
+        Work::PromiseTimeout(id)
+        | Work::TaskLeaseTimeout(id)
+        | Work::TaskRetryTimeout(id)
+        | Work::Listener { awaited: id, .. } => origin(id) == want,
+        Work::Callback { awaited, .. } => origin(awaited) == want,
+        Work::ScheduleTimeout { .. } | Work::Occurrence { .. } => false,
+    }
+}
+
+fn close_workflow(
+    config: &ServerConfig,
+    mut state: Store,
+    workflow: &str,
+    now: Time,
+    limit: usize,
+) -> Option<(Store, Vec<Work>, Vec<Dispatch>, Vec<&'static str>)> {
+    let mut deferred = Vec::new();
+    let mut effects = Vec::new();
+    let mut marks = Vec::new();
+    for _ in 0..limit {
+        let Some(step) = timeout_work_plain(config, &state, now)
+            .into_iter()
+            .find(|step| belongs_to_workflow(workflow, step.req()))
+        else {
+            return Some((state, deferred, effects, marks));
+        };
+        let outcome = config.process_work(step.req(), &state, now);
+        if outcome.not_due {
+            return None;
+        }
+        state = outcome.next;
+        deferred.extend(outcome.work);
+        effects.extend(outcome.send);
+        marks.extend(outcome.marks);
+    }
+    if timeout_work_plain(config, &state, now)
+        .iter()
+        .any(|step| belongs_to_workflow(workflow, step.req()))
+    {
+        None
+    } else {
+        Some((state, deferred, effects, marks))
+    }
+}
+
+fn effect_relevant(state: &Store, effect: &Dispatch) -> bool {
+    match effect {
+        Dispatch::Execute { id, version } => state
+            .tasks
+            .get(id)
+            .is_some_and(|task| task.state == echod_types::TaskState::Pending && task.version == *version),
+        Dispatch::Unblock { .. } => true,
+    }
+}
+
+fn same_effect_key(a: &Dispatch, b: &Dispatch) -> bool {
+    match (a, b) {
+        (Dispatch::Execute { id: x, .. }, Dispatch::Execute { id: y, .. }) => x == y,
+        (
+            Dispatch::Unblock { address: xa, promise: xp },
+            Dispatch::Unblock { address: ya, promise: yp },
+        ) => xa == ya && xp.id == yp.id,
+        _ => false,
+    }
+}
+
+fn keyed_effects(state: &Store, effects: Vec<Dispatch>) -> Vec<Dispatch> {
+    let mut kept = Vec::new();
+    for effect in effects {
+        if effect_relevant(state, &effect)
+            && !kept.iter().any(|present| same_effect_key(present, &effect))
+        {
+            kept.push(effect);
+        }
+    }
+    kept
+}
+
+impl ServerConfig {
+    /// One authoritative external transition.
+    ///
+    /// Workflow requests close everything due at `now`, run the raw handler,
+    /// and close newly due work before returning. Schedule requests retain
+    /// their independent internal timer processing. Either finite closure
+    /// failing leaves the original state and effects untouched and returns
+    /// the request-shaped 503.
+    pub fn request_transition(
+        &self,
+        request: &Request,
+        state: &Store,
+        now: Time,
+        limit: usize,
+    ) -> Vec<Out> {
+        let Some(workflow) = workflow_origin(request) else {
+            return self.handler(request, state, now);
+        };
+        let Some((before, before_work, before_effects, before_marks)) =
+            close_workflow(self, state.clone(), workflow, now, limit)
+        else {
+            return vec![Out {
+                resp: unavailable(request),
+                next: state.clone(),
+                work: Vec::new(),
+                send: Vec::new(),
+                marks: Vec::new(),
+            }];
+        };
+        self.handler(request, &before, now)
+            .into_iter()
+            .map(|handled| {
+                let Some((next, mut after_work, mut after_effects, after_marks)) =
+                    close_workflow(self, handled.next, workflow, now, limit)
+                else {
+                    return Out {
+                        resp: unavailable(request),
+                        next: state.clone(),
+                        work: Vec::new(),
+                        send: Vec::new(),
+                        marks: Vec::new(),
+                    };
+                };
+                let mut work = before_work.clone();
+                work.append(&mut after_work);
+                let mut effects = before_effects.clone();
+                effects.append(&mut handled.send.clone());
+                effects.append(&mut after_effects);
+                let mut marks = before_marks.clone();
+                marks.extend(handled.marks);
+                marks.extend(after_marks);
+                Out {
+                    resp: handled.resp,
+                    send: keyed_effects(&next, effects),
+                    next,
+                    work,
+                    marks,
+                }
+            })
+            .collect()
+    }
+}
+
 /// The origin every occurrence of a schedule's promise template expands to,
 /// if it is one: `None` when the template's origin part carries the
 /// timestamp, so each occurrence lands in an origin of its own.

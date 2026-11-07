@@ -361,7 +361,7 @@ fn callback_layer() {
     t.step("task.get root → suspended", get_task("ex:root"), task(TaskState::Suspended, 1));
     t.step("suspend foreign → 400", suspend("ex:root", 1, &["other:x"]), st(400));
     t.step("settle awaited → arms resume", Request::PromiseSettle(settle("ex:awaited", "resolved", "v")), st(200));
-    // C# polls until the resume lands; this is the poll that sees it.
+    // Settlement drains the callback and re-arms the suspended task before replying.
     t.step("task.get root → pending (resumed)", get_task("ex:root"), task(TaskState::Pending, 1));
     t.step("re-acquire root v1 → v2", acquire("ex:root", 1, "worker-1"), task(TaskState::Acquired, 2));
 
@@ -373,7 +373,7 @@ fn callback_layer() {
 }
 
 #[test]
-fn resume_may_lag_the_settle() {
+fn settle_resumes_before_return() {
     let now = 3_000_000;
     let mut t = Trace::new(now);
     t.step("create a", create("ex:a", FAR, "x").external().op(), st(200));
@@ -381,9 +381,40 @@ fn resume_may_lag_the_settle() {
     t.step("acquire r", acquire("ex:r", 0, "w"), st(200));
     t.step("suspend r on a", suspend("ex:r", 1, &["ex:a"]), st(200));
     t.step("settle a", Request::PromiseSettle(settle("ex:a", "resolved", "v")), st(200));
-    // The resume is background work: right after the settle, either answer is fine.
     let seen = t.c.allowed(&get_task("ex:r"));
-    assert!(seen.iter().any(task(TaskState::Suspended, 1)) && seen.iter().any(task(TaskState::Pending, 1)), "{seen:?}");
+    assert!(!seen.is_empty() && seen.iter().all(task(TaskState::Pending, 1)), "{seen:?}");
+}
+
+#[test]
+fn execute_consumed_inside_request_does_not_escape() {
+    let model = ServerConfig { retry_timeout: 50 };
+    let created = <ServerConfig as echod_rover::Model>::external(
+        &model,
+        &create("ex:atomic", FAR, "x").target().op(),
+        &Store::default(),
+        10,
+    );
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        created[0].send,
+        vec![Dispatch::Execute {
+            id: "ex:atomic".into(),
+            version: 0,
+        }],
+    );
+
+    let acquired = <ServerConfig as echod_rover::Model>::external(
+        &model,
+        &acquire("ex:atomic", 0, "worker"),
+        &created[0].next,
+        60,
+    );
+    assert_eq!(acquired.len(), 1);
+    assert!(st(200)(&acquired[0].resp));
+    assert!(
+        acquired[0].send.is_empty(),
+        "the pre-sweep Execute was consumed by acquire"
+    );
 }
 
 #[test]
@@ -737,7 +768,7 @@ fn a_resume_dispatches_the_waiting_task() {
     assert!(t.c.receive(execute("ex:r", 1)).is_err(), "running, not suspended");
     t.step("suspend r on a", suspend("ex:r", 1, &["ex:a"]), st(200));
     t.step("settle a", Request::PromiseSettle(settle("ex:a", "resolved", "v")), st(200));
-    // Receiving the execute forces the hidden resume, then the dispatch.
+    // The settle atomically resumes, dispatches, and rearms the task.
     t.c.receive(execute("ex:r", 1)).unwrap();
     assert!(t.c.all(|s| s.tasks["ex:r"].state == TaskState::Pending));
 }

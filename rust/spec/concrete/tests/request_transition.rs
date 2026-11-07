@@ -4,7 +4,8 @@ use echod_concrete::{
 };
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
-    PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq, TaskAcquireReq, TaskContinueReq,
+    PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleGetReq,
+    TaskAcquireReq, TaskContinueReq,
     TaskHaltReq, TaskReleaseReq, TaskState, TaskSuspendReq, Value, MAX_TIME, MAX_VERSION,
 };
 
@@ -309,6 +310,32 @@ fn client_bounds_and_stored_version_exhaustion_are_rejected() {
         request_transition(empty_schedule(), &schedule, NOW, RETRY, REQUEST_SWEEP_STEPS);
     assert_eq!(status(&response), 400);
     assert_eq!(doc, empty_schedule());
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn schedule_request_leaves_due_timer_for_internal_processing() {
+    let schedule = Schedule {
+        id: "schedule".to_string(),
+        cron: "* * * * * *".to_string(),
+        promise_id: "wf.{{.timestamp}}".to_string(),
+        promise_timeout: 100,
+        promise_param: Value::default(),
+        promise_tags: Vec::new(),
+        created_at: 1,
+        next_run_at: 10,
+        last_run_at: None,
+    };
+    let original = DocumentBody::Schedule(Some(schedule));
+    let get = Request::ScheduleGet(ScheduleGetReq {
+        id: "schedule".to_string(),
+    });
+
+    let (doc, response, born, notes) = request_transition(original.clone(), &get, 10, 50, 32);
+
+    assert_eq!(status(&response), 200);
+    assert_eq!(doc, original);
     assert!(born.is_empty());
     assert!(notes.is_empty());
 }
