@@ -19,16 +19,260 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use echod_rover::{Checker, Config, Event, Grouped, Violation};
-use echod_abstract::types::{Request, Response};
-use echod_abstract::{Dispatch, ServerConfig, Store};
+use echod_abstract::types::{
+    PromiseRes, Request, Response, ScheduleRes, StatusRes, TaskClaimRes, TaskFenceRes, TaskGetRes,
+};
+use echod_abstract::{Dispatch, Key, ServerConfig, Store, Work};
+use echod_rover::{
+    Checker, Config, Event, ExternalOutcome, Footprint, Grouped, InternalOutcome, Model,
+    Partitioned, Sched, Touches, Violation,
+};
 
 use crate::bus::Sent;
 use crate::history::Entry;
 use crate::wire::{decode, encode};
 use crate::workload::WORKER;
 
-pub type Trace = Vec<Event<Request, Response, Dispatch>>;
+/// A request and the instant the process preserves across store retries.
+///
+/// The checker may linearize an overlapping call after a later invocation,
+/// but the process still decides that call at its original `debug_time`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TimedRequest {
+    at: u64,
+    req: Request,
+}
+
+struct TimedServer(ServerConfig);
+
+#[derive(Clone)]
+enum Document {
+    Workflow(String),
+    Schedule(String),
+}
+
+impl TimedServer {
+    fn unavailable(req: &Request) -> Response {
+        match req {
+            Request::PromiseGet(_)
+            | Request::PromiseCreate(_)
+            | Request::PromiseSettle(_)
+            | Request::PromiseRegisterCallback(_)
+            | Request::PromiseRegisterListener(_)
+            | Request::TaskFulfill(_) => Response::Promise(PromiseRes {
+                status: 503,
+                promise: None,
+            }),
+            Request::ScheduleGet(_) | Request::ScheduleCreate(_) => {
+                Response::Schedule(ScheduleRes {
+                    status: 503,
+                    schedule: None,
+                })
+            }
+            Request::ScheduleDelete(_)
+            | Request::TaskRelease(_)
+            | Request::TaskHalt(_)
+            | Request::TaskContinue(_)
+            | Request::TaskHeartbeat(_)
+            | Request::TaskSuspend(_)
+            | Request::TaskFenceCheck(_) => Response::Status(StatusRes { status: 503 }),
+            Request::TaskGet(_) => Response::TaskGet(TaskGetRes {
+                status: 503,
+                task: None,
+            }),
+            Request::TaskCreate(_) | Request::TaskAcquire(_) => Response::TaskClaim(TaskClaimRes {
+                status: 503,
+                task: None,
+                promise: None,
+            }),
+            Request::TaskFence(_) => Response::TaskFence(TaskFenceRes {
+                status: 503,
+                action: None,
+            }),
+        }
+    }
+
+    fn document(&self, req: &Request) -> Option<Document> {
+        let Touches::Only(keys) = self.0.external_touches(req) else {
+            return None;
+        };
+        match keys.first() {
+            Some(Key::Object(id)) => Some(Document::Workflow(
+                echod_abstract::types::origin_of(id).to_owned(),
+            )),
+            Some(Key::Schedule(id)) => Some(Document::Schedule(id.clone())),
+            _ => None,
+        }
+    }
+
+    fn belongs(document: &Document, work: &Work) -> bool {
+        match (document, work) {
+            (
+                Document::Workflow(origin),
+                Work::PromiseTimeout(id)
+                | Work::TaskLeaseTimeout(id)
+                | Work::TaskRetryTimeout(id)
+                | Work::Listener { awaited: id, .. },
+            ) => echod_abstract::types::origin_of(id) == origin,
+            (Document::Workflow(origin), Work::Callback { awaited, .. }) => {
+                echod_abstract::types::origin_of(awaited) == origin
+            }
+            (Document::Schedule(expected), Work::ScheduleTimeout { id, .. }) => id == expected,
+            _ => false,
+        }
+    }
+
+    /// Close one document at the request's preserved decision instant.
+    fn close(
+        &self,
+        mut state: Store,
+        document: &Document,
+        at: u64,
+    ) -> (
+        Store,
+        Vec<Sched<Work>>,
+        Vec<Dispatch>,
+        Vec<&'static str>,
+        bool,
+    ) {
+        let mut deferred = Vec::new();
+        let mut send = Vec::new();
+        let mut marks = Vec::new();
+        for _ in 0..echod_logic::handler_docs::SWEEP_STEPS {
+            let Some(step) = self
+                .0
+                .due(&state, at)
+                .into_iter()
+                .find(|step| Self::belongs(document, step.req()))
+            else {
+                break;
+            };
+            let Some(outcome) = self.0.internal(step.req(), &state, at).into_iter().next() else {
+                break;
+            };
+            state = outcome.next;
+            deferred.extend(outcome.work);
+            send.extend(outcome.send);
+            marks.extend(outcome.marks);
+        }
+        let closed = !self
+            .0
+            .due(&state, at)
+            .iter()
+            .any(|step| Self::belongs(document, step.req()));
+        (state, deferred, send, marks, closed)
+    }
+}
+
+impl Model for TimedServer {
+    type State = Store;
+    type External = TimedRequest;
+    type Response = Response;
+    type Internal = Work;
+    type Dispatch = Dispatch;
+
+    fn external(&self, op: &TimedRequest, state: &Store, _now: u64) -> Vec<ExternalOutcome<Self>> {
+        let Some(document) = self.document(&op.req) else {
+            return self
+                .0
+                .external(&op.req, state, op.at)
+                .into_iter()
+                .map(|o| ExternalOutcome {
+                    next: o.next,
+                    resp: o.resp,
+                    work: o.work,
+                    send: o.send,
+                    marks: o.marks,
+                })
+                .collect();
+        };
+        let (before, before_work, before_send, before_marks, before_closed) =
+            self.close(state.clone(), &document, op.at);
+        if !before_closed {
+            return vec![ExternalOutcome::same(Self::unavailable(&op.req), state)];
+        }
+        self.0
+            .external(&op.req, &before, op.at)
+            .into_iter()
+            .map(|o| {
+                let (next, mut after_work, mut after_send, mut after_marks, after_closed) =
+                    self.close(o.next, &document, op.at);
+                if !after_closed {
+                    return ExternalOutcome::same(Self::unavailable(&op.req), state);
+                }
+                let mut work = before_work.clone();
+                work.append(&mut after_work);
+                let mut send = before_send.clone();
+                send.append(&mut after_send);
+                let mut marks = before_marks.clone();
+                marks.extend(o.marks);
+                marks.append(&mut after_marks);
+                ExternalOutcome {
+                    next,
+                    resp: o.resp,
+                    work,
+                    send,
+                    marks,
+                }
+            })
+            .collect()
+    }
+
+    fn internal(&self, step: &Work, state: &Store, now: u64) -> Vec<InternalOutcome<Self>> {
+        self.0
+            .internal(step, state, now)
+            .into_iter()
+            .map(|o| InternalOutcome {
+                next: o.next,
+                work: o.work,
+                send: o.send,
+                marks: o.marks,
+            })
+            .collect()
+    }
+
+    fn due(&self, state: &Store, now: u64) -> Vec<echod_rover::Sched<Work>> {
+        self.0.due(state, now)
+    }
+}
+
+impl Footprint for TimedServer {
+    type Key = Key;
+
+    fn external_touches(&self, op: &TimedRequest) -> Touches<Key> {
+        self.0.external_touches(&op.req)
+    }
+
+    fn internal_touches(&self, step: &Work) -> Touches<Key> {
+        self.0.internal_touches(step)
+    }
+
+    fn state_spans(&self, state: &Store) -> Vec<Touches<Key>> {
+        self.0.state_spans(state)
+    }
+
+    fn dispatch_touches(&self, msg: &Dispatch) -> Touches<Key> {
+        self.0.dispatch_touches(msg)
+    }
+}
+
+impl Partitioned for TimedServer {
+    type Group = String;
+
+    fn group(&self, key: &Key) -> String {
+        self.0.group(key)
+    }
+
+    fn restrict(&self, state: &Store, keep: &dyn Fn(&String) -> bool) -> Store {
+        self.0.restrict(state, keep)
+    }
+
+    fn join(&self, a: &Store, b: &Store) -> Store {
+        self.0.join(a, b)
+    }
+}
+
+pub type Trace = Vec<Event<TimedRequest, Response, Dispatch>>;
 
 /// The trace, from what the run recorded.
 pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
@@ -40,12 +284,31 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
     // or a receive moves it nowhere: nothing is stamped at those instants,
     // and every instant the clock visits while a call is open is one more
     // place the model may land its effect.
-    let mut items: Vec<(u64, u8, u64, Event<Request, Response, Dispatch>)> = Vec::new();
+    let mut items: Vec<(u64, u8, u64, Event<TimedRequest, Response, Dispatch>)> = Vec::new();
     for e in entries {
-        items.push((e.now, 2, e.id, Event::Invoke { call: e.id, req: e.req.clone() }));
+        items.push((
+            e.now,
+            2,
+            e.id,
+            Event::Invoke {
+                call: e.id,
+                req: TimedRequest {
+                    at: e.now,
+                    req: e.req.clone(),
+                },
+            },
+        ));
         if let Some((status, data)) = &e.outcome {
             let (kind, _) = encode(&e.req, WORKER);
-            items.push((e.ret.max(e.now), 3, e.id, Event::Return { call: e.id, res: decode(kind, *status, data) }));
+            items.push((
+                e.ret.max(e.now),
+                3,
+                e.id,
+                Event::Return {
+                    call: e.id,
+                    res: decode(kind, *status, data),
+                },
+            ));
         }
     }
     for (i, s) in sent.iter().enumerate() {
@@ -88,12 +351,22 @@ pub enum Verdict {
 /// The trace against the model, partitioned by origin, with `budget` nodes
 /// to explore at most. `retry_timeout` is the nodes' and the model's.
 pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
-    let mut cfg = Config { max_explore: budget as usize, ..Config::default() };
+    let mut cfg = Config {
+        max_explore: budget as usize,
+        ..Config::default()
+    };
     // `ECHOD_SIM_WIDTH=n`: give up at a narrower profile, to see what it holds.
-    if let Some(w) = std::env::var("ECHOD_SIM_WIDTH").ok().and_then(|v| v.parse().ok()) {
+    if let Some(w) = std::env::var("ECHOD_SIM_WIDTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         cfg.max_width = w;
     }
-    let mut c: Checker<Grouped<ServerConfig>> = Checker::with_partitions(ServerConfig { retry_timeout }, Store::default(), cfg);
+    let mut c: Checker<Grouped<TimedServer>> = Checker::with_partitions(
+        TimedServer(ServerConfig { retry_timeout }),
+        Store::default(),
+        cfg,
+    );
     // The history is whole: a call it never answers may have taken effect at
     // any point or never, and a candidate still holding it subsumes one that
     // applied it.
@@ -111,20 +384,33 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     }
     c.never_answered(open);
     // `ECHOD_SIM_PROGRESS=n`: a line every n events, for where the time goes.
-    let progress: Option<usize> = std::env::var("ECHOD_SIM_PROGRESS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0);
+    let progress: Option<usize> = std::env::var("ECHOD_SIM_PROGRESS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0);
     let started = std::time::Instant::now();
     let mut run = || -> Result<(), Violation> {
         for (i, e) in trace.iter().enumerate() {
             if progress.is_some_and(|n| i % n == 0) {
                 let widths: Vec<usize> = c.factors().iter().map(|f| f.nodes.len()).collect();
-                eprintln!("event {i}: {:.1?} explored {} max_width {} subsumed {} factors {:?}", started.elapsed(), c.stats.explored, c.stats.max_width, c.stats.subsumed, widths);
+                eprintln!(
+                    "event {i}: {:.1?} explored {} max_width {} subsumed {} factors {:?}",
+                    started.elapsed(),
+                    c.stats.explored,
+                    c.stats.max_width,
+                    c.stats.subsumed,
+                    widths
+                );
             }
-            c.observe(e.clone()).map_err(|v| Violation { index: i, ..v })?;
+            c.observe(e.clone())
+                .map_err(|v| Violation { index: i, ..v })?;
         }
         Ok(())
     };
     match run() {
-        Ok(_) => Verdict::Ok { explored: c.stats.explored },
+        Ok(_) => Verdict::Ok {
+            explored: c.stats.explored,
+        },
         Err(v) if v.unknown => Verdict::Unknown(v),
         Err(v) => Verdict::Ko(v),
     }
