@@ -417,10 +417,6 @@ pub open spec fn sat_add(a: Time, b: Time) -> Time {
     if a + b > u64::MAX { u64::MAX } else { (a + b) as Time }
 }
 
-/// The version the reference kernel refuses to acquire past. This model
-/// follows Lean and increments, saturating at `u64::MAX`.
-pub const MAX_VERSION: u32 = u32::MAX;
-
 pub open spec fn distinct(ids: Seq<Chars>) -> bool {
     forall|i: int, j: int| 0 <= i < j < ids.len() ==> ids[i] != ids[j]
 }

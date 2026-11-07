@@ -14,6 +14,61 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Largest logical instant or duration admitted by the protocol.
+///
+/// Keeping the protocol domain to one quarter of `u64` leaves enough
+/// headroom to derive a deadline from two individually bounded values without
+/// overflowing the executable carrier.
+pub const MAX_TIME: u64 = 4_611_686_018_427_387_904; // 2^62
+
+/// Largest task version admitted by the protocol.
+pub const MAX_VERSION: u64 = u32::MAX as u64;
+
+pub open spec fn spec_time_bounded(value: u64) -> bool {
+    value <= MAX_TIME
+}
+
+pub fn time_bounded(value: u64) -> (bounded: bool)
+    ensures
+        bounded == spec_time_bounded(value),
+{
+    value <= MAX_TIME
+}
+
+pub open spec fn spec_ttl_valid(ttl: u64) -> bool {
+    0 < ttl && ttl <= MAX_TIME
+}
+
+pub fn ttl_valid(ttl: u64) -> (valid: bool)
+    ensures
+        valid == spec_ttl_valid(ttl),
+{
+    0 < ttl && ttl <= MAX_TIME
+}
+
+/// Whether `at + duration` is a representable protocol instant.
+pub open spec fn spec_deadline_bounded(at: u64, duration: u64) -> bool {
+    at <= MAX_TIME && duration <= MAX_TIME && at + duration <= MAX_TIME
+}
+
+pub fn deadline_bounded(at: u64, duration: u64) -> (bounded: bool)
+    ensures
+        bounded == spec_deadline_bounded(at, duration),
+{
+    at <= MAX_TIME && duration <= MAX_TIME && at <= MAX_TIME - duration
+}
+
+pub open spec fn spec_version_can_increment(version: u64) -> bool {
+    version < MAX_VERSION
+}
+
+pub fn version_can_increment(version: u64) -> (can_increment: bool)
+    ensures
+        can_increment == spec_version_can_increment(version),
+{
+    version < MAX_VERSION
+}
+
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
@@ -91,6 +146,7 @@ impl Value {
         choose|v: Value| v@ == AValue::empty()
     }
 }
+
 // ---------------------------------------------------------------------------
 // Schedules
 // ---------------------------------------------------------------------------

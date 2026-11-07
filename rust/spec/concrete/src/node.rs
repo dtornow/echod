@@ -20,10 +20,11 @@ use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
 use echod_types::{
-    origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
-    PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
-    ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
-    TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
+    deadline_bounded, origin_of, same_origin, time_bounded, ttl_valid, version_can_increment,
+    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseRes, PromiseSettleReq,
+    PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, Tags,
+    TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskRef,
+    TaskState, Value,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -37,7 +38,10 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::ProcessEvent;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec, AValue};
+use echod_types::{
+    origin, same_origin_spec, spec_deadline_bounded, spec_time_bounded, spec_ttl_valid,
+    spec_version_can_increment, AValue,
+};
 
 pub use crate::document::{
     DocumentBody, DocumentBodyV, LoadedDocument, LoadedDocumentV, Obj, ObjV, Objects, Prom, PromV,
@@ -2546,6 +2550,102 @@ fn unavailable(request: &Request) -> (r: Response)
     }
 }
 
+/// A bounds rejection in the response shape of the operation.
+///
+/// This is checked before a request's pre-sweep, so a malformed request
+/// cannot persist due work or release notifications.
+fn bounds_error(request: &Request, now: u64) -> (r: Option<Response>)
+    ensures
+        r == spec_bounds_error(*request, now),
+{
+    match request {
+        Request::PromiseCreate(q) => {
+            if !time_bounded(q.timeout_at) {
+                Some(promise_res(400, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskCreate(q) => {
+            if !time_bounded(q.action.timeout_at) || !ttl_valid(q.ttl) {
+                Some(claim_res(400, None, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskAcquire(q) => {
+            if !ttl_valid(q.ttl) {
+                Some(claim_res(400, None, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskFence(q) => {
+            match &q.action {
+                TaskFenceAction::Create(c) => {
+                    if !time_bounded(c.timeout_at) {
+                        Some(fence_res(400, None))
+                    } else {
+                        None
+                    }
+                },
+                TaskFenceAction::Settle(_) => None,
+            }
+        },
+        Request::ScheduleCreate(q) => {
+            let next = next_cron(&q.cron, now);
+            if !deadline_bounded(next, q.promise_timeout) {
+                Some(Response::Schedule(ScheduleRes { status: 400, schedule: None }))
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// A version increment that the raw task handler would reject.
+///
+/// Looking only at the target row and the current instant lets the complete
+/// transition return the same 409 before sweeping unrelated due work.
+fn version_error(doc: &DocumentBody, request: &Request, now: u64) -> (r: Option<Response>)
+    ensures
+        r == spec_version_error(doc@, *request, now),
+{
+    let id = match request {
+        Request::TaskCreate(q) => {
+            if !targeted(&q.action.tags) || timer(&q.action.tags) {
+                return None;
+            }
+            &q.action.id
+        },
+        Request::TaskAcquire(q) => &q.id,
+        _ => return None,
+    };
+    match peek(doc, id) {
+        Some(object) => match object.task {
+            Some(task) if object.promise.state == PromiseState::Pending
+                && object.promise.timeout_at > now
+                && targeted(&object.promise.tags)
+                && task.state == TaskState::Pending
+                && !version_can_increment(task.version) =>
+                Some(claim_res(409, None, None)),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+fn preflight_error(doc: &DocumentBody, request: &Request, now: u64) -> (r: Option<Response>)
+    ensures
+        r == spec_preflight_error(doc@, *request, now),
+{
+    match bounds_error(request, now) {
+        Some(response) => Some(response),
+        None => version_error(doc, request, now),
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Handlers: one request against one document
@@ -2652,7 +2752,7 @@ fn promise_create(doc: DocumentBody, req: &PromiseCreateReq, now: u64) -> (r: (D
     ensures
         (r.0@, r.1) == spec_promise_create(doc@, *req, now),
 {
-    if timer(&req.tags) && targeted(&req.tags) {
+    if !time_bounded(req.timeout_at) || (timer(&req.tags) && targeted(&req.tags)) {
         return (doc, promise_res(400, None));
     }
     match peek(&doc, &req.id) {
@@ -2774,7 +2874,9 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
     ensures
         (r.0@, r.1) == spec_task_create(doc@, *pid, ttl, *action, now),
 {
-    if !targeted(&action.tags) || timer(&action.tags) {
+    if !time_bounded(action.timeout_at) || !ttl_valid(ttl)
+        || !targeted(&action.tags) || timer(&action.tags)
+    {
         return (doc, claim_res(400, None, None));
     }
     let (doc, created) = promise_create(doc, action, now);
@@ -2798,7 +2900,7 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
                     if t.state == TaskState::Fulfilled {
                         let res = claim_res(200, Some(task_record(&action.id, &t)), Some(record(&action.id, &promise)));
                         (doc, res)
-                    } else if t.state == TaskState::Pending {
+                    } else if t.state == TaskState::Pending && version_can_increment(t.version) {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(&action.id, &u)), Some(record(&action.id, &promise)));
                         let objs = open(doc).put(&action.id, Obj { promise, task: Some(u) });
@@ -2852,6 +2954,9 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
     ensures
         (r.0@, r.1) == spec_task_acquire(doc@, *id, version, *pid, ttl, now),
 {
+    if !ttl_valid(ttl) {
+        return (doc, claim_res(400, None, None));
+    }
     let objs = open(doc);
     match objs.get(id) {
         None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
@@ -2860,7 +2965,10 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
             match task {
                 None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
                 Some(t) => {
-                    if !(t.state == TaskState::Pending) || t.version != version || !(promise.state == PromiseState::Pending) {
+                    if !(t.state == TaskState::Pending) || t.version != version
+                        || !(promise.state == PromiseState::Pending)
+                        || !version_can_increment(t.version)
+                    {
                         (DocumentBody::Workflow(objs), claim_res(409, None, None))
                     } else {
                         let u = acquire(&t, pid, ttl, now);
@@ -3282,6 +3390,12 @@ fn fence(doc: DocumentBody, id: &String, version: u64, action: &TaskFenceAction,
     ensures
         (r.0@, r.1) == spec_fence(doc@, *id, version, *action, now),
 {
+    if match action {
+        TaskFenceAction::Create(c) => !time_bounded(c.timeout_at),
+        TaskFenceAction::Settle(_) => false,
+    } {
+        return (doc, fence_res(400, None));
+    }
     let crossed = match action {
         TaskFenceAction::Create(c) => c.id == *id || !same_origin(&c.id, id),
         TaskFenceAction::Settle(st) => st.id == *id || !same_origin(&st.id, id),
@@ -3356,7 +3470,10 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    if targeted(&req.promise_tags) && timer(&req.promise_tags) {
+    let next_run_at = next_cron(&req.cron, now);
+    if !deadline_bounded(next_run_at, req.promise_timeout)
+        || (targeted(&req.promise_tags) && timer(&req.promise_tags))
+    {
         return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
     }
     let existing = match &doc {
@@ -3373,7 +3490,7 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
                 promise_timeout: req.promise_timeout,
                 promise_param: copy(&req.promise_param),
                 promise_tags: copy(&req.promise_tags),
-                next_run_at: next_cron(&req.cron, now),
+                next_run_at,
                 last_run_at: None,
                 created_at: now,
             };
@@ -3416,6 +3533,9 @@ pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBo
     ensures
         (r.0@, r.1) == spec_handle(doc@, *request, now),
 {
+    if let Some(response) = bounds_error(request, now) {
+        return (doc, response);
+    }
     match request {
         Request::PromiseGet(q) => promise_get(doc, &q.id, now),
         Request::PromiseCreate(q) => promise_create(doc, q, now),
@@ -3444,7 +3564,8 @@ pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBo
 // ---------------------------------------------------------------------------
 
 /// Maximum pre-close and post-close steps in one external request.
-pub const REQUEST_STEPS: u64 = 256;
+pub const REQUEST_SWEEP_STEPS: u64 = 256;
+pub const REQUEST_STEPS: u64 = REQUEST_SWEEP_STEPS;
 
 proof fn lemma_notes_empty()
     ensures
@@ -3807,7 +3928,8 @@ fn local_well_formed(id: &String, object: &Obj, now: u64) -> (r: bool)
     let ghost ov = object@;
     assert(promise@ == ov.promise);
     assert(ov.promise.callbacks == strs_v(promise.callbacks@));
-    if promise.created_at > promise.timeout_at
+    if !time_bounded(promise.timeout_at)
+        || promise.created_at > promise.timeout_at
         || promise.created_at > now
         || (promise.state == PromiseState::Pending) != promise.settled_at.is_none()
     {
@@ -3889,6 +4011,11 @@ fn local_well_formed(id: &String, object: &Obj, now: u64) -> (r: bool)
     {
         return false;
     }
+    if let Some(ttl) = task.ttl {
+        if !ttl_valid(ttl) {
+            return false;
+        }
+    }
     if acquired && (task.version == 0 || task.lease_timeout_at.unwrap() <= now) {
         return false;
     }
@@ -3913,7 +4040,7 @@ fn local_well_formed(id: &String, object: &Obj, now: u64) -> (r: bool)
     if promise.state != PromiseState::Pending && task.state != TaskState::Fulfilled {
         return false;
     }
-    ids_unique(&task.resumes) && task.version <= u32::MAX as u64
+    ids_unique(&task.resumes) && task.version <= echod_types::MAX_VERSION
 }
 
 fn has_callback(objects: &Objects, awaiter: &String) -> (r: bool)
@@ -3957,6 +4084,9 @@ fn workflow_body_well_formed(
     ensures
         r == crate::document::workflow_body_well_formed(document@, objects@, now),
 {
+    if !time_bounded(now) {
+        return false;
+    }
     proof {
         use_type_invariant(objects);
         assert(spec_sorted_entries(objects.entries@));
@@ -4125,9 +4255,11 @@ fn body_well_formed_for(
         DocumentBody::Workflow(objects) => {
             workflow_body_well_formed(document, objects, now)
         },
-        DocumentBody::Schedule(None) => true,
+        DocumentBody::Schedule(None) => time_bounded(now),
         DocumentBody::Schedule(Some(schedule)) => {
-            if schedule.id != *document
+            if !time_bounded(now)
+                || !time_bounded(schedule.promise_timeout)
+                || schedule.id != *document
                 || schedule.created_at > now
                 || schedule.created_at > schedule.next_run_at
             {
@@ -4171,6 +4303,9 @@ pub fn request_transition(
         lemma_pend_empty();
         lemma_notes_empty();
     }
+    if let Some(response) = preflight_error(&from, request, now) {
+        return (from, response, Vec::new(), Vec::new());
+    }
     let original = copy(&from);
     let (before, mut born_before, mut notes_before) =
         sweep(from, now, retry_timeout, limit);
@@ -4187,23 +4322,6 @@ pub fn request_transition(
     let (after, mut born_after, mut notes_after) =
         sweep(handled, now, retry_timeout, limit);
     if due(&after, now) {
-        return (
-            original,
-            unavailable(request),
-            Vec::new(),
-            Vec::new(),
-        );
-    }
-    let document = request_document(request);
-    let Some(document) = document else {
-        return (
-            original,
-            unavailable(request),
-            Vec::new(),
-            Vec::new(),
-        );
-    };
-    if !body_well_formed_for(&document, &after, now) {
         return (
             original,
             unavailable(request),
@@ -5609,9 +5727,92 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
     }
 }
 
+pub open spec fn spec_bounds_error(request: Request, now: Time) -> Option<Response> {
+    match request {
+        Request::PromiseCreate(q) if !spec_time_bounded(q.timeout_at) =>
+            Some(spec_promise_res(400, None)),
+        Request::TaskCreate(q)
+            if !spec_time_bounded(q.action.timeout_at) || !spec_ttl_valid(q.ttl) =>
+            Some(Response::TaskClaim(TaskClaimRes {
+                status: 400,
+                task: None,
+                promise: None,
+            })),
+        Request::TaskAcquire(q) if !spec_ttl_valid(q.ttl) =>
+            Some(Response::TaskClaim(TaskClaimRes {
+                status: 400,
+                task: None,
+                promise: None,
+            })),
+        Request::TaskFence(q) => match q.action {
+            TaskFenceAction::Create(c) if !spec_time_bounded(c.timeout_at) =>
+                Some(Response::TaskFence(TaskFenceRes { status: 400, action: None })),
+            _ => None,
+        },
+        Request::ScheduleCreate(q)
+            if !spec_deadline_bounded(
+                echod_abstract::trusted::spec_next_cron(q.cron@, now),
+                q.promise_timeout,
+            ) =>
+            Some(Response::Schedule(ScheduleRes { status: 400, schedule: None })),
+        _ => None,
+    }
+}
+
+pub open spec fn spec_version_error(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+) -> Option<Response> {
+    let id = match request {
+        Request::TaskCreate(q)
+            if spec_targeted(q.action.tags) && !spec_timer(q.action.tags) =>
+                Some(q.action.id@),
+        Request::TaskAcquire(q) => Some(q.id@),
+        _ => None,
+    };
+    match id {
+        Some(id) => {
+            let map = spec_workflow_map(doc);
+            if map.contains_key(id) {
+                let object = map[id];
+                match object.task {
+                    Some(task) if object.promise.state == PromiseState::Pending
+                        && object.promise.timeout_at > now
+                        && spec_targeted(object.promise.tags)
+                        && task.state == TaskState::Pending
+                        && !spec_version_can_increment(task.version) =>
+                        Some(Response::TaskClaim(TaskClaimRes {
+                            status: 409,
+                            task: None,
+                            promise: None,
+                        })),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+pub open spec fn spec_preflight_error(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+) -> Option<Response> {
+    match spec_bounds_error(request, now) {
+        Some(response) => Some(response),
+        None => spec_version_error(doc, request, now),
+    }
+}
+
 /// One request against one document. The same match as `handle`.
 pub open spec fn spec_handle(doc: DocumentBodyV, request: Request, now: Time) -> (DocumentBodyV, Response) {
-    match request {
+    match spec_bounds_error(request, now) {
+        Some(response) => (doc, response),
+        None => match request {
         Request::PromiseGet(q) => spec_promise_get(doc, q.id, now),
         Request::PromiseCreate(q) => spec_promise_create(doc, q, now),
         Request::PromiseSettle(q) => spec_promise_settle(doc, q, now),
@@ -5631,6 +5832,7 @@ pub open spec fn spec_handle(doc: DocumentBodyV, request: Request, now: Time) ->
         Request::ScheduleGet(q) => spec_schedule_get(doc, q.id),
         Request::ScheduleCreate(q) => spec_schedule_create(doc, q, now),
         Request::ScheduleDelete(q) => spec_schedule_delete(doc, q.id),
+        },
     }
 }
 
@@ -5817,7 +6019,7 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
 }
 
 pub open spec fn spec_promise_create(doc: DocumentBodyV, req: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+    if !spec_time_bounded(req.timeout_at) || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         (doc, spec_promise_res(400, None))
     } else {
         let map = spec_workflow_map(doc);
@@ -5943,7 +6145,9 @@ pub open spec fn spec_acquire(t: TkV, pid: Seq<char>, ttl: u64, now: Time) -> Tk
 }
 
 pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, action: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+    if !spec_time_bounded(action.timeout_at) || !spec_ttl_valid(ttl)
+        || !spec_targeted(action.tags) || spec_timer(action.tags)
+    {
         (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
         let (doc, created) = spec_promise_create(doc, action, now);
@@ -5970,7 +6174,7 @@ pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, act
                                     promise: Some(spec_record(action.id, seen.promise)),
                                 }),
                             ),
-                            Some(t) if t.state == TaskState::Pending => {
+                            Some(t) if t.state == TaskState::Pending && spec_version_can_increment(t.version) => {
                                 let u = spec_acquire(t, pid@, ttl, now);
                                 let obj = ObjV { task: Some(u), ..seen };
                                 (
@@ -6007,6 +6211,9 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
 }
 
 pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocumentBodyV, Response) {
+    if !spec_ttl_valid(ttl) {
+        (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
+    } else {
     let doc = spec_opened(doc);
     let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
@@ -6015,7 +6222,9 @@ pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64,
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
             None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
-            Some(t) if t.state != TaskState::Pending || t.version != version || obj.promise.state != PromiseState::Pending => {
+            Some(t) if t.state != TaskState::Pending || t.version != version
+                || obj.promise.state != PromiseState::Pending
+                || !spec_version_can_increment(t.version) => {
                 (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
             },
             Some(t) => {
@@ -6031,6 +6240,7 @@ pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64,
                 )
             },
         }
+    }
     }
 }
 
@@ -6240,7 +6450,11 @@ pub open spec fn spec_fence(doc: DocumentBodyV, id: String, version: u64, action
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
-    if target@ == id@ || !same_origin_spec(target@, id@) {
+    let timeout_bad = match action {
+        TaskFenceAction::Create(c) => !spec_time_bounded(c.timeout_at),
+        TaskFenceAction::Settle(_) => false,
+    };
+    if timeout_bad || target@ == id@ || !same_origin_spec(target@, id@) {
         (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }))
     } else {
         let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
@@ -6283,7 +6497,10 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+    let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
+    {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
         match doc {
@@ -6296,7 +6513,7 @@ pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq
                     promise_timeout: req.promise_timeout,
                     promise_param: req.promise_param,
                     promise_tags: req.promise_tags,
-                    next_run_at: echod_abstract::trusted::spec_next_cron(req.cron@, now),
+                    next_run_at,
                     last_run_at: None,
                     created_at: now,
                 };
@@ -6372,18 +6589,17 @@ pub open spec fn spec_request_commits(
     retry_timeout: u64,
     limit: nat,
 ) -> bool {
+    if spec_preflight_error(doc, request, now) is Some {
+        true
+    } else {
     let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
     if spec_earliest_in(before, now) is Some {
         false
     } else {
         let (handled, _) = spec_handle(before, request, now);
         let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
-        &&& spec_earliest_in(after, now) is None
-        &&& match spec_request_document(request) {
-            Some(document) =>
-                crate::document::body_well_formed(document, after, now),
-            None => false,
-        }
+        spec_earliest_in(after, now) is None
+    }
     }
 }
 
@@ -6394,6 +6610,9 @@ pub open spec fn spec_request_transition(
     retry_timeout: u64,
     limit: nat,
 ) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
+    match spec_preflight_error(doc, request, now) {
+    Some(response) => (doc, response, Seq::empty(), Seq::empty()),
+    None => {
     let (before, born_before, notes_before) =
         spec_sweep(doc, now, retry_timeout, limit);
     if spec_earliest_in(before, now) is Some {
@@ -6405,20 +6624,15 @@ pub open spec fn spec_request_transition(
         if spec_earliest_in(after, now) is Some {
             (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
         } else {
-            match spec_request_document(request) {
-                Some(document) if crate::document::body_well_formed(
-                    document,
-                    after,
-                    now,
-                ) => (
-                    after,
-                    response,
-                    born_before + born_after,
-                    notes_before + notes_after,
-                ),
-                _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
-            }
+            (
+                after,
+                response,
+                born_before + born_after,
+                notes_before + notes_after,
+            )
         }
+    }
+    }
     }
 }
 

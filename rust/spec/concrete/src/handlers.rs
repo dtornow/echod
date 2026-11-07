@@ -67,6 +67,7 @@ use echod_types::{
     origin, PromiseRegisterCallbackReq, PromiseRes, PromiseState, Request, Response,
     same_origin_spec, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, TaskClaimRes,
     TaskFenceAction, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRef, TaskState,
+    spec_deadline_bounded, MAX_TIME, MAX_VERSION,
 };
 
 verus! {
@@ -551,7 +552,8 @@ pub proof fn lemma_task_create_agrees(
     assert(outs == a_task_create(pid, ttl, action, s, now));
     lemma_targeted(action.tags);
     lemma_timer(action.tags);
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !spec_targeted(action.tags) || spec_timer(action.tags) {
         assert(outs == spec_out(spec_claim_res(400, None, None), s));
         assert(c_task_create(doc, pid, ttl, action, now) == (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None })));
         lemma_others_same(key, s);
@@ -592,6 +594,10 @@ pub proof fn lemma_task_create_agrees(
                             lemma_task_record(action.id, t, seen_t);
                             lemma_record(action.id, seen.promise, seen_p);
                             assert(outs[0].next == s);
+                            lemma_others_same(key, s);
+                        } else if t.state == TaskState::Pending && t.version >= MAX_VERSION {
+                            assert(stored.version >= MAX_VERSION);
+                            assert(outs == spec_out(spec_claim_res(409, None, None), s));
                             lemma_others_same(key, s);
                         } else if t.state == TaskState::Pending {
                             lemma_unfulfilled_is_stored(map[x], p, ta, now);
@@ -745,6 +751,17 @@ pub proof fn lemma_task_acquire_agrees(
     assert(spec_handle(doc, request, now) == c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_acquire(req.id, req.version, req.pid, req.ttl, s, now));
+    if req.ttl == 0 || req.ttl > MAX_TIME {
+        assert(outs == spec_out(spec_claim_res(400, None, None), s));
+        assert(c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now)
+            == (doc, Response::TaskClaim(TaskClaimRes {
+                status: 400,
+                task: None,
+                promise: None,
+            })));
+        lemma_others_same(key, s);
+        return;
+    }
     lemma_origin_doc(key, o, doc, s);
     let map = spec_workflow_map(doc);
     assert(doc == DocumentBodyV::Workflow(map));
@@ -771,7 +788,8 @@ pub proof fn lemma_task_acquire_agrees(
                 let seen_t = spec_project_task(stored, seen_p);
                 assert(task_rel(t, seen_t));
                 assert(seen_t.version == stored.version);
-                if t.state != TaskState::Pending || t.version != req.version || seen.promise.state != PromiseState::Pending {
+                if t.state != TaskState::Pending || t.version != req.version
+                    || seen.promise.state != PromiseState::Pending || t.version >= MAX_VERSION {
                     assert(outs == spec_out(spec_claim_res(409, None, None), s));
                     lemma_others_same(key, s);
                 } else {
@@ -1821,10 +1839,14 @@ pub proof fn lemma_fence_agrees(
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
+    let timeout_bad = match action {
+        TaskFenceAction::Create(c) => c.timeout_at > MAX_TIME,
+        TaskFenceAction::Settle(_) => false,
+    };
     assert(spec_handle(doc, request, now) == c_fence(doc, req.id, req.version, action, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_fence(req, s, now));
-    if target@ == x || !same_origin_spec(target@, x) {
+    if timeout_bad || target@ == x || !same_origin_spec(target@, x) {
         assert(outs == spec_out(spec_fence_res(400, None), s));
         assert(c_fence(doc, req.id, req.version, action, now) == (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None })));
         lemma_others_same(key, s);
@@ -1986,7 +2008,9 @@ pub proof fn lemma_schedule_create_agrees(
     lemma_schedule_doc(key, req.id@, doc, s);
     lemma_schedule_key(req.id@);
     let slot = doc->Schedule_0;
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+    let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         assert(outs == spec_out(spec_schedule_res(400, None), s));
         lemma_others_same(key, s);
     } else {
@@ -2000,7 +2024,6 @@ pub proof fn lemma_schedule_create_agrees(
             },
             None => {
                 assert(!s.schedules.contains_key(req.id@));
-                let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
                 let schedule = Schedule {
                     id: req.id,
                     cron: req.cron,

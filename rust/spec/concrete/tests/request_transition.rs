@@ -1,7 +1,8 @@
 use echod_concrete::{peek, request_transition, DocumentBody, Obj, Objects, Outbound, Prom, Tk};
 use echod_types::{
-    PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, Tags,
-    TaskContinueReq, TaskReleaseReq, TaskState, Value,
+    PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq,
+    Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction, TaskFenceReq,
+    TaskReleaseReq, TaskState, Value, MAX_TIME, MAX_VERSION,
 };
 
 fn tags(values: &[(&str, &str)]) -> Tags {
@@ -248,6 +249,177 @@ fn exhausted_closure_is_atomic_503() {
     let (doc, response, born, notes) = request_transition(original.clone(), &get, 10, 50, 0);
 
     assert_eq!(status(&response), 503);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn invalid_timeout_is_atomic_before_the_pre_sweep() {
+    let original = workflow(vec![(
+        "wf.due".to_string(),
+        Obj {
+            promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
+            task: Some(task(TaskState::Pending, Some(10), None)),
+        },
+    )]);
+    let request = Request::PromiseCreate(PromiseCreateReq {
+        id: "wf.new".to_string(),
+        timeout_at: MAX_TIME + 1,
+        param: Value::default(),
+        tags: Vec::new(),
+    });
+
+    let (doc, response, born, notes) =
+        request_transition(original.clone(), &request, 10, 50, 32);
+
+    assert_eq!(status(&response), 400);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn invalid_ttl_is_operation_shaped_and_atomic() {
+    let action = PromiseCreateReq {
+        id: "wf.task".to_string(),
+        timeout_at: 1_000,
+        param: Value::default(),
+        tags: tags(&[("resonate:target", "worker")]),
+    };
+    for ttl in [0, MAX_TIME + 1] {
+        let original = workflow(Vec::new());
+        let create = Request::TaskCreate(TaskCreateReq {
+            pid: "worker".to_string(),
+            ttl,
+            action: action.clone(),
+        });
+        let (doc, response, born, notes) =
+            request_transition(original.clone(), &create, 10, 50, 32);
+        assert!(matches!(response, Response::TaskClaim(_)));
+        assert_eq!(status(&response), 400);
+        assert_eq!(doc, original);
+        assert!(born.is_empty());
+        assert!(notes.is_empty());
+
+        let acquire = Request::TaskAcquire(TaskAcquireReq {
+            id: "wf.task".to_string(),
+            version: 0,
+            pid: "worker".to_string(),
+            ttl,
+        });
+        let (doc, response, born, notes) =
+            request_transition(workflow(Vec::new()), &acquire, 10, 50, 32);
+        assert!(matches!(response, Response::TaskClaim(_)));
+        assert_eq!(status(&response), 400);
+        assert_eq!(doc, workflow(Vec::new()));
+        assert!(born.is_empty());
+        assert!(notes.is_empty());
+    }
+}
+
+#[test]
+fn exact_protocol_limits_are_admitted() {
+    let create = Request::TaskCreate(TaskCreateReq {
+        pid: "worker".to_string(),
+        ttl: MAX_TIME,
+        action: PromiseCreateReq {
+            id: "wf.task".to_string(),
+            timeout_at: MAX_TIME,
+            param: Value::default(),
+            tags: tags(&[("resonate:target", "worker")]),
+        },
+    });
+    let (doc, response, _, _) =
+        request_transition(workflow(Vec::new()), &create, 10, 50, 32);
+    assert_eq!(status(&response), 200);
+    assert_eq!(object(&doc, "wf.task").task.unwrap().version, 1);
+}
+
+#[test]
+fn maximum_task_version_cannot_be_incremented() {
+    let mut at_limit = task(TaskState::Pending, Some(500), None);
+    at_limit.version = MAX_VERSION;
+    let original = workflow(vec![(
+        "wf.task".to_string(),
+        Obj {
+            promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
+            task: Some(at_limit),
+        },
+    ), (
+        "wf.due".to_string(),
+        Obj {
+            promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
+            task: Some(task(TaskState::Pending, Some(10), None)),
+        },
+    )]);
+
+    let acquire = Request::TaskAcquire(TaskAcquireReq {
+        id: "wf.task".to_string(),
+        version: MAX_VERSION,
+        pid: "worker".to_string(),
+        ttl: 100,
+    });
+    let (doc, response, born, notes) =
+        request_transition(original.clone(), &acquire, 10, 50, 32);
+    assert_eq!(status(&response), 409);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+
+    let create = Request::TaskCreate(TaskCreateReq {
+        pid: "worker".to_string(),
+        ttl: 100,
+        action: PromiseCreateReq {
+            id: "wf.task".to_string(),
+            timeout_at: 1_000,
+            param: Value::default(),
+            tags: tags(&[("resonate:target", "worker")]),
+        },
+    });
+    let (doc, response, born, notes) =
+        request_transition(original.clone(), &create, 10, 50, 32);
+    assert_eq!(status(&response), 409);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn fence_and_schedule_reject_timeout_overflow_without_effects() {
+    let original = workflow(Vec::new());
+    let fence = Request::TaskFence(TaskFenceReq {
+        id: "wf.task".to_string(),
+        version: 1,
+        action: TaskFenceAction::Create(PromiseCreateReq {
+            id: "wf.child".to_string(),
+            timeout_at: MAX_TIME + 1,
+            param: Value::default(),
+            tags: Vec::new(),
+        }),
+    });
+    let (doc, response, born, notes) =
+        request_transition(original.clone(), &fence, 10, 50, 32);
+    assert!(matches!(response, Response::TaskFence(_)));
+    assert_eq!(status(&response), 400);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+
+    let schedule = Request::ScheduleCreate(ScheduleCreateReq {
+        id: "tick".to_string(),
+        cron: "* * * * * *".to_string(),
+        promise_id: "tick-{{.timestamp}}".to_string(),
+        promise_timeout: MAX_TIME,
+        promise_param: Value::default(),
+        promise_tags: Vec::new(),
+        next_run_at: 0,
+    });
+    let original = DocumentBody::Schedule(None);
+    let (doc, response, born, notes) =
+        request_transition(original.clone(), &schedule, 10, 50, 32);
+    assert!(matches!(response, Response::Schedule(_)));
+    assert_eq!(status(&response), 400);
     assert_eq!(doc, original);
     assert!(born.is_empty());
     assert!(notes.is_empty());
