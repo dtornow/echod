@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use echod_concrete::{peek, request_transition, DocumentBody, Obj, Objects, Outbound, Prom, Tk};
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, Tags,
-    TaskContinueReq, TaskReleaseReq, TaskState, Value,
+    TaskAcquireReq, TaskContinueReq, TaskReleaseReq, TaskState, Value,
 };
 
 fn tags(values: &[(&str, &str)]) -> Tags {
@@ -62,6 +64,19 @@ fn assert_execute(notes: &[Outbound], id: &str, version: u64) {
         matches!(note, Outbound::Execute { id: actual, version: actual_version }
             if actual == id && *actual_version == version)
     }));
+}
+
+fn assert_unique_effect_keys(notes: &[Outbound]) {
+    let mut keys = HashSet::new();
+    for note in notes {
+        let key = match note {
+            Outbound::Execute { id, .. } => format!("execute:{id}"),
+            Outbound::Unblock { address, promise } => {
+                format!("unblock:{}:{address}", promise.id)
+            }
+        };
+        assert!(keys.insert(key), "duplicate protocol effect key");
+    }
 }
 
 #[test]
@@ -129,6 +144,7 @@ fn settlement_drains_listener_and_resumes_suspended_task() {
     let mut awaited = promise(tags(&[("resonate:external", "true")]), 1_000);
     awaited.callbacks.push("wf:awaiter".to_string());
     awaited.listeners.push("inbox".to_string());
+    awaited.listeners.push("audit".to_string());
     let doc = workflow(vec![
         (
             "wf:awaited".to_string(),
@@ -157,7 +173,11 @@ fn settlement_drains_listener_and_resumes_suspended_task() {
     assert!(notes
         .iter()
         .any(|note| { matches!(note, Outbound::Unblock { address, .. } if address == "inbox") }));
+    assert!(notes
+        .iter()
+        .any(|note| { matches!(note, Outbound::Unblock { address, .. } if address == "audit") }));
     assert_execute(&notes, "wf:awaiter", 1);
+    assert_unique_effect_keys(&notes);
     let awaited = object(&doc, "wf:awaited");
     assert!(awaited.promise.callbacks.is_empty());
     assert!(awaited.promise.listeners.is_empty());
@@ -251,4 +271,36 @@ fn exhausted_closure_is_atomic_503() {
     assert_eq!(doc, original);
     assert!(born.is_empty());
     assert!(notes.is_empty());
+}
+
+#[test]
+fn endpoint_documents_cannot_alone_determine_execute_effects() {
+    // The same old body and request produce the same final body.  At time 10
+    // the old offer is due and the pre-sweep emits Execute; at time 5 it is
+    // not due.  The maximal TTL saturates both acquired lease deadlines, so
+    // no durable final field records which transition emitted the effect.
+    let old = workflow(vec![(
+        "wf.task".to_string(),
+        Obj {
+            promise: promise(tags(&[("resonate:target", "worker")]), u64::MAX),
+            task: Some(task(TaskState::Pending, Some(10), None)),
+        },
+    )]);
+    let acquire = Request::TaskAcquire(TaskAcquireReq {
+        id: "wf.task".to_string(),
+        version: 1,
+        pid: "worker".to_string(),
+        ttl: u64::MAX,
+    });
+
+    let (due_doc, due_response, _, due_notes) =
+        request_transition(old.clone(), &acquire, 10, 50, 32);
+    let (early_doc, early_response, _, early_notes) = request_transition(old, &acquire, 5, 50, 32);
+
+    assert_eq!(status(&due_response), 200);
+    assert_eq!(status(&early_response), 200);
+    assert_eq!(due_doc, early_doc);
+    assert_execute(&due_notes, "wf.task", 1);
+    assert!(early_notes.is_empty());
+    assert_unique_effect_keys(&due_notes);
 }

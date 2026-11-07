@@ -35,6 +35,7 @@
 pub mod document;
 pub mod quick_n_dirty;
 pub mod node;
+pub mod effects;
 pub mod store;
 pub mod model;
 pub mod interpret;

@@ -335,6 +335,175 @@ pub struct ObjV {
     pub task: Option<TkV>,
 }
 
+/// The storage-independent payload of an Unblock effect.  The promise id is
+/// kept as characters here (rather than a `String`) so this algebra does not
+/// depend on the node's trusted string constructor.
+pub struct PromiseEffectV {
+    pub id: Seq<char>,
+    pub state: PromiseState,
+    pub param: Value,
+    pub value: Value,
+    pub tags: Tags,
+    pub timeout_at: u64,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
+}
+
+/// A protocol effect as a value.  Equality includes the payload; uniqueness
+/// is stated separately in terms of [`ProtocolEffectKeyV`].
+pub enum ProtocolEffectV {
+    Execute {
+        id: Seq<char>,
+        version: u64,
+    },
+    Unblock {
+        promise: Seq<char>,
+        address: Seq<char>,
+        record: PromiseEffectV,
+    },
+}
+
+/// The idempotency key of a protocol effect.
+///
+/// Execute is keyed only by task id.  Unblock is keyed by promise id and
+/// listener address.  Neither storage versions nor encoded bytes participate.
+pub enum ProtocolEffectKeyV {
+    Execute { id: Seq<char> },
+    Unblock { promise: Seq<char>, address: Seq<char> },
+}
+
+pub open spec fn protocol_effect_key(effect: ProtocolEffectV) -> ProtocolEffectKeyV {
+    match effect {
+        ProtocolEffectV::Execute { id, .. } => ProtocolEffectKeyV::Execute { id },
+        ProtocolEffectV::Unblock { promise, address, .. } =>
+            ProtocolEffectKeyV::Unblock { promise, address },
+    }
+}
+
+pub open spec fn promise_effect(id: Seq<char>, promise: PromV) -> PromiseEffectV {
+    PromiseEffectV {
+        id,
+        state: promise.state,
+        param: promise.param,
+        value: promise.value,
+        tags: promise.tags,
+        timeout_at: promise.timeout_at,
+        created_at: promise.created_at,
+        settled_at: promise.settled_at,
+    }
+}
+
+pub open spec fn effect_rearm_at(now: u64, retry_timeout: u64) -> u64 {
+    if (now as nat) + (retry_timeout as nat) > (u64::MAX as nat) {
+        u64::MAX
+    } else {
+        ((now as nat) + (retry_timeout as nat)) as u64
+    }
+}
+
+/// Whether one closure step rearmed pending task `id`.
+pub open spec fn offer_rearmed(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    now: u64,
+    retry_timeout: u64,
+) -> bool {
+    before.contains_key(id)
+        && match before[id].task {
+            Some(old) => {
+                let new = TkV {
+                    retry_timeout_at: Some(effect_rearm_at(now, retry_timeout)),
+                    ..old
+                };
+                &&& before[id].promise.state == PromiseState::Pending
+                &&& old.state == TaskState::Pending
+                &&& match old.retry_timeout_at {
+                    Some(at) => at <= now,
+                    None => false,
+                }
+                &&& old.retry_timeout_at != new.retry_timeout_at
+                &&& after == before.insert(id, ObjV {
+                    task: Some(new),
+                    ..before[id]
+                })
+            },
+            _ => false,
+        }
+}
+
+/// Whether one closure step removed the first listener of `promise`.
+pub open spec fn listener_unblocked(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    promise: Seq<char>,
+    address: Seq<char>,
+) -> bool {
+    before.contains_key(promise)
+        && before[promise].promise.listeners.len() > 0
+        && before[promise].promise.listeners[0] == address
+        && after == before.insert(promise, ObjV {
+            promise: PromV {
+                listeners: before[promise].promise.listeners.skip(1),
+                ..before[promise].promise
+            },
+            ..before[promise]
+        })
+}
+
+/// The unordered keyed protocol effects visible in one closure step.
+///
+/// This compares the old and new workflow maps only, with the clock and retry
+/// configuration needed to recognize a task rearm:
+///
+/// * rearming a due pending-task offer produces Execute, with the version in
+///   the new document;
+/// * removing a listener produces Unblock, with the settled promise value in
+///   the new document.
+///
+/// A complete request folds these comparisons over its pre-handler and
+/// post-handler closure traces.  Those traces cannot in general be collapsed
+/// to the request's initial/final pair:
+/// the handler may acquire a task after the pre-sweep emitted Execute, hiding
+/// the rearmed pending state in the final document.  More strongly, take one
+/// old task whose retry is 10 and acquire it with TTL `u64::MAX`: at `now = 10`
+/// the pre-sweep emits Execute, while at `now = 5` it does not, but both final
+/// acquired tasks have the same saturated lease deadline and all the same
+/// durable fields.  Thus old/new documents alone are indistinguishable.
+/// `effects.rs` retains the clock/configuration and exactly the logically
+/// unavoidable closure boundaries; its executable regression test instantiates
+/// this counterexample.
+pub open spec fn workflow_effects(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    now: u64,
+    retry_timeout: u64,
+) -> ISet<ProtocolEffectV> {
+    ISet::new(|effect: ProtocolEffectV| match effect {
+        ProtocolEffectV::Execute { id, version } =>
+            offer_rearmed(before, after, id, now, retry_timeout)
+                && after[id].task.unwrap().version == version,
+        ProtocolEffectV::Unblock { promise, address, record } =>
+            listener_unblocked(before, after, promise, address)
+                && record == promise_effect(promise, after[promise].promise),
+    })
+}
+
+/// The same comparison lifted to document bodies.  Schedule documents have
+/// no Execute or Unblock effects.
+pub open spec fn document_effects(
+    before: DocumentBodyV,
+    after: DocumentBodyV,
+    now: u64,
+    retry_timeout: u64,
+) -> ISet<ProtocolEffectV> {
+    match (before, after) {
+        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) =>
+            workflow_effects(old, new, now, retry_timeout),
+        _ => ISet::empty(),
+    }
+}
+
 pub enum DocumentBodyV {
     Workflow(Map<Seq<char>, ObjV>),
     Schedule(Option<Schedule>),
