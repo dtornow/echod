@@ -122,4 +122,53 @@ module Keys {
     var k :| k in keys && forall k' :: k' in keys ==> Leq(k, k');
     k
   }
+
+  // The keys in dictionary order: least, then the rest.
+  function Sorted(keys: set<string>): seq<string>
+    decreases |keys|
+  {
+    if keys == {} then []
+    else
+      var k := MinKey(keys);
+      [k] + Sorted(keys - {k})
+  }
+
+  lemma SortedProps(keys: set<string>)
+    ensures var s := Sorted(keys);
+      |s| == |keys| &&
+      (forall x :: x in s <==> x in keys) &&
+      (forall i, j | 0 <= i < j < |s| :: Lt(s[i], s[j]))
+    decreases |keys|
+  {
+    if keys != {} {
+      var k := MinKey(keys);
+      var rest := keys - {k};
+      SortedProps(rest);
+      var tail := Sorted(rest);
+      var s := Sorted(keys);
+      assert s == [k] + tail;
+      assert |rest| == |keys| - 1;
+      forall x | x in s
+        ensures x in keys
+      {
+        if x != k { assert x in tail; }
+      }
+      forall x | x in keys
+        ensures x in s
+      {
+        if x != k { assert x in rest && x in tail; }
+      }
+      forall i, j | 0 <= i < j < |s|
+        ensures Lt(s[i], s[j])
+      {
+        if i == 0 {
+          assert s[j] in tail && s[j] in rest && s[j] != k;
+          assert Leq(k, s[j]);
+        } else {
+          assert 0 <= i - 1 < j - 1 < |tail|;
+          assert s[i] == tail[i - 1] && s[j] == tail[j - 1];
+        }
+      }
+    }
+  }
 }

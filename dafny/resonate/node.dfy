@@ -5,8 +5,11 @@ include "../framework/order.dfy"
 // A document is an origin's objects, or a schedule. `WellFormed` is the
 // catalogue for that document: the promise rows, the task rows, and, when
 // the document is a schedule, the schedule rows. Before the handler, the
-// document is swept at that instant: due steps until one changes nothing,
-// or `SweepSteps` of them have run. Promise create then sees that document.
+// document is swept at that instant: due steps until one changes nothing.
+// Promise create then sees that document. The sweep finishes because of the
+// order of that work. A deadline is settled before the callbacks it
+// uncovers, a lease is returned before the retry it arms, and a callback
+// is spent before the retry it wakes.
 // A timer that is also targeted is refused. An id already present is
 // answered as it stands, projected at `now`, and not written back. A new id
 // is inserted, and a schedule document becomes an origin to hold it. The
@@ -76,10 +79,6 @@ module Node {
   datatype Note = Execute(id: string, version: nat) | Unblock(address: string, id: string, promise: Promise)
   datatype Ran = Ran(doc: Doc, born: seq<Occurrence>, notes: seq<Note>)
   datatype Stepped = Stepped(objects: map<string, Obj>, notes: seq<Note>)
-
-  // How many due steps one sweep runs. A document with more due is left
-  // with a deadline still due.
-  const SweepSteps: nat := 256
 
   // The cron engine. The sweep uses one fact: the next run is later.
   function {:axiom} NextCron(cron: string, at: nat): nat
@@ -411,22 +410,421 @@ module Node {
     case Schedule(None) => Ran(doc, [], [])
   }
 
-  function Sweep(doc: Doc, now: nat, retry: nat, limit: nat): (s: Ran)
-    ensures WellFormed(doc, now) ==> WellFormed(s.doc, now)
-    decreases limit
+  function Sum(objects: map<string, Obj>, keys: seq<string>, weight: Obj -> nat): nat
+    requires forall k :: k in keys ==> k in objects
+    decreases |keys|
   {
-    if limit == 0 then Ran(doc, [], [])
-    else
-      var ran := RunDue(doc, now, retry);
-      if ran.doc == doc then Ran(doc, [], [])
-      else
-        var rest := Sweep(ran.doc, now, retry, limit - 1);
-        assert WellFormed(doc, now) ==> WellFormed(rest.doc, now) by {
-          if WellFormed(doc, now) {
-            RunDueOk(doc, now, retry);
+    if |keys| == 0 then 0
+    else weight(objects[keys[0]]) + Sum(objects, keys[1..], weight)
+  }
+
+  lemma SumAgree(a: map<string, Obj>, b: map<string, Obj>, keys: seq<string>, weight: Obj -> nat)
+    requires forall k :: k in keys ==> k in a && k in b && weight(a[k]) == weight(b[k])
+    ensures Sum(a, keys, weight) == Sum(b, keys, weight)
+    decreases |keys|
+  {
+    if |keys| != 0 { SumAgree(a, b, keys[1..], weight); }
+  }
+
+  lemma SumReplace(objects: map<string, Obj>, keys: seq<string>, id: string, o: Obj, weight: Obj -> nat)
+    requires id in objects && id in keys
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    decreases |keys|
+    ensures var objects' := objects[id := o];
+      Sum(objects', keys, weight) + weight(objects[id]) == Sum(objects, keys, weight) + weight(o)
+  {
+    var objects' := objects[id := o];
+    if keys[0] == id {
+      forall k | k in keys[1..]
+        ensures k in objects && k in objects' && weight(objects'[k]) == weight(objects[k])
+      {
+        assert k != id;
+        assert objects'[k] == objects[k];
+      }
+      SumAgree(objects, objects', keys[1..], weight);
+    } else {
+      assert id in keys[1..];
+      SumReplace(objects, keys[1..], id, o, weight);
+    }
+  }
+
+  function Weigh(doc: Doc, weight: Obj -> nat): nat {
+    match doc
+    case Origin(objects) =>
+      SortedProps(objects.Keys);
+      Sum(objects, Sorted(objects.Keys), weight)
+    case Schedule(_) => 0
+  }
+
+  lemma WeighReplace(objects: map<string, Obj>, id: string, o: Obj, weight: Obj -> nat)
+    requires id in objects
+    ensures var objects' := objects[id := o];
+      Weigh(Origin(objects'), weight) + weight(objects[id]) == Weigh(Origin(objects), weight) + weight(o)
+  {
+    var keys := Sorted(objects.Keys);
+    SortedProps(objects.Keys);
+    var objects' := objects[id := o];
+    assert objects'.Keys == objects.Keys;
+    assert id in keys;
+    forall i, j | 0 <= i < j < |keys|
+      ensures keys[i] != keys[j]
+    {
+      assert Lt(keys[i], keys[j]);
+    }
+    SumReplace(objects, keys, id, o, weight);
+    assert Sorted(objects'.Keys) == keys;
+  }
+
+  lemma WeighKeep(objects: map<string, Obj>, id: string, o: Obj, weight: Obj -> nat)
+    requires id in objects
+    requires weight(o) == weight(objects[id])
+    ensures Weigh(Origin(objects[id := o]), weight) == Weigh(Origin(objects), weight)
+  {
+    WeighReplace(objects, id, o, weight);
+  }
+
+  lemma WeighDown(objects: map<string, Obj>, id: string, o: Obj, weight: Obj -> nat)
+    requires id in objects
+    requires weight(objects[id]) == weight(o) + 1
+    ensures Weigh(Origin(objects[id := o]), weight) == Weigh(Origin(objects), weight) - 1
+  {
+    WeighReplace(objects, id, o, weight);
+  }
+
+  lemma WeighLess(objects: map<string, Obj>, id: string, o: Obj, weight: Obj -> nat)
+    requires id in objects
+    requires weight(o) < weight(objects[id])
+    ensures Weigh(Origin(objects[id := o]), weight) < Weigh(Origin(objects), weight)
+  {
+    WeighReplace(objects, id, o, weight);
+  }
+
+  lemma WeighSame(a: map<string, Obj>, b: map<string, Obj>, weight: Obj -> nat)
+    requires a.Keys == b.Keys
+    requires forall k :: k in a ==> weight(a[k]) == weight(b[k])
+    ensures Weigh(Origin(a), weight) == Weigh(Origin(b), weight)
+  {
+    SortedProps(a.Keys);
+    assert Sorted(a.Keys) == Sorted(b.Keys);
+    SumAgree(a, b, Sorted(a.Keys), weight);
+  }
+
+  function CbW(o: Obj): nat { |o.promise.callbacks| }
+  function LnW(o: Obj): nat { |o.promise.listeners| }
+
+  function ToutW(now: nat): Obj -> nat {
+    (o: Obj) => if o.promise.state == PromiseState.Pending && o.promise.timeoutAt <= now then 1 else 0
+  }
+
+  function LeaseW(now: nat): Obj -> nat {
+    (o: Obj) => if LeaseDue(o, now) then 1 else 0
+  }
+
+  function RetryW(now: nat): Obj -> nat {
+    (o: Obj) => if RetryDue(o, now) then 1 else 0
+  }
+
+  function SlackOf(o: Obj, now: nat): nat {
+    match o.task
+    case None => 0
+    case Some(t) =>
+      if RetryDue(o, now) then now - t.retryTimeoutAt.value else 0
+  }
+
+  function SlackW(now: nat): Obj -> nat {
+    (o: Obj) => SlackOf(o, now)
+  }
+
+  // How far a schedule's next run sits at or before `now`. An origin has none.
+  function Gap(doc: Doc, now: nat): nat {
+    match doc
+    case Schedule(Some(s)) =>
+      if s.nextRunAt <= now then now - s.nextRunAt + 1 else 0
+    case _ => 0
+  }
+
+  lemma ResumeKeeps(objects: map<string, Obj>, awaiter: string, awaited: string, since: nat, now: nat)
+    ensures var after := Resume(objects, awaiter, awaited, since, now);
+      after.Keys == objects.Keys &&
+      (forall k :: k in objects ==> after[k].promise == objects[k].promise) &&
+      (forall k :: k in objects ==> LeaseW(now)(after[k]) == LeaseW(now)(objects[k]))
+  {
+    if awaiter in objects {
+      var stored := objects[awaiter];
+      var seen := Project(stored, now);
+      match seen.task
+      case None =>
+      case Some(t) =>
+        if t.state == TaskState.Suspended {
+          if stored.promise.state != PromiseState.Pending {
+            match stored.task
+            case None => assert false;
+            case Some(st) =>
+              if st.state == TaskState.Fulfilled {
+                assert seen.task == Some(st);
+                assert false;
+              } else {
+                assert seen.task == Some(Fulfill(st));
+                assert false;
+              }
+          }
+          assert stored.promise.state == PromiseState.Pending;
+          if now >= stored.promise.timeoutAt { assert false; }
+          assert stored.promise.timeoutAt > now;
+          assert stored.task == Some(t);
+          assert !LeaseDue(stored, now);
+          var woken := Task(TaskState.Pending, t.version, None, None, None, Some(since), [awaited]);
+          var placed := Obj(stored.promise, Some(woken));
+          assert !LeaseDue(placed, now);
+          var after := objects[awaiter := placed];
+          forall k | k in objects
+            ensures after[k].promise == objects[k].promise && LeaseW(now)(after[k]) == LeaseW(now)(objects[k])
+          {
+            if k == awaiter {
+              assert after[k] == placed;
+              assert LeaseW(now)(placed) == 0 == LeaseW(now)(stored);
+            } else {
+              assert after[k] == objects[k];
+            }
+          }
+        } else if t.state == TaskState.Fulfilled {
+        } else if awaited in t.resumes {
+        } else {
+          var placed := Obj(stored.promise, Some(t.(resumes := t.resumes + [awaited])));
+          assert placed.promise == stored.promise;
+          assert placed.task.value.state == stored.task.value.state;
+          assert placed.task.value.leaseTimeoutAt == stored.task.value.leaseTimeoutAt;
+          assert LeaseDue(placed, now) == LeaseDue(stored, now);
+          var after := objects[awaiter := placed];
+          forall k | k in objects
+            ensures after[k].promise == objects[k].promise && LeaseW(now)(after[k]) == LeaseW(now)(objects[k])
+          {
+            if k == awaiter { assert after[k] == placed; }
+            else { assert after[k] == objects[k]; }
           }
         }
-        Ran(rest.doc, ran.born + rest.born, ran.notes + rest.notes)
+    }
+  }
+
+  lemma StepDrops(objects: map<string, Obj>, id: string, now: nat, retry: nat)
+    requires id in objects
+    requires StepObject(objects, id, now, retry).objects != objects
+    ensures var before := Origin(objects);
+            var after := Origin(StepObject(objects, id, now, retry).objects);
+      Weigh(after, ToutW(now)) < Weigh(before, ToutW(now)) ||
+      (Weigh(after, ToutW(now)) == Weigh(before, ToutW(now)) &&
+        Weigh(after, LeaseW(now)) < Weigh(before, LeaseW(now))) ||
+      (Weigh(after, ToutW(now)) == Weigh(before, ToutW(now)) &&
+        Weigh(after, LeaseW(now)) == Weigh(before, LeaseW(now)) &&
+        Weigh(after, CbW) < Weigh(before, CbW)) ||
+      (Weigh(after, ToutW(now)) == Weigh(before, ToutW(now)) &&
+        Weigh(after, LeaseW(now)) == Weigh(before, LeaseW(now)) &&
+        Weigh(after, CbW) == Weigh(before, CbW) &&
+        Weigh(after, LnW) < Weigh(before, LnW)) ||
+      (Weigh(after, ToutW(now)) == Weigh(before, ToutW(now)) &&
+        Weigh(after, LeaseW(now)) == Weigh(before, LeaseW(now)) &&
+        Weigh(after, CbW) == Weigh(before, CbW) &&
+        Weigh(after, LnW) == Weigh(before, LnW) &&
+        Weigh(after, RetryW(now)) < Weigh(before, RetryW(now))) ||
+      (Weigh(after, ToutW(now)) == Weigh(before, ToutW(now)) &&
+        Weigh(after, LeaseW(now)) == Weigh(before, LeaseW(now)) &&
+        Weigh(after, CbW) == Weigh(before, CbW) &&
+        Weigh(after, LnW) == Weigh(before, LnW) &&
+        Weigh(after, RetryW(now)) == Weigh(before, RetryW(now)) &&
+        Weigh(after, SlackW(now)) < Weigh(before, SlackW(now)))
+  {
+    var o := objects[id];
+    if o.promise.state == PromiseState.Pending && o.promise.timeoutAt <= now {
+      var placed := Project(o, now);
+      assert placed.promise.state != PromiseState.Pending;
+      assert placed.promise.callbacks == o.promise.callbacks;
+      assert ToutW(now)(o) == 1 && ToutW(now)(placed) == 0;
+      assert StepObject(objects, id, now, retry).objects == objects[id := placed];
+      WeighDown(objects, id, placed, ToutW(now));
+    } else if o.promise.state == PromiseState.Pending {
+      match o.task
+      case Some(t) =>
+        if t.state == TaskState.Acquired && t.leaseTimeoutAt.Some? && t.leaseTimeoutAt.value <= now {
+          var placed := Obj(o.promise, Some(Unlease(t, now)));
+          assert o.promise.timeoutAt > now;
+          assert ToutW(now)(o) == 0 == ToutW(now)(placed);
+          assert LeaseDue(o, now) && !LeaseDue(placed, now);
+          assert StepObject(objects, id, now, retry).objects == objects[id := placed];
+          WeighKeep(objects, id, placed, ToutW(now));
+          WeighDown(objects, id, placed, LeaseW(now));
+        } else if t.state == TaskState.Pending && t.retryTimeoutAt.Some? && t.retryTimeoutAt.value <= now {
+          var at := t.retryTimeoutAt.value;
+          var at' := now + retry;
+          var placed := Obj(o.promise, Some(Rearm(t, at')));
+          assert o.promise.timeoutAt > now;
+          assert !LeaseDue(o, now) && !LeaseDue(placed, now);
+          assert CbW(placed) == CbW(o) && LnW(placed) == LnW(o);
+          assert StepObject(objects, id, now, retry).objects == objects[id := placed];
+          WeighKeep(objects, id, placed, ToutW(now));
+          WeighKeep(objects, id, placed, LeaseW(now));
+          WeighKeep(objects, id, placed, CbW);
+          WeighKeep(objects, id, placed, LnW);
+          if at' > now {
+            assert RetryDue(o, now) && !RetryDue(placed, now);
+            WeighDown(objects, id, placed, RetryW(now));
+          } else {
+            assert at' == now && at <= now;
+            if at == now {
+              assert placed.task == o.task;
+              assert placed == o;
+              assert false;
+            } else {
+              assert at < now;
+              assert RetryDue(placed, now);
+              assert SlackOf(o, now) == now - at;
+              assert SlackOf(placed, now) == 0;
+              assert now - at >= 1;
+              assert SlackW(now)(placed) < SlackW(now)(o);
+              WeighKeep(objects, id, placed, RetryW(now));
+              WeighLess(objects, id, placed, SlackW(now));
+            }
+          }
+        } else {
+          assert StepObject(objects, id, now, retry).objects == objects;
+          assert false;
+        }
+      case None =>
+        assert StepObject(objects, id, now, retry).objects == objects;
+        assert false;
+    } else if o.promise.callbacks != {} {
+      var awaiter := MinKey(o.promise.callbacks);
+      var since := if o.promise.settledAt.Some? then o.promise.settledAt.value else 0;
+      var dropped := DropCallback(o, awaiter);
+      var objects' := objects[id := dropped];
+      var objects'' := Resume(objects', awaiter, id, since, now);
+      assert |o.promise.callbacks - {awaiter}| + 1 == |o.promise.callbacks|;
+      assert CbW(o) == CbW(dropped) + 1;
+      assert ToutW(now)(dropped) == ToutW(now)(o);
+      assert LeaseW(now)(dropped) == LeaseW(now)(o);
+      assert StepObject(objects, id, now, retry).objects == objects'';
+      WeighKeep(objects, id, dropped, ToutW(now));
+      WeighKeep(objects, id, dropped, LeaseW(now));
+      WeighDown(objects, id, dropped, CbW);
+      ResumeKeeps(objects', awaiter, id, since, now);
+      var after := objects'';
+      forall k | k in objects'
+        ensures CbW(after[k]) == CbW(objects'[k]) && ToutW(now)(after[k]) == ToutW(now)(objects'[k])
+      {
+        assert after[k].promise == objects'[k].promise;
+      }
+      WeighSame(objects', after, CbW);
+      WeighSame(objects', after, ToutW(now));
+      WeighSame(objects', after, LeaseW(now));
+    } else if o.promise.listeners != {} {
+      var address := MinKey(o.promise.listeners);
+      var dropped := DropListener(o, address);
+      assert |o.promise.listeners - {address}| + 1 == |o.promise.listeners|;
+      assert LnW(o) == LnW(dropped) + 1;
+      assert CbW(dropped) == CbW(o);
+      assert ToutW(now)(dropped) == ToutW(now)(o);
+      assert LeaseW(now)(dropped) == LeaseW(now)(o);
+      assert StepObject(objects, id, now, retry).objects == objects[id := dropped];
+      WeighKeep(objects, id, dropped, ToutW(now));
+      WeighKeep(objects, id, dropped, LeaseW(now));
+      WeighKeep(objects, id, dropped, CbW);
+      WeighDown(objects, id, dropped, LnW);
+    } else {
+      assert StepObject(objects, id, now, retry).objects == objects;
+      assert false;
+    }
+  }
+
+  lemma RunDueDrops(doc: Doc, now: nat, retry: nat)
+    requires RunDue(doc, now, retry).doc != doc
+    ensures var next := RunDue(doc, now, retry).doc;
+      Gap(next, now) < Gap(doc, now) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) < Weigh(doc, ToutW(now))) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) == Weigh(doc, ToutW(now)) &&
+        Weigh(next, LeaseW(now)) < Weigh(doc, LeaseW(now))) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) == Weigh(doc, ToutW(now)) &&
+        Weigh(next, LeaseW(now)) == Weigh(doc, LeaseW(now)) &&
+        Weigh(next, CbW) < Weigh(doc, CbW)) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) == Weigh(doc, ToutW(now)) &&
+        Weigh(next, LeaseW(now)) == Weigh(doc, LeaseW(now)) &&
+        Weigh(next, CbW) == Weigh(doc, CbW) &&
+        Weigh(next, LnW) < Weigh(doc, LnW)) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) == Weigh(doc, ToutW(now)) &&
+        Weigh(next, LeaseW(now)) == Weigh(doc, LeaseW(now)) &&
+        Weigh(next, CbW) == Weigh(doc, CbW) &&
+        Weigh(next, LnW) == Weigh(doc, LnW) &&
+        Weigh(next, RetryW(now)) < Weigh(doc, RetryW(now))) ||
+      (Gap(next, now) == Gap(doc, now) &&
+        Weigh(next, ToutW(now)) == Weigh(doc, ToutW(now)) &&
+        Weigh(next, LeaseW(now)) == Weigh(doc, LeaseW(now)) &&
+        Weigh(next, CbW) == Weigh(doc, CbW) &&
+        Weigh(next, LnW) == Weigh(doc, LnW) &&
+        Weigh(next, RetryW(now)) == Weigh(doc, RetryW(now)) &&
+        Weigh(next, SlackW(now)) < Weigh(doc, SlackW(now)))
+  {
+    match doc
+    case Schedule(Some(s)) =>
+      if s.nextRunAt <= now {
+        var at := s.nextRunAt;
+        var nextAt := NextCron(s.cron, at);
+        var s' := s.(lastRunAt := Some(at), nextRunAt := nextAt);
+        var next := Schedule(Some(s'));
+        assert RunDue(doc, now, retry).doc == next;
+        assert nextAt > at;
+        if nextAt <= now {
+          assert now - at == (now - nextAt) + (nextAt - at);
+          assert nextAt - at >= 1;
+          assert Gap(next, now) == now - nextAt + 1;
+          assert Gap(doc, now) == now - at + 1;
+        } else {
+          assert Gap(next, now) == 0;
+          assert Gap(doc, now) == now - at + 1;
+          assert Gap(doc, now) >= 1;
+        }
+      } else {
+        assert false;
+      }
+    case Origin(objects) =>
+      var due := FirstDue(objects, now);
+      if due.None? {
+        assert false;
+      } else {
+        var id := due.value;
+        StepDrops(objects, id, now, retry);
+        assert Gap(doc, now) == 0;
+        assert RunDue(doc, now, retry).doc == Origin(StepObject(objects, id, now, retry).objects);
+        assert Gap(RunDue(doc, now, retry).doc, now) == 0;
+      }
+    case Schedule(None) =>
+      assert false;
+  }
+
+  function Sweep(doc: Doc, now: nat, retry: nat): (s: Ran)
+    ensures WellFormed(doc, now) ==> WellFormed(s.doc, now)
+    decreases Gap(doc, now),
+              Weigh(doc, ToutW(now)),
+              Weigh(doc, LeaseW(now)),
+              Weigh(doc, CbW),
+              Weigh(doc, LnW),
+              Weigh(doc, RetryW(now)),
+              Weigh(doc, SlackW(now))
+  {
+    var ran := RunDue(doc, now, retry);
+    if ran.doc == doc then Ran(doc, [], [])
+    else
+      RunDueDrops(doc, now, retry);
+      var rest := Sweep(ran.doc, now, retry);
+      assert WellFormed(doc, now) ==> WellFormed(rest.doc, now) by {
+        if WellFormed(doc, now) {
+          RunDueOk(doc, now, retry);
+        }
+      }
+      Ran(rest.doc, ran.born + rest.born, ran.notes + rest.notes)
   }
 
   lemma AdvanceOk(s: Sched)
@@ -618,7 +1016,7 @@ module Node {
   function Handle(doc: Doc, request: Request, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
-    var swept := Sweep(doc, now, retry, SweepSteps);
+    var swept := Sweep(doc, now, retry);
     match request
     case PromiseCreate(req) =>
       var r := Create(swept.doc, req, now);
