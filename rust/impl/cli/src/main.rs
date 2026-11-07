@@ -15,7 +15,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let server = Node::new(cfg.clone(), store);
+    let server = match Node::new(cfg.clone(), store) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::error!(error = %e, "invalid configuration");
+            std::process::exit(1);
+        }
+    };
     if let Err(e) = server.init(cfg.debug).await {
         tracing::error!(error = %e, "could not start");
         std::process::exit(1);

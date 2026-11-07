@@ -6,15 +6,20 @@
 use vstd::prelude::*;
 
 use echod_types::{
-    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
-    Request, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq,
-    TaskFenceInnerRes, TaskFenceReq, TaskRecord, TaskRef, TaskState, TaskSuspendReq, Value,
+    deadline_bounded, time_bounded, ttl_valid, version_can_increment, PromiseCreateReq,
+    PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState, Request, Response,
+    Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq, TaskFenceInnerRes,
+    TaskFenceReq, TaskRecord, TaskRef, TaskState, TaskSuspendReq, Value,
 };
 
 use super::super::trusted::*;
 use echod_rover::certificate::trusted::copy;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec};
+#[cfg(verus_keep_ghost)]
+use echod_types::{
+    spec_deadline_bounded, spec_time_bounded, spec_ttl_valid, spec_version_can_increment,
+};
 #[cfg(verus_keep_ghost)]
 use super::super::view::{
     all_in_origin, distinct, group_views, lift_dispatch, outs_v, sat_add, sends, strs, works,
@@ -73,7 +78,7 @@ impl ServerConfig {
             outs_v(outs@) == spec_promise_create(*req, s@, now),
     {
         broadcast use group_views;
-        if is_timer(&req.tags) && has_target(&req.tags) {
+        if !time_bounded(req.timeout_at) || (is_timer(&req.tags) && has_target(&req.tags)) {
             return status(promise_res(400, None), mk("create: timer with target (400)"), s);
         }
         match s.promises.get(&req.id) {
@@ -204,7 +209,9 @@ impl ServerConfig {
             outs_v(outs@) == spec_task_create(*pid, ttl, *req, s@, now),
     {
         broadcast use group_views;
-        if !has_target(&req.tags) || is_timer(&req.tags) {
+        if !time_bounded(req.timeout_at) || !ttl_valid(ttl)
+            || !has_target(&req.tags) || is_timer(&req.tags)
+        {
             return status(claim_res(400, None, None), mk("task.create: not runnable, or a timer (400)"), s);
         }
         match s.promises.get(&req.id) {
@@ -220,7 +227,7 @@ impl ServerConfig {
                 let seen_t = stored_task.project(&seen_p);
                 return match seen_t.state {
                     TaskState::Fulfilled => echo(claim_res(200, Some(seen_t.to_record(&req.id)), Some(seen_p.to_record(&req.id))), mk("task.create: task done (echo)"), s),
-                    TaskState::Pending => {
+                    TaskState::Pending if version_can_increment(stored_task.version) => {
                         let mut n = copy_store(s);
                         let mut u = copy(stored_task);
                         u.acquire(stored_task.version.saturating_add(1), pid.clone(), ttl, now);
@@ -441,6 +448,12 @@ impl ServerConfig {
         broadcast use group_views;
         let id = &req.id;
         let version = req.version;
+        if match &req.action {
+            TaskFenceAction::Create(c) => !time_bounded(c.timeout_at),
+            TaskFenceAction::Settle(_) => false,
+        } {
+            return status(fence_res(400, None), mk("fence: invalid promise timeout (400)"), s);
+        }
         let target = match &req.action {
             TaskFenceAction::Create(c) => &c.id,
             TaskFenceAction::Settle(st) => &st.id,
@@ -566,7 +579,10 @@ impl ServerConfig {
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_views;
-        if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
+        let next_run_at = next_cron(&req.cron, now);
+        if !deadline_bounded(next_run_at, req.promise_timeout)
+            || (is_timer(&req.promise_tags) && has_target(&req.promise_tags))
+        {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
         match s.schedules.get(&req.id) {
@@ -582,7 +598,6 @@ impl ServerConfig {
         }
         // `next_run_at` is the server's: the first instant the cron names
         // strictly after now. The request does not carry it.
-        let next_run_at = next_cron(&req.cron, now);
         let promise_param = req.promise_param.dup();
         let promise_tags = echod_types::clone_tags(&req.promise_tags);
         proof {
@@ -690,6 +705,9 @@ impl ServerConfig {
             outs_v(outs@) == spec_task_acquire(*id, version, *pid, ttl, s@, now),
     {
         broadcast use group_views;
+        if !ttl_valid(ttl) {
+            return status(claim_res(400, None, None), mk("acquire: invalid ttl (400)"), s);
+        }
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(claim_res(404, None, None), mk("acquire: no such task (404)"), s),
@@ -700,7 +718,9 @@ impl ServerConfig {
         };
         let p = stored_p.project(now);
         let seen = t.project(&p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || !version_can_increment(t.version)
+        {
             return status(claim_res(409, None, None), mk("acquire: not pending, or stale version (409)"), s);
         }
         let mut n = copy_store(s);
@@ -918,7 +938,9 @@ pub open spec fn spec_held(s: StoreV, id: Seq<char>, version: u64, now: Time) ->
 }
 
 pub open spec fn spec_promise_create(req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.tags) && spec_has_target(req.tags) {
+    if !spec_time_bounded(req.timeout_at)
+        || (spec_is_timer(req.tags) && spec_has_target(req.tags))
+    {
         spec_out(spec_promise_res(400, None), s)
     } else if s.promises.contains_key(req.id@) {
         let seen = spec_project_promise(s.promises[req.id@], now);
@@ -957,7 +979,9 @@ pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time
 }
 
 pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if !spec_has_target(req.tags) || spec_is_timer(req.tags) {
+    if !spec_time_bounded(req.timeout_at) || !spec_ttl_valid(ttl)
+        || !spec_has_target(req.tags) || spec_is_timer(req.tags)
+    {
         spec_out(spec_claim_res(400, None, None), s)
     } else if s.promises.contains_key(req.id@) {
         let p = s.promises[req.id@];
@@ -974,7 +998,7 @@ pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq,
                     spec_claim_res(200, Some(spec_task_record(req.id, seen_t)), Some(spec_promise_record(req.id, seen_p))),
                     s,
                 ),
-                TaskState::Pending => {
+                TaskState::Pending if spec_version_can_increment(stored.version) => {
                     let u = spec_acquire(stored, sat_add(stored.version, 1), pid@, ttl, now);
                     let n = StoreV { tasks: s.tasks.insert(req.id@, u), ..s };
                     spec_out(
@@ -1158,7 +1182,11 @@ pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
-    if target@ == id@ {
+    let timeout_bad = match req.action {
+        TaskFenceAction::Create(c) => !spec_time_bounded(c.timeout_at),
+        TaskFenceAction::Settle(_) => false,
+    };
+    if timeout_bad || target@ == id@ {
         spec_out(spec_fence_res(400, None), s)
     } else {
         match req.action {
@@ -1231,12 +1259,14 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags) {
+    let next_run_at = spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
+    {
         spec_out(spec_schedule_res(400, None), s)
     } else if s.schedules.contains_key(req.id@) {
         spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
     } else {
-        let next_run_at = spec_next_cron(req.cron@, now);
         let c = ScheduleV {
             id: req.id@,
             cron: req.cron@,
@@ -1305,13 +1335,17 @@ pub open spec fn spec_register_listener(awaited: String, address: String, s: Sto
 }
 
 pub open spec fn spec_task_acquire(id: String, version: u64, pid: String, ttl: Time, s: StoreV, now: Time) -> Seq<OutV> {
-    if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
+    if !spec_ttl_valid(ttl) {
+        spec_out(spec_claim_res(400, None, None), s)
+    } else if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
         spec_out(spec_claim_res(404, None, None), s)
     } else {
         let t = s.tasks[id@];
         let p = spec_project_promise(s.promises[id@], now);
         let seen = spec_project_task(t, p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || !spec_version_can_increment(t.version)
+        {
             spec_out(spec_claim_res(409, None, None), s)
         } else {
             let u = spec_acquire(t, sat_add(t.version, 1), pid@, ttl, now);

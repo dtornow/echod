@@ -32,7 +32,7 @@ use crate::model::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     axiom_decode_encode_body, spec_begin, spec_body_is_empty, spec_cached, spec_cached_from,
-    spec_commit, spec_decide, spec_earliest_from, spec_earliest_key, spec_empty_body,
+    spec_bounds_error, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key, spec_empty_body,
     spec_encode_body, spec_flight, spec_forget, spec_handle, spec_keep, spec_key, spec_occurrence,
     spec_owns, spec_pure, spec_read, spec_remember, spec_request, spec_request_commits,
     spec_request_transition, spec_run_due, spec_store_reply, spec_sweep, spec_timeout,
@@ -3216,6 +3216,64 @@ pub proof fn lemma_request_commit_matches(
         }),
 {
     let state = astate(before_a);
+    if spec_bounds_error(call.request, at) is Some {
+        let response = spec_bounds_error(call.request, at).unwrap();
+        assert(spec_request_transition(
+            doc,
+            call.request,
+            at,
+            config.retry_timeout,
+            limit,
+        ) == (
+            doc,
+            response,
+            Seq::<PendingV>::empty(),
+            Seq::<NoteV>::empty(),
+        ));
+        assert(spec_handle(doc, call.request, at) == (doc, response));
+        assert(request_agrees(
+            config,
+            call.request,
+            key,
+            doc,
+            state.store,
+            at,
+        ));
+        let outs = spec_handler(config, call.request, state.store, at);
+        assert(outs.len() == 1);
+        assert(outs[0].resp == response);
+        assert(outs[0].next == state.store);
+        assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
+        assert(outs[0].send
+            =~= Seq::<echod_abstract::view::DispatchV>::empty());
+        let event = ProcessEvent::Receive {
+            sender: APid::Outside,
+            message: AMessage::Request(call),
+        };
+        assert(event_valid(before_a, APid::Service, event));
+        let outcomes = abstract_model().spec_on_event(
+            config,
+            APid::Service,
+            state,
+            at,
+            event,
+        );
+        let served = spec_run(config, state, call, at);
+        assert(served.len() == 1);
+        assert(outcomes[0] == served[0]);
+        let handled_a = lemma_service_step(config, before_a, at, event, 0);
+        assert(astate(handled_a).store == state.store);
+        assert(astate(handled_a).pending == state.pending);
+        lemma_others_same(key, state.store);
+        lemma_send_is_reply(before_a.network, call, response);
+        assert(service_output(
+            handled_a.network,
+            reply_output(call.client@, call.id, response),
+        ));
+        assert(items(Seq::<PendingV>::empty())
+            =~= Seq::<Sched<InternalV>>::empty());
+        return handled_a;
+    }
     let (before, born_before, notes_before) =
         spec_sweep(doc, at, config.retry_timeout, limit);
     let swept_a =

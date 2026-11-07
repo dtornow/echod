@@ -14,6 +14,7 @@ use super::footprint::{next_cron, origin};
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `exec`.
 pub const MARKS: &[&str] = &[
+    "acquire: invalid ttl (400)",
     "acquire: no such task (404)",
     "acquire: not pending, or stale version (409)",
     "callback registered",
@@ -29,6 +30,7 @@ pub const MARKS: &[&str] = &[
     "delete schedule: none (404)",
     "fence check",
     "fence: create in another origin (400)",
+    "fence: invalid promise timeout (400)",
     "fence: no such task (404)",
     "fence: not held, or stale version (409)",
     "fence: promise created",

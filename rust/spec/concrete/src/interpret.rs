@@ -49,6 +49,7 @@ use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{
     origin, PromiseState, Request, Response, same_origin_spec, Schedule, Tags, TaskState, Value,
+    MAX_TIME,
 };
 
 verus! {
@@ -1191,7 +1192,7 @@ pub proof fn lemma_promise_create_agrees(
     assert(outs == a_promise_create(req, s, now));
     lemma_timer(req.tags);
     lemma_targeted(req.tags);
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+    if req.timeout_at > MAX_TIME || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         assert(outs[0].next == s);
         assert(c_promise_create(doc, req, now) == (doc, c_promise_res(400, None)));
         lemma_others_same(key, s);

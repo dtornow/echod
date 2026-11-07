@@ -20,10 +20,11 @@ use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
 use echod_types::{
-    origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
-    PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
-    ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
-    TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
+    deadline_bounded, origin_of, same_origin, time_bounded, ttl_valid, version_can_increment,
+    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseRes, PromiseSettleReq,
+    PromiseState, Request, Response, Schedule, ScheduleCreateReq, ScheduleRes, StatusRes, Tags,
+    TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskRef,
+    TaskState, Value,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -37,7 +38,10 @@ use echod_rover::rover::semantics::StepResultV;
 use echod_rover::rover::ProcessEvent;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec, AValue};
+use echod_types::{
+    origin, same_origin_spec, spec_deadline_bounded, spec_time_bounded, spec_ttl_valid,
+    spec_version_can_increment, AValue,
+};
 
 pub use crate::document::{
     DocumentBody, DocumentBodyV, LoadedDocument, LoadedDocumentV, Obj, ObjV, Objects, Prom, PromV,
@@ -667,6 +671,8 @@ proof fn lemma_sorted_keys(entries: Seq<(String, Obj)>)
 }
 
 /// Two sorted tables are one map exactly when they are the same entries, view for view.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(10)]
 proof fn lemma_objs_eq(a: Seq<(String, Obj)>, b: Seq<(String, Obj)>)
     requires
         spec_sorted_entries(a),
@@ -677,6 +683,10 @@ proof fn lemma_objs_eq(a: Seq<(String, Obj)>, b: Seq<(String, Obj)>)
     lemma_sorted_keys(a);
     lemma_sorted_keys(b);
     if spec_objs(a) == spec_objs(b) {
+        assert(spec_objs(a).dom() == spec_objs(b).dom());
+        assert(spec_keys_of(a).to_set() == spec_keys_of(b).to_set());
+        assert(spec_sorted(spec_keys_of(a).to_set())
+            == spec_sorted(spec_keys_of(b).to_set()));
         assert(spec_keys_of(a) == spec_keys_of(b));
         assert(a.len() == b.len());
         assert forall|i: int| 0 <= i < a.len() implies #[trigger] a[i].0@ == b[i].0@ && a[i].1@ == b[i].1@ by {
@@ -684,6 +694,9 @@ proof fn lemma_objs_eq(a: Seq<(String, Obj)>, b: Seq<(String, Obj)>)
             assert(spec_keys_of(b)[i] == b[i].0@);
             lemma_sorted_index(a, i);
             lemma_sorted_index(b, i);
+            assert(spec_objs(a)[a[i].0@] == a[i].1@);
+            assert(spec_objs(b)[b[i].0@] == b[i].1@);
+            assert(spec_objs(a)[a[i].0@] == spec_objs(b)[a[i].0@]);
         };
     }
     if a.len() == b.len() && forall|i: int| 0 <= i < a.len() ==> #[trigger] a[i].0@ == b[i].0@ && a[i].1@ == b[i].1@ {
@@ -2546,6 +2559,60 @@ fn unavailable(request: &Request) -> (r: Response)
     }
 }
 
+/// A bounds rejection in the response shape of the operation.
+///
+/// This is checked before a request's pre-sweep, so a malformed request
+/// cannot persist due work or release notifications.
+fn bounds_error(request: &Request, now: u64) -> (r: Option<Response>)
+    ensures
+        r == spec_bounds_error(*request, now),
+{
+    match request {
+        Request::PromiseCreate(q) => {
+            if !time_bounded(q.timeout_at) {
+                Some(promise_res(400, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskCreate(q) => {
+            if !time_bounded(q.action.timeout_at) || !ttl_valid(q.ttl) {
+                Some(claim_res(400, None, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskAcquire(q) => {
+            if !ttl_valid(q.ttl) {
+                Some(claim_res(400, None, None))
+            } else {
+                None
+            }
+        },
+        Request::TaskFence(q) => {
+            match &q.action {
+                TaskFenceAction::Create(c) => {
+                    if !time_bounded(c.timeout_at) {
+                        Some(fence_res(400, None))
+                    } else {
+                        None
+                    }
+                },
+                TaskFenceAction::Settle(_) => None,
+            }
+        },
+        Request::ScheduleCreate(q) => {
+            let next = next_cron(&q.cron, now);
+            if !deadline_bounded(next, q.promise_timeout) {
+                Some(Response::Schedule(ScheduleRes { status: 400, schedule: None }))
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Handlers: one request against one document
@@ -2652,7 +2719,7 @@ fn promise_create(doc: DocumentBody, req: &PromiseCreateReq, now: u64) -> (r: (D
     ensures
         (r.0@, r.1) == spec_promise_create(doc@, *req, now),
 {
-    if timer(&req.tags) && targeted(&req.tags) {
+    if !time_bounded(req.timeout_at) || (timer(&req.tags) && targeted(&req.tags)) {
         return (doc, promise_res(400, None));
     }
     match peek(&doc, &req.id) {
@@ -2774,7 +2841,9 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
     ensures
         (r.0@, r.1) == spec_task_create(doc@, *pid, ttl, *action, now),
 {
-    if !targeted(&action.tags) || timer(&action.tags) {
+    if !time_bounded(action.timeout_at) || !ttl_valid(ttl)
+        || !targeted(&action.tags) || timer(&action.tags)
+    {
         return (doc, claim_res(400, None, None));
     }
     let (doc, created) = promise_create(doc, action, now);
@@ -2798,7 +2867,7 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
                     if t.state == TaskState::Fulfilled {
                         let res = claim_res(200, Some(task_record(&action.id, &t)), Some(record(&action.id, &promise)));
                         (doc, res)
-                    } else if t.state == TaskState::Pending {
+                    } else if t.state == TaskState::Pending && version_can_increment(t.version) {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(&action.id, &u)), Some(record(&action.id, &promise)));
                         let objs = open(doc).put(&action.id, Obj { promise, task: Some(u) });
@@ -2852,6 +2921,9 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
     ensures
         (r.0@, r.1) == spec_task_acquire(doc@, *id, version, *pid, ttl, now),
 {
+    if !ttl_valid(ttl) {
+        return (doc, claim_res(400, None, None));
+    }
     let objs = open(doc);
     match objs.get(id) {
         None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
@@ -2860,7 +2932,10 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
             match task {
                 None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
                 Some(t) => {
-                    if !(t.state == TaskState::Pending) || t.version != version || !(promise.state == PromiseState::Pending) {
+                    if !(t.state == TaskState::Pending) || t.version != version
+                        || !(promise.state == PromiseState::Pending)
+                        || !version_can_increment(t.version)
+                    {
                         (DocumentBody::Workflow(objs), claim_res(409, None, None))
                     } else {
                         let u = acquire(&t, pid, ttl, now);
@@ -3282,6 +3357,12 @@ fn fence(doc: DocumentBody, id: &String, version: u64, action: &TaskFenceAction,
     ensures
         (r.0@, r.1) == spec_fence(doc@, *id, version, *action, now),
 {
+    if match action {
+        TaskFenceAction::Create(c) => !time_bounded(c.timeout_at),
+        TaskFenceAction::Settle(_) => false,
+    } {
+        return (doc, fence_res(400, None));
+    }
     let crossed = match action {
         TaskFenceAction::Create(c) => c.id == *id || !same_origin(&c.id, id),
         TaskFenceAction::Settle(st) => st.id == *id || !same_origin(&st.id, id),
@@ -3356,7 +3437,10 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    if targeted(&req.promise_tags) && timer(&req.promise_tags) {
+    let next_run_at = next_cron(&req.cron, now);
+    if !deadline_bounded(next_run_at, req.promise_timeout)
+        || (targeted(&req.promise_tags) && timer(&req.promise_tags))
+    {
         return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
     }
     let existing = match &doc {
@@ -3373,7 +3457,7 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
                 promise_timeout: req.promise_timeout,
                 promise_param: copy(&req.promise_param),
                 promise_tags: copy(&req.promise_tags),
-                next_run_at: next_cron(&req.cron, now),
+                next_run_at,
                 last_run_at: None,
                 created_at: now,
             };
@@ -3416,6 +3500,9 @@ pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBo
     ensures
         (r.0@, r.1) == spec_handle(doc@, *request, now),
 {
+    if let Some(response) = bounds_error(request, now) {
+        return (doc, response);
+    }
     match request {
         Request::PromiseGet(q) => promise_get(doc, &q.id, now),
         Request::PromiseCreate(q) => promise_create(doc, q, now),
@@ -3444,7 +3531,8 @@ pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBo
 // ---------------------------------------------------------------------------
 
 /// Maximum pre-close and post-close steps in one external request.
-pub const REQUEST_STEPS: u64 = 256;
+pub const REQUEST_SWEEP_STEPS: u64 = 256;
+pub const REQUEST_STEPS: u64 = REQUEST_SWEEP_STEPS;
 
 proof fn lemma_notes_empty()
     ensures
@@ -3740,409 +3828,6 @@ pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
     earliest_in(doc, now).is_some()
 }
 
-fn ids_unique(ids: &Vec<String>) -> (r: bool)
-    ensures
-        r == crate::document::unique(strs_v(ids@)),
-{
-    let mut i: usize = 0;
-    while i < ids.len()
-        invariant
-            i <= ids.len(),
-            forall|a: int, b: int|
-                0 <= a < i && 0 <= b < ids.len() && strs_v(ids@)[a] == strs_v(ids@)[b]
-                    ==> a == b,
-        decreases ids.len() - i,
-    {
-        let mut j: usize = 0;
-        while j < ids.len()
-            invariant
-                j <= ids.len(),
-                i < ids.len(),
-                forall|b: int|
-                    0 <= b < j && strs_v(ids@)[i as int] == strs_v(ids@)[b]
-                        ==> i == b,
-            decreases ids.len() - j,
-        {
-            if i != j && ids[i] == ids[j] {
-                assert(strs_v(ids@)[i as int] == ids@[i as int]@);
-                assert(strs_v(ids@)[j as int] == ids@[j as int]@);
-                assert(strs_v(ids@)[i as int] == strs_v(ids@)[j as int]);
-                assert(!crate::document::unique(strs_v(ids@))) by {
-                    assert(i as int != j as int);
-                }
-                return false;
-            }
-            j += 1;
-        }
-        i += 1;
-    }
-    true
-}
-
-fn value_is_empty(value: &Value) -> (r: bool)
-    ensures
-        r == crate::document::value_empty(*value),
-{
-    value.data.is_none() && value.headers.len() == 0
-}
-
-fn task_is_cleared(task: &Tk) -> (r: bool)
-    ensures
-        r == crate::document::task_cleared(task@),
-{
-    task.pid.is_none()
-        && task.ttl.is_none()
-        && task.lease_timeout_at.is_none()
-        && task.retry_timeout_at.is_none()
-}
-
-fn local_well_formed(id: &String, object: &Obj, now: u64) -> (r: bool)
-    ensures
-        r == (
-            crate::document::promise_well_formed(id@, object@, now)
-                && crate::document::task_well_formed(object@, now)
-        ),
-{
-    let promise = &object.promise;
-    let ghost ov = object@;
-    assert(promise@ == ov.promise);
-    assert(ov.promise.callbacks == strs_v(promise.callbacks@));
-    if promise.created_at > promise.timeout_at
-        || promise.created_at > now
-        || (promise.state == PromiseState::Pending) != promise.settled_at.is_none()
-    {
-        return false;
-    }
-    if let Some(at) = promise.settled_at {
-        if at < promise.created_at || at > promise.timeout_at || at > now {
-            return false;
-        }
-    }
-    if promise.state == PromiseState::Pending
-        && (promise.timeout_at <= now || !value_is_empty(&promise.value))
-    {
-        return false;
-    }
-    if promise.state == PromiseState::RejectedTimedout
-        && promise.settled_at != Some(promise.timeout_at)
-    {
-        return false;
-    }
-    if promise.settled_at == Some(promise.timeout_at) && !value_is_empty(&promise.value) {
-        return false;
-    }
-    if !ids_unique(&promise.callbacks)
-        || !ids_unique(&promise.listeners)
-        || contains_str(&promise.callbacks, id)
-    {
-        return false;
-    }
-    let mut i: usize = 0;
-    while i < promise.callbacks.len()
-        invariant
-            i <= promise.callbacks.len(),
-            ov == object@,
-            promise@ == ov.promise,
-            ov.promise.callbacks == strs_v(promise.callbacks@),
-            forall|k: int| 0 <= k < i ==>
-                origin(#[trigger] promise.callbacks@[k]@) == origin(id@),
-        decreases promise.callbacks.len() - i,
-    {
-        if !same_origin(&promise.callbacks[i], id) {
-            assert(origin(promise.callbacks@[i as int]@) != origin(id@));
-            assert(strs_v(promise.callbacks@)[i as int]
-                == promise.callbacks@[i as int]@);
-            assert(ov.promise.callbacks[i as int]
-                == strs_v(promise.callbacks@)[i as int]);
-            assert(!(forall|k: int| 0 <= k < ov.promise.callbacks.len() ==>
-                origin(ov.promise.callbacks[k]) == origin(id@))) by {
-                assert(0 <= i as int);
-                assert((i as int) < (ov.promise.callbacks.len()));
-            }
-            assert(!crate::document::promise_well_formed(id@, object@, now));
-            return false;
-        }
-        i += 1;
-    }
-    if (promise.callbacks.len() > 0 || promise.listeners.len() > 0)
-        && !awaitable(&promise.tags)
-    {
-        return false;
-    }
-    if promise.state != PromiseState::Pending
-        && (promise.callbacks.len() > 0 || promise.listeners.len() > 0)
-    {
-        return false;
-    }
-
-    if object.task.is_some() != targeted(&promise.tags) {
-        return false;
-    }
-    let Some(task) = &object.task else {
-        return true;
-    };
-    let acquired = task.state == TaskState::Acquired;
-    if acquired != task.pid.is_some()
-        || acquired != task.ttl.is_some()
-        || acquired != task.lease_timeout_at.is_some()
-        || (task.state == TaskState::Pending) != task.retry_timeout_at.is_some()
-    {
-        return false;
-    }
-    if acquired && (task.version == 0 || task.lease_timeout_at.unwrap() <= now) {
-        return false;
-    }
-    if task.state == TaskState::Pending && task.retry_timeout_at.unwrap() <= now {
-        return false;
-    }
-    if task.state == TaskState::Fulfilled
-        && (!task_is_cleared(task)
-            || task.resumes.len() != 0
-            || promise.state == PromiseState::Pending)
-    {
-        return false;
-    }
-    if task.state == TaskState::Suspended
-        && (!task_is_cleared(task) || task.resumes.len() != 0)
-    {
-        return false;
-    }
-    if task.state == TaskState::Halted && !task_is_cleared(task) {
-        return false;
-    }
-    if promise.state != PromiseState::Pending && task.state != TaskState::Fulfilled {
-        return false;
-    }
-    ids_unique(&task.resumes) && task.version <= u32::MAX as u64
-}
-
-fn has_callback(objects: &Objects, awaiter: &String) -> (r: bool)
-    ensures
-        r == exists|awaited: Seq<char>|
-            objects@.contains_key(awaited)
-                && objects@[awaited].promise.callbacks.contains(awaiter@),
-{
-    proof {
-        use_type_invariant(objects);
-        assert(spec_sorted_entries(objects.entries@));
-    }
-    let mut i: usize = 0;
-    while i < objects.entries.len()
-        invariant
-            i <= objects.entries.len(),
-            spec_sorted_entries(objects.entries@),
-            forall|j: int| 0 <= j < i ==>
-                !objects.entries@[j].1@.promise.callbacks.contains(awaiter@),
-        decreases objects.entries.len() - i,
-    {
-        if contains_str(&objects.entries[i].1.promise.callbacks, awaiter) {
-            proof {
-                lemma_sorted_index(objects.entries@, i as int);
-            }
-            return true;
-        }
-        i += 1;
-    }
-    proof {
-        lemma_sorted_keys(objects.entries@);
-    }
-    false
-}
-
-fn workflow_body_well_formed(
-    document: &String,
-    objects: &Objects,
-    now: u64,
-) -> (r: bool)
-    ensures
-        r == crate::document::workflow_body_well_formed(document@, objects@, now),
-{
-    proof {
-        use_type_invariant(objects);
-        assert(spec_sorted_entries(objects.entries@));
-    }
-    let mut i: usize = 0;
-    while i < objects.entries.len()
-        invariant
-            i <= objects.entries.len(),
-            spec_sorted_entries(objects.entries@),
-            forall|j: int| 0 <= j < i ==> {
-                let entry = #[trigger] objects.entries@[j];
-                let id = entry.0@;
-                let object = entry.1@;
-                &&& origin(id) == document@
-                &&& crate::document::promise_well_formed(id, object, now)
-                &&& crate::document::task_well_formed(object, now)
-                &&& crate::document::callback_targets_well_formed(objects@, object)
-                &&& crate::document::suspended_rung_well_formed(objects@, id, object)
-            },
-        decreases objects.entries.len() - i,
-    {
-        let (id, object) = &objects.entries[i];
-        proof {
-            lemma_sorted_index(objects.entries@, i as int);
-            assert(objects@.contains_key(id@));
-            assert(objects@[id@] == object@);
-        }
-        if origin_of(id.as_str()) != document.as_str() {
-            assert(origin(id@) != document@);
-            assert(!crate::document::workflow_body_well_formed(
-                document@,
-                objects@,
-                now,
-            ));
-            return false;
-        }
-        if !local_well_formed(id, object, now) {
-            assert(!crate::document::workflow_body_well_formed(
-                document@,
-                objects@,
-                now,
-            ));
-            return false;
-        }
-        let mut j: usize = 0;
-        while j < object.promise.callbacks.len()
-            invariant
-                j <= object.promise.callbacks.len(),
-                objects@.contains_key(id@),
-                objects@[id@] == object@,
-                origin(id@) == document@,
-                crate::document::promise_well_formed(id@, object@, now),
-                crate::document::task_well_formed(object@, now),
-                forall|k: int| 0 <= k < j ==> {
-                    let callback = #[trigger] object.promise.callbacks@[k]@;
-                    &&& objects@.contains_key(callback)
-                    &&& objects@[callback].task is Some
-                    &&& spec_targeted(objects@[callback].promise.tags)
-                },
-            decreases object.promise.callbacks.len() - j,
-        {
-            let callback = &object.promise.callbacks[j];
-            let Some(target) = objects.get(callback) else {
-                assert(object@.promise.callbacks[j as int] == callback@);
-                assert(!objects@.contains_key(callback@));
-                assert(!crate::document::callback_targets_well_formed(
-                    objects@,
-                    object@,
-                ));
-                assert(!crate::document::workflow_body_well_formed(
-                    document@,
-                    objects@,
-                    now,
-                )) by {
-                    if crate::document::workflow_body_well_formed(
-                        document@,
-                        objects@,
-                        now,
-                    ) {
-                        assert(origin(id@) == document@);
-                        assert(crate::document::callback_targets_well_formed(
-                            objects@,
-                            objects@[id@],
-                        ));
-                    }
-                };
-                return false;
-            };
-            if target.task.is_none() || !targeted(&target.promise.tags) {
-                assert(object@.promise.callbacks[j as int] == callback@);
-                assert(objects@.contains_key(callback@));
-                assert(target@ == objects@[callback@]);
-                assert(!crate::document::callback_targets_well_formed(
-                    objects@,
-                    object@,
-                ));
-                assert(!crate::document::workflow_body_well_formed(
-                    document@,
-                    objects@,
-                    now,
-                )) by {
-                    if crate::document::workflow_body_well_formed(
-                        document@,
-                        objects@,
-                        now,
-                    ) {
-                        assert(origin(id@) == document@);
-                        assert(crate::document::callback_targets_well_formed(
-                            objects@,
-                            objects@[id@],
-                        ));
-                    }
-                };
-                return false;
-            }
-            j += 1;
-        }
-        let suspended = match &object.task {
-            Some(task) => {
-                task.state == TaskState::Suspended
-                    && object.promise.state == PromiseState::Pending
-            },
-            None => false,
-        };
-        if suspended && !has_callback(objects, id) {
-            assert(!crate::document::suspended_rung_well_formed(
-                objects@,
-                id@,
-                object@,
-            ));
-            assert(!crate::document::workflow_body_well_formed(
-                document@,
-                objects@,
-                now,
-            ));
-            return false;
-        }
-        i += 1;
-    }
-    proof {
-        lemma_sorted_keys(objects.entries@);
-        assert forall|id: Seq<char>| objects@.contains_key(id) implies {
-            &&& origin(id) == document@
-            &&& crate::document::promise_well_formed(id, objects@[id], now)
-            &&& crate::document::task_well_formed(objects@[id], now)
-            &&& crate::document::callback_targets_well_formed(objects@, objects@[id])
-            &&& crate::document::suspended_rung_well_formed(objects@, id, objects@[id])
-        } by {
-            let j = choose|j: int|
-                0 <= j < objects.entries@.len() && objects.entries@[j].0@ == id;
-            lemma_sorted_index(objects.entries@, j);
-        };
-    }
-    true
-}
-
-fn body_well_formed_for(
-    document: &String,
-    body: &DocumentBody,
-    now: u64,
-) -> (r: bool)
-    ensures
-        r == crate::document::body_well_formed(document@, body@, now),
-{
-    match body {
-        DocumentBody::Workflow(objects) => {
-            workflow_body_well_formed(document, objects, now)
-        },
-        DocumentBody::Schedule(None) => true,
-        DocumentBody::Schedule(Some(schedule)) => {
-            if schedule.id != *document
-                || schedule.created_at > now
-                || schedule.created_at > schedule.next_run_at
-            {
-                return false;
-            }
-            if let Some(last) = schedule.last_run_at {
-                if last < schedule.created_at || last >= schedule.next_run_at {
-                    return false;
-                }
-            }
-            !(targeted(&schedule.promise_tags) && timer(&schedule.promise_tags))
-        },
-    }
-}
-
 /// One complete request transition.
 ///
 /// Time-driven work already due is drained before the raw handler, so reads
@@ -4171,6 +3856,9 @@ pub fn request_transition(
         lemma_pend_empty();
         lemma_notes_empty();
     }
+    if let Some(response) = bounds_error(request, now) {
+        return (from, response, Vec::new(), Vec::new());
+    }
     let original = copy(&from);
     let (before, mut born_before, mut notes_before) =
         sweep(from, now, retry_timeout, limit);
@@ -4187,23 +3875,6 @@ pub fn request_transition(
     let (after, mut born_after, mut notes_after) =
         sweep(handled, now, retry_timeout, limit);
     if due(&after, now) {
-        return (
-            original,
-            unavailable(request),
-            Vec::new(),
-            Vec::new(),
-        );
-    }
-    let document = request_document(request);
-    let Some(document) = document else {
-        return (
-            original,
-            unavailable(request),
-            Vec::new(),
-            Vec::new(),
-        );
-    };
-    if !body_well_formed_for(&document, &after, now) {
         return (
             original,
             unavailable(request),
@@ -5609,9 +5280,43 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
     }
 }
 
+pub open spec fn spec_bounds_error(request: Request, now: Time) -> Option<Response> {
+    match request {
+        Request::PromiseCreate(q) if !spec_time_bounded(q.timeout_at) =>
+            Some(spec_promise_res(400, None)),
+        Request::TaskCreate(q)
+            if !spec_time_bounded(q.action.timeout_at) || !spec_ttl_valid(q.ttl) =>
+            Some(Response::TaskClaim(TaskClaimRes {
+                status: 400,
+                task: None,
+                promise: None,
+            })),
+        Request::TaskAcquire(q) if !spec_ttl_valid(q.ttl) =>
+            Some(Response::TaskClaim(TaskClaimRes {
+                status: 400,
+                task: None,
+                promise: None,
+            })),
+        Request::TaskFence(q) => match q.action {
+            TaskFenceAction::Create(c) if !spec_time_bounded(c.timeout_at) =>
+                Some(Response::TaskFence(TaskFenceRes { status: 400, action: None })),
+            _ => None,
+        },
+        Request::ScheduleCreate(q)
+            if !spec_deadline_bounded(
+                echod_abstract::trusted::spec_next_cron(q.cron@, now),
+                q.promise_timeout,
+            ) =>
+            Some(Response::Schedule(ScheduleRes { status: 400, schedule: None })),
+        _ => None,
+    }
+}
+
 /// One request against one document. The same match as `handle`.
 pub open spec fn spec_handle(doc: DocumentBodyV, request: Request, now: Time) -> (DocumentBodyV, Response) {
-    match request {
+    match spec_bounds_error(request, now) {
+        Some(response) => (doc, response),
+        None => match request {
         Request::PromiseGet(q) => spec_promise_get(doc, q.id, now),
         Request::PromiseCreate(q) => spec_promise_create(doc, q, now),
         Request::PromiseSettle(q) => spec_promise_settle(doc, q, now),
@@ -5631,6 +5336,7 @@ pub open spec fn spec_handle(doc: DocumentBodyV, request: Request, now: Time) ->
         Request::ScheduleGet(q) => spec_schedule_get(doc, q.id),
         Request::ScheduleCreate(q) => spec_schedule_create(doc, q, now),
         Request::ScheduleDelete(q) => spec_schedule_delete(doc, q.id),
+        },
     }
 }
 
@@ -5817,7 +5523,7 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
 }
 
 pub open spec fn spec_promise_create(doc: DocumentBodyV, req: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+    if !spec_time_bounded(req.timeout_at) || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         (doc, spec_promise_res(400, None))
     } else {
         let map = spec_workflow_map(doc);
@@ -5943,7 +5649,9 @@ pub open spec fn spec_acquire(t: TkV, pid: Seq<char>, ttl: u64, now: Time) -> Tk
 }
 
 pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, action: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+    if !spec_time_bounded(action.timeout_at) || !spec_ttl_valid(ttl)
+        || !spec_targeted(action.tags) || spec_timer(action.tags)
+    {
         (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
         let (doc, created) = spec_promise_create(doc, action, now);
@@ -5970,7 +5678,7 @@ pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, act
                                     promise: Some(spec_record(action.id, seen.promise)),
                                 }),
                             ),
-                            Some(t) if t.state == TaskState::Pending => {
+                            Some(t) if t.state == TaskState::Pending && spec_version_can_increment(t.version) => {
                                 let u = spec_acquire(t, pid@, ttl, now);
                                 let obj = ObjV { task: Some(u), ..seen };
                                 (
@@ -6007,6 +5715,9 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
 }
 
 pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocumentBodyV, Response) {
+    if !spec_ttl_valid(ttl) {
+        (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
+    } else {
     let doc = spec_opened(doc);
     let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
@@ -6015,7 +5726,9 @@ pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64,
         let obj = spec_project_obj(map[id@], now);
         match obj.task {
             None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
-            Some(t) if t.state != TaskState::Pending || t.version != version || obj.promise.state != PromiseState::Pending => {
+            Some(t) if t.state != TaskState::Pending || t.version != version
+                || obj.promise.state != PromiseState::Pending
+                || !spec_version_can_increment(t.version) => {
                 (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
             },
             Some(t) => {
@@ -6031,6 +5744,7 @@ pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64,
                 )
             },
         }
+    }
     }
 }
 
@@ -6240,7 +5954,11 @@ pub open spec fn spec_fence(doc: DocumentBodyV, id: String, version: u64, action
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
-    if target@ == id@ || !same_origin_spec(target@, id@) {
+    let timeout_bad = match action {
+        TaskFenceAction::Create(c) => !spec_time_bounded(c.timeout_at),
+        TaskFenceAction::Settle(_) => false,
+    };
+    if timeout_bad || target@ == id@ || !same_origin_spec(target@, id@) {
         (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }))
     } else {
         let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
@@ -6283,7 +6001,10 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+    let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
+    {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
         match doc {
@@ -6296,7 +6017,7 @@ pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq
                     promise_timeout: req.promise_timeout,
                     promise_param: req.promise_param,
                     promise_tags: req.promise_tags,
-                    next_run_at: echod_abstract::trusted::spec_next_cron(req.cron@, now),
+                    next_run_at,
                     last_run_at: None,
                     created_at: now,
                 };
@@ -6372,18 +6093,17 @@ pub open spec fn spec_request_commits(
     retry_timeout: u64,
     limit: nat,
 ) -> bool {
+    if spec_bounds_error(request, now) is Some {
+        true
+    } else {
     let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
     if spec_earliest_in(before, now) is Some {
         false
     } else {
         let (handled, _) = spec_handle(before, request, now);
         let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
-        &&& spec_earliest_in(after, now) is None
-        &&& match spec_request_document(request) {
-            Some(document) =>
-                crate::document::body_well_formed(document, after, now),
-            None => false,
-        }
+        spec_earliest_in(after, now) is None
+    }
     }
 }
 
@@ -6394,6 +6114,9 @@ pub open spec fn spec_request_transition(
     retry_timeout: u64,
     limit: nat,
 ) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
+    match spec_bounds_error(request, now) {
+    Some(response) => (doc, response, Seq::empty(), Seq::empty()),
+    None => {
     let (before, born_before, notes_before) =
         spec_sweep(doc, now, retry_timeout, limit);
     if spec_earliest_in(before, now) is Some {
@@ -6405,20 +6128,15 @@ pub open spec fn spec_request_transition(
         if spec_earliest_in(after, now) is Some {
             (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
         } else {
-            match spec_request_document(request) {
-                Some(document) if crate::document::body_well_formed(
-                    document,
-                    after,
-                    now,
-                ) => (
-                    after,
-                    response,
-                    born_before + born_after,
-                    notes_before + notes_after,
-                ),
-                _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
-            }
+            (
+                after,
+                response,
+                born_before + born_after,
+                notes_before + notes_after,
+            )
         }
+    }
+    }
     }
 }
 

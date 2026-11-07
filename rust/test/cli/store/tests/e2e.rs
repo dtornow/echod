@@ -106,7 +106,7 @@ impl Node {
         cfg.retry_timeout = 600;
         // Small buckets, so the tests cross bucket boundaries.
         cfg.timer_bucket_ms = 400;
-        let server = Server::new(cfg, store);
+        let server = Server::new(cfg, store).unwrap();
         server.init(false).await.unwrap();
         let (stop, rx) = tokio::sync::watch::channel(false);
         let (addr, _) = gateway::serve(Arc::clone(&server), &addr.to_string(), rx).await.unwrap();

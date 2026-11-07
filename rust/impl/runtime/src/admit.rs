@@ -55,6 +55,14 @@ pub fn admit(req: &RequestEnvelope, now: u64, debug: bool) -> Admission {
         (true, Some(t)) => (t.max(0) as u64, true),
         _ => (now, false),
     };
+    if !rows::time_bounded(now) {
+        return Admission::Rejected(ResponseEnvelope::error(
+            req.kind.clone(),
+            req.head.corr_id.clone(),
+            400,
+            &format!("logical time must be at most {}", rows::MAX_TIME),
+        ));
+    }
     match decode(req, now, pinned) {
         Ok(decoded) => Admission::Request(decoded),
         Err(resp) => Admission::Rejected(resp),
@@ -75,7 +83,11 @@ fn admit_debug(req: &RequestEnvelope) -> Admission {
             if req.head.debug_time.is_some_and(|t| t != time) {
                 return reject(400, "resonate:debug_time must equal data.time");
             }
-            Admission::Debug { kind, corr, op: DebugOp::Tick { time: time.max(0) as u64 } }
+            let time = time.max(0) as u64;
+            if !rows::time_bounded(time) {
+                return reject(400, &format!("time must be at most {}", rows::MAX_TIME));
+            }
+            Admission::Debug { kind, corr, op: DebugOp::Tick { time } }
         }
         _ => reject(400, "Unknown debug operation"),
     }
@@ -198,6 +210,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
+            if !rows::ttl_valid(ttl) {
+                return err(400, &format!("ttl must be between 1 and {}", rows::MAX_TIME));
+            }
             (rows::Request::TaskCreate(rows::TaskCreateReq { pid: d.pid, ttl, action }), None, None)
         }
         "task.acquire" => {
@@ -206,6 +221,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 (Ok(v), Ok(t)) => (v, t),
                 (Err(m), _) | (_, Err(m)) => return err(400, &m),
             };
+            if !rows::ttl_valid(ttl) {
+                return err(400, &format!("ttl must be between 1 and {}", rows::MAX_TIME));
+            }
             (rows::Request::TaskAcquire(rows::TaskAcquireReq { id: d.id, version, pid: d.pid, ttl }), None, None)
         }
         "task.release" => {
@@ -310,6 +328,13 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
+            let next_run_at = echod_cron::next_run_at(&d.cron, now);
+            if !rows::deadline_bounded(next_run_at, promise_timeout) {
+                return err(400, &format!(
+                    "promiseTimeout produces a deadline above {}",
+                    rows::MAX_TIME
+                ));
+            }
             let id = d.id.clone();
             let q = rows::ScheduleCreateReq {
                 id: d.id,
