@@ -12,9 +12,10 @@ def promiseGet (req : PromiseGetReq) (now : Nat) : Handler PromiseGetRes := do
 
 def promiseCreate (req : PromiseCreateReq) (now : Nat) :
     Handler PromiseCreateRes := do
-  if req.tags.timerTargeted then
+  if req.timeoutAt > MAX_TIME ∨ req.tags.timerTargeted then
     return { status := 400, promise := none }
   let o ← readOrCreate req now
+  dispatchIfDue o now
   return { status := 200, promise := some (o.promise.toRecord o.id) }
 
 def promiseSettle (req : PromiseSettleReq) (now : Nat) :
@@ -75,7 +76,8 @@ def taskGet (req : TaskGetReq) (now : Nat) : Handler TaskGetRes := do
 
 def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
   let action := req.action
-  if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
+  if req.ttl == 0 ∨ req.ttl > MAX_TIME ∨ action.timeoutAt > MAX_TIME ∨
+      action.tags.otype != .runnable ∨ action.tags.timerTargeted then
     return { status := 400 }
   let o ← readOrCreate action now
   if o.promise.otype != .runnable then return { status := 422 }
@@ -86,6 +88,7 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
         return { status := 200, task := some (t.toRecord action.id),
                  promise := some (o.promise.toRecord action.id) }
       else if t.state == .pending then
+        if t.version ≥ MAX_VERSION then return { status := 409 }
         let next := t.acquire req.pid req.ttl now
         setObject { o with task := some next }
         return { status := 200, task := some (next.toRecord action.id),
@@ -93,11 +96,13 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
       return { status := 409 }
 
 def taskAcquire (req : TaskAcquireReq) (now : Nat) : Handler TaskAcquireRes := do
+  if req.ttl == 0 ∨ req.ttl > MAX_TIME then return { status := 400 }
   match ← readTask req.id now with
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
+      if t.version ≥ MAX_VERSION then return { status := 409 }
       let next := t.acquire req.pid req.ttl now
       setObject { o with task := some next }
       return { status := 200, task := some (next.toRecord req.id),
@@ -189,7 +194,7 @@ def taskRelease (req : TaskReleaseReq) (now : Nat) : Handler TaskReleaseRes := d
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      setObject { o with task := some (t.unlease .pending (some now)) }
+      dispatchTask o (t.unlease .pending none) now
       return { status := 200 }
 
 def taskHalt (req : TaskHaltReq) (now : Nat) : Handler TaskHaltRes := do
@@ -206,7 +211,7 @@ def taskContinue (req : TaskContinueReq) (now : Nat) : Handler TaskContinueRes :
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .halted then return { status := 409 }
-      setObject { o with task := some { t with state := .pending, retryTimeoutAt := some now } }
+      dispatchTask o { t with state := .pending } now
       return { status := 200 }
 
 def taskSearch (_req : TaskSearchReq) (_now : Nat) : TaskSearchRes :=
@@ -220,7 +225,8 @@ def scheduleGet (req : ScheduleGetReq) (_now : Nat) : Handler ScheduleGetRes := 
 
 def scheduleCreate (req : ScheduleCreateReq) (now : Nat) :
     Handler ScheduleCreateRes := do
-  if req.promiseTags.timerTargeted then return { status := 400 }
+  if req.promiseTimeout > MAX_TIME ∨ req.promiseTags.timerTargeted then
+    return { status := 400 }
   match ← getSchedule req.id with
   | some schedule =>
       return { status := 200, schedule := some schedule }
