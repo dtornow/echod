@@ -14,6 +14,13 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Client-visible time values and durations stay below this bound. Two valid
+/// values can therefore be added without overflowing `u64`.
+pub const MAX_TIME: u64 = 0x4000_0000_0000_0000;
+
+/// The largest task fencing version representable by the protocol wire.
+pub const MAX_VERSION: u64 = u32::MAX as u64;
+
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------

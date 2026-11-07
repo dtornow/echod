@@ -9,6 +9,7 @@ use echod_types::{
     PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
     Request, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq,
     TaskFenceInnerRes, TaskFenceReq, TaskRecord, TaskRef, TaskState, TaskSuspendReq, Value,
+    MAX_TIME, MAX_VERSION,
 };
 
 use super::super::trusted::*;
@@ -73,7 +74,7 @@ impl ServerConfig {
             outs_v(outs@) == spec_promise_create(*req, s@, now),
     {
         broadcast use group_views;
-        if is_timer(&req.tags) && has_target(&req.tags) {
+        if req.timeout_at > MAX_TIME || (is_timer(&req.tags) && has_target(&req.tags)) {
             return status(promise_res(400, None), mk("create: timer with target (400)"), s);
         }
         match s.promises.get(&req.id) {
@@ -204,7 +205,8 @@ impl ServerConfig {
             outs_v(outs@) == spec_task_create(*pid, ttl, *req, s@, now),
     {
         broadcast use group_views;
-        if !has_target(&req.tags) || is_timer(&req.tags) {
+        if ttl == 0 || ttl > MAX_TIME || req.timeout_at > MAX_TIME
+            || !has_target(&req.tags) || is_timer(&req.tags) {
             return status(claim_res(400, None, None), mk("task.create: not runnable, or a timer (400)"), s);
         }
         match s.promises.get(&req.id) {
@@ -220,6 +222,9 @@ impl ServerConfig {
                 let seen_t = stored_task.project(&seen_p);
                 return match seen_t.state {
                     TaskState::Fulfilled => echo(claim_res(200, Some(seen_t.to_record(&req.id)), Some(seen_p.to_record(&req.id))), mk("task.create: task done (echo)"), s),
+                    TaskState::Pending if stored_task.version >= MAX_VERSION => {
+                        status(claim_res(409, None, None), mk("task.create: version exhausted (409)"), s)
+                    },
                     TaskState::Pending => {
                         let mut n = copy_store(s);
                         let mut u = copy(stored_task);
@@ -566,7 +571,7 @@ impl ServerConfig {
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_views;
-        if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
+        if req.promise_timeout > MAX_TIME || (is_timer(&req.promise_tags) && has_target(&req.promise_tags)) {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
         match s.schedules.get(&req.id) {
@@ -690,6 +695,9 @@ impl ServerConfig {
             outs_v(outs@) == spec_task_acquire(*id, version, *pid, ttl, s@, now),
     {
         broadcast use group_views;
+        if ttl == 0 || ttl > MAX_TIME {
+            return status(claim_res(400, None, None), mk("acquire: invalid ttl (400)"), s);
+        }
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(claim_res(404, None, None), mk("acquire: no such task (404)"), s),
@@ -700,7 +708,8 @@ impl ServerConfig {
         };
         let p = stored_p.project(now);
         let seen = t.project(&p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || t.version >= MAX_VERSION {
             return status(claim_res(409, None, None), mk("acquire: not pending, or stale version (409)"), s);
         }
         let mut n = copy_store(s);
@@ -918,7 +927,7 @@ pub open spec fn spec_held(s: StoreV, id: Seq<char>, version: u64, now: Time) ->
 }
 
 pub open spec fn spec_promise_create(req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.tags) && spec_has_target(req.tags) {
+    if req.timeout_at > MAX_TIME || (spec_is_timer(req.tags) && spec_has_target(req.tags)) {
         spec_out(spec_promise_res(400, None), s)
     } else if s.promises.contains_key(req.id@) {
         let seen = spec_project_promise(s.promises[req.id@], now);
@@ -957,7 +966,8 @@ pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time
 }
 
 pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if !spec_has_target(req.tags) || spec_is_timer(req.tags) {
+    if ttl == 0 || ttl > MAX_TIME || req.timeout_at > MAX_TIME
+        || !spec_has_target(req.tags) || spec_is_timer(req.tags) {
         spec_out(spec_claim_res(400, None, None), s)
     } else if s.promises.contains_key(req.id@) {
         let p = s.promises[req.id@];
@@ -974,6 +984,8 @@ pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq,
                     spec_claim_res(200, Some(spec_task_record(req.id, seen_t)), Some(spec_promise_record(req.id, seen_p))),
                     s,
                 ),
+                TaskState::Pending if stored.version >= MAX_VERSION =>
+                    spec_out(spec_claim_res(409, None, None), s),
                 TaskState::Pending => {
                     let u = spec_acquire(stored, sat_add(stored.version, 1), pid@, ttl, now);
                     let n = StoreV { tasks: s.tasks.insert(req.id@, u), ..s };
@@ -1231,7 +1243,7 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags) {
+    if req.promise_timeout > MAX_TIME || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags)) {
         spec_out(spec_schedule_res(400, None), s)
     } else if s.schedules.contains_key(req.id@) {
         spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
@@ -1305,13 +1317,16 @@ pub open spec fn spec_register_listener(awaited: String, address: String, s: Sto
 }
 
 pub open spec fn spec_task_acquire(id: String, version: u64, pid: String, ttl: Time, s: StoreV, now: Time) -> Seq<OutV> {
-    if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
+    if ttl == 0 || ttl > MAX_TIME {
+        spec_out(spec_claim_res(400, None, None), s)
+    } else if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
         spec_out(spec_claim_res(404, None, None), s)
     } else {
         let t = s.tasks[id@];
         let p = spec_project_promise(s.promises[id@], now);
         let seen = spec_project_task(t, p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || t.version >= MAX_VERSION {
             spec_out(spec_claim_res(409, None, None), s)
         } else {
             let u = spec_acquire(t, sat_add(t.version, 1), pid@, ttl, now);

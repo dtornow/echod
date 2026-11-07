@@ -13,7 +13,7 @@ use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
 use echod_types::origin;
-use echod_types::{PromiseState, Schedule, Tags, TaskState, Value};
+use echod_types::{PromiseState, Schedule, Tags, TaskState, Value, MAX_TIME, MAX_VERSION};
 
 #[cfg(not(verus_keep_ghost))]
 use serde::{Deserialize, Serialize};
@@ -389,6 +389,7 @@ pub open spec fn promise_well_formed(
     committed_at: u64,
 ) -> bool {
     let promise = object.promise;
+    &&& promise.timeout_at <= MAX_TIME
     &&& promise.created_at <= promise.timeout_at
     &&& promise.created_at <= committed_at
     &&& (promise.state == PromiseState::Pending) == (promise.settled_at is None)
@@ -427,6 +428,7 @@ pub open spec fn task_well_formed(
                 &&& (task.state == TaskState::Acquired) == (task.ttl is Some)
                 &&& (task.state == TaskState::Acquired) == (task.lease_timeout_at is Some)
                 &&& (task.state == TaskState::Pending) == (task.retry_timeout_at is Some)
+                &&& match task.ttl { Some(ttl) => 0 < ttl <= MAX_TIME, None => true }
                 &&& task.state == TaskState::Acquired ==> {
                     &&& task.version > 0
                     &&& task.lease_timeout_at.unwrap() > committed_at
@@ -446,7 +448,7 @@ pub open spec fn task_well_formed(
                 &&& object.promise.state != PromiseState::Pending ==>
                     task.state == TaskState::Fulfilled
                 &&& unique(task.resumes)
-                &&& task.version <= u32::MAX as u64
+                &&& task.version <= MAX_VERSION
             },
         }
 }
@@ -490,7 +492,8 @@ pub open spec fn descendants_well_formed(
 }
 
 pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
-    &&& forall|id: Seq<char>| workflow.objects.contains_key(id) ==> {
+    &&& workflow.committed_at <= MAX_TIME
+    &&& forall|id: Seq<char>| #[trigger] workflow.objects.contains_key(id) ==> {
         &&& origin(id) == workflow.document
         &&& promise_well_formed(id, workflow.objects[id], workflow.committed_at)
         &&& task_well_formed(workflow.objects[id], workflow.committed_at)
@@ -508,9 +511,11 @@ pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
 }
 
 pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
+    &&& schedule.committed_at <= MAX_TIME
     &&& match schedule.schedule {
         Some(row) => {
             &&& row.id@ == schedule.document
+            &&& row.promise_timeout <= MAX_TIME
             &&& row.created_at <= schedule.committed_at
             &&& row.created_at <= row.next_run_at
             &&& match row.last_run_at {

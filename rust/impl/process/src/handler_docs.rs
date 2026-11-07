@@ -276,7 +276,7 @@ impl DeepView for Progress {
 /// How many due steps one sweep runs before it commits. A document with
 /// more due is committed with its nearest deadline past, which arms a key
 /// that fires at once.
-pub const SWEEP_STEPS: u64 = 256;
+pub const SWEEP_STEPS: u64 = echod_concrete::node::REQUEST_SWEEP_STEPS;
 
 /// What a committed step answers with.
 #[make_spec_type]

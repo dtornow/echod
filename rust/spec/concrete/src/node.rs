@@ -23,7 +23,7 @@ use echod_types::{
     origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
     PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
     ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
-    TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
+    TaskGetRes, TaskRecord, TaskRef, TaskState, Value, MAX_TIME, MAX_VERSION,
 };
 
 use echod_abstract::trusted::{copy, expand, next_cron};
@@ -57,6 +57,11 @@ use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 verus! {
 
 broadcast use vstd::seq::group_seq_lemmas, vstd::set::group_set_lemmas;
+
+/// Request transitions drain their finite workflow to a fixed point.  The
+/// executable representation is bounded by addressable memory; using the
+/// full `u64` range avoids turning document size into a semantic cutoff.
+pub const REQUEST_SWEEP_STEPS: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
 // The node, executed
@@ -2215,7 +2220,6 @@ fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) 
 {
     let live = timeout_at > now;
     let is_timer = timer(&tags);
-    let offer = offer_at(&tags, now);
     let empty = Value::empty();
     proof {
         assert(exists|v: Value| v@ == AValue::empty());
@@ -2240,7 +2244,10 @@ fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) 
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: if live { Some(offer) } else { None },
+            // A newly runnable promise is offered by this transition.  The
+            // request drain advances this to `now + retry_timeout` before
+            // the document is committed.
+            retry_timeout_at: if live { Some(now) } else { None },
             resumes: Vec::new(),
         })
     } else {
@@ -2611,7 +2618,7 @@ fn promise_create(doc: DocumentBody, req: &PromiseCreateReq, now: u64) -> (r: (D
     ensures
         (r.0@, r.1) == spec_promise_create(doc@, *req, now),
 {
-    if timer(&req.tags) && targeted(&req.tags) {
+    if req.timeout_at > MAX_TIME || (timer(&req.tags) && targeted(&req.tags)) {
         return (doc, promise_res(400, None));
     }
     match peek(&doc, &req.id) {
@@ -2669,11 +2676,15 @@ fn register_callback(doc: DocumentBody, awaited: &String, awaiter: &String, now:
             Some(b) => {
                 let awaited_obj = project_obj(&a, now);
                 let awaiter_obj = project_obj(&b, now);
-                if !targeted(&awaiter_obj.promise.tags) || !awaitable(&awaited_obj.promise.tags) {
+                let runnable = targeted(&awaiter_obj.promise.tags);
+                let can_await = awaitable(&awaited_obj.promise.tags);
+                let both_pending = awaited_obj.promise.state == PromiseState::Pending
+                    && awaiter_obj.promise.state == PromiseState::Pending;
+                if !runnable || !can_await {
                     (DocumentBody::Workflow(objs), promise_res(422, None))
                 } else {
                     let res = promise_res(200, Some(record(awaited, &awaited_obj.promise)));
-                    if awaited_obj.promise.state == PromiseState::Pending && awaiter_obj.promise.state == PromiseState::Pending {
+                    if both_pending {
                         let obj = add_callback(awaited_obj, awaiter);
                         (DocumentBody::Workflow(objs.put(awaited, obj)), res)
                     } else {
@@ -2733,7 +2744,8 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
     ensures
         (r.0@, r.1) == spec_task_create(doc@, *pid, ttl, *action, now),
 {
-    if !targeted(&action.tags) || timer(&action.tags) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !targeted(&action.tags) || timer(&action.tags) {
         return (doc, claim_res(400, None, None));
     }
     let (doc, created) = promise_create(doc, action, now);
@@ -2757,6 +2769,8 @@ fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreate
                     if t.state == TaskState::Fulfilled {
                         let res = claim_res(200, Some(task_record(&action.id, &t)), Some(record(&action.id, &promise)));
                         (doc, res)
+                    } else if t.state == TaskState::Pending && t.version >= MAX_VERSION {
+                        (doc, claim_res(409, None, None))
                     } else if t.state == TaskState::Pending {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(&action.id, &u)), Some(record(&action.id, &promise)));
@@ -2811,6 +2825,9 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
     ensures
         (r.0@, r.1) == spec_task_acquire(doc@, *id, version, *pid, ttl, now),
 {
+    if ttl == 0 || ttl > MAX_TIME {
+        return (doc, claim_res(400, None, None));
+    }
     let objs = open(doc);
     match objs.get(id) {
         None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
@@ -2819,7 +2836,8 @@ fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl:
             match task {
                 None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
                 Some(t) => {
-                    if !(t.state == TaskState::Pending) || t.version != version || !(promise.state == PromiseState::Pending) {
+                    if !(t.state == TaskState::Pending) || t.version != version
+                        || !(promise.state == PromiseState::Pending) || t.version >= MAX_VERSION {
                         (DocumentBody::Workflow(objs), claim_res(409, None, None))
                     } else {
                         let u = acquire(&t, pid, ttl, now);
@@ -3315,7 +3333,7 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    if targeted(&req.promise_tags) && timer(&req.promise_tags) {
+    if req.promise_timeout > MAX_TIME || (targeted(&req.promise_tags) && timer(&req.promise_tags)) {
         return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
     }
     let existing = match &doc {
@@ -3426,7 +3444,8 @@ proof fn lemma_pend_one(pending: Pending)
     assert(pend_v(seq![pending]) =~= seq![pending@]);
 }
 
-/// `spec_resume`: a suspended awaiter is offered again from `since`.
+/// `spec_resume`: a suspended awaiter is offered immediately.  A callback
+/// on a pending, acquired, or halted task only records the resume.
 fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u64) -> (r: Objects)
     ensures
         r@ == spec_resume(objs@, awaiter@, awaited@, since, now),
@@ -3450,7 +3469,7 @@ fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u6
                             pid: None,
                             ttl: None,
                             lease_timeout_at: None,
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             resumes,
                         };
                         let Obj { promise, task: _ } = found;
@@ -3615,7 +3634,7 @@ pub fn create_occurrence(doc: DocumentBody, pending: &Pending, now: u64) -> (r: 
         Some(t) => {
             if t.state == TaskState::Pending {
                 let mut u = t;
-                u.retry_timeout_at = Some(offer_at(&pending.tags, pending.at));
+                u.retry_timeout_at = Some(now);
                 Some(u)
             } else {
                 Some(t)
@@ -3682,6 +3701,168 @@ pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r
         assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
     }
     (doc, born, notes)
+}
+
+/// Whether a document still has work due at `now`.
+pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
+    ensures
+        r == (spec_earliest_in(doc@, now) is Some),
+{
+    earliest_in(doc, now).is_some()
+}
+
+fn same_key_string(a: &String, b: &String) -> (r: bool)
+    ensures
+        r == (a@ == b@),
+{
+    *a == *b
+}
+
+fn same_outbound_key(a: &Outbound, b: &Outbound) -> (r: bool)
+    ensures
+        r == (spec_note_key(a@) == spec_note_key(b@)),
+{
+    match (a, b) {
+        (Outbound::Execute { id: x, .. }, Outbound::Execute { id: y, .. }) =>
+            same_key_string(x, y),
+        (
+            Outbound::Unblock { address: xa, promise: xp },
+            Outbound::Unblock { address: ya, promise: yp },
+        ) => same_key_string(xa, ya) && same_key_string(&xp.id, &yp.id),
+        _ => false,
+    }
+}
+
+fn contains_outbound_key(notes: &Vec<Outbound>, note: &Outbound) -> (r: bool)
+    ensures
+        r == exists|i: int| 0 <= i < notes@.len()
+            && spec_note_key(notes@[i]@) == spec_note_key(note@),
+{
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            forall|j: int| 0 <= j < i ==>
+                spec_note_key(notes@[j]@) != spec_note_key(note@),
+        decreases notes@.len() - i,
+    {
+        if same_outbound_key(&notes[i], note) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Canonical insertion-order representation of the keyed effect set.
+fn keyed_notes(notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_keyed_notes(notes_v(notes@), notes@.len() as nat),
+{
+    let mut out: Vec<Outbound> = Vec::new();
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            notes_v(out@) == spec_keyed_notes(notes_v(notes@), i as nat),
+        decreases notes@.len() - i,
+    {
+        let present = contains_outbound_key(&out, &notes[i]);
+        proof {
+            assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+            assert forall|j: int| 0 <= j < out@.len() implies
+                notes_v(out@)[j] == out@[j]@ by {};
+            if present {
+                let j = choose|j: int| 0 <= j < out@.len()
+                    && spec_note_key(out@[j]@) == spec_note_key(notes@[i as int]@);
+                assert(0 <= j < notes_v(out@).len());
+                assert(spec_note_key(notes_v(out@)[j])
+                    == spec_note_key(notes_v(notes@)[i as int]));
+            } else {
+                assert forall|j: int| 0 <= j < notes_v(out@).len() implies
+                    spec_note_key(notes_v(out@)[j])
+                        != spec_note_key(notes_v(notes@)[i as int]) by {
+                    assert(notes_v(out@)[j] == out@[j]@);
+                    assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+                };
+            }
+            assert(spec_keyed_notes(notes_v(notes@), (i + 1) as nat)
+                == spec_keyed_insert(
+                    spec_keyed_notes(notes_v(notes@), i as nat),
+                    notes_v(notes@)[i as int],
+                ));
+        }
+        if !present {
+            let ghost before = out@;
+            out.push(copy(&notes[i]));
+            proof {
+                assert(notes_v(before.push(notes@[i as int])) =~=
+                    notes_v(before).push(notes@[i as int]@));
+                assert(notes_v(out@)
+                    == spec_keyed_notes(notes_v(notes@), (i + 1) as nat));
+            }
+        } else {
+            proof {
+                assert(notes_v(out@)
+                    == spec_keyed_notes(notes_v(notes@), (i + 1) as nat));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// One complete request transition on a workflow document: sweep everything
+/// already due, run the selected handler, then sweep the work that handler
+/// made immediately due. If either finite sweep budget is exhausted, reject
+/// atomically: the original body and no effects escape. Schedule requests
+/// keep their separate schedule semantics and do not sweep/fire occurrences.
+pub fn request_transition(
+    doc: DocumentBody,
+    request: &Request,
+    now: u64,
+    retry_timeout: u64,
+    limit: u64,
+) -> (r: (DocumentBody, Response, Vec<Pending>, Vec<Outbound>))
+    ensures
+        (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
+            == spec_request_transition(doc@, *request, now, retry_timeout, limit as nat),
+{
+    let workflow = match &doc {
+        DocumentBody::Workflow(_) => true,
+        DocumentBody::Schedule(_) => false,
+    };
+    if !workflow {
+        let (doc, response) = handle(doc, request, now);
+        return (doc, response, Vec::new(), Vec::new());
+    }
+
+    proof {
+        lemma_pend_empty();
+        lemma_notes_empty();
+    }
+    let original = copy(&doc);
+    let (before, mut born, mut notes) = sweep(doc, now, retry_timeout, limit);
+    if due(&before, now) {
+        return (original, unavailable(request), Vec::new(), Vec::new());
+    }
+    let (handled, response) = handle(before, request, now);
+    let (after, mut more_born, mut more_notes) =
+        sweep(handled, now, retry_timeout, limit);
+    if due(&after, now) {
+        return (original, unavailable(request), Vec::new(), Vec::new());
+    }
+    let ghost born0 = born@;
+    let ghost notes0 = notes@;
+    let ghost more_born0 = more_born@;
+    let ghost more_notes0 = more_notes@;
+    born.append(&mut more_born);
+    notes.append(&mut more_notes);
+    proof {
+        lemma_map_values_add(born0, more_born0);
+        lemma_notes_add(notes0, more_notes0);
+    }
+    (after, response, born, keyed_notes(notes))
 }
 
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
@@ -4672,6 +4853,41 @@ pub enum NoteV {
     Unblock { address: Seq<char>, promise: PromiseRecord },
 }
 
+pub enum NoteKeyV {
+    Execute(Seq<char>),
+    Unblock(Seq<char>, Seq<char>),
+}
+
+pub open spec fn spec_note_key(note: NoteV) -> NoteKeyV {
+    match note {
+        NoteV::Execute { id, .. } => NoteKeyV::Execute(id),
+        NoteV::Unblock { address, promise } => NoteKeyV::Unblock(promise.id@, address),
+    }
+}
+
+pub open spec fn spec_keyed_insert(notes: Seq<NoteV>, note: NoteV) -> Seq<NoteV> {
+    if exists|i: int| 0 <= i < notes.len()
+        && spec_note_key(notes[i]) == spec_note_key(note)
+    {
+        notes
+    } else {
+        notes.push(note)
+    }
+}
+
+pub open spec fn spec_keyed_notes(notes: Seq<NoteV>, count: nat) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        spec_keyed_insert(
+            spec_keyed_notes(notes, (count - 1) as nat),
+            notes[(count - 1) as int],
+        )
+    }
+}
+
 /// What the open flight is doing.
 pub enum JobV {
     External(Request),
@@ -5233,7 +5449,7 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: if live { Some(spec_offer_at(tags, now)) } else { None },
+            retry_timeout_at: if live { Some(now) } else { None },
             resumes: Seq::empty(),
         })
     } else {
@@ -5243,7 +5459,7 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
 }
 
 pub open spec fn spec_promise_create(doc: DocumentBodyV, req: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+    if req.timeout_at > MAX_TIME || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         (doc, spec_promise_res(400, None))
     } else {
         let map = spec_workflow_map(doc);
@@ -5369,7 +5585,8 @@ pub open spec fn spec_acquire(t: TkV, pid: Seq<char>, ttl: u64, now: Time) -> Tk
 }
 
 pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, action: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !spec_targeted(action.tags) || spec_timer(action.tags) {
         (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
         let (doc, created) = spec_promise_create(doc, action, now);
@@ -5396,6 +5613,9 @@ pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, act
                                     promise: Some(spec_record(action.id, seen.promise)),
                                 }),
                             ),
+                            Some(t) if t.state == TaskState::Pending && t.version >= MAX_VERSION => {
+                                (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
+                            },
                             Some(t) if t.state == TaskState::Pending => {
                                 let u = spec_acquire(t, pid@, ttl, now);
                                 let obj = ObjV { task: Some(u), ..seen };
@@ -5433,29 +5653,34 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
 }
 
 pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocumentBodyV, Response) {
-    let doc = spec_opened(doc);
-    let map = spec_workflow_map(doc);
-    if !map.contains_key(id@) {
-        (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None }))
+    if ttl == 0 || ttl > MAX_TIME {
+        (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
-        let obj = spec_project_obj(map[id@], now);
-        match obj.task {
-            None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
-            Some(t) if t.state != TaskState::Pending || t.version != version || obj.promise.state != PromiseState::Pending => {
-                (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
-            },
-            Some(t) => {
-                let u = spec_acquire(t, pid@, ttl, now);
-                let obj = ObjV { task: Some(u), ..obj };
-                (
-                    spec_with_workflow(doc, map.insert(id@, obj)),
-                    Response::TaskClaim(TaskClaimRes {
-                        status: 200,
-                        task: Some(spec_task_record(id, u)),
-                        promise: Some(spec_record(id, obj.promise)),
-                    }),
-                )
-            },
+        let doc = spec_opened(doc);
+        let map = spec_workflow_map(doc);
+        if !map.contains_key(id@) {
+            (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None }))
+        } else {
+            let obj = spec_project_obj(map[id@], now);
+            match obj.task {
+                None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
+                Some(t) if t.state != TaskState::Pending || t.version != version
+                    || obj.promise.state != PromiseState::Pending || t.version >= MAX_VERSION => {
+                    (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
+                },
+                Some(t) => {
+                    let u = spec_acquire(t, pid@, ttl, now);
+                    let obj = ObjV { task: Some(u), ..obj };
+                    (
+                        spec_with_workflow(doc, map.insert(id@, obj)),
+                        Response::TaskClaim(TaskClaimRes {
+                            status: 200,
+                            task: Some(spec_task_record(id, u)),
+                            promise: Some(spec_record(id, obj.promise)),
+                        }),
+                    )
+                },
+            }
         }
     }
 }
@@ -5709,7 +5934,7 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+    if req.promise_timeout > MAX_TIME || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
         match doc {
@@ -5788,6 +6013,45 @@ pub open spec fn spec_sweep(doc: DocumentBodyV, now: Time, retry_timeout: u64, l
     }
 }
 
+pub open spec fn spec_request_transition(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (doc, response) = spec_handle(doc, request, now);
+            (doc, response, Seq::empty(), Seq::empty())
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (swept, before_born, before_notes) =
+                spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(swept, now) is Some {
+                (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+            } else {
+                let (handled, response) = spec_handle(swept, request, now);
+                let (closed, after_born, after_notes) =
+                    spec_sweep(handled, now, retry_timeout, limit);
+                if spec_earliest_in(closed, now) is Some {
+                    (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+                } else {
+                    (
+                        closed,
+                        response,
+                        before_born + after_born,
+                        spec_keyed_notes(
+                            before_notes + after_notes,
+                            (before_notes + after_notes).len() as nat,
+                        ),
+                    )
+                }
+            }
+        },
+    }
+}
+
 pub open spec fn spec_occurrence(doc: DocumentBodyV, pending: PendingV, now: Time) -> DocumentBodyV {
     let doc = spec_opened(doc);
     let map = spec_workflow_map(doc);
@@ -5802,7 +6066,7 @@ pub open spec fn spec_occurrence(doc: DocumentBodyV, pending: PendingV, now: Tim
             born.promise
         };
         let task = match born.task {
-            Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)), ..t }),
+            Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(now), ..t }),
             other => other,
         };
         spec_with_workflow(doc, map.insert(pending.promise, ObjV { promise, task }))
@@ -5942,7 +6206,7 @@ pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awai
                         pid: None,
                         ttl: None,
                         lease_timeout_at: None,
-                        retry_timeout_at: Some(since),
+                        retry_timeout_at: Some(now),
                         resumes: seq![awaited],
                         ..t
                     }),

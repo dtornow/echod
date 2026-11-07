@@ -12,8 +12,8 @@
 use vstd::prelude::*;
 
 use echod_concrete::node::{
-    notes_v, pend_v, spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocumentBodyV,
-    FlightV, JobV, NodeV, NoteV, PendingV,
+    notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
+    spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
 use echod_concrete::store::{StoreCall, StoreError, StoreOutcome};
 use echod_concrete::model::{Message, Pid};
@@ -45,8 +45,9 @@ pub enum AJob {
 pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
-            let (next, response) = spec_handle(doc, request, now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notes) =
+                spec_request_transition(doc, request, now, retry_timeout, limit);
+            (next, Some(response), born, notes)
         },
         AJob::Sweep => {
             let (next, born, notes) = spec_sweep(doc, now, retry_timeout, limit);
@@ -66,11 +67,13 @@ pub open spec fn job_of(job: JobV) -> AJob {
     }
 }
 
-/// The model's `spec_decide` writes the document `spec_step` leaves, under
-/// the condition of the version the flight loaded: `PutIfMatch` on that
-/// version, `PutIfNoneMatch` when the document was absent. The commit below
-/// writes under the same condition.
+/// For model-native due and occurrence jobs, `spec_decide` writes the
+/// document `spec_step` leaves. Request jobs use the stronger process-level
+/// pre/handler/post transition and are verified directly by
+/// [`super::flight::decide`], rather than by Rover's raw-handler step.
 pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
+    requires
+        !(flight.job is External),
     ensures
         ({
             let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);

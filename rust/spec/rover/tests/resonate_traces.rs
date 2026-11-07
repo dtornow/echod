@@ -860,14 +860,14 @@ fn a_pending_task_is_offered_again_every_retry_timeout() {
 }
 
 #[test]
-fn a_delayed_task_is_first_offered_at_its_delay() {
+fn a_runnable_task_is_offered_immediately_even_with_a_delay_tag() {
     let now = 1_000_000;
     let mut t = Trace::new(now);
     let c = PromiseCreateReq { id: "ex:d".into(), timeout_at: FAR, param: val(None), tags: flag_tags(true, false, false, Some(now + 1_000)) };
     t.step("create d +target, delayed", Request::PromiseCreate(c), promise(PromiseState::Pending, None));
-    assert!(t.c.receive(execute("ex:d", 0)).is_err(), "not before its delay");
-    t.tick(now + 1_000);
     t.c.receive(execute("ex:d", 0)).unwrap();
+    t.tick(now + 1_000);
+    assert!(t.c.receive(execute("ex:d", 0)).is_err(), "not offered again before retry");
 }
 
 #[test]

@@ -291,6 +291,14 @@ pub axiom fn axiom_bytes_realised(bytes: Seq<u8>)
         exists|v: Vec<u8>| v@ == bytes,
 ;
 
+/// The executable empty protocol value has a representative in the
+/// verification model, just as strings and byte vectors do above.
+pub axiom fn axiom_empty_value_realised()
+    ensures
+        exists|v: echod_types::Value|
+            v@ == echod_types::AValue::empty(),
+;
+
 /// A map is its entries.
 pub axiom fn axiom_pmap_ext<V>(a: PMap<V>, b: PMap<V>)
     requires

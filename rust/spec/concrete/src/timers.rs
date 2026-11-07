@@ -1405,7 +1405,7 @@ pub proof fn lemma_callback_due(
                         let u = TaskV {
                             state: TaskState::Pending,
                             resumes: seq![id],
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             ..t
                         };
                         assert(n.tasks == tasks0.insert(awaiter, u));
@@ -1414,7 +1414,7 @@ pub proof fn lemma_callback_due(
                             pid: None,
                             ttl: None,
                             lease_timeout_at: None,
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             resumes: seq![id],
                             ..tp
                         };
@@ -1790,7 +1790,7 @@ pub proof fn lemma_born(pending: PendingV, now: Time)
             };
             let task = match born.task {
                 Some(t) if t.state == TaskState::Pending => Some(TkV {
-                    retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)),
+                    retry_timeout_at: Some(now),
                     ..t
                 }),
                 other => other,
@@ -1824,7 +1824,7 @@ pub proof fn lemma_born(pending: PendingV, now: Time)
     };
     let task = match born.task {
         Some(t) if t.state == TaskState::Pending => Some(TkV {
-            retry_timeout_at: Some(spec_offer_at(tags, at)),
+            retry_timeout_at: Some(now),
             ..t
         }),
         other => other,
@@ -1878,7 +1878,7 @@ pub proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocumentBodyV, s: A
         };
         let task = match born.task {
             Some(t) if t.state == TaskState::Pending => Some(TkV {
-                retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)),
+                retry_timeout_at: Some(now),
                 ..t
             }),
             other => other,

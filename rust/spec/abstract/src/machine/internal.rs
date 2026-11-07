@@ -78,7 +78,7 @@ impl ServerConfig {
         if projected.state == PromiseState::Pending || !projected.callbacks.contains(awaiter) {
             return self.noop(s);
         }
-        let since = match projected.settled_at {
+        let _since = match projected.settled_at {
             Some(t) => t,
             None => 0,
         };
@@ -102,7 +102,7 @@ impl ServerConfig {
                     u.resumes = Vec::new();
                     u.resumes.push(awaited.clone());
                     assert(strs(u.resumes@) =~= seq![awaited@]);
-                    u.retry_timeout_at = Some(since);
+                    u.retry_timeout_at = Some(now);
                     n.tasks.insert(awaiter.clone(), u);
                     marks.push(mk("task resumed"));
                 },
@@ -381,7 +381,7 @@ pub open spec fn spec_callback_apply(
             TaskState::Suspended => tasks0.insert(awaiter, TaskV {
                 state: TaskState::Pending,
                 resumes: seq![awaited],
-                retry_timeout_at: Some(since),
+                retry_timeout_at: Some(now),
                 ..t
             }),
             TaskState::Fulfilled => tasks0,
