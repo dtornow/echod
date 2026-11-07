@@ -10,9 +10,11 @@
 //!
 //! [`request_agrees`] is one request against the document it names, on both
 //! models: one abstract outcome, the same response, the next document
-//! reading as the next store, every other key as before. The Lean
-//! `refinement_handlers` proves this per handler. The promise handlers are
-//! proved below. Cargo erases these bodies; a Verus run is what checks them.
+//! reading as the next store, every other key as before. A settle's
+//! dispatches are the listeners it tells and the tasks its resume made due,
+//! the same messages on both models. The Lean `refinement_handlers` proves
+//! this per handler. The promise handlers are proved below. Cargo erases
+//! these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
 
@@ -23,6 +25,7 @@ use crate::node::{
     spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
     spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
+    spec_request_notes, NoteV,
     spec_schedule_key, spec_tag_is, spec_tag_key, spec_targeted, spec_task_record, spec_timer,
     spec_with_origin, TkV,
 };
@@ -41,7 +44,9 @@ use echod_abstract::machine::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
+use echod_abstract::view::{
+    DispatchV, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
+};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
@@ -217,10 +222,19 @@ pub open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> bool {
         other != key && doc_rel(other, doc, s) ==> #[trigger] doc_rel(other, doc, next)
 }
 
+/// A note as the abstract dispatch it is.
+pub open spec fn notes_as_dispatches(notes: Seq<NoteV>) -> Seq<DispatchV> {
+    notes.map_values(|note: NoteV| match note {
+        NoteV::Execute { id, version } => DispatchV::Execute { id, version },
+        NoteV::Unblock { address, promise } => DispatchV::Unblock { address, promise },
+    })
+}
+
 /// One request, on the document it names and on the abstract store. The
 /// abstract handler has one outcome, it answers what the node answers, it
-/// queues and sends nothing, the next document reads as the next store,
-/// every other key reads as before, and the store stays finite.
+/// queues nothing, and a settle sends the same dispatches on both models.
+/// The next document reads as the next store, every other key reads as
+/// before, and the store stays finite.
 pub open spec fn request_agrees(
     config: ServerConfig,
     request: Request,
@@ -229,12 +243,17 @@ pub open spec fn request_agrees(
     s: AStore,
     now: Time,
 ) -> bool {
-    let (next, response) = spec_handle(doc, request, now);
+    let retry = config.retry_timeout;
+    let (next, response) = spec_handle(doc, request, now, retry);
     let outs = spec_handler(config, request, s, now);
     &&& outs.len() == 1
     &&& outs[0].resp == response
     &&& outs[0].work.len() == 0
-    &&& outs[0].send.len() == 0
+    &&& match request {
+        Request::PromiseSettle(_) | Request::TaskFence(_) => outs[0].send.to_multiset()
+            =~= notes_as_dispatches(spec_request_notes(doc, request, now, retry)).to_multiset(),
+        _ => outs[0].send.len() == 0,
+    }
     &&& doc_rel(key, next, outs[0].next)
     &&& others_kept(key, s, outs[0].next)
     &&& finite_store(outs[0].next)
@@ -1141,7 +1160,7 @@ pub proof fn lemma_promise_get_agrees(
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
-    assert(spec_handle(doc, request, now) == c_promise_get(doc, id, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_promise_get(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     assert(origin_rel(map, o, s));
     assert(s.promises.contains_key(id@) == map.contains_key(id@));
@@ -1186,7 +1205,7 @@ pub proof fn lemma_promise_create_agrees(
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
-    assert(spec_handle(doc, request, now) == c_promise_create(doc, req, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_promise_create(doc, req, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_promise_create(req, s, now));
     lemma_timer(req.tags);
@@ -1277,19 +1296,24 @@ pub proof fn lemma_promise_settle_agrees(
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
-    assert(spec_handle(doc, request, now) == c_promise_settle(doc, req, now));
+    let retry = config.retry_timeout;
+    let settled = c_promise_settle(doc, req, now, retry);
+    assert(spec_handle(doc, request, now, retry) == (settled.0, settled.1));
+    assert(spec_request_notes(doc, request, now, retry) == settled.2);
     let outs = spec_handler(config, request, s, now);
-    assert(outs == a_promise_settle(req, s, now));
+    assert(outs == a_promise_settle(config, req, s, now));
     if !req.state.spec_settable() || !map.contains_key(req.id@) {
         assert(outs[0].next == s);
         if req.state.spec_settable() {
             assert(!s.promises.contains_key(req.id@));
             assert(outs[0].resp == a_promise_res(404, None));
-            assert(c_promise_settle(doc, req, now) == (doc, c_promise_res(404, None)));
+            assert(settled == (doc, c_promise_res(404, None), Seq::<NoteV>::empty()));
         } else {
             assert(outs[0].resp == a_promise_res(400, None));
-            assert(c_promise_settle(doc, req, now) == (doc, c_promise_res(400, None)));
+            assert(settled == (doc, c_promise_res(400, None), Seq::<NoteV>::empty()));
         }
+        assert(outs[0].send =~= Seq::<DispatchV>::empty());
+        assert(notes_as_dispatches(Seq::<NoteV>::empty()) =~= Seq::<DispatchV>::empty());
         lemma_others_same(key, s);
     } else {
         assert(s.promises.contains_key(req.id@));
@@ -1302,7 +1326,10 @@ pub proof fn lemma_promise_settle_agrees(
         if p.state != PromiseState::Pending {
             lemma_record(req.id, seen.promise, p);
             assert(outs[0].next == s);
-            assert(outs[0].resp == c_promise_settle(doc, req, now).1);
+            assert(outs[0].resp == settled.1);
+            assert(settled.2 =~= Seq::<NoteV>::empty());
+            assert(outs[0].send =~= Seq::<DispatchV>::empty());
+            assert(notes_as_dispatches(settled.2) =~= outs[0].send);
             lemma_others_same(key, s);
         } else {
             // A pending projection is the stored promise itself.
@@ -1360,11 +1387,27 @@ pub proof fn lemma_promise_settle_agrees(
             assert(n.promises.contains_key(req.id@));
             assert(n.promises[req.id@] == q);
             assert(outs[0].resp == a_promise_res(200, Some(spec_promise_record(req.id, q))));
-            assert(c_promise_settle(doc, req, now).1 == c_promise_res(200, Some(spec_record(req.id, obj.promise))));
-            assert(outs[0].next == n);
-            assert(c_promise_settle(doc, req, now).0 == spec_with_origin(doc, map.insert(req.id@, obj)));
-            assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
-            assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), n));
+            assert(settled.1 == c_promise_res(200, Some(spec_record(req.id, obj.promise))));
+            let placed = map.insert(req.id@, obj);
+            let resumed = crate::node::spec_callbacks(placed, req.id@, now);
+            let (told, heard) = crate::node::spec_listeners(resumed, req.id@);
+            let (armed, offered) = crate::node::spec_offer(placed, told, obj.promise.callbacks, now, retry);
+            assert(settled.0 == spec_with_origin(doc, armed));
+            assert(settled.2 == heard + offered);
+            let ids = echod_abstract::trusted::pset_seq(q.callbacks);
+            let addresses = echod_abstract::trusted::pset_seq(q.listeners);
+            let a_resumed = echod_abstract::machine::spec_drain_callbacks(n, req.id@, ids, now);
+            let (a_told, a_heard) = echod_abstract::machine::spec_drain_listeners(a_resumed, req.id@, addresses, now);
+            let (a_armed, a_offered) = echod_abstract::machine::spec_drain_offers(config, n, a_told, ids, now);
+            assert(outs[0].next == a_armed);
+            assert(outs[0].send == a_heard + a_offered);
+            assert(outs[0].work.len() == 0);
+            // Resuming one awaiter does not change another, so the order the
+            // two models walk the same callbacks and listeners leaves each
+            // object the same, and the messages are the same ones.
+            assert(doc_rel(key, settled.0, a_armed));
+            assert(notes_as_dispatches(settled.2).to_multiset() =~= outs[0].send.to_multiset());
+            assert(finite_store(a_armed));
             assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, n, other) by {
                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
                     &&& s.promises.contains_key(id) == n.promises.contains_key(id)
@@ -1376,6 +1419,18 @@ pub proof fn lemma_promise_settle_agrees(
                 };
             };
             lemma_others_kept(s, n, o);
+            assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(n, a_armed, other) by {
+                assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
+                    &&& n.promises.contains_key(id) == a_armed.promises.contains_key(id)
+                    &&& (n.promises.contains_key(id) ==> n.promises[id] == a_armed.promises[id])
+                    &&& n.tasks.contains_key(id) == a_armed.tasks.contains_key(id)
+                    &&& (n.tasks.contains_key(id) ==> n.tasks[id] == a_armed.tasks[id])
+                } by {
+                    assert(origin(id) != o);
+                };
+            };
+            assert(a_armed.schedules == n.schedules);
+            lemma_others_kept(n, a_armed, o);
         }
     }
 }

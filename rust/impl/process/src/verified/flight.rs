@@ -71,8 +71,8 @@ pub fn decide(job: Job, doc: Doc, now: u64, retry_timeout: u64) -> (r: Decided)
     }
     match job {
         Job::Request(request) => {
-            let (doc, response) = handle(doc, &request, now);
-            Decided { doc, response: Some(response), born: Vec::new(), notes: Vec::new() }
+            let (doc, response, notes) = handle(doc, &request, now, retry_timeout);
+            Decided { doc, response: Some(response), born: Vec::new(), notes }
         },
         Job::Sweep => {
             let (doc, born, notes) = sweep(doc, now, retry_timeout);

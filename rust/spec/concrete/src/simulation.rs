@@ -21,7 +21,9 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
+use crate::interpret::{
+    doc_rel, finite_store, lemma_others_same, notes_as_dispatches, others_kept, request_agrees,
+};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
     EntryV, Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, spec_bytes,
@@ -35,6 +37,7 @@ use crate::node::{
     spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
     spec_empty_doc, spec_encode, spec_flight, spec_forget, spec_handle, spec_is_empty, spec_keep,
     spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
+    spec_request_notes,
     spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
 };
 #[cfg(verus_keep_ghost)]
@@ -2892,6 +2895,70 @@ pub proof fn lemma_begin_related(
 // A client request
 // ---------------------------------------------------------------------------
 
+/// A value that occurs in a sequence occurs at some index.
+pub proof fn lemma_multiset_index<T>(s: Seq<T>, x: T)
+    requires
+        s.to_multiset().count(x) > 0,
+    ensures
+        exists|j: int| 0 <= j < s.len() && s[j] == x,
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        assert(s.to_multiset().count(x) == 0);
+        assert(false);
+    } else if s[0] == x {
+    } else {
+        assert(s.to_multiset().count(x) == s.drop_first().to_multiset().count(x));
+        lemma_multiset_index(s.drop_first(), x);
+    }
+}
+
+/// The reply, and each note, are on the network a served request lands on.
+/// The notes are the dispatches, in some order.
+pub proof fn lemma_request_outputs(
+    network: Seq<Envelope<APid, AMessage>>,
+    call: Call,
+    response: Response,
+    dispatches: Seq<echod_abstract::view::DispatchV>,
+    notes: Seq<NoteV>,
+)
+    requires
+        dispatches.to_multiset() =~= notes_as_dispatches(notes).to_multiset(),
+    ensures
+        ({
+            let send = spec_send(call, response, dispatches);
+            &&& service_output(
+                network + envelopes(APid::Service, send),
+                reply_output(call.client@, call.id, response),
+            )
+            &&& forall|k: int|
+                0 <= k < notes.len() ==> service_output(
+                    network + envelopes(APid::Service, send),
+                    note_output(#[trigger] notes[k]),
+                )
+        }),
+{
+    let send = spec_send(call, response, dispatches);
+    let reply = (APid::Outside, AMessage::Output(reply_output(call.client@, call.id, response)));
+    assert(send.len() == 1 + dispatches.len());
+    assert(send[0] == reply);
+    lemma_sent_outputs(network, send, 0);
+    lemma_reply_is_output(call, response);
+    let mapped = notes_as_dispatches(notes);
+    assert forall|k: int| 0 <= k < notes.len() implies service_output(
+        network + envelopes(APid::Service, send),
+        note_output(#[trigger] notes[k]),
+    ) by {
+        let d = mapped[k];
+        assert(mapped.to_multiset().count(d) > 0);
+        assert(dispatches.to_multiset().count(d) > 0);
+        lemma_multiset_index(dispatches, d);
+        let j = choose|j: int| 0 <= j < dispatches.len() && dispatches[j] == d;
+        assert(note_output(notes[k]) == send[j + 1].1->Output_0);
+        lemma_sent_outputs(network, send, j + 1);
+    };
+}
+
 /// The one send of a served or shed call is the service's output of its reply.
 pub proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, call: Call, response: Response)
     ensures
@@ -2984,6 +3051,7 @@ pub proof fn lemma_request_served(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -3016,7 +3084,8 @@ pub proof fn lemma_request_served(
     assert(effective(fleet, cb, key) == doc);
     assert(doc_rel(key, doc, s));
     assert(request_agrees(config, call.request, key, doc, s, at));
-    let (next, response) = spec_handle(doc, call.request, at);
+    assert(node0.retry_timeout == config.retry_timeout);
+    let (next, response) = spec_handle(doc, call.request, at, config.retry_timeout);
     let outs = spec_handler(config, call.request, s, at);
     assert(outs.len() == 1);
     assert(outs[0].resp == response);
@@ -3031,19 +3100,21 @@ pub proof fn lemma_request_served(
     let aa = lemma_service_step(config, ab, at, event, 0);
     let outcome = outcomes[0];
     assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
-    assert(outs[0].send =~= Seq::<echod_abstract::view::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
     assert(finite_store(astate(aa).store));
-    assert(outcome.send == spec_send(call, response, Seq::empty()));
-    lemma_send_is_reply(ab.network, call, response);
+    assert(outcome.send == spec_send(call, response, outs[0].send));
+    let notes = spec_request_notes(doc, call.request, at, config.retry_timeout);
+    assert(outs[0].send.to_multiset() =~= notes_as_dispatches(notes).to_multiset());
+    lemma_request_outputs(ab.network, call, response, outs[0].send, notes);
+    assert(aa.network == ab.network + envelopes(APid::Service, outcome.send));
     // the decision the flight stands for
     let probe_flight = probe(key, at, caller, job);
-    let (dnext, dreply, born, notes) = decision(probe_flight, doc, node0.retry_timeout);
+    let (dnext, dreply, born, dnotes) = decision(probe_flight, doc, node0.retry_timeout);
     assert(dnext == next);
     assert(dreply == Some(response));
     assert(born.len() == 0);
-    assert(notes.len() == 0);
+    assert(dnotes == notes);
     assert(flight_reply(probe_flight, dreply) == Some((call.client@, call.id, response)));
     // the occurrences: nothing changes
     assert forall|item: Sched<InternalV>|
@@ -3072,6 +3143,7 @@ pub proof fn lemma_request(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,

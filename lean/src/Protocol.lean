@@ -23,6 +23,16 @@ abbrev PromiseObject := AbstractModel.PromiseObject
 abbrev TaskObject := AbstractModel.TaskObject
 abbrev ServerConfig := AbstractModel.ServerConfig
 
+/-- A pending task whose retry is due. The promise it runs is still pending. -/
+def retryDue (promise : PromiseObject) (task : Option TaskObject) (now : Nat) : Bool :=
+  match task with
+  | some t =>
+    promise.state == .pending && t.state == .pending &&
+      match t.retryTimeoutAt with
+      | some due => decide (due ≤ now)
+      | none => false
+  | none => false
+
 /-- Pure environment value supplied to document decision functions. -/
 structure HandlerEnv where
   config : ServerConfig := {}

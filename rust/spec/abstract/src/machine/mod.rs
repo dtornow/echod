@@ -1146,6 +1146,77 @@ pub open spec fn spec_new_object(
     (promise, task)
 }
 
+/// Whether `spec_retry` would offer `id` at `now`.
+pub open spec fn spec_task_due(s: StoreV, id: Seq<char>, now: Time) -> bool {
+    let live = s.promises.contains_key(id)
+        && spec_project_promise(s.promises[id], now).state == PromiseState::Pending;
+    if !s.tasks.contains_key(id) {
+        false
+    } else {
+        let t = s.tasks[id];
+        let due = match t.retry_timeout_at {
+            Some(r) => r <= now,
+            None => false,
+        };
+        t.state == TaskState::Pending && due && live
+    }
+}
+
+/// Resume each callback id, in the order captured before any removal.
+pub open spec fn spec_drain_callbacks(s: StoreV, awaited: Seq<char>, ids: Seq<Seq<char>>, now: Time) -> StoreV
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        s
+    } else {
+        spec_drain_callbacks(spec_callback(s, awaited, ids[0], now).next, awaited, ids.skip(1), now)
+    }
+}
+
+/// Tell each listener, in the order captured before any removal.
+pub open spec fn spec_drain_listeners(
+    s: StoreV,
+    awaited: Seq<char>,
+    ids: Seq<Seq<char>>,
+    now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        (s, Seq::empty())
+    } else {
+        let step = spec_listener(s, awaited, ids[0], now);
+        let (rest, more) = spec_drain_listeners(step.next, awaited, ids.skip(1), now);
+        (rest, step.send + more)
+    }
+}
+
+/// Offer a callback this resume made due. `before` is the store after the
+/// promise was written and before its callbacks ran, so a retry that was
+/// already due is not offered again.
+pub open spec fn spec_drain_offers(
+    config: ServerConfig,
+    before: StoreV,
+    s: StoreV,
+    ids: Seq<Seq<char>>,
+    now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        (s, Seq::empty())
+    } else {
+        let id = ids[0];
+        let step = if spec_task_due(before, id, now) {
+            spec_noop(s)
+        } else {
+            spec_retry(config, s, id, now)
+        };
+        let (rest, more) = spec_drain_offers(config, before, step.next, ids.skip(1), now);
+        (rest, step.send + more)
+    }
+}
+
 pub open spec fn spec_settle(
     s: StoreV,
     id: Seq<char>,

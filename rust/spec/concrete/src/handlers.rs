@@ -17,7 +17,7 @@ use crate::interpret::{
     lemma_project_object, lemma_promise_create_agrees, lemma_promise_handlers_agree,
     lemma_promise_settle_agrees, lemma_push_to_set, lemma_record, lemma_sat_add, lemma_schedule_doc,
     lemma_schedule_key, lemma_string_of, lemma_targeted, lemma_task_record, lemma_timer, object_rel,
-    origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel, task_rel,
+    notes_as_dispatches, origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
@@ -28,6 +28,7 @@ use crate::node::{
     spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key,
     spec_origin_map, spec_project_obj, spec_promise_create as c_promise_create,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle,
+    spec_request_notes, NoteV,
     spec_register_callback as c_register_callback, spec_register_listener as c_register_listener,
     spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete,
     spec_schedule_get as c_schedule_get, spec_schedule_key, spec_seen, spec_suspend as c_suspend,
@@ -256,7 +257,7 @@ pub proof fn lemma_register_callback_agrees(
     let awaiter = req.awaiter;
     let o = origin(awaited@);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_register_callback(doc, awaited, awaiter, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_register_callback(doc, awaited, awaiter, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_register_callback(awaited, awaiter, s, now));
     if awaited@ == awaiter@ || !same_origin_spec(awaited@, awaiter@) {
@@ -363,7 +364,7 @@ pub proof fn lemma_register_listener_agrees(
     let address = req.address;
     let o = origin(awaited@);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_register_listener(doc, awaited, address, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_register_listener(doc, awaited, address, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_register_listener(awaited, address, s, now));
     lemma_origin_doc(key, o, doc, s);
@@ -483,7 +484,7 @@ pub proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocV, 
     let request = Request::TaskGet(echod_types::TaskGetReq { id });
     let o = origin(id@);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_task_get(doc, id, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_get(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
@@ -546,7 +547,7 @@ pub proof fn lemma_task_create_agrees(
     let key = spec_origin_key(o);
     let pid = req.pid;
     let ttl = req.ttl;
-    assert(spec_handle(doc, request, now) == c_task_create(doc, pid, ttl, action, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_create(doc, pid, ttl, action, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_create(pid, ttl, action, s, now));
     lemma_targeted(action.tags);
@@ -742,7 +743,7 @@ pub proof fn lemma_task_acquire_agrees(
     let x = req.id@;
     let o = origin(x);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_acquire(req.id, req.version, req.pid, req.ttl, s, now));
     lemma_origin_doc(key, o, doc, s);
@@ -868,7 +869,7 @@ pub proof fn lemma_task_release_agrees(
     let x = req.id@;
     let o = origin(x);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_task_release(doc, req.id, req.version, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_release(doc, req.id, req.version, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_release(req.id, req.version, s, now));
     lemma_origin_doc(key, o, doc, s);
@@ -923,7 +924,7 @@ pub proof fn lemma_task_fulfill_agrees(
     let o = origin(x);
     let key = spec_origin_key(o);
     let action = req.action;
-    assert(spec_handle(doc, request, now) == c_task_fulfill(doc, req.id, req.version, action, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_fulfill(doc, req.id, req.version, action, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_fulfill(req.id, req.version, action, s, now));
     if !action.state.spec_settable() {
@@ -990,7 +991,7 @@ pub proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV,
     let x = id@;
     let o = origin(x);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_task_halt(doc, id, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_halt(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_halt(id, s, now));
     lemma_origin_doc(key, o, doc, s);
@@ -1066,7 +1067,7 @@ pub proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: D
     let x = id@;
     let o = origin(x);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_task_continue(doc, id, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_task_continue(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_continue(id, s, now));
     lemma_origin_doc(key, o, doc, s);
@@ -1338,7 +1339,7 @@ pub proof fn lemma_heartbeat_agrees(
     let pid = req.pid;
     let o = origin(refs[0].id@);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_heartbeat(doc, pid, refs, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_heartbeat(doc, pid, refs, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_heartbeat(pid, refs, s, now));
     lemma_one_origin_from(refs, o, 0);
@@ -1588,7 +1589,7 @@ pub proof fn lemma_suspend_agrees(
     let ids = spec_awaited(actions);
     assert(ids.len() == actions.len());
     assert forall|j: int| 0 <= j < actions.len() implies #[trigger] ids[j] == actions[j].awaited@ by {};
-    assert(spec_handle(doc, request, now) == c_suspend(doc, req.id, req.version, actions, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_suspend(doc, req.id, req.version, actions, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_suspend(req.id, req.version, actions, s, now));
     lemma_bad_suspend_from(actions, x, 0);
@@ -1790,11 +1791,11 @@ pub proof fn lemma_suspend_agrees(
 // ---------------------------------------------------------------------------
 
 /// The promise handlers answer a promise response.
-pub proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, now: Time)
+pub proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, now: Time, retry: u64)
     ensures
         match action {
             TaskFenceAction::Create(c) => c_promise_create(doc, c, now).1 is Promise,
-            TaskFenceAction::Settle(st) => c_promise_settle(doc, st, now).1 is Promise,
+            TaskFenceAction::Settle(st) => c_promise_settle(doc, st, now, retry).1 is Promise,
         },
 {
 }
@@ -1821,12 +1822,14 @@ pub proof fn lemma_fence_agrees(
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
-    assert(spec_handle(doc, request, now) == c_fence(doc, req.id, req.version, action, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_fence(doc, req.id, req.version, action, now, config.retry_timeout));
     let outs = spec_handler(config, request, s, now);
-    assert(outs == a_fence(req, s, now));
+    assert(outs == a_fence(config, req, s, now));
     if target@ == x || !same_origin_spec(target@, x) {
         assert(outs == spec_out(spec_fence_res(400, None), s));
-        assert(c_fence(doc, req.id, req.version, action, now) == (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None })));
+        assert(c_fence(doc, req.id, req.version, action, now, config.retry_timeout) == (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None })));
+        assert(spec_request_notes(doc, request, now, config.retry_timeout) =~= Seq::<NoteV>::empty());
+        assert(outs[0].send.to_multiset() =~= notes_as_dispatches(spec_request_notes(doc, request, now, config.retry_timeout)).to_multiset());
         lemma_others_same(key, s);
     } else {
         assert(origin(target@) == o);
@@ -1839,14 +1842,18 @@ pub proof fn lemma_fence_agrees(
         match held {
             Held::Missing => {
                 assert(outs == spec_out(spec_fence_res(404, None), s));
+                assert(spec_request_notes(doc, request, now, config.retry_timeout) =~= Seq::<NoteV>::empty());
+                assert(outs[0].send.to_multiset() =~= notes_as_dispatches(spec_request_notes(doc, request, now, config.retry_timeout)).to_multiset());
                 lemma_others_same(key, s);
             },
             Held::Stale => {
                 assert(outs == spec_out(spec_fence_res(409, None), s));
+                assert(spec_request_notes(doc, request, now, config.retry_timeout) =~= Seq::<NoteV>::empty());
+                assert(outs[0].send.to_multiset() =~= notes_as_dispatches(spec_request_notes(doc, request, now, config.retry_timeout)).to_multiset());
                 lemma_others_same(key, s);
             },
             Held::Ok(_) => {
-                lemma_promise_answers(doc, action, now);
+                lemma_promise_answers(doc, action, now, config.retry_timeout);
                 match action {
                     TaskFenceAction::Create(c) => {
                         assert(spec_origin_key(origin(c.id@)) == key);
@@ -1854,27 +1861,35 @@ pub proof fn lemma_fence_agrees(
                         let inner_outs = spec_handler(config, Request::PromiseCreate(c), s, now);
                         assert(inner_outs == a_promise_create(c, s, now));
                         let (doc2, response) = c_promise_create(doc, c, now);
-                        assert(spec_handle(doc, Request::PromiseCreate(c), now) == (doc2, response));
+                        assert(spec_handle(doc, Request::PromiseCreate(c), now, config.retry_timeout) == (doc2, response));
                         assert(inner_outs.len() == 1);
                         assert(inner_outs[0].resp == response);
                         let inner = response->Promise_0;
                         assert(outs == spec_wrap_fence(inner_outs, true));
                         assert(outs == seq![OutV { resp: spec_fence_res(200, Some(TaskFenceInnerRes::Create(inner))), ..inner_outs[0] }]);
-                        assert(c_fence(doc, req.id, req.version, action, now) == (doc2, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Create(inner)) })));
+                        assert(c_fence(doc, req.id, req.version, action, now, config.retry_timeout) == (doc2, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Create(inner)) })));
+                        assert(spec_request_notes(doc, request, now, config.retry_timeout) =~= Seq::<NoteV>::empty());
+                        assert(outs[0].send =~= inner_outs[0].send);
+                        assert(outs[0].send.to_multiset() =~= notes_as_dispatches(spec_request_notes(doc, request, now, config.retry_timeout)).to_multiset());
                     },
                     TaskFenceAction::Settle(st) => {
                         assert(spec_origin_key(origin(st.id@)) == key);
                         lemma_promise_settle_agrees(config, st, doc, s, now);
                         let inner_outs = spec_handler(config, Request::PromiseSettle(st), s, now);
-                        assert(inner_outs == a_promise_settle(st, s, now));
-                        let (doc2, response) = c_promise_settle(doc, st, now);
-                        assert(spec_handle(doc, Request::PromiseSettle(st), now) == (doc2, response));
+                        assert(inner_outs == a_promise_settle(config, st, s, now));
+                        let settled = c_promise_settle(doc, st, now, config.retry_timeout);
+                        let (doc2, response) = (settled.0, settled.1);
+                        assert(spec_handle(doc, Request::PromiseSettle(st), now, config.retry_timeout) == (doc2, response));
                         assert(inner_outs.len() == 1);
                         assert(inner_outs[0].resp == response);
                         let inner = response->Promise_0;
                         assert(outs == spec_wrap_fence(inner_outs, false));
                         assert(outs == seq![OutV { resp: spec_fence_res(200, Some(TaskFenceInnerRes::Settle(inner))), ..inner_outs[0] }]);
-                        assert(c_fence(doc, req.id, req.version, action, now) == (doc2, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Settle(inner)) })));
+                        assert(c_fence(doc, req.id, req.version, action, now, config.retry_timeout) == (doc2, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Settle(inner)) })));
+                        assert(spec_request_notes(doc, request, now, config.retry_timeout) == settled.2);
+                        assert(outs[0].send == inner_outs[0].send);
+                        assert(outs[0].next == inner_outs[0].next);
+                        assert(outs[0].send.to_multiset() =~= notes_as_dispatches(settled.2).to_multiset());
                     },
                 }
             },
@@ -1899,7 +1914,7 @@ pub proof fn lemma_fence_check_agrees(
     let x = req.id@;
     let o = origin(x);
     let key = spec_origin_key(o);
-    assert(spec_handle(doc, request, now) == c_fence_check(doc, req.id, req.version, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_fence_check(doc, req.id, req.version, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
     let map = spec_origin_map(doc);
@@ -1942,7 +1957,7 @@ pub proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, doc: Do
 {
     let request = Request::ScheduleGet(echod_types::ScheduleGetReq { id });
     let key = spec_schedule_key(id@);
-    assert(spec_handle(doc, request, now) == c_schedule_get(doc, id));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_schedule_get(doc, id));
     let outs = spec_handler(config, request, s, now);
     lemma_schedule_doc(key, id@, doc, s);
     let slot = doc->Schedule_0;
@@ -1978,7 +1993,7 @@ pub proof fn lemma_schedule_create_agrees(
 {
     let request = Request::ScheduleCreate(req);
     let key = spec_schedule_key(req.id@);
-    assert(spec_handle(doc, request, now) == c_schedule_create(doc, req, now));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_schedule_create(doc, req, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_schedule_create(req, s, now));
     lemma_timer(req.promise_tags);
@@ -2053,7 +2068,7 @@ pub proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: String, doc:
 {
     let request = Request::ScheduleDelete(echod_types::ScheduleDeleteReq { id });
     let key = spec_schedule_key(id@);
-    assert(spec_handle(doc, request, now) == c_schedule_delete(doc, id));
+    assert(spec_handle(doc, request, now, config.retry_timeout) == c_schedule_delete(doc, id));
     let outs = spec_handler(config, request, s, now);
     lemma_schedule_doc(key, id@, doc, s);
     lemma_schedule_key(id@);

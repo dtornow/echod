@@ -29,14 +29,15 @@ use super::{
     spec_acquire, spec_claim_res, spec_empty_value, spec_has_target, spec_is_timer,
     spec_external, spec_fence_res, spec_fulfill, spec_is_global, spec_new_object, spec_out,
     spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res,
-    spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_string,
+    spec_drain_callbacks, spec_drain_listeners, spec_drain_offers, spec_schedule_res,
+    spec_schedule_value, spec_settle, spec_status_res, spec_string, spec_task_due,
     spec_task_get_res, spec_task_record, spec_unlease,
 };
 
 use super::{
     claim_res, contains, copy_store, echo, fence_res, has_target, is_timer, marked, mk, new_object,
-    next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out,
-    Promise, ServerConfig, Store, Task, Time,
+    next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Dispatch,
+    Id, Out, Promise, ServerConfig, Store, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -127,9 +128,134 @@ impl ServerConfig {
         outs
     }
 
+    /// `spec_task_due`: `spec_retry` would offer this id.
+    fn task_due(&self, s: &Store, id: &Id, now: Time) -> (r: bool)
+        ensures
+            r == spec_task_due(s@, id@, now),
+    {
+        let live = match s.promises.get(id) {
+            Some(p) => p.project(now).state == PromiseState::Pending,
+            None => false,
+        };
+        match s.tasks.get(id) {
+            Some(t) => {
+                let due = match t.retry_timeout_at {
+                    Some(at) => at <= now,
+                    None => false,
+                };
+                t.state == TaskState::Pending && due && live
+            },
+            None => false,
+        }
+    }
+
+    fn drain_callbacks(&self, awaited: &Id, ids: &Vec<String>, i: usize, s: Store, now: Time) -> (r: Store)
+        requires
+            i <= ids.len(),
+        ensures
+            r@ == spec_drain_callbacks(s@, awaited@, ids@.map_values(|x: String| x@).skip(i as int), now),
+        decreases ids.len() - i,
+    {
+        if i == ids.len() {
+            proof {
+                assert(ids@.map_values(|x: String| x@).skip(i as int).len() == 0);
+            }
+            return s;
+        }
+        let step = self.process_callback(awaited, &ids[i], &s, now);
+        proof {
+            assert(ids@[i as int]@ == ids@.map_values(|x: String| x@)[i as int]);
+            assert(ids@.map_values(|x: String| x@).skip(i as int).drop_first()
+                =~= ids@.map_values(|x: String| x@).skip(i + 1));
+        }
+        self.drain_callbacks(awaited, ids, i + 1, step.next, now)
+    }
+
+    fn drain_listeners(
+        &self,
+        awaited: &Id,
+        ids: &Vec<String>,
+        i: usize,
+        s: Store,
+        now: Time,
+    ) -> (r: (Store, Vec<Dispatch>))
+        requires
+            i <= ids.len(),
+        ensures
+            r.0@ == spec_drain_listeners(s@, awaited@, ids@.map_values(|x: String| x@).skip(i as int), now).0,
+            sends(r.1@) == spec_drain_listeners(s@, awaited@, ids@.map_values(|x: String| x@).skip(i as int), now).1,
+        decreases ids.len() - i,
+    {
+        if i == ids.len() {
+            proof {
+                assert(ids@.map_values(|x: String| x@).skip(i as int).len() == 0);
+                assert(sends(Seq::<Dispatch>::empty()) =~= Seq::empty());
+            }
+            return (s, Vec::new());
+        }
+        let step = self.process_listener(awaited, &ids[i], &s, now);
+        proof {
+            assert(ids@[i as int]@ == ids@.map_values(|x: String| x@)[i as int]);
+            assert(ids@.map_values(|x: String| x@).skip(i as int).drop_first()
+                =~= ids@.map_values(|x: String| x@).skip(i + 1));
+        }
+        let (rest, mut tail) = self.drain_listeners(awaited, ids, i + 1, step.next, now);
+        let mut head = step.send;
+        let ghost hv = head@;
+        let ghost tv = tail@;
+        head.append(&mut tail);
+        proof {
+            assert(sends(hv + tv) =~= sends(hv) + sends(tv));
+        }
+        (rest, head)
+    }
+
+    fn drain_offers(
+        &self,
+        before: &Store,
+        ids: &Vec<String>,
+        i: usize,
+        s: Store,
+        now: Time,
+    ) -> (r: (Store, Vec<Dispatch>))
+        requires
+            i <= ids.len(),
+        ensures
+            r.0@ == spec_drain_offers(*self, before@, s@, ids@.map_values(|x: String| x@).skip(i as int), now).0,
+            sends(r.1@) == spec_drain_offers(*self, before@, s@, ids@.map_values(|x: String| x@).skip(i as int), now).1,
+        decreases ids.len() - i,
+    {
+        if i == ids.len() {
+            proof {
+                assert(ids@.map_values(|x: String| x@).skip(i as int).len() == 0);
+                assert(sends(Seq::<Dispatch>::empty()) =~= Seq::empty());
+            }
+            return (s, Vec::new());
+        }
+        let (next, mut notes) = if self.task_due(before, &ids[i], now) {
+            (s, Vec::new())
+        } else {
+            let step = self.process_retry_timeout(&ids[i], &s, now);
+            (step.next, step.send)
+        };
+        proof {
+            assert(ids@[i as int]@ == ids@.map_values(|x: String| x@)[i as int]);
+            assert(ids@.map_values(|x: String| x@).skip(i as int).drop_first()
+                =~= ids@.map_values(|x: String| x@).skip(i + 1));
+        }
+        let (rest, mut tail) = self.drain_offers(before, ids, i + 1, next, now);
+        let ghost hv = notes@;
+        let ghost tv = tail@;
+        notes.append(&mut tail);
+        proof {
+            assert(sends(hv + tv) =~= sends(hv) + sends(tv));
+        }
+        (rest, notes)
+    }
+
     pub(crate) fn promise_settle(&self, req: &PromiseSettleReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
-            outs_v(outs@) == spec_promise_settle(*req, s@, now),
+            outs_v(outs@) == spec_promise_settle(*self, *req, s@, now),
     {
         broadcast use group_views;
         if !req.state.settable() {
@@ -150,13 +276,31 @@ impl ServerConfig {
             Some(q) => promise_res(200, Some(q.to_record(&req.id))),
             None => promise_res(500, None), // unreachable: the promise exists
         };
+        let callbacks = match n.promises.get(&req.id) {
+            Some(q) => q.callbacks.to_vec(),
+            None => Vec::new(),
+        };
+        let listeners = match n.promises.get(&req.id) {
+            Some(q) => q.listeners.to_vec(),
+            None => Vec::new(),
+        };
+        let before = copy_store(&n);
+        let resumed = self.drain_callbacks(&req.id, &callbacks, 0, n, now);
+        let (told, mut heard) = self.drain_listeners(&req.id, &listeners, 0, resumed, now);
+        let (armed, mut offered) = self.drain_offers(&before, &callbacks, 0, told, now);
+        let ghost heard_v = heard@;
+        let ghost offered_v = offered@;
+        heard.append(&mut offered);
+        proof {
+            assert(sends(heard_v + offered_v) =~= sends(heard_v) + sends(offered_v));
+        }
         let mut marks = Vec::new();
         marks.push(if fenced { mk("fence: promise settled") } else { mk("promise settled") });
         if noted {
             marks.push(mk("settled with callbacks or listeners"));
         }
-        let outs = one(Out { resp: res, next: n, work: Vec::new(), send: Vec::new(), marks });
-        proof { assert(outs_v(outs@) =~~= spec_promise_settle(*req, s@, now)); }
+        let outs = one(Out { resp: res, next: armed, work: Vec::new(), send: heard, marks });
+        proof { assert(outs_v(outs@) =~~= spec_promise_settle(*self, *req, s@, now)); }
         outs
     }
 
@@ -436,7 +580,7 @@ impl ServerConfig {
 
     pub(crate) fn task_fence(&self, req: &echod_types::TaskFenceReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
-            outs_v(outs@) == spec_fence(*req, s@, now),
+            outs_v(outs@) == spec_fence(*self, *req, s@, now),
     {
         broadcast use group_views;
         let id = &req.id;
@@ -935,7 +1079,7 @@ pub open spec fn spec_promise_create(req: PromiseCreateReq, s: StoreV, now: Time
     }
 }
 
-pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time) -> Seq<OutV> {
+pub open spec fn spec_promise_settle(config: ServerConfig, req: PromiseSettleReq, s: StoreV, now: Time) -> Seq<OutV> {
     if !req.state.spec_settable() {
         spec_out(spec_promise_res(400, None), s)
     } else if !s.promises.contains_key(req.id@) {
@@ -951,7 +1095,16 @@ pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time
             } else {
                 spec_promise_res(500, None)
             };
-            spec_out(res, n)
+            if !n.promises.contains_key(req.id@) {
+                spec_out(res, n)
+            } else {
+                let ids = pset_seq(n.promises[req.id@].callbacks);
+                let addresses = pset_seq(n.promises[req.id@].listeners);
+                let resumed = spec_drain_callbacks(n, req.id@, ids, now);
+                let (told, heard) = spec_drain_listeners(resumed, req.id@, addresses, now);
+                let (armed, offered) = spec_drain_offers(config, n, told, ids, now);
+                seq![OutV { resp: res, next: armed, work: Seq::empty(), send: heard + offered }]
+            }
         }
     }
 }
@@ -1152,7 +1305,7 @@ pub open spec fn spec_wrap_fence(outs: Seq<OutV>, create: bool) -> Seq<OutV> {
     }
 }
 
-pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV> {
+pub open spec fn spec_fence(config: ServerConfig, req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV> {
     let id = req.id;
     let target = match req.action {
         TaskFenceAction::Create(c) => c.id,
@@ -1178,7 +1331,7 @@ pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV
                     };
                     let inner = match action {
                         TaskFenceAction::Create(c) => spec_promise_create(c, s, now),
-                        TaskFenceAction::Settle(st) => spec_promise_settle(st, s, now),
+                        TaskFenceAction::Settle(st) => spec_promise_settle(config, st, s, now),
                     };
                     spec_wrap_fence(inner, create)
                 },
@@ -1402,7 +1555,7 @@ pub open spec fn spec_handler(_config: ServerConfig, op: Request, s: StoreV, now
                 spec_out(spec_promise_res(200, Some(spec_promise_record(q.id, seen))), s)
             }
         },
-        Request::PromiseSettle(st) => spec_promise_settle(st, s, now),
+        Request::PromiseSettle(st) => spec_promise_settle(_config, st, s, now),
         Request::PromiseRegisterCallback(q) => spec_register_callback(q.awaited, q.awaiter, s, now),
         Request::PromiseRegisterListener(q) => spec_register_listener(q.awaited, q.address, s, now),
         Request::TaskGet(q) => {
@@ -1424,7 +1577,7 @@ pub open spec fn spec_handler(_config: ServerConfig, op: Request, s: StoreV, now
         Request::TaskFulfill(q) => spec_task_fulfill(q.id, q.version, q.action, s, now),
         Request::TaskHeartbeat(q) => spec_heartbeat(q.pid, q.tasks@, s, now),
         Request::TaskSuspend(q) => spec_suspend(q.id, q.version, q.actions@, s, now),
-        Request::TaskFence(q) => spec_fence(q, s, now),
+        Request::TaskFence(q) => spec_fence(_config, q, s, now),
         Request::TaskFenceCheck(q) => match spec_held(s, q.id@, q.version, now) {
             SpecHeld::Missing => spec_out(spec_status_res(404), s),
             SpecHeld::Stale => spec_out(spec_status_res(409), s),

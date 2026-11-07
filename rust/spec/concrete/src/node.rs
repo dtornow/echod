@@ -2401,25 +2401,44 @@ fn promise_create(doc: Doc, req: &PromiseCreateReq, now: u64) -> (r: (Doc, Respo
     }
 }
 
-fn promise_settle(doc: Doc, req: &PromiseSettleReq, now: u64) -> (r: (Doc, Response))
+/// Settle the promise and finish what that settlement owes, in this step:
+/// fulfill its task, resume the callbacks it held, tell its listeners, and
+/// offer a task this resume made due. A retry already due is left for the
+/// sweep that armed it.
+fn promise_settle(doc: Doc, req: &PromiseSettleReq, now: u64, retry: u64) -> (r: (Doc, Response, Vec<Outbound>))
     ensures
-        (r.0@, r.1) == spec_promise_settle(doc@, *req, now),
+        (r.0@, r.1, notes_v(r.2@)) == spec_promise_settle(doc@, *req, now, retry),
 {
+    proof {
+        lemma_notes_empty();
+    }
     if !req.state.settable() {
-        return (doc, promise_res(400, None));
+        return (doc, promise_res(400, None), Vec::new());
     }
     let objs = open(doc);
     match objs.get(&req.id) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (Doc::Origin(objs), promise_res(404, None), Vec::new()),
         Some(found) => {
             let seen = project_obj(&found, now);
             if !(seen.promise.state == PromiseState::Pending) {
                 let res = promise_res(200, Some(record(&req.id, &seen.promise)));
-                (Doc::Origin(objs), res)
+                (Doc::Origin(objs), res, Vec::new())
             } else {
                 let obj = settle_obj(seen, req.state, copy(&req.value), now);
+                let ids = copy(&obj.promise.callbacks);
                 let res = promise_res(200, Some(record(&req.id, &obj.promise)));
-                (Doc::Origin(objs.put(&req.id, obj)), res)
+                let placed = objs.put(&req.id, obj);
+                let before = placed.clone();
+                let resumed = callbacks(placed, &req.id, now);
+                let (told, mut notes) = listeners(resumed, &req.id);
+                let (armed, mut offered) = offer(&before, told, &ids, 0, now, retry);
+                let ghost heard = notes@;
+                let ghost extra = offered@;
+                notes.append(&mut offered);
+                proof {
+                    lemma_notes_add(heard, extra);
+                }
+                (Doc::Origin(armed), res, notes)
             }
         },
     }
@@ -3008,21 +3027,25 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
     }
 }
 
-fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64) -> (r: (Doc, Response))
+fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64, retry: u64) -> (r: (Doc, Response, Vec<Outbound>))
     ensures
-        (r.0@, r.1) == spec_fence(doc@, *id, version, *action, now),
+        (r.0@, r.1) == spec_fence(doc@, *id, version, *action, now, retry),
+        notes_v(r.2@) == spec_fence_notes(doc@, *id, version, *action, now, retry),
 {
+    proof {
+        lemma_notes_empty();
+    }
     let crossed = match action {
         TaskFenceAction::Create(c) => c.id == *id || !same_origin(&c.id, id),
         TaskFenceAction::Settle(st) => st.id == *id || !same_origin(&st.id, id),
     };
     if crossed {
-        return (doc, fence_res(400, None));
+        return (doc, fence_res(400, None), Vec::new());
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), fence_res(404, None)),
-        Lease::Stale => (Doc::Origin(objs), fence_res(409, None)),
+        Lease::Missing => (Doc::Origin(objs), fence_res(404, None), Vec::new()),
+        Lease::Stale => (Doc::Origin(objs), fence_res(409, None), Vec::new()),
         Lease::Ok(_) => {
             let doc = Doc::Origin(objs);
             match action {
@@ -3032,15 +3055,15 @@ fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64
                         Response::Promise(p) => p,
                         _ => PromiseRes { status: 500, promise: None },
                     };
-                    (doc, fence_res(200, Some(TaskFenceInnerRes::Create(inner))))
+                    (doc, fence_res(200, Some(TaskFenceInnerRes::Create(inner))), Vec::new())
                 },
                 TaskFenceAction::Settle(req) => {
-                    let (doc, response) = promise_settle(doc, req, now);
+                    let (doc, response, notes) = promise_settle(doc, req, now, retry);
                     let inner = match response {
                         Response::Promise(p) => p,
                         _ => PromiseRes { status: 500, promise: None },
                     };
-                    (doc, fence_res(200, Some(TaskFenceInnerRes::Settle(inner))))
+                    (doc, fence_res(200, Some(TaskFenceInnerRes::Settle(inner))), notes)
                 },
             }
         },
@@ -3137,31 +3160,86 @@ fn schedule_delete(doc: Doc, id: &String) -> (r: (Doc, Response))
     }
 }
 
-/// `spec_handle`: the same match.
-pub fn handle(doc: Doc, request: &Request, now: u64) -> (r: (Doc, Response))
+/// `spec_handle`: the same match. A settle's notes are the resumes it owed.
+pub fn handle(doc: Doc, request: &Request, now: u64, retry: u64) -> (r: (Doc, Response, Vec<Outbound>))
     ensures
-        (r.0@, r.1) == spec_handle(doc@, *request, now),
+        (r.0@, r.1) == spec_handle(doc@, *request, now, retry),
+        notes_v(r.2@) == spec_request_notes(doc@, *request, now, retry),
 {
+    proof {
+        lemma_notes_empty();
+    }
     match request {
-        Request::PromiseGet(q) => promise_get(doc, &q.id, now),
-        Request::PromiseCreate(q) => promise_create(doc, q, now),
-        Request::PromiseSettle(q) => promise_settle(doc, q, now),
-        Request::PromiseRegisterCallback(q) => register_callback(doc, &q.awaited, &q.awaiter, now),
-        Request::PromiseRegisterListener(q) => register_listener(doc, &q.awaited, &q.address, now),
-        Request::TaskGet(q) => task_get(doc, &q.id, now),
-        Request::TaskCreate(q) => task_create(doc, &q.pid, q.ttl, &q.action, now),
-        Request::TaskAcquire(q) => task_acquire(doc, &q.id, q.version, &q.pid, q.ttl, now),
-        Request::TaskFulfill(q) => task_fulfill(doc, &q.id, q.version, &q.action, now),
-        Request::TaskRelease(q) => task_release(doc, &q.id, q.version, now),
-        Request::TaskHalt(q) => task_halt(doc, &q.id, now),
-        Request::TaskContinue(q) => task_continue(doc, &q.id, now),
-        Request::TaskHeartbeat(q) => heartbeat(doc, &q.pid, &q.tasks, now),
-        Request::TaskSuspend(q) => suspend(doc, &q.id, q.version, &q.actions, now),
-        Request::TaskFence(q) => fence(doc, &q.id, q.version, &q.action, now),
-        Request::TaskFenceCheck(q) => fence_check(doc, &q.id, q.version, now),
-        Request::ScheduleGet(q) => schedule_get(doc, &q.id),
-        Request::ScheduleCreate(q) => schedule_create(doc, q, now),
-        Request::ScheduleDelete(q) => schedule_delete(doc, &q.id),
+        Request::PromiseSettle(q) => promise_settle(doc, q, now, retry),
+        Request::TaskFence(q) => fence(doc, &q.id, q.version, &q.action, now, retry),
+        Request::PromiseGet(q) => {
+            let (doc, response) = promise_get(doc, &q.id, now);
+            (doc, response, Vec::new())
+        },
+        Request::PromiseCreate(q) => {
+            let (doc, response) = promise_create(doc, q, now);
+            (doc, response, Vec::new())
+        },
+        Request::PromiseRegisterCallback(q) => {
+            let (doc, response) = register_callback(doc, &q.awaited, &q.awaiter, now);
+            (doc, response, Vec::new())
+        },
+        Request::PromiseRegisterListener(q) => {
+            let (doc, response) = register_listener(doc, &q.awaited, &q.address, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskGet(q) => {
+            let (doc, response) = task_get(doc, &q.id, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskCreate(q) => {
+            let (doc, response) = task_create(doc, &q.pid, q.ttl, &q.action, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskAcquire(q) => {
+            let (doc, response) = task_acquire(doc, &q.id, q.version, &q.pid, q.ttl, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskFulfill(q) => {
+            let (doc, response) = task_fulfill(doc, &q.id, q.version, &q.action, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskRelease(q) => {
+            let (doc, response) = task_release(doc, &q.id, q.version, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskHalt(q) => {
+            let (doc, response) = task_halt(doc, &q.id, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskContinue(q) => {
+            let (doc, response) = task_continue(doc, &q.id, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskHeartbeat(q) => {
+            let (doc, response) = heartbeat(doc, &q.pid, &q.tasks, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskSuspend(q) => {
+            let (doc, response) = suspend(doc, &q.id, q.version, &q.actions, now);
+            (doc, response, Vec::new())
+        },
+        Request::TaskFenceCheck(q) => {
+            let (doc, response) = fence_check(doc, &q.id, q.version, now);
+            (doc, response, Vec::new())
+        },
+        Request::ScheduleGet(q) => {
+            let (doc, response) = schedule_get(doc, &q.id);
+            (doc, response, Vec::new())
+        },
+        Request::ScheduleCreate(q) => {
+            let (doc, response) = schedule_create(doc, q, now);
+            (doc, response, Vec::new())
+        },
+        Request::ScheduleDelete(q) => {
+            let (doc, response) = schedule_delete(doc, &q.id);
+            (doc, response, Vec::new())
+        },
     }
 }
 
@@ -3688,6 +3766,97 @@ fn retries(objs: Objects, keys: &Vec<String>, i: usize, now: u64, retry_timeout:
     (rest, notes)
 }
 
+/// A pending task whose retry has come due, on a promise that is still pending.
+fn due_retry(obj: &Obj, now: u64) -> (r: bool)
+    ensures
+        r == spec_due_retry(obj@, now),
+{
+    obj.promise.state == PromiseState::Pending && match &obj.task {
+        Some(t) => t.state == TaskState::Pending && match t.retry_timeout_at {
+            Some(at) => at <= now,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Offer ids this resume made due. `before` is the document before the
+/// callbacks ran, so a retry that was already due is not offered again.
+fn offer(
+    before: &Objects,
+    objs: Objects,
+    ids: &Vec<String>,
+    i: usize,
+    now: u64,
+    retry: u64,
+) -> (r: (Objects, Vec<Outbound>))
+    requires
+        i <= ids.len(),
+    ensures
+        r.0@.dom() == objs@.dom(),
+        (r.0@, notes_v(r.1@)) == spec_offer(
+            before@,
+            objs@,
+            ids@.map_values(|s: String| s@).skip(i as int),
+            now,
+            retry,
+        ),
+    decreases ids.len() - i,
+{
+    proof {
+        lemma_notes_empty();
+    }
+    if i == ids.len() {
+        proof {
+            assert(ids@.map_values(|s: String| s@).skip(i as int).len() == 0);
+        }
+        return (objs, Vec::new());
+    }
+    let ghost old = objs@;
+    let (next, mut notes) = if let Some(obj) = objs.get(&ids[i]) {
+        if let Some(earlier) = before.get(&ids[i]) {
+            if due_retry(&obj, now) && !due_retry(&earlier, now) {
+                let Obj { promise, task } = obj;
+                match task {
+                    Some(t) => {
+                        let version = t.version;
+                        let mut u = t;
+                        u.retry_timeout_at = Some(sat_add(now, retry));
+                        let mut notes = Vec::new();
+                        let note = Outbound::Execute { id: ids[i].clone(), version };
+                        proof {
+                            lemma_notes_one(note);
+                        }
+                        notes.push(note);
+                        (objs.put(&ids[i], Obj { promise, task: Some(u) }), notes)
+                    },
+                    None => (objs, Vec::new()),
+                }
+            } else {
+                (objs, Vec::new())
+            }
+        } else {
+            (objs, Vec::new())
+        }
+    } else {
+        (objs, Vec::new())
+    };
+    proof {
+        assert(ids@[i as int]@ == ids@.map_values(|s: String| s@)[i as int]);
+        assert(next@.dom() == old.dom());
+        assert(ids@.map_values(|s: String| s@).skip(i as int).drop_first()
+            =~= ids@.map_values(|s: String| s@).skip(i + 1));
+    }
+    let (rest, mut tail) = offer(before, next, ids, i + 1, now, retry);
+    let ghost head = notes@;
+    let ghost tail_v = tail@;
+    notes.append(&mut tail);
+    proof {
+        lemma_notes_add(head, tail_v);
+    }
+    (rest, notes)
+}
+
 /// `spec_sweep`: time out every promise that is due, then apply the callbacks
 /// that pass left on settled promises. Listeners, leases and retries follow.
 /// A schedule is its next run.
@@ -4188,8 +4357,8 @@ impl Node {
         let Flight { key, job, etag, now, caller, .. } = flight;
         let (next, answer, born, notify): (Doc, Option<Response>, Vec<Pending>, Vec<Outbound>) = match &job {
             Job::External { request } => {
-                let (next, response) = handle(doc, request, now);
-                (next, Some(response), Vec::new(), Vec::new())
+                let (next, response, notify) = handle(doc, request, now, self.retry_timeout);
+                (next, Some(response), Vec::new(), notify)
             },
             Job::Due => {
                 let (next, born, notify) = run_due(doc, now, self.retry_timeout);
@@ -4978,8 +5147,13 @@ pub open spec fn spec_begin(node: NodeV, key: Seq<char>, job: JobV, now: Time, c
 pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV, Seq<(Pid, Message)>) {
     let (next, reply, born, notify) = match flight.job {
         JobV::External(request) => {
-            let (next, response) = spec_handle(doc, request, flight.now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response) = spec_handle(doc, request, flight.now, node.retry_timeout);
+            (
+                next,
+                Some(response),
+                Seq::empty(),
+                spec_request_notes(doc, request, flight.now, node.retry_timeout),
+            )
         },
         JobV::Due => spec_run_due(doc, flight.now, node.retry_timeout),
         JobV::Occurrence(pending) => (spec_occurrence(doc, pending, flight.now), None, Seq::empty(), Seq::empty()),
@@ -5119,11 +5293,14 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
 }
 
 /// One request against one document. The same match as `handle`.
-pub open spec fn spec_handle(doc: DocV, request: Request, now: Time) -> (DocV, Response) {
+pub open spec fn spec_handle(doc: DocV, request: Request, now: Time, retry: u64) -> (DocV, Response) {
     match request {
         Request::PromiseGet(q) => spec_promise_get(doc, q.id, now),
         Request::PromiseCreate(q) => spec_promise_create(doc, q, now),
-        Request::PromiseSettle(q) => spec_promise_settle(doc, q, now),
+        Request::PromiseSettle(q) => {
+            let settled = spec_promise_settle(doc, q, now, retry);
+            (settled.0, settled.1)
+        },
         Request::PromiseRegisterCallback(q) => spec_register_callback(doc, q.awaited, q.awaiter, now),
         Request::PromiseRegisterListener(q) => spec_register_listener(doc, q.awaited, q.address, now),
         Request::TaskGet(q) => spec_task_get(doc, q.id, now),
@@ -5135,11 +5312,21 @@ pub open spec fn spec_handle(doc: DocV, request: Request, now: Time) -> (DocV, R
         Request::TaskContinue(q) => spec_task_continue(doc, q.id, now),
         Request::TaskHeartbeat(q) => spec_heartbeat(doc, q.pid, q.tasks@, now),
         Request::TaskSuspend(q) => spec_suspend(doc, q.id, q.version, q.actions@, now),
-        Request::TaskFence(q) => spec_fence(doc, q.id, q.version, q.action, now),
+        Request::TaskFence(q) => spec_fence(doc, q.id, q.version, q.action, now, retry),
         Request::TaskFenceCheck(q) => spec_fence_check(doc, q.id, q.version, now),
         Request::ScheduleGet(q) => spec_schedule_get(doc, q.id),
         Request::ScheduleCreate(q) => spec_schedule_create(doc, q, now),
         Request::ScheduleDelete(q) => spec_schedule_delete(doc, q.id),
+    }
+}
+
+/// Notes a request sends. Only a settle, and a fence that settles, has any:
+/// the listeners it tells, then the tasks its resume made due.
+pub open spec fn spec_request_notes(doc: DocV, request: Request, now: Time, retry: u64) -> Seq<NoteV> {
+    match request {
+        Request::PromiseSettle(q) => spec_promise_settle(doc, q, now, retry).2,
+        Request::TaskFence(q) => spec_fence_notes(doc, q.id, q.version, q.action, now, retry),
+        _ => Seq::empty(),
     }
 }
 
@@ -5340,18 +5527,67 @@ pub open spec fn spec_promise_create(doc: DocV, req: PromiseCreateReq, now: Time
     }
 }
 
-pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time) -> (DocV, Response) {
+/// A pending task whose retry has come due, on a promise that is still pending.
+pub open spec fn spec_due_retry(obj: ObjV, now: Time) -> bool {
+    obj.promise.state == PromiseState::Pending && match obj.task {
+        Some(t) => t.state == TaskState::Pending && match t.retry_timeout_at {
+            Some(at) => at <= now,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Offer ids this resume made due. `before` is the map before the callbacks
+/// ran, so a retry that was already due is not offered again.
+pub open spec fn spec_offer(
+    before: Map<Seq<char>, ObjV>,
+    map: Map<Seq<char>, ObjV>,
+    ids: Seq<Seq<char>>,
+    now: Time,
+    retry: u64,
+) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
+    decreases ids.len(),
+{
+    if ids.len() == 0 {
+        (map, Seq::empty())
+    } else {
+        let id = ids[0];
+        let (map, notes) = if map.contains_key(id) && before.contains_key(id)
+            && spec_due_retry(map[id], now) && !spec_due_retry(before[id], now) {
+            match map[id].task {
+                Some(t) => (
+                    map.insert(id, ObjV {
+                        task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry)), ..t }),
+                        ..map[id]
+                    }),
+                    seq![NoteV::Execute { id, version: t.version }],
+                ),
+                None => (map, Seq::<NoteV>::empty()),
+            }
+        } else {
+            (map, Seq::<NoteV>::empty())
+        };
+        let (rest, more) = spec_offer(before, map, ids.drop_first(), now, retry);
+        (rest, notes + more)
+    }
+}
+
+/// Settle, then resume the callbacks the promise held, tell its listeners,
+/// and offer a task that resume made due. The answer is the settled promise,
+/// callbacks still listed; the document has spent them.
+pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time, retry: u64) -> (DocV, Response, Seq<NoteV>) {
     if !req.state.spec_settable() {
-        (doc, spec_promise_res(400, None))
+        (doc, spec_promise_res(400, None), Seq::empty())
     } else {
         let doc = spec_opened(doc);
         let map = spec_origin_map(doc);
         if !map.contains_key(req.id@) {
-            (doc, spec_promise_res(404, None))
+            (doc, spec_promise_res(404, None), Seq::empty())
         } else {
             let seen = spec_project_obj(map[req.id@], now);
             if seen.promise.state != PromiseState::Pending {
-                (doc, spec_promise_res(200, Some(spec_record(req.id, seen.promise))))
+                (doc, spec_promise_res(200, Some(spec_record(req.id, seen.promise))), Seq::empty())
             } else {
                 let promise = PromV { state: req.state, value: req.value, settled_at: Some(now), ..seen.promise };
                 let task = match seen.task {
@@ -5359,7 +5595,15 @@ pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time
                     other => other,
                 };
                 let obj = ObjV { promise, task };
-                (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+                let placed = map.insert(req.id@, obj);
+                let resumed = spec_callbacks(placed, req.id@, now);
+                let (told, heard) = spec_listeners(resumed, req.id@);
+                let (armed, offered) = spec_offer(placed, told, obj.promise.callbacks, now, retry);
+                (
+                    spec_with_origin(doc, armed),
+                    spec_promise_res(200, Some(spec_record(req.id, obj.promise))),
+                    heard + offered,
+                )
             }
         }
     }
@@ -5744,35 +5988,44 @@ pub open spec fn spec_add_callbacks(map: Map<Seq<char>, ObjV>, id: Seq<char>, ac
     }
 }
 
-pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFenceAction, now: Time) -> (DocV, Response) {
+pub open spec fn spec_fence_step(doc: DocV, id: String, version: u64, action: TaskFenceAction, now: Time, retry: u64) -> (DocV, Response, Seq<NoteV>) {
     let target = match action {
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
     };
     if target@ == id@ || !same_origin_spec(target@, id@) {
-        (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }))
+        (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }), Seq::empty())
     } else {
         let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None })),
-            Held::Stale => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None })),
+            Held::Missing => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None }), Seq::empty()),
+            Held::Stale => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None }), Seq::empty()),
             Held::Ok(_) => {
                 let doc = spec_with_origin(doc, map);
                 match action {
                     TaskFenceAction::Create(req) => {
                         let (doc, response) = spec_promise_create(doc, req, now);
                         let inner = match response { Response::Promise(p) => p, _ => PromiseRes { status: 500, promise: None } };
-                        (doc, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Create(inner)) }))
+                        (doc, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Create(inner)) }), Seq::empty())
                     },
                     TaskFenceAction::Settle(req) => {
-                        let (doc, response) = spec_promise_settle(doc, req, now);
+                        let (doc, response, notes) = spec_promise_settle(doc, req, now, retry);
                         let inner = match response { Response::Promise(p) => p, _ => PromiseRes { status: 500, promise: None } };
-                        (doc, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Settle(inner)) }))
+                        (doc, Response::TaskFence(TaskFenceRes { status: 200, action: Some(TaskFenceInnerRes::Settle(inner)) }), notes)
                     },
                 }
             },
         }
     }
+}
+
+pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFenceAction, now: Time, retry: u64) -> (DocV, Response) {
+    let (doc, response, _) = spec_fence_step(doc, id, version, action, now, retry);
+    (doc, response)
+}
+
+pub open spec fn spec_fence_notes(doc: DocV, id: String, version: u64, action: TaskFenceAction, now: Time, retry: u64) -> Seq<NoteV> {
+    spec_fence_step(doc, id, version, action, now, retry).2
 }
 
 pub open spec fn spec_fence_check(doc: DocV, id: String, version: u64, now: Time) -> (DocV, Response) {
