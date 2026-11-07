@@ -30,6 +30,18 @@ use super::machine::*;
 
 verus! {
 
+/// Maximum number of internal workflow steps closed on either side of an
+/// external handler. Exhaustion rejects the whole request atomically.
+pub const REQUEST_STEPS: usize = 256;
+
+pub assume_specification [ServerConfig::request_transition](
+    config: &ServerConfig,
+    request: &Request,
+    state: &Store,
+    now: Time,
+    limit: usize,
+) -> Vec<Out>;
+
 // ------------------------------------------------------------------- views
 
 pub type Chars = Seq<char>;
@@ -534,7 +546,7 @@ impl Model for ServerConfig {
     type Dispatch = Dispatch;
 
     fn external(&self, op: &Request, s: &Store, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        let mut outs = self.handler(op, s, now);
+        let mut outs = self.request_transition(op, s, now, REQUEST_STEPS);
         let mut r: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
         while outs.len() > 0
             decreases outs@.len(),

@@ -3740,6 +3740,119 @@ pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
     earliest_in(doc, now).is_some()
 }
 
+fn same_outbound_key(a: &Outbound, b: &Outbound) -> (r: bool)
+    ensures
+        r == (spec_note_key(a@) == spec_note_key(b@)),
+{
+    match (a, b) {
+        (Outbound::Execute { id: x, .. }, Outbound::Execute { id: y, .. }) => *x == *y,
+        (
+            Outbound::Unblock { address: xa, promise: xp },
+            Outbound::Unblock { address: ya, promise: yp },
+        ) => *xa == *ya && xp.id == yp.id,
+        _ => false,
+    }
+}
+
+fn contains_outbound_key(notes: &Vec<Outbound>, note: &Outbound) -> (r: bool)
+    ensures
+        r == exists|i: int| 0 <= i < notes@.len()
+            && spec_note_key(notes@[i]@) == spec_note_key(note@),
+{
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            forall|j: int| 0 <= j < i ==>
+                spec_note_key(notes@[j]@) != spec_note_key(note@),
+        decreases notes@.len() - i,
+    {
+        if same_outbound_key(&notes[i], note) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// An Execute remains visible only while the committed task is pending at
+/// that version. The handler can consume a pre-sweep offer in the same CAS.
+fn outbound_relevant(doc: &DocumentBody, note: &Outbound) -> (r: bool)
+    ensures
+        r == spec_note_relevant(doc@, note@),
+{
+    match note {
+        Outbound::Execute { id, version } => match peek(doc, id) {
+            Some(object) => match object.task {
+                Some(task) => task.state == TaskState::Pending && task.version == *version,
+                None => false,
+            },
+            None => false,
+        },
+        Outbound::Unblock { .. } => true,
+    }
+}
+
+/// Canonical insertion-order representation of the unordered keyed effects.
+fn keyed_notes(doc: &DocumentBody, notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_keyed_notes(doc@, notes_v(notes@), notes@.len() as nat),
+{
+    let mut out: Vec<Outbound> = Vec::new();
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            notes_v(out@) == spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+        decreases notes@.len() - i,
+    {
+        let relevant = outbound_relevant(doc, &notes[i]);
+        let present = contains_outbound_key(&out, &notes[i]);
+        proof {
+            assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+            assert forall|j: int| 0 <= j < out@.len() implies
+                notes_v(out@)[j] == out@[j]@ by {};
+            if present {
+                let j = choose|j: int| 0 <= j < out@.len()
+                    && spec_note_key(out@[j]@) == spec_note_key(notes@[i as int]@);
+                assert(0 <= j < notes_v(out@).len());
+                assert(spec_note_key(notes_v(out@)[j])
+                    == spec_note_key(notes_v(notes@)[i as int]));
+            } else {
+                assert forall|j: int| 0 <= j < notes_v(out@).len() implies
+                    spec_note_key(notes_v(out@)[j])
+                        != spec_note_key(notes_v(notes@)[i as int]) by {
+                    assert(notes_v(out@)[j] == out@[j]@);
+                    assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+                };
+            }
+            assert(spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat)
+                == spec_keyed_insert(
+                    doc@,
+                    spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+                    notes_v(notes@)[i as int],
+                ));
+        }
+        if relevant && !present {
+            let ghost before = out@;
+            out.push(copy(&notes[i]));
+            proof {
+                assert(notes_v(before.push(notes@[i as int])) =~=
+                    notes_v(before).push(notes@[i as int]@));
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        } else {
+            proof {
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn ids_unique(ids: &Vec<String>) -> (r: bool)
     ensures
         r == crate::document::unique(strs_v(ids@)),
@@ -4145,7 +4258,7 @@ fn body_well_formed_for(
 
 /// One complete request transition.
 ///
-/// Time-driven work already due is drained before the raw handler, so reads
+/// Workflow work already due is drained before the raw handler, so reads
 /// and errors persist the projection they observed.  Work made immediately
 /// due by the handler is drained afterwards.  This includes the first
 /// Execute (and rearm) for runnable creates, releases, continues, and
@@ -4167,11 +4280,31 @@ pub fn request_transition(
         (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
             == spec_request_transition(from@, *request, now, retry_timeout, limit as nat),
 {
+    let original = copy(&from);
+    if matches!(from, DocumentBody::Schedule(_)) {
+        let (doc, response) = handle(from, request, now);
+        let Some(document) = request_document(request) else {
+            return (
+                original,
+                unavailable(request),
+                Vec::new(),
+                Vec::new(),
+            );
+        };
+        if body_well_formed_for(&document, &doc, now) {
+            return (doc, response, Vec::new(), Vec::new());
+        }
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
     proof {
         lemma_pend_empty();
         lemma_notes_empty();
     }
-    let original = copy(&from);
     let (before, mut born_before, mut notes_before) =
         sweep(from, now, retry_timeout, limit);
     if due(&before, now) {
@@ -4222,7 +4355,8 @@ pub fn request_transition(
         lemma_map_values_add(b0, b1);
         lemma_notes_add(n0, n1);
     }
-    (after, response, born_before, notes_before)
+    let notes = keyed_notes(&after, notes_before);
+    (after, response, born_before, notes)
 }
 
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
@@ -5212,6 +5346,94 @@ pub struct PendingV {
 pub enum NoteV {
     Execute { id: Seq<char>, version: u64 },
     Unblock { address: Seq<char>, promise: PromiseRecord },
+}
+
+/// Idempotency key of an outbound protocol effect.
+pub enum NoteKeyV {
+    Execute(Seq<char>),
+    Unblock(Seq<char>, Seq<char>),
+}
+
+pub open spec fn spec_note_key(note: NoteV) -> NoteKeyV {
+    match note {
+        NoteV::Execute { id, .. } => NoteKeyV::Execute(id),
+        NoteV::Unblock { address, promise } => NoteKeyV::Unblock(promise.id@, address),
+    }
+}
+
+pub open spec fn spec_note_relevant(doc: DocumentBodyV, note: NoteV) -> bool {
+    match note {
+        NoteV::Execute { id, version } => {
+            let objects = spec_workflow_map(doc);
+            objects.contains_key(id)
+                && match objects[id].task {
+                    Some(task) => task.state == TaskState::Pending && task.version == version,
+                    None => false,
+                }
+        },
+        NoteV::Unblock { .. } => true,
+    }
+}
+
+pub open spec fn spec_keyed_insert(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    note: NoteV,
+) -> Seq<NoteV> {
+    if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < notes.len()
+        && spec_note_key(notes[i]) == spec_note_key(note)
+    {
+        notes
+    } else {
+        notes.push(note)
+    }
+}
+
+pub open spec fn spec_keyed_notes(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        spec_keyed_insert(
+            doc,
+            spec_keyed_notes(doc, notes, (count - 1) as nat),
+            notes[count as int - 1],
+        )
+    }
+}
+
+pub proof fn lemma_keyed_notes_from_input(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+    k: int,
+)
+    requires
+        count <= notes.len(),
+        0 <= k < spec_keyed_notes(doc, notes, count).len(),
+    ensures
+        exists|j: int| 0 <= j < count
+            && spec_keyed_notes(doc, notes, count)[k] == notes[j],
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_keyed_notes(doc, notes, (count - 1) as nat);
+        let note = notes[count as int - 1];
+        if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < prior.len()
+            && spec_note_key(prior[i]) == spec_note_key(note)
+        {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else if k < prior.len() {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else {
+            assert(k == prior.len());
+        }
+    }
 }
 
 /// What the open flight is doing.
@@ -6372,17 +6594,28 @@ pub open spec fn spec_request_commits(
     retry_timeout: u64,
     limit: nat,
 ) -> bool {
-    let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
-    if spec_earliest_in(before, now) is Some {
-        false
-    } else {
-        let (handled, _) = spec_handle(before, request, now);
-        let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
-        &&& spec_earliest_in(after, now) is None
-        &&& match spec_request_document(request) {
-            Some(document) =>
-                crate::document::body_well_formed(document, after, now),
-            None => false,
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (handled, _) = spec_handle(doc, request, now);
+            match spec_request_document(request) {
+                Some(document) => crate::document::body_well_formed(document, handled, now),
+                None => false,
+            }
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(before, now) is Some {
+                false
+            } else {
+                let (handled, _) = spec_handle(before, request, now);
+                let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
+                &&& spec_earliest_in(after, now) is None
+                &&& match spec_request_document(request) {
+                    Some(document) =>
+                        crate::document::body_well_formed(document, after, now),
+                    None => false,
+                }
+            }
         }
     }
 }
@@ -6394,31 +6627,46 @@ pub open spec fn spec_request_transition(
     retry_timeout: u64,
     limit: nat,
 ) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
-    let (before, born_before, notes_before) =
-        spec_sweep(doc, now, retry_timeout, limit);
-    if spec_earliest_in(before, now) is Some {
-        (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
-    } else {
-        let (handled, response) = spec_handle(before, request, now);
-        let (after, born_after, notes_after) =
-            spec_sweep(handled, now, retry_timeout, limit);
-        if spec_earliest_in(after, now) is Some {
-            (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
-        } else {
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (handled, response) = spec_handle(doc, request, now);
             match spec_request_document(request) {
-                Some(document) if crate::document::body_well_formed(
-                    document,
-                    after,
-                    now,
-                ) => (
-                    after,
-                    response,
-                    born_before + born_after,
-                    notes_before + notes_after,
-                ),
+                Some(document) if crate::document::body_well_formed(document, handled, now) =>
+                    (handled, response, Seq::empty(), Seq::empty()),
                 _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
             }
-        }
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (before, born_before, notes_before) =
+                spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(before, now) is Some {
+                (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+            } else {
+                let (handled, response) = spec_handle(before, request, now);
+                let (after, born_after, notes_after) =
+                    spec_sweep(handled, now, retry_timeout, limit);
+                if spec_earliest_in(after, now) is Some {
+                    (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+                } else {
+                    match spec_request_document(request) {
+                        Some(document) if crate::document::body_well_formed(
+                            document,
+                            after,
+                            now,
+                        ) => {
+                            let notes = notes_before + notes_after;
+                            (
+                                after,
+                                response,
+                                born_before + born_after,
+                                spec_keyed_notes(after, notes, notes.len() as nat),
+                            )
+                        },
+                        _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
+                    }
+                }
+            }
+        },
     }
 }
 

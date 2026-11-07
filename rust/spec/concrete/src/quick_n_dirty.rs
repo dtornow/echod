@@ -17,6 +17,8 @@ use crate::node::{
     spec_advance_stored, spec_key, spec_request_commits, spec_request_document,
     spec_request_transition, spec_stored_body, spec_stored_committed_at, spec_stored_name,
 };
+#[cfg(verus_keep_ghost)]
+use crate::interpret::{lemma_origin_key, lemma_schedule_key};
 
 verus! {
 
@@ -60,33 +62,59 @@ pub open spec fn routed(document: StoredDocumentV, request: Request) -> bool {
     }
 }
 
+proof fn lemma_key_names_document(request: Request)
+    ensures
+        match (spec_key(request), spec_request_document(request)) {
+            (Some(key), Some(document)) => key.skip(2) == document,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    match request {
+        Request::PromiseGet(_)
+        | Request::PromiseCreate(_)
+        | Request::PromiseSettle(_)
+        | Request::PromiseRegisterCallback(_)
+        | Request::PromiseRegisterListener(_)
+        | Request::TaskGet(_)
+        | Request::TaskCreate(_)
+        | Request::TaskAcquire(_)
+        | Request::TaskFulfill(_)
+        | Request::TaskRelease(_)
+        | Request::TaskHalt(_)
+        | Request::TaskContinue(_)
+        | Request::TaskFence(_)
+        | Request::TaskFenceCheck(_)
+        | Request::TaskSuspend(_) => {
+            lemma_origin_key(spec_request_document(request)->0);
+        },
+        Request::TaskHeartbeat(q) => {
+            if q.tasks@.len() > 0 {
+                lemma_origin_key(spec_request_document(request)->0);
+            }
+        },
+        Request::ScheduleGet(_)
+        | Request::ScheduleCreate(_)
+        | Request::ScheduleDelete(_) => {
+            lemma_schedule_key(spec_request_document(request)->0);
+        },
+    }
+}
+
 proof fn lemma_routed_document(document: StoredDocumentV, request: Request)
     requires
         routed(document, request),
     ensures
         spec_request_document(request) == Some(spec_stored_name(document)),
 {
+    lemma_key_names_document(request);
     match document {
-        StoredDocumentV::Workflow(_) => match request {
-            Request::PromiseGet(_)
-            | Request::PromiseCreate(_)
-            | Request::PromiseSettle(_)
-            | Request::PromiseRegisterCallback(_)
-            | Request::PromiseRegisterListener(_)
-            | Request::TaskGet(_)
-            | Request::TaskCreate(_)
-            | Request::TaskAcquire(_)
-            | Request::TaskFulfill(_)
-            | Request::TaskRelease(_)
-            | Request::TaskHalt(_)
-            | Request::TaskContinue(_)
-            | Request::TaskFence(_)
-            | Request::TaskFenceCheck(_)
-            | Request::TaskSuspend(_)
-            | Request::TaskHeartbeat(_) => {},
-            _ => {},
+        StoredDocumentV::Workflow(workflow) => {
+            lemma_origin_key(workflow.document);
         },
-        StoredDocumentV::Schedule(_) => {},
+        StoredDocumentV::Schedule(schedule) => {
+            lemma_schedule_key(schedule.document);
+        },
     }
 }
 
