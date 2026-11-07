@@ -30,7 +30,8 @@ use crate::model::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_body, spec_encode_body,
-    spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
+    spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_request_transition,
+    spec_run_due, REQUEST_STEPS,
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome};
@@ -129,8 +130,14 @@ pub open spec fn decision(flight: FlightV, doc: DocumentBodyV, retry_timeout: u6
 ) {
     match flight.job {
         JobV::External(request) => {
-            let (next, response) = spec_handle(doc, request, flight.now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notes) = spec_request_transition(
+                doc,
+                request,
+                flight.now,
+                retry_timeout,
+                REQUEST_STEPS as nat,
+            );
+            (next, Some(response), born, notes)
         },
         JobV::Due => spec_run_due(doc, flight.now, retry_timeout),
         JobV::Occurrence(pending) => (

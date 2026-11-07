@@ -11,7 +11,9 @@
 use vstd::prelude::*;
 
 use echod_concrete::store::{StoreError, StoreOutcome};
-use echod_concrete::{create_occurrence, handle, run_due, sweep, DocumentBody, Outbound, Pending};
+use echod_concrete::{
+    create_occurrence, request_transition, run_due, sweep, DocumentBody, Outbound, Pending,
+};
 use echod_types::{Request, Response};
 
 use super::commit::Commit;
@@ -71,8 +73,9 @@ pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: 
     }
     match job {
         Job::Request(request) => {
-            let (doc, response) = handle(doc, &request, now);
-            Decided { doc, response: Some(response), born: Vec::new(), notes: Vec::new() }
+            let (doc, response, born, notes) =
+                request_transition(doc, &request, now, retry_timeout, limit);
+            Decided { doc, response: Some(response), born, notes }
         },
         Job::Sweep => {
             let (doc, born, notes) = sweep(doc, now, retry_timeout, limit);

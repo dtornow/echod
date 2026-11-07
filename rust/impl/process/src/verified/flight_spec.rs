@@ -12,8 +12,8 @@
 use vstd::prelude::*;
 
 use echod_concrete::node::{
-    notes_v, pend_v, spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocumentBodyV,
-    FlightV, JobV, NodeV, NoteV, PendingV,
+    notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
+    spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
 use echod_concrete::store::{StoreCall, StoreError, StoreOutcome};
 use echod_concrete::model::{Message, Pid};
@@ -45,8 +45,9 @@ pub enum AJob {
 pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
-            let (next, response) = spec_handle(doc, request, now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notes) =
+                spec_request_transition(doc, request, now, retry_timeout, limit);
+            (next, Some(response), born, notes)
         },
         AJob::Sweep => {
             let (next, born, notes) = spec_sweep(doc, now, retry_timeout, limit);
