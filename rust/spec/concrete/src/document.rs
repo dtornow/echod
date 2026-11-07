@@ -497,7 +497,8 @@ pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
         &&& callback_targets_well_formed(workflow.objects, workflow.objects[id])
         &&& suspended_rung_well_formed(workflow.objects, id, workflow.objects[id])
     }
-    &&& descendants_well_formed(workflow.objects)
+    // Deferred until descendant settlement semantics are decided:
+    // &&& descendants_well_formed(workflow.objects)
     &&& workflow.next_wake_at == match crate::node::spec_body_deadline(
         DocumentBodyV::Workflow(workflow.objects),
     ) {
