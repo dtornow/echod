@@ -214,6 +214,31 @@ fn callbacks_only_record_resumes_on_tasks_that_are_already_running_or_queued() {
 }
 
 #[test]
+fn an_effect_consumed_by_the_handler_does_not_escape_the_commit() {
+    let (doc, _, _) = step(empty_workflow(), create("wf:task", target()), NOW);
+    let acquire = Request::TaskAcquire(TaskAcquireReq {
+        id: "wf:task".into(),
+        version: 0,
+        pid: "worker".into(),
+        ttl: 500,
+    });
+
+    let (doc, response, born, notes) =
+        request_transition(doc, &acquire, NOW + RETRY, RETRY, REQUEST_SWEEP_STEPS);
+
+    assert_eq!(status(&response), 200);
+    assert!(born.is_empty());
+    assert!(
+        notes.is_empty(),
+        "the pre-sweep retry was consumed by the acquire in the same commit"
+    );
+    assert_eq!(
+        peek(&doc, &"wf:task".into()).unwrap().task.unwrap().state,
+        TaskState::Acquired,
+    );
+}
+
+#[test]
 fn reads_commit_only_when_the_pre_sweep_projects_state() {
     let (doc, _, _) = step(empty_workflow(), create("wf:p", external()), NOW);
     let before = clone_body(&doc);

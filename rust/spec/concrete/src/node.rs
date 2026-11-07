@@ -3754,19 +3754,41 @@ fn contains_outbound_key(notes: &Vec<Outbound>, note: &Outbound) -> (r: bool)
     false
 }
 
-/// Canonical insertion-order representation of the keyed effect set.
-fn keyed_notes(notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+/// An Execute survives the atomic request only while the task it names is
+/// still pending at that version. The handler may consume work discovered by
+/// the pre-sweep (for example by acquiring or settling that task), in which
+/// case the not-yet-committed Execute must be cancelled. Unblocks describe a
+/// listener removed by closure and cannot be consumed by a later handler.
+fn outbound_relevant(doc: &DocumentBody, note: &Outbound) -> (r: bool)
     ensures
-        notes_v(r@) == spec_keyed_notes(notes_v(notes@), notes@.len() as nat),
+        r == spec_note_relevant(doc@, note@),
+{
+    match note {
+        Outbound::Execute { id, version } => match peek(doc, id) {
+            Some(object) => match object.task {
+                Some(task) => task.state == TaskState::Pending && task.version == *version,
+                None => false,
+            },
+            None => false,
+        },
+        Outbound::Unblock { .. } => true,
+    }
+}
+
+/// Canonical insertion-order representation of the keyed effect set.
+fn keyed_notes(doc: &DocumentBody, notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_keyed_notes(doc@, notes_v(notes@), notes@.len() as nat),
 {
     let mut out: Vec<Outbound> = Vec::new();
     let mut i: usize = 0;
     while i < notes.len()
         invariant
             i <= notes@.len(),
-            notes_v(out@) == spec_keyed_notes(notes_v(notes@), i as nat),
+            notes_v(out@) == spec_keyed_notes(doc@, notes_v(notes@), i as nat),
         decreases notes@.len() - i,
     {
+        let relevant = outbound_relevant(doc, &notes[i]);
         let present = contains_outbound_key(&out, &notes[i]);
         proof {
             assert(notes_v(notes@)[i as int] == notes@[i as int]@);
@@ -3786,25 +3808,26 @@ fn keyed_notes(notes: Vec<Outbound>) -> (r: Vec<Outbound>)
                     assert(notes_v(notes@)[i as int] == notes@[i as int]@);
                 };
             }
-            assert(spec_keyed_notes(notes_v(notes@), (i + 1) as nat)
+            assert(spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat)
                 == spec_keyed_insert(
-                    spec_keyed_notes(notes_v(notes@), i as nat),
+                    doc@,
+                    spec_keyed_notes(doc@, notes_v(notes@), i as nat),
                     notes_v(notes@)[i as int],
                 ));
         }
-        if !present {
+        if relevant && !present {
             let ghost before = out@;
             out.push(copy(&notes[i]));
             proof {
                 assert(notes_v(before.push(notes@[i as int])) =~=
                     notes_v(before).push(notes@[i as int]@));
                 assert(notes_v(out@)
-                    == spec_keyed_notes(notes_v(notes@), (i + 1) as nat));
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
             }
         } else {
             proof {
                 assert(notes_v(out@)
-                    == spec_keyed_notes(notes_v(notes@), (i + 1) as nat));
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
             }
         }
         i += 1;
@@ -3862,7 +3885,8 @@ pub fn request_transition(
         lemma_map_values_add(born0, more_born0);
         lemma_notes_add(notes0, more_notes0);
     }
-    (after, response, born, keyed_notes(notes))
+    let notes = keyed_notes(&after, notes);
+    (after, response, born, notes)
 }
 
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
@@ -4865,8 +4889,27 @@ pub open spec fn spec_note_key(note: NoteV) -> NoteKeyV {
     }
 }
 
-pub open spec fn spec_keyed_insert(notes: Seq<NoteV>, note: NoteV) -> Seq<NoteV> {
-    if exists|i: int| 0 <= i < notes.len()
+pub open spec fn spec_note_relevant(doc: DocumentBodyV, note: NoteV) -> bool {
+    match note {
+        NoteV::Execute { id, version } => {
+            let objects = spec_workflow_map(doc);
+            objects.contains_key(id)
+                && match objects[id].task {
+                    Some(task) =>
+                        task.state == TaskState::Pending && task.version == version,
+                    None => false,
+                }
+        },
+        NoteV::Unblock { .. } => true,
+    }
+}
+
+pub open spec fn spec_keyed_insert(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    note: NoteV,
+) -> Seq<NoteV> {
+    if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < notes.len()
         && spec_note_key(notes[i]) == spec_note_key(note)
     {
         notes
@@ -4875,14 +4918,19 @@ pub open spec fn spec_keyed_insert(notes: Seq<NoteV>, note: NoteV) -> Seq<NoteV>
     }
 }
 
-pub open spec fn spec_keyed_notes(notes: Seq<NoteV>, count: nat) -> Seq<NoteV>
+pub open spec fn spec_keyed_notes(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+) -> Seq<NoteV>
     decreases count,
 {
     if count == 0 {
         Seq::empty()
     } else {
         spec_keyed_insert(
-            spec_keyed_notes(notes, (count - 1) as nat),
+            doc,
+            spec_keyed_notes(doc, notes, (count - 1) as nat),
             notes[(count - 1) as int],
         )
     }
@@ -6042,6 +6090,7 @@ pub open spec fn spec_request_transition(
                         response,
                         before_born + after_born,
                         spec_keyed_notes(
+                            closed,
                             before_notes + after_notes,
                             (before_notes + after_notes).len() as nat,
                         ),
