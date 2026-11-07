@@ -3366,6 +3366,10 @@ fn schedule_delete(doc: DocumentBody, id: &String) -> (r: (DocumentBody, Respons
     }
 }
 
+/// The raw request handler.  It deliberately does not run time-driven work:
+/// callers that commit a request must use [`request_transition`], which
+/// closes the document before and after this handler.
+///
 /// `spec_handle`: the same match.
 pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBody, Response))
     ensures
@@ -3397,6 +3401,9 @@ pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBo
 // ---------------------------------------------------------------------------
 // Due work: timeouts, leases, retries, callbacks, listeners, schedules
 // ---------------------------------------------------------------------------
+
+/// Maximum pre-close and post-close steps in one external request.
+pub const REQUEST_STEPS: u64 = 256;
 
 proof fn lemma_notes_empty()
     ensures
@@ -3682,6 +3689,79 @@ pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r
         assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
     }
     (doc, born, notes)
+}
+
+/// Whether a document still has work due at `now`.
+pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
+    ensures
+        r == (spec_earliest_in(doc@, now) is Some),
+{
+    earliest_in(doc, now).is_some()
+}
+
+/// One complete request transition.
+///
+/// Time-driven work already due is drained before the raw handler, so reads
+/// and errors persist the projection they observed.  Work made immediately
+/// due by the handler is drained afterwards.  This includes the first
+/// Execute (and rearm) for runnable creates, releases, continues, and
+/// suspended resumes, and all callbacks/listeners created by settlement.
+///
+/// Each drain is bounded independently.  If either bound is exhausted while
+/// work remains due, the transition is rejected as 503 and returns the
+/// original document with no occurrences or notifications.  Consequently a
+/// caller can make every returned effect conditional on the same document
+/// CAS.  A lost CAS discards the effects and re-runs this transition.
+pub fn request_transition(
+    from: DocumentBody,
+    request: &Request,
+    now: u64,
+    retry_timeout: u64,
+    limit: u64,
+) -> (r: (DocumentBody, Response, Vec<Pending>, Vec<Outbound>))
+    ensures
+        (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
+            == spec_request_transition(from@, *request, now, retry_timeout, limit as nat),
+{
+    proof {
+        lemma_pend_empty();
+        lemma_notes_empty();
+    }
+    let original = copy(&from);
+    let (before, mut born_before, mut notes_before) =
+        sweep(from, now, retry_timeout, limit);
+    if due(&before, now) {
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+
+    let (handled, response) = handle(before, request, now);
+    let (after, mut born_after, mut notes_after) =
+        sweep(handled, now, retry_timeout, limit);
+    if due(&after, now) {
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+
+    let ghost b0 = born_before@;
+    let ghost b1 = born_after@;
+    let ghost n0 = notes_before@;
+    let ghost n1 = notes_after@;
+    born_before.append(&mut born_after);
+    notes_before.append(&mut notes_after);
+    proof {
+        lemma_map_values_add(b0, b1);
+        lemma_notes_add(n0, n1);
+    }
+    (after, response, born_before, notes_before)
 }
 
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
@@ -4137,8 +4217,9 @@ impl Node {
         let Flight { key, job, etag, now, caller, .. } = flight;
         let (next, answer, born, notify): (DocumentBody, Option<Response>, Vec<Pending>, Vec<Outbound>) = match &job {
             Job::External { request } => {
-                let (next, response) = handle(doc, request, now);
-                (next, Some(response), Vec::new(), Vec::new())
+                let (next, response, born, notify) =
+                    request_transition(doc, request, now, self.retry_timeout, REQUEST_STEPS);
+                (next, Some(response), born, notify)
             },
             Job::Due => {
                 let (next, born, notify) = run_due(doc, now, self.retry_timeout);
@@ -4895,8 +4976,14 @@ pub open spec fn spec_begin(node: NodeV, key: Seq<char>, job: JobV, now: Time, c
 pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV) -> (NodeV, Seq<(Pid, Message)>) {
     let (next, reply, born, notify) = match flight.job {
         JobV::External(request) => {
-            let (next, response) = spec_handle(doc, request, flight.now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notify) = spec_request_transition(
+                doc,
+                request,
+                flight.now,
+                node.retry_timeout,
+                REQUEST_STEPS as nat,
+            );
+            (next, Some(response), born, notify)
         },
         JobV::Due => spec_run_due(doc, flight.now, node.retry_timeout),
         JobV::Occurrence(pending) => (spec_occurrence(doc, pending, flight.now), None, Seq::empty(), Seq::empty()),
@@ -5784,6 +5871,37 @@ pub open spec fn spec_sweep(doc: DocumentBodyV, now: Time, retry_timeout: u64, l
         } else {
             let (last, more_born, more_notes) = spec_sweep(next, now, retry_timeout, (limit - 1) as nat);
             (last, born + more_born, notes + more_notes)
+        }
+    }
+}
+
+/// The complete document-level request transition.  Both closures have the
+/// same finite budget.  Exhaustion is an atomic rejection: neither the
+/// partially closed document nor any effect escapes.
+pub open spec fn spec_request_transition(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
+    let (before, born_before, notes_before) =
+        spec_sweep(doc, now, retry_timeout, limit);
+    if spec_earliest_in(before, now) is Some {
+        (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+    } else {
+        let (handled, response) = spec_handle(before, request, now);
+        let (after, born_after, notes_after) =
+            spec_sweep(handled, now, retry_timeout, limit);
+        if spec_earliest_in(after, now) is Some {
+            (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+        } else {
+            (
+                after,
+                response,
+                born_before + born_after,
+                notes_before + notes_after,
+            )
         }
     }
 }
