@@ -24,35 +24,36 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    EntryV, Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, spec_bytes,
-    spec_get, spec_initial_node as initial_node, spec_node as spec_node_step, spec_nodes,
-    spec_notes, spec_notify, spec_one, spec_reply, spec_step, spec_store, spec_string, spec_world,
+    spec_bytes, spec_get, spec_initial_node as initial_node, spec_node as spec_node_step,
+    spec_nodes, spec_notes, spec_notify, spec_one, spec_reply, spec_step, spec_store, spec_string,
+    spec_world, EntryV, Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid,
     StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    axiom_decode_encode_body, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
-    spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
-    spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep,
-    spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
-    spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
-};
-#[cfg(verus_keep_ghost)]
-use crate::store::{
-    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreCall, StoreOutcome,
+    axiom_decode_encode_body, spec_begin, spec_body_is_empty, spec_cached, spec_cached_from,
+    spec_commit, spec_decide, spec_earliest_from, spec_earliest_key, spec_empty_body,
+    spec_encode_body, spec_flight, spec_forget, spec_handle, spec_keep, spec_key, spec_occurrence,
+    spec_owns, spec_pure, spec_read, spec_remember, spec_request, spec_request_commits,
+    spec_request_transition, spec_run_due, spec_store_reply, spec_sweep, spec_timeout,
+    spec_unavailable, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, REQUEST_STEPS,
 };
 #[cfg(verus_keep_ghost)]
 use crate::relation::*;
 #[cfg(verus_keep_ghost)]
+use crate::store::{
+    spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, Etag, StoreCall, StoreOutcome,
+};
+#[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{spec_body, spec_create_if_absent, spec_handler, spec_process_work};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::model::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
     spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
     spec_send, spec_service, spec_shed, StateV,
 };
-#[cfg(verus_keep_ghost)]
-use echod_abstract::model::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
@@ -63,12 +64,13 @@ use echod_abstract::view::{InOutV, InternalV, OutV, StoreV as AStore};
 use echod_abstract::{BoundaryEvent, Call, Model as AModel, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
-    concrete_refines_abstract, end, matches, project, refines, simulation,
+    concrete_refines_abstract, end, lemma_end_add, lemma_legal_add, lemma_project_add, matches,
+    project, refines, simulation,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::{
-    before, envelopes, event_valid, Execution, initial, inject, is_process, Label, land, legal,
-    observe_outside, step, StepResultV, World, WorldV,
+    before, envelopes, event_valid, initial, inject, is_process, land, legal, observe_outside,
+    step, Execution, Label, StepResultV, World, WorldV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
@@ -315,6 +317,27 @@ pub proof fn lemma_request_monotone(
     }
 }
 
+pub proof fn lemma_service_request_monotone(
+    earlier: Seq<Envelope<APid, AMessage>>,
+    later: Seq<Envelope<APid, AMessage>>,
+    call: Call,
+)
+    requires
+        service_request(earlier, call),
+        extends(later, earlier),
+    ensures
+        service_request(later, call),
+{
+    let j = choose|j: int|
+        #![trigger earlier[j]]
+        0 <= j < earlier.len() && earlier[j] == Envelope {
+            sender: APid::Outside,
+            recipient: APid::Service,
+            message: AMessage::Request(call),
+        };
+    assert(later[j] == earlier[j]);
+}
+
 pub proof fn lemma_output_monotone(
     env: Envelope<CPid, CMessage>,
     earlier: Seq<Envelope<APid, AMessage>>,
@@ -526,6 +549,36 @@ pub proof fn lemma_matches_same_visible(
         legal(abstract_model(), config, before, execution) && project::<AModel>(abstract_model(), execution)
             == visible && end::<AModel>(before, execution) == after;
     assert(project::<AModel>(abstract_model(), execution) == same);
+}
+
+/// Concatenate two invisible abstract executions.
+pub proof fn lemma_matches_trans(
+    config: ServerConfig,
+    first: World<AModel>,
+    middle: World<AModel>,
+    last: World<AModel>,
+)
+    requires
+        matches(abstract_model(), config, first, Seq::<BoundaryEvent>::empty(), middle),
+        matches(abstract_model(), config, middle, Seq::<BoundaryEvent>::empty(), last),
+    ensures
+        matches(abstract_model(), config, first, Seq::<BoundaryEvent>::empty(), last),
+{
+    let prefix = choose|execution: Execution<AModel>|
+        #![trigger legal(abstract_model(), config, first, execution)]
+        legal(abstract_model(), config, first, execution)
+            && project::<AModel>(abstract_model(), execution) == Seq::<BoundaryEvent>::empty()
+            && end::<AModel>(first, execution) == middle;
+    let suffix = choose|execution: Execution<AModel>|
+        #![trigger legal(abstract_model(), config, middle, execution)]
+        legal(abstract_model(), config, middle, execution)
+            && project::<AModel>(abstract_model(), execution) == Seq::<BoundaryEvent>::empty()
+            && end::<AModel>(middle, execution) == last;
+    lemma_legal_add(abstract_model(), config, first, prefix, suffix);
+    lemma_project_add(abstract_model(), prefix, suffix);
+    lemma_end_add::<AModel>(first, prefix, suffix);
+    assert(Seq::<BoundaryEvent>::empty() + Seq::<BoundaryEvent>::empty()
+        =~= Seq::<BoundaryEvent>::empty());
 }
 
 /// A process step with the outcome at `j`, stated over the model's trait: the
@@ -2970,6 +3023,309 @@ pub proof fn lemma_answered_idle(
 
 /// A call whose handler the node runs: the service serves it, with the
 /// first outcome, at the same time, on the store the node's document reads as.
+pub proof fn lemma_sweep_matches(
+    config: ServerConfig,
+    before_a: World<AModel>,
+    key: Seq<char>,
+    doc: DocumentBodyV,
+    now: Time,
+    limit: nat,
+) -> (after_a: World<AModel>)
+    requires
+        agreement(config),
+        single(before_a),
+        before_a.now <= now,
+        doc_rel(key, doc, astate(before_a).store),
+        finite_store(astate(before_a).store),
+    ensures
+        ({
+            let (next, born, notes) =
+                spec_sweep(doc, now, config.retry_timeout, limit);
+            &&& matches(
+                abstract_model(),
+                config,
+                before_a,
+                Seq::<BoundaryEvent>::empty(),
+                after_a,
+            )
+            &&& single(after_a)
+            &&& after_a.now <= now
+            &&& doc_rel(key, next, astate(after_a).store)
+            &&& others_kept(
+                key,
+                astate(before_a).store,
+                astate(after_a).store,
+            )
+            &&& finite_store(astate(after_a).store)
+            &&& astate(after_a).pending
+                == astate(before_a).pending + items(born)
+            &&& after_a.network
+                == before_a.network
+                    + envelopes(APid::Service, note_sends(notes))
+        }),
+    decreases limit,
+{
+    if limit == 0 {
+        lemma_empty_matches(config, before_a);
+        lemma_others_same(key, astate(before_a).store);
+        assert(items(Seq::<PendingV>::empty()) =~= Seq::<Sched<InternalV>>::empty());
+        assert(note_sends(Seq::<NoteV>::empty())
+            =~= Seq::<(APid, AMessage)>::empty());
+        assert(envelopes(
+            APid::Service,
+            Seq::<(APid, AMessage)>::empty(),
+        ) =~= Seq::<Envelope<APid, AMessage>>::empty());
+        return before_a;
+    }
+
+    let state = astate(before_a);
+    let (next, _, born, notes) =
+        spec_run_due(doc, now, config.retry_timeout);
+    if next == doc {
+        lemma_empty_matches(config, before_a);
+        lemma_others_same(key, state.store);
+        assert(items(Seq::<PendingV>::empty())
+            =~= Seq::<Sched<InternalV>>::empty());
+        assert(note_sends(Seq::<NoteV>::empty())
+            =~= Seq::<(APid, AMessage)>::empty());
+        assert(envelopes(
+            APid::Service,
+            Seq::<(APid, AMessage)>::empty(),
+        )
+            =~= Seq::<Envelope<APid, AMessage>>::empty());
+        return before_a;
+    }
+
+    assert(dues_agree(config));
+    assert(due_agrees(config, key, doc, state, now));
+    let results = spec_run_timeout(config, state, now);
+    let j = choose|j: int|
+        {
+            &&& 0 <= j < results.len()
+            &&& (#[trigger] results[j]).send == note_sends(notes)
+            &&& results[j].state.pending == state.pending + items(born)
+            &&& doc_rel(key, next, results[j].state.store)
+            &&& others_kept(key, state.store, results[j].state.store)
+            &&& finite_store(results[j].state.store)
+        };
+    lemma_timeout_offers(config, state, now, j);
+    let middle = lemma_service_step(
+        config,
+        before_a,
+        now,
+        ProcessEvent::Timeout,
+        j,
+    );
+    assert(astate(middle) == results[j].state);
+    let last = lemma_sweep_matches(
+        config,
+        middle,
+        key,
+        next,
+        now,
+        (limit - 1) as nat,
+    );
+    lemma_matches_trans(config, before_a, middle, last);
+
+    let (_, tail_born, tail_notes) =
+        spec_sweep(next, now, config.retry_timeout, (limit - 1) as nat);
+    assert(items(born + tail_born) =~= items(born) + items(tail_born));
+    assert(note_sends(notes + tail_notes)
+        =~= note_sends(notes) + note_sends(tail_notes));
+    assert(envelopes(
+        APid::Service,
+        note_sends(notes) + note_sends(tail_notes),
+    ) =~= envelopes(APid::Service, note_sends(notes))
+        + envelopes(APid::Service, note_sends(tail_notes)));
+    assert((state.pending + items(born)) + items(tail_born)
+        =~= state.pending + items(born + tail_born));
+    assert((before_a.network + envelopes(APid::Service, note_sends(notes)))
+        + envelopes(APid::Service, note_sends(tail_notes))
+        =~= before_a.network
+            + envelopes(APid::Service, note_sends(notes + tail_notes)));
+    assert forall|other: Seq<char>, body: DocumentBodyV|
+        other != key && doc_rel(other, body, state.store)
+            implies #[trigger] doc_rel(other, body, astate(last).store) by {
+        assert(doc_rel(other, body, astate(middle).store));
+    };
+    last
+}
+
+#[verifier::rlimit(100)]
+pub proof fn lemma_request_commit_matches(
+    config: ServerConfig,
+    before_a: World<AModel>,
+    key: Seq<char>,
+    doc: DocumentBodyV,
+    at: Time,
+    call: Call,
+    limit: nat,
+) -> (after_a: World<AModel>)
+    requires
+        agreement(config),
+        single(before_a),
+        before_a.now <= at,
+        service_request(before_a.network, call),
+        spec_key(call.request) == Some(key),
+        doc_rel(key, doc, astate(before_a).store),
+        finite_store(astate(before_a).store),
+        spec_request_commits(
+            doc,
+            call.request,
+            at,
+            config.retry_timeout,
+            limit,
+        ),
+    ensures
+        ({
+            let (next, response, born, notes) = spec_request_transition(
+                doc,
+                call.request,
+                at,
+                config.retry_timeout,
+                limit,
+            );
+            &&& matches(
+                abstract_model(),
+                config,
+                before_a,
+                Seq::<BoundaryEvent>::empty(),
+                after_a,
+            )
+            &&& single(after_a)
+            &&& after_a.now <= at
+            &&& extends(after_a.network, before_a.network)
+            &&& doc_rel(key, next, astate(after_a).store)
+            &&& others_kept(
+                key,
+                astate(before_a).store,
+                astate(after_a).store,
+            )
+            &&& finite_store(astate(after_a).store)
+            &&& astate(after_a).pending
+                == astate(before_a).pending + items(born)
+            &&& service_output(
+                after_a.network,
+                reply_output(call.client@, call.id, response),
+            )
+            &&& forall|k: int| 0 <= k < notes.len() ==>
+                service_output(
+                    after_a.network,
+                    note_output(#[trigger] notes[k]),
+                )
+        }),
+{
+    let state = astate(before_a);
+    let (before, born_before, notes_before) =
+        spec_sweep(doc, at, config.retry_timeout, limit);
+    let swept_a =
+        lemma_sweep_matches(config, before_a, key, doc, at, limit);
+    lemma_extends_add(
+        before_a.network,
+        envelopes(APid::Service, note_sends(notes_before)),
+    );
+    lemma_service_request_monotone(before_a.network, swept_a.network, call);
+    assert(request_agrees(
+        config,
+        call.request,
+        key,
+        before,
+        astate(swept_a).store,
+        at,
+    ));
+    let (handled, raw_response) = spec_handle(before, call.request, at);
+    let outs = spec_handler(
+        config,
+        call.request,
+        astate(swept_a).store,
+        at,
+    );
+    assert(outs.len() == 1);
+    assert(outs[0].resp == raw_response);
+    assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
+    assert(outs[0].send
+        =~= Seq::<echod_abstract::view::DispatchV>::empty());
+    let event = ProcessEvent::Receive {
+        sender: APid::Outside,
+        message: AMessage::Request(call),
+    };
+    assert(event_valid(swept_a, APid::Service, event));
+    let outcomes = abstract_model().spec_on_event(
+        config,
+        APid::Service,
+        astate(swept_a),
+        at,
+        event,
+    );
+    let served = spec_run(config, astate(swept_a), call, at);
+    assert(served.len() == 1);
+    assert(outcomes[0] == served[0]);
+    let handled_a = lemma_service_step(config, swept_a, at, event, 0);
+    assert(astate(handled_a).store == outs[0].next);
+    assert(doc_rel(key, handled, astate(handled_a).store));
+    assert(astate(handled_a).pending == astate(swept_a).pending);
+    assert(finite_store(astate(handled_a).store));
+
+    let (after, born_after, notes_after) =
+        spec_sweep(handled, at, config.retry_timeout, limit);
+    let last =
+        lemma_sweep_matches(config, handled_a, key, handled, at, limit);
+    lemma_matches_trans(config, before_a, swept_a, handled_a);
+    lemma_matches_trans(config, before_a, handled_a, last);
+    let (next, response, born, notes) = spec_request_transition(
+        doc,
+        call.request,
+        at,
+        config.retry_timeout,
+        limit,
+    );
+    assert(next == after);
+    assert(response == raw_response);
+    assert(born == born_before + born_after);
+    assert(notes == notes_before + notes_after);
+    assert(astate(last).pending == state.pending + items(born));
+    assert forall|other: Seq<char>, body: DocumentBodyV|
+        other != key && doc_rel(other, body, state.store)
+            implies #[trigger] doc_rel(other, body, astate(last).store) by {
+        assert(doc_rel(other, body, astate(swept_a).store));
+        assert(doc_rel(other, body, astate(handled_a).store));
+    };
+    lemma_send_is_reply(swept_a.network, call, response);
+    assert(service_output(
+        handled_a.network,
+        reply_output(call.client@, call.id, response),
+    ));
+    lemma_service_output_monotone(
+        handled_a.network,
+        last.network,
+        reply_output(call.client@, call.id, response),
+    );
+    lemma_note_sends(before_a.network, notes_before);
+    assert forall|k: int| 0 <= k < notes.len()
+        implies service_output(
+            last.network,
+            note_output(#[trigger] notes[k]),
+        ) by {
+        if k < notes_before.len() {
+            assert(service_output(
+                swept_a.network,
+                note_output(notes_before[k]),
+            ));
+            lemma_service_output_monotone(
+                swept_a.network,
+                last.network,
+                note_output(notes_before[k]),
+            );
+        } else {
+            let j = k - notes_before.len();
+            lemma_note_sends(handled_a.network, notes_after);
+            assert(notes[k] == notes_after[j]);
+        }
+    };
+    last
+}
+
+#[verifier::rlimit(200)]
 pub proof fn lemma_request_served(
     fleet: Fleet,
     config: ServerConfig,
@@ -2984,6 +3340,7 @@ pub proof fn lemma_request_served(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -3012,50 +3369,83 @@ pub proof fn lemma_request_served(
     let caller = Some((call.client@, call.id));
     let job = JobV::External(call.request);
     let doc = held(node0, key);
+    lemma_node_facts(fleet, cb, ab, i);
     lemma_owner(fleet, cb, i, key);
     assert(effective(fleet, cb, key) == doc);
     assert(doc_rel(key, doc, s));
-    assert(request_agrees(config, call.request, key, doc, s, at));
-    let (next, response) = spec_handle(doc, call.request, at);
-    let outs = spec_handler(config, call.request, s, at);
-    assert(outs.len() == 1);
-    assert(outs[0].resp == response);
+    assert(config.retry_timeout == node0.retry_timeout);
+    let limit = REQUEST_STEPS as nat;
+    let (dnext, response, born, notes) = spec_request_transition(
+        doc,
+        call.request,
+        at,
+        config.retry_timeout,
+        limit,
+    );
+    let probe_flight = probe(key, at, caller, job);
+    assert(decision(probe_flight, doc, node0.retry_timeout)
+        == (dnext, Some(response), born, notes));
+    assert(flight_reply(probe_flight, Some(response))
+        == Some((call.client@, call.id, response)));
     let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(call) };
     assert(event_valid(ab, APid::Service, event));
-    let outcomes = abstract_model().spec_on_event(config, APid::Service, state, at, event);
-    let served = spec_run(config, state, call, at);
-    assert(served.len() == 1);
-    assert(served[0] == spec_request_outcome(state, call, outs[0]));
-    assert(outcomes == served + echod_abstract::model::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
-    assert(outcomes[0] == served[0]);
-    let aa = lemma_service_step(config, ab, at, event, 0);
-    let outcome = outcomes[0];
-    assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
-    assert(outs[0].send =~= Seq::<echod_abstract::view::DispatchV>::empty());
-    assert(astate(aa).pending =~= state.pending);
-    assert(astate(aa).store == outs[0].next);
-    assert(finite_store(astate(aa).store));
-    assert(outcome.send == spec_send(call, response, Seq::empty()));
-    lemma_send_is_reply(ab.network, call, response);
-    // the decision the flight stands for
-    let probe_flight = probe(key, at, caller, job);
-    let (dnext, dreply, born, notes) = decision(probe_flight, doc, node0.retry_timeout);
-    assert(dnext == next);
-    assert(dreply == Some(response));
-    assert(born.len() == 0);
-    assert(notes.len() == 0);
-    assert(flight_reply(probe_flight, dreply) == Some((call.client@, call.id, response)));
-    // the occurrences: nothing changes
-    assert forall|item: Sched<InternalV>|
-        owed(fleet, cb, item, 0) - owed_by(node0, item) + items(node0.pending + born).to_multiset().count(item)
-            <= #[trigger] astate(aa).pending.to_multiset().count(item) by {
+    if !spec_request_commits(
+        doc,
+        call.request,
+        at,
+        config.retry_timeout,
+        limit,
+    ) {
+        assert(dnext == doc);
+        assert(response == spec_unavailable(call.request));
         assert(born =~= Seq::<PendingV>::empty());
-        assert(born_of(node0) =~= Seq::<PendingV>::empty());
-        assert(occurrences(node0) == node0.pending + born);
-        assert(owed_by(node0, item) == items(node0.pending + born).to_multiset().count(item));
-    };
-    lemma_begin_related(fleet, cb, ab, ca, aa, i, at, node0, key, job, caller, node2, send);
-    aa
+        assert(notes =~= Seq::<NoteV>::empty());
+        let outcomes =
+            abstract_model().spec_on_event(config, APid::Service, state, at, event);
+        lemma_shed_is_last(config, state, at, call);
+        let last = outcomes.len() as int - 1;
+        let aa = lemma_service_step(config, ab, at, event, last);
+        assert(outcomes[last] == spec_shed(state, call));
+        assert(astate(aa) == state);
+        lemma_send_is_reply(ab.network, call, response);
+        lemma_others_same(key, s);
+        assert forall|item: Sched<InternalV>|
+            owed(fleet, cb, item, 0) - owed_by(node0, item)
+                + items(node0.pending + born).to_multiset().count(item)
+                <= #[trigger] astate(aa).pending.to_multiset().count(item) by {
+            assert(born_of(node0) =~= Seq::<PendingV>::empty());
+            assert(occurrences(node0) == node0.pending);
+            assert(owed_by(node0, item)
+                == items(node0.pending).to_multiset().count(item));
+        };
+        lemma_begin_related(
+            fleet, cb, ab, ca, aa, i, at, node0, key, job, caller, node2, send,
+        );
+        aa
+    } else {
+        let aa = lemma_request_commit_matches(
+            config, ab, key, doc, at, call, limit,
+        );
+        assert forall|item: Sched<InternalV>|
+            owed(fleet, cb, item, 0) - owed_by(node0, item)
+                + items(node0.pending + born).to_multiset().count(item)
+                <= #[trigger] astate(aa).pending.to_multiset().count(item) by {
+            assert(born_of(node0) =~= Seq::<PendingV>::empty());
+            assert(occurrences(node0) == node0.pending);
+            assert(owed_by(node0, item)
+                == items(node0.pending).to_multiset().count(item));
+            lemma_add_multiset(state.pending, items(born));
+            assert(items(node0.pending + born)
+                =~= items(node0.pending) + items(born));
+            lemma_add_multiset(items(node0.pending), items(born));
+            assert(owed(fleet, cb, item, 0)
+                <= state.pending.to_multiset().count(item));
+        };
+        lemma_begin_related(
+            fleet, cb, ab, ca, aa, i, at, node0, key, job, caller, node2, send,
+        );
+        aa
+    }
 }
 
 /// A client request at an idle node.
@@ -3072,6 +3462,7 @@ pub proof fn lemma_request(
     ca: World<CModel>,
 ) -> (aa: World<AModel>)
     requires
+        config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,

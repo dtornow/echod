@@ -490,13 +490,11 @@ pub open spec fn descendants_well_formed(
 }
 
 pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
-    &&& forall|id: Seq<char>| workflow.objects.contains_key(id) ==> {
-        &&& origin(id) == workflow.document
-        &&& promise_well_formed(id, workflow.objects[id], workflow.committed_at)
-        &&& task_well_formed(workflow.objects[id], workflow.committed_at)
-        &&& callback_targets_well_formed(workflow.objects, workflow.objects[id])
-        &&& suspended_rung_well_formed(workflow.objects, id, workflow.objects[id])
-    }
+    &&& workflow_body_well_formed(
+        workflow.document,
+        workflow.objects,
+        workflow.committed_at,
+    )
     // Deferred until descendant settlement semantics are decided:
     // &&& descendants_well_formed(workflow.objects)
     &&& workflow.next_wake_at == match crate::node::spec_body_deadline(
@@ -507,11 +505,29 @@ pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
     }
 }
 
-pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
-    &&& match schedule.schedule {
+pub open spec fn workflow_body_well_formed(
+    document: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    committed_at: u64,
+) -> bool {
+    forall|id: Seq<char>| objects.contains_key(id) ==> {
+        &&& origin(id) == document
+        &&& promise_well_formed(id, objects[id], committed_at)
+        &&& task_well_formed(objects[id], committed_at)
+        &&& callback_targets_well_formed(objects, objects[id])
+        &&& suspended_rung_well_formed(objects, id, objects[id])
+    }
+}
+
+pub open spec fn schedule_body_well_formed(
+    document: Seq<char>,
+    schedule: Option<Schedule>,
+    committed_at: u64,
+) -> bool {
+    match schedule {
         Some(row) => {
-            &&& row.id@ == schedule.document
-            &&& row.created_at <= schedule.committed_at
+            &&& row.id@ == document
+            &&& row.created_at <= committed_at
             &&& row.created_at <= row.next_run_at
             &&& match row.last_run_at {
                 Some(last) => row.created_at <= last < row.next_run_at,
@@ -522,11 +538,32 @@ pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
         },
         None => true,
     }
+}
+
+pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
+    &&& schedule_body_well_formed(
+        schedule.document,
+        schedule.schedule,
+        schedule.committed_at,
+    )
     &&& schedule.next_wake_at == match crate::node::spec_body_deadline(
         DocumentBodyV::Schedule(schedule.schedule),
     ) {
         Some(at) => Some(at as u64),
         None => None,
+    }
+}
+
+pub open spec fn body_well_formed(
+    document: Seq<char>,
+    body: DocumentBodyV,
+    committed_at: u64,
+) -> bool {
+    match body {
+        DocumentBodyV::Workflow(objects) =>
+            workflow_body_well_formed(document, objects, committed_at),
+        DocumentBodyV::Schedule(schedule) =>
+            schedule_body_well_formed(document, schedule, committed_at),
     }
 }
 

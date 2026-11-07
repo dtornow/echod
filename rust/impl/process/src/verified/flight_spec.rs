@@ -13,7 +13,7 @@ use vstd::prelude::*;
 
 use echod_concrete::node::{
     notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
-    spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
+    spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV, REQUEST_STEPS,
 };
 use echod_concrete::store::{StoreCall, StoreError, StoreOutcome};
 use echod_concrete::model::{Message, Pid};
@@ -72,6 +72,8 @@ pub open spec fn job_of(job: JobV) -> AJob {
 /// version, `PutIfNoneMatch` when the document was absent. The commit below
 /// writes under the same condition.
 pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
+    requires
+        flight.job is External ==> limit == REQUEST_STEPS as nat,
     ensures
         ({
             let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);

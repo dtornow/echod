@@ -14,8 +14,8 @@ use crate::document::well_formed;
 use crate::document::StoredDocumentV;
 #[cfg(verus_keep_ghost)]
 use crate::node::{
-    spec_advance_stored, spec_key, spec_request_transition, spec_stored_body,
-    spec_stored_committed_at, spec_unavailable,
+    spec_advance_stored, spec_key, spec_request_commits, spec_request_document,
+    spec_request_transition, spec_stored_body, spec_stored_committed_at, spec_stored_name,
 };
 
 verus! {
@@ -29,17 +29,23 @@ pub open spec fn on_request(
     retry_timeout: u64,
     limit: nat,
 ) -> StoredDocumentV {
-    let (body, response, _, _) = spec_request_transition(
+    let (body, _, _, _) = spec_request_transition(
         spec_stored_body(document),
         request,
         now,
         retry_timeout,
         limit,
     );
-    if response == spec_unavailable(request) {
-        document
-    } else {
+    if spec_request_commits(
+        spec_stored_body(document),
+        request,
+        now,
+        retry_timeout,
+        limit,
+    ) {
         spec_advance_stored(document, body, now)
+    } else {
+        document
     }
 }
 
@@ -47,10 +53,40 @@ pub open spec fn on_request(
 pub open spec fn routed(document: StoredDocumentV, request: Request) -> bool {
     match (document, spec_key(request)) {
         (StoredDocumentV::Workflow(workflow), Some(key)) =>
-            key == seq!['d', '/'] + workflow.document,
+            key == seq!['o', '/'] + workflow.document,
         (StoredDocumentV::Schedule(schedule), Some(key)) =>
             key == seq!['s', '/'] + schedule.document,
         (_, None) => false,
+    }
+}
+
+proof fn lemma_routed_document(document: StoredDocumentV, request: Request)
+    requires
+        routed(document, request),
+    ensures
+        spec_request_document(request) == Some(spec_stored_name(document)),
+{
+    match document {
+        StoredDocumentV::Workflow(_) => match request {
+            Request::PromiseGet(_)
+            | Request::PromiseCreate(_)
+            | Request::PromiseSettle(_)
+            | Request::PromiseRegisterCallback(_)
+            | Request::PromiseRegisterListener(_)
+            | Request::TaskGet(_)
+            | Request::TaskCreate(_)
+            | Request::TaskAcquire(_)
+            | Request::TaskFulfill(_)
+            | Request::TaskRelease(_)
+            | Request::TaskHalt(_)
+            | Request::TaskContinue(_)
+            | Request::TaskFence(_)
+            | Request::TaskFenceCheck(_)
+            | Request::TaskSuspend(_)
+            | Request::TaskHeartbeat(_) => {},
+            _ => {},
+        },
+        StoredDocumentV::Schedule(_) => {},
     }
 }
 
@@ -71,6 +107,32 @@ pub proof fn lemma_request_preserves_well_formed(
     ensures
         well_formed(on_request(document, request, now, retry_timeout, limit)),
 {
+    if spec_request_commits(
+        spec_stored_body(document),
+        request,
+        now,
+        retry_timeout,
+        limit,
+    ) {
+        lemma_routed_document(document, request);
+        let (body, _, _, _) = spec_request_transition(
+            spec_stored_body(document),
+            request,
+            now,
+            retry_timeout,
+            limit,
+        );
+        assert(crate::document::body_well_formed(
+            spec_stored_name(document),
+            body,
+            now,
+        ));
+        match (document, body) {
+            (StoredDocumentV::Workflow(_), crate::node::DocumentBodyV::Workflow(_)) => {},
+            (StoredDocumentV::Schedule(_), crate::node::DocumentBodyV::Schedule(_)) => {},
+            _ => {},
+        }
+    }
 }
 
 } // verus!

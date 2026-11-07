@@ -26,33 +26,33 @@ use echod_types::{
     TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
 };
 
-use echod_abstract::trusted::{copy, expand, next_cron};
-#[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{lemma_tags_ext, lemma_value_ext};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
+use echod_abstract::trusted::{copy, expand, next_cron};
 use echod_abstract::{Call, Dispatch, Output};
-use echod_rover::rover::ProcessEvent;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::ProcessEvent;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, AValue};
 
+pub use crate::document::{
+    DocumentBody, DocumentBodyV, LoadedDocument, LoadedDocumentV, Obj, ObjV, Objects, Prom, PromV,
+    ScheduleDocument, ScheduleDocumentV, StoredDocument, StoredDocumentV, Tk, TkV,
+    WorkflowDocument, WorkflowDocumentV,
+};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
     spec_bytes, spec_clock, spec_get, spec_initial_node, spec_node, spec_notes, spec_notify,
     spec_one, spec_reply, spec_string, LocalV,
 };
 use crate::model::{Fleet, Logic, LogicV, Message, Pid};
-pub use crate::document::{
-    DocumentBody, DocumentBodyV, LoadedDocument, LoadedDocumentV, Obj, ObjV, Objects, Prom,
-    PromV, ScheduleDocument, ScheduleDocumentV, StoredDocument, StoredDocumentV, Tk, TkV,
-    WorkflowDocument, WorkflowDocumentV,
-};
+use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 #[cfg(verus_keep_ghost)]
 use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Read, StoreError};
-use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 
 verus! {
 
@@ -783,6 +783,13 @@ fn string_lit(text: &str) -> (r: String)
         r@ == text@,
 {
     text.to_owned()
+}
+
+fn origin_name(id: &String) -> (r: String)
+    ensures
+        r@ == origin(id@),
+{
+    origin_of(id.as_str()).to_owned()
 }
 
 /// `spec_origin_key(origin(id))`.
@@ -2465,6 +2472,40 @@ fn key_of(request: &Request) -> (r: Option<String>)
     }
 }
 
+/// The logical document name named by a request.
+fn request_document(request: &Request) -> (r: Option<String>)
+    ensures
+        r.deep_view() == spec_request_document(*request),
+{
+    match request {
+        Request::PromiseGet(q) => Some(origin_name(&q.id)),
+        Request::PromiseCreate(q) => Some(origin_name(&q.id)),
+        Request::PromiseSettle(q) => Some(origin_name(&q.id)),
+        Request::PromiseRegisterCallback(q) => Some(origin_name(&q.awaited)),
+        Request::PromiseRegisterListener(q) => Some(origin_name(&q.awaited)),
+        Request::TaskGet(q) => Some(origin_name(&q.id)),
+        Request::TaskCreate(q) => Some(origin_name(&q.action.id)),
+        Request::TaskAcquire(q) => Some(origin_name(&q.id)),
+        Request::TaskFulfill(q) => Some(origin_name(&q.id)),
+        Request::TaskRelease(q) => Some(origin_name(&q.id)),
+        Request::TaskHalt(q) => Some(origin_name(&q.id)),
+        Request::TaskContinue(q) => Some(origin_name(&q.id)),
+        Request::TaskFence(q) => Some(origin_name(&q.id)),
+        Request::TaskFenceCheck(q) => Some(origin_name(&q.id)),
+        Request::TaskSuspend(q) => Some(origin_name(&q.id)),
+        Request::TaskHeartbeat(q) => {
+            if q.tasks.len() == 0 {
+                None
+            } else {
+                Some(origin_name(&q.tasks[0].id))
+            }
+        },
+        Request::ScheduleGet(q) => Some(q.id.clone()),
+        Request::ScheduleDelete(q) => Some(q.id.clone()),
+        Request::ScheduleCreate(q) => Some(q.id.clone()),
+    }
+}
+
 /// `spec_promise_res`.
 fn promise_res(status: u16, promise: Option<PromiseRecord>) -> (r: Response)
     ensures
@@ -3699,6 +3740,409 @@ pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
     earliest_in(doc, now).is_some()
 }
 
+fn ids_unique(ids: &Vec<String>) -> (r: bool)
+    ensures
+        r == crate::document::unique(strs_v(ids@)),
+{
+    let mut i: usize = 0;
+    while i < ids.len()
+        invariant
+            i <= ids.len(),
+            forall|a: int, b: int|
+                0 <= a < i && 0 <= b < ids.len() && strs_v(ids@)[a] == strs_v(ids@)[b]
+                    ==> a == b,
+        decreases ids.len() - i,
+    {
+        let mut j: usize = 0;
+        while j < ids.len()
+            invariant
+                j <= ids.len(),
+                i < ids.len(),
+                forall|b: int|
+                    0 <= b < j && strs_v(ids@)[i as int] == strs_v(ids@)[b]
+                        ==> i == b,
+            decreases ids.len() - j,
+        {
+            if i != j && ids[i] == ids[j] {
+                assert(strs_v(ids@)[i as int] == ids@[i as int]@);
+                assert(strs_v(ids@)[j as int] == ids@[j as int]@);
+                assert(strs_v(ids@)[i as int] == strs_v(ids@)[j as int]);
+                assert(!crate::document::unique(strs_v(ids@))) by {
+                    assert(i as int != j as int);
+                }
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn value_is_empty(value: &Value) -> (r: bool)
+    ensures
+        r == crate::document::value_empty(*value),
+{
+    value.data.is_none() && value.headers.len() == 0
+}
+
+fn task_is_cleared(task: &Tk) -> (r: bool)
+    ensures
+        r == crate::document::task_cleared(task@),
+{
+    task.pid.is_none()
+        && task.ttl.is_none()
+        && task.lease_timeout_at.is_none()
+        && task.retry_timeout_at.is_none()
+}
+
+fn local_well_formed(id: &String, object: &Obj, now: u64) -> (r: bool)
+    ensures
+        r == (
+            crate::document::promise_well_formed(id@, object@, now)
+                && crate::document::task_well_formed(object@, now)
+        ),
+{
+    let promise = &object.promise;
+    let ghost ov = object@;
+    assert(promise@ == ov.promise);
+    assert(ov.promise.callbacks == strs_v(promise.callbacks@));
+    if promise.created_at > promise.timeout_at
+        || promise.created_at > now
+        || (promise.state == PromiseState::Pending) != promise.settled_at.is_none()
+    {
+        return false;
+    }
+    if let Some(at) = promise.settled_at {
+        if at < promise.created_at || at > promise.timeout_at || at > now {
+            return false;
+        }
+    }
+    if promise.state == PromiseState::Pending
+        && (promise.timeout_at <= now || !value_is_empty(&promise.value))
+    {
+        return false;
+    }
+    if promise.state == PromiseState::RejectedTimedout
+        && promise.settled_at != Some(promise.timeout_at)
+    {
+        return false;
+    }
+    if promise.settled_at == Some(promise.timeout_at) && !value_is_empty(&promise.value) {
+        return false;
+    }
+    if !ids_unique(&promise.callbacks)
+        || !ids_unique(&promise.listeners)
+        || contains_str(&promise.callbacks, id)
+    {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < promise.callbacks.len()
+        invariant
+            i <= promise.callbacks.len(),
+            ov == object@,
+            promise@ == ov.promise,
+            ov.promise.callbacks == strs_v(promise.callbacks@),
+            forall|k: int| 0 <= k < i ==>
+                origin(#[trigger] promise.callbacks@[k]@) == origin(id@),
+        decreases promise.callbacks.len() - i,
+    {
+        if !same_origin(&promise.callbacks[i], id) {
+            assert(origin(promise.callbacks@[i as int]@) != origin(id@));
+            assert(strs_v(promise.callbacks@)[i as int]
+                == promise.callbacks@[i as int]@);
+            assert(ov.promise.callbacks[i as int]
+                == strs_v(promise.callbacks@)[i as int]);
+            assert(!(forall|k: int| 0 <= k < ov.promise.callbacks.len() ==>
+                origin(ov.promise.callbacks[k]) == origin(id@))) by {
+                assert(0 <= i as int);
+                assert((i as int) < (ov.promise.callbacks.len()));
+            }
+            assert(!crate::document::promise_well_formed(id@, object@, now));
+            return false;
+        }
+        i += 1;
+    }
+    if (promise.callbacks.len() > 0 || promise.listeners.len() > 0)
+        && !awaitable(&promise.tags)
+    {
+        return false;
+    }
+    if promise.state != PromiseState::Pending
+        && (promise.callbacks.len() > 0 || promise.listeners.len() > 0)
+    {
+        return false;
+    }
+
+    if object.task.is_some() != targeted(&promise.tags) {
+        return false;
+    }
+    let Some(task) = &object.task else {
+        return true;
+    };
+    let acquired = task.state == TaskState::Acquired;
+    if acquired != task.pid.is_some()
+        || acquired != task.ttl.is_some()
+        || acquired != task.lease_timeout_at.is_some()
+        || (task.state == TaskState::Pending) != task.retry_timeout_at.is_some()
+    {
+        return false;
+    }
+    if acquired && (task.version == 0 || task.lease_timeout_at.unwrap() <= now) {
+        return false;
+    }
+    if task.state == TaskState::Pending && task.retry_timeout_at.unwrap() <= now {
+        return false;
+    }
+    if task.state == TaskState::Fulfilled
+        && (!task_is_cleared(task)
+            || task.resumes.len() != 0
+            || promise.state == PromiseState::Pending)
+    {
+        return false;
+    }
+    if task.state == TaskState::Suspended
+        && (!task_is_cleared(task) || task.resumes.len() != 0)
+    {
+        return false;
+    }
+    if task.state == TaskState::Halted && !task_is_cleared(task) {
+        return false;
+    }
+    if promise.state != PromiseState::Pending && task.state != TaskState::Fulfilled {
+        return false;
+    }
+    ids_unique(&task.resumes) && task.version <= u32::MAX as u64
+}
+
+fn has_callback(objects: &Objects, awaiter: &String) -> (r: bool)
+    ensures
+        r == exists|awaited: Seq<char>|
+            objects@.contains_key(awaited)
+                && objects@[awaited].promise.callbacks.contains(awaiter@),
+{
+    proof {
+        use_type_invariant(objects);
+        assert(spec_sorted_entries(objects.entries@));
+    }
+    let mut i: usize = 0;
+    while i < objects.entries.len()
+        invariant
+            i <= objects.entries.len(),
+            spec_sorted_entries(objects.entries@),
+            forall|j: int| 0 <= j < i ==>
+                !objects.entries@[j].1@.promise.callbacks.contains(awaiter@),
+        decreases objects.entries.len() - i,
+    {
+        if contains_str(&objects.entries[i].1.promise.callbacks, awaiter) {
+            proof {
+                lemma_sorted_index(objects.entries@, i as int);
+            }
+            return true;
+        }
+        i += 1;
+    }
+    proof {
+        lemma_sorted_keys(objects.entries@);
+    }
+    false
+}
+
+fn workflow_body_well_formed(
+    document: &String,
+    objects: &Objects,
+    now: u64,
+) -> (r: bool)
+    ensures
+        r == crate::document::workflow_body_well_formed(document@, objects@, now),
+{
+    proof {
+        use_type_invariant(objects);
+        assert(spec_sorted_entries(objects.entries@));
+    }
+    let mut i: usize = 0;
+    while i < objects.entries.len()
+        invariant
+            i <= objects.entries.len(),
+            spec_sorted_entries(objects.entries@),
+            forall|j: int| 0 <= j < i ==> {
+                let entry = #[trigger] objects.entries@[j];
+                let id = entry.0@;
+                let object = entry.1@;
+                &&& origin(id) == document@
+                &&& crate::document::promise_well_formed(id, object, now)
+                &&& crate::document::task_well_formed(object, now)
+                &&& crate::document::callback_targets_well_formed(objects@, object)
+                &&& crate::document::suspended_rung_well_formed(objects@, id, object)
+            },
+        decreases objects.entries.len() - i,
+    {
+        let (id, object) = &objects.entries[i];
+        proof {
+            lemma_sorted_index(objects.entries@, i as int);
+            assert(objects@.contains_key(id@));
+            assert(objects@[id@] == object@);
+        }
+        if origin_of(id.as_str()) != document.as_str() {
+            assert(origin(id@) != document@);
+            assert(!crate::document::workflow_body_well_formed(
+                document@,
+                objects@,
+                now,
+            ));
+            return false;
+        }
+        if !local_well_formed(id, object, now) {
+            assert(!crate::document::workflow_body_well_formed(
+                document@,
+                objects@,
+                now,
+            ));
+            return false;
+        }
+        let mut j: usize = 0;
+        while j < object.promise.callbacks.len()
+            invariant
+                j <= object.promise.callbacks.len(),
+                objects@.contains_key(id@),
+                objects@[id@] == object@,
+                origin(id@) == document@,
+                crate::document::promise_well_formed(id@, object@, now),
+                crate::document::task_well_formed(object@, now),
+                forall|k: int| 0 <= k < j ==> {
+                    let callback = #[trigger] object.promise.callbacks@[k]@;
+                    &&& objects@.contains_key(callback)
+                    &&& objects@[callback].task is Some
+                    &&& spec_targeted(objects@[callback].promise.tags)
+                },
+            decreases object.promise.callbacks.len() - j,
+        {
+            let callback = &object.promise.callbacks[j];
+            let Some(target) = objects.get(callback) else {
+                assert(object@.promise.callbacks[j as int] == callback@);
+                assert(!objects@.contains_key(callback@));
+                assert(!crate::document::callback_targets_well_formed(
+                    objects@,
+                    object@,
+                ));
+                assert(!crate::document::workflow_body_well_formed(
+                    document@,
+                    objects@,
+                    now,
+                )) by {
+                    if crate::document::workflow_body_well_formed(
+                        document@,
+                        objects@,
+                        now,
+                    ) {
+                        assert(origin(id@) == document@);
+                        assert(crate::document::callback_targets_well_formed(
+                            objects@,
+                            objects@[id@],
+                        ));
+                    }
+                };
+                return false;
+            };
+            if target.task.is_none() || !targeted(&target.promise.tags) {
+                assert(object@.promise.callbacks[j as int] == callback@);
+                assert(objects@.contains_key(callback@));
+                assert(target@ == objects@[callback@]);
+                assert(!crate::document::callback_targets_well_formed(
+                    objects@,
+                    object@,
+                ));
+                assert(!crate::document::workflow_body_well_formed(
+                    document@,
+                    objects@,
+                    now,
+                )) by {
+                    if crate::document::workflow_body_well_formed(
+                        document@,
+                        objects@,
+                        now,
+                    ) {
+                        assert(origin(id@) == document@);
+                        assert(crate::document::callback_targets_well_formed(
+                            objects@,
+                            objects@[id@],
+                        ));
+                    }
+                };
+                return false;
+            }
+            j += 1;
+        }
+        let suspended = match &object.task {
+            Some(task) => {
+                task.state == TaskState::Suspended
+                    && object.promise.state == PromiseState::Pending
+            },
+            None => false,
+        };
+        if suspended && !has_callback(objects, id) {
+            assert(!crate::document::suspended_rung_well_formed(
+                objects@,
+                id@,
+                object@,
+            ));
+            assert(!crate::document::workflow_body_well_formed(
+                document@,
+                objects@,
+                now,
+            ));
+            return false;
+        }
+        i += 1;
+    }
+    proof {
+        lemma_sorted_keys(objects.entries@);
+        assert forall|id: Seq<char>| objects@.contains_key(id) implies {
+            &&& origin(id) == document@
+            &&& crate::document::promise_well_formed(id, objects@[id], now)
+            &&& crate::document::task_well_formed(objects@[id], now)
+            &&& crate::document::callback_targets_well_formed(objects@, objects@[id])
+            &&& crate::document::suspended_rung_well_formed(objects@, id, objects@[id])
+        } by {
+            let j = choose|j: int|
+                0 <= j < objects.entries@.len() && objects.entries@[j].0@ == id;
+            lemma_sorted_index(objects.entries@, j);
+        };
+    }
+    true
+}
+
+fn body_well_formed_for(
+    document: &String,
+    body: &DocumentBody,
+    now: u64,
+) -> (r: bool)
+    ensures
+        r == crate::document::body_well_formed(document@, body@, now),
+{
+    match body {
+        DocumentBody::Workflow(objects) => {
+            workflow_body_well_formed(document, objects, now)
+        },
+        DocumentBody::Schedule(None) => true,
+        DocumentBody::Schedule(Some(schedule)) => {
+            if schedule.id != *document
+                || schedule.created_at > now
+                || schedule.created_at > schedule.next_run_at
+            {
+                return false;
+            }
+            if let Some(last) = schedule.last_run_at {
+                if last < schedule.created_at || last >= schedule.next_run_at {
+                    return false;
+                }
+            }
+            !(targeted(&schedule.promise_tags) && timer(&schedule.promise_tags))
+        },
+    }
+}
+
 /// One complete request transition.
 ///
 /// Time-driven work already due is drained before the raw handler, so reads
@@ -3743,6 +4187,23 @@ pub fn request_transition(
     let (after, mut born_after, mut notes_after) =
         sweep(handled, now, retry_timeout, limit);
     if due(&after, now) {
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+    let document = request_document(request);
+    let Some(document) = document else {
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    };
+    if !body_well_formed_for(&document, &after, now) {
         return (
             original,
             unavailable(request),
@@ -5096,6 +5557,32 @@ pub open spec fn spec_key(request: Request) -> Option<Seq<char>> {
     }
 }
 
+pub open spec fn spec_request_document(request: Request) -> Option<Seq<char>> {
+    match request {
+        Request::PromiseGet(q) => Some(origin(q.id@)),
+        Request::PromiseCreate(q) => Some(origin(q.id@)),
+        Request::PromiseSettle(q) => Some(origin(q.id@)),
+        Request::PromiseRegisterCallback(q) => Some(origin(q.awaited@)),
+        Request::PromiseRegisterListener(q) => Some(origin(q.awaited@)),
+        Request::TaskGet(q) => Some(origin(q.id@)),
+        Request::TaskCreate(q) => Some(origin(q.action.id@)),
+        Request::TaskAcquire(q) => Some(origin(q.id@)),
+        Request::TaskFulfill(q) => Some(origin(q.id@)),
+        Request::TaskRelease(q) => Some(origin(q.id@)),
+        Request::TaskHalt(q) => Some(origin(q.id@)),
+        Request::TaskContinue(q) => Some(origin(q.id@)),
+        Request::TaskFence(q) => Some(origin(q.id@)),
+        Request::TaskFenceCheck(q) => Some(origin(q.id@)),
+        Request::TaskSuspend(q) => Some(origin(q.id@)),
+        Request::TaskHeartbeat(q) => {
+            if q.tasks@.len() == 0 { None } else { Some(origin(q.tasks@[0].id@)) }
+        },
+        Request::ScheduleGet(q) => Some(q.id@),
+        Request::ScheduleDelete(q) => Some(q.id@),
+        Request::ScheduleCreate(q) => Some(q.id@),
+    }
+}
+
 pub open spec fn spec_promise_res(status: u16, promise: Option<PromiseRecord>) -> Response {
     Response::Promise(PromiseRes { status, promise })
 }
@@ -5878,6 +6365,28 @@ pub open spec fn spec_sweep(doc: DocumentBodyV, now: Time, retry_timeout: u64, l
 /// The complete document-level request transition.  Both closures have the
 /// same finite budget.  Exhaustion is an atomic rejection: neither the
 /// partially closed document nor any effect escapes.
+pub open spec fn spec_request_commits(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> bool {
+    let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
+    if spec_earliest_in(before, now) is Some {
+        false
+    } else {
+        let (handled, _) = spec_handle(before, request, now);
+        let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
+        &&& spec_earliest_in(after, now) is None
+        &&& match spec_request_document(request) {
+            Some(document) =>
+                crate::document::body_well_formed(document, after, now),
+            None => false,
+        }
+    }
+}
+
 pub open spec fn spec_request_transition(
     doc: DocumentBodyV,
     request: Request,
@@ -5896,12 +6405,19 @@ pub open spec fn spec_request_transition(
         if spec_earliest_in(after, now) is Some {
             (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
         } else {
-            (
-                after,
-                response,
-                born_before + born_after,
-                notes_before + notes_after,
-            )
+            match spec_request_document(request) {
+                Some(document) if crate::document::body_well_formed(
+                    document,
+                    after,
+                    now,
+                ) => (
+                    after,
+                    response,
+                    born_before + born_after,
+                    notes_before + notes_after,
+                ),
+                _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
+            }
         }
     }
 }
