@@ -194,6 +194,30 @@ fn settlement_drains_callbacks_and_listeners_before_returning_effects() {
 }
 
 #[test]
+fn settlement_closes_more_than_256_obligations() {
+    let (mut doc, _, _) = step(empty_workflow(), create("wf:awaited", external()), NOW);
+    for i in 0..300 {
+        let listener = Request::PromiseRegisterListener(PromiseRegisterListenerReq {
+            awaited: "wf:awaited".into(),
+            address: format!("listener-{i}"),
+        });
+        let (next, response, notes) = step(doc, listener, NOW + 1);
+        assert_eq!(status(&response), 200);
+        assert!(notes.is_empty());
+        doc = next;
+    }
+
+    let (doc, response, notes) = step(doc, settle("wf:awaited"), NOW + 2);
+    assert_eq!(status(&response), 200);
+    assert_eq!(notes.len(), 300);
+    assert!(peek(&doc, &"wf:awaited".into())
+        .unwrap()
+        .promise
+        .listeners
+        .is_empty());
+}
+
+#[test]
 fn callbacks_only_record_resumes_on_tasks_that_are_already_running_or_queued() {
     let (doc, _, _) = step(empty_workflow(), create("wf:awaiter", target()), NOW);
     let (doc, _, _) = step(doc, create("wf:awaited", external()), NOW + 1);

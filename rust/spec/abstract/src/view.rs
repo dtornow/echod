@@ -31,8 +31,9 @@ use super::machine::*;
 verus! {
 
 /// Maximum number of internal workflow steps closed on either side of an
-/// external handler. Exhaustion rejects the whole request atomically.
-pub const REQUEST_STEPS: usize = 256;
+/// external handler. The executable state is memory-bounded; using the full
+/// addressable range prevents document size from becoming a semantic cutoff.
+pub const REQUEST_STEPS: usize = usize::MAX;
 
 pub assume_specification [ServerConfig::request_transition](
     config: &ServerConfig,

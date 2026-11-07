@@ -363,6 +363,13 @@ pub enum ProtocolEffectKeyV {
     Unblock { promise: Seq<char>, address: Seq<char> },
 }
 
+/// Logical changes to the durable wake frontier. Physical timer tokens and
+/// arm/delete ordering remain process concerns.
+pub enum TimerEffectV {
+    Add { at: u64 },
+    Delete { at: u64 },
+}
+
 pub open spec fn protocol_effect_key(effect: ProtocolEffectV) -> ProtocolEffectKeyV {
     match effect {
         ProtocolEffectV::Execute { id, .. } => ProtocolEffectKeyV::Execute { id },
@@ -462,6 +469,27 @@ pub open spec fn document_effects(
             workflow_effects(old.objects, new.objects, new.committed_at),
         _ => ISet::empty(),
     }
+}
+
+pub open spec fn stored_next_wake_at(document: StoredDocumentV) -> Option<u64> {
+    match document {
+        StoredDocumentV::Workflow(workflow) => workflow.next_wake_at,
+        StoredDocumentV::Schedule(schedule) => schedule.next_wake_at,
+    }
+}
+
+/// Timer additions/deletions are completely determined by the old and new
+/// folded documents' wake frontiers.
+pub open spec fn document_timer_effects(
+    before: StoredDocumentV,
+    after: StoredDocumentV,
+) -> ISet<TimerEffectV> {
+    let old = stored_next_wake_at(before);
+    let new = stored_next_wake_at(after);
+    ISet::new(|effect: TimerEffectV| match effect {
+        TimerEffectV::Add { at } => new == Some(at) && new != old,
+        TimerEffectV::Delete { at } => old == Some(at) && old != new,
+    })
 }
 
 pub enum DocumentBodyV {
