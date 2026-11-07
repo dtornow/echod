@@ -10,11 +10,17 @@ include "../framework/order.dfy"
 // place, and the next pass applies them: every callback on a settled
 // promise, least id first. Listeners are told the same way. A lease and a
 // retry still due on a promise that is still pending come after that. A
-// schedule is its next run. Promise create then sees that document.
-// A timer that is also targeted is refused. An id already present is
-// answered as it stands, projected at `now`, and not written back. A new id
-// is inserted, and a schedule document becomes an origin to hold it. The
-// sweep and the handler each leave a well-formed document well-formed.
+// schedule is its next run. The promise calls then see that document.
+// Get answers from the projection and does not write it back. Create refuses
+// a timer that is also targeted. An id already present is answered as it
+// stands, projected at `now`, and not written back. A new id is inserted,
+// and a schedule document becomes an origin to hold it. Settle writes only
+// a promise the projection still shows as pending, and fulfills its task.
+// A callback is recorded only while both promises are still pending, and
+// only for another id of the same origin. A listener is recorded only while
+// the promise is still pending. A schedule is opened into an empty origin
+// before get, settle, and the two registrations look it up. The sweep and
+// the handler each leave a well-formed document well-formed.
 
 module Node {
   import opened Keys
@@ -72,7 +78,15 @@ module Node {
   datatype Doc = Origin(objects: map<string, Obj>) | Schedule(slot: Opt<Sched>)
 
   datatype CreateReq = CreateReq(id: string, timeoutAt: nat, param: Value, tags: Tags)
-  datatype Request = PromiseCreate(req: CreateReq)
+  datatype SettleReq = SettleReq(id: string, state: PromiseState, value: Value)
+  datatype CallbackReq = CallbackReq(awaited: string, awaiter: string)
+  datatype ListenerReq = ListenerReq(awaited: string, address: string)
+  datatype Request =
+    | PromiseGet(id: string)
+    | PromiseCreate(create: CreateReq)
+    | PromiseSettle(settle: SettleReq)
+    | PromiseRegisterCallback(callback: CallbackReq)
+    | PromiseRegisterListener(listener: ListenerReq)
   datatype Answer = Answer(status: nat, promise: Opt<Promise>)
   datatype Applied = Applied(doc: Doc, answer: Answer)
 
@@ -115,6 +129,13 @@ module Node {
 
   predicate Timer(tags: Tags) { TagIs(tags, "resonate:timer", "true") }
   predicate Targeted(tags: Tags) { TagKey(tags, "resonate:target") }
+  predicate External(tags: Tags) { TagIs(tags, "resonate:external", "true") }
+  predicate Global(tags: Tags) { TagIs(tags, "resonate:scope", "global") }
+  predicate Awaitable(tags: Tags) { Targeted(tags) || Timer(tags) || External(tags) || Global(tags) }
+
+  predicate Settable(state: PromiseState) {
+    state == PromiseState.Resolved || state == PromiseState.Rejected || state == PromiseState.RejectedCanceled
+  }
 
   ghost predicate Distinct(xs: seq<string>) {
     forall i, j :: 0 <= i < j < |xs| ==> xs[i] != xs[j]
@@ -281,6 +302,131 @@ module Node {
           if WellFormed(doc, now) { InsertOk(doc, req.id, obj, now); }
         }
         Applied(doc', Answer(200, Some(obj.promise)))
+  }
+
+  // A schedule has no rows. Looking one up is the empty origin.
+  function Opened(doc: Doc): Doc {
+    Origin(ObjectsOf(doc))
+  }
+
+  function Get(doc: Doc, id: string, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if id !in objects then Applied(shown, Answer(404, None))
+    else Applied(shown, Answer(200, Some(Project(objects[id], now).promise)))
+  }
+
+  function Settled(o: Obj, state: PromiseState, value: Value, now: nat): Obj {
+    var promise := o.promise.(state := state, value := value, settledAt := Some(now));
+    var task :=
+      match o.task
+      case None => None
+      case Some(t) => if t.state == TaskState.Fulfilled then Some(t) else Some(Fulfill(t));
+    Obj(promise, task)
+  }
+
+  function Settle(doc: Doc, req: SettleReq, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if !Settable(req.state) then Applied(doc, Answer(400, None))
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      if req.id !in objects then Applied(shown, Answer(404, None))
+      else
+        var seen := Project(objects[req.id], now);
+        if seen.promise.state != PromiseState.Pending then
+          Applied(shown, Answer(200, Some(seen.promise)))
+        else
+          var obj := Settled(seen, req.state, req.value, now);
+          var doc' := Origin(objects[req.id := obj]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              StillPending(objects[req.id], now);
+              SettledOk(req.id, seen, req.state, req.value, now);
+              ReplaceOk(objects, req.id, obj, now);
+            }
+          }
+          Applied(doc', Answer(200, Some(obj.promise)))
+  }
+
+  function AddCallback(o: Obj, awaiter: string): Obj {
+    if awaiter in o.promise.callbacks then o
+    else Obj(o.promise.(callbacks := o.promise.callbacks + {awaiter}), o.task)
+  }
+
+  function RegisterCallback(doc: Doc, req: CallbackReq, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if req.awaited == req.awaiter || OriginOf(req.awaited) != OriginOf(req.awaiter) then
+      Applied(doc, Answer(400, None))
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      if req.awaited !in objects then Applied(shown, Answer(404, None))
+      else if req.awaiter !in objects then Applied(shown, Answer(422, None))
+      else
+        var awaited := Project(objects[req.awaited], now);
+        var awaiter := Project(objects[req.awaiter], now);
+        if !Targeted(awaiter.promise.tags) || !Awaitable(awaited.promise.tags) then
+          Applied(shown, Answer(422, None))
+        else if awaited.promise.state == PromiseState.Pending && awaiter.promise.state == PromiseState.Pending then
+          var obj := AddCallback(awaited, req.awaiter);
+          var doc' := Origin(objects[req.awaited := obj]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              StillPending(objects[req.awaited], now);
+              AddCallbackOk(req.awaited, awaited, req.awaiter, now);
+              ReplaceOk(objects, req.awaited, obj, now);
+            }
+          }
+          Applied(doc', Answer(200, Some(awaited.promise)))
+        else
+          Applied(shown, Answer(200, Some(awaited.promise)))
+  }
+
+  function AddListener(o: Obj, address: string): Obj {
+    if address in o.promise.listeners then o
+    else Obj(o.promise.(listeners := o.promise.listeners + {address}), o.task)
+  }
+
+  function RegisterListener(doc: Doc, req: ListenerReq, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if req.awaited !in objects then Applied(shown, Answer(404, None))
+    else
+      var awaited := Project(objects[req.awaited], now);
+      if !Awaitable(awaited.promise.tags) then
+        Applied(shown, Answer(422, None))
+      else if awaited.promise.state == PromiseState.Pending then
+        var obj := AddListener(awaited, req.address);
+        var doc' := Origin(objects[req.awaited := obj]);
+        assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+          if WellFormed(doc, now) {
+            StillPending(objects[req.awaited], now);
+            AddListenerOk(req.awaited, awaited, req.address, now);
+            ReplaceOk(objects, req.awaited, obj, now);
+          }
+        }
+        Applied(doc', Answer(200, Some(awaited.promise)))
+      else
+        Applied(shown, Answer(200, Some(awaited.promise)))
   }
 
   function Unlease(t: Task, at: nat): Task {
@@ -827,19 +973,108 @@ module Node {
     }
   }
 
+  lemma OpenOk(doc: Doc, now: nat)
+    requires WellFormed(doc, now)
+    ensures WellFormed(Opened(doc), now)
+  {
+    match doc
+    case Origin(_) =>
+      assert Opened(doc) == doc;
+    case Schedule(_) =>
+      assert ObjectsOf(doc) == map[];
+  }
+
+  // A projection that is still pending did not fire, so it is the stored row.
+  lemma StillPending(o: Obj, now: nat)
+    requires Project(o, now).promise.state == PromiseState.Pending
+    ensures Project(o, now) == o
+    ensures o.promise.state == PromiseState.Pending
+    ensures now < o.promise.timeoutAt
+  {
+    var seen := Project(o, now);
+    var p := o.promise;
+    if p.state == PromiseState.Pending && now >= p.timeoutAt {
+      var projected := ProjectPromise(p, now);
+      assert projected.state != PromiseState.Pending;
+      assert seen.promise == projected;
+      assert false;
+    }
+    assert ProjectPromise(p, now) == p;
+    assert seen.promise == p;
+    assert p.state == PromiseState.Pending;
+    assert now < p.timeoutAt;
+    assert seen.task == o.task;
+  }
+
+  lemma SettledOk(id: string, o: Obj, state: PromiseState, value: Value, now: nat)
+    requires ObjectOk(id, o, now)
+    requires o.promise.state == PromiseState.Pending
+    requires now < o.promise.timeoutAt
+    requires Settable(state)
+    ensures ObjectOk(id, Settled(o, state, value, now), now)
+  {
+    var obj := Settled(o, state, value, now);
+    var p := obj.promise;
+    assert p.createdAt == o.promise.createdAt && p.timeoutAt == o.promise.timeoutAt;
+    assert p.createdAt <= p.timeoutAt;
+    assert p.settledAt == Some(now);
+    assert now <= p.timeoutAt;
+    assert p.createdAt <= now;
+    assert state != PromiseState.Pending && state != PromiseState.RejectedTimedout;
+    assert p.state == state;
+    assert p.settledAt != Some(p.timeoutAt);
+    assert p.callbacks == o.promise.callbacks;
+    assert id !in p.callbacks;
+    if o.task.Some? && o.task.value.state != TaskState.Fulfilled {
+      FulfillOk(o.task.value);
+    }
+  }
+
+  lemma AddCallbackOk(id: string, o: Obj, awaiter: string, now: nat)
+    requires ObjectOk(id, o, now)
+    requires awaiter != id
+    requires OriginOf(id) == OriginOf(awaiter)
+    ensures ObjectOk(id, AddCallback(o, awaiter), now)
+  {
+    if awaiter !in o.promise.callbacks {
+      var added := AddCallback(o, awaiter);
+      assert added.promise.callbacks == o.promise.callbacks + {awaiter};
+      assert id !in added.promise.callbacks;
+      forall a | a in added.promise.callbacks
+        ensures OriginOf(id) == OriginOf(a)
+      {
+        if a != awaiter {
+          assert a in o.promise.callbacks;
+        }
+      }
+    }
+  }
+
+  lemma AddListenerOk(id: string, o: Obj, address: string, now: nat)
+    requires ObjectOk(id, o, now)
+    ensures ObjectOk(id, AddListener(o, address), now)
+  {
+    var added := AddListener(o, address);
+    assert added.promise.state == o.promise.state;
+    assert added.promise.callbacks == o.promise.callbacks;
+    assert added.promise.timeoutAt == o.promise.timeoutAt;
+    assert added.promise.createdAt == o.promise.createdAt;
+    assert added.promise.settledAt == o.promise.settledAt;
+    assert added.promise.value == o.promise.value;
+    assert added.task == o.task;
+  }
+
   function Handle(doc: Doc, request: Request, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
     var swept := Sweep(doc, now, retry);
+    assert WellFormed(doc, now) ==> WellFormed(swept.doc, now);
     match request
-    case PromiseCreate(req) =>
-      var r := Create(swept.doc, req, now);
-      assert WellFormed(doc, now) ==> WellFormed(r.doc, now) by {
-        if WellFormed(doc, now) {
-          assert WellFormed(swept.doc, now);
-        }
-      }
-      r
+    case PromiseGet(id) => Get(swept.doc, id, now)
+    case PromiseCreate(req) => Create(swept.doc, req, now)
+    case PromiseSettle(req) => Settle(swept.doc, req, now)
+    case PromiseRegisterCallback(req) => RegisterCallback(swept.doc, req, now)
+    case PromiseRegisterListener(req) => RegisterListener(swept.doc, req, now)
   }
 
   lemma HandlerPreservesWellFormed(doc: Doc, request: Request, now: nat, retry: nat)
