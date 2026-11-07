@@ -1,6 +1,4 @@
-use echod_concrete::{
-    peek, request_transition, DocumentBody, Obj, Objects, Outbound, Prom, Tk,
-};
+use echod_concrete::{peek, request_transition, DocumentBody, Obj, Objects, Outbound, Prom, Tk};
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, Tags,
     TaskContinueReq, TaskReleaseReq, TaskState, Value,
@@ -99,8 +97,7 @@ fn release_and_continue_execute_immediately() {
         id: "wf.release".to_string(),
         version: 1,
     });
-    let (doc, response, _, notes) =
-        request_transition(release_doc, &release, 10, 50, 32);
+    let (doc, response, _, notes) = request_transition(release_doc, &release, 10, 50, 32);
     assert_eq!(status(&response), 200);
     assert_execute(&notes, "wf.release", 1);
     assert_eq!(
@@ -118,15 +115,11 @@ fn release_and_continue_execute_immediately() {
     let continue_request = Request::TaskContinue(TaskContinueReq {
         id: "wf.continue".to_string(),
     });
-    let (doc, response, _, notes) =
-        request_transition(continue_doc, &continue_request, 10, 50, 32);
+    let (doc, response, _, notes) = request_transition(continue_doc, &continue_request, 10, 50, 32);
     assert_eq!(status(&response), 200);
     assert_execute(&notes, "wf.continue", 1);
     assert_eq!(
-        object(&doc, "wf.continue")
-            .task
-            .unwrap()
-            .retry_timeout_at,
+        object(&doc, "wf.continue").task.unwrap().retry_timeout_at,
         Some(60)
     );
 }
@@ -134,18 +127,18 @@ fn release_and_continue_execute_immediately() {
 #[test]
 fn settlement_drains_listener_and_resumes_suspended_task() {
     let mut awaited = promise(tags(&[("resonate:external", "true")]), 1_000);
-    awaited.callbacks.push("wf.awaiter".to_string());
+    awaited.callbacks.push("wf:awaiter".to_string());
     awaited.listeners.push("inbox".to_string());
     let doc = workflow(vec![
         (
-            "wf.awaited".to_string(),
+            "wf:awaited".to_string(),
             Obj {
                 promise: awaited,
                 task: None,
             },
         ),
         (
-            "wf.awaiter".to_string(),
+            "wf:awaiter".to_string(),
             Obj {
                 promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
                 task: Some(task(TaskState::Suspended, None, None)),
@@ -153,26 +146,25 @@ fn settlement_drains_listener_and_resumes_suspended_task() {
         ),
     ]);
     let settle = Request::PromiseSettle(PromiseSettleReq {
-        id: "wf.awaited".to_string(),
+        id: "wf:awaited".to_string(),
         state: PromiseState::Resolved,
         value: Value::default(),
     });
 
-    let (doc, response, _, notes) =
-        request_transition(doc, &settle, 10, 50, 32);
+    let (doc, response, _, notes) = request_transition(doc, &settle, 10, 50, 32);
 
     assert_eq!(status(&response), 200);
-    assert!(notes.iter().any(|note| {
-        matches!(note, Outbound::Unblock { address, .. } if address == "inbox")
-    }));
-    assert_execute(&notes, "wf.awaiter", 1);
-    let awaited = object(&doc, "wf.awaited");
+    assert!(notes
+        .iter()
+        .any(|note| { matches!(note, Outbound::Unblock { address, .. } if address == "inbox") }));
+    assert_execute(&notes, "wf:awaiter", 1);
+    let awaited = object(&doc, "wf:awaited");
     assert!(awaited.promise.callbacks.is_empty());
     assert!(awaited.promise.listeners.is_empty());
-    let awaiter = object(&doc, "wf.awaiter").task.unwrap();
+    let awaiter = object(&doc, "wf:awaiter").task.unwrap();
     assert_eq!(awaiter.state, TaskState::Pending);
     assert_eq!(awaiter.retry_timeout_at, Some(60));
-    assert_eq!(awaiter.resumes, vec!["wf.awaited".to_string()]);
+    assert_eq!(awaiter.resumes, vec!["wf:awaited".to_string()]);
 }
 
 #[test]
@@ -183,17 +175,17 @@ fn callback_does_not_execute_pending_acquired_or_halted_task() {
         (TaskState::Halted, None, None),
     ] {
         let mut awaited = promise(tags(&[("resonate:external", "true")]), 1_000);
-        awaited.callbacks.push("wf.awaiter".to_string());
+        awaited.callbacks.push("wf:awaiter".to_string());
         let doc = workflow(vec![
             (
-                "wf.awaited".to_string(),
+                "wf:awaited".to_string(),
                 Obj {
                     promise: awaited,
                     task: None,
                 },
             ),
             (
-                "wf.awaiter".to_string(),
+                "wf:awaiter".to_string(),
                 Obj {
                     promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
                     task: Some(task(state, retry, lease)),
@@ -201,21 +193,20 @@ fn callback_does_not_execute_pending_acquired_or_halted_task() {
             ),
         ]);
         let settle = Request::PromiseSettle(PromiseSettleReq {
-            id: "wf.awaited".to_string(),
+            id: "wf:awaited".to_string(),
             state: PromiseState::Resolved,
             value: Value::default(),
         });
 
-        let (doc, response, _, notes) =
-            request_transition(doc, &settle, 10, 50, 32);
+        let (doc, response, _, notes) = request_transition(doc, &settle, 10, 50, 32);
 
         assert_eq!(status(&response), 200);
         assert!(!notes
             .iter()
             .any(|note| matches!(note, Outbound::Execute { .. })));
-        let awaiter = object(&doc, "wf.awaiter").task.unwrap();
+        let awaiter = object(&doc, "wf:awaiter").task.unwrap();
         assert_eq!(awaiter.state, state);
-        assert_eq!(awaiter.resumes, vec!["wf.awaited".to_string()]);
+        assert_eq!(awaiter.resumes, vec!["wf:awaited".to_string()]);
     }
 }
 
@@ -232,8 +223,7 @@ fn read_persists_expired_projection() {
         id: "wf.expired".to_string(),
     });
 
-    let (doc, response, _, notes) =
-        request_transition(doc, &get, 10, 50, 32);
+    let (doc, response, _, notes) = request_transition(doc, &get, 10, 50, 32);
 
     assert_eq!(status(&response), 200);
     assert!(notes.is_empty());
@@ -255,8 +245,7 @@ fn exhausted_closure_is_atomic_503() {
         id: "wf.due".to_string(),
     });
 
-    let (doc, response, born, notes) =
-        request_transition(original.clone(), &get, 10, 50, 0);
+    let (doc, response, born, notes) = request_transition(original.clone(), &get, 10, 50, 0);
 
     assert_eq!(status(&response), 503);
     assert_eq!(doc, original);
