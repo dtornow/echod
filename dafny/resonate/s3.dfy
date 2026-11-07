@@ -197,8 +197,10 @@ module Lex {
 // that landed and an ack that did not; a duplicate delivery is a second
 // call, and a conditional create then fails. Both are the network's Drop
 // and Duplicate. The `(node, op)` memory in the concrete Rover store is not
-// part of S3.
-module S3 refines ProcessSpec {
+// part of S3. The bucket is one system on the generic network: its ids, its
+// Init, its Step, and a network that may drop or duplicate.
+module S3 {
+  import opened Network
   import opened Lex
 
   datatype Opt<T> = None | Some(value: T)
@@ -541,7 +543,7 @@ module S3 refines ProcessSpec {
     case ListPrefixes(prefix) => Applied(s, Listed(PrefixKeys(s.objects, prefix)))
   }
 
-  function Step(self: Pid, s: State, i: Input): Result
+  function Step(self: Pid, s: State, i: Input<Pid, Msg>): Result<Pid, Msg, State>
     ensures Step(self, s, i).state.appendable == s.appendable
   {
     match i
@@ -707,49 +709,61 @@ module S3 refines ProcessSpec {
     assert PrefixKeys(s.objects, "") == ["a/", "b/"];
     assert Apply(s, ListPrefixes("")).out == Listed(["a/", "b/"]);
   }
-}
 
-// The bucket on the network. Faults are on: a request or a reply may be
-// dropped or duplicated, and that is the whole of transport failure. The
-// bucket itself does not answer "unknown".
-module S3Net refines Network {
-  import opened P = S3
-  const Faults := true
+  // Faults are on: a request or a reply may be dropped or duplicated, and
+  // that is the whole of transport failure. The bucket does not answer
+  // "unknown".
+  function World(): Sys<Pid, Msg, State> { Sys(Pids, true, Init, Step) }
 
-  ghost predicate Inv(n: Net) {
+  ghost predicate Stable(n: Net<Pid, Msg, State>) {
     && n.procs.Keys == Pids
     && Bucket in n.procs
-    && n.procs[Bucket].appendable == P.Init(Bucket).appendable
+    && n.procs[Bucket].appendable == Init(Bucket).appendable
   }
 
-  ghost predicate Safety(n: Net) { Inv(n) }
+  // Boot is a timeout at time 0. The bucket has nothing to do then: the
+  // timer is cancelled and the bucket stays empty.
+  lemma BootCancelsTheTimer()
+    ensures var w := World();
+      exists n: Net<Pid, Msg, State>, n': Net<Pid, Msg, State> ::
+        IsInit(w, n) && NextStep(w, n, n', Fire(Bucket)) &&
+        n'.procs[Bucket].objects == map[] && Bucket !in n'.timers
+  {
+    var w := World();
+    var n := Net(map[Bucket := Init(Bucket)], multiset{}, map[Bucket := 0], 0);
+    var n' := Net(n.procs, multiset{}, map[], 0);
+    assert IsInit(w, n);
+    assert NextStep(w, n, n', Fire(Bucket));
+  }
 
-  lemma InitInv(n: Net) { }
-  lemma InvSafety(n: Net) { }
-
-  lemma NextInv(n: Net, n': Net, a: Action) {
+  lemma StableStep(n: Net<Pid, Msg, State>, n': Net<Pid, Msg, State>, a: Action<Pid, Msg>)
+    requires Stable(n) && NextStep(World(), n, n', a)
+    ensures Stable(n')
+  {
+    var w := World();
+    assert w.step == Step;
     match a
     case Deliver(p) => {
-      var r := P.Step(p.dst, n.procs[p.dst], Request(p.src, p.msg));
+      var r := Step(p.dst, n.procs[p.dst], Request(p.src, p.msg));
       assert r.state.appendable == n.procs[p.dst].appendable;
     }
     case Fire(pid) => {
-      var r := P.Step(pid, n.procs[pid], Timeout);
+      var r := Step(pid, n.procs[pid], Timeout);
       assert r.state.appendable == n.procs[pid].appendable;
     }
     case _ => { }
   }
 
-  // Boot is a timeout at time 0, and the bucket has nothing to do then:
-  // the timer is cancelled and the bucket stays empty.
-  lemma BootCancelsTheTimer()
-    ensures exists n, n' ::
-      Init(n) && NextStep(n, n', Fire(Bucket)) &&
-      n'.procs[Bucket].objects == map[] && Bucket !in n'.timers
+  lemma StableTrace(t: seq<Net<Pid, Msg, State>>)
+    requires IsTrace(World(), t)
+    ensures forall i :: 0 <= i < |t| ==> Stable(t[i])
   {
-    var n := Net(map[Bucket := P.Init(Bucket)], multiset{}, map[Bucket := 0], 0);
-    var n' := Net(n.procs, multiset{}, map[], 0);
-    assert Init(n);
-    assert NextStep(n, n', Fire(Bucket));
+    var w := World();
+    forall n | IsInit(w, n) ensures Stable(n) { }
+    forall n, n', a | Stable(n) && NextStep(w, n, n', a) ensures Stable(n') {
+      StableStep(n, n', a);
+    }
+    assert Preserves(w, Stable);
+    TraceSafety(w, Stable, Stable, t);
   }
 }
