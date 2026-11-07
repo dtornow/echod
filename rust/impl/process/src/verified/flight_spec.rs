@@ -32,7 +32,7 @@ verus! {
 pub enum AJob {
     /// A request: `spec_handle`.
     Request(echod_types::Request),
-    /// A fired key: `spec_sweep`, the keys in order.
+    /// A fired key: `spec_sweep`, every due timeout, then the callbacks that left.
     Sweep,
     /// A schedule's key: `spec_run_due`, the occurrence due and the schedule advanced.
     Fire,

@@ -1714,8 +1714,9 @@ impl State {
 
     /// The step: `verified::flight::decide`, the concrete model's step on
     /// the document, decided no earlier than the last step on the
-    /// document. A request is `handle`; a due key is `sweep`, the keys in
-    /// order. A lost race runs this again on what it re-read.
+    /// document. A request is `handle`; a due key is `sweep`: every due
+    /// timeout, then the callbacks that pass left behind. A lost race runs
+    /// this again on what it re-read.
     pub fn decide(&mut self, work: &Work, w: Working) -> (r: (Committing, Done))
         ensures
             ({

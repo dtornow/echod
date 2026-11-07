@@ -3473,84 +3473,77 @@ fn listeners(objs: Objects, id: &String) -> (r: (Objects, Vec<Outbound>))
     (rest, notes)
 }
 
-/// One object, in order: its deadline, its lease, its retry, its callbacks, its listeners.
-fn object_at(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
+/// Every promise whose deadline has passed. The keys stay in order.
+fn timeouts(objs: Objects, keys: &Vec<String>, i: usize, now: u64) -> (r: Objects)
+    requires
+        i <= keys.len(),
+        keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
     ensures
-        r.0@.dom() == objs@.dom(),
-        (r.0@, notes_v(r.1@)) == spec_object(objs@, id@, now, retry_timeout),
+        r@.dom() == objs@.dom(),
+        r@ == spec_timeouts(objs@, spec_sorted(objs@.dom()).skip(i as int), now),
+    decreases keys.len() - i,
 {
-    proof {
-        lemma_notes_empty();
+    if i == keys.len() {
+        proof {
+            assert(spec_sorted(objs@.dom()).skip(i as int).len() == 0);
+        }
+        return objs;
     }
-    let Some(obj) = objs.get(id) else { return (objs, Vec::new()); };
-    let mut obj = if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
-        project_obj(&obj, now)
+    let ghost old = objs@;
+    let next = if let Some(obj) = objs.get(&keys[i]) {
+        if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
+            let projected = project_obj(&obj, now);
+            objs.put(&keys[i], projected)
+        } else {
+            objs
+        }
     } else {
-        obj
+        objs
     };
-    if obj.promise.state == PromiseState::Pending {
-        let Obj { promise, task } = obj;
-        obj = match task {
-            Some(t) => {
-                let lease_over = t.state == TaskState::Acquired
-                    && match t.lease_timeout_at { Some(at) => at <= now, None => false };
-                if lease_over {
-                    let u = unlease(&t, TaskState::Pending, Some(now));
-                    Obj { promise, task: Some(u) }
-                } else {
-                    Obj { promise, task: Some(t) }
-                }
-            },
-            None => Obj { promise, task: None },
-        };
-    }
-    let mut notes: Vec<Outbound> = Vec::new();
-    if obj.promise.state == PromiseState::Pending {
-        let Obj { promise, task } = obj;
-        obj = match task {
-            Some(t) => {
-                let retry_over = t.state == TaskState::Pending
-                    && match t.retry_timeout_at { Some(at) => at <= now, None => false };
-                if retry_over {
-                    let version = t.version;
-                    let mut u = t;
-                    u.retry_timeout_at = Some(sat_add(now, retry_timeout));
-                    let note = Outbound::Execute { id: id.clone(), version };
-                    proof {
-                        lemma_notes_one(note);
-                    }
-                    notes.push(note);
-                    Obj { promise, task: Some(u) }
-                } else {
-                    Obj { promise, task: Some(t) }
-                }
-            },
-            None => Obj { promise, task: None },
-        };
-    }
-    let placed = objs.put(id, obj);
-    let woken = callbacks(placed, id, now);
-    let (told, mut more) = listeners(woken, id);
-    let ghost head = notes@;
-    let ghost tail = more@;
-    notes.append(&mut more);
     proof {
-        lemma_notes_add(head, tail);
-        assert(placed@.dom() =~= objs@.dom());
-        assert(woken@.dom() =~= placed@.dom());
-        assert(told@.dom() =~= woken@.dom());
+        assert(keys@[i as int]@ == spec_sorted(old.dom())[i as int]);
+        assert(next@.dom() == old.dom());
+        assert(spec_sorted(next@.dom()) == spec_sorted(old.dom()));
+        assert(spec_sorted(old.dom()).skip(i as int).drop_first() =~= spec_sorted(old.dom()).skip(i + 1));
     }
-    (told, notes)
+    timeouts(next, keys, i + 1, now)
 }
 
-/// The keys of an origin, in order.
-fn along(objs: Objects, keys: &Vec<String>, i: usize, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
+/// The callbacks the timeout pass left on settled promises.
+fn callbacks_along(objs: Objects, keys: &Vec<String>, i: usize, now: u64) -> (r: Objects)
+    requires
+        i <= keys.len(),
+        keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
+    ensures
+        r@.dom() == objs@.dom(),
+        r@ == spec_callbacks_along(objs@, spec_sorted(objs@.dom()).skip(i as int), now),
+    decreases keys.len() - i,
+{
+    if i == keys.len() {
+        proof {
+            assert(spec_sorted(objs@.dom()).skip(i as int).len() == 0);
+        }
+        return objs;
+    }
+    let ghost old = objs@;
+    let woken = callbacks(objs, &keys[i], now);
+    proof {
+        assert(keys@[i as int]@ == spec_sorted(old.dom())[i as int]);
+        assert(woken@.dom() == old.dom());
+        assert(spec_sorted(woken@.dom()) == spec_sorted(old.dom()));
+        assert(spec_sorted(old.dom()).skip(i as int).drop_first() =~= spec_sorted(old.dom()).skip(i + 1));
+    }
+    callbacks_along(woken, keys, i + 1, now)
+}
+
+/// The listeners of settled promises, after the callbacks.
+fn listeners_along(objs: Objects, keys: &Vec<String>, i: usize) -> (r: (Objects, Vec<Outbound>))
     requires
         i <= keys.len(),
         keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
     ensures
         r.0@.dom() == objs@.dom(),
-        (r.0@, notes_v(r.1@)) == spec_along(objs@, spec_sorted(objs@.dom()).skip(i as int), now, retry_timeout),
+        (r.0@, notes_v(r.1@)) == spec_listeners_along(objs@, spec_sorted(objs@.dom()).skip(i as int)),
     decreases keys.len() - i,
 {
     proof {
@@ -3562,24 +3555,142 @@ fn along(objs: Objects, keys: &Vec<String>, i: usize, now: u64, retry_timeout: u
         }
         return (objs, Vec::new());
     }
-    let (here_objs, mut notes) = object_at(objs, &keys[i], now, retry_timeout);
+    let ghost old = objs@;
+    let (told, mut notes) = listeners(objs, &keys[i]);
     proof {
-        assert(keys@[i as int]@ == spec_sorted(objs@.dom())[i as int]);
-        assert(spec_sorted(here_objs@.dom()) == spec_sorted(objs@.dom()));
+        assert(keys@[i as int]@ == spec_sorted(old.dom())[i as int]);
+        assert(told@.dom() == old.dom());
+        assert(spec_sorted(told@.dom()) == spec_sorted(old.dom()));
+        assert(spec_sorted(old.dom()).skip(i as int).drop_first() =~= spec_sorted(old.dom()).skip(i + 1));
     }
-    let (rest, mut tail) = along(here_objs, keys, i + 1, now, retry_timeout);
+    let (rest, mut tail) = listeners_along(told, keys, i + 1);
     let ghost head = notes@;
     let ghost tail_v = tail@;
     notes.append(&mut tail);
     proof {
         lemma_notes_add(head, tail_v);
-        assert(spec_sorted(objs@.dom()).skip(i as int).drop_first() =~= spec_sorted(objs@.dom()).skip(i + 1));
     }
     (rest, notes)
 }
 
-/// `spec_sweep`: an origin's keys in order, and on each object its deadline,
-/// its lease, its retry, its callbacks and its listeners. A schedule is its next run.
+/// A lease still due on a promise that is still pending.
+fn leases(objs: Objects, keys: &Vec<String>, i: usize, now: u64) -> (r: Objects)
+    requires
+        i <= keys.len(),
+        keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
+    ensures
+        r@.dom() == objs@.dom(),
+        r@ == spec_leases(objs@, spec_sorted(objs@.dom()).skip(i as int), now),
+    decreases keys.len() - i,
+{
+    if i == keys.len() {
+        proof {
+            assert(spec_sorted(objs@.dom()).skip(i as int).len() == 0);
+        }
+        return objs;
+    }
+    let ghost old = objs@;
+    let next = if let Some(obj) = objs.get(&keys[i]) {
+        if obj.promise.state == PromiseState::Pending {
+            let Obj { promise, task } = obj;
+            let obj = match task {
+                Some(t) => {
+                    let lease_over = t.state == TaskState::Acquired
+                        && match t.lease_timeout_at { Some(at) => at <= now, None => false };
+                    if lease_over {
+                        let u = unlease(&t, TaskState::Pending, Some(now));
+                        Obj { promise, task: Some(u) }
+                    } else {
+                        Obj { promise, task: Some(t) }
+                    }
+                },
+                None => Obj { promise, task: None },
+            };
+            objs.put(&keys[i], obj)
+        } else {
+            objs
+        }
+    } else {
+        objs
+    };
+    proof {
+        assert(keys@[i as int]@ == spec_sorted(old.dom())[i as int]);
+        assert(next@.dom() == old.dom());
+        assert(spec_sorted(next@.dom()) == spec_sorted(old.dom()));
+        assert(spec_sorted(old.dom()).skip(i as int).drop_first() =~= spec_sorted(old.dom()).skip(i + 1));
+    }
+    leases(next, keys, i + 1, now)
+}
+
+/// A retry still due on a promise that is still pending.
+fn retries(objs: Objects, keys: &Vec<String>, i: usize, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
+    requires
+        i <= keys.len(),
+        keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
+    ensures
+        r.0@.dom() == objs@.dom(),
+        (r.0@, notes_v(r.1@)) == spec_retries(objs@, spec_sorted(objs@.dom()).skip(i as int), now, retry_timeout),
+    decreases keys.len() - i,
+{
+    proof {
+        lemma_notes_empty();
+    }
+    if i == keys.len() {
+        proof {
+            assert(spec_sorted(objs@.dom()).skip(i as int).len() == 0);
+        }
+        return (objs, Vec::new());
+    }
+    let ghost old = objs@;
+    let (next, mut notes) = if let Some(obj) = objs.get(&keys[i]) {
+        if obj.promise.state == PromiseState::Pending {
+            let Obj { promise, task } = obj;
+            match task {
+                Some(t) => {
+                    let retry_over = t.state == TaskState::Pending
+                        && match t.retry_timeout_at { Some(at) => at <= now, None => false };
+                    if retry_over {
+                        let version = t.version;
+                        let mut u = t;
+                        u.retry_timeout_at = Some(sat_add(now, retry_timeout));
+                        let mut notes = Vec::new();
+                        let note = Outbound::Execute { id: keys[i].clone(), version };
+                        proof {
+                            lemma_notes_one(note);
+                        }
+                        notes.push(note);
+                        (objs.put(&keys[i], Obj { promise, task: Some(u) }), notes)
+                    } else {
+                        (objs, Vec::new())
+                    }
+                },
+                None => (objs, Vec::new()),
+            }
+        } else {
+            (objs, Vec::new())
+        }
+    } else {
+        (objs, Vec::new())
+    };
+    proof {
+        assert(keys@[i as int]@ == spec_sorted(old.dom())[i as int]);
+        assert(next@.dom() == old.dom());
+        assert(spec_sorted(next@.dom()) == spec_sorted(old.dom()));
+        assert(spec_sorted(old.dom()).skip(i as int).drop_first() =~= spec_sorted(old.dom()).skip(i + 1));
+    }
+    let (rest, mut tail) = retries(next, keys, i + 1, now, retry_timeout);
+    let ghost head = notes@;
+    let ghost tail_v = tail@;
+    notes.append(&mut tail);
+    proof {
+        lemma_notes_add(head, tail_v);
+    }
+    (rest, notes)
+}
+
+/// `spec_sweep`: time out every promise that is due, then apply the callbacks
+/// that pass left on settled promises. Listeners, leases and retries follow.
+/// A schedule is its next run.
 pub fn sweep(from: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
     ensures
         (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout),
@@ -3595,8 +3706,34 @@ pub fn sweep(from: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>,
                 assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
                 assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
             }
-            let (objs, notes) = along(objs, &keys, 0, now, retry_timeout);
-            (Doc::Origin(objs), Vec::new(), notes)
+            let objs = timeouts(objs, &keys, 0, now);
+            proof {
+                assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
+                assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
+            }
+            let objs = callbacks_along(objs, &keys, 0, now);
+            proof {
+                assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
+                assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
+            }
+            let (objs, mut heard) = listeners_along(objs, &keys, 0);
+            proof {
+                assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
+                assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
+            }
+            let objs = leases(objs, &keys, 0, now);
+            proof {
+                assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
+                assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
+            }
+            let (objs, mut armed) = retries(objs, &keys, 0, now, retry_timeout);
+            let ghost head = heard@;
+            let ghost tail = armed@;
+            heard.append(&mut armed);
+            proof {
+                lemma_notes_add(head, tail);
+            }
+            (Doc::Origin(objs), Vec::new(), heard)
         },
         other => {
             let (doc, born, notes) = run_due(other, now, retry_timeout);
@@ -5812,66 +5949,107 @@ proof fn spec_listeners_decreases(map: Map<Seq<char>, ObjV>, id: Seq<char>) {
     }
 }
 
-/// One object, in order: its deadline, its lease, its retry, its callbacks, its listeners.
-pub open spec fn spec_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
-    if !map.contains_key(id) {
-        (map, Seq::empty())
+/// Every promise whose deadline has passed, keys in order.
+pub open spec fn spec_timeouts(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time) -> Map<Seq<char>, ObjV>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        map
     } else {
-        let obj0 = map[id];
-        let obj1 = if obj0.promise.state == PromiseState::Pending && obj0.promise.timeout_at <= now {
-            spec_project_obj(obj0, now)
+        let id = keys[0];
+        let map = if map.contains_key(id) && map[id].promise.state == PromiseState::Pending && map[id].promise.timeout_at <= now {
+            map.insert(id, spec_project_obj(map[id], now))
         } else {
-            obj0
+            map
         };
-        let obj2 = if obj1.promise.state == PromiseState::Pending {
-            match obj1.task {
-                Some(t) if t.state == TaskState::Acquired && match t.lease_timeout_at { Some(at) => at <= now, None => false } => {
-                    ObjV { task: Some(spec_unlease(t, TaskState::Pending, Some(now))), ..obj1 }
-                },
-                _ => obj1,
-            }
-        } else {
-            obj1
-        };
-        let (obj3, notes) = if obj2.promise.state == PromiseState::Pending {
-            match obj2.task {
-                Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
-                    (
-                        ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry_timeout)), ..t }), ..obj2 },
-                        seq![NoteV::Execute { id, version: t.version }],
-                    )
-                },
-                _ => (obj2, Seq::<NoteV>::empty()),
-            }
-        } else {
-            (obj2, Seq::<NoteV>::empty())
-        };
-        let map = map.insert(id, obj3);
-        let map = spec_callbacks(map, id, now);
-        let (map, more) = spec_listeners(map, id);
-        (map, notes + more)
+        spec_timeouts(map, keys.drop_first(), now)
     }
 }
 
-/// The keys, in order.
-pub open spec fn spec_along(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
+/// The callbacks a settled promise holds, every key, after the timeouts.
+pub open spec fn spec_callbacks_along(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time) -> Map<Seq<char>, ObjV>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        map
+    } else {
+        spec_callbacks_along(spec_callbacks(map, keys[0], now), keys.drop_first(), now)
+    }
+}
+
+/// The listeners of settled promises, after the callbacks.
+pub open spec fn spec_listeners_along(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
     decreases keys.len(),
 {
     if keys.len() == 0 {
         (map, Seq::empty())
     } else {
-        let (map, notes) = spec_object(map, keys[0], now, retry_timeout);
-        let (rest, more) = spec_along(map, keys.drop_first(), now, retry_timeout);
+        let (map, notes) = spec_listeners(map, keys[0]);
+        let (rest, more) = spec_listeners_along(map, keys.drop_first());
         (rest, notes + more)
     }
 }
 
-/// An origin's keys in order. A schedule is its next run.
+/// A lease still due on a promise that is still pending.
+pub open spec fn spec_leases(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time) -> Map<Seq<char>, ObjV>
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        map
+    } else {
+        let id = keys[0];
+        let map = if map.contains_key(id) && map[id].promise.state == PromiseState::Pending {
+            match map[id].task {
+                Some(t) if t.state == TaskState::Acquired && match t.lease_timeout_at { Some(at) => at <= now, None => false } => {
+                    map.insert(id, ObjV { task: Some(spec_unlease(t, TaskState::Pending, Some(now))), ..map[id] })
+                },
+                _ => map,
+            }
+        } else {
+            map
+        };
+        spec_leases(map, keys.drop_first(), now)
+    }
+}
+
+/// A retry still due on a promise that is still pending.
+pub open spec fn spec_retries(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        (map, Seq::empty())
+    } else {
+        let id = keys[0];
+        let (map, notes) = if map.contains_key(id) && map[id].promise.state == PromiseState::Pending {
+            match map[id].task {
+                Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
+                    (
+                        map.insert(id, ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry_timeout)), ..t }), ..map[id] }),
+                        seq![NoteV::Execute { id, version: t.version }],
+                    )
+                },
+                _ => (map, Seq::<NoteV>::empty()),
+            }
+        } else {
+            (map, Seq::<NoteV>::empty())
+        };
+        let (rest, more) = spec_retries(map, keys.drop_first(), now, retry_timeout);
+        (rest, notes + more)
+    }
+}
+
+/// Time out every due promise, then apply the callbacks that pass left behind.
+/// A schedule is its next run.
 pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64) -> (DocV, Seq<PendingV>, Seq<NoteV>) {
     match doc {
         DocV::Origin(map) => {
-            let (map, notes) = spec_along(map, spec_sorted(map.dom()), now, retry_timeout);
-            (DocV::Origin(map), Seq::empty(), notes)
+            let keys = spec_sorted(map.dom());
+            let map = spec_timeouts(map, keys, now);
+            let map = spec_callbacks_along(map, keys, now);
+            let (map, heard) = spec_listeners_along(map, keys);
+            let map = spec_leases(map, keys, now);
+            let (map, armed) = spec_retries(map, keys, now, retry_timeout);
+            (DocV::Origin(map), Seq::empty(), heard + armed)
         },
         _ => {
             let (next, _, born, notes) = spec_run_due(doc, now, retry_timeout);

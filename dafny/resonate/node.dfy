@@ -5,12 +5,12 @@ include "../framework/order.dfy"
 // A document is an origin's objects, or a schedule. `WellFormed` is the
 // catalogue for that document: the promise rows, the task rows, and, when
 // the document is a schedule, the schedule rows. Before the handler, the
-// document is swept at that instant. An origin is its keys in order, and
-// each object in order: the deadline, the lease, the retry, the callbacks,
-// the listeners. A schedule is its next run. Promise create then sees that
-// document. A deadline is settled before the callbacks it uncovers, a lease
-// is returned before the retry it arms, and a callback is spent before the
-// retry it wakes.
+// document is swept at that instant. Every promise whose deadline has
+// passed is timed out first. A timeout leaves that promise's callbacks in
+// place, and the next pass applies them: every callback on a settled
+// promise, least id first. Listeners are told the same way. A lease and a
+// retry still due on a promise that is still pending come after that. A
+// schedule is its next run. Promise create then sees that document.
 // A timer that is also targeted is refused. An id already present is
 // answered as it stands, projected at `now`, and not written back. A new id
 // is inserted, and a schedule document becomes an origin to hold it. The
@@ -415,20 +415,58 @@ module Node {
       Passed(rest.objects, [Unblock(address, id, o.promise)] + rest.notes)
   }
 
-  function ObjectAt(objects: map<string, Obj>, id: string, now: nat, retry: nat): (s: Passed)
-    requires id in objects
-    ensures s.objects.Keys == objects.Keys
+  lemma TailKeys(objects: map<string, Obj>, objects': map<string, Obj>, keys: seq<string>)
+    requires |keys| > 0
+    requires objects'.Keys == objects.Keys
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures var tail := keys[1..];
+      (forall k :: k in tail ==> k in objects') &&
+      (forall i, j | 0 <= i < j < |tail| :: tail[i] != tail[j])
   {
-    var due := Deadline(objects[id], now);
-    var returned := Lease(due, now);
-    var armed := RetryOf(returned, id, now, retry);
-    var objects' := objects[id := armed.obj];
-    var woken := Callbacks(objects', id, now);
-    var told := Listeners(woken, id);
-    Passed(told.objects, armed.notes + told.notes)
+    var tail := keys[1..];
+    forall k | k in tail
+      ensures k in objects'
+    {
+      assert k in objects;
+    }
+    forall i, j | 0 <= i < j < |tail|
+      ensures tail[i] != tail[j]
+    {
+      assert tail[i] == keys[i + 1] && tail[j] == keys[j + 1];
+    }
   }
 
-  function Along(objects: map<string, Obj>, keys: seq<string>, now: nat, retry: nat): (s: Passed)
+  // Every promise whose deadline has passed, keys in order.
+  function Timeouts(objects: map<string, Obj>, keys: seq<string>, now: nat): (r: map<string, Obj>)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures r.Keys == objects.Keys
+    decreases |keys|
+  {
+    if |keys| == 0 then objects
+    else
+      var id := keys[0];
+      var objects' := objects[id := Deadline(objects[id], now)];
+      TailKeys(objects, objects', keys);
+      Timeouts(objects', keys[1..], now)
+  }
+
+  // The callbacks a settled promise holds, every key, after the timeouts.
+  function ApplyCallbacks(objects: map<string, Obj>, keys: seq<string>, now: nat): (r: map<string, Obj>)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures r.Keys == objects.Keys
+    decreases |keys|
+  {
+    if |keys| == 0 then objects
+    else
+      var woken := Callbacks(objects, keys[0], now);
+      TailKeys(objects, woken, keys);
+      ApplyCallbacks(woken, keys[1..], now)
+  }
+
+  function ApplyListeners(objects: map<string, Obj>, keys: seq<string>): (s: Passed)
     requires forall k :: k in keys ==> k in objects
     requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
     ensures s.objects.Keys == objects.Keys
@@ -436,21 +474,40 @@ module Node {
   {
     if |keys| == 0 then Passed(objects, [])
     else
-      var here := ObjectAt(objects, keys[0], now, retry);
-      var tail := keys[1..];
-      forall k | k in tail
-        ensures k in here.objects
-      {
-        assert k in objects;
-        assert here.objects.Keys == objects.Keys;
-      }
-      forall i, j | 0 <= i < j < |tail|
-        ensures tail[i] != tail[j]
-      {
-        assert tail[i] == keys[i + 1] && tail[j] == keys[j + 1];
-      }
-      var rest := Along(here.objects, tail, now, retry);
-      Passed(rest.objects, here.notes + rest.notes)
+      var told := Listeners(objects, keys[0]);
+      TailKeys(objects, told.objects, keys);
+      var rest := ApplyListeners(told.objects, keys[1..]);
+      Passed(rest.objects, told.notes + rest.notes)
+  }
+
+  function Leases(objects: map<string, Obj>, keys: seq<string>, now: nat): (r: map<string, Obj>)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures r.Keys == objects.Keys
+    decreases |keys|
+  {
+    if |keys| == 0 then objects
+    else
+      var id := keys[0];
+      var objects' := objects[id := Lease(objects[id], now)];
+      TailKeys(objects, objects', keys);
+      Leases(objects', keys[1..], now)
+  }
+
+  function Retries(objects: map<string, Obj>, keys: seq<string>, now: nat, retry: nat): (s: Passed)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures s.objects.Keys == objects.Keys
+    decreases |keys|
+  {
+    if |keys| == 0 then Passed(objects, [])
+    else
+      var id := keys[0];
+      var armed := RetryOf(objects[id], id, now, retry);
+      var objects' := objects[id := armed.obj];
+      TailKeys(objects, objects', keys);
+      var rest := Retries(objects', keys[1..], now, retry);
+      Passed(rest.objects, armed.notes + rest.notes)
   }
 
   function Sweep(doc: Doc, now: nat, retry: nat): (s: Ran)
@@ -472,11 +529,26 @@ module Node {
     case Origin(objects) =>
       SortedProps(objects.Keys);
       var keys := Sorted(objects.Keys);
-      var passed := Along(objects, keys, now, retry);
-      assert WellFormed(doc, now) ==> WellFormed(Origin(passed.objects), now) by {
-        if WellFormed(doc, now) { AlongOk(objects, keys, now, retry); }
+      forall i, j | 0 <= i < j < |keys|
+        ensures keys[i] != keys[j]
+      {
+        assert Lt(keys[i], keys[j]);
       }
-      Ran(Origin(passed.objects), [], passed.notes)
+      var timed := Timeouts(objects, keys, now);
+      var woken := ApplyCallbacks(timed, keys, now);
+      var told := ApplyListeners(woken, keys);
+      var returned := Leases(told.objects, keys, now);
+      var armed := Retries(returned, keys, now, retry);
+      assert WellFormed(doc, now) ==> WellFormed(Origin(armed.objects), now) by {
+        if WellFormed(doc, now) {
+          TimeoutsOk(objects, keys, now);
+          ApplyCallbacksOk(timed, keys, now);
+          ApplyListenersOk(woken, keys, now);
+          LeasesOk(told.objects, keys, now);
+          RetriesOk(returned, keys, now, retry);
+        }
+      }
+      Ran(Origin(armed.objects), [], told.notes + armed.notes)
     case Schedule(None) => Ran(doc, [], [])
   }
 
@@ -516,55 +588,110 @@ module Node {
     }
   }
 
-  lemma ObjectAtOk(objects: map<string, Obj>, id: string, now: nat, retry: nat)
-    requires MapOk(objects, now) && id in objects
-    ensures MapOk(ObjectAt(objects, id, now, retry).objects, now)
-  {
-    var o := objects[id];
-    var due := Deadline(o, now);
-    if o.promise.state == PromiseState.Pending && o.promise.timeoutAt <= now {
-      ProjectOk(id, o, now);
-    }
-    assert ObjectOk(id, due, now);
-    var returned := Lease(due, now);
-    if due.promise.state == PromiseState.Pending {
-      match due.task
-      case Some(t) =>
-        if t.state == TaskState.Acquired && t.leaseTimeoutAt.Some? && t.leaseTimeoutAt.value <= now {
-          UnleaseOk(t, now);
-          assert returned == Obj(due.promise, Some(Unlease(t, now)));
-        }
-      case None =>
-    }
-    assert ObjectOk(id, returned, now);
-    var armed := RetryOf(returned, id, now, retry);
-    if returned.promise.state == PromiseState.Pending {
-      match returned.task
-      case Some(t) =>
-        if t.state == TaskState.Pending && t.retryTimeoutAt.Some? && t.retryTimeoutAt.value <= now {
-          RearmOk(t, now + retry);
-        }
-      case None =>
-    }
-    assert ObjectOk(id, armed.obj, now);
-    var objects' := objects[id := armed.obj];
-    ReplaceOk(objects, id, armed.obj, now);
-    CallbacksOk(objects', id, now);
-    var woken := Callbacks(objects', id, now);
-    ListenersOk(woken, id, now);
-  }
-
-  lemma AlongOk(objects: map<string, Obj>, keys: seq<string>, now: nat, retry: nat)
+  lemma TimeoutsOk(objects: map<string, Obj>, keys: seq<string>, now: nat)
     requires MapOk(objects, now)
     requires forall k :: k in keys ==> k in objects
     requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
-    ensures MapOk(Along(objects, keys, now, retry).objects, now)
+    ensures MapOk(Timeouts(objects, keys, now), now)
     decreases |keys|
   {
     if |keys| != 0 {
-      ObjectAtOk(objects, keys[0], now, retry);
-      var here := ObjectAt(objects, keys[0], now, retry);
-      AlongOk(here.objects, keys[1..], now, retry);
+      var id := keys[0];
+      var o := objects[id];
+      var due := Deadline(o, now);
+      if o.promise.state == PromiseState.Pending && o.promise.timeoutAt <= now {
+        ProjectOk(id, o, now);
+      }
+      assert ObjectOk(id, due, now);
+      var objects' := objects[id := due];
+      ReplaceOk(objects, id, due, now);
+      TailKeys(objects, objects', keys);
+      TimeoutsOk(objects', keys[1..], now);
+    }
+  }
+
+  lemma ApplyCallbacksOk(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires MapOk(objects, now)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures MapOk(ApplyCallbacks(objects, keys, now), now)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      CallbacksOk(objects, keys[0], now);
+      var woken := Callbacks(objects, keys[0], now);
+      TailKeys(objects, woken, keys);
+      ApplyCallbacksOk(woken, keys[1..], now);
+    }
+  }
+
+  lemma ApplyListenersOk(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires MapOk(objects, now)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures MapOk(ApplyListeners(objects, keys).objects, now)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      ListenersOk(objects, keys[0], now);
+      var told := Listeners(objects, keys[0]);
+      TailKeys(objects, told.objects, keys);
+      ApplyListenersOk(told.objects, keys[1..], now);
+    }
+  }
+
+  lemma LeasesOk(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires MapOk(objects, now)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures MapOk(Leases(objects, keys, now), now)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var id := keys[0];
+      var o := objects[id];
+      var returned := Lease(o, now);
+      if o.promise.state == PromiseState.Pending {
+        match o.task
+        case Some(t) =>
+          if t.state == TaskState.Acquired && t.leaseTimeoutAt.Some? && t.leaseTimeoutAt.value <= now {
+            UnleaseOk(t, now);
+            assert returned == Obj(o.promise, Some(Unlease(t, now)));
+          }
+        case None =>
+      }
+      assert ObjectOk(id, returned, now);
+      var objects' := objects[id := returned];
+      ReplaceOk(objects, id, returned, now);
+      TailKeys(objects, objects', keys);
+      LeasesOk(objects', keys[1..], now);
+    }
+  }
+
+  lemma RetriesOk(objects: map<string, Obj>, keys: seq<string>, now: nat, retry: nat)
+    requires MapOk(objects, now)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures MapOk(Retries(objects, keys, now, retry).objects, now)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var id := keys[0];
+      var o := objects[id];
+      var armed := RetryOf(o, id, now, retry);
+      if o.promise.state == PromiseState.Pending {
+        match o.task
+        case Some(t) =>
+          if t.state == TaskState.Pending && t.retryTimeoutAt.Some? && t.retryTimeoutAt.value <= now {
+            RearmOk(t, now + retry);
+          }
+        case None =>
+      }
+      assert ObjectOk(id, armed.obj, now);
+      var objects' := objects[id := armed.obj];
+      ReplaceOk(objects, id, armed.obj, now);
+      TailKeys(objects, objects', keys);
+      RetriesOk(objects', keys[1..], now, retry);
     }
   }
 
