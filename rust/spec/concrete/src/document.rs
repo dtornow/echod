@@ -335,6 +335,139 @@ pub struct ObjV {
     pub task: Option<TkV>,
 }
 
+/// Storage-independent payload carried by an Unblock effect.
+pub struct PromiseEffectV {
+    pub id: Seq<char>,
+    pub state: PromiseState,
+    pub param: Value,
+    pub value: Value,
+    pub tags: Tags,
+    pub timeout_at: u64,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
+}
+
+/// The unordered effects implied by a committed document transition.
+pub enum ProtocolEffectV {
+    Execute { id: Seq<char>, version: u64 },
+    Unblock {
+        promise: Seq<char>,
+        address: Seq<char>,
+        record: PromiseEffectV,
+    },
+}
+
+/// The idempotency key used when effects are released after CAS.
+pub enum ProtocolEffectKeyV {
+    Execute { id: Seq<char> },
+    Unblock { promise: Seq<char>, address: Seq<char> },
+}
+
+pub open spec fn protocol_effect_key(effect: ProtocolEffectV) -> ProtocolEffectKeyV {
+    match effect {
+        ProtocolEffectV::Execute { id, .. } => ProtocolEffectKeyV::Execute { id },
+        ProtocolEffectV::Unblock { promise, address, .. } =>
+            ProtocolEffectKeyV::Unblock { promise, address },
+    }
+}
+
+pub open spec fn promise_effect(id: Seq<char>, promise: PromV) -> PromiseEffectV {
+    PromiseEffectV {
+        id,
+        state: promise.state,
+        param: promise.param,
+        value: promise.value,
+        tags: promise.tags,
+        timeout_at: promise.timeout_at,
+        created_at: promise.created_at,
+        settled_at: promise.settled_at,
+    }
+}
+
+/// The final document still contains an offer produced at this commit.
+///
+/// This deliberately describes the initial/final pair, not an intermediate
+/// sweep step. If the handler acquires, settles, or halts a task after the
+/// pre-sweep rearmed it, the final task is not pending and no Execute belongs
+/// to the committed effect set.
+pub open spec fn offer_committed(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    now: u64,
+    retry_timeout: u64,
+) -> bool {
+    after.contains_key(id)
+        && match after[id].task {
+            Some(new) => {
+                &&& after[id].promise.state == PromiseState::Pending
+                &&& new.state == TaskState::Pending
+                &&& new.retry_timeout_at
+                    == Some(crate::store::spec_sat_add(now, retry_timeout))
+                &&& (!before.contains_key(id) || before[id] != after[id])
+                &&& if before.contains_key(id) {
+                    match before[id].task {
+                        Some(old) if old.state == TaskState::Pending =>
+                            match old.retry_timeout_at {
+                                Some(at) => at <= now,
+                                None => true,
+                            },
+                        _ => true,
+                    }
+                } else {
+                    true
+                }
+            },
+            None => false,
+        }
+}
+
+/// A listener present before the transaction was discharged by its final,
+/// settled promise.
+pub open spec fn listener_committed(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    promise: Seq<char>,
+    address: Seq<char>,
+) -> bool {
+    before.contains_key(promise)
+        && before[promise].promise.listeners.contains(address)
+        && after.contains_key(promise)
+        && after[promise].promise.state != PromiseState::Pending
+        && !after[promise].promise.listeners.contains(address)
+}
+
+pub open spec fn workflow_effects(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    now: u64,
+    retry_timeout: u64,
+) -> ISet<ProtocolEffectV> {
+    ISet::new(|effect: ProtocolEffectV| match effect {
+        ProtocolEffectV::Execute { id, version } =>
+            offer_committed(before, after, id, now, retry_timeout)
+                && after[id].task.unwrap().version == version,
+        ProtocolEffectV::Unblock { promise, address, record } =>
+            listener_committed(before, after, promise, address)
+                && record == promise_effect(promise, after[promise].promise),
+    })
+}
+
+/// Effects are derived from the two logical document bodies alone, plus the
+/// commit clock and configured retry delay needed to recognize a rearm.
+pub open spec fn document_effects(
+    before: DocumentBodyV,
+    after: DocumentBodyV,
+    now: u64,
+    retry_timeout: u64,
+) -> ISet<ProtocolEffectV> {
+    match (before, after) {
+        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) =>
+            workflow_effects(old, new, now, retry_timeout),
+        _ => ISet::empty(),
+    }
+}
+
 pub enum DocumentBodyV {
     Workflow(Map<Seq<char>, ObjV>),
     Schedule(Option<Schedule>),
