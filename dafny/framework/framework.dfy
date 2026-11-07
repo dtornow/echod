@@ -1,3 +1,5 @@
+include "order.dfy"
+
 // A network of processes, generic in the process.
 //
 // A process is a value: an id, a state, and a step function. A system is the

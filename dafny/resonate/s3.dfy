@@ -9,6 +9,7 @@ include "../framework/framework.dfy"
 // one system on the network.
 module S3 {
   import opened Network
+  import opened Keys
 
   type Bytes = seq<bv8>
   type Key = string
@@ -56,63 +57,8 @@ module S3 {
 
   const Pids: set<Pid> := {Bucket}
 
-  predicate Leq(a: string, b: string)
-    decreases |a|
-  {
-    |a| == 0 || (|b| > 0 && (a[0] < b[0] || (a[0] == b[0] && Leq(a[1..], b[1..]))))
-  }
-
-  predicate Lt(a: string, b: string) { a != b && Leq(a, b) }
-
   predicate Ordered(xs: seq<Entry>) {
     forall i, j :: 0 <= i < j < |xs| ==> Lt(xs[i].key, xs[j].key)
-  }
-
-  lemma LeqTotal(a: string, b: string)
-    ensures Leq(a, b) || Leq(b, a)
-    decreases |a| + |b|
-  {
-    if |a| != 0 && |b| != 0 && a[0] == b[0] { LeqTotal(a[1..], b[1..]); }
-  }
-
-  lemma LeqAntisym(a: string, b: string)
-    requires Leq(a, b) && Leq(b, a)
-    ensures a == b
-    decreases |a| + |b|
-  {
-    if |a| != 0 && |b| != 0 && a[0] == b[0] { LeqAntisym(a[1..], b[1..]); }
-  }
-
-  lemma LeqHead(a: string, b: string)
-    requires |a| > 0 && |b| > 0 && Leq(a, b)
-    ensures a[0] < b[0] || (a[0] == b[0] && Leq(a[1..], b[1..]))
-  {}
-
-  lemma LeqTrans(a: string, b: string, c: string)
-    requires Leq(a, b) && Leq(b, c)
-    ensures Leq(a, c)
-    decreases |a| + |b| + |c|
-  {
-    if |a| > 0 && |b| > 0 && |c| > 0 {
-      LeqHead(a, b);
-      LeqHead(b, c);
-      if a[0] == b[0] && b[0] == c[0] { LeqTrans(a[1..], b[1..], c[1..]); }
-    }
-  }
-
-  lemma LtTrans(a: string, b: string, c: string)
-    requires Lt(a, b) && Lt(b, c)
-    ensures Lt(a, c)
-  {
-    LeqTrans(a, b, c);
-    if a == c { LeqAntisym(b, a); }
-  }
-
-  lemma Earlier(a: Key, b: Key)
-    requires a != b && !Lt(a, b)
-    ensures Lt(b, a)
-  {
-    LeqTotal(a, b);
   }
 
   // Insert or replace, in order.
