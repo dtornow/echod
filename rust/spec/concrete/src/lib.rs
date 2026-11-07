@@ -33,6 +33,7 @@
 #![allow(non_shorthand_field_patterns)]
 
 pub mod document;
+pub mod quick_n_dirty;
 pub mod node;
 pub mod store;
 pub mod model;
