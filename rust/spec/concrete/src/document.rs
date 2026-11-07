@@ -359,6 +359,27 @@ pub enum StoredDocumentV {
     Schedule(ScheduleDocumentV),
 }
 
+/// The wake cached in document metadata is exactly the body's least
+/// deadline. More document-local clauses can be conjoined here.
+pub open spec fn well_formed(document: StoredDocumentV) -> bool {
+    match document {
+        StoredDocumentV::Workflow(workflow) =>
+            workflow.next_wake_at == match crate::node::spec_body_deadline(
+                DocumentBodyV::Workflow(workflow.objects),
+            ) {
+                Some(at) => Some(at as u64),
+                None => None,
+            },
+        StoredDocumentV::Schedule(schedule) =>
+            schedule.next_wake_at == match crate::node::spec_body_deadline(
+                DocumentBodyV::Schedule(schedule.schedule),
+            ) {
+                Some(at) => Some(at as u64),
+                None => None,
+            },
+    }
+}
+
 pub struct LoadedDocumentV {
     pub document: StoredDocumentV,
     pub change_count: usize,
