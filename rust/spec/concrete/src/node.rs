@@ -1605,6 +1605,35 @@ impl Objects {
         }
     }
 
+    /// The ids, in key order.
+    fn ids(&self) -> (r: Vec<String>)
+        ensures
+            r@.map_values(|s: String| s@) == spec_sorted(self@.dom()),
+    {
+        proof {
+            use_type_invariant(self);
+            lemma_sorted_keys(self.entries@);
+        }
+        let ghost entries = self.entries@;
+        let mut r: Vec<String> = Vec::new();
+        let mut i: usize = 0;
+        while i < self.entries.len()
+            invariant
+                i <= self.entries.len(),
+                self.entries@ == entries,
+                r@ =~= entries.take(i as int).map_values(|e: (String, Obj)| e.0),
+            decreases self.entries.len() - i,
+        {
+            r.push(self.entries[i].0.clone());
+            i += 1;
+        }
+        proof {
+            assert(entries.take(entries.len() as int) =~= entries);
+            assert(r@.map_values(|s: String| s@) =~= spec_keys_of(entries));
+        }
+        r
+    }
+
     fn contains(&self, id: &String) -> (r: bool)
         ensures
             r == self@.contains_key(id@),
@@ -3368,69 +3397,212 @@ pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
     Doc::Origin(objs.put(&pending.promise, Obj { promise, task }))
 }
 
-/// `spec_sweep`: `run_due` again and again, until a step leaves the document
-/// as it was or `limit` steps have run. What the steps queue and tell, in order.
-pub fn sweep(from: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+/// The callbacks of one object, in the order they are stored.
+fn callbacks(objs: Objects, id: &String, now: u64) -> (r: Objects)
     ensures
-        (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout, limit as nat),
+        r@.dom() == objs@.dom(),
+        r@ == spec_callbacks(objs@, id@, now),
+    decreases (if objs@.contains_key(id@) && objs@[id@].promise.state != PromiseState::Pending { objs@[id@].promise.callbacks.len() } else { 0 }),
 {
-    let ghost start = from@;
-    let mut doc = from;
-    let mut born: Vec<Pending> = Vec::new();
+    let Some(obj) = objs.get(id) else { return objs; };
+    if obj.promise.state == PromiseState::Pending || obj.promise.callbacks.len() == 0 {
+        return objs;
+    }
+    let ghost before_len = obj@.promise.callbacks.len();
+    let Obj { mut promise, task } = obj;
+    let ghost before = promise.callbacks@;
+    let awaiter = promise.callbacks.remove(0);
+    proof {
+        lemma_strs_skip(before);
+    }
+    let since = match promise.settled_at { Some(t) => t, None => 0 };
+    let placed = objs.put(id, Obj { promise, task });
+    let objs = resume(placed, &awaiter, id, since, now);
+    proof {
+        lemma_resume_promise(placed@, awaiter@, id@, since, now);
+        assert(objs@ == spec_resume(placed@, awaiter@, id@, since, now));
+        assert(objs@.contains_key(id@));
+        assert(objs@[id@].promise.callbacks.len() < before_len);
+    }
+    callbacks(objs, id, now)
+}
+
+/// The listeners of one object, in the order they are stored.
+fn listeners(objs: Objects, id: &String) -> (r: (Objects, Vec<Outbound>))
+    ensures
+        r.0@.dom() == objs@.dom(),
+        (r.0@, notes_v(r.1@)) == spec_listeners(objs@, id@),
+    decreases (if objs@.contains_key(id@) && objs@[id@].promise.state != PromiseState::Pending { objs@[id@].promise.listeners.len() } else { 0 }),
+{
+    proof {
+        lemma_notes_empty();
+    }
+    let Some(obj) = objs.get(id) else { return (objs, Vec::new()); };
+    if obj.promise.state == PromiseState::Pending || obj.promise.listeners.len() == 0 {
+        return (objs, Vec::new());
+    }
+    let ghost before_len = obj@.promise.listeners.len();
+    let Obj { mut promise, task } = obj;
+    let ghost before = promise.listeners@;
+    proof {
+        crate::interpret::lemma_string_of(*id);
+    }
+    let rec = record(id, &promise);
+    let address = promise.listeners.remove(0);
+    proof {
+        lemma_strs_skip(before);
+    }
+    let placed = objs.put(id, Obj { promise, task });
+    proof {
+        assert(placed@.contains_key(id@));
+        assert(placed@[id@].promise.listeners.len() < before_len);
+    }
+    let (rest, mut tail) = listeners(placed, id);
     let mut notes: Vec<Outbound> = Vec::new();
-    let mut left: u64 = limit;
+    let note = Outbound::Unblock { address, promise: rec };
+    proof {
+        lemma_notes_one(note);
+    }
+    notes.push(note);
+    let ghost head = notes@;
+    let ghost tail_v = tail@;
+    notes.append(&mut tail);
+    proof {
+        lemma_notes_add(head, tail_v);
+    }
+    (rest, notes)
+}
+
+/// One object, in order: its deadline, its lease, its retry, its callbacks, its listeners.
+fn object_at(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
+    ensures
+        r.0@.dom() == objs@.dom(),
+        (r.0@, notes_v(r.1@)) == spec_object(objs@, id@, now, retry_timeout),
+{
+    proof {
+        lemma_notes_empty();
+    }
+    let Some(obj) = objs.get(id) else { return (objs, Vec::new()); };
+    let mut obj = if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
+        project_obj(&obj, now)
+    } else {
+        obj
+    };
+    if obj.promise.state == PromiseState::Pending {
+        let Obj { promise, task } = obj;
+        obj = match task {
+            Some(t) => {
+                let lease_over = t.state == TaskState::Acquired
+                    && match t.lease_timeout_at { Some(at) => at <= now, None => false };
+                if lease_over {
+                    let u = unlease(&t, TaskState::Pending, Some(now));
+                    Obj { promise, task: Some(u) }
+                } else {
+                    Obj { promise, task: Some(t) }
+                }
+            },
+            None => Obj { promise, task: None },
+        };
+    }
+    let mut notes: Vec<Outbound> = Vec::new();
+    if obj.promise.state == PromiseState::Pending {
+        let Obj { promise, task } = obj;
+        obj = match task {
+            Some(t) => {
+                let retry_over = t.state == TaskState::Pending
+                    && match t.retry_timeout_at { Some(at) => at <= now, None => false };
+                if retry_over {
+                    let version = t.version;
+                    let mut u = t;
+                    u.retry_timeout_at = Some(sat_add(now, retry_timeout));
+                    let note = Outbound::Execute { id: id.clone(), version };
+                    proof {
+                        lemma_notes_one(note);
+                    }
+                    notes.push(note);
+                    Obj { promise, task: Some(u) }
+                } else {
+                    Obj { promise, task: Some(t) }
+                }
+            },
+            None => Obj { promise, task: None },
+        };
+    }
+    let placed = objs.put(id, obj);
+    let woken = callbacks(placed, id, now);
+    let (told, mut more) = listeners(woken, id);
+    let ghost head = notes@;
+    let ghost tail = more@;
+    notes.append(&mut more);
+    proof {
+        lemma_notes_add(head, tail);
+        assert(placed@.dom() =~= objs@.dom());
+        assert(woken@.dom() =~= placed@.dom());
+        assert(told@.dom() =~= woken@.dom());
+    }
+    (told, notes)
+}
+
+/// The keys of an origin, in order.
+fn along(objs: Objects, keys: &Vec<String>, i: usize, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
+    requires
+        i <= keys.len(),
+        keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()),
+    ensures
+        r.0@.dom() == objs@.dom(),
+        (r.0@, notes_v(r.1@)) == spec_along(objs@, spec_sorted(objs@.dom()).skip(i as int), now, retry_timeout),
+    decreases keys.len() - i,
+{
+    proof {
+        lemma_notes_empty();
+    }
+    if i == keys.len() {
+        proof {
+            assert(spec_sorted(objs@.dom()).skip(i as int).len() == 0);
+        }
+        return (objs, Vec::new());
+    }
+    let (here_objs, mut notes) = object_at(objs, &keys[i], now, retry_timeout);
+    proof {
+        assert(keys@[i as int]@ == spec_sorted(objs@.dom())[i as int]);
+        assert(spec_sorted(here_objs@.dom()) == spec_sorted(objs@.dom()));
+    }
+    let (rest, mut tail) = along(here_objs, keys, i + 1, now, retry_timeout);
+    let ghost head = notes@;
+    let ghost tail_v = tail@;
+    notes.append(&mut tail);
+    proof {
+        lemma_notes_add(head, tail_v);
+        assert(spec_sorted(objs@.dom()).skip(i as int).drop_first() =~= spec_sorted(objs@.dom()).skip(i + 1));
+    }
+    (rest, notes)
+}
+
+/// `spec_sweep`: an origin's keys in order, and on each object its deadline,
+/// its lease, its retry, its callbacks and its listeners. A schedule is its next run.
+pub fn sweep(from: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+    ensures
+        (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout),
+{
     proof {
         lemma_pend_empty();
         lemma_notes_empty();
-        assert(Seq::<PendingV>::empty() + spec_sweep(doc@, now, retry_timeout, left as nat).1 =~= spec_sweep(doc@, now, retry_timeout, left as nat).1);
-        assert(Seq::<NoteV>::empty() + spec_sweep(doc@, now, retry_timeout, left as nat).2 =~= spec_sweep(doc@, now, retry_timeout, left as nat).2);
     }
-    while left > 0
-        invariant
-            start == from@,
-            ({
-                let (d, p, n) = spec_sweep(doc@, now, retry_timeout, left as nat);
-                spec_sweep(start, now, retry_timeout, limit as nat) == (d, pend_v(born@) + p, notes_v(notes@) + n)
-            }),
-        decreases left,
-    {
-        let (next, mut p, mut n) = run_due(copy(&doc), now, retry_timeout);
-        if same_doc(&next, &doc) {
+    match from {
+        Doc::Origin(objs) => {
+            let keys = objs.ids();
             proof {
-                assert(spec_run_due(doc@, now, retry_timeout).0 == doc@);
-                assert(left as nat != 0);
-                assert(spec_sweep(doc@, now, retry_timeout, left as nat) == (doc@, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
-                assert(pend_v(born@) + Seq::<PendingV>::empty() =~= pend_v(born@));
-                assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
+                assert(keys@.map_values(|s: String| s@) == spec_sorted(objs@.dom()));
+                assert(spec_sorted(objs@.dom()).skip(0) =~= spec_sorted(objs@.dom()));
             }
-            return (doc, born, notes);
-        }
-        let ghost (p0, n0) = (p@, n@);
-        let ghost (b0, s0) = (born@, notes@);
-        born.append(&mut p);
-        notes.append(&mut n);
-        proof {
-            lemma_map_values_add(b0, p0);
-            lemma_notes_add(s0, n0);
-            let (d, pp, nn) = spec_sweep(next@, now, retry_timeout, (left - 1) as nat);
-            assert(pend_v(b0) + (pend_v(p0) + pp) =~= (pend_v(b0) + pend_v(p0)) + pp);
-            assert(notes_v(s0) + (notes_v(n0) + nn) =~= (notes_v(s0) + notes_v(n0)) + nn);
-        }
-        doc = next;
-        left = left - 1;
+            let (objs, notes) = along(objs, &keys, 0, now, retry_timeout);
+            (Doc::Origin(objs), Vec::new(), notes)
+        },
+        other => {
+            let (doc, born, notes) = run_due(other, now, retry_timeout);
+            (doc, born, notes)
+        },
     }
-    proof {
-        assert(pend_v(born@) + Seq::<PendingV>::empty() =~= pend_v(born@));
-        assert(notes_v(notes@) + Seq::<NoteV>::empty() =~= notes_v(notes@));
-    }
-    (doc, born, notes)
-}
-
-proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
-    ensures
-        pend_v(a + b) == pend_v(a) + pend_v(b),
-{
-    assert(pend_v(a + b) =~= pend_v(a) + pend_v(b));
 }
 
 proof fn lemma_notes_add(a: Seq<Outbound>, b: Seq<Outbound>)
@@ -5544,21 +5716,167 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
     }
 }
 
-/// `spec_run_due` iterated: it stops at a step that leaves the document as it
-/// was, or after `limit` steps. The occurrences queued and the notes, in order.
-pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64, limit: nat) -> (DocV, Seq<PendingV>, Seq<NoteV>)
-    decreases limit,
+proof fn lemma_resume_promise(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awaited: Seq<char>, since: Time, now: Time)
+    ensures
+        spec_resume(map, awaiter, awaited, since, now).dom() == map.dom(),
+        forall|k: Seq<char>| #[trigger] map.contains_key(k) ==> spec_resume(map, awaiter, awaited, since, now)[k].promise == map[k].promise,
 {
-    if limit == 0 {
-        (doc, Seq::empty(), Seq::empty())
-    } else {
-        let (next, _, born, notes) = spec_run_due(doc, now, retry_timeout);
-        if next == doc {
-            (doc, Seq::empty(), Seq::empty())
-        } else {
-            let (last, more_born, more_notes) = spec_sweep(next, now, retry_timeout, (limit - 1) as nat);
-            (last, born + more_born, notes + more_notes)
+    if map.contains_key(awaiter) {
+        match spec_project_obj(map[awaiter], now).task {
+            None => {},
+            Some(t) => {
+                if t.state == TaskState::Suspended {
+                    let after = map.insert(awaiter, ObjV {
+                        task: Some(TkV {
+                            state: TaskState::Pending,
+                            pid: None,
+                            ttl: None,
+                            lease_timeout_at: None,
+                            retry_timeout_at: Some(since),
+                            resumes: seq![awaited],
+                            ..t
+                        }),
+                        ..map[awaiter]
+                    });
+                    assert(after.dom() =~= map.dom());
+                    assert(spec_resume(map, awaiter, awaited, since, now) =~= after);
+                } else if t.state == TaskState::Fulfilled {
+                } else if t.resumes.contains(awaited) {
+                } else {
+                    let after = map.insert(awaiter, ObjV { task: Some(TkV { resumes: t.resumes.push(awaited), ..t }), ..map[awaiter] });
+                    assert(after.dom() =~= map.dom());
+                    assert(spec_resume(map, awaiter, awaited, since, now) =~= after);
+                }
+            },
         }
+    }
+}
+
+/// The callbacks of one object, in the order they are stored.
+pub open spec fn spec_callbacks(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time) -> Map<Seq<char>, ObjV>
+    decreases (if map.contains_key(id) && map[id].promise.state != PromiseState::Pending { map[id].promise.callbacks.len() } else { 0 }),
+    via spec_callbacks_decreases
+{
+    if !map.contains_key(id) {
+        map
+    } else if map[id].promise.state == PromiseState::Pending || map[id].promise.callbacks.len() == 0 {
+        map
+    } else {
+        let awaiter = map[id].promise.callbacks[0];
+        let since = match map[id].promise.settled_at { Some(t) => t, None => 0 };
+        let obj = ObjV { promise: PromV { callbacks: map[id].promise.callbacks.skip(1), ..map[id].promise }, ..map[id] };
+        let map = map.insert(id, obj);
+        spec_callbacks(spec_resume(map, awaiter, id, since, now), id, now)
+    }
+}
+
+#[via_fn]
+proof fn spec_callbacks_decreases(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time) {
+    if map.contains_key(id) && map[id].promise.state != PromiseState::Pending && map[id].promise.callbacks.len() > 0 {
+        let awaiter = map[id].promise.callbacks[0];
+        let since = match map[id].promise.settled_at { Some(t) => t, None => 0 };
+        let obj = ObjV { promise: PromV { callbacks: map[id].promise.callbacks.skip(1), ..map[id].promise }, ..map[id] };
+        let map1 = map.insert(id, obj);
+        lemma_resume_promise(map1, awaiter, id, since, now);
+        let map2 = spec_resume(map1, awaiter, id, since, now);
+        assert(map2.contains_key(id));
+        assert(map2[id].promise.callbacks.len() + 1 == map[id].promise.callbacks.len());
+    }
+}
+
+/// The listeners of one object, in the order they are stored.
+pub open spec fn spec_listeners(map: Map<Seq<char>, ObjV>, id: Seq<char>) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
+    decreases (if map.contains_key(id) && map[id].promise.state != PromiseState::Pending { map[id].promise.listeners.len() } else { 0 }),
+    via spec_listeners_decreases
+{
+    if !map.contains_key(id) {
+        (map, Seq::empty())
+    } else if map[id].promise.state == PromiseState::Pending || map[id].promise.listeners.len() == 0 {
+        (map, Seq::empty())
+    } else {
+        let address = map[id].promise.listeners[0];
+        let promise = spec_record(spec_string(id), map[id].promise);
+        let obj = ObjV { promise: PromV { listeners: map[id].promise.listeners.skip(1), ..map[id].promise }, ..map[id] };
+        let map = map.insert(id, obj);
+        let (rest, notes) = spec_listeners(map, id);
+        (rest, seq![NoteV::Unblock { address, promise }] + notes)
+    }
+}
+
+#[via_fn]
+proof fn spec_listeners_decreases(map: Map<Seq<char>, ObjV>, id: Seq<char>) {
+    if map.contains_key(id) && map[id].promise.state != PromiseState::Pending && map[id].promise.listeners.len() > 0 {
+        let obj = ObjV { promise: PromV { listeners: map[id].promise.listeners.skip(1), ..map[id].promise }, ..map[id] };
+        let map1 = map.insert(id, obj);
+        assert(map1[id].promise.listeners.len() + 1 == map[id].promise.listeners.len());
+    }
+}
+
+/// One object, in order: its deadline, its lease, its retry, its callbacks, its listeners.
+pub open spec fn spec_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
+    if !map.contains_key(id) {
+        (map, Seq::empty())
+    } else {
+        let obj0 = map[id];
+        let obj1 = if obj0.promise.state == PromiseState::Pending && obj0.promise.timeout_at <= now {
+            spec_project_obj(obj0, now)
+        } else {
+            obj0
+        };
+        let obj2 = if obj1.promise.state == PromiseState::Pending {
+            match obj1.task {
+                Some(t) if t.state == TaskState::Acquired && match t.lease_timeout_at { Some(at) => at <= now, None => false } => {
+                    ObjV { task: Some(spec_unlease(t, TaskState::Pending, Some(now))), ..obj1 }
+                },
+                _ => obj1,
+            }
+        } else {
+            obj1
+        };
+        let (obj3, notes) = if obj2.promise.state == PromiseState::Pending {
+            match obj2.task {
+                Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
+                    (
+                        ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry_timeout)), ..t }), ..obj2 },
+                        seq![NoteV::Execute { id, version: t.version }],
+                    )
+                },
+                _ => (obj2, Seq::<NoteV>::empty()),
+            }
+        } else {
+            (obj2, Seq::<NoteV>::empty())
+        };
+        let map = map.insert(id, obj3);
+        let map = spec_callbacks(map, id, now);
+        let (map, more) = spec_listeners(map, id);
+        (map, notes + more)
+    }
+}
+
+/// The keys, in order.
+pub open spec fn spec_along(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>)
+    decreases keys.len(),
+{
+    if keys.len() == 0 {
+        (map, Seq::empty())
+    } else {
+        let (map, notes) = spec_object(map, keys[0], now, retry_timeout);
+        let (rest, more) = spec_along(map, keys.drop_first(), now, retry_timeout);
+        (rest, notes + more)
+    }
+}
+
+/// An origin's keys in order. A schedule is its next run.
+pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64) -> (DocV, Seq<PendingV>, Seq<NoteV>) {
+    match doc {
+        DocV::Origin(map) => {
+            let (map, notes) = spec_along(map, spec_sorted(map.dom()), now, retry_timeout);
+            (DocV::Origin(map), Seq::empty(), notes)
+        },
+        _ => {
+            let (next, _, born, notes) = spec_run_due(doc, now, retry_timeout);
+            (next, born, notes)
+        },
     }
 }
 

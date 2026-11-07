@@ -267,11 +267,6 @@ impl DeepView for Progress {
     }
 }
 
-/// How many due steps one sweep runs before it commits. A document with
-/// more due is committed with its nearest deadline past, which arms a key
-/// that fires at once.
-pub const SWEEP_STEPS: u64 = 256;
-
 /// What a committed step answers with.
 #[make_spec_type]
 pub struct Done {
@@ -913,7 +908,7 @@ pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, Commit
         WorkSpec::Sweep { .. } => AJob::Sweep,
         WorkSpec::Fire { .. } => AJob::Fire,
     };
-    let (after, response, _born, notes) = spec_step(job, w.loaded.doc, now, s.cfg.retry_timeout, SWEEP_STEPS as nat);
+    let (after, response, _born, notes) = spec_step(job, w.loaded.doc, now, s.cfg.retry_timeout);
     let why = match work {
         WorkSpec::Request { req, kind, .. } => match response {
             Some(r) => {
@@ -1719,9 +1714,8 @@ impl State {
 
     /// The step: `verified::flight::decide`, the concrete model's step on
     /// the document, decided no earlier than the last step on the
-    /// document. A request is `handle`; a due key is `sweep`, every due
-    /// step on the document up to `SWEEP_STEPS`. A lost race runs this
-    /// again on what it re-read.
+    /// document. A request is `handle`; a due key is `sweep`, the keys in
+    /// order. A lost race runs this again on what it re-read.
     pub fn decide(&mut self, work: &Work, w: Working) -> (r: (Committing, Done))
         ensures
             ({
@@ -1738,7 +1732,7 @@ impl State {
             Work::Sweep { .. } => Job::Sweep,
             Work::Fire { .. } => Job::Fire,
         };
-        let Decided { doc: after, response, born: _, notes } = flight::decide(job, clone_doc(&w.loaded.doc), now, self.cfg.retry_timeout, SWEEP_STEPS);
+        let Decided { doc: after, response, born: _, notes } = flight::decide(job, clone_doc(&w.loaded.doc), now, self.cfg.retry_timeout);
         let why = match work {
             Work::Request { req, kind, .. } => match &response {
                 Some(r) => {

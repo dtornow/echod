@@ -4,9 +4,9 @@
 //! the operation. `debug.reset` empties the bucket of documents and keys
 //! and forgets everything the node held of them. `debug.snap` reads every
 //! document. `debug.tick` moves the work to `time`: every origin is swept
-//! at that instant and every schedule due fires, again and again until
-//! none is due, as the timers would have done had the clock passed through
-//! every instant on the way. Each is a machine over store calls like
+//! at that instant, and a schedule that still has a run due is fired again,
+//! as the timers would have done had the clock passed through every instant
+//! on the way. Each is a machine over store calls like
 //! everything else here; the sweeps and fires are ordinary flights that
 //! report back when they end. The runtime turns the answer into the
 //! protocol's snapshot.

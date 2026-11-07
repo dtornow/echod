@@ -61,9 +61,9 @@ pub struct Decided {
 }
 
 /// The step: the concrete model's, by the job.
-pub fn decide(job: Job, doc: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: Decided)
+pub fn decide(job: Job, doc: Doc, now: u64, retry_timeout: u64) -> (r: Decided)
     ensures
-        (r.doc@, r.response, pend_v(r.born@), notes_v(r.notes@)) == spec_step(job@, doc@, now, retry_timeout, limit as nat),
+        (r.doc@, r.response, pend_v(r.born@), notes_v(r.notes@)) == spec_step(job@, doc@, now, retry_timeout),
 {
     proof {
         assert(pend_v(Seq::<Pending>::empty()) =~= Seq::<PendingV>::empty());
@@ -75,7 +75,7 @@ pub fn decide(job: Job, doc: Doc, now: u64, retry_timeout: u64, limit: u64) -> (
             Decided { doc, response: Some(response), born: Vec::new(), notes: Vec::new() }
         },
         Job::Sweep => {
-            let (doc, born, notes) = sweep(doc, now, retry_timeout, limit);
+            let (doc, born, notes) = sweep(doc, now, retry_timeout);
             Decided { doc, response: None, born, notes }
         },
         Job::Fire => {

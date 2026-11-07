@@ -32,7 +32,7 @@ verus! {
 pub enum AJob {
     /// A request: `spec_handle`.
     Request(echod_types::Request),
-    /// A fired key: `spec_sweep`, every due step up to a limit.
+    /// A fired key: `spec_sweep`, the keys in order.
     Sweep,
     /// A schedule's key: `spec_run_due`, the occurrence due and the schedule advanced.
     Fire,
@@ -42,14 +42,14 @@ pub enum AJob {
 
 /// The document a step leaves, its answer, the occurrences it queued, and
 /// the notes it will send once the document is committed.
-pub open spec fn spec_step(job: AJob, doc: DocV, now: u64, retry_timeout: u64, limit: nat) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_step(job: AJob, doc: DocV, now: u64, retry_timeout: u64) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
             let (next, response) = spec_handle(doc, request, now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
         AJob::Sweep => {
-            let (next, born, notes) = spec_sweep(doc, now, retry_timeout, limit);
+            let (next, born, notes) = spec_sweep(doc, now, retry_timeout);
             (next, None, born, notes)
         },
         AJob::Fire => spec_run_due(doc, now, retry_timeout),
@@ -70,10 +70,10 @@ pub open spec fn job_of(job: JobV) -> AJob {
 /// the condition of the version the flight loaded: `PutIfMatch` on that
 /// version, `PutIfNoneMatch` when the document was absent. The commit below
 /// writes under the same condition.
-pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit: nat)
+pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV)
     ensures
         ({
-            let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
+            let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout);
             let (after, sent) = spec_decide(node, flight, doc);
             match after.flight {
                 Some(open) => {
