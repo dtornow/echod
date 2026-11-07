@@ -393,113 +393,82 @@ pub open spec fn promise_effect(id: Seq<char>, promise: PromV) -> PromiseEffectV
     }
 }
 
-pub open spec fn effect_rearm_at(now: u64, retry_timeout: u64) -> u64 {
-    if (now as nat) + (retry_timeout as nat) > (u64::MAX as nat) {
-        u64::MAX
-    } else {
-        ((now as nat) + (retry_timeout as nat)) as u64
-    }
-}
-
-/// Whether one closure step rearmed pending task `id`.
-pub open spec fn offer_rearmed(
+/// The final document still contains an offer produced at this commit.
+///
+/// This deliberately describes the initial/final pair, not an intermediate
+/// sweep step. If the handler acquires, settles, or halts a task after the
+/// pre-sweep rearmed it, the final task is not pending and no Execute belongs
+/// to the committed effect set.
+pub open spec fn offer_committed(
     before: Map<Seq<char>, ObjV>,
     after: Map<Seq<char>, ObjV>,
     id: Seq<char>,
-    now: u64,
-    retry_timeout: u64,
+    committed_at: u64,
 ) -> bool {
-    before.contains_key(id)
-        && match before[id].task {
-            Some(old) => {
-                let new = TkV {
-                    retry_timeout_at: Some(effect_rearm_at(now, retry_timeout)),
-                    ..old
-                };
-                &&& before[id].promise.state == PromiseState::Pending
-                &&& old.state == TaskState::Pending
-                &&& match old.retry_timeout_at {
-                    Some(at) => at <= now,
-                    None => false,
+    after.contains_key(id)
+        && match after[id].task {
+            Some(new) => {
+                &&& after[id].promise.state == PromiseState::Pending
+                &&& new.state == TaskState::Pending
+                &&& new.retry_timeout_at is Some
+                &&& new.retry_timeout_at.unwrap() > committed_at
+                &&& (!before.contains_key(id) || before[id] != after[id])
+                &&& if before.contains_key(id) {
+                    match before[id].task {
+                        Some(old) if old.state == TaskState::Pending =>
+                            match old.retry_timeout_at {
+                                Some(at) => at <= committed_at,
+                                None => true,
+                            },
+                        _ => true,
+                    }
+                } else {
+                    true
                 }
-                &&& old.retry_timeout_at != new.retry_timeout_at
-                &&& after == before.insert(id, ObjV {
-                    task: Some(new),
-                    ..before[id]
-                })
             },
             _ => false,
         }
 }
 
-/// Whether one closure step removed the first listener of `promise`.
-pub open spec fn listener_unblocked(
+/// A listener present before the transaction was discharged by its final,
+/// settled promise.
+pub open spec fn listener_committed(
     before: Map<Seq<char>, ObjV>,
     after: Map<Seq<char>, ObjV>,
     promise: Seq<char>,
     address: Seq<char>,
 ) -> bool {
     before.contains_key(promise)
-        && before[promise].promise.listeners.len() > 0
-        && before[promise].promise.listeners[0] == address
-        && after == before.insert(promise, ObjV {
-            promise: PromV {
-                listeners: before[promise].promise.listeners.skip(1),
-                ..before[promise].promise
-            },
-            ..before[promise]
-        })
+        && before[promise].promise.listeners.contains(address)
+        && after.contains_key(promise)
+        && after[promise].promise.state != PromiseState::Pending
+        && !after[promise].promise.listeners.contains(address)
 }
 
-/// The unordered keyed protocol effects visible in one closure step.
-///
-/// This compares the old and new workflow maps only, with the clock and retry
-/// configuration needed to recognize a task rearm:
-///
-/// * rearming a due pending-task offer produces Execute, with the version in
-///   the new document;
-/// * removing a listener produces Unblock, with the settled promise value in
-///   the new document.
-///
-/// A complete request folds these comparisons over its pre-handler and
-/// post-handler closure traces.  Those traces cannot in general be collapsed
-/// to the request's initial/final pair:
-/// the handler may acquire a task after the pre-sweep emitted Execute, hiding
-/// the rearmed pending state in the final document.  More strongly, take one
-/// old task whose retry is 10 and acquire it with TTL `u64::MAX`: at `now = 10`
-/// the pre-sweep emits Execute, while at `now = 5` it does not, but both final
-/// acquired tasks have the same saturated lease deadline and all the same
-/// durable fields.  Thus old/new documents alone are indistinguishable.
-/// `effects.rs` retains the clock/configuration and exactly the logically
-/// unavoidable closure boundaries; its executable regression test instantiates
-/// this counterexample.
 pub open spec fn workflow_effects(
     before: Map<Seq<char>, ObjV>,
     after: Map<Seq<char>, ObjV>,
-    now: u64,
-    retry_timeout: u64,
+    committed_at: u64,
 ) -> ISet<ProtocolEffectV> {
     ISet::new(|effect: ProtocolEffectV| match effect {
         ProtocolEffectV::Execute { id, version } =>
-            offer_rearmed(before, after, id, now, retry_timeout)
+            offer_committed(before, after, id, committed_at)
                 && after[id].task.unwrap().version == version,
         ProtocolEffectV::Unblock { promise, address, record } =>
-            listener_unblocked(before, after, promise, address)
+            listener_committed(before, after, promise, address)
                 && record == promise_effect(promise, after[promise].promise),
     })
 }
 
-/// The same comparison lifted to document bodies.  Schedule documents have
-/// no Execute or Unblock effects.
+/// Effects are derived from the two complete logical documents alone. The
+/// new document's `committed_at` is the comparison clock.
 pub open spec fn document_effects(
-    before: DocumentBodyV,
-    after: DocumentBodyV,
-    now: u64,
-    retry_timeout: u64,
+    before: StoredDocumentV,
+    after: StoredDocumentV,
 ) -> ISet<ProtocolEffectV> {
     match (before, after) {
-        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) =>
-            workflow_effects(old, new, now, retry_timeout),
+        (StoredDocumentV::Workflow(old), StoredDocumentV::Workflow(new)) =>
+            workflow_effects(old.objects, new.objects, new.committed_at),
         _ => ISet::empty(),
     }
 }

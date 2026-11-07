@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use echod_concrete::{peek, request_transition, DocumentBody, Obj, Objects, Outbound, Prom, Tk};
 use echod_types::{
-    PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, Tags,
-    TaskAcquireReq, TaskContinueReq, TaskReleaseReq, TaskState, Value,
+    PromiseCreateReq, PromiseGetReq, PromiseSettleReq, PromiseState, Request, Response, Schedule,
+    ScheduleGetReq, Tags, TaskContinueReq, TaskReleaseReq, TaskState, Value,
 };
 
 fn tags(values: &[(&str, &str)]) -> Tags {
@@ -231,6 +231,33 @@ fn callback_does_not_execute_pending_acquired_or_halted_task() {
 }
 
 #[test]
+fn execute_consumed_by_handler_is_not_observable() {
+    let doc = workflow(vec![(
+        "wf.task".to_string(),
+        Obj {
+            promise: promise(tags(&[("resonate:target", "worker")]), 1_000),
+            task: Some(task(TaskState::Pending, Some(10), None)),
+        },
+    )]);
+    let acquire = Request::TaskAcquire(echod_types::TaskAcquireReq {
+        id: "wf.task".to_string(),
+        version: 1,
+        pid: "worker".to_string(),
+        ttl: 100,
+    });
+
+    let (doc, response, born, notes) = request_transition(doc, &acquire, 10, 50, 32);
+
+    assert_eq!(status(&response), 200);
+    assert!(born.is_empty());
+    assert!(notes.is_empty(), "the acquire consumed the pre-sweep offer");
+    assert_eq!(
+        object(&doc, "wf.task").task.unwrap().state,
+        TaskState::Acquired,
+    );
+}
+
+#[test]
 fn read_persists_expired_projection() {
     let doc = workflow(vec![(
         "wf.expired".to_string(),
@@ -274,33 +301,27 @@ fn exhausted_closure_is_atomic_503() {
 }
 
 #[test]
-fn endpoint_documents_cannot_alone_determine_execute_effects() {
-    // The same old body and request produce the same final body.  At time 10
-    // the old offer is due and the pre-sweep emits Execute; at time 5 it is
-    // not due.  The maximal TTL saturates both acquired lease deadlines, so
-    // no durable final field records which transition emitted the effect.
-    let old = workflow(vec![(
-        "wf.task".to_string(),
-        Obj {
-            promise: promise(tags(&[("resonate:target", "worker")]), u64::MAX),
-            task: Some(task(TaskState::Pending, Some(10), None)),
-        },
-    )]);
-    let acquire = Request::TaskAcquire(TaskAcquireReq {
-        id: "wf.task".to_string(),
-        version: 1,
-        pid: "worker".to_string(),
-        ttl: u64::MAX,
+fn schedule_request_leaves_due_timer_for_internal_processing() {
+    let schedule = Schedule {
+        id: "schedule".to_string(),
+        cron: "* * * * * *".to_string(),
+        promise_id: "wf.{{.timestamp}}".to_string(),
+        promise_timeout: 100,
+        promise_param: Value::default(),
+        promise_tags: Vec::new(),
+        created_at: 1,
+        next_run_at: 10,
+        last_run_at: None,
+    };
+    let original = DocumentBody::Schedule(Some(schedule));
+    let get = Request::ScheduleGet(ScheduleGetReq {
+        id: "schedule".to_string(),
     });
 
-    let (due_doc, due_response, _, due_notes) =
-        request_transition(old.clone(), &acquire, 10, 50, 32);
-    let (early_doc, early_response, _, early_notes) = request_transition(old, &acquire, 5, 50, 32);
+    let (doc, response, born, notes) = request_transition(original.clone(), &get, 10, 50, 32);
 
-    assert_eq!(status(&due_response), 200);
-    assert_eq!(status(&early_response), 200);
-    assert_eq!(due_doc, early_doc);
-    assert_execute(&due_notes, "wf.task", 1);
-    assert!(early_notes.is_empty());
-    assert_unique_effect_keys(&due_notes);
+    assert_eq!(status(&response), 200);
+    assert_eq!(doc, original);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
 }

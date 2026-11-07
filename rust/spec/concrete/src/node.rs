@@ -3740,6 +3740,119 @@ pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
     earliest_in(doc, now).is_some()
 }
 
+fn same_outbound_key(a: &Outbound, b: &Outbound) -> (r: bool)
+    ensures
+        r == (spec_note_key(a@) == spec_note_key(b@)),
+{
+    match (a, b) {
+        (Outbound::Execute { id: x, .. }, Outbound::Execute { id: y, .. }) => *x == *y,
+        (
+            Outbound::Unblock { address: xa, promise: xp },
+            Outbound::Unblock { address: ya, promise: yp },
+        ) => *xa == *ya && xp.id == yp.id,
+        _ => false,
+    }
+}
+
+fn contains_outbound_key(notes: &Vec<Outbound>, note: &Outbound) -> (r: bool)
+    ensures
+        r == exists|i: int| 0 <= i < notes@.len()
+            && spec_note_key(notes@[i]@) == spec_note_key(note@),
+{
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            forall|j: int| 0 <= j < i ==>
+                spec_note_key(notes@[j]@) != spec_note_key(note@),
+        decreases notes@.len() - i,
+    {
+        if same_outbound_key(&notes[i], note) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// An Execute remains visible only while the committed task is pending at
+/// that version. The handler can consume a pre-sweep offer in the same CAS.
+fn outbound_relevant(doc: &DocumentBody, note: &Outbound) -> (r: bool)
+    ensures
+        r == spec_note_relevant(doc@, note@),
+{
+    match note {
+        Outbound::Execute { id, version } => match peek(doc, id) {
+            Some(object) => match object.task {
+                Some(task) => task.state == TaskState::Pending && task.version == *version,
+                None => false,
+            },
+            None => false,
+        },
+        Outbound::Unblock { .. } => true,
+    }
+}
+
+/// Canonical insertion-order representation of the unordered keyed effects.
+fn keyed_notes(doc: &DocumentBody, notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_keyed_notes(doc@, notes_v(notes@), notes@.len() as nat),
+{
+    let mut out: Vec<Outbound> = Vec::new();
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            notes_v(out@) == spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+        decreases notes@.len() - i,
+    {
+        let relevant = outbound_relevant(doc, &notes[i]);
+        let present = contains_outbound_key(&out, &notes[i]);
+        proof {
+            assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+            assert forall|j: int| 0 <= j < out@.len() implies
+                notes_v(out@)[j] == out@[j]@ by {};
+            if present {
+                let j = choose|j: int| 0 <= j < out@.len()
+                    && spec_note_key(out@[j]@) == spec_note_key(notes@[i as int]@);
+                assert(0 <= j < notes_v(out@).len());
+                assert(spec_note_key(notes_v(out@)[j])
+                    == spec_note_key(notes_v(notes@)[i as int]));
+            } else {
+                assert forall|j: int| 0 <= j < notes_v(out@).len() implies
+                    spec_note_key(notes_v(out@)[j])
+                        != spec_note_key(notes_v(notes@)[i as int]) by {
+                    assert(notes_v(out@)[j] == out@[j]@);
+                    assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+                };
+            }
+            assert(spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat)
+                == spec_keyed_insert(
+                    doc@,
+                    spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+                    notes_v(notes@)[i as int],
+                ));
+        }
+        if relevant && !present {
+            let ghost before = out@;
+            out.push(copy(&notes[i]));
+            proof {
+                assert(notes_v(before.push(notes@[i as int])) =~=
+                    notes_v(before).push(notes@[i as int]@));
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        } else {
+            proof {
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn ids_unique(ids: &Vec<String>) -> (r: bool)
     ensures
         r == crate::document::unique(strs_v(ids@)),
@@ -4143,9 +4256,234 @@ fn body_well_formed_for(
     }
 }
 
+fn offer_is_committed(
+    before: &Objects,
+    after: &Objects,
+    id: &String,
+    committed_at: u64,
+) -> (r: bool)
+    ensures
+        r == crate::document::offer_committed(
+            before@,
+            after@,
+            id@,
+            committed_at,
+        ),
+{
+    let Some(new_obj) = after.get(id) else {
+        return false;
+    };
+    let Some(new_task) = &new_obj.task else {
+        return false;
+    };
+    if new_obj.promise.state != PromiseState::Pending
+        || new_task.state != TaskState::Pending
+    {
+        return false;
+    }
+    let Some(retry_at) = new_task.retry_timeout_at else {
+        return false;
+    };
+    if retry_at <= committed_at {
+        return false;
+    }
+    let Some(old_obj) = before.get(id) else {
+        return true;
+    };
+    if same_obj(&old_obj, &new_obj) {
+        return false;
+    }
+    match &old_obj.task {
+        Some(old_task) if old_task.state == TaskState::Pending => {
+            match old_task.retry_timeout_at {
+                Some(at) => at <= committed_at,
+                None => true,
+            }
+        },
+        _ => true,
+    }
+}
+
+fn listener_is_committed(
+    before: &Objects,
+    after: &Objects,
+    promise: &String,
+    address: &String,
+) -> (r: bool)
+    ensures
+        r == crate::document::listener_committed(
+            before@,
+            after@,
+            promise@,
+            address@,
+        ),
+{
+    let Some(old_obj) = before.get(promise) else {
+        return false;
+    };
+    if !contains_str(&old_obj.promise.listeners, address) {
+        return false;
+    }
+    let Some(new_obj) = after.get(promise) else {
+        return false;
+    };
+    new_obj.promise.state != PromiseState::Pending
+        && !contains_str(&new_obj.promise.listeners, address)
+}
+
+proof fn lemma_notes_push(notes: Seq<Outbound>, note: Outbound)
+    ensures
+        notes_v(notes.push(note)) == notes_v(notes).push(note@),
+{
+    lemma_outbound_view(&note);
+    assert(notes_v(notes.push(note)) =~= notes_v(notes).push(note@));
+}
+
+fn committed_notes(
+    before: &DocumentBody,
+    after: &DocumentBody,
+    committed_at: u64,
+) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_committed_notes(before@, after@, committed_at),
+{
+    let (DocumentBody::Workflow(old), DocumentBody::Workflow(new)) = (before, after) else {
+        proof {
+            lemma_notes_empty();
+        }
+        return Vec::new();
+    };
+    proof {
+        use_type_invariant(old);
+        use_type_invariant(new);
+        lemma_sorted_keys(old.entries@);
+        lemma_sorted_keys(new.entries@);
+    }
+    let mut notes = Vec::new();
+    let mut i = 0;
+    while i < new.entries.len()
+        invariant
+            i <= new.entries.len(),
+            spec_sorted_present(new@) == spec_keys_of(new.entries@),
+            notes_v(notes@) == spec_execute_notes(
+                old@,
+                new@,
+                committed_at,
+                spec_sorted_present(new@),
+                i as nat,
+            ),
+        decreases new.entries.len() - i,
+    {
+        let id = &new.entries[i].0;
+        assert(spec_sorted_present(new@)[i as int] == id@);
+        assert(new@.contains_key(id@));
+        if offer_is_committed(old, new, id, committed_at) {
+            let obj = new.get(id).unwrap();
+            let task = obj.task.unwrap();
+            let ghost prior = notes@;
+            notes.push(Outbound::Execute {
+                id: id.clone(),
+                version: task.version,
+            });
+            proof {
+                lemma_notes_push(prior, notes@[prior.len() as int]);
+            }
+        }
+        assert(notes_v(notes@) == spec_execute_notes(
+            old@,
+            new@,
+            committed_at,
+            spec_sorted_present(new@),
+            (i + 1) as nat,
+        ));
+        i += 1;
+    }
+    let ghost execute_notes = notes@;
+    let mut j = 0;
+    while j < old.entries.len()
+        invariant
+            j <= old.entries.len(),
+            spec_sorted_entries(old.entries@),
+            spec_sorted_present(old@) == spec_keys_of(old.entries@),
+            notes_v(notes@) == notes_v(execute_notes)
+                + spec_unblock_notes(
+                    old@,
+                    new@,
+                    spec_sorted_present(old@),
+                    j as nat,
+                ),
+        decreases old.entries.len() - j,
+    {
+        let promise = &old.entries[j].0;
+        assert(spec_sorted_present(old@)[j as int] == promise@);
+        assert(old@.contains_key(promise@)) by {
+            lemma_objs_key(old.entries@, promise@);
+        }
+        let old_obj = old.get(promise).unwrap();
+        let mut k = 0;
+        let ghost before_promise_notes = notes@;
+        while k < old_obj.promise.listeners.len()
+            invariant
+                k <= old_obj.promise.listeners.len(),
+                old@.contains_key(promise@),
+                old_obj@ == old@[promise@],
+                notes_v(notes@) == notes_v(before_promise_notes)
+                    + spec_unblock_notes_for(
+                        old@,
+                        new@,
+                        promise@,
+                        strs_v(old_obj.promise.listeners@),
+                        k as nat,
+                    ),
+            decreases old_obj.promise.listeners.len() - k,
+        {
+            let address = &old_obj.promise.listeners[k];
+            assert(strs_v(old_obj.promise.listeners@)[k as int] == address@);
+            if listener_is_committed(old, new, promise, address) {
+                let new_obj = new.get(promise).unwrap();
+                let promise_record = record(promise, &new_obj.promise);
+                let ghost prior = notes@;
+                let outbound = Outbound::Unblock {
+                    address: address.clone(),
+                    promise: promise_record,
+                };
+                let ghost outbound_v = outbound@;
+                notes.push(outbound);
+                proof {
+                    crate::interpret::lemma_string_of(*promise);
+                    lemma_notes_push(prior, notes@[prior.len() as int]);
+                    assert(outbound_v == NoteV::Unblock {
+                        address: address@,
+                        promise: spec_record(*promise, new_obj.promise@),
+                    });
+                    assert(new_obj@ == new@[promise@]);
+                }
+            }
+            assert(notes_v(notes@) == notes_v(before_promise_notes)
+                + spec_unblock_notes_for(
+                    old@,
+                    new@,
+                    promise@,
+                    strs_v(old_obj.promise.listeners@),
+                    (k + 1) as nat,
+                ));
+            k += 1;
+        }
+        assert(notes_v(notes@) == notes_v(execute_notes)
+            + spec_unblock_notes(
+                old@,
+                new@,
+                spec_sorted_present(old@),
+                (j + 1) as nat,
+            ));
+        j += 1;
+    }
+    notes
+}
+
 /// One complete request transition.
 ///
-/// Time-driven work already due is drained before the raw handler, so reads
+/// Workflow work already due is drained before the raw handler, so reads
 /// and errors persist the projection they observed.  Work made immediately
 /// due by the handler is drained afterwards.  This includes the first
 /// Execute (and rearm) for runnable creates, releases, continues, and
@@ -4167,11 +4505,31 @@ pub fn request_transition(
         (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
             == spec_request_transition(from@, *request, now, retry_timeout, limit as nat),
 {
+    let original = copy(&from);
+    if matches!(from, DocumentBody::Schedule(_)) {
+        let (doc, response) = handle(from, request, now);
+        let Some(document) = request_document(request) else {
+            return (
+                original,
+                unavailable(request),
+                Vec::new(),
+                Vec::new(),
+            );
+        };
+        if body_well_formed_for(&document, &doc, now) {
+            return (doc, response, Vec::new(), Vec::new());
+        }
+        return (
+            original,
+            unavailable(request),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
     proof {
         lemma_pend_empty();
         lemma_notes_empty();
     }
-    let original = copy(&from);
     let (before, mut born_before, mut notes_before) =
         sweep(from, now, retry_timeout, limit);
     if due(&before, now) {
@@ -4222,7 +4580,11 @@ pub fn request_transition(
         lemma_map_values_add(b0, b1);
         lemma_notes_add(n0, n1);
     }
-    (after, response, born_before, notes_before)
+    // The endpoint pair is authoritative.  Canonicalizing here cancels a
+    // pre-sweep Execute consumed by the handler and gives one sequence entry
+    // per protocol key, independent of intermediate sweep order.
+    let notes = committed_notes(&original, &after, now);
+    (after, response, born_before, notes)
 }
 
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
@@ -5212,6 +5574,190 @@ pub struct PendingV {
 pub enum NoteV {
     Execute { id: Seq<char>, version: u64 },
     Unblock { address: Seq<char>, promise: PromiseRecord },
+}
+
+/// Idempotency key of an outbound protocol effect.
+pub enum NoteKeyV {
+    Execute(Seq<char>),
+    Unblock(Seq<char>, Seq<char>),
+}
+
+pub open spec fn spec_note_key(note: NoteV) -> NoteKeyV {
+    match note {
+        NoteV::Execute { id, .. } => NoteKeyV::Execute(id),
+        NoteV::Unblock { address, promise } => NoteKeyV::Unblock(promise.id@, address),
+    }
+}
+
+pub open spec fn spec_note_relevant(doc: DocumentBodyV, note: NoteV) -> bool {
+    match note {
+        NoteV::Execute { id, version } => {
+            let objects = spec_workflow_map(doc);
+            objects.contains_key(id)
+                && match objects[id].task {
+                    Some(task) => task.state == TaskState::Pending && task.version == version,
+                    None => false,
+                }
+        },
+        NoteV::Unblock { .. } => true,
+    }
+}
+
+pub open spec fn spec_keyed_insert(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    note: NoteV,
+) -> Seq<NoteV> {
+    if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < notes.len()
+        && spec_note_key(notes[i]) == spec_note_key(note)
+    {
+        notes
+    } else {
+        notes.push(note)
+    }
+}
+
+pub open spec fn spec_keyed_notes(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        spec_keyed_insert(
+            doc,
+            spec_keyed_notes(doc, notes, (count - 1) as nat),
+            notes[count as int - 1],
+        )
+    }
+}
+
+pub open spec fn spec_execute_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    committed_at: u64,
+    keys: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_execute_notes(before, after, committed_at, keys, (count - 1) as nat);
+        let id = keys[count as int - 1];
+        if crate::document::offer_committed(before, after, id, committed_at) {
+            prior.push(NoteV::Execute {
+                id,
+                version: after[id].task.unwrap().version,
+            })
+        } else {
+            prior
+        }
+    }
+}
+
+pub open spec fn spec_unblock_notes_for(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    promise: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            (count - 1) as nat,
+        );
+        let address = listeners[count as int - 1];
+        if crate::document::listener_committed(before, after, promise, address) {
+            prior.push(NoteV::Unblock {
+                address,
+                promise: spec_record(spec_string(promise), after[promise].promise),
+            })
+        } else {
+            prior
+        }
+    }
+}
+
+pub open spec fn spec_unblock_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_unblock_notes(before, after, keys, (count - 1) as nat);
+        let promise = keys[count as int - 1];
+        prior + spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            before[promise].promise.listeners,
+            before[promise].promise.listeners.len(),
+        )
+    }
+}
+
+/// Canonical imperative representation of the endpoint-derived effect set.
+pub open spec fn spec_committed_notes(
+    before: DocumentBodyV,
+    after: DocumentBodyV,
+    committed_at: u64,
+) -> Seq<NoteV> {
+    match (before, after) {
+        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) => {
+            let new_keys = spec_sorted_present(new);
+            let old_keys = spec_sorted_present(old);
+            spec_execute_notes(old, new, committed_at, new_keys, new_keys.len())
+                + spec_unblock_notes(old, new, old_keys, old_keys.len())
+        },
+        _ => Seq::empty(),
+    }
+}
+
+pub proof fn lemma_keyed_notes_from_input(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+    k: int,
+)
+    requires
+        count <= notes.len(),
+        0 <= k < spec_keyed_notes(doc, notes, count).len(),
+    ensures
+        exists|j: int| 0 <= j < count
+            && spec_keyed_notes(doc, notes, count)[k] == notes[j],
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_keyed_notes(doc, notes, (count - 1) as nat);
+        let note = notes[count as int - 1];
+        if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < prior.len()
+            && spec_note_key(prior[i]) == spec_note_key(note)
+        {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else if k < prior.len() {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else {
+            assert(k == prior.len());
+        }
+    }
 }
 
 /// What the open flight is doing.
@@ -6372,17 +6918,28 @@ pub open spec fn spec_request_commits(
     retry_timeout: u64,
     limit: nat,
 ) -> bool {
-    let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
-    if spec_earliest_in(before, now) is Some {
-        false
-    } else {
-        let (handled, _) = spec_handle(before, request, now);
-        let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
-        &&& spec_earliest_in(after, now) is None
-        &&& match spec_request_document(request) {
-            Some(document) =>
-                crate::document::body_well_formed(document, after, now),
-            None => false,
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (handled, _) = spec_handle(doc, request, now);
+            match spec_request_document(request) {
+                Some(document) => crate::document::body_well_formed(document, handled, now),
+                None => false,
+            }
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(before, now) is Some {
+                false
+            } else {
+                let (handled, _) = spec_handle(before, request, now);
+                let (after, _, _) = spec_sweep(handled, now, retry_timeout, limit);
+                &&& spec_earliest_in(after, now) is None
+                &&& match spec_request_document(request) {
+                    Some(document) =>
+                        crate::document::body_well_formed(document, after, now),
+                    None => false,
+                }
+            }
         }
     }
 }
@@ -6394,31 +6951,45 @@ pub open spec fn spec_request_transition(
     retry_timeout: u64,
     limit: nat,
 ) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
-    let (before, born_before, notes_before) =
-        spec_sweep(doc, now, retry_timeout, limit);
-    if spec_earliest_in(before, now) is Some {
-        (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
-    } else {
-        let (handled, response) = spec_handle(before, request, now);
-        let (after, born_after, notes_after) =
-            spec_sweep(handled, now, retry_timeout, limit);
-        if spec_earliest_in(after, now) is Some {
-            (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
-        } else {
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (handled, response) = spec_handle(doc, request, now);
             match spec_request_document(request) {
-                Some(document) if crate::document::body_well_formed(
-                    document,
-                    after,
-                    now,
-                ) => (
-                    after,
-                    response,
-                    born_before + born_after,
-                    notes_before + notes_after,
-                ),
+                Some(document) if crate::document::body_well_formed(document, handled, now) =>
+                    (handled, response, Seq::empty(), Seq::empty()),
                 _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
             }
-        }
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (before, born_before, notes_before) =
+                spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(before, now) is Some {
+                (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+            } else {
+                let (handled, response) = spec_handle(before, request, now);
+                let (after, born_after, notes_after) =
+                    spec_sweep(handled, now, retry_timeout, limit);
+                if spec_earliest_in(after, now) is Some {
+                    (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+                } else {
+                    match spec_request_document(request) {
+                        Some(document) if crate::document::body_well_formed(
+                            document,
+                            after,
+                            now,
+                        ) => {
+                            (
+                                after,
+                                response,
+                                born_before + born_after,
+                                spec_committed_notes(doc, after, now),
+                            )
+                        },
+                        _ => (doc, spec_unavailable(request), Seq::empty(), Seq::empty()),
+                    }
+                }
+            }
+        },
     }
 }
 

@@ -33,10 +33,11 @@ use crate::model::{
 use crate::node::{
     axiom_decode_encode_body, spec_begin, spec_body_is_empty, spec_cached, spec_cached_from,
     spec_commit, spec_decide, spec_earliest_from, spec_earliest_key, spec_empty_body,
-    spec_encode_body, spec_flight, spec_forget, spec_handle, spec_keep, spec_key, spec_occurrence,
-    spec_owns, spec_pure, spec_read, spec_remember, spec_request, spec_request_commits,
-    spec_request_transition, spec_run_due, spec_store_reply, spec_sweep, spec_timeout,
-    spec_unavailable, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, REQUEST_STEPS,
+    spec_encode_body, spec_flight, spec_forget, spec_handle, spec_keep, spec_key,
+    spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
+    spec_request_commits, spec_request_transition, spec_run_due, spec_store_reply, spec_sweep,
+    spec_timeout, spec_unavailable, lemma_keyed_notes_from_input, CachedV, DocumentBodyV,
+    FlightV, JobV, NoteV, PendingV, REQUEST_STEPS,
 };
 #[cfg(verus_keep_ghost)]
 use crate::relation::*;
@@ -3216,6 +3217,60 @@ pub proof fn lemma_request_commit_matches(
         }),
 {
     let state = astate(before_a);
+    if doc is Schedule {
+        assert(request_agrees(
+            config,
+            call.request,
+            key,
+            doc,
+            state.store,
+            at,
+        ));
+        let (next, response) = spec_handle(doc, call.request, at);
+        let outs = spec_handler(config, call.request, state.store, at);
+        assert(outs.len() == 1);
+        assert(outs[0].resp == response);
+        assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
+        assert(outs[0].send =~= Seq::<echod_abstract::view::DispatchV>::empty());
+        let event = ProcessEvent::Receive {
+            sender: APid::Outside,
+            message: AMessage::Request(call),
+        };
+        assert(event_valid(before_a, APid::Service, event));
+        let outcomes = abstract_model().spec_on_event(
+            config,
+            APid::Service,
+            state,
+            at,
+            event,
+        );
+        let served = spec_run(config, state, call, at);
+        assert(served.len() == 1);
+        assert(outcomes[0] == served[0]);
+        let last = lemma_service_step(config, before_a, at, event, 0);
+        assert(astate(last).store == outs[0].next);
+        assert(astate(last).pending == state.pending);
+        assert(doc_rel(key, next, astate(last).store));
+        assert(others_kept(key, state.store, astate(last).store));
+        assert(finite_store(astate(last).store));
+        lemma_send_is_reply(before_a.network, call, response);
+        assert(service_output(
+            last.network,
+            reply_output(call.client@, call.id, response),
+        ));
+        let (actual_next, actual_response, born, notes) = spec_request_transition(
+            doc,
+            call.request,
+            at,
+            config.retry_timeout,
+            limit,
+        );
+        assert(actual_next == next);
+        assert(actual_response == response);
+        assert(born =~= Seq::<PendingV>::empty());
+        assert(notes =~= Seq::<NoteV>::empty());
+        return last;
+    }
     let (before, born_before, notes_before) =
         spec_sweep(doc, at, config.retry_timeout, limit);
     let swept_a =
@@ -3282,7 +3337,12 @@ pub proof fn lemma_request_commit_matches(
     assert(next == after);
     assert(response == raw_response);
     assert(born == born_before + born_after);
-    assert(notes == notes_before + notes_after);
+    let all_notes = notes_before + notes_after;
+    assert(notes == crate::node::spec_keyed_notes(
+        after,
+        all_notes,
+        all_notes.len() as nat,
+    ));
     assert(astate(last).pending == state.pending + items(born));
     assert forall|other: Seq<char>, body: DocumentBodyV|
         other != key && doc_rel(other, body, state.store)
@@ -3306,20 +3366,29 @@ pub proof fn lemma_request_commit_matches(
             last.network,
             note_output(#[trigger] notes[k]),
         ) by {
-        if k < notes_before.len() {
+        lemma_keyed_notes_from_input(
+            after,
+            all_notes,
+            all_notes.len() as nat,
+            k,
+        );
+        let j = choose|j: int| 0 <= j < all_notes.len()
+            && notes[k] == all_notes[j];
+        if j < notes_before.len() {
+            assert(all_notes[j] == notes_before[j]);
             assert(service_output(
                 swept_a.network,
-                note_output(notes_before[k]),
+                note_output(notes_before[j]),
             ));
             lemma_service_output_monotone(
                 swept_a.network,
                 last.network,
-                note_output(notes_before[k]),
+                note_output(notes_before[j]),
             );
         } else {
-            let j = k - notes_before.len();
+            let q = j - notes_before.len();
             lemma_note_sends(handled_a.network, notes_after);
-            assert(notes[k] == notes_after[j]);
+            assert(all_notes[j] == notes_after[q]);
         }
     };
     last

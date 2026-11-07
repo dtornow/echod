@@ -19,13 +19,11 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use echod_abstract::types::{
-    PromiseRes, Request, Response, ScheduleRes, StatusRes, TaskClaimRes, TaskFenceRes, TaskGetRes,
-};
+use echod_abstract::types::{Request, Response};
 use echod_abstract::{Dispatch, Key, ServerConfig, Store, Work};
 use echod_rover::{
     Checker, Config, Event, ExternalOutcome, Footprint, Grouped, InternalOutcome, Model,
-    Partitioned, Sched, Touches, Violation,
+    Partitioned, Touches, Violation,
 };
 
 use crate::bus::Sent;
@@ -45,125 +43,6 @@ pub struct TimedRequest {
 
 struct TimedServer(ServerConfig);
 
-#[derive(Clone)]
-enum Document {
-    Workflow(String),
-    Schedule(String),
-}
-
-impl TimedServer {
-    fn unavailable(req: &Request) -> Response {
-        match req {
-            Request::PromiseGet(_)
-            | Request::PromiseCreate(_)
-            | Request::PromiseSettle(_)
-            | Request::PromiseRegisterCallback(_)
-            | Request::PromiseRegisterListener(_)
-            | Request::TaskFulfill(_) => Response::Promise(PromiseRes {
-                status: 503,
-                promise: None,
-            }),
-            Request::ScheduleGet(_) | Request::ScheduleCreate(_) => {
-                Response::Schedule(ScheduleRes {
-                    status: 503,
-                    schedule: None,
-                })
-            }
-            Request::ScheduleDelete(_)
-            | Request::TaskRelease(_)
-            | Request::TaskHalt(_)
-            | Request::TaskContinue(_)
-            | Request::TaskHeartbeat(_)
-            | Request::TaskSuspend(_)
-            | Request::TaskFenceCheck(_) => Response::Status(StatusRes { status: 503 }),
-            Request::TaskGet(_) => Response::TaskGet(TaskGetRes {
-                status: 503,
-                task: None,
-            }),
-            Request::TaskCreate(_) | Request::TaskAcquire(_) => Response::TaskClaim(TaskClaimRes {
-                status: 503,
-                task: None,
-                promise: None,
-            }),
-            Request::TaskFence(_) => Response::TaskFence(TaskFenceRes {
-                status: 503,
-                action: None,
-            }),
-        }
-    }
-
-    fn document(&self, req: &Request) -> Option<Document> {
-        let Touches::Only(keys) = self.0.external_touches(req) else {
-            return None;
-        };
-        match keys.first() {
-            Some(Key::Object(id)) => Some(Document::Workflow(
-                echod_abstract::types::origin_of(id).to_owned(),
-            )),
-            Some(Key::Schedule(id)) => Some(Document::Schedule(id.clone())),
-            _ => None,
-        }
-    }
-
-    fn belongs(document: &Document, work: &Work) -> bool {
-        match (document, work) {
-            (
-                Document::Workflow(origin),
-                Work::PromiseTimeout(id)
-                | Work::TaskLeaseTimeout(id)
-                | Work::TaskRetryTimeout(id)
-                | Work::Listener { awaited: id, .. },
-            ) => echod_abstract::types::origin_of(id) == origin,
-            (Document::Workflow(origin), Work::Callback { awaited, .. }) => {
-                echod_abstract::types::origin_of(awaited) == origin
-            }
-            (Document::Schedule(expected), Work::ScheduleTimeout { id, .. }) => id == expected,
-            _ => false,
-        }
-    }
-
-    /// Close one document at the request's preserved decision instant.
-    fn close(
-        &self,
-        mut state: Store,
-        document: &Document,
-        at: u64,
-    ) -> (
-        Store,
-        Vec<Sched<Work>>,
-        Vec<Dispatch>,
-        Vec<&'static str>,
-        bool,
-    ) {
-        let mut deferred = Vec::new();
-        let mut send = Vec::new();
-        let mut marks = Vec::new();
-        for _ in 0..echod_logic::handler_docs::SWEEP_STEPS {
-            let Some(step) = self
-                .0
-                .due(&state, at)
-                .into_iter()
-                .find(|step| Self::belongs(document, step.req()))
-            else {
-                break;
-            };
-            let Some(outcome) = self.0.internal(step.req(), &state, at).into_iter().next() else {
-                break;
-            };
-            state = outcome.next;
-            deferred.extend(outcome.work);
-            send.extend(outcome.send);
-            marks.extend(outcome.marks);
-        }
-        let closed = !self
-            .0
-            .due(&state, at)
-            .iter()
-            .any(|step| Self::belongs(document, step.req()));
-        (state, deferred, send, marks, closed)
-    }
-}
-
 impl Model for TimedServer {
     type State = Store;
     type External = TimedRequest;
@@ -172,48 +51,15 @@ impl Model for TimedServer {
     type Dispatch = Dispatch;
 
     fn external(&self, op: &TimedRequest, state: &Store, _now: u64) -> Vec<ExternalOutcome<Self>> {
-        let Some(document) = self.document(&op.req) else {
-            return self
-                .0
-                .external(&op.req, state, op.at)
-                .into_iter()
-                .map(|o| ExternalOutcome {
-                    next: o.next,
-                    resp: o.resp,
-                    work: o.work,
-                    send: o.send,
-                    marks: o.marks,
-                })
-                .collect();
-        };
-        let (before, before_work, before_send, before_marks, before_closed) =
-            self.close(state.clone(), &document, op.at);
-        if !before_closed {
-            return vec![ExternalOutcome::same(Self::unavailable(&op.req), state)];
-        }
         self.0
-            .external(&op.req, &before, op.at)
+            .external(&op.req, state, op.at)
             .into_iter()
-            .map(|o| {
-                let (next, mut after_work, mut after_send, mut after_marks, after_closed) =
-                    self.close(o.next, &document, op.at);
-                if !after_closed {
-                    return ExternalOutcome::same(Self::unavailable(&op.req), state);
-                }
-                let mut work = before_work.clone();
-                work.append(&mut after_work);
-                let mut send = before_send.clone();
-                send.append(&mut after_send);
-                let mut marks = before_marks.clone();
-                marks.extend(o.marks);
-                marks.append(&mut after_marks);
-                ExternalOutcome {
-                    next,
-                    resp: o.resp,
-                    work,
-                    send,
-                    marks,
-                }
+            .map(|o| ExternalOutcome {
+                next: o.next,
+                resp: o.resp,
+                work: o.work,
+                send: o.send,
+                marks: o.marks,
             })
             .collect()
     }
