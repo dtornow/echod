@@ -3851,21 +3851,12 @@ pub fn request_transition(
         (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
             == spec_request_transition(doc@, *request, now, retry_timeout, limit as nat),
 {
-    let ghost initial = doc@;
     let workflow = match &doc {
         DocumentBody::Workflow(_) => true,
         DocumentBody::Schedule(_) => false,
     };
     if !workflow {
         let (doc, response) = handle(doc, request, now);
-        proof {
-            crate::effects::lemma_schedule_has_no_effects(
-                initial,
-                doc@,
-                now,
-                retry_timeout,
-            );
-        }
         return (doc, response, Vec::new(), Vec::new());
     }
 
@@ -3876,26 +3867,12 @@ pub fn request_transition(
     let original = copy(&doc);
     let (before, mut born, mut notes) = sweep(doc, now, retry_timeout, limit);
     if due(&before, now) {
-        proof {
-            crate::effects::lemma_same_document_has_no_effects(
-                original@,
-                now,
-                retry_timeout,
-            );
-        }
         return (original, unavailable(request), Vec::new(), Vec::new());
     }
     let (handled, response) = handle(before, request, now);
     let (after, mut more_born, mut more_notes) =
         sweep(handled, now, retry_timeout, limit);
     if due(&after, now) {
-        proof {
-            crate::effects::lemma_same_document_has_no_effects(
-                original@,
-                now,
-                retry_timeout,
-            );
-        }
         return (original, unavailable(request), Vec::new(), Vec::new());
     }
     let ghost born0 = born@;

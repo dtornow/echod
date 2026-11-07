@@ -394,22 +394,21 @@ pub open spec fn offer_committed(
     before: Map<Seq<char>, ObjV>,
     after: Map<Seq<char>, ObjV>,
     id: Seq<char>,
-    now: u64,
-    retry_timeout: u64,
+    committed_at: u64,
 ) -> bool {
     after.contains_key(id)
         && match after[id].task {
             Some(new) => {
                 &&& after[id].promise.state == PromiseState::Pending
                 &&& new.state == TaskState::Pending
-                &&& new.retry_timeout_at
-                    == Some(crate::store::spec_sat_add(now, retry_timeout))
+                &&& new.retry_timeout_at is Some
+                &&& new.retry_timeout_at.unwrap() > committed_at
                 &&& (!before.contains_key(id) || before[id] != after[id])
                 &&& if before.contains_key(id) {
                     match before[id].task {
                         Some(old) if old.state == TaskState::Pending =>
                             match old.retry_timeout_at {
-                                Some(at) => at <= now,
+                                Some(at) => at <= committed_at,
                                 None => true,
                             },
                         _ => true,
@@ -440,12 +439,11 @@ pub open spec fn listener_committed(
 pub open spec fn workflow_effects(
     before: Map<Seq<char>, ObjV>,
     after: Map<Seq<char>, ObjV>,
-    now: u64,
-    retry_timeout: u64,
+    committed_at: u64,
 ) -> ISet<ProtocolEffectV> {
     ISet::new(|effect: ProtocolEffectV| match effect {
         ProtocolEffectV::Execute { id, version } =>
-            offer_committed(before, after, id, now, retry_timeout)
+            offer_committed(before, after, id, committed_at)
                 && after[id].task.unwrap().version == version,
         ProtocolEffectV::Unblock { promise, address, record } =>
             listener_committed(before, after, promise, address)
@@ -453,17 +451,15 @@ pub open spec fn workflow_effects(
     })
 }
 
-/// Effects are derived from the two logical document bodies alone, plus the
-/// commit clock and configured retry delay needed to recognize a rearm.
+/// Effects are derived from the two complete logical documents alone. The
+/// new document's `committed_at` is the comparison clock.
 pub open spec fn document_effects(
-    before: DocumentBodyV,
-    after: DocumentBodyV,
-    now: u64,
-    retry_timeout: u64,
+    before: StoredDocumentV,
+    after: StoredDocumentV,
 ) -> ISet<ProtocolEffectV> {
     match (before, after) {
-        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) =>
-            workflow_effects(old, new, now, retry_timeout),
+        (StoredDocumentV::Workflow(old), StoredDocumentV::Workflow(new)) =>
+            workflow_effects(old.objects, new.objects, new.committed_at),
         _ => ISet::empty(),
     }
 }

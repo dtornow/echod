@@ -6,10 +6,10 @@ use echod_types::PromiseRecord;
 
 #[cfg(verus_keep_ghost)]
 use crate::document::{
-    document_effects, PromiseEffectV, ProtocolEffectKeyV, ProtocolEffectV,
+    document_effects, PromiseEffectV, ProtocolEffectKeyV, ProtocolEffectV, StoredDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{DocumentBodyV, NoteV};
+use crate::node::NoteV;
 
 verus! {
 
@@ -47,90 +47,14 @@ pub open spec fn note_effect_keys(notes: Seq<NoteV>) -> Seq<ProtocolEffectKeyV> 
     )
 }
 
-/// The assertion attached to every complete request transition.
+/// The assertion used by the complete request-effect theorem.
 pub open spec fn effects_match(
-    before: DocumentBodyV,
-    after: DocumentBodyV,
+    before: StoredDocumentV,
+    after: StoredDocumentV,
     notes: Seq<NoteV>,
-    now: u64,
-    retry_timeout: u64,
 ) -> bool {
-    &&& note_effects(notes) == document_effects(before, after, now, retry_timeout)
+    &&& note_effects(notes) == document_effects(before, after)
     &&& note_effect_keys(notes).no_duplicates()
-}
-
-pub proof fn lemma_same_document_has_no_effects(
-    document: DocumentBodyV,
-    now: u64,
-    retry_timeout: u64,
-)
-    ensures
-        effects_match(
-            document,
-            document,
-            Seq::<NoteV>::empty(),
-            now,
-            retry_timeout,
-        ),
-{
-    match document {
-        DocumentBodyV::Workflow(objects) => {
-            assert forall|effect: ProtocolEffectV|
-                !document_effects(
-                    document,
-                    document,
-                    now,
-                    retry_timeout,
-                ).contains(effect) by {
-                match effect {
-                    ProtocolEffectV::Execute { id, .. } => {
-                        if objects.contains_key(id) {
-                            assert(objects[id] == objects[id]);
-                        }
-                    },
-                    ProtocolEffectV::Unblock { promise, address, .. } => {
-                        if objects.contains_key(promise) {
-                            assert(
-                                objects[promise].promise.listeners.contains(address)
-                                    == objects[promise].promise.listeners.contains(address)
-                            );
-                        }
-                    },
-                }
-            };
-            assert(document_effects(document, document, now, retry_timeout)
-                =~= ISet::<ProtocolEffectV>::empty());
-        },
-        DocumentBodyV::Schedule(_) => {},
-    }
-    assert(Seq::<NoteV>::empty()
-        .map_values(|note: NoteV| note_effect(note))
-        =~= Seq::<ProtocolEffectV>::empty());
-    assert(note_effects(Seq::<NoteV>::empty()) =~= ISet::<ProtocolEffectV>::empty());
-    assert(note_effect_keys(Seq::<NoteV>::empty()) =~= Seq::<ProtocolEffectKeyV>::empty());
-}
-
-pub proof fn lemma_schedule_has_no_effects(
-    before: DocumentBodyV,
-    after: DocumentBodyV,
-    now: u64,
-    retry_timeout: u64,
-)
-    requires
-        before is Schedule,
-    ensures
-        effects_match(
-            before,
-            after,
-            Seq::<NoteV>::empty(),
-            now,
-            retry_timeout,
-        ),
-{
-    assert(document_effects(before, after, now, retry_timeout)
-        =~= ISet::<ProtocolEffectV>::empty());
-    assert(note_effects(Seq::<NoteV>::empty()) =~= ISet::<ProtocolEffectV>::empty());
-    assert(note_effect_keys(Seq::<NoteV>::empty()) =~= Seq::<ProtocolEffectKeyV>::empty());
 }
 
 } // verus!
