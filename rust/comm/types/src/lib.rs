@@ -49,13 +49,6 @@ pub fn deadline_bounded(at: u64, duration: u64) -> (bounded: bool)
     at <= MAX_TIME && duration <= MAX_TIME && at <= MAX_TIME - duration
 }
 
-pub fn version_can_increment(version: u64) -> (can_increment: bool)
-    ensures
-        can_increment == (version < MAX_VERSION),
-{
-    version < MAX_VERSION
-}
-
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
