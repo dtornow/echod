@@ -34,15 +34,9 @@ def minimumTime? : List Time → Option Time
   | first :: rest => some (rest.foldl min first)
 
 def OriginObject.deadlines {origin : String}
-    (object : OriginObject origin) (now : Time) : List Time :=
+    (object : OriginObject origin) (_now : Time) : List Time :=
   let promise :=
-    if object.promise.state == .pending then
-      [object.promise.timeoutAt]
-    else if !object.promise.callbacks.isEmpty ||
-        !object.promise.listeners.isEmpty then
-      [now]
-    else
-      []
+    if object.promise.state == .pending then [object.promise.timeoutAt] else []
   let task :=
     match object.task with
     | none => []
@@ -372,12 +366,25 @@ def Candidate.cast {left right : DocumentKey} (h : left = right)
     (candidate : Candidate left) : Candidate right :=
   h ▸ candidate
 
+/-- A workflow request drains the document on both sides of its handler.
+Schedule documents retain their separate occurrence workflow. -/
+def completeDecision (key : DocumentKey) (now : Time)
+    (action : Decision.Handler key α) : Decision.Handler key α :=
+  match key with
+  | .origin origin => do
+      Decision.sweepOrigin origin now
+      let result ← action
+      Decision.sweepOrigin origin now
+      return result
+  | .schedule _ => action
+
 def externalCandidate {key : DocumentKey} (appConfig : Resonate.Config)
     (call : Call) (document : Document key)
     (action : Decision.Handler key α) (wrap : α → Response) :
     Candidate key :=
   let (response, next, emitted) :=
-    Decision.run appConfig.toServerConfig action document
+    Decision.run appConfig.toServerConfig
+      (completeDecision key call.requestedAt action) document
   { document := next
     outputs := .response call.client call.id (wrap response) ::
       emitted.map .message

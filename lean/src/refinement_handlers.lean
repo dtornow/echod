@@ -454,6 +454,46 @@ theorem map_norm_suffix {origin : String} (document : OriginDocument origin) :
   rw [List.map_map]
   rfl
 
+theorem origin_rows_suffixes (objects : List Object) (origin : String) :
+    ((objects.filterMap (Object.toOriginRow? origin)).map OriginObject.suffix) =
+      (objects.filter (·.id.origin == origin)).map (·.id.suffix) := by
+  induction objects with
+  | nil => rfl
+  | cons object objects ih =>
+      simp only [List.filterMap_cons, List.filter_cons]
+      by_cases h : object.id.origin = origin
+      · simp [Object.toOriginRow?, h, ih]
+      · simp [Object.toOriginRow?, h, ih]
+
+theorem sortStrings_eq_of_perm {left right : List String}
+    (h : left.Perm right) :
+    sortStrings left = sortStrings right := by
+  apply List.Perm.eq_of_pairwise (le := fun a b : String => a ≤ b)
+  · intro a b _ _ hab hba
+    exact String.le_antisymm hab hba
+  · simpa only [sortStrings, decide_eq_true_eq] using
+      (List.pairwise_mergeSort
+        (le := fun a b : String => decide (a ≤ b))
+        (fun _ _ _ hab hbc => by
+          simp only [decide_eq_true_eq] at hab hbc ⊢
+          exact String.le_trans hab hbc)
+        (fun a b => by
+          simp only [Bool.or_eq_true, decide_eq_true_eq]
+          exact String.le_total a b)
+        left)
+  · simpa only [sortStrings, decide_eq_true_eq] using
+      (List.pairwise_mergeSort
+        (le := fun a b : String => decide (a ≤ b))
+        (fun _ _ _ hab hbc => by
+          simp only [decide_eq_true_eq] at hab hbc ⊢
+          exact String.le_trans hab hbc)
+        (fun a b => by
+          simp only [Bool.or_eq_true, decide_eq_true_eq]
+          exact String.le_total a b)
+        right)
+  · exact (List.mergeSort_perm _ _).trans
+      (h.trans (List.mergeSort_perm _ _).symm)
+
 theorem find?_map_norm {origin : String} (document : OriginDocument origin) (s : String) :
     (document.map (·.norm)).find? (·.suffix == s) =
       (document.find? (·.suffix == s)).map (·.norm) := by
@@ -698,17 +738,197 @@ theorem Object.project_settled (o : Object) {p : PromiseObject} (now : Nat)
       { o with promise := p, task := o.task.map (·.project p) } := by
   simp [Object.project, h, AbstractModel.TaskObject.project]
 
+theorem ask_sim_early {key : DocumentKey} {P : Document key → Prop} :
+    Sim key P Eq (fun _ d => P d) Abstract.ask
+      (Concrete.Decision.ask (key := key)) := by
+  intro env store document hunique hdoc hp
+  exact ⟨rfl, hp, Same.write_of hdoc, rfl, hunique⟩
+
+theorem setMessage_sim_early {key : DocumentKey} (address : String)
+    (message : ServerModel.Message) {P : Document key → Prop} :
+    Sim key P Eq (fun _ d => P d) (Abstract.setMessage address message)
+      (Concrete.Decision.setMessage (key := key) address message) := by
+  intro env store document hunique hdoc hp
+  exact ⟨rfl, hp, Same.write_of hdoc, rfl, hunique⟩
+
+theorem dispatchTask_sim {origin : String} (row : OriginObject origin)
+    (task : TaskObject) (now : Nat) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P Eq (fun _ _ => True)
+      (Abstract.dispatchTask (Object.ofOrigin row) task now)
+      (Concrete.Decision.dispatchTask row task now) := by
+  unfold Abstract.dispatchTask Concrete.Decision.dispatchTask
+  refine Sim.bind ask_sim_early ?_
+  intro abstractEnv concreteEnv henv
+  subst henv
+  let next := { task with
+    retryTimeoutAt := some (now + abstractEnv.config.retryTimeout) }
+  refine Sim.seq (setObject_sim ({ row with task := some next }) rfl) ?_
+  exact Sim.post (fun _ _ _ => trivial)
+    (setMessage_sim_early
+      ((row.promise.tags.get? "resonate:target").getD "")
+      (.execute row.id task.version))
+
+theorem dispatchIfDue_sim {origin : String} (row : OriginObject origin)
+    (now : Nat) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P Eq (fun _ _ => True)
+      (Abstract.dispatchIfDue (Object.ofOrigin row) now)
+      (Concrete.Decision.dispatchIfDue row now) := by
+  obtain ⟨suffix, promise, task?⟩ := row
+  unfold Abstract.dispatchIfDue Concrete.Decision.dispatchIfDue
+  cases task? with
+  | none =>
+      simp [Object.ofOrigin]
+      exact Sim.pure (P := P) (R := Eq) (Q := fun _ _ => True)
+        rfl (fun _ _ => trivial)
+  | some task =>
+      simp only [Object.ofOrigin]
+      refine Sim.ite _
+        (fun _ => dispatchTask_sim
+          (⟨suffix, promise, some task⟩ : OriginObject origin) task now)
+        (fun _ => Sim.pure (P := P) (R := Eq)
+          (Q := fun _ _ => True) rfl (fun _ _ => trivial))
+
+theorem readTask_sim_early' (id : Ident) (now : Nat) {origin : String}
+    (h : id.origin = origin) {P : Document (.origin origin) → Prop} :
+    Sim (.origin origin) P (TaskRel origin id.suffix)
+      (fun _ d => P d) (Abstract.readTask id now)
+      (Concrete.Decision.readTask (origin := origin) id.suffix now) := by
+  subst h
+  exact readTask_sim id now
+
+theorem TaskRel_cases_early {origin suffix : String}
+    {P : Option (Object × TaskObject) →
+      Option (OriginObject origin × TaskObject) → Prop}
+    (hnone : P none none)
+    (hsome : ∀ promise task,
+      P (some (Object.ofOrigin
+          (⟨suffix, promise, some task⟩ : OriginObject origin), task))
+        (some (⟨suffix, promise, some task⟩, task))) :
+    ∀ a c, TaskRel origin suffix a c → P a c := by
+  rintro a (_ | ⟨⟨rowSuffix, promise, current⟩, task⟩) ⟨rfl, h⟩
+  · exact hnone
+  · obtain ⟨hs, ht⟩ := h _ _ rfl
+    simp only at hs ht
+    subst hs ht
+    exact hsome promise task
+
+theorem resumeOne_sim_early (awaited awaiter : Ident) (now : Nat)
+    {origin : String} (h : awaited.origin = origin) :
+    Sim (.origin origin) (fun _ => True) Eq (fun _ _ => True)
+      (Abstract.resumeOne awaited awaiter now)
+      (h ▸ Concrete.Decision.resumeOne awaited awaiter now) := by
+  obtain ⟨awaitedOrigin, awaitedSuffix⟩ := awaited
+  obtain ⟨awaiterOrigin, awaiterSuffix⟩ := awaiter
+  simp only at h
+  subst origin
+  unfold Abstract.resumeOne Concrete.Decision.resumeOne
+  by_cases hlocal : awaitedOrigin = awaiterOrigin
+  · subst awaiterOrigin
+    simp only [Ident.sameOrigin, beq_self_eq_true, Bool.not_true,
+      Bool.false_eq_true, ↓reduceIte]
+    refine Sim.bind
+      (Sim.pure (P := fun _ => True) (R := Eq)
+        (Q := fun _ _ => True) rfl (fun _ _ => trivial)) ?_
+    intro _ _ hunit
+    subst hunit
+    let awaiter : Ident := { origin := awaitedOrigin, suffix := awaiterSuffix }
+    refine Sim.bind
+      (readTask_sim awaiter now (P := fun _ => True)) ?_
+    refine TaskRel_cases_early (Sim.pure rfl (fun _ _ => trivial)) ?_
+    intro promise task
+    cases hstate : task.state with
+    | suspended =>
+        simpa [hstate, awaiter] using
+          (dispatchTask_sim
+            (⟨awaiterSuffix, promise, some task⟩ :
+              OriginObject awaitedOrigin)
+            { task with
+              state := .pending
+              pid := none
+              ttl := none
+              leaseTimeoutAt := none
+              resumes := [{ origin := awaitedOrigin, suffix := awaitedSuffix }] }
+            now)
+    | fulfilled =>
+        simp [hstate]
+        exact Sim.pure rfl (fun _ _ => trivial)
+    | pending | acquired | halted =>
+        simp only [hstate]
+        refine Sim.ite _
+          (fun _ => by
+            simpa [hstate, awaiter, Object.ofOrigin] using
+              (setObject_sim
+                ({ suffix := awaiterSuffix
+                   promise
+                   task := some { task with
+                     resumes := task.resumes ++
+                       [{ origin := awaitedOrigin, suffix := awaitedSuffix }] } } :
+                  OriginObject awaitedOrigin)
+                rfl))
+          (fun _ => Sim.pure rfl (fun _ _ => trivial))
+  · have hbeq : (awaitedOrigin == awaiterOrigin) = false := by
+      simpa [beq_iff_eq] using hlocal
+    simp [Ident.sameOrigin, hbeq]
+    exact Sim.pure rfl (fun _ _ => trivial)
+
+theorem resumeAll_sim {origin : String} (awaited : Ident) (now : Nat)
+    (h : awaited.origin = origin) :
+    ∀ callbacks : List Ident,
+      Sim (.origin origin) (fun _ => True) Eq (fun _ _ => True)
+        (Abstract.resumeAll awaited now callbacks)
+        (h ▸ Concrete.Decision.resumeAll awaited now callbacks) := by
+  subst h
+  intro callbacks
+  induction callbacks with
+  | nil => exact Sim.pure rfl (fun _ _ => trivial)
+  | cons awaiter rest ih =>
+      exact Sim.seq
+        (resumeOne_sim_early awaited awaiter now rfl) ih
+
+theorem notifyAll_sim {origin : String} (promise : PromiseObject) (id : Ident) :
+    ∀ listeners : List String,
+      Sim (.origin origin) (fun _ => True) Eq (fun _ _ => True)
+        (Abstract.notifyAll promise id listeners)
+        (Concrete.Decision.notifyAll (origin := origin) promise id listeners)
+  | [] => Sim.pure rfl (fun _ _ => trivial)
+  | address :: rest =>
+      Sim.seq
+        (Sim.post (fun _ _ _ => trivial)
+          (setMessage_sim_early address (.unblock (promise.toRecord id))))
+        (notifyAll_sim promise id rest)
+
 /-- Settling the read object writes it with the promise settled and its task
-finished. -/
+finished, drains its local callbacks, and emits every listener notification. -/
 theorem setSettled_sim {origin : String} (row : OriginObject origin) {object : Object}
     (h : Object.ofOrigin row = object) {p : PromiseObject} {now : Nat}
     (hsettled : p.state ≠ .pending) {P : Document (.origin origin) → Prop} :
     Sim (.origin origin) P Eq (fun _ _ => True) (Abstract.setSettled object p now)
-      (Concrete.Decision.setSettled row p) := by
+      (Concrete.Decision.setSettled row p now) := by
   subst h
+  let settled : PromiseObject := { p with callbacks := [], listeners := [] }
   unfold Abstract.setSettled Concrete.Decision.setSettled
-  rw [Object.project_settled _ _ hsettled]
-  exact setObject_sim _ rfl
+  change Sim (.origin origin) P Eq (fun _ _ => True)
+    (do
+      Abstract.setObject ({ Object.ofOrigin row with promise := settled }.project now)
+      Abstract.resumeAll row.id now p.callbacks
+      Abstract.notifyAll settled row.id p.listeners)
+    (do
+      Concrete.Decision.setObject
+        { row with
+          promise := settled
+          task := row.task.map (·.project settled) }
+      Concrete.Decision.resumeAll row.id now p.callbacks
+      Concrete.Decision.notifyAll settled row.id p.listeners)
+  rw [Object.project_settled _ _ (by simpa [settled] using hsettled)]
+  simp only [Object.ofOrigin]
+  refine Sim.seq
+    (setObject_sim
+      ({ row with
+        promise := settled
+        task := row.task.map (·.project settled) })
+      rfl) ?_
+  refine Sim.seq (Sim.weaken (resumeAll_sim row.id now rfl p.callbacks)) ?_
+  exact Sim.weaken (notifyAll_sim settled row.id p.listeners)
 
 theorem Concrete.bind_assoc {key : DocumentKey} (x : DocumentHandler key α)
     (f : α → DocumentHandler key β) (g : β → DocumentHandler key γ) :
@@ -1185,13 +1405,10 @@ theorem processPromiseTimeout_sim (id : Ident) (now : Nat) :
   unfold Abstract.processPromiseTimeout Concrete.Decision.processPromiseTimeout
   sim
 
-theorem resumeOne_sim (awaited awaiter : Ident) (now : Nat) {origin : String}
-    (h : awaiter.origin = origin) :
-    HandlerSim (.origin origin) (Abstract.resumeOne awaited awaiter now)
-      (Concrete.Decision.resumeOne (origin := origin) awaited awaiter now) := by
-  subst h
-  unfold Abstract.resumeOne Concrete.Decision.resumeOne
-  sim
+theorem resumeOne_sim (awaited awaiter : Ident) (now : Nat) :
+    HandlerSim (.origin awaited.origin) (Abstract.resumeOne awaited awaiter now)
+      (Concrete.Decision.resumeOne awaited awaiter now) := by
+  apply resumeOne_sim_early awaited awaiter now rfl
 
 /-- The concrete callback step checks that the awaiter shares the awaited
 origin; the abstract step relies on every registered callback doing so. -/
@@ -1221,6 +1438,40 @@ theorem processRetryTimeout_sim (id : Ident) (now : Nat) :
       (Concrete.Decision.processRetryTimeout id now) := by
   unfold Abstract.processRetryTimeout Concrete.Decision.processRetryTimeout
   sim
+
+theorem sweepObject_sim (id : Ident) (now : Nat) :
+    HandlerSim (.origin id.origin) (Abstract.sweepObject id now)
+      (Concrete.Decision.sweepObject id now) := by
+  unfold Abstract.sweepObject Concrete.Decision.sweepObject
+  exact Sim.seq (processPromiseTimeout_sim id now)
+    (Sim.seq (processLeaseTimeout_sim id now) (processRetryTimeout_sim id now))
+
+theorem getStore_suffixes_sim (origin : String) :
+    Sim (.origin origin) (fun _ => True)
+      (fun store document =>
+        Abstract.originSuffixes store origin =
+          sortStrings (document.map (·.suffix)))
+      (fun _ _ => True) Abstract.getStore Concrete.Decision.get := by
+  intro env store document hunique hdoc _
+  have hp := hdoc.map (fun row => row.suffix)
+  rw [map_norm_suffix, map_norm_suffix] at hp
+  have hsuffixes :
+      Abstract.originSuffixes store origin =
+        sortStrings (document.map (·.suffix)) := by
+    unfold Abstract.originSuffixes
+    rw [← origin_rows_suffixes, ← read_origin]
+    exact sortStrings_eq_of_perm hp
+  exact ⟨hsuffixes, trivial, Same.write_of hdoc, rfl, hunique⟩
+
+theorem sweepOrigin_sim (origin : String) (now : Nat) :
+    HandlerSim (.origin origin) (Abstract.sweepOrigin origin now)
+      (Concrete.Decision.sweepOrigin origin now) := by
+  unfold Abstract.sweepOrigin Concrete.Decision.sweepOrigin
+  refine Sim.bind (getStore_suffixes_sim origin) ?_
+  intro store document hsuffixes
+  rw [hsuffixes]
+  exact forM_sim _ fun suffix _ =>
+    sweepObject_sim { origin, suffix } now
 
 theorem createIfAbsent_sim (req : PromiseCreateReq) (now : Nat) :
     HandlerSim (.origin req.id.origin) (Abstract.createIfAbsent req now)
@@ -1268,6 +1519,27 @@ theorem processSchedule_sim (id : Ident) (now : Nat) :
 
 /-! ## Whole steps -/
 
+def Abstract.completeForKey (key : DocumentKey) (now : Nat)
+    (action : Abstract.Handler α) : Abstract.Handler α :=
+  match key with
+  | .origin origin => Abstract.completeOrigin origin now action
+  | .schedule _ => action
+
+theorem completeDecision_sim (key : DocumentKey) (now : Nat)
+    {ma : Abstract.Handler α} {action : Concrete.Decision.Handler key α}
+    (hsim : HandlerSim key ma action) :
+    HandlerSim key (Abstract.completeForKey key now ma)
+      (Concrete.completeDecision key now action) := by
+  cases key with
+  | origin origin =>
+      unfold Abstract.completeForKey Abstract.completeOrigin Concrete.completeDecision
+      exact Sim.seq (sweepOrigin_sim origin now)
+        (Sim.bind hsim fun a c h =>
+          Sim.seq (sweepOrigin_sim origin now)
+            (Sim.pure h (fun _ _ => trivial)))
+  | schedule id =>
+      simpa [Abstract.completeForKey, Concrete.completeDecision] using hsim
+
 theorem Abstract.map_apply (f : α → β) (m : Abstract.Handler α) (env : Abstract.Env)
     (store : Store) :
     (f <$> m) env store = (f (m env store).1, (m env store).2.1, (m env store).2.2) := by
@@ -1304,7 +1576,8 @@ decision's candidate written back into the store. -/
 theorem run_of_sim (appConfig : Resonate.Config) (call : Call) (state : State)
     {key : DocumentKey} {before : Document key} {ma : Abstract.Handler β}
     {action : Concrete.Decision.Handler key β} {wrap : β → Response}
-    (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
+    (hhandler : Abstract.handler call.request call.requestedAt =
+      wrap <$> Abstract.completeForKey key call.requestedAt ma)
     (hsim : HandlerSim key ma action) (hunique : state.store.Unique)
     (hdoc : DocEquiv key (state.store.read key) before) :
     let candidate := Concrete.externalCandidate appConfig call before action wrap
@@ -1313,8 +1586,9 @@ theorem run_of_sim (appConfig : Resonate.Config) (call : Call) (state : State)
       lifted.1.store.Unique ∧
       lifted.1.workflow = state.workflow ∧
       lifted.2 = candidate.outputs := by
+  have hcomplete := completeDecision_sim key call.requestedAt hsim
   obtain ⟨hresult, -, hsame, hemit, hunique'⟩ :=
-    hsim { config := appConfig.toServerConfig } state.store before hunique hdoc trivial
+    hcomplete { config := appConfig.toServerConfig } state.store before hunique hdoc trivial
   simp only [Abstract.run, Abstract.serve, hhandler, Abstract.map_apply,
     Concrete.externalCandidate, Concrete.Decision.run]
   exact ⟨hsame, hunique', trivial, by rw [hresult, hemit]⟩
@@ -1325,7 +1599,8 @@ theorem external_sim_of (appConfig : Resonate.Config) (call : Call)
     (hcandidate :
       Concrete.selectedExternalCandidate appConfig call key before =
         some (Concrete.externalCandidate appConfig call before action wrap))
-    (hhandler : Abstract.handler call.request call.requestedAt = wrap <$> ma)
+    (hhandler : Abstract.handler call.request call.requestedAt =
+      wrap <$> Abstract.completeForKey key call.requestedAt ma)
     (hsim : HandlerSim key ma action) :
     ExternalSim appConfig call key before :=
   ⟨_, hcandidate, externalCandidate_continuations _ _ _ _ _,
@@ -1358,7 +1633,8 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
     · cases hkey
       exact external_sim_of appConfig call before (wrap := .promiseRegisterCallback)
         (by simp [Concrete.selectedExternalCandidate, hrequest])
-        (by rw [hrequest]; rfl) (promiseRegisterCallback_sim req call.requestedAt)
+        (by simp_all [Abstract.handler, Abstract.completeForKey])
+        (promiseRegisterCallback_sim req call.requestedAt)
     · contradiction
   case promiseRegisterListener req =>
     cases hkey
@@ -1400,7 +1676,8 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
     · cases hkey
       exact external_sim_of appConfig call before (wrap := .taskFence)
         (by simp [Concrete.selectedExternalCandidate, hrequest])
-        (by rw [hrequest]; rfl) (taskFence_sim req call.requestedAt)
+        (by simp_all [Abstract.handler, Abstract.completeForKey])
+        (taskFence_sim req call.requestedAt)
     · contradiction
   case taskHeartbeat req =>
     cases htasks : req.tasks with
@@ -1411,7 +1688,7 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
       · cases hkey
         exact external_sim_of appConfig call before (wrap := .taskHeartbeat)
           (by simp [Concrete.selectedExternalCandidate, hrequest, htasks])
-          (by rw [hrequest]; rfl)
+          (by simp_all [Abstract.handler, Abstract.completeForKey])
           (taskHeartbeat_sim req call.requestedAt first rest htasks)
       · contradiction
   case taskSuspend req =>
@@ -1420,13 +1697,15 @@ theorem external_sim (appConfig : Resonate.Config) (call : Call) (key : Document
     · cases hkey
       exact external_sim_of appConfig call before (wrap := .taskSuspend)
         (by simp [Concrete.selectedExternalCandidate, hrequest])
-        (by rw [hrequest]; rfl) (taskSuspend_sim req call.requestedAt)
+        (by simp_all [Abstract.handler, Abstract.completeForKey])
+        (taskSuspend_sim req call.requestedAt)
   case taskFulfill req =>
     split at hkey
     · cases hkey
       exact external_sim_of appConfig call before (wrap := .taskFulfill)
         (by simp [Concrete.selectedExternalCandidate, hrequest])
-        (by rw [hrequest]; rfl) (taskFulfill_sim req call.requestedAt)
+        (by simp_all [Abstract.handler, Abstract.completeForKey])
+        (taskFulfill_sim req call.requestedAt)
     · contradiction
   case taskRelease req =>
     cases hkey
@@ -1598,37 +1877,9 @@ theorem work_sim (appConfig : Resonate.Config) (item : WorkItem) (now : Nat)
 theorem originObjectWork_mem {origin : String} (row : OriginObject origin) (now : Nat)
     {item : WorkItem} (h : item ∈ Concrete.Decision.originObjectWork row now) :
     item ∈ Abstract.objectWork (Object.ofOrigin row) := by
-  simp only [Concrete.Decision.originObjectWork, Concrete.Decision.originSettledWork,
-    Concrete.Decision.originTaskWork, List.mem_append] at h
-  simp only [Abstract.objectWork, List.mem_append, List.mem_cons, List.mem_map,
-    List.not_mem_nil, or_false]
-  rcases h with (h | h) | h
-  · split at h
-    · simp only [List.mem_singleton] at h
-      exact .inl (.inl (.inl h))
-    · cases h
-  · split at h
-    · cases h
-    · simp only [List.mem_append, List.mem_map] at h
-      rcases h with h | h
-      · exact .inl (.inr h)
-      · exact .inr h
-  · split at h
-    · cases h
-    · simp only [List.mem_append] at h
-      rcases h with h | h
-      · split at h
-        · split at h
-          · simp only [List.mem_singleton] at h
-            exact .inl (.inl (.inr (.inl h)))
-          · cases h
-        · cases h
-      · split at h
-        · split at h
-          · simp only [List.mem_singleton] at h
-            exact .inl (.inl (.inr (.inr h)))
-          · cases h
-        · cases h
+  grind [Concrete.Decision.originObjectWork,
+    Concrete.Decision.originTaskWork, Abstract.objectWork,
+    Object.ofOrigin, OriginObject.id]
 
 theorem objectWork_ofOrigin {origin : String} {a b : OriginObject origin}
     (hsuffix : a.suffix = b.suffix) (hpromise : a.promise = b.promise) :

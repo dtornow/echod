@@ -10,24 +10,9 @@ def processPromiseTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
   match ← readObject id.suffix now with
   | none => pure ()
-  | some object => setObject object
-
-def resumeOne {origin : String} (awaited awaiter : Ident) (now : Nat) :
-    Handler (.origin origin) Unit := do
-  match ← readTask awaiter.suffix now with
-  | none => pure ()
-  | some (object, task) =>
-      match task.state with
-      | .suspended =>
-          setObject { object with task := some { task with
-            state := .pending
-            resumes := [awaited]
-            retryTimeoutAt := some now } }
-      | .pending | .acquired | .halted =>
-          if !(task.resumes.contains awaited) then
-            setObject { object with task := some { task with
-                resumes := task.resumes ++ [awaited] } }
-      | .fulfilled => pure ()
+  | some object =>
+      if object.promise.state == .pending then setObject object
+      else setSettled object object.promise now
 
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
     Handler (.origin req.awaited.origin) Unit := do
@@ -61,12 +46,13 @@ def processLeaseTimeout (id : Ident) (now : Nat) :
       | none => pure ()
       | some deadline =>
           if task.state == .acquired ∧ deadline ≤ now then
-            setObject { object with task := some { task with
-              state := .pending
-              pid := none
-              ttl := none
-              leaseTimeoutAt := none
-              retryTimeoutAt := some now } }
+            dispatchTask object
+              { task with
+                state := .pending
+                pid := none
+                ttl := none
+                leaseTimeoutAt := none }
+              now
 
 def processRetryTimeout (id : Ident) (now : Nat) :
     Handler (.origin id.origin) Unit := do
@@ -77,12 +63,22 @@ def processRetryTimeout (id : Ident) (now : Nat) :
       | none => pure ()
       | some due =>
           if task.state == .pending ∧ due ≤ now then
-            let env ← ask
-            setObject { object with task := some { task with
-              retryTimeoutAt := some (now + env.config.retryTimeout) } }
-            setMessage
-              ((object.promise.tags.get? "resonate:target").getD "")
-              (.execute object.id task.version)
+            dispatchTask object task now
+
+/-- One complete due-work pass for an object. -/
+def sweepObject (id : Ident) (now : Nat) :
+    Handler (.origin id.origin) Unit := do
+  processPromiseTimeout id now
+  processLeaseTimeout id now
+  processRetryTimeout id now
+
+/-- Drain every currently stored object in one workflow document. -/
+def sweepOrigin (origin : String) (now : Nat) :
+    Handler (.origin origin) Unit := do
+  let document ← get
+  let suffixes := sortStrings (document.map (·.suffix))
+  suffixes.forM fun suffix =>
+    sweepObject { origin, suffix } now
 
 def processSchedule (id : Ident) (now : Nat) :
     Handler (.schedule id) (List WorkItem) := do
@@ -129,19 +125,11 @@ def originTaskWork {origin : String} (object : OriginObject origin)
            else []
        | none => [])
 
-def originSettledWork {origin : String} (object : OriginObject origin) :
-    List WorkItem :=
-  if object.promise.state == .pending then [] else
-    (object.promise.callbacks.map fun awaiter =>
-      .callback { awaited := object.id, awaiter }) ++
-    (object.promise.listeners.map fun address =>
-      .listener { awaited := object.id, address })
-
 def originObjectWork {origin : String} (object : OriginObject origin)
     (now : Nat) : List WorkItem :=
   (if object.promise.state == .pending ∧ object.promise.timeoutAt ≤ now then
     [.promiseTimeout object.id]
-  else []) ++ originSettledWork object ++ originTaskWork object now
+  else []) ++ originTaskWork object now
 
 def originWork (origin : String) (document : OriginDocument origin) (now : Nat) :
     List WorkItem :=
