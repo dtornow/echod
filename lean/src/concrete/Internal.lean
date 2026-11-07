@@ -131,7 +131,7 @@ def originObjectWork {origin : String} (object : OriginObject origin)
     [.promiseTimeout object.id]
   else []) ++ originTaskWork object now
 
-def originWork (origin : String) (document : OriginDocument origin) (now : Nat) :
+def originWork (origin : String) (document : WorkflowDocument origin) (now : Nat) :
     List WorkItem :=
   document.flatMap fun object => originObjectWork object now
 

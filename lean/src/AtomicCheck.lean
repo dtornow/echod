@@ -30,7 +30,7 @@ def createReq : PromiseCreateReq :=
 def created :=
   Concrete.Decision.run config
     (Concrete.Decision.promiseCreate createReq 1000)
-    ([] : OriginDocument "wf")
+    ([] : WorkflowDocument "wf")
 
 example :
     created.2.2 =
@@ -101,7 +101,7 @@ def outOfRangeCreate : PromiseCreateReq :=
 def rejectedCreate :=
   Concrete.Decision.run config
     (Concrete.Decision.promiseCreate outOfRangeCreate 1000)
-    ([] : OriginDocument "wf")
+    ([] : WorkflowDocument "wf")
 
 example : rejectedCreate.1.status = 400 := by native_decide
 example : rejectedCreate.2.1.isEmpty = true := by native_decide
@@ -152,7 +152,7 @@ def suspendedAwaiter : OriginObject "wf" :=
     promise := pendingPromise runnableTags
     task := some { state := .suspended, version := 1 } }
 
-def settlementDocument : OriginDocument "wf" :=
+def settlementDocument : WorkflowDocument "wf" :=
   [awaitedWithListener, suspendedAwaiter]
 
 def settleReq : PromiseSettleReq :=
@@ -201,7 +201,7 @@ def pendingAwaiter : OriginObject "wf" :=
       version := 3
       retryTimeoutAt := some 5000 } }
 
-def pendingAwaiterDocument : OriginDocument "wf" :=
+def pendingAwaiterDocument : WorkflowDocument "wf" :=
   [awaitedWithoutListener, pendingAwaiter]
 
 def settledPending :=
@@ -225,7 +225,7 @@ def call : Call :=
 
 def candidate :=
   Concrete.externalCandidate (key := .origin "wf") appConfig call
-    ([] : OriginDocument "wf")
+    ([] : WorkflowDocument "wf")
     (Concrete.Decision.promiseCreate createReq 1000)
     .promiseCreate
 

@@ -329,7 +329,7 @@ theorem getObject_eq_read (store : Store) (id : Ident) :
   exact (find?_originRows store.objects id).symm
 
 /-- The rows of an origin document have distinct suffixes. -/
-abbrev RowsUnique {origin : String} (document : OriginDocument origin) : Prop :=
+abbrev RowsUnique {origin : String} (document : WorkflowDocument origin) : Prop :=
   (document.map (·.suffix)).Nodup
 
 theorem rows_unique (origin : String) :
@@ -367,7 +367,7 @@ theorem _root_.Resonate.Store.Unique.rows {store : Store} (h : store.Unique) (or
     RowsUnique (store.read (.origin origin)) :=
   rows_unique origin store.objects h
 
-theorem find?_suffix_iff {origin : String} {document : OriginDocument origin}
+theorem find?_suffix_iff {origin : String} {document : WorkflowDocument origin}
     (hunique : RowsUnique document) {suffix : String} {row : OriginObject origin} :
     document.find? (·.suffix == suffix) = some row ↔
       row ∈ document ∧ row.suffix = suffix := by
@@ -403,7 +403,7 @@ where
 
 /-- Looking up a suffix gives the same row in documents with the same
 entries. -/
-theorem find?_perm {origin : String} {a b : OriginDocument origin}
+theorem find?_perm {origin : String} {a b : WorkflowDocument origin}
     (hunique : RowsUnique a) (hperm : List.Perm a b) (suffix : String) :
     a.find? (·.suffix == suffix) = b.find? (·.suffix == suffix) := by
   have hunique' : RowsUnique b := ((hperm.map _).nodup_iff).mp hunique
@@ -419,7 +419,7 @@ theorem find?_perm {origin : String} {a b : OriginDocument origin}
 
 /-- A document is its row with suffix `row.suffix` in front of the others. -/
 theorem perm_cons_filter {origin : String} :
-    ∀ {document : OriginDocument origin}, RowsUnique document →
+    ∀ {document : WorkflowDocument origin}, RowsUnique document →
       ∀ {row : OriginObject origin}, row ∈ document →
         List.Perm document (row :: document.filter (·.suffix != row.suffix))
   | [], _, _, hrow => by cases hrow
@@ -449,7 +449,7 @@ theorem perm_cons_filter {origin : String} :
         simp only [List.filter_cons, hne, ↓reduceIte]
         exact ((perm_cons_filter hrest hrowRest).cons first).trans (List.Perm.swap _ _ _)
 
-theorem map_norm_suffix {origin : String} (document : OriginDocument origin) :
+theorem map_norm_suffix {origin : String} (document : WorkflowDocument origin) :
     (document.map (·.norm)).map (·.suffix) = document.map (·.suffix) := by
   rw [List.map_map]
   rfl
@@ -494,14 +494,14 @@ theorem sortStrings_eq_of_perm {left right : List String}
   · exact (List.mergeSort_perm _ _).trans
       (h.trans (List.mergeSort_perm _ _).symm)
 
-theorem find?_map_norm {origin : String} (document : OriginDocument origin) (s : String) :
+theorem find?_map_norm {origin : String} (document : WorkflowDocument origin) (s : String) :
     (document.map (·.norm)).find? (·.suffix == s) =
       (document.find? (·.suffix == s)).map (·.norm) := by
   rw [List.find?_map]
   rfl
 
 /-- Documents that read alike give rows that read alike for each suffix. -/
-theorem find?_equiv {origin : String} {a b : OriginDocument origin}
+theorem find?_equiv {origin : String} {a b : WorkflowDocument origin}
     (ha : RowsUnique a) (h : DocEquiv (.origin origin) a b) (s : String) :
     (a.find? (·.suffix == s)).map (·.norm) = (b.find? (·.suffix == s)).map (·.norm) := by
   rw [← find?_map_norm, ← find?_map_norm]
@@ -510,7 +510,7 @@ theorem find?_equiv {origin : String} {a b : OriginDocument origin}
   rw [map_norm_suffix]
   exact ha
 
-theorem map_norm_filter {origin : String} (document : OriginDocument origin) (s : String) :
+theorem map_norm_filter {origin : String} (document : WorkflowDocument origin) (s : String) :
     (document.filter (·.suffix != s)).map (·.norm) =
       (document.map (·.norm)).filter (·.suffix != s) := by
   rw [List.filter_map]
@@ -536,7 +536,7 @@ theorem ObjRel.cases {origin suffix : String}
     subst this
     exact hsome promise task
 
-theorem find?_suffix {origin suffix : String} {document : OriginDocument origin}
+theorem find?_suffix {origin suffix : String} {document : WorkflowDocument origin}
     {row : OriginObject origin}
     (h : document.find? (·.suffix == suffix) = some row) : row.suffix = suffix := by
   simpa using List.find?_some h
@@ -544,7 +544,7 @@ theorem find?_suffix {origin suffix : String} {document : OriginDocument origin}
 /-- What the abstract store shows at `id` is what the concrete document
 shows at its suffix. -/
 theorem readObject_eq_document {store : Store} {id : Ident}
-    {document : OriginDocument id.origin} (hunique : store.Unique)
+    {document : WorkflowDocument id.origin} (hunique : store.Unique)
     (hdoc : DocEquiv (.origin id.origin) (store.read (.origin id.origin)) document)
     (now : Nat) :
     (store.getObject id).map (·.project now) =
@@ -626,7 +626,7 @@ theorem readTask_sim (id : Ident) (now : Nat) {P : Document (.origin id.origin) 
 /-! ## Writes -/
 
 theorem same_write_origin {a store : Store} {origin : String}
-    {document : OriginDocument origin}
+    {document : WorkflowDocument origin}
     (hschedules : a.schedules = store.schedules)
     (hsame : DocEquiv (.origin origin) (a.read (.origin origin)) document)
     (hother : ∀ other, other ≠ origin →
@@ -706,7 +706,7 @@ theorem read_setObject_other (store : Store) (object : Object) {other : String}
 /-- Writing `object` matches putting a row that reads alike in front of the
 document rows with other suffixes. -/
 theorem setObject_equiv {store : Store} (object : Object)
-    {document : OriginDocument object.id.origin}
+    {document : WorkflowDocument object.id.origin}
     (hdoc : DocEquiv (.origin object.id.origin)
       (store.read (.origin object.id.origin)) document)
     {row : OriginObject object.id.origin}
@@ -1893,7 +1893,7 @@ theorem objectWork_ofOrigin {origin : String} {a b : OriginObject origin}
 /-- Work the concrete sweep finds in an origin document is a step of an
 object of the abstract store. -/
 theorem originWork_mem (store : Store) (origin : String) (now : Nat)
-    {document : OriginDocument origin}
+    {document : WorkflowDocument origin}
     (hdoc : DocEquiv (.origin origin) (store.read (.origin origin)) document)
     {item : WorkItem}
     (h : item ∈ Concrete.Decision.originWork origin document now) :
