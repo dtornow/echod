@@ -292,7 +292,13 @@ module S3 {
     case Request(_, Reply(_)) => Result(s, [], Keep)
   }
 
-  function Processes(self: Pid): Process<Pid, Msg, State> { Process(Step) }
+  datatype Machine extends Process<Pid, Msg, State> = Proc {
+    function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+      decreases now
+    { Step(self, s, i, now) }
+  }
+
+  function Processes(self: Pid): Process<Pid, Msg, State> { Proc }
 
   function World(): Sys<Pid, Msg, State> { Sys(Pids, true, Init, Processes) }
 
@@ -310,13 +316,18 @@ module S3 {
   {
     var w := World();
     assert w.process == Processes;
-    assert w.process(Bucket).step == Step;
+    assert w.process(Bucket) == Proc;
     match a
     case Deliver(p) =>
+      assert w.process(p.dst) == Proc;
+      assert (Proc).step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now)
+          == Step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
       var r := Step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
       assert r.state.appendable == n.procs[p.dst].appendable;
       assert Ordered(r.state.entries);
     case Fire(pid) =>
+      assert w.process(pid) == Proc;
+      assert (Proc).step(pid, n.procs[pid], Timeout, n.now) == Step(pid, n.procs[pid], Timeout, n.now);
       var r := Step(pid, n.procs[pid], Timeout, n.now);
       assert r.state.appendable == n.procs[pid].appendable;
       assert Ordered(r.state.entries);

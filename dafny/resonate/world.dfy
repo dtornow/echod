@@ -30,9 +30,31 @@ module Worlds {
   // What the world installs. The network holds these and calls process.step.
   function Processes(self: Pid): Process<Pid, Msg, State> {
     match self
-    case Client(_) => Process(Client.Step)
-    case Node(_) => Process(Node.Step)
-    case Bucket => Process(Bucket.Step)
+    case Client(_) => Client.Proc
+    case Node(_) => Node.Proc
+    case Bucket => Bucket.Proc
+  }
+
+  lemma Installed(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
+    ensures Processes(self).step(self, s, i, now) ==
+      match self
+      case Client(_) => Client.Step(self, s, i, now)
+      case Node(_) => Node.Step(self, s, i, now)
+      case Bucket => Bucket.Step(self, s, i, now)
+  {
+    match self
+    case Client(_) =>
+      assert Processes(self) == Client.Proc;
+      assert (Client.Proc).step(self, s, i, now) == Client.Step(self, s, i, now);
+      assert Processes(self).step(self, s, i, now) == (Client.Proc).step(self, s, i, now);
+    case Node(_) =>
+      assert Processes(self) == Node.Proc;
+      assert (Node.Proc).step(self, s, i, now) == Node.Step(self, s, i, now);
+      assert Processes(self).step(self, s, i, now) == (Node.Proc).step(self, s, i, now);
+    case Bucket =>
+      assert Processes(self) == Bucket.Proc;
+      assert (Bucket.Proc).step(self, s, i, now) == Bucket.Step(self, s, i, now);
+      assert Processes(self).step(self, s, i, now) == (Bucket.Proc).step(self, s, i, now);
   }
 
   function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask): Sys<Pid, Msg, State>

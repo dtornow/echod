@@ -23,10 +23,14 @@ module Network {
   datatype TimerOp = Keep | Set(delay: nat) | Cancel   // delay is relative to "now"
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
 
-  // The same shape for every process: who it is, the state it holds, what
-  // arrived, and the time.
-  datatype Process<!P(==, !new), !M(==, !new), !S(!new)> = Process(
-    step: (P, S, Input<P, M>, nat) -> Result<P, M, S>)
+  // The interface of a process: who it is, the state it holds, what arrived,
+  // and the time. A datatype implements it, so the process is a value.
+  // `{:termination false}` lets that datatype live in another module. `step`
+  // does not call itself through the trait.
+  trait {:termination false} Process<!P(==, !new), !M(==, !new), !S(!new)> {
+    function step(self: P, s: S, i: Input<P, M>, now: nat): Result<P, M, S>
+      decreases now
+  }
 
   // The processes, plugged in. `!` because each type occurs under a function arrow.
   // `!new` because a trace quantifies over these values, so they are not references.

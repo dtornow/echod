@@ -18,4 +18,10 @@ module Client {
       Result(AtClient(s.id, s.node, s.kind, false), [Send(Node(s.node), msg)], Keep)
     else Result(s, [], Keep)
   }
+
+  datatype Machine extends Process<Pid, Msg, State> = Proc {
+    function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+      decreases now
+    { Step(self, s, i, now) }
+  }
 }

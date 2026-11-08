@@ -110,4 +110,10 @@ module Node {
       }
     else Result(s, [], Keep)
   }
+
+  datatype Machine extends Process<Pid, Msg, State> = Proc {
+    function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+      decreases now
+    { Step(self, s, i, now) }
+  }
 }
