@@ -858,9 +858,18 @@ pub proof fn lemma_arm_preserves_timer_wheel_order(
     );
 }
 
+/// `inflight` is the number of accepted timer firings that have not called
+/// `spec_timer_fired` yet.  It reserves sweep capacity even when the target's
+/// document lane is busy and `spec_submit` queues the work.  The backlog is a
+/// separate queue of due keys that have not reserved capacity, so there is no
+/// ordering relation between their lengths.
+pub open spec fn timer_accounting_consistent(timers: TimersSpec) -> bool {
+    timers.inflight <= crate::state_timers::CONCURRENCY
+}
+
 pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
     &&& timer_wheel_ordered(timers)
-    &&& timers.inflight <= timers.backlog.len()
+    &&& timer_accounting_consistent(timers)
 }
 
 /// Every wheel slot is a real timer key and carries the deadline encoded by
@@ -962,6 +971,326 @@ pub proof fn lemma_timer_activity_preserved_by_control_state(
             }
         }
     }
+}
+
+pub proof fn lemma_timer_accounting_initial()
+    ensures
+        timer_accounting_consistent(
+            crate::state_timers::spec_timers_new(),
+        ),
+        timers_consistent(crate::state_timers::spec_timers_new()),
+{
+    reveal(crate::state_timers::spec_timers_new);
+}
+
+/// Submitting or queueing document work does not itself alter timer
+/// accounting.  Capacity is reserved by `spec_timer_fire` immediately before
+/// this call, including when the target lane is already busy.
+pub proof fn lemma_submit_preserves_timer_accounting(
+    s: S,
+    target: TargetSpec,
+    work: WorkSpec,
+    firing: Option<crate::handler_docs::FiringSpec>,
+    debug: bool,
+)
+    ensures
+        crate::handler_docs::spec_submit(
+            s,
+            target,
+            work,
+            firing,
+            debug,
+        ).timers == s.timers,
+{
+    reveal(crate::handler_docs::spec_submit);
+    reveal(crate::handler_docs::spec_start);
+    reveal(crate::handler_docs::spec_begin);
+    reveal(crate::handler_docs::spec_load_origin);
+    reveal(crate::handler_docs::spec_inflight);
+    reveal(crate::handler_docs::spec_slot_of);
+    reveal(crate::handler_docs::spec_with_slot);
+    reveal(crate::state::spec_store);
+    reveal(crate::state::spec_note);
+}
+
+/// `spec_timer_fire` is called by the dispatcher only while capacity remains.
+/// A successful owned firing reserves one slot; malformed, foreign, or
+/// inactive keys reserve none.
+pub proof fn lemma_timer_fire_preserves_accounting(
+    s: S,
+    key: Seq<char>,
+    at: u64,
+    now: u64,
+)
+    requires
+        timer_accounting_consistent(s.timers),
+        s.timers.inflight < crate::state_timers::CONCURRENCY,
+    ensures
+        timer_accounting_consistent(
+            crate::handler_timers::spec_timer_fire(
+                s,
+                key,
+                at,
+                now,
+            ).timers,
+        ),
+{
+    reveal(crate::handler_timers::spec_timer_fire);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::state::spec_note);
+    match crate::keys::spec_parse_timer_key(key) {
+        Some(entry) => {
+            if crate::handler_timers::spec_owns_entry(s, entry)
+                && crate::verified::node_spec::spec_acts(
+                    s.node.core,
+                    entry.target(),
+                    now as nat,
+                )
+            {
+                let counted = crate::handler_timers::spec_with_timers(
+                    s,
+                    TimersSpec {
+                        inflight:
+                            s.timers.inflight.saturating_add(1),
+                        ..s.timers
+                    },
+                );
+                match entry {
+                    crate::keys::TimerEntrySpec::Origin {
+                        origin,
+                        deadline,
+                        token,
+                        by,
+                    } => {
+                        let fired = crate::verified::flight_spec::AFired {
+                            key: crate::verified::node::AKey {
+                                origin,
+                                at: deadline as nat,
+                                token: token as nat,
+                            },
+                            by,
+                        };
+                        lemma_submit_preserves_timer_accounting(
+                            counted,
+                            TargetSpec::Origin(origin),
+                            WorkSpec::Sweep {
+                                fired: Some(fired),
+                                now,
+                            },
+                            Some(crate::handler_docs::FiringSpec {
+                                key,
+                                at,
+                                kind: crate::types::TimerKind::Origin,
+                                lag: now.saturating_sub(at),
+                            }),
+                            false,
+                        );
+                    },
+                    crate::keys::TimerEntrySpec::Schedule {
+                        id,
+                        deadline,
+                        token,
+                        by,
+                    } => {
+                        let fired = crate::verified::flight_spec::AFired {
+                            key: crate::verified::node::AKey {
+                                origin: "sched:"@ + id,
+                                at: deadline as nat,
+                                token: token as nat,
+                            },
+                            by,
+                        };
+                        lemma_submit_preserves_timer_accounting(
+                            counted,
+                            TargetSpec::Schedule(id),
+                            WorkSpec::Fire {
+                                schedule: id,
+                                fired: Some(fired),
+                                now,
+                            },
+                            Some(crate::handler_docs::FiringSpec {
+                                key,
+                                at,
+                                kind:
+                                    crate::types::TimerKind::Schedule,
+                                lag: now.saturating_sub(at),
+                            }),
+                            false,
+                        );
+                    },
+                }
+            }
+        },
+        None => {},
+    }
+}
+
+/// Backlog length is intentionally unrestricted: dispatch reserves at most
+/// `CONCURRENCY` slots and leaves every additional due key queued.
+pub proof fn lemma_dispatch_due_preserves_accounting(
+    s: S,
+    now: u64,
+    fuel: nat,
+)
+    requires
+        timer_accounting_consistent(s.timers),
+    ensures
+        timer_accounting_consistent(
+            crate::handler_timers::spec_dispatch_due(s, now, fuel).timers,
+        ),
+    decreases fuel,
+{
+    reveal(crate::handler_timers::spec_dispatch_due);
+    if fuel > 0
+        && s.timers.inflight < crate::state_timers::CONCURRENCY
+        && s.timers.backlog.len() > 0
+    {
+        let key = s.timers.backlog[0].1;
+        let at = s.timers.backlog[0].0;
+        let popped = crate::handler_timers::spec_with_timers(
+            s,
+            TimersSpec {
+                backlog: s.timers.backlog.drop_first(),
+                ..s.timers
+            },
+        );
+        reveal(crate::handler_timers::spec_with_timers);
+        assert(timer_accounting_consistent(popped.timers));
+        lemma_timer_fire_preserves_accounting(popped, key, at, now);
+        lemma_dispatch_due_preserves_accounting(
+            crate::handler_timers::spec_timer_fire(
+                popped,
+                key,
+                at,
+                now,
+            ),
+            now,
+            (fuel - 1) as nat,
+        );
+    }
+}
+
+/// Once all sweep reservations are occupied, dispatch is an exact stutter:
+/// every due key remains in the backlog until a completion decrements the
+/// reservation count.
+pub proof fn lemma_dispatch_due_at_capacity_keeps_backlog(
+    s: S,
+    now: u64,
+    fuel: nat,
+)
+    requires
+        s.timers.inflight == crate::state_timers::CONCURRENCY,
+    ensures
+        crate::handler_timers::spec_dispatch_due(s, now, fuel) == s,
+{
+    reveal(crate::handler_timers::spec_dispatch_due);
+}
+
+/// Completion releases exactly one reservation (saturating defensively at
+/// zero), optionally rearms the key, and then fills available capacity from
+/// the independent backlog.
+pub proof fn lemma_timer_fired_preserves_accounting(
+    s: S,
+    firing: crate::handler_docs::FiringSpec,
+    now: u64,
+    result: Result<crate::types::Fired, Seq<char>>,
+)
+    requires
+        timer_accounting_consistent(s.timers),
+    ensures
+        timer_accounting_consistent(
+            crate::handler_timers::spec_timer_fired(
+                s,
+                firing,
+                now,
+                result,
+            ).timers,
+        ),
+{
+    reveal(crate::handler_timers::spec_timer_fired);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::state::spec_note);
+    let decremented = crate::handler_timers::spec_with_timers(
+        s,
+        TimersSpec {
+            inflight: s.timers.inflight.saturating_sub(1),
+            ..s.timers
+        },
+    );
+    assert(timer_accounting_consistent(decremented.timers));
+    let rearm = crate::state_timers::spec_max(now, firing.at)
+        .saturating_add(crate::state_timers::RETRY_AFTER_MS);
+    let (staged, outcome) = match result {
+        Ok(crate::types::Fired::Deleted) => (
+            decremented,
+            crate::types::FireOutcome::Deleted,
+        ),
+        Ok(crate::types::Fired::Kept) => (
+            crate::handler_timers::spec_with_timers(
+                decremented,
+                TimersSpec {
+                    wheel: crate::state_timers::TimerWheelSpec {
+                        armed: crate::state_timers::spec_arm(
+                            decremented.timers.wheel.armed,
+                            rearm,
+                            firing.key,
+                        ),
+                    },
+                    ..decremented.timers
+                },
+            ),
+            crate::types::FireOutcome::Kept,
+        ),
+        Err(error) => {
+            let noted = crate::state::spec_note(
+                decremented,
+                crate::types::NoteSpec::FireFailed {
+                    key: firing.key,
+                    error,
+                },
+            );
+            (
+                crate::handler_timers::spec_with_timers(
+                    noted,
+                    TimersSpec {
+                        wheel: crate::state_timers::TimerWheelSpec {
+                            armed: crate::state_timers::spec_arm(
+                                noted.timers.wheel.armed,
+                                rearm,
+                                firing.key,
+                            ),
+                        },
+                        ..noted.timers
+                    },
+                ),
+                crate::types::FireOutcome::Failed,
+            )
+        },
+    };
+    let ready = crate::state::spec_note(
+        staged,
+        crate::types::NoteSpec::TimerFire {
+            kind: firing.kind,
+            outcome,
+            lag_ms: firing.lag,
+        },
+    );
+    assert(timer_accounting_consistent(ready.timers));
+    lemma_dispatch_due_preserves_accounting(
+        ready,
+        now,
+        ready.timers.backlog.len(),
+    );
+    assert(crate::handler_timers::spec_timer_fired(
+        s,
+        firing,
+        now,
+        result,
+    ) == crate::handler_timers::spec_dispatch_due(
+        ready,
+        now,
+        ready.timers.backlog.len(),
+    ));
 }
 
 pub proof fn lemma_arm_preserves_timer_key_deadlines(
@@ -1409,8 +1738,8 @@ pub proof fn lemma_dispatch_due_zero(s: S, now: u64)
 }
 
 /// A real origin-key dispatch starts exactly one origin sweep.  The theorem
-/// deliberately states the resulting timer counters as well as the flight:
-/// those counters expose the activity-invariant frontier below.
+/// states the resulting reservation and flight shape and proves the repaired
+/// timer activity and lane invariants.
 pub proof fn lemma_singleton_due_origin_starts_sweep(
     s: S,
     now: u64,
@@ -1425,6 +1754,7 @@ pub proof fn lemma_singleton_due_origin_starts_sweep(
         s.timers.wheel.armed == seq![(at, key)],
         s.timers.backlog == Seq::<crate::state_timers::SlotSpec>::empty(),
         s.timers.inflight == 0,
+        timer_activity_consistent(s),
         at <= now,
         crate::keys::spec_parse_timer_key(key)
             == Some(crate::keys::TimerEntrySpec::Origin {
@@ -1449,6 +1779,8 @@ pub proof fn lemma_singleton_due_origin_starts_sweep(
         ),
         crate::handler_docs::spec_slot_of(s, origin).busy is None,
         !s.flights.inflight.contains_key(s.next_flight),
+        !s.ops.contains_key(s.next_op),
+        owners_consistent(s),
         flight_lanes_consistent(s.flights),
     ensures
         ({
@@ -1487,8 +1819,9 @@ pub proof fn lemma_singleton_due_origin_starts_sweep(
                     && after.flights.inflight[old_fid]
                         == s.flights.inflight[old_fid]
             &&& flight_lanes_consistent(after.flights)
-            &&& !timers_consistent(after.timers)
-            &&& !timer_activity_consistent(after)
+            &&& owners_consistent(after)
+            &&& timers_consistent(after.timers)
+            &&& timer_activity_consistent(after)
         }),
 {
     lemma_singleton_take_due(at, key, now);
@@ -1551,13 +1884,14 @@ pub proof fn lemma_singleton_due_origin_starts_sweep(
     assert(after.flights.inflight[fid].firing is Some);
     assert(after.flights.inflight[fid].phase is Loading);
     assert(flight_lanes_consistent(after.flights));
-    assert(!timers_consistent(after.timers));
-    assert(!timer_activity_consistent(after));
+    assert(owners_consistent(after));
+    assert(timer_accounting_consistent(after.timers));
+    assert(timers_consistent(after.timers));
+    assert(timer_activity_consistent(after));
 }
 
 /// The schedule counterpart starts the exact `Fire` flight and loads the
-/// named schedule.  As in the origin case, the singleton dispatch cannot
-/// preserve the current timer-activity invariant.
+/// named schedule while preserving timer activity and every existing lane.
 pub proof fn lemma_singleton_due_schedule_starts_fire(
     s: S,
     now: u64,
@@ -1572,6 +1906,7 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
         s.timers.wheel.armed == seq![(at, key)],
         s.timers.backlog == Seq::<crate::state_timers::SlotSpec>::empty(),
         s.timers.inflight == 0,
+        timer_activity_consistent(s),
         at <= now,
         crate::keys::spec_parse_timer_key(key)
             == Some(crate::keys::TimerEntrySpec::Schedule {
@@ -1599,6 +1934,8 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
             crate::target::spec_name(TargetSpec::Schedule(id)),
         ).busy is None,
         !s.flights.inflight.contains_key(s.next_flight),
+        !s.ops.contains_key(s.next_op),
+        owners_consistent(s),
         flight_lanes_consistent(s.flights),
     ensures
         ({
@@ -1638,8 +1975,9 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
                     && after.flights.inflight[old_fid]
                         == s.flights.inflight[old_fid]
             &&& flight_lanes_consistent(after.flights)
-            &&& !timers_consistent(after.timers)
-            &&& !timer_activity_consistent(after)
+            &&& owners_consistent(after)
+            &&& timers_consistent(after.timers)
+            &&& timer_activity_consistent(after)
         }),
 {
     lemma_singleton_take_due(at, key, now);
@@ -1701,8 +2039,10 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
     assert(after.flights.inflight[fid].firing is Some);
     assert(after.flights.inflight[fid].phase is FireLoadingSchedule);
     assert(flight_lanes_consistent(after.flights));
-    assert(!timers_consistent(after.timers));
-    assert(!timer_activity_consistent(after));
+    assert(owners_consistent(after));
+    assert(timer_accounting_consistent(after.timers));
+    assert(timers_consistent(after.timers));
+    assert(timer_activity_consistent(after));
 }
 
 /// Runtime bookkeeping agrees with the operation table held by the core.
@@ -1716,10 +2056,12 @@ pub open spec fn pending_store_consistent(p: ProcessV) -> bool {
         p.completed_store.contains(op) ==> !p.pending_store.contains_key(op)
 }
 
-/// The current relation. It is intentionally strong enough for the sequential
-/// happy path and explicit about the pieces a full concurrent proof must
-/// preserve.
-pub open spec fn related(
+/// The unchanged abstract frame for a production due submission.  Starting a
+/// document load neither chooses an abstract origin timeout nor executes a
+/// schedule timeout: that match is delayed until the loaded document makes
+/// the internal transition identifiable.  This frame retains every existing
+/// ownership, membership, lane, cache, and Store-operation requirement.
+pub open spec fn due_submission_frame_related(
     production: ProcessV,
     abstract_state: AbstractStateV,
 ) -> bool {
@@ -1727,7 +2069,6 @@ pub open spec fn related(
     &&& pending_store_consistent(production)
     &&& owners_consistent(production.core)
     &&& membership_consistent(production.core)
-    &&& timer_activity_consistent(production.core)
     &&& flight_lanes_consistent(production.core.flights)
     &&& cache_related(
         production.core.cache,
@@ -1741,10 +2082,30 @@ pub open spec fn related(
     &&& abstract_state.pending.len() == 0
 }
 
-/// No abstract state can repair a production-side timer-activity violation:
-/// `related` requires that invariant independently of the abstract store or
-/// pending work.  The singleton due-dispatch theorems above establish this
-/// violation for both exact successful submission branches.
+/// The current relation.  The decomposition makes the repaired due-dispatch
+/// proof obligation explicit without removing any conjunct.
+pub open spec fn related(
+    production: ProcessV,
+    abstract_state: AbstractStateV,
+) -> bool {
+    &&& due_submission_frame_related(production, abstract_state)
+    &&& timer_activity_consistent(production.core)
+}
+
+pub proof fn lemma_due_submission_frame_closes_related(
+    production: ProcessV,
+    abstract_state: AbstractStateV,
+)
+    requires
+        due_submission_frame_related(production, abstract_state),
+        timer_activity_consistent(production.core),
+    ensures
+        related(production, abstract_state),
+{
+}
+
+/// Conversely, a genuine production-side timer-activity violation cannot be
+/// hidden by choosing a different abstract state.
 pub proof fn lemma_failed_timer_activity_has_no_abstract_match(
     production: ProcessV,
     abstract_state: AbstractStateV,
