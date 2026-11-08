@@ -2245,6 +2245,42 @@ module Temp {
     }
   }
 
+  // The earliest instant a stored document still owes: a pending promise's
+  // deadline, an acquired task's lease, a pending task's retry, or a
+  // schedule's next run. The minimum of those, when any exist.
+  function MinOpt(a: Opt<nat>, b: Opt<nat>): Opt<nat> {
+    match (a, b)
+    case (None, r) => r
+    case (r, None) => r
+    case (Some(x), Some(y)) => Some(if x < y then x else y)
+  }
+
+  function ObjDue(o: Obj): Opt<nat> {
+    var promise := if o.promise.state == PromiseState.Pending then Some(o.promise.timeoutAt) else None;
+    var lease :=
+      match o.task
+      case None => None
+      case Some(t) => if t.state == TaskState.Acquired && t.leaseTimeoutAt.Some? then Some(t.leaseTimeoutAt.value) else None;
+    var retry :=
+      match o.task
+      case None => None
+      case Some(t) => if t.state == TaskState.Pending && t.retryTimeoutAt.Some? then Some(t.retryTimeoutAt.value) else None;
+    MinOpt(promise, MinOpt(lease, retry))
+  }
+
+  function MapDue(objects: map<string, Obj>, keys: seq<string>): Opt<nat>
+    decreases |keys|
+  {
+    if |keys| == 0 then None
+    else MinOpt(if keys[0] in objects then ObjDue(objects[keys[0]]) else None, MapDue(objects, keys[1..]))
+  }
+
+  function Nearest(doc: Doc): Opt<nat> {
+    match doc
+    case Origin(_, objects) => MapDue(objects, Sorted(objects.Keys))
+    case Schedule(_, slot) => if slot.Some? then Some(slot.value.nextRunAt) else None
+  }
+
   function Handle(doc: Doc, request: Request, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
     ensures CaughtUp(r.doc, now)
