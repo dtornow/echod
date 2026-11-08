@@ -1305,10 +1305,54 @@ mod tests {
         );
 
         assert_eq!(store_outcomes.len(), 1);
-        assert!(store_outcomes[0].send.iter().any(|(recipient, message)| {
-            *recipient == Pid::Node(0)
-                && matches!(message, Message::StoreRes { op: answer, .. } if *answer == op)
-        }));
+        let response = store_outcomes[0]
+            .send
+            .iter()
+            .find_map(|(recipient, message)| match message {
+                Message::StoreRes {
+                    op: answer,
+                    response,
+                } if *recipient == Pid::Node(0) && *answer == op => Some(response.clone()),
+                _ => None,
+            })
+            .expect("the hidden store returns the membership Put");
+
+        let completion = model.on_event(
+            &config,
+            &initial[0].0,
+            &node_outcome.state,
+            0,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            },
+        );
+        assert_eq!(completion.len(), 1);
+        assert_eq!(completion[0].send.len(), 1);
+        assert!(matches!(
+            &completion[0].send[0],
+            (Pid::Store, Message::StoreReq { op: 2, .. })
+        ));
+        let Local::Node(before) = &node_outcome.state else {
+            panic!("the startup timeout produced a node");
+        };
+        let Local::Node(after) = &completion[0].state else {
+            panic!("the membership completion keeps the node");
+        };
+        assert!(matches!(
+            &after.core.node.members.refresh,
+            Some(crate::state_node::Refresh::Listing { op: 2, now: 0 })
+        ));
+        assert_eq!(
+            after.core.cache.entries.len(),
+            before.core.cache.entries.len()
+        );
+        assert_eq!(after.core.cache.bytes, before.core.cache.bytes);
+        assert_eq!(after.core.timers.started, before.core.timers.started);
+        assert_eq!(
+            after.core.timers.wheel.armed.len(),
+            before.core.timers.wheel.armed.len()
+        );
     }
 
     #[test]

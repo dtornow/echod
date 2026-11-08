@@ -6,8 +6,9 @@
 //! membership refresh, wake replacement, and the full store-call sequence.
 //! This module records the exact theorem target and reuses the already-proved
 //! handler/effect agreement without claiming the missing world invariant. It
-//! also proves the deterministic startup Wake/membership/timer-check slice as
-//! a real Rover process step matched by an empty abstract execution.
+//! also proves the deterministic startup Wake and successful membership
+//! announcement completion as real Rover process steps matched by empty
+//! abstract executions.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -23,6 +24,8 @@ use crate::rover::{
 #[cfg(verus_keep_ghost)]
 use crate::state::Owner;
 #[cfg(verus_keep_ghost)]
+use crate::state_node::RefreshSpec;
+#[cfg(verus_keep_ghost)]
 use crate::types::{Armed, EffectSpec, EventSpec};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{Model as AbstractModel, ServerConfig};
@@ -31,12 +34,14 @@ use echod_concrete::model::Pid;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::relation::agreement;
 #[cfg(verus_keep_ghost)]
+use echod_concrete::store::StoreRes;
+#[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::{
-    initial, land, legal, step, Execution, Label, StepResultV, World,
+    event_valid, initial, land, legal, step, Execution, Label, StepResultV, World,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::{ProcessEvent, RoverModel};
@@ -114,9 +119,18 @@ pub open spec fn initial_wake_membership_shape(
     }
     &&& match outcome.state {
         ProductionLocalV::Node(node) => {
+            &&& node.core.out.len() == 0
             &&& node.core.ops.contains_key(1)
             &&& node.core.ops[1] == Owner::Members
-            &&& node.core.node.members.refresh is Some
+            &&& node.core.ops.dom()
+                == Set::<u64>::empty().insert(1)
+            &&& node.core.next_op == 2
+            &&& node.core.clock == 0
+            &&& match node.core.node.members.refresh {
+                Some(RefreshSpec::Announcing { op, now }) =>
+                    op == 1 && now == 0,
+                _ => false,
+            }
             &&& !node.core.timers.started
             &&& node.pending.len() == 0
             &&& node.wake is None
@@ -233,9 +247,18 @@ pub proof fn lemma_initial_wake_membership_is_abstract_stutter(
     });
     assert(match outcome.state {
         ProductionLocalV::Node(next) => {
+            &&& next.core.out.len() == 0
             &&& next.core.ops.contains_key(1)
             &&& next.core.ops[1] == Owner::Members
-            &&& next.core.node.members.refresh is Some
+            &&& next.core.ops.dom()
+                == Set::<u64>::empty().insert(1)
+            &&& next.core.next_op == 2
+            &&& next.core.clock == 0
+            &&& match next.core.node.members.refresh {
+                Some(RefreshSpec::Announcing { op, now }) =>
+                    op == 1 && now == 0,
+                _ => false,
+            }
             &&& !next.core.timers.started
             &&& next.pending.len() == 0
             &&& next.wake is None
@@ -270,6 +293,353 @@ pub proof fn lemma_initial_wake_membership_is_abstract_stutter(
 
     let abstract_before =
         initial(AbstractModel, abstract_config(config));
+    let execution = Execution::<AbstractModel>::empty();
+    assert(legal(
+        AbstractModel,
+        abstract_config(config),
+        abstract_before,
+        execution,
+    ));
+    assert(project::<AbstractModel>(AbstractModel, execution)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    assert(end::<AbstractModel>(abstract_before, execution)
+        == abstract_before);
+    assert(matches(
+        AbstractModel,
+        abstract_config(config),
+        abstract_before,
+        Seq::<echod_abstract::BoundaryEvent>::empty(),
+        abstract_before,
+    ));
+}
+
+/// Node state reached by the proved startup wake.
+pub open spec fn startup_membership_node(
+    config: crate::Config,
+) -> ProductionNodeV {
+    initial_wake_outcome(config).state->Node_0
+}
+
+/// The successful completion delivered for the startup announcement.
+pub open spec fn startup_membership_completion_event(
+) -> ProcessEvent<Pid, ProductionMessage> {
+    ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: ProductionMessage::StoreRes {
+            op: 1,
+            response: StoreRes::Put { result: Ok(()) },
+        },
+    }
+}
+
+/// Exact local precondition for a successful announcement completion. This
+/// deliberately names the membership phase and owner rather than treating any
+/// Store response as control-plane traffic.
+pub open spec fn membership_store_completion_pre(
+    node: ProductionNodeV,
+    event: ProcessEvent<Pid, ProductionMessage>,
+) -> bool {
+    match event {
+        ProcessEvent::Receive {
+            sender: Pid::Store,
+            message: ProductionMessage::StoreRes {
+                op,
+                response: StoreRes::Put { result: Ok(()) },
+            },
+        } => {
+            &&& node.core.out.len() == 0
+            &&& node.core.ops.contains_key(op)
+            &&& node.core.ops[op] == Owner::Members
+            &&& match node.core.node.members.refresh {
+                Some(RefreshSpec::Announcing {
+                    op: expected,
+                    ..
+                }) => expected == op,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+/// Exact local postcondition: announcement op `1` is replaced by list op `2`,
+/// while every document-bearing component and the Rover shell's client state
+/// remain unchanged.
+pub open spec fn membership_store_completion_post(
+    before: ProductionNodeV,
+    outcome: StepResultV<ProductionLocalV, Pid, ProductionMessage>,
+) -> bool {
+    &&& outcome.send.len() == 1
+    &&& match outcome.send[0] {
+        (
+            Pid::Store,
+            ProductionMessage::StoreReq { op, .. },
+        ) => op == 2,
+        _ => false,
+    }
+    &&& match outcome.state {
+        ProductionLocalV::Node(after) => {
+            &&& !after.core.ops.contains_key(1)
+            &&& after.core.ops.contains_key(2)
+            &&& after.core.ops[2] == Owner::Members
+            &&& match after.core.node.members.refresh {
+                Some(RefreshSpec::Listing { op, now }) =>
+                    op == 2 && now == 0,
+                _ => false,
+            }
+            &&& after.core.node.core == before.core.node.core
+            &&& after.core.cache == before.core.cache
+            &&& after.core.flights == before.core.flights
+            &&& after.core.timers == before.core.timers
+            &&& after.pending == before.pending
+            &&& after.wake == before.wake
+        },
+        _ => false,
+    }
+}
+
+/// The production adapter's next local activity step after startup has the
+/// exact membership-listing shape above.
+pub proof fn lemma_startup_membership_store_completion_shape(
+    config: crate::Config,
+    at: u64,
+)
+    ensures
+        ({
+            let before = startup_membership_node(config);
+            let event = startup_membership_completion_event();
+            let outcomes = spec_node_step(before, at, event);
+            &&& membership_store_completion_pre(before, event)
+            &&& outcomes.len() == 1
+            &&& membership_store_completion_post(
+                before,
+                outcomes[0],
+            )
+        }),
+{
+    lemma_initial_wake_membership_is_abstract_stutter(config);
+    assert(initial_wake_membership_shape(config));
+    assert(initial_wake_outcome(config).state is Node);
+    let before = startup_membership_node(config);
+    let event = startup_membership_completion_event();
+    let outcomes = spec_node_step(before, at, event);
+    assert(before.core.ops.contains_key(1));
+    assert(before.core.ops[1] == Owner::Members);
+    assert(before.core.ops.dom() =~= Set::<u64>::empty().insert(1));
+    assert(before.core.next_op == 2);
+    assert(before.core.clock == 0);
+    assert(match before.core.node.members.refresh {
+        Some(RefreshSpec::Announcing { op, now }) =>
+            op == 1 && now == 0,
+        _ => false,
+    });
+    assert(membership_store_completion_pre(before, event));
+
+    reveal(crate::handler::spec_on_event);
+    reveal(crate::handler_node::spec_members_tick);
+    reveal(crate::handler_node::spec_members_completed);
+    reveal(crate::handler_node::spec_announced);
+    reveal(crate::handler::spec_schedule_wake);
+    reveal_with_fuel(crate::rover::spec_effects, 2);
+    reveal(crate::rover::spec_effect);
+
+    let core_event = EventSpec::Store {
+        op: 1,
+        response: StoreRes::Put { result: Ok(()) },
+        clock: at,
+    };
+    let clocked = crate::state::StateSpec {
+        clock: at,
+        ..before.core
+    };
+    let removed = crate::state::StateSpec {
+        ops: clocked.ops.remove(1),
+        ..clocked
+    };
+    assert(!removed.ops.contains_key(1));
+    assert(removed.ops =~= Map::<u64, Owner>::empty());
+    let handled = crate::handler_node::spec_members_completed(
+        removed,
+        1,
+        StoreRes::Put { result: Ok(()) },
+    );
+    assert(!handled.ops.contains_key(1));
+    assert(handled.ops.contains_key(2));
+    assert(handled.ops[2] == Owner::Members);
+    assert(match handled.node.members.refresh {
+        Some(RefreshSpec::Listing { op, now }) =>
+            op == 2 && now == 0,
+        _ => false,
+    });
+    let (core, effects) =
+        crate::handler::spec_on_event(before.core, core_event);
+    assert(core.ops == handled.ops);
+    assert(core.node.members.refresh == handled.node.members.refresh);
+    assert(effects.len() == 1);
+    assert(effects[0] is Store);
+    assert(!core.ops.contains_key(1));
+    assert(core.ops.contains_key(2));
+    assert(core.ops[2] == Owner::Members);
+    assert(match core.node.members.refresh {
+        Some(RefreshSpec::Listing { op, now }) =>
+            op == 2 && now == 0,
+        _ => false,
+    });
+    assert(core.node.core == before.core.node.core);
+    assert(core.cache == before.core.cache);
+    assert(core.flights == before.core.flights);
+    assert(core.timers == before.core.timers);
+
+    let base = ProductionNodeV { core, ..before };
+    let (next, send) =
+        crate::rover::spec_effects(base, at, effects);
+    assert(effects =~= seq![effects[0]]);
+    assert(effects.drop_first() =~= Seq::<EffectSpec>::empty());
+    match effects[0] {
+        EffectSpec::Store { op, request } => {
+            assert(op == 2);
+            assert((next, send) == crate::rover::spec_effect(
+                base,
+                at,
+                EffectSpec::Store { op, request },
+                Seq::empty(),
+            ));
+            assert(next == base);
+            assert(send =~= seq![(
+                Pid::Store,
+                ProductionMessage::StoreReq {
+                    op,
+                    request: crate::rover::spec_store_request(request),
+                },
+            )]);
+        },
+        _ => {
+            assert(false);
+        },
+    }
+    assert(outcomes =~= seq![StepResultV {
+        state: ProductionLocalV::Node(next),
+        send,
+    }]);
+    assert(outcomes.len() == 1);
+    assert(membership_store_completion_post(
+        before,
+        outcomes[0],
+    ));
+}
+
+/// World-step preconditions are explicit: the startup membership node occupies
+/// slot zero, time is monotone, and its successful Store response is present
+/// in the append-only network. Under precisely those conditions, the real
+/// production process step is matched by an empty abstract execution.
+pub proof fn lemma_startup_membership_store_completion_is_abstract_stutter(
+    config: crate::Config,
+    concrete_before: World<ProductionModel>,
+    abstract_before: World<AbstractModel>,
+    at: u64,
+)
+    requires
+        concrete_before.process.len() > 0,
+        concrete_before.process[0]
+            == (
+                Pid::Node(0),
+                ProductionLocalV::Node(
+                    startup_membership_node(config),
+                ),
+            ),
+        concrete_before.now <= at,
+        event_valid(
+            concrete_before,
+            Pid::Node(0),
+            startup_membership_completion_event(),
+        ),
+    ensures
+        ({
+            let event = startup_membership_completion_event();
+            let outcome = spec_node_step(
+                startup_membership_node(config),
+                at,
+                event,
+            )[0];
+            let label = Label::Process {
+                process: Pid::Node(0),
+                at,
+                event,
+                send: outcome.send,
+            };
+            let concrete_after = land(
+                concrete_before,
+                0,
+                Pid::Node(0),
+                at,
+                outcome,
+            );
+            &&& membership_store_completion_post(
+                startup_membership_node(config),
+                outcome,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                concrete_before,
+                label,
+                concrete_after,
+            )
+            &&& ProductionModel.spec_observe(label)
+                == Seq::<echod_abstract::BoundaryEvent>::empty()
+            &&& matches(
+                AbstractModel,
+                abstract_config(config),
+                abstract_before,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                abstract_before,
+            )
+        }),
+{
+    lemma_startup_membership_store_completion_shape(config, at);
+    let event = startup_membership_completion_event();
+    let outcomes = spec_node_step(
+        startup_membership_node(config),
+        at,
+        event,
+    );
+    let outcome = outcomes[0];
+    let label = Label::Process {
+        process: Pid::Node(0),
+        at,
+        event,
+        send: outcome.send,
+    };
+    let concrete_after = land(
+        concrete_before,
+        0,
+        Pid::Node(0),
+        at,
+        outcome,
+    );
+    assert(membership_store_completion_post(
+        startup_membership_node(config),
+        outcome,
+    ));
+
+    reveal(step);
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Node(0),
+        concrete_before.process[0].1,
+        at,
+        event,
+    ) == outcomes);
+    assert(step(
+        ProductionModel,
+        config,
+        concrete_before,
+        label,
+        concrete_after,
+    ));
+    assert(ProductionModel.spec_observe(label)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+
     let execution = Execution::<AbstractModel>::empty();
     assert(legal(
         AbstractModel,

@@ -22,11 +22,12 @@
 //! `quick_n_dirty::request_preserves_well_formed` and
 //! `effects::lemma_request_transition_effects`.
 //!
-//! Failure, racing-CAS, concurrent flights, later membership completions, and
-//! timer fire/commit steps remain classified by [`open_case`]. The bounded
-//! startup wake is proved below: it starts membership refresh, leaves timers
-//! inactive, and preserves the full relation as an abstract stutter. There are
-//! no admits or axioms in this module.
+//! Failure, racing-CAS, concurrent flights, membership listing/configuration
+//! completions, and timer fire/commit steps remain classified by
+//! [`open_case`]. The bounded startup wake and successful announcement
+//! completion are proved below: they advance membership from announce to list,
+//! leave document and timer state unchanged, and preserve the full relation as
+//! abstract stutters. There are no admits or axioms in this module.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code))]
 
@@ -44,6 +45,8 @@ use crate::handler::spec_on_event;
 use crate::handler_docs::{FlightSpec, FlightsSpec, PhaseSpec};
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
+#[cfg(verus_keep_ghost)]
+use crate::state_node::RefreshSpec;
 #[cfg(verus_keep_ghost)]
 use crate::state_timers::{spec_slot_before, TimersSpec};
 #[cfg(verus_keep_ghost)]
@@ -618,6 +621,24 @@ pub proof fn lemma_initial_wake_membership_stutters(cfg: ConfigSpec)
             &&& after.core.node.members.refresh is Some
             &&& !after.core.timers.started
             &&& after.pending_store.dom().len() == 1
+            &&& after.pending_store.dom()
+                == Set::<OpId>::empty().insert(1)
+            &&& after.completed_store
+                == Set::<OpId>::empty()
+            &&& after.pending_store.contains_key(1)
+            &&& after.pending_store[1].owner == Some(Owner::Members)
+            &&& after.core.ops.contains_key(1)
+            &&& after.core.ops[1] == Owner::Members
+            &&& after.core.ops.dom()
+                == Set::<OpId>::empty().insert(1)
+            &&& after.core.next_op == 2
+            &&& after.core.clock == 0
+            &&& !after.core.loops
+            &&& match after.core.node.members.refresh {
+                Some(RefreshSpec::Announcing { op, now }) =>
+                    op == 1 && now == 0,
+                _ => false,
+            }
         }),
 {
     let before = initial_process(cfg);
@@ -673,15 +694,264 @@ pub proof fn lemma_initial_wake_membership_stutters(cfg: ConfigSpec)
     }
     assert(after.pending_store.dom() =~= Set::<OpId>::empty().insert(1));
     assert(after.pending_store.dom().len() == 1);
+    assert(after.pending_store.contains_key(1));
+    assert(after.pending_store[1].owner == Some(Owner::Members));
     assert(after.boundary == before.boundary);
     assert(after.completed_store =~= Set::<OpId>::empty());
     assert(after.core == core);
+    assert(after.core.ops.contains_key(1));
+    assert(after.core.ops[1] == Owner::Members);
+    assert(after.core.ops.dom() =~= Set::<OpId>::empty().insert(1));
+    assert(after.core.next_op == 2);
+    assert(after.core.clock == 0);
+    assert(!after.core.loops);
+    assert(match after.core.node.members.refresh {
+        Some(RefreshSpec::Announcing { op, now }) =>
+            op == 1 && now == 0,
+        _ => false,
+    });
     assert(after.core.out =~= Seq::<EffectSpec>::empty());
     assert(after.core.cache == before.core.cache);
     assert(after.core.flights == before.core.flights);
     assert(after.core.timers == before.core.timers);
     assert(after.core.node.core == before.core.node.core);
 
+    assert(pending_store_consistent(after));
+    assert(owners_consistent(after.core));
+    assert(membership_consistent(after.core));
+    assert(timers_consistent(after.core.timers));
+    assert(flight_lanes_consistent(after.core.flights));
+    assert(cache_related(
+        after.core.cache,
+        after.core.flights,
+        initial_abstract().store,
+    ));
+    assert(flights_related(
+        after.core.flights,
+        initial_abstract().store,
+    ));
+    assert(related(after, initial_abstract()));
+}
+
+/// Preconditions for the production core to accept a successful membership
+/// announcement completion. The operation must be pending in both runtime
+/// bookkeeping and the core, owned by the membership machine, and be the
+/// announcement operation that machine currently expects.
+pub open spec fn membership_announcement_completion_pre(
+    before: ProcessV,
+    event: EventSpec,
+) -> bool {
+    match event {
+        EventSpec::Store { op, response, .. } => {
+            &&& response == StoreRes::Put { result: Ok(()) }
+            &&& before.pending_store.contains_key(op)
+            &&& before.pending_store[op].owner
+                == Some(Owner::Members)
+            &&& before.core.ops.contains_key(op)
+            &&& before.core.ops[op] == Owner::Members
+            &&& match before.core.node.members.refresh {
+                Some(RefreshSpec::Announcing {
+                    op: expected,
+                    ..
+                }) => expected == op,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+/// Exact post-state of the bounded announcement-completion slice. Operation
+/// `completed` has been consumed, operation `listing` is the newly issued
+/// node-list call, and no document, cache, flight, timer, or boundary state
+/// moved.
+pub open spec fn membership_listing_started(
+    before: ProcessV,
+    after: ProcessV,
+    completed: OpId,
+    listing: OpId,
+) -> bool {
+    &&& !after.pending_store.contains_key(completed)
+    &&& after.completed_store.contains(completed)
+    &&& after.pending_store.contains_key(listing)
+    &&& after.pending_store[listing].owner == Some(Owner::Members)
+    &&& after.core.ops.contains_key(listing)
+    &&& after.core.ops[listing] == Owner::Members
+    &&& match after.core.node.members.refresh {
+        Some(RefreshSpec::Listing { op, now }) =>
+            op == listing && now == 0,
+        _ => false,
+    }
+    &&& after.core.node.core == before.core.node.core
+    &&& after.core.cache == before.core.cache
+    &&& after.core.flights == before.core.flights
+    &&& after.core.timers == before.core.timers
+    &&& after.boundary == before.boundary
+}
+
+/// Completing the startup announcement replaces pending membership op `1`
+/// with the node-list op `2`. This real Store event preserves the full
+/// production/abstract relation and is therefore an abstract stutter.
+pub proof fn lemma_initial_membership_announcement_completion_stutters(
+    cfg: ConfigSpec,
+)
+    ensures
+        ({
+            let initial = initial_process(cfg);
+            let wake = EventSpec::Wake {
+                clock: 0,
+                armed: Armed::Heartbeat,
+            };
+            let before = process_step(initial, wake);
+            let event = EventSpec::Store {
+                op: 1,
+                response: StoreRes::Put { result: Ok(()) },
+                clock: 0,
+            };
+            let after = process_step(before, event);
+            &&& membership_announcement_completion_pre(before, event)
+            &&& membership_listing_started(before, after, 1, 2)
+            &&& related(after, initial_abstract())
+        }),
+{
+    lemma_initial_wake_membership_stutters(cfg);
+    let initial = initial_process(cfg);
+    let wake = EventSpec::Wake {
+        clock: 0,
+        armed: Armed::Heartbeat,
+    };
+    let before = process_step(initial, wake);
+    let event = EventSpec::Store {
+        op: 1,
+        response: StoreRes::Put { result: Ok(()) },
+        clock: 0,
+    };
+
+    assert(related(before, initial_abstract()));
+    assert(before.pending_store.contains_key(1));
+    assert(before.pending_store[1].owner == Some(Owner::Members));
+    assert(before.pending_store.dom()
+        =~= Set::<OpId>::empty().insert(1));
+    assert(before.core.ops.contains_key(1));
+    assert(before.core.ops[1] == Owner::Members);
+    assert(before.core.ops.dom()
+        =~= Set::<OpId>::empty().insert(1));
+    assert(before.core.next_op == 2);
+    assert(before.core.clock == 0);
+    assert(!before.core.loops);
+    assert(match before.core.node.members.refresh {
+        Some(RefreshSpec::Announcing { op, now }) =>
+            op == 1 && now == 0,
+        _ => false,
+    });
+    assert(membership_announcement_completion_pre(before, event));
+
+    reveal(spec_on_event);
+    reveal(crate::handler_node::spec_members_tick);
+    reveal(crate::handler_node::spec_members_completed);
+    reveal(crate::handler_node::spec_announced);
+    reveal(crate::handler::spec_schedule_wake);
+    reveal_with_fuel(apply_effects, 2);
+
+    let accepted = accept_event(before, event);
+    assert(!accepted.pending_store.contains_key(1));
+    assert(accepted.pending_store =~= Map::<OpId, PendingStoreV>::empty());
+    assert(accepted.completed_store.contains(1));
+    assert(accepted.completed_store
+        =~= Set::<OpId>::empty().insert(1));
+    assert(accepted.core == before.core);
+    assert(accepted.core.clock == 0);
+    assert(!accepted.core.loops);
+    let removed = S {
+        ops: accepted.core.ops.remove(1),
+        ..accepted.core
+    };
+    assert(!removed.ops.contains_key(1));
+    assert(removed.ops =~= Map::<OpId, Owner>::empty());
+    let handled = crate::handler_node::spec_members_completed(
+        removed,
+        1,
+        StoreRes::Put { result: Ok(()) },
+    );
+    assert(!handled.ops.contains_key(1));
+    assert(handled.ops.contains_key(2));
+    assert(handled.ops[2] == Owner::Members);
+    assert(match handled.node.members.refresh {
+        Some(RefreshSpec::Listing { op, now }) =>
+            op == 2 && now == 0,
+        _ => false,
+    });
+    let (core, effects) = spec_on_event(accepted.core, event);
+    assert(core.ops == handled.ops);
+    assert(core.node.members.refresh == handled.node.members.refresh);
+    assert(effects.len() == 1);
+    assert(effects[0] is Store);
+    assert(core.out =~= Seq::<EffectSpec>::empty());
+    assert(!core.ops.contains_key(1));
+    assert(core.ops.contains_key(2));
+    assert(core.ops[2] == Owner::Members);
+    assert(match core.node.members.refresh {
+        Some(RefreshSpec::Listing { op, now }) =>
+            op == 2 && now == 0,
+        _ => false,
+    });
+    assert(core.node.core == before.core.node.core);
+    assert(core.cache == before.core.cache);
+    assert(core.flights == before.core.flights);
+    assert(core.timers == before.core.timers);
+
+    let after = process_step(before, event);
+    let base = ProcessV { core, ..accepted };
+    assert(after == apply_effects(base, effects));
+    assert(effects =~= seq![effects[0]]);
+    assert(effects.drop_first() =~= Seq::<EffectSpec>::empty());
+    match effects[0] {
+        EffectSpec::Store { op, request } => {
+            assert(op == 2);
+            assert(after == apply_effect(
+                base,
+                EffectSpec::Store { op, request },
+            ));
+            lemma_store_effect_is_pending(base, op, request);
+            assert(after.pending_store
+                == base.pending_store.insert(
+                    op,
+                    PendingStoreV {
+                        request,
+                        owner: Some(Owner::Members),
+                    },
+                ));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+    assert(!after.pending_store.contains_key(1));
+    assert(after.completed_store.contains(1));
+    assert(after.pending_store.contains_key(2));
+    assert(after.pending_store[2].owner == Some(Owner::Members));
+    assert(after.pending_store.dom()
+        =~= Set::<OpId>::empty().insert(2));
+    assert(after.core == core);
+    assert(after.core.ops.dom()
+        =~= Set::<OpId>::empty().insert(2));
+    assert(after.completed_store
+        =~= Set::<OpId>::empty().insert(1));
+    assert(membership_listing_started(before, after, 1, 2));
+
+    assert forall|op: OpId|
+        after.pending_store.contains_key(op) implies {
+            &&& after.core.ops.contains_key(op)
+            &&& after.pending_store[op].owner
+                == Some(after.core.ops[op])
+        } by {
+        assert(op == 2);
+    }
+    assert forall|op: OpId|
+        after.completed_store.contains(op) implies
+            !after.pending_store.contains_key(op) by {
+        assert(op == 1);
+    }
     assert(pending_store_consistent(after));
     assert(owners_consistent(after.core));
     assert(membership_consistent(after.core));
