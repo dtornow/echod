@@ -18,6 +18,10 @@
 //!   stored-document invariant and computes the exact endpoint-note delta;
 //! * dispatchable endpoint notes become exactly one Send effect each, with
 //!   the same unique effect keys.
+//! * a quiet empty-heartbeat core step emits exactly its successful reply;
+//! * a quiet cache-miss origin request starts one real loading flight and Get;
+//! * a normal atomic request preserves the stored-document invariant and its
+//!   Reply/Send effects are exactly the endpoint delta.
 //!
 //! These local theorems intentionally reuse the two document theorems on which
 //! a full process simulation must rest:
@@ -44,16 +48,19 @@ use crate::config::ConfigSpec;
 #[cfg(verus_keep_ghost)]
 use crate::document::spec_loaded_body;
 #[cfg(verus_keep_ghost)]
-use crate::handler::{spec_on_event, spec_schedule_wake};
+use crate::handler::{spec_on_event, spec_request, spec_schedule_wake};
 #[cfg(verus_keep_ghost)]
 use crate::handler_docs::{
     spec_answered_loading, spec_answered_origin, spec_begin,
     spec_commit_advance, spec_commit_failed, spec_committed, spec_decide,
     spec_dispatch, spec_dispatches, spec_flight_completed, spec_inflight,
     spec_load_origin, spec_loaded_origin, spec_retry, spec_run_origin,
-    spec_send_all, spec_take_flight, CommittingSpec, DoneSpec, FlightSpec,
-    FlightsSpec, PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec,
+    spec_send_all, spec_slot_of, spec_start, spec_submit, spec_take_flight,
+    CommittingSpec, DoneSpec, FlightSpec, FlightsSpec, PhaseSpec, ProgressSpec,
+    WorkSpec, WorkingSpec,
 };
+#[cfg(verus_keep_ghost)]
+use crate::keys::spec_doc_key;
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
 #[cfg(verus_keep_ghost)]
@@ -64,7 +71,8 @@ use crate::state_timers::{spec_slot_before, ListingSpec, TimersSpec};
 use crate::target::TargetSpec;
 #[cfg(verus_keep_ghost)]
 use crate::types::{
-    AnswerSpec, Armed, EffectSpec, EventSpec, Fired, MessageSpec, OpId,
+    AnswerSpec, Armed, CacheResult, CallSpec, EffectSpec, EventSpec,
+    Fired, MessageSpec, NoteSpec, OpId, RequestEventSpec,
 };
 
 #[cfg(verus_keep_ghost)]
@@ -99,7 +107,7 @@ use echod_concrete::store::{
     spec_before, StoreError, StoreErrorSpec, StoreReqSpec, StoreRes,
 };
 #[cfg(verus_keep_ghost)]
-use echod_types::{Request, MAX_TIME};
+use echod_types::{Request, Response, StatusRes, MAX_TIME};
 #[cfg(verus_keep_ghost)]
 use crate::verified::flight_spec::{
     answer_v, spec_advance, AAct, AAnswer, AOutcome, AStep,
@@ -246,6 +254,163 @@ pub open spec fn process_step(p: ProcessV, event: EventSpec) -> ProcessV {
     let accepted = accept_event(p, event);
     let (next, effects) = spec_on_event(accepted.core, event);
     apply_effects(ProcessV { core: next, ..accepted }, effects)
+}
+
+// ---------------------------------------------------------------------------
+// Bounded production request steps
+// ---------------------------------------------------------------------------
+
+/// No background membership or wake work can be inserted around a request.
+///
+/// This is an exact production-state precondition, not an alternate
+/// transition relation. A refresh in progress suppresses the implicit
+/// membership tick, and `loops == false` makes `spec_schedule_wake` a no-op.
+pub open spec fn quiet_request_ready(s: S) -> bool {
+    &&& s.out.len() == 0
+    &&& s.node.members.refresh is Some
+    &&& !s.loops
+}
+
+/// Under a quiet production state, the real `State::on_event` transition for
+/// an empty task heartbeat changes only the observed clock and emits exactly
+/// the successful reply.
+pub proof fn lemma_empty_heartbeat_core_step(
+    s: S,
+    clock: u64,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    action_kind: Option<Seq<char>>,
+)
+    requires
+        quiet_request_ready(s),
+    ensures
+        spec_on_event(
+            s,
+            EventSpec::Request {
+                clock,
+                request: RequestEventSpec::EmptyHeartbeat {
+                    id,
+                    kind,
+                    corr,
+                    action_kind,
+                },
+            },
+        ) == (
+            S {
+                clock,
+                out: Seq::empty(),
+                ..s
+            },
+            seq![EffectSpec::Reply {
+                id,
+                response: Ok(AnswerSpec::Step {
+                    kind,
+                    corr,
+                    action_kind,
+                    response: Response::Status(StatusRes { status: 200 }),
+                    why: None,
+                }),
+            }],
+        ),
+{
+    reveal(spec_on_event);
+    reveal(spec_schedule_wake);
+    assert(s.node.members.refreshing());
+    assert(s.out =~= Seq::<EffectSpec>::empty());
+}
+
+/// Exact preconditions for the first, cache-miss step of one ordinary origin
+/// request. Fresh operation/flight ids and an absent slot prevent this slice
+/// from silently overwriting concurrent production work.
+pub open spec fn normal_origin_request_ready(
+    s: S,
+    origin: Seq<char>,
+) -> bool {
+    let name = crate::target::spec_name(TargetSpec::Origin(origin));
+    &&& quiet_request_ready(s)
+    &&& !s.ops.contains_key(s.next_op)
+    &&& !s.flights.inflight.contains_key(s.next_flight)
+    &&& !s.flights.slots.contains_key(name)
+    &&& crate::cache::spec_get(s.cache, origin).1 is None
+    &&& spec_doc_key(s.keys.prefix, origin).len() <= usize::MAX as int
+}
+
+/// The first real production transition for a normal origin request starts a
+/// flight and issues the document Get. The load response and commit sequence
+/// are deliberately outside this one-step slice.
+pub proof fn lemma_normal_origin_request_starts_load(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    clock: u64,
+)
+    requires
+        call.target == TargetSpec::Origin(origin),
+        normal_origin_request_ready(s, origin),
+    ensures
+        ({
+            let event = EventSpec::Request {
+                clock,
+                request: RequestEventSpec::Protocol(call),
+            };
+            let (next, effects) = spec_on_event(s, event);
+            let op = s.next_op;
+            let fid = s.next_flight;
+            let request_now =
+                if call.pinned || call.now > s.node.fleet_at {
+                    call.now
+                } else {
+                    s.node.fleet_at
+                };
+            let work = WorkSpec::Request {
+                id: call.id,
+                kind: call.kind,
+                corr: call.corr,
+                req: call.request,
+                action_kind: call.action_kind,
+                now: request_now,
+            };
+            &&& effects == seq![
+                EffectSpec::Note(NoteSpec::Cache(CacheResult::Miss)),
+                EffectSpec::Store {
+                    op,
+                    request: StoreReqSpec::Get {
+                        key: spec_doc_key(s.keys.prefix, origin),
+                    },
+                },
+            ]
+            &&& next.out.len() == 0
+            &&& next.ops.contains_key(op)
+            &&& next.ops[op] == Owner::Flight(fid)
+            &&& next.flights.inflight.contains_key(fid)
+            &&& next.flights.inflight[fid].target
+                == TargetSpec::Origin(origin)
+            &&& next.flights.inflight[fid].work == work
+            &&& next.flights.inflight[fid].phase
+                == PhaseSpec::Loading {
+                    op,
+                    revalidating: None,
+                }
+            &&& spec_slot_of(
+                next,
+                crate::target::spec_name(TargetSpec::Origin(origin)),
+            ).busy == Some(fid)
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_request);
+    reveal(spec_submit);
+    reveal(spec_start);
+    reveal(spec_begin);
+    reveal(spec_load_origin);
+    reveal(spec_schedule_wake);
+    assert(s.node.members.refreshing());
+    assert(s.out =~= Seq::<EffectSpec>::empty());
+    assert(spec_slot_of(
+        s,
+        crate::target::spec_name(TargetSpec::Origin(origin)),
+    ).busy is None);
 }
 
 // ---------------------------------------------------------------------------

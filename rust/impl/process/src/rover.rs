@@ -1243,7 +1243,7 @@ pub open spec fn spec_store_step(
 mod tests {
     use super::*;
     use echod_rover::rover::RoverModel;
-    use echod_types::{ScheduleGetReq, TaskHeartbeatReq};
+    use echod_types::{ScheduleGetReq, TaskGetReq, TaskHeartbeatReq};
 
     #[test]
     fn initial_timeout_runs_the_production_heartbeat() {
@@ -1395,6 +1395,40 @@ mod tests {
         assert!(outcomes[0].send.iter().any(|(recipient, message)| {
             *recipient == Pid::Outside
                 && matches!(message, Message::Reply(Output::Response { id: 7, .. }))
+        }));
+    }
+
+    #[test]
+    fn normal_origin_request_enters_production_store_path() {
+        let config = Config::memory("node-0");
+        let model = Model;
+        let call = BoundaryCall {
+            client: "client".to_string(),
+            id: 8,
+            request: Request::TaskGet(TaskGetReq {
+                id: "order:task".to_string(),
+            }),
+        };
+        let initial = model.initial(&config);
+        let outcomes = model.on_event(
+            &config,
+            &initial[0].0,
+            &initial[0].1,
+            1,
+            &ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        );
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            &outcomes[0].state,
+            Local::Node(node) if node.pending.len() == 1
+        ));
+        assert!(outcomes[0].send.iter().any(|(recipient, message)| {
+            *recipient == Pid::Store
+                && matches!(message, Message::StoreReq { .. })
         }));
     }
 }

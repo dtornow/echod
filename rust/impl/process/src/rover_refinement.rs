@@ -9,44 +9,79 @@
 //! also proves the deterministic startup Wake and successful membership
 //! announcement completion as real Rover process steps matched by empty
 //! abstract executions.
+//! It also proves two bounded slices
+//! of the real Rover transition relation: a quiet empty task heartbeat and
+//! the admission/cache-miss load of one normal origin request. The latter is
+//! composed with the already-proved document decision theorem, but does not
+//! claim the still-missing StoreRes/commit world invariant.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::rover::Model as ProductionModel;
-#[cfg(verus_keep_ghost)]
-use crate::rover::{
-    spec_initial_node, spec_node_step, LocalV as ProductionLocalV, Message as ProductionMessage,
-    NodeV as ProductionNodeV,
+use crate::refinement::{
+    document_ids_bounded,
+    lemma_empty_heartbeat_core_step,
+    lemma_normal_origin_request_starts_load,
+    lemma_normal_request_matches_abstract_handler,
+    normal_origin_request_ready,
+    quiet_request_ready,
 };
 #[cfg(verus_keep_ghost)]
-use crate::state::Owner;
+use crate::rover::{
+    spec_call, spec_effect, spec_effects, spec_node_step,
+    spec_initial_node, spec_store_request, spec_take_pending, LocalV, Message,
+    Model as ProductionModel, NodeV, LocalV as ProductionLocalV,
+    Message as ProductionMessage, NodeV as ProductionNodeV,
+};
+#[cfg(verus_keep_ghost)]
+use crate::state::{Owner, S};
 #[cfg(verus_keep_ghost)]
 use crate::state_node::RefreshSpec;
 #[cfg(verus_keep_ghost)]
 use crate::state_timers::ListingSpec;
 #[cfg(verus_keep_ghost)]
-use crate::types::{Armed, EffectSpec, EventSpec};
+use crate::target::TargetSpec;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::{Model as AbstractModel, ServerConfig};
+use crate::types::{
+    AnswerSpec, Armed, EffectSpec, EventSpec, RequestEventSpec,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::{
+    Call as BoundaryCall, Model as AbstractModel, Output, ServerConfig,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract::view::StoreV as AbstractStoreV;
+#[cfg(verus_keep_ghost)]
+use echod_concrete::document::{well_formed, StoredDocumentV};
+#[cfg(verus_keep_ghost)]
+use echod_concrete::effects::{effects_match, safe_effect_config};
+#[cfg(verus_keep_ghost)]
+use echod_concrete::interpret::{doc_rel, finite_store, request_agrees};
+#[cfg(verus_keep_ghost)]
+use echod_concrete::node::spec_stored_body;
+#[cfg(verus_keep_ghost)]
+use echod_concrete::quick_n_dirty::{on_request, routed};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::model::Pid;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::relation::agreement;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreReq, StoreRes, StoreV};
+use echod_concrete::store::{StoreReq, StoreReqSpec, StoreRes, StoreV};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::{
-    event_valid, initial, land, legal, step, Execution, Label, StepResultV, World,
+    event_valid, initial, is_process, land, legal, step, Execution, Label,
+    StepResultV, World,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
+#[cfg(verus_keep_ghost)]
+use echod_types::{Response, StatusRes, MAX_TIME};
 
 verus! {
 
@@ -3960,6 +3995,651 @@ pub proof fn lemma_empty_timer_completion_is_abstract_stutter(
         Seq::<echod_abstract::BoundaryEvent>::empty(),
         abstract_before,
     ));
+// ---------------------------------------------------------------------------
+// Production-backed Rover request slices
+// ---------------------------------------------------------------------------
+
+pub open spec fn pending_id_fresh(
+    pending: Seq<(u64, BoundaryCall)>,
+    id: u64,
+) -> bool {
+    forall|i: int| 0 <= i < pending.len() ==> pending[i].0 != id
+}
+
+proof fn lemma_take_pending_fresh(
+    pending: Seq<(u64, BoundaryCall)>,
+    id: u64,
+)
+    requires
+        pending_id_fresh(pending, id),
+    ensures
+        spec_take_pending(pending, id) == (None, pending),
+    decreases pending.len(),
+{
+    if pending.len() == 0 {
+        assert(pending =~= Seq::<(u64, BoundaryCall)>::empty());
+    } else {
+        let prefix = pending.drop_last();
+        assert(pending_id_fresh(prefix, id)) by {
+            assert forall|i: int| 0 <= i < prefix.len()
+                implies prefix[i].0 != id by {
+                assert(prefix[i] == pending[i]);
+            }
+        }
+        lemma_take_pending_fresh(prefix, id);
+        assert(pending.last().0 != id);
+        assert(prefix.push(pending.last()) =~= pending);
+    }
+}
+
+proof fn lemma_take_pending_fresh_push(
+    pending: Seq<(u64, BoundaryCall)>,
+    call: BoundaryCall,
+)
+    requires
+        pending_id_fresh(pending, call.id),
+    ensures
+        spec_take_pending(
+            pending.push((call.id, call)),
+            call.id,
+        ) == (Some(call), pending),
+{
+    lemma_take_pending_fresh(pending, call.id);
+    assert(pending.push((call.id, call)).drop_last() =~= pending);
+    assert(pending.push((call.id, call)).last() == (call.id, call));
+}
+
+pub open spec fn request_event(
+    call: BoundaryCall,
+) -> ProcessEvent<Pid, Message> {
+    ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    }
+}
+
+pub open spec fn empty_heartbeat_reply(
+    call: BoundaryCall,
+) -> (Pid, Message) {
+    (
+        Pid::Outside,
+        Message::Reply(Output::Response {
+            client: call.client,
+            id: call.id,
+            response: Response::Status(StatusRes { status: 200 }),
+        }),
+    )
+}
+
+pub open spec fn empty_heartbeat_result(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+) -> StepResultV<LocalV, Pid, Message> {
+    StepResultV {
+        state: LocalV::Node(NodeV {
+            core: S {
+                clock: at,
+                out: Seq::empty(),
+                ..node.core
+            },
+            pending: node.pending,
+            wake: node.wake,
+        }),
+        send: seq![empty_heartbeat_reply(call)],
+    }
+}
+
+/// The node-level Rover outcome for an empty task heartbeat. Its core is the
+/// real `spec_on_event` transition proved in `refinement`, and its reply is
+/// interpreted by the same adapter used by executable `Node::step`.
+pub proof fn lemma_empty_heartbeat_node_step(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+)
+    requires
+        crate::rover::spec_empty_heartbeat(call.request),
+        quiet_request_ready(node.core),
+        pending_id_fresh(node.pending, call.id),
+    ensures
+        spec_node_step(node, at, request_event(call))
+            == seq![empty_heartbeat_result(node, at, call)],
+{
+    reveal(spec_node_step);
+    assert(crate::rover::spec_target(call.request) is None);
+    let event = EventSpec::Request {
+        clock: at,
+        request: RequestEventSpec::EmptyHeartbeat {
+            id: call.id,
+            kind: Seq::empty(),
+            corr: call.client@,
+            action_kind: None,
+        },
+    };
+    lemma_empty_heartbeat_core_step(
+        node.core,
+        at,
+        call.id,
+        Seq::empty(),
+        call.client@,
+        None,
+    );
+    let core = S {
+        clock: at,
+        out: Seq::empty(),
+        ..node.core
+    };
+    let reply = crate::types::EffectSpec::Reply {
+        id: call.id,
+        response: Ok(AnswerSpec::Step {
+            kind: Seq::empty(),
+            corr: call.client@,
+            action_kind: None,
+            response: Response::Status(StatusRes { status: 200 }),
+            why: None,
+        }),
+    };
+    assert(crate::handler::spec_on_event(node.core, event)
+        == (core, seq![reply]));
+    lemma_take_pending_fresh_push(node.pending, call);
+    reveal_with_fuel(spec_effects, 3);
+    reveal(spec_effect);
+    let started = NodeV {
+        core,
+        pending: node.pending.push((call.id, call)),
+        wake: node.wake,
+    };
+    assert(spec_effects(started, at, seq![reply]) == (
+        empty_heartbeat_result(node, at, call).state->Node_0,
+        seq![empty_heartbeat_reply(call)],
+    ));
+    assert(spec_node_step(node, at, request_event(call))
+        =~= seq![empty_heartbeat_result(node, at, call)]);
+}
+
+pub open spec fn empty_heartbeat_slice_ready(
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+) -> bool {
+    &&& before.process.len() > 0
+    &&& before.process[0].0 == Pid::Node(0)
+    &&& before.process[0].1 is Node
+    &&& before.now <= at
+    &&& event_valid(before, Pid::Node(0), request_event(call))
+    &&& crate::rover::spec_empty_heartbeat(call.request)
+    &&& quiet_request_ready(before.process[0].1->Node_0.core)
+    &&& pending_id_fresh(
+        before.process[0].1->Node_0.pending,
+        call.id,
+    )
+}
+
+/// A precisely bounded slice of Rover's real transition relation for one
+/// external empty task heartbeat.
+pub open spec fn empty_heartbeat_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    after: World<ProductionModel>,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let result = empty_heartbeat_result(node, at, call);
+    &&& empty_heartbeat_slice_ready(before, at, call)
+    &&& after == land(before, 0, Pid::Node(0), at, result)
+    &&& step(
+        ProductionModel,
+        config,
+        before,
+        Label::Process {
+            process: Pid::Node(0),
+            at,
+            event: request_event(call),
+            send: result.send,
+        },
+        after,
+    )
+}
+
+pub proof fn lemma_empty_heartbeat_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+)
+    requires
+        empty_heartbeat_slice_ready(before, at, call),
+    ensures
+        empty_heartbeat_rover_step(
+            config,
+            before,
+            at,
+            call,
+            land(
+                before,
+                0,
+                Pid::Node(0),
+                at,
+                empty_heartbeat_result(
+                    before.process[0].1->Node_0,
+                    at,
+                    call,
+                ),
+            ),
+        ),
+{
+    let node = before.process[0].1->Node_0;
+    let result = empty_heartbeat_result(node, at, call);
+    lemma_empty_heartbeat_node_step(node, at, call);
+    assert(spec_node_step(node, at, request_event(call))
+        == seq![result]);
+    assert(spec_node_step(node, at, request_event(call)).len() == 1);
+    reveal(step);
+    assert(spec_node_step(node, at, request_event(call))[0] == result);
+    assert(is_process(ProductionModel, before, Pid::Node(0))) by {
+        assert(before.process[0].0 == Pid::Node(0));
+    }
+    assert(exists|i: int, j: int|
+        #![trigger ProductionModel.spec_on_event(
+            config,
+            Pid::Node(0),
+            before.process[i].1,
+            at,
+            request_event(call),
+        )[j]]
+        {
+            &&& 0 <= i < before.process.len()
+            &&& before.process[i].0 == Pid::Node(0)
+            &&& {
+                let outcomes = ProductionModel.spec_on_event(
+                    config,
+                    Pid::Node(0),
+                    before.process[i].1,
+                    at,
+                    request_event(call),
+                );
+                &&& 0 <= j < outcomes.len()
+                &&& outcomes[j].send == result.send
+                &&& land(before, i, Pid::Node(0), at, outcomes[j])
+                    == land(before, 0, Pid::Node(0), at, result)
+            }
+        }
+    ) by {
+        let i: int = 0;
+        let j: int = 0;
+        assert(ProductionModel.spec_on_event(
+            config,
+            Pid::Node(0),
+            before.process[i].1,
+            at,
+            request_event(call),
+        ) == seq![result]);
+    }
+}
+
+pub open spec fn normal_origin_admission_result(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> StepResultV<LocalV, Pid, Message> {
+    let process_call =
+        spec_call(call, TargetSpec::Origin(origin), at);
+    let event = EventSpec::Request {
+        clock: at,
+        request: RequestEventSpec::Protocol(process_call),
+    };
+    let (core, _) = crate::handler::spec_on_event(node.core, event);
+    StepResultV {
+        state: LocalV::Node(NodeV {
+            core,
+            pending: node.pending.push((call.id, call)),
+            wake: node.wake,
+        }),
+        send: seq![(
+            Pid::Store,
+            Message::StoreReq {
+                op: node.core.next_op,
+                request: spec_store_request(StoreReqSpec::Get {
+                    key: crate::keys::spec_doc_key(
+                        node.core.keys.prefix,
+                        origin,
+                    ),
+                }),
+            },
+        )],
+    }
+}
+
+/// The first normal-request node step is the actual production admission
+/// transition: it creates one loading flight and emits the document Get.
+pub proof fn lemma_normal_origin_request_node_step(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+)
+    requires
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        normal_origin_request_ready(node.core, origin),
+    ensures
+        ({
+            let result =
+                normal_origin_admission_result(node, at, call, origin);
+            &&& spec_node_step(node, at, request_event(call))
+                == seq![result]
+            &&& result.state->Node_0.core.ops.contains_key(
+                node.core.next_op,
+            )
+            &&& result.state->Node_0.core.ops[node.core.next_op]
+                == crate::state::Owner::Flight(node.core.next_flight)
+            &&& result.state->Node_0.core.flights.inflight.contains_key(
+                node.core.next_flight,
+            )
+            &&& result.state->Node_0.core.flights.inflight[
+                node.core.next_flight
+            ].target == TargetSpec::Origin(origin)
+        }),
+{
+    let process_call =
+        spec_call(call, TargetSpec::Origin(origin), at);
+    lemma_normal_origin_request_starts_load(
+        node.core,
+        process_call,
+        origin,
+        at,
+    );
+    let event = EventSpec::Request {
+        clock: at,
+        request: RequestEventSpec::Protocol(process_call),
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(node.core, event);
+    let result =
+        normal_origin_admission_result(node, at, call, origin);
+    reveal(spec_node_step);
+    assert(effects == seq![
+        crate::types::EffectSpec::Note(
+            crate::types::NoteSpec::Cache(
+                crate::types::CacheResult::Miss,
+            ),
+        ),
+        crate::types::EffectSpec::Store {
+            op: node.core.next_op,
+            request: StoreReqSpec::Get {
+                key: crate::keys::spec_doc_key(
+                    node.core.keys.prefix,
+                    origin,
+                ),
+            },
+        },
+    ]);
+    reveal_with_fuel(spec_effects, 4);
+    reveal(spec_effect);
+    assert(spec_effects(
+        NodeV {
+            core,
+            pending: node.pending.push((call.id, call)),
+            wake: node.wake,
+        },
+        at,
+        effects,
+    ) == (result.state->Node_0, result.send));
+    assert(spec_node_step(node, at, request_event(call))
+        =~= seq![result]);
+    assert(result.state->Node_0.core == core);
+}
+
+pub open spec fn normal_origin_slice_ready(
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> bool {
+    &&& before.process.len() > 0
+    &&& before.process[0].0 == Pid::Node(0)
+    &&& before.process[0].1 is Node
+    &&& before.now <= at
+    &&& event_valid(before, Pid::Node(0), request_event(call))
+    &&& crate::rover::spec_target(call.request)
+        == Some(TargetSpec::Origin(origin))
+    &&& normal_origin_request_ready(
+        before.process[0].1->Node_0.core,
+        origin,
+    )
+}
+
+/// One real Rover process transition for a normal external origin request.
+/// The predicate stops exactly after admission and the cache-miss Get; the
+/// subsequent StoreRes/conditional-write sequence is not hidden in it.
+pub open spec fn normal_origin_request_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    after: World<ProductionModel>,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let result = normal_origin_admission_result(
+        node,
+        at,
+        call,
+        origin,
+    );
+    &&& normal_origin_slice_ready(before, at, call, origin)
+    &&& after == land(before, 0, Pid::Node(0), at, result)
+    &&& step(
+        ProductionModel,
+        config,
+        before,
+        Label::Process {
+            process: Pid::Node(0),
+            at,
+            event: request_event(call),
+            send: result.send,
+        },
+        after,
+    )
+    &&& result.state->Node_0.core.ops.contains_key(node.core.next_op)
+    &&& result.state->Node_0.core.ops[node.core.next_op]
+        == crate::state::Owner::Flight(node.core.next_flight)
+    &&& result.state->Node_0.core.flights.inflight.contains_key(
+        node.core.next_flight,
+    )
+    &&& result.state->Node_0.core.flights.inflight[
+        node.core.next_flight
+    ].target == TargetSpec::Origin(origin)
+}
+
+pub proof fn lemma_normal_origin_request_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+)
+    requires
+        normal_origin_slice_ready(before, at, call, origin),
+    ensures
+        normal_origin_request_rover_step(
+            config,
+            before,
+            at,
+            call,
+            origin,
+            land(
+                before,
+                0,
+                Pid::Node(0),
+                at,
+                normal_origin_admission_result(
+                    before.process[0].1->Node_0,
+                    at,
+                    call,
+                    origin,
+                ),
+            ),
+        ),
+{
+    let node = before.process[0].1->Node_0;
+    let result = normal_origin_admission_result(
+        node,
+        at,
+        call,
+        origin,
+    );
+    lemma_normal_origin_request_node_step(node, at, call, origin);
+    assert(spec_node_step(node, at, request_event(call))
+        == seq![result]);
+    assert(spec_node_step(node, at, request_event(call)).len() == 1);
+    reveal(step);
+    assert(spec_node_step(node, at, request_event(call))[0] == result);
+    assert(is_process(ProductionModel, before, Pid::Node(0))) by {
+        assert(before.process[0].0 == Pid::Node(0));
+    }
+    assert(exists|i: int, j: int|
+        #![trigger ProductionModel.spec_on_event(
+            config,
+            Pid::Node(0),
+            before.process[i].1,
+            at,
+            request_event(call),
+        )[j]]
+        {
+            &&& 0 <= i < before.process.len()
+            &&& before.process[i].0 == Pid::Node(0)
+            &&& {
+                let outcomes = ProductionModel.spec_on_event(
+                    config,
+                    Pid::Node(0),
+                    before.process[i].1,
+                    at,
+                    request_event(call),
+                );
+                &&& 0 <= j < outcomes.len()
+                &&& outcomes[j].send == result.send
+                &&& land(before, i, Pid::Node(0), at, outcomes[j])
+                    == land(before, 0, Pid::Node(0), at, result)
+            }
+        }
+    ) by {
+        let i: int = 0;
+        let j: int = 0;
+        assert(ProductionModel.spec_on_event(
+            config,
+            Pid::Node(0),
+            before.process[i].1,
+            at,
+            request_event(call),
+        ) == seq![result]);
+    }
+}
+
+/// The bounded normal-request happy path: the actual Rover admission step is
+/// paired with the already-proved production document decision on the same
+/// request and logical origin key. This theorem intentionally does not claim
+/// that the load and conditional-write Store steps have already occurred.
+pub proof fn lemma_normal_origin_request_happy_path_slice(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    document: StoredDocumentV,
+    abstract_store: AbstractStoreV,
+)
+    requires
+        normal_origin_slice_ready(before, at, call, origin),
+        well_formed(document),
+        routed(document, call.request),
+        echod_concrete::node::spec_key(call.request)
+            == Some(crate::refinement::logical_key(
+                TargetSpec::Origin(origin),
+            )),
+        doc_rel(
+            crate::refinement::logical_key(
+                TargetSpec::Origin(origin),
+            ),
+            spec_stored_body(document),
+            abstract_store,
+        ),
+        finite_store(abstract_store),
+        echod_concrete::node::spec_stored_committed_at(document) <= at,
+        at <= MAX_TIME,
+        0 < config.retry_timeout <= MAX_TIME,
+        safe_effect_config(at, config.retry_timeout),
+        document_ids_bounded(document),
+    ensures
+        ({
+            let key = crate::refinement::logical_key(
+                TargetSpec::Origin(origin),
+            );
+            let after_document = on_request(
+                document,
+                call.request,
+                at,
+                config.retry_timeout,
+            );
+            let (_, _, _, notes) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(document),
+                    call.request,
+                    at,
+                    config.retry_timeout,
+                );
+            let rover_after = land(
+                before,
+                0,
+                Pid::Node(0),
+                at,
+                normal_origin_admission_result(
+                    before.process[0].1->Node_0,
+                    at,
+                    call,
+                    origin,
+                ),
+            );
+            &&& normal_origin_request_rover_step(
+                config,
+                before,
+                at,
+                call,
+                origin,
+                rover_after,
+            )
+            &&& request_agrees(
+                abstract_config(config),
+                call.request,
+                key,
+                spec_stored_body(document),
+                abstract_store,
+                at,
+            )
+            &&& well_formed(after_document)
+            &&& effects_match(document, after_document, notes)
+        }),
+{
+    lemma_normal_origin_request_rover_step(
+        config,
+        before,
+        at,
+        call,
+        origin,
+    );
+    lemma_normal_request_matches_abstract_handler(
+        abstract_config(config),
+        document,
+        call.request,
+        crate::refinement::logical_key(
+            TargetSpec::Origin(origin),
+        ),
+        abstract_store,
+        at,
+    );
 }
 
 /// The requested trace-inclusion statement, now naming the production model.
