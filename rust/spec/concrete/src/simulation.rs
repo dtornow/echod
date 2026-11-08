@@ -3773,6 +3773,7 @@ pub proof fn lemma_write_after_read(
 }
 
 /// A store reply at a busy node.
+#[verifier::rlimit(200)]
 pub proof fn lemma_store_reply(
     fleet: Fleet,
     config: ServerConfig,
@@ -3919,6 +3920,7 @@ pub proof fn lemma_push_contains<A>(s: Seq<A>, x: A, y: A)
 
 /// The store's answer to the live flight's call: a read of an absent key,
 /// or a write that lands.
+#[verifier::rlimit(200)]
 pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
     requires
         inv(fleet, world),
