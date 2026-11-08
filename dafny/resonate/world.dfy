@@ -27,12 +27,16 @@ module Worlds {
     case Bucket => AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs))
   }
 
-  // The network calls this. It drives the step of whichever process was named.
-  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State> {
+  function ProcessOf(self: Pid): Process<Pid, Msg, State> {
     match self
-    case Client(_) => Client.Step(self, s, i, now)
-    case Node(_) => Node.Step(self, s, i, now)
-    case Bucket => Bucket.Step(self, s, i, now)
+    case Client(_) => Process(Client.Step)
+    case Node(_) => Process(Node.Step)
+    case Bucket => Process(Bucket.Step)
+  }
+
+  // The network calls this. The id picks a process, and that process's step runs.
+  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State> {
+    ProcessOf(self).step(self, s, i, now)
   }
 
   function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask): Sys<Pid, Msg, State>

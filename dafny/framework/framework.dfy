@@ -2,9 +2,9 @@ include "order.dfy"
 
 // A network of processes, generic in the process.
 //
-// A process is a value: an id, a state, and a step function. The step is told
-// the time. A system is the set of ids, how each one boots, the step, and
-// whether the network may drop or duplicate packets. One network runs any system. Deliver, fire, tick,
+// A process is a value: its step, told the time. A system is the set of ids,
+// how each one boots, the step, and whether the network may drop or duplicate
+// packets. One network runs any system. Deliver, fire, tick,
 // drop and duplicate are the same transitions; a trace invariant is an
 // argument of the safety theorem, not a module each system has to refine.
 //
@@ -21,6 +21,11 @@ module Network {
   datatype Send<P(!new), M(!new)> = Send(to: P, msg: M)
   datatype TimerOp = Keep | Set(delay: nat) | Cancel   // delay is relative to "now"
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
+
+  // The same shape for every process: who it is, the state it holds, what
+  // arrived, and the time. The world drives this, whichever process the id names.
+  datatype Process<!P(==, !new), !M(==, !new), !S(!new)> = Process(
+    step: (P, S, Input<P, M>, nat) -> Result<P, M, S>)
 
   // The process, plugged in. `!` because each type occurs under a function arrow.
   // `!new` because a trace quantifies over these values, so they are not references.
