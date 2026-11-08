@@ -67,7 +67,7 @@ module Node {
   }
 
   // Promise get reads the projection and does not write it back.
-  function Get(doc: Temp.Doc, id: string, now: nat): (r: Temp.Applied)
+  function HandlePromiseGet(doc: Temp.Doc, id: string, now: nat): (r: Temp.Applied)
     ensures Temp.WellFormed(doc, now) ==> Temp.WellFormed(r.doc, now)
     ensures Temp.CaughtUp(doc, now) ==> Temp.CaughtUp(r.doc, now)
   {
@@ -82,7 +82,7 @@ module Node {
 
   // Promise create sweeps, then creates. A timer that is also targeted is refused.
   // An id already present is answered from the projection and not written back.
-  function Create(doc: Temp.Doc, req: Temp.CreateReq, now: nat): (r: Temp.Applied)
+  function HandlePromiseCreate(doc: Temp.Doc, req: Temp.CreateReq, now: nat): (r: Temp.Applied)
     ensures Temp.WellFormed(doc, now) ==> Temp.WellFormed(r.doc, now)
     ensures Temp.CaughtUp(r.doc, now)
   {
@@ -107,9 +107,9 @@ module Node {
     requires s.AtNode?
   {
     match job
-    case AskGet => Plan(Get(doc, id, now).answer, false, [], Temp.None, false, s.next)
+    case AskGet => Plan(HandlePromiseGet(doc, id, now).answer, false, [], Temp.None, false, s.next)
     case AskCreate(req) =>
-      var applied := Create(doc, req, now);
+      var applied := HandlePromiseCreate(doc, req, now);
       if applied.doc == doc then Plan(applied.answer, true, [], Temp.None, false, s.next)
       else
         var key := DocKey(req.id);
