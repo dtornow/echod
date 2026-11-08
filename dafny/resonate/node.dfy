@@ -2,13 +2,18 @@ include "../framework/order.dfy"
 
 // One node handler, the document half of `spec_handle`.
 //
-// A document is an origin's objects, or a schedule. `WellFormed` is the
-// catalogue for that document: the promise rows, the task rows, and, when
-// the document is a schedule, the schedule rows. Before the handler, the
-// document is swept at that instant. Every promise whose deadline has
-// passed is timed out first. A timeout leaves that promise's callbacks in
-// place, and the next pass applies them: every callback on a settled
-// promise, least id first. Listeners are told the same way. A lease and a
+// A document is an origin's objects, or a schedule, and the stamp of the
+// step that wrote it: the processing time. `WellFormed` is the catalogue
+// for that document at that instant: the promise rows, the task rows, and,
+// when the document is a schedule, the schedule rows. A document the
+// handler leaves is caught up at its stamp. No promise is still pending
+// with a deadline at or before that processing time; the sweep timed every
+// one of those out before the call ran, and the call does not put one back.
+// Before the handler, the document is swept at that instant. Every promise
+// whose deadline has passed is timed out first. A timeout leaves that
+// promise's callbacks in place, and the next pass applies them: every
+// callback on a settled promise, least id first. Listeners are told the
+// same way. A lease and a
 // retry still due on a promise that is still pending come after that. A
 // schedule is its next run. The promise calls then see that document.
 // Get answers from the projection and does not write it back. Create refuses
@@ -83,7 +88,7 @@ module Node {
     lastRunAt: Opt<nat>,
     createdAt: nat)
 
-  datatype Doc = Origin(objects: map<string, Obj>) | Schedule(slot: Opt<Sched>)
+  datatype Doc = Origin(stamp: nat, objects: map<string, Obj>) | Schedule(stamp: nat, slot: Opt<Sched>)
 
   datatype CreateReq = CreateReq(id: string, timeoutAt: nat, param: Value, tags: Tags)
   datatype SettleReq = SettleReq(id: string, state: PromiseState, value: Value)
@@ -222,19 +227,31 @@ module Node {
 
   ghost predicate WellFormed(doc: Doc, now: nat) {
     match doc
-    case Origin(objects) => MapOk(objects, now)
-    case Schedule(slot) => slot.Some? ==> ScheduleOk(slot.value)
+    case Origin(_, objects) => MapOk(objects, now)
+    case Schedule(_, slot) => slot.Some? ==> ScheduleOk(slot.value)
+  }
+
+  // No promise deadline at or before `now` is still pending.
+  ghost predicate OnTime(objects: map<string, Obj>, now: nat) {
+    forall id :: id in objects ==>
+      objects[id].promise.state == PromiseState.Pending ==> now < objects[id].promise.timeoutAt
+  }
+
+  // Written at the processing time, with every due promise deadline timed out.
+  ghost predicate CaughtUp(doc: Doc, now: nat) {
+    doc.stamp == now && OnTime(ObjectsOf(doc), now)
   }
 
   function ObjectsOf(doc: Doc): map<string, Obj> {
     match doc
-    case Origin(objects) => objects
-    case Schedule(_) => map[]
+    case Origin(_, objects) => objects
+    case Schedule(_, _) => map[]
   }
 
   function NewPromise(timeout: nat, now: nat, param: Value, tags: Tags): (p: Promise)
     ensures PromiseOk(p, now)
     ensures p.callbacks == {}
+    ensures p.state == PromiseState.Pending ==> now < p.timeoutAt
   {
     if timeout > now then
       Promise(PromiseState.Pending, param, Empty(), tags, timeout, now, None, {}, {})
@@ -291,7 +308,7 @@ module Node {
     requires WellFormed(doc, now)
     requires PromiseOk(obj.promise, now) && TaskOk(obj.task) && obj.promise.callbacks == {}
     requires id !in ObjectsOf(doc)
-    ensures WellFormed(Origin(ObjectsOf(doc)[id := obj]), now)
+    ensures WellFormed(Origin(doc.stamp, ObjectsOf(doc)[id := obj]), now)
   {
     var objects := ObjectsOf(doc);
     var placed := objects[id := obj];
@@ -304,9 +321,9 @@ module Node {
       } else {
         assert k in objects && placed[k] == objects[k];
         match doc
-        case Origin(os) =>
+        case Origin(_, os) =>
           assert os == objects;
-        case Schedule(_) =>
+        case Schedule(_, _) =>
           assert objects == map[];
           assert false;
       }
@@ -315,6 +332,7 @@ module Node {
 
   function Create(doc: Doc, req: CreateReq, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if Timer(req.tags) && Targeted(req.tags) then
       Applied(doc, Answer(400, None), [])
@@ -325,7 +343,7 @@ module Node {
         Applied(doc, Answer(200, Some(seen.promise)), [])
       else
         var obj := NewObj(req.timeoutAt, now, req.param, req.tags, Targeted(req.tags));
-        var doc' := Origin(objects[req.id := obj]);
+        var doc' := Origin(now, objects[req.id := obj]);
         assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
           if WellFormed(doc, now) { InsertOk(doc, req.id, obj, now); }
         }
@@ -333,12 +351,16 @@ module Node {
   }
 
   // A schedule has no rows. Looking one up is the empty origin.
-  function Opened(doc: Doc): Doc {
-    Origin(ObjectsOf(doc))
+  function Opened(doc: Doc): (r: Doc)
+    ensures r.stamp == doc.stamp
+    ensures ObjectsOf(r) == ObjectsOf(doc)
+  {
+    Origin(doc.stamp, ObjectsOf(doc))
   }
 
   function Get(doc: Doc, id: string, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -360,6 +382,7 @@ module Node {
 
   function Settle(doc: Doc, req: SettleReq, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if !Settable(req.state) then Applied(doc, Answer(400, None), [])
     else
@@ -387,7 +410,7 @@ module Node {
             assert Lt(ids[i], ids[j]);
           }
           var armed := Offer(placed, told.objects, ids, now, retry);
-          var doc' := Origin(armed.objects);
+          var doc' := Origin(now, armed.objects);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               StillPending(objects[req.id], now);
@@ -397,6 +420,21 @@ module Node {
               ListenersOk(resumed, req.id, now);
               assert placed.Keys == resumed.Keys == told.objects.Keys;
               OfferOk(placed, told.objects, ids, now, retry);
+            }
+          }
+          assert CaughtUp(doc, now) ==> CaughtUp(doc', now) by {
+            if CaughtUp(doc, now) {
+              assert shown.stamp == doc.stamp;
+              assert ObjectsOf(shown) == ObjectsOf(doc);
+              assert OnTime(objects, now);
+              ReplaceOnTime(objects, req.id, obj, now);
+              CallbacksClock(placed, req.id, now);
+              ClockOnTime(placed, resumed, now);
+              ListenersClock(resumed, req.id);
+              ClockOnTime(resumed, told.objects, now);
+              assert placed.Keys == told.objects.Keys;
+              OfferClock(placed, told.objects, ids, now, retry);
+              ClockOnTime(told.objects, armed.objects, now);
             }
           }
           Applied(doc', Answer(200, Some(obj.promise)), told.notes + armed.notes)
@@ -409,6 +447,7 @@ module Node {
 
   function RegisterCallback(doc: Doc, req: CallbackReq, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if req.awaited == req.awaiter || OriginOf(req.awaited) != OriginOf(req.awaiter) then
       Applied(doc, Answer(400, None), [])
@@ -427,7 +466,7 @@ module Node {
           Applied(shown, Answer(422, None), [])
         else if awaited.promise.state == PromiseState.Pending && awaiter.promise.state == PromiseState.Pending then
           var obj := AddCallback(awaited, req.awaiter);
-          var doc' := Origin(objects[req.awaited := obj]);
+          var doc' := Origin(now, objects[req.awaited := obj]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               StillPending(objects[req.awaited], now);
@@ -447,6 +486,7 @@ module Node {
 
   function RegisterListener(doc: Doc, req: ListenerReq, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -460,7 +500,7 @@ module Node {
         Applied(shown, Answer(422, None), [])
       else if awaited.promise.state == PromiseState.Pending then
         var obj := AddListener(awaited, req.address);
-        var doc' := Origin(objects[req.awaited := obj]);
+        var doc' := Origin(now, objects[req.awaited := obj]);
         assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
           if WellFormed(doc, now) {
             StillPending(objects[req.awaited], now);
@@ -590,6 +630,7 @@ module Node {
 
   function GetTask(doc: Doc, id: string, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -606,6 +647,7 @@ module Node {
 
   function CreateTask(doc: Doc, pid: string, ttl: nat, action: CreateReq, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if !Targeted(action.tags) || Timer(action.tags) then
       Applied(doc, Claim(400, None, None), [])
@@ -627,7 +669,7 @@ module Node {
             else if t.state == TaskState.Pending && seen.promise.state == PromiseState.Pending then
               var u := ToAcquired(t, pid, ttl, now);
               var obj := Obj(seen.promise, Some(u));
-              var doc' := Origin(objects[action.id := obj]);
+              var doc' := Origin(now, objects[action.id := obj]);
               assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
                 if WellFormed(doc, now) {
                   assert WellFormed(done.doc, now);
@@ -646,6 +688,7 @@ module Node {
 
   function AcquireTask(doc: Doc, id: string, version: nat, pid: string, ttl: nat, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -663,7 +706,7 @@ module Node {
         else
           var u := ToAcquired(t, pid, ttl, now);
           var obj := Obj(seen.promise, Some(u));
-          var doc' := Origin(objects[id := obj]);
+          var doc' := Origin(now, objects[id := obj]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               assert WellFormed(shown, now);
@@ -680,6 +723,7 @@ module Node {
 
   function ReleaseTask(doc: Doc, id: string, version: nat, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -693,7 +737,7 @@ module Node {
       var t := obj.task.value;
       var u := Unlease(t, now);
       var next := Obj(obj.promise, Some(u));
-      var doc' := Origin(objects[id := next]);
+      var doc' := Origin(now, objects[id := next]);
       assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
         if WellFormed(doc, now) {
           assert WellFormed(shown, now);
@@ -710,6 +754,7 @@ module Node {
 
   function FulfillTask(doc: Doc, id: string, version: nat, action: SettleReq, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if !Settable(action.state) then Applied(doc, Answer(400, None), [])
     else
@@ -723,7 +768,7 @@ module Node {
       case HeldStale => Applied(shown, Answer(409, None), [])
       case HeldOk(obj) =>
         var settled := Settled(obj, action.state, action.value, now);
-        var doc' := Origin(objects[id := settled]);
+        var doc' := Origin(now, objects[id := settled]);
         assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
           if WellFormed(doc, now) {
             assert WellFormed(shown, now);
@@ -739,6 +784,7 @@ module Node {
 
   function HaltTask(doc: Doc, id: string, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -756,7 +802,7 @@ module Node {
         else
           var u := ToHalted(t);
           var obj := Obj(seen.promise, Some(u));
-          var doc' := Origin(objects[id := obj]);
+          var doc' := Origin(now, objects[id := obj]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               assert WellFormed(shown, now);
@@ -773,6 +819,7 @@ module Node {
 
   function ContinueTask(doc: Doc, id: string, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -790,7 +837,7 @@ module Node {
         else
           var u := ToPending(t, now);
           var obj := Obj(seen.promise, Some(u));
-          var doc' := Origin(objects[id := obj]);
+          var doc' := Origin(now, objects[id := obj]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               assert WellFormed(shown, now);
@@ -807,6 +854,7 @@ module Node {
 
   function Heartbeat(doc: Doc, pid: string, refs: seq<TaskRef>, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if |refs| == 0 then Applied(doc, Status(200), [])
     else if !OneOrigin(refs) then Applied(doc, Status(400), [])
@@ -817,7 +865,7 @@ module Node {
       }
       var objects := ObjectsOf(shown);
       var next := Extend(objects, pid, refs, 0, now);
-      var doc' := Origin(next);
+      var doc' := Origin(now, next);
       assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
         if WellFormed(doc, now) {
           assert WellFormed(shown, now);
@@ -825,11 +873,20 @@ module Node {
           ExtendOk(objects, pid, refs, 0, now);
         }
       }
+      assert CaughtUp(doc, now) ==> CaughtUp(doc', now) by {
+        if CaughtUp(doc, now) {
+          assert shown.stamp == doc.stamp;
+          assert ObjectsOf(shown) == ObjectsOf(doc);
+          ExtendClock(objects, pid, refs, 0, now);
+          ClockOnTime(objects, next, now);
+        }
+      }
       Applied(doc', Status(200), [])
   }
 
   function SuspendTask(doc: Doc, id: string, version: nat, actions: seq<CallbackReq>, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     if |actions| == 0 || BadSuspend(actions, id) || !DistinctAwaited(actions) then
       Applied(doc, Status(400), [])
@@ -848,7 +905,7 @@ module Node {
         else if AnySettled(objects, actions, now) then
           var t := obj.task.value;
           var next := Obj(obj.promise, Some(t.(resumes := [])));
-          var doc' := Origin(objects[id := next]);
+          var doc' := Origin(now, objects[id := next]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               assert WellFormed(shown, now);
@@ -865,7 +922,7 @@ module Node {
           var placed := AddSuspends(objects, id, actions, 0);
           var t := obj.task.value;
           var next := Obj(obj.promise, Some(ToSuspended(t)));
-          var doc' := Origin(placed[id := next]);
+          var doc' := Origin(now, placed[id := next]);
           assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
             if WellFormed(doc, now) {
               assert WellFormed(shown, now);
@@ -880,11 +937,24 @@ module Node {
               ReplaceOk(placed, id, next, now);
             }
           }
+          assert CaughtUp(doc, now) ==> CaughtUp(doc', now) by {
+            if CaughtUp(doc, now) {
+              assert shown.stamp == doc.stamp;
+              assert ObjectsOf(shown) == ObjectsOf(doc);
+              assert OnTime(objects, now);
+              AddSuspendsClock(objects, id, actions, 0);
+              ClockOnTime(objects, placed, now);
+              assert next.promise.state == obj.promise.state;
+              assert next.promise.timeoutAt == obj.promise.timeoutAt;
+              ReplaceOnTime(placed, id, next, now);
+            }
+          }
           Applied(doc', Status(200), [])
   }
 
   function Fence(doc: Doc, id: string, version: nat, action: FenceAction, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var target := match action case FenceCreate(req) => req.id case FenceSettle(req) => req.id;
     if target == id || OriginOf(target) != OriginOf(id) then
@@ -916,6 +986,7 @@ module Node {
 
   function FenceCheck(doc: Doc, id: string, version: nat, now: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(doc, now) ==> CaughtUp(r.doc, now)
   {
     var shown := Opened(doc);
     assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
@@ -1187,23 +1258,316 @@ module Node {
         Offer(before, objects, tail, now, retry)
   }
 
+  ghost predicate ClockSame(a: map<string, Obj>, b: map<string, Obj>) {
+    && a.Keys == b.Keys
+    && (forall id :: id in a ==>
+         b[id].promise.state == a[id].promise.state &&
+         b[id].promise.timeoutAt == a[id].promise.timeoutAt)
+  }
+
+  lemma ClockOnTime(a: map<string, Obj>, b: map<string, Obj>, now: nat)
+    requires OnTime(a, now)
+    requires ClockSame(a, b)
+    ensures OnTime(b, now)
+  {
+  }
+
+  lemma DeadlineOnTime(o: Obj, now: nat)
+    ensures var d := Deadline(o, now);
+      d.promise.state == PromiseState.Pending ==> now < d.promise.timeoutAt
+  {
+    if o.promise.state == PromiseState.Pending && o.promise.timeoutAt <= now {
+      var d := Project(o, now);
+      assert d.promise == ProjectPromise(o.promise, now);
+      assert d.promise.state != PromiseState.Pending;
+    }
+  }
+
+  lemma TimeoutsKeeps(objects: map<string, Obj>, keys: seq<string>, now: nat, id: string)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    requires id in objects
+    requires id !in keys
+    ensures Timeouts(objects, keys, now)[id] == objects[id]
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var head := keys[0];
+      var objects' := objects[head := Deadline(objects[head], now)];
+      var tail := keys[1..];
+      assert id != head;
+      assert objects'[id] == objects[id];
+      if id in tail {
+        assert id in keys;
+        assert false;
+      }
+      TailKeys(objects, objects', keys);
+      TimeoutsKeeps(objects', tail, now, id);
+    }
+  }
+
+  lemma TimeoutsOnTime(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures var r := Timeouts(objects, keys, now);
+      forall id :: id in keys ==>
+        r[id].promise.state == PromiseState.Pending ==> now < r[id].promise.timeoutAt
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var head := keys[0];
+      var due := Deadline(objects[head], now);
+      DeadlineOnTime(objects[head], now);
+      var objects' := objects[head := due];
+      var tail := keys[1..];
+      assert head !in tail by {
+        if head in tail {
+          var i :| 0 <= i < |tail| && tail[i] == head;
+          assert tail[i] == keys[i + 1];
+          assert keys[i + 1] != keys[0];
+        }
+      }
+      TailKeys(objects, objects', keys);
+      TimeoutsOnTime(objects', tail, now);
+      var r := Timeouts(objects, keys, now);
+      assert r == Timeouts(objects', tail, now);
+      TimeoutsKeeps(objects', tail, now, head);
+      assert r[head] == due;
+    }
+  }
+
+  lemma CallbacksClock(objects: map<string, Obj>, id: string, now: nat)
+    ensures ClockSame(objects, Callbacks(objects, id, now))
+    decreases if id in objects && objects[id].promise.state != PromiseState.Pending then |objects[id].promise.callbacks| else 0
+  {
+    if id in objects && objects[id].promise.state != PromiseState.Pending && objects[id].promise.callbacks != {} {
+      var o := objects[id];
+      var awaiter := MinKey(o.promise.callbacks);
+      var dropped := DropCallback(o, awaiter);
+      var objects' := objects[id := dropped];
+      var since := if o.promise.settledAt.Some? then o.promise.settledAt.value else 0;
+      var resumed := Resume(objects', awaiter, id, since, now);
+      ResumePromise(objects', awaiter, id, since, now);
+      assert dropped.promise.state == o.promise.state && dropped.promise.timeoutAt == o.promise.timeoutAt;
+      forall k | k in objects
+        ensures resumed[k].promise.state == objects[k].promise.state && resumed[k].promise.timeoutAt == objects[k].promise.timeoutAt
+      {
+        assert resumed[k].promise == objects'[k].promise;
+        if k == id {
+          assert objects'[k].promise.state == o.promise.state;
+        } else {
+          assert objects'[k] == objects[k];
+        }
+      }
+      CallbacksClock(resumed, id, now);
+    }
+  }
+
+  lemma ListenersClock(objects: map<string, Obj>, id: string)
+    ensures ClockSame(objects, Listeners(objects, id).objects)
+    decreases if id in objects && objects[id].promise.state != PromiseState.Pending then |objects[id].promise.listeners| else 0
+  {
+    if id in objects && objects[id].promise.state != PromiseState.Pending && objects[id].promise.listeners != {} {
+      var o := objects[id];
+      var address := MinKey(o.promise.listeners);
+      var dropped := DropListener(o, address);
+      var objects' := objects[id := dropped];
+      assert dropped.promise.state == o.promise.state && dropped.promise.timeoutAt == o.promise.timeoutAt;
+      ListenersClock(objects', id);
+    }
+  }
+
+  lemma ApplyCallbacksClock(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures ClockSame(objects, ApplyCallbacks(objects, keys, now))
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      CallbacksClock(objects, keys[0], now);
+      var woken := Callbacks(objects, keys[0], now);
+      TailKeys(objects, woken, keys);
+      ApplyCallbacksClock(woken, keys[1..], now);
+    }
+  }
+
+  lemma ApplyListenersClock(objects: map<string, Obj>, keys: seq<string>)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures ClockSame(objects, ApplyListeners(objects, keys).objects)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      ListenersClock(objects, keys[0]);
+      var told := Listeners(objects, keys[0]);
+      TailKeys(objects, told.objects, keys);
+      ApplyListenersClock(told.objects, keys[1..]);
+    }
+  }
+
+  lemma LeasePromise(o: Obj, now: nat)
+    ensures Lease(o, now).promise == o.promise
+  {
+  }
+
+  lemma LeasesClock(objects: map<string, Obj>, keys: seq<string>, now: nat)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures ClockSame(objects, Leases(objects, keys, now))
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var id := keys[0];
+      LeasePromise(objects[id], now);
+      var objects' := objects[id := Lease(objects[id], now)];
+      TailKeys(objects, objects', keys);
+      LeasesClock(objects', keys[1..], now);
+    }
+  }
+
+  lemma RetryPromise(o: Obj, id: string, now: nat, retry: nat)
+    ensures RetryOf(o, id, now, retry).obj.promise == o.promise
+  {
+  }
+
+  lemma RetriesClock(objects: map<string, Obj>, keys: seq<string>, now: nat, retry: nat)
+    requires forall k :: k in keys ==> k in objects
+    requires forall i, j | 0 <= i < j < |keys| :: keys[i] != keys[j]
+    ensures ClockSame(objects, Retries(objects, keys, now, retry).objects)
+    decreases |keys|
+  {
+    if |keys| != 0 {
+      var id := keys[0];
+      RetryPromise(objects[id], id, now, retry);
+      var objects' := objects[id := RetryOf(objects[id], id, now, retry).obj];
+      TailKeys(objects, objects', keys);
+      RetriesClock(objects', keys[1..], now, retry);
+    }
+  }
+
+  lemma OfferClock(before: map<string, Obj>, objects: map<string, Obj>, ids: seq<string>, now: nat, retry: nat)
+    requires before.Keys == objects.Keys
+    requires forall i, j | 0 <= i < j < |ids| :: ids[i] != ids[j]
+    ensures ClockSame(objects, Offer(before, objects, ids, now, retry).objects)
+    decreases |ids|
+  {
+    if |ids| != 0 {
+      var id := ids[0];
+      var tail := ids[1..];
+      forall i, j | 0 <= i < j < |tail|
+        ensures tail[i] != tail[j]
+      {
+        assert tail[i] == ids[i + 1] && tail[j] == ids[j + 1];
+      }
+      if id in objects && DueRetry(objects[id], now) && !DueRetry(before[id], now) {
+        RetryPromise(objects[id], id, now, retry);
+        var armed := RetryOf(objects[id], id, now, retry);
+        var objects' := objects[id := armed.obj];
+        OfferClock(before, objects', tail, now, retry);
+      } else {
+        OfferClock(before, objects, tail, now, retry);
+      }
+    }
+  }
+
+  lemma ExtendClock(objects: map<string, Obj>, pid: string, refs: seq<TaskRef>, i: nat, now: nat)
+    requires i <= |refs|
+    ensures ClockSame(objects, Extend(objects, pid, refs, i, now))
+    decreases |refs| - i
+  {
+    if i < |refs| {
+      var id := refs[i].id;
+      if id in objects {
+        var seen := Project(objects[id], now);
+        match seen.task
+        case None =>
+          ExtendClock(objects, pid, refs, i + 1, now);
+        case Some(t) =>
+          if t.state == TaskState.Acquired && t.version == refs[i].version && t.pid == Some(pid) {
+            Stored(objects[id], now, t);
+            var next := Obj(seen.promise, Some(t.(leaseTimeoutAt := Some(now + TtlOf(t)))));
+            assert seen == objects[id];
+            assert next.promise == objects[id].promise;
+            ExtendClock(objects[id := next], pid, refs, i + 1, now);
+          } else {
+            ExtendClock(objects, pid, refs, i + 1, now);
+          }
+      } else {
+        ExtendClock(objects, pid, refs, i + 1, now);
+      }
+    }
+  }
+
+  lemma AddSuspendsClock(objects: map<string, Obj>, awaiter: string, actions: seq<CallbackReq>, i: nat)
+    requires i <= |actions|
+    ensures ClockSame(objects, AddSuspends(objects, awaiter, actions, i))
+    decreases |actions| - i
+  {
+    if i < |actions| {
+      var awaited := actions[i].awaited;
+      if awaited in objects {
+        var added := AddCallback(objects[awaited], awaiter);
+        assert added.promise.state == objects[awaited].promise.state;
+        assert added.promise.timeoutAt == objects[awaited].promise.timeoutAt;
+        AddSuspendsClock(objects[awaited := added], awaiter, actions, i + 1);
+      } else {
+        AddSuspendsClock(objects, awaiter, actions, i + 1);
+      }
+    }
+  }
+
+  lemma ReplaceOnTime(objects: map<string, Obj>, id: string, o: Obj, now: nat)
+    requires OnTime(objects, now)
+    requires id in objects
+    requires o.promise.state == PromiseState.Pending ==> now < o.promise.timeoutAt
+    ensures OnTime(objects[id := o], now)
+  {
+    var placed := objects[id := o];
+    forall k | k in placed
+      ensures placed[k].promise.state == PromiseState.Pending ==> now < placed[k].promise.timeoutAt
+    {
+      if k != id {
+        assert placed[k] == objects[k];
+      }
+    }
+  }
+
+  lemma InsertOnTime(objects: map<string, Obj>, id: string, o: Obj, now: nat)
+    requires OnTime(objects, now)
+    requires id !in objects
+    requires o.promise.state == PromiseState.Pending ==> now < o.promise.timeoutAt
+    ensures OnTime(objects[id := o], now)
+  {
+    var placed := objects[id := o];
+    forall k | k in placed
+      ensures placed[k].promise.state == PromiseState.Pending ==> now < placed[k].promise.timeoutAt
+    {
+      if k != id {
+        assert k in objects && placed[k] == objects[k];
+      }
+    }
+  }
+
   function Sweep(doc: Doc, now: nat, retry: nat): (s: Ran)
     ensures WellFormed(doc, now) ==> WellFormed(s.doc, now)
+    ensures CaughtUp(s.doc, now)
   {
     match doc
-    case Schedule(Some(sched)) =>
+    case Schedule(_, Some(sched)) =>
       if sched.nextRunAt <= now then
         var at := sched.nextRunAt;
         var born := Occurrence(Expand(sched.promiseId, sched.id, at), at, sched.promiseTimeout, sched.promiseParam, sched.promiseTags);
         var sched' := sched.(lastRunAt := Some(at), nextRunAt := NextCron(sched.cron, at));
-        var doc' := Schedule(Some(sched'));
+        var doc' := Schedule(now, Some(sched'));
         assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
           if WellFormed(doc, now) { AdvanceOk(sched); }
         }
         Ran(doc', [born], [])
       else
-        Ran(doc, [], [])
-    case Origin(objects) =>
+        var kept := Schedule(now, Some(sched));
+        assert WellFormed(doc, now) ==> WellFormed(kept, now);
+        Ran(kept, [], [])
+    case Origin(_, objects) =>
       SortedProps(objects.Keys);
       var keys := Sorted(objects.Keys);
       forall i, j | 0 <= i < j < |keys|
@@ -1212,11 +1576,25 @@ module Node {
         assert Lt(keys[i], keys[j]);
       }
       var timed := Timeouts(objects, keys, now);
+      TimeoutsOnTime(objects, keys, now);
+      forall id | id in timed
+        ensures timed[id].promise.state == PromiseState.Pending ==> now < timed[id].promise.timeoutAt
+      {
+        assert id in keys;
+      }
       var woken := ApplyCallbacks(timed, keys, now);
+      ApplyCallbacksClock(timed, keys, now);
+      ClockOnTime(timed, woken, now);
       var told := ApplyListeners(woken, keys);
+      ApplyListenersClock(woken, keys);
+      ClockOnTime(woken, told.objects, now);
       var returned := Leases(told.objects, keys, now);
+      LeasesClock(told.objects, keys, now);
+      ClockOnTime(told.objects, returned, now);
       var armed := Retries(returned, keys, now, retry);
-      assert WellFormed(doc, now) ==> WellFormed(Origin(armed.objects), now) by {
+      RetriesClock(returned, keys, now, retry);
+      ClockOnTime(returned, armed.objects, now);
+      assert WellFormed(doc, now) ==> WellFormed(Origin(now, armed.objects), now) by {
         if WellFormed(doc, now) {
           TimeoutsOk(objects, keys, now);
           ApplyCallbacksOk(timed, keys, now);
@@ -1225,8 +1603,8 @@ module Node {
           RetriesOk(returned, keys, now, retry);
         }
       }
-      Ran(Origin(armed.objects), [], told.notes + armed.notes)
-    case Schedule(None) => Ran(doc, [], [])
+      Ran(Origin(now, armed.objects), [], told.notes + armed.notes)
+    case Schedule(_, None) => Ran(Schedule(now, None), [], [])
   }
 
   lemma CallbacksOk(objects: map<string, Obj>, id: string, now: nat)
@@ -1540,9 +1918,9 @@ module Node {
     ensures WellFormed(Opened(doc), now)
   {
     match doc
-    case Origin(_) =>
+    case Origin(_, _) =>
       assert Opened(doc) == doc;
-    case Schedule(_) =>
+    case Schedule(_, _) =>
       assert ObjectsOf(doc) == map[];
   }
 
@@ -1633,8 +2011,8 @@ module Node {
     ensures MapOk(ObjectsOf(doc), now)
   {
     match doc
-    case Origin(objects) =>
-    case Schedule(_) =>
+    case Origin(_, objects) =>
+    case Schedule(_, _) =>
       assert ObjectsOf(doc) == map[];
       assert false;
   }
@@ -1869,6 +2247,7 @@ module Node {
 
   function Handle(doc: Doc, request: Request, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+    ensures CaughtUp(r.doc, now)
   {
     var swept := Sweep(doc, now, retry);
     assert WellFormed(doc, now) ==> WellFormed(swept.doc, now);
@@ -1895,7 +2274,10 @@ module Node {
 
   lemma HandlerPreservesWellFormed(doc: Doc, request: Request, now: nat, retry: nat)
     requires WellFormed(doc, now)
-    ensures WellFormed(Handle(doc, request, now, retry).doc, now)
+    ensures var r := Handle(doc, request, now, retry);
+      && WellFormed(r.doc, now)
+      && r.doc.stamp == now
+      && OnTime(ObjectsOf(r.doc), now)
   {
   }
 }
