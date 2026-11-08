@@ -12,9 +12,9 @@
 //! It also proves bounded slices of
 //! the real Rover transition relation: a quiet empty task heartbeat and a
 //! normal origin request through admission, hidden Store Get delivery, the
-//! matching successful StoreRes, decode/decision, and conditional-write
-//! issuance. The latter stops before delivery of the conditional write and
-//! therefore does not claim that the commit has replied yet.
+//! matching successful StoreRes, decode/decision, conditional-write delivery,
+//! and final Reply. The previous-deadline-key branch additionally proves the
+//! exact hidden Del delivery and matching successful response.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -29,6 +29,13 @@ use crate::refinement::{
     lemma_normal_origin_request_starts_load,
     lemma_normal_origin_successful_get_issues_put_if_match,
     lemma_normal_request_matches_abstract_handler,
+    lemma_successful_origin_write_completes_directly,
+    lemma_successful_origin_write_issues_previous_key_delete,
+    lemma_successful_previous_key_delete_completes,
+    lemma_no_reply_effects_drop_last,
+    no_reply_effects,
+    normal_origin_previous_deadline_key,
+    normal_request_reply_effect,
     normal_origin_request_ready,
     normal_origin_get_write_ready,
     quiet_request_ready,
@@ -90,6 +97,8 @@ use echod_rover::rover::semantics::{
 use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Response, StatusRes, MAX_TIME};
+#[cfg(verus_keep_ghost)]
+use crate::verified::node::AKey;
 
 verus! {
 
@@ -4059,6 +4068,52 @@ proof fn lemma_take_pending_fresh_push(
     assert(pending.push((call.id, call)).last() == (call.id, call));
 }
 
+proof fn lemma_no_reply_effects_preserve_pending(
+    node: NodeV,
+    at: u64,
+    effects: Seq<crate::types::EffectSpec>,
+)
+    requires
+        no_reply_effects(effects),
+    ensures
+        spec_effects(node, at, effects).0.pending == node.pending,
+    decreases effects.len(),
+{
+    reveal_with_fuel(no_reply_effects, 2);
+    reveal(spec_effects);
+    reveal(spec_effect);
+    if effects.len() > 0 {
+        let prefix = effects.drop_last();
+        lemma_no_reply_effects_drop_last(effects);
+        lemma_no_reply_effects_preserve_pending(node, at, prefix);
+        let (before_last, send) = spec_effects(node, at, prefix);
+        match effects.last() {
+            crate::types::EffectSpec::Reply { .. } => {
+                assert(false);
+            },
+            _ => {},
+        }
+    }
+}
+
+proof fn lemma_effects_preserve_core(
+    node: NodeV,
+    at: u64,
+    effects: Seq<crate::types::EffectSpec>,
+)
+    ensures
+        spec_effects(node, at, effects).0.core == node.core,
+    decreases effects.len(),
+{
+    reveal(spec_effects);
+    if effects.len() > 0 {
+        let prefix = effects.drop_last();
+        lemma_effects_preserve_core(node, at, prefix);
+        let (before_last, send) = spec_effects(node, at, prefix);
+        reveal(spec_effect);
+    }
+}
+
 pub open spec fn request_event(
     call: BoundaryCall,
 ) -> ProcessEvent<Pid, Message> {
@@ -4416,6 +4471,10 @@ pub open spec fn normal_origin_slice_ready(
     &&& event_valid(before, Pid::Node(0), request_event(call))
     &&& crate::rover::spec_target(call.request)
         == Some(TargetSpec::Origin(origin))
+    &&& pending_id_fresh(
+        before.process[0].1->Node_0.pending,
+        call.id,
+    )
     &&& normal_origin_request_ready(
         before.process[0].1->Node_0.core,
         origin,
@@ -4624,6 +4683,149 @@ pub proof fn lemma_fresh_store_request_delivery(
             request,
         )],
 {
+}
+
+/// Lift one fresh production Store request through Rover once its exact
+/// hidden envelope is present.
+pub proof fn lemma_fresh_store_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    store_slot: int,
+    at: u64,
+    sender: Pid,
+    op: u64,
+    request: StoreReq,
+)
+    requires
+        before.now <= at,
+        0 <= store_slot < before.process.len(),
+        before.process[store_slot].0 == Pid::Store,
+        before.process[store_slot].1 is Store,
+        event_valid(
+            before,
+            Pid::Store,
+            ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq { op, request },
+            },
+        ),
+        !before.process[
+            store_slot
+        ].1->Store_0.seen.contains((sender, op)),
+    ensures
+        ({
+            let store = before.process[store_slot].1->Store_0;
+            let event = ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq { op, request },
+            };
+            let result = fresh_store_delivery_result(
+                store,
+                sender,
+                op,
+                request,
+            );
+            step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Store,
+                    at,
+                    event,
+                    send: result.send,
+                },
+                land(before, store_slot, Pid::Store, at, result),
+            )
+        }),
+{
+    let store = before.process[store_slot].1->Store_0;
+    let event = ProcessEvent::Receive {
+        sender,
+        message: Message::StoreReq { op, request },
+    };
+    let result = fresh_store_delivery_result(
+        store,
+        sender,
+        op,
+        request,
+    );
+    lemma_fresh_store_request_delivery(store, sender, op, request);
+    assert(is_process(ProductionModel, before, Pid::Store)) by {
+        assert(before.process[store_slot].0 == Pid::Store);
+    }
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Store,
+        before.process[store_slot].1,
+        at,
+        event,
+    ) == seq![result]);
+    echod_concrete::simulation::lemma_process_step(
+        ProductionModel,
+        config,
+        before,
+        store_slot,
+        at,
+        event,
+        0,
+    );
+}
+
+/// Lift one exact production Node continuation through Rover once its
+/// matching hidden response envelope is present.
+pub proof fn lemma_node_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    at: u64,
+    event: ProcessEvent<Pid, Message>,
+    result: StepResultV<LocalV, Pid, Message>,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        event_valid(before, Pid::Node(0), event),
+        spec_node_step(
+            before.process[node_slot].1->Node_0,
+            at,
+            event,
+        ) == seq![result],
+    ensures
+        step(
+            ProductionModel,
+            config,
+            before,
+            Label::Process {
+                process: Pid::Node(0),
+                at,
+                event,
+                send: result.send,
+            },
+            land(before, node_slot, Pid::Node(0), at, result),
+        ),
+{
+    assert(is_process(ProductionModel, before, Pid::Node(0))) by {
+        assert(before.process[node_slot].0 == Pid::Node(0));
+    }
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Node(0),
+        before.process[node_slot].1,
+        at,
+        event,
+    ) == seq![result]);
+    echod_concrete::simulation::lemma_process_step(
+        ProductionModel,
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        0,
+    );
 }
 
 pub open spec fn normal_origin_store_delivery_ready(
@@ -5281,6 +5483,16 @@ pub proof fn lemma_normal_origin_get_to_conditional_write_rover_steps(
         etag,
         loaded,
     );
+    lemma_normal_origin_successful_get_issues_put_if_match(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
     let event = ProcessEvent::Receive {
         sender: Pid::Store,
         message: Message::StoreRes {
@@ -5362,6 +5574,1673 @@ pub proof fn lemma_normal_origin_get_to_conditional_write_rover_steps(
         response_at,
         result,
     ));
+}
+
+pub open spec fn normal_origin_put_request(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    loaded: LoadedSpec,
+    etag: Etag,
+) -> StoreReq {
+    let process_call =
+        spec_call(call, TargetSpec::Origin(origin), at);
+    let (after_body, _, _, _) =
+        echod_concrete::node::spec_request_transition(
+            spec_stored_body(loaded.document),
+            process_call.request,
+            at,
+            node.core.cfg.retry_timeout,
+        );
+    let after_document = echod_concrete::node::spec_advance_stored(
+        loaded.document,
+        after_body,
+        at,
+    );
+    spec_store_request(StoreReqSpec::PutIfMatch {
+        key: crate::keys::spec_doc_key(
+            node.core.keys.prefix,
+            origin,
+        ),
+        body: spec_encode(after_document),
+        etag: etag.deep_view(),
+    })
+}
+
+pub open spec fn normal_origin_write_response_result(
+    issued: NodeV,
+    op: u64,
+    response_at: u64,
+    written_etag: Etag,
+) -> StepResultV<LocalV, Pid, Message> {
+    let event = EventSpec::Store {
+        op,
+        response: StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        },
+        clock: response_at,
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(issued.core, event);
+    let (node, send) = spec_effects(
+        NodeV { core, ..issued },
+        response_at,
+        effects,
+    );
+    StepResultV {
+        state: LocalV::Node(node),
+        send,
+    }
+}
+
+pub open spec fn normal_origin_delete_response_result(
+    waiting: NodeV,
+    op: u64,
+    response_at: u64,
+) -> StepResultV<LocalV, Pid, Message> {
+    let event = EventSpec::Store {
+        op,
+        response: StoreRes::Del { result: Ok(()) },
+        clock: response_at,
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(waiting.core, event);
+    let (node, send) = spec_effects(
+        NodeV { core, ..waiting },
+        response_at,
+        effects,
+    );
+    StepResultV {
+        state: LocalV::Node(node),
+        send,
+    }
+}
+
+/// The successful CAS response is the final production Node continuation
+/// when the commit has no previous deadline key.
+#[verifier::rlimit(40)]
+pub proof fn lemma_normal_origin_direct_write_response_node_step(
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    write_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+)
+    requires
+        at <= get_response_at <= write_response_at,
+        pending_id_fresh(node.pending, call.id),
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        normal_origin_get_write_ready(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            loaded,
+            etag,
+        ),
+        normal_origin_previous_deadline_key(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            get_response_at,
+            bytes,
+            etag,
+        ) is None,
+    ensures
+        ({
+            let issued = normal_origin_get_response_result(
+                node,
+                at,
+                call,
+                origin,
+                get_response_at,
+                bytes,
+                etag,
+                loaded,
+            ).state->Node_0;
+            let op = node.core.next_op.wrapping_add(1);
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Ok(written_etag),
+                    },
+                },
+            };
+            let result = normal_origin_write_response_result(
+                issued,
+                op,
+                write_response_at,
+                written_etag,
+            );
+            let (_, response, _, _) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    at,
+                    node.core.cfg.retry_timeout,
+                );
+            &&& spec_node_step(issued, write_response_at, event)
+                == seq![result]
+            &&& result.send.len() > 0
+            &&& result.send.last() == (
+                Pid::Outside,
+                Message::Reply(Output::Response {
+                    client: call.client,
+                    id: call.id,
+                    response,
+                }),
+            )
+        }),
+{
+    lemma_normal_origin_successful_get_node_step(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    lemma_normal_origin_successful_get_issues_put_if_match(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    let issued = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    ).state->Node_0;
+    let op = node.core.next_op.wrapping_add(1);
+    lemma_successful_origin_write_completes_directly(
+        issued.core,
+        node.core.next_flight,
+        op,
+        write_response_at,
+        written_etag,
+    );
+    lemma_take_pending_fresh_push(node.pending, call);
+    reveal(spec_node_step);
+    reveal(spec_effects);
+    reveal(spec_effect);
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op,
+            response: StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            },
+        },
+    };
+    let result = normal_origin_write_response_result(
+        issued,
+        op,
+        write_response_at,
+        written_etag,
+    );
+    assert(spec_node_step(issued, write_response_at, event)
+        == seq![result]);
+    let core_event = EventSpec::Store {
+        op,
+        response: StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        },
+        clock: write_response_at,
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(issued.core, core_event);
+    assert(effects.len() > 0);
+    assert(no_reply_effects(effects.drop_last()));
+    assert(effects.last() == normal_request_reply_effect(
+        issued.core.flights.inflight[node.core.next_flight],
+        issued.core.flights.inflight[
+            node.core.next_flight
+        ].phase->Origin_done,
+    ));
+    let prefix = effects.drop_last();
+    let before_effects = NodeV { core, ..issued };
+    lemma_no_reply_effects_preserve_pending(
+        before_effects,
+        write_response_at,
+        prefix,
+    );
+    assert(before_effects.pending
+        == node.pending.push((call.id, call)));
+    let (before_reply, prefix_send) = spec_effects(
+        before_effects,
+        write_response_at,
+        prefix,
+    );
+    assert(before_reply.pending
+        == node.pending.push((call.id, call)));
+    assert(spec_take_pending(before_reply.pending, call.id).0
+        == Some(call));
+    let (_, response, _, _) =
+        echod_concrete::node::spec_request_transition(
+            spec_stored_body(loaded.document),
+            call.request,
+            at,
+            node.core.cfg.retry_timeout,
+        );
+    assert(effects.last() == crate::types::EffectSpec::Reply {
+        id: call.id,
+        response: Ok(AnswerSpec::Step {
+            kind: Seq::empty(),
+            corr: call.client@,
+            action_kind: None,
+            response,
+            why: issued.core.flights.inflight[
+                node.core.next_flight
+            ].phase->Origin_done.why,
+        }),
+    });
+    assert(spec_effects(before_effects, write_response_at, effects)
+        == spec_effect(
+            before_reply,
+            write_response_at,
+            effects.last(),
+            prefix_send,
+        )) by {
+        reveal(spec_effects);
+    }
+    assert(spec_effect(
+        before_reply,
+        write_response_at,
+        effects.last(),
+        prefix_send,
+    ).1 == prefix_send.push((
+        Pid::Outside,
+        Message::Reply(Output::Response {
+            client: call.client,
+            id: call.id,
+            response,
+        }),
+    ))) by {
+        reveal(spec_effect);
+    }
+    assert(result.send
+        == prefix_send.push((
+            Pid::Outside,
+            Message::Reply(Output::Response {
+                client: call.client,
+                id: call.id,
+                response,
+            }),
+        )));
+    assert(result.send.len() > 0);
+    assert(result.send.last() == (
+        Pid::Outside,
+        Message::Reply(Output::Response {
+            client: call.client,
+            id: call.id,
+            response,
+        }),
+    ));
+}
+
+/// The successful CAS response emits the exact previous-deadline-key delete
+/// when the production decision replaced an armed deadline.
+#[verifier::rlimit(15)]
+pub proof fn lemma_normal_origin_previous_key_write_response_node_step(
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    write_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+    previous: AKey,
+)
+    requires
+        at <= get_response_at <= write_response_at,
+        pending_id_fresh(node.pending, call.id),
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        normal_origin_get_write_ready(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            loaded,
+            etag,
+        ),
+        normal_origin_previous_deadline_key(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            get_response_at,
+            bytes,
+            etag,
+        ) == Some(previous),
+    ensures
+        ({
+            let issued = normal_origin_get_response_result(
+                node,
+                at,
+                call,
+                origin,
+                get_response_at,
+                bytes,
+                etag,
+                loaded,
+            ).state->Node_0;
+            let write_op = node.core.next_op.wrapping_add(1);
+            let delete_op = node.core.next_op.wrapping_add(2);
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: write_op,
+                    response: StoreRes::PutIfMatch {
+                        result: Ok(written_etag),
+                    },
+                },
+            };
+            let result = normal_origin_write_response_result(
+                issued,
+                write_op,
+                write_response_at,
+                written_etag,
+            );
+            let waiting = result.state->Node_0;
+            let delete_name = waiting.core.flights.inflight[
+                node.core.next_flight
+            ].phase->Origin_commit.issued->Some_0->Key_name;
+            &&& spec_node_step(issued, write_response_at, event)
+                == seq![result]
+            &&& result.send.len() > 0
+            &&& result.send.last() == (
+                Pid::Store,
+                Message::StoreReq {
+                    op: delete_op,
+                    request: spec_store_request(
+                        StoreReqSpec::Del { key: delete_name },
+                    ),
+                },
+            )
+        }),
+{
+    lemma_normal_origin_successful_get_node_step(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    lemma_normal_origin_successful_get_issues_put_if_match(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    let issued = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    ).state->Node_0;
+    let write_op = node.core.next_op.wrapping_add(1);
+    let delete_op = node.core.next_op.wrapping_add(2);
+    lemma_successful_origin_write_issues_previous_key_delete(
+        issued.core,
+        node.core.next_flight,
+        write_op,
+        write_response_at,
+        written_etag,
+        previous,
+    );
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: write_op,
+            response: StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            },
+        },
+    };
+    let result = normal_origin_write_response_result(
+        issued,
+        write_op,
+        write_response_at,
+        written_etag,
+    );
+    reveal(spec_node_step);
+    assert(spec_node_step(issued, write_response_at, event)
+        == seq![result]);
+    let core_event = EventSpec::Store {
+        op: write_op,
+        response: StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        },
+        clock: write_response_at,
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(issued.core, core_event);
+    let waiting = result.state->Node_0;
+    lemma_effects_preserve_core(
+        NodeV { core, ..issued },
+        write_response_at,
+        effects,
+    );
+    assert(waiting.core == core);
+    let delete_name = core.flights.inflight[
+        node.core.next_flight
+    ].phase->Origin_commit.issued->Some_0->Key_name;
+    assert(no_reply_effects(effects));
+    lemma_no_reply_effects_preserve_pending(
+        NodeV { core, ..issued },
+        write_response_at,
+        effects,
+    );
+    assert(waiting.pending == issued.pending);
+    assert(effects.len() > 0);
+    let prefix = effects.drop_last();
+    let (before_delete, prefix_send) = spec_effects(
+        NodeV { core, ..issued },
+        write_response_at,
+        prefix,
+    );
+    assert(spec_effects(
+        NodeV { core, ..issued },
+        write_response_at,
+        effects,
+    ) == spec_effect(
+        before_delete,
+        write_response_at,
+        effects.last(),
+        prefix_send,
+    )) by {
+        reveal(spec_effects);
+    }
+    assert(spec_effect(
+        before_delete,
+        write_response_at,
+        effects.last(),
+        prefix_send,
+    ).1 == prefix_send.push((
+        Pid::Store,
+        Message::StoreReq {
+            op: delete_op,
+            request: spec_store_request(
+                StoreReqSpec::Del { key: delete_name },
+            ),
+        },
+    ))) by {
+        reveal(spec_effect);
+    }
+    assert(result.send == prefix_send.push((
+        Pid::Store,
+        Message::StoreReq {
+            op: delete_op,
+            request: spec_store_request(
+                StoreReqSpec::Del { key: delete_name },
+            ),
+        },
+    )));
+    assert(result.send.len() > 0);
+    assert(result.send.last() == (
+        Pid::Store,
+        Message::StoreReq {
+            op: delete_op,
+            request: spec_store_request(
+                StoreReqSpec::Del { key: delete_name },
+            ),
+        },
+    ));
+}
+
+/// The matching successful delete response closes the previous-key branch
+/// and interprets the production Reply as the original Rover boundary call.
+#[verifier::rlimit(50)]
+pub proof fn lemma_normal_origin_previous_key_delete_response_node_step(
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    write_response_at: u64,
+    delete_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+    previous: AKey,
+)
+    requires
+        at <= get_response_at <= write_response_at,
+        write_response_at <= delete_response_at,
+        pending_id_fresh(node.pending, call.id),
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        normal_origin_get_write_ready(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            loaded,
+            etag,
+        ),
+        normal_origin_previous_deadline_key(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            get_response_at,
+            bytes,
+            etag,
+        ) == Some(previous),
+    ensures
+        ({
+            let issued = normal_origin_get_response_result(
+                node,
+                at,
+                call,
+                origin,
+                get_response_at,
+                bytes,
+                etag,
+                loaded,
+            ).state->Node_0;
+            let write_op = node.core.next_op.wrapping_add(1);
+            let delete_op = node.core.next_op.wrapping_add(2);
+            let waiting = normal_origin_write_response_result(
+                issued,
+                write_op,
+                write_response_at,
+                written_etag,
+            ).state->Node_0;
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: delete_op,
+                    response: StoreRes::Del { result: Ok(()) },
+                },
+            };
+            let result = normal_origin_delete_response_result(
+                waiting,
+                delete_op,
+                delete_response_at,
+            );
+            let (_, response, _, _) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    at,
+                    node.core.cfg.retry_timeout,
+                );
+            &&& spec_node_step(waiting, delete_response_at, event)
+                == seq![result]
+            &&& result.send.len() > 0
+            &&& result.send.last() == (
+                Pid::Outside,
+                Message::Reply(Output::Response {
+                    client: call.client,
+                    id: call.id,
+                    response,
+                }),
+            )
+        }),
+{
+    lemma_normal_origin_previous_key_write_response_node_step(
+        node,
+        at,
+        get_response_at,
+        write_response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+        written_etag,
+        previous,
+    );
+    let issued = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    ).state->Node_0;
+    let write_op = node.core.next_op.wrapping_add(1);
+    let delete_op = node.core.next_op.wrapping_add(2);
+    lemma_normal_origin_successful_get_node_step(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    lemma_normal_origin_successful_get_issues_put_if_match(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    lemma_successful_origin_write_issues_previous_key_delete(
+        issued.core,
+        node.core.next_flight,
+        write_op,
+        write_response_at,
+        written_etag,
+        previous,
+    );
+    let waiting = normal_origin_write_response_result(
+        issued,
+        write_op,
+        write_response_at,
+        written_etag,
+    ).state->Node_0;
+    let write_core_event = EventSpec::Store {
+        op: write_op,
+        response: StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        },
+        clock: write_response_at,
+    };
+    let (waiting_core, write_effects) =
+        crate::handler::spec_on_event(issued.core, write_core_event);
+    lemma_effects_preserve_core(
+        NodeV { core: waiting_core, ..issued },
+        write_response_at,
+        write_effects,
+    );
+    lemma_no_reply_effects_preserve_pending(
+        NodeV { core: waiting_core, ..issued },
+        write_response_at,
+        write_effects,
+    );
+    assert(waiting.core == waiting_core);
+    assert(waiting.pending == issued.pending);
+    assert(issued.pending == node.pending.push((call.id, call)));
+    lemma_successful_previous_key_delete_completes(
+        waiting.core,
+        node.core.next_flight,
+        delete_op,
+        delete_response_at,
+    );
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: delete_op,
+            response: StoreRes::Del { result: Ok(()) },
+        },
+    };
+    let result = normal_origin_delete_response_result(
+        waiting,
+        delete_op,
+        delete_response_at,
+    );
+    reveal(spec_node_step);
+    assert(spec_node_step(waiting, delete_response_at, event)
+        == seq![result]);
+    let core_event = EventSpec::Store {
+        op: delete_op,
+        response: StoreRes::Del { result: Ok(()) },
+        clock: delete_response_at,
+    };
+    let (core, effects) =
+        crate::handler::spec_on_event(waiting.core, core_event);
+    assert(effects.len() > 0);
+    assert(no_reply_effects(effects.drop_last()));
+    let prefix = effects.drop_last();
+    let before_effects = NodeV { core, ..waiting };
+    lemma_no_reply_effects_preserve_pending(
+        before_effects,
+        delete_response_at,
+        prefix,
+    );
+    lemma_take_pending_fresh_push(node.pending, call);
+    assert(before_effects.pending
+        == node.pending.push((call.id, call)));
+    let (before_reply, prefix_send) = spec_effects(
+        before_effects,
+        delete_response_at,
+        prefix,
+    );
+    assert(before_reply.pending
+        == node.pending.push((call.id, call)));
+    assert(spec_take_pending(before_reply.pending, call.id).0
+        == Some(call));
+    let (_, response, _, _) =
+        echod_concrete::node::spec_request_transition(
+            spec_stored_body(loaded.document),
+            call.request,
+            at,
+            node.core.cfg.retry_timeout,
+        );
+    assert(effects.last() == crate::types::EffectSpec::Reply {
+        id: call.id,
+        response: Ok(AnswerSpec::Step {
+            kind: Seq::empty(),
+            corr: call.client@,
+            action_kind: None,
+            response,
+            why: waiting.core.flights.inflight[
+                node.core.next_flight
+            ].phase->Origin_done.why,
+        }),
+    });
+    assert(spec_effects(before_effects, delete_response_at, effects)
+        == spec_effect(
+            before_reply,
+            delete_response_at,
+            effects.last(),
+            prefix_send,
+        )) by {
+        reveal(spec_effects);
+    }
+    assert(spec_effect(
+        before_reply,
+        delete_response_at,
+        effects.last(),
+        prefix_send,
+    ).1 == prefix_send.push((
+        Pid::Outside,
+        Message::Reply(Output::Response {
+            client: call.client,
+            id: call.id,
+            response,
+        }),
+    ))) by {
+        reveal(spec_effect);
+    }
+    assert(result.send == prefix_send.push((
+        Pid::Outside,
+        Message::Reply(Output::Response {
+            client: call.client,
+            id: call.id,
+            response,
+        }),
+    )));
+}
+
+pub open spec fn normal_origin_put_delivered_world(
+    issued_world: World<ProductionModel>,
+    store_at: u64,
+    op: u64,
+    request: StoreReq,
+) -> World<ProductionModel> {
+    let store = issued_world.process[1].1->Store_0;
+    land(
+        issued_world,
+        1,
+        Pid::Store,
+        store_at,
+        fresh_store_delivery_result(
+            store,
+            Pid::Node(0),
+            op,
+            request,
+        ),
+    )
+}
+
+/// Exact bounded preconditions for the no-previous-key Rover suffix. The
+/// starting world is the world that emitted the CAS in the proved Get slice;
+/// the two event-valid premises name the actual hidden PutIfMatch and its
+/// matching StoreRes envelopes.
+pub open spec fn normal_origin_direct_put_completion_ready(
+    issued_world: World<ProductionModel>,
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    store_at: u64,
+    write_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+) -> bool {
+    let issued = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    ).state->Node_0;
+    let op = node.core.next_op.wrapping_add(1);
+    let request = normal_origin_put_request(
+        node,
+        at,
+        call,
+        origin,
+        loaded,
+        etag,
+    );
+    let store = issued_world.process[1].1->Store_0;
+    let delivered = normal_origin_put_delivered_world(
+        issued_world,
+        store_at,
+        op,
+        request,
+    );
+    let response = StoreRes::PutIfMatch {
+        result: Ok(written_etag),
+    };
+    &&& issued_world.process.len() > 1
+    &&& issued_world.process[0]
+        == (Pid::Node(0), LocalV::Node(issued))
+    &&& issued_world.process[1].0 == Pid::Store
+    &&& issued_world.process[1].1 is Store
+    &&& issued_world.now <= store_at
+    &&& store_at <= write_response_at
+    &&& at <= get_response_at <= write_response_at
+    &&& pending_id_fresh(node.pending, call.id)
+    &&& crate::rover::spec_target(call.request)
+        == Some(TargetSpec::Origin(origin))
+    &&& spec_decode_workflow(bytes@) == Ok(loaded)
+    &&& normal_origin_get_write_ready(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        loaded,
+        etag,
+    )
+    &&& normal_origin_previous_deadline_key(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+    ) is None
+    &&& request.deep_view() == StoreReqSpec::PutIfMatch {
+        key: crate::keys::spec_doc_key(node.core.keys.prefix, origin),
+        body: spec_encode(
+            echod_concrete::node::spec_advance_stored(
+                loaded.document,
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    at,
+                    node.core.cfg.retry_timeout,
+                ).0,
+                at,
+            ),
+        ),
+        etag: etag.deep_view(),
+    }
+    &&& !store.seen.contains((Pid::Node(0), op))
+    &&& spec_apply(store, request).1 == response
+    &&& event_valid(
+        issued_world,
+        Pid::Store,
+        ProcessEvent::Receive {
+            sender: Pid::Node(0),
+            message: Message::StoreReq { op, request },
+        },
+    )
+    &&& event_valid(
+        delivered,
+        Pid::Node(0),
+        ProcessEvent::Receive {
+            sender: Pid::Store,
+            message: Message::StoreRes { op, response },
+        },
+    )
+}
+
+/// Two actual Rover transitions close the no-previous-key suffix: the Store
+/// applies the emitted CAS, then the Node consumes that exact successful
+/// response and emits the final boundary Reply. `land` makes network growth
+/// append-only and the explicit frame conjunct preserves every unrelated
+/// process lane.
+#[verifier::rlimit(20)]
+pub proof fn lemma_normal_origin_direct_put_delivery_and_reply_rover_steps(
+    config: crate::Config,
+    issued_world: World<ProductionModel>,
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    store_at: u64,
+    write_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+)
+    requires
+        normal_origin_direct_put_completion_ready(
+            issued_world,
+            node,
+            at,
+            get_response_at,
+            store_at,
+            write_response_at,
+            call,
+            origin,
+            bytes,
+            etag,
+            loaded,
+            written_etag,
+        ),
+    ensures
+        ({
+            let issued = issued_world.process[0].1->Node_0;
+            let store = issued_world.process[1].1->Store_0;
+            let op = node.core.next_op.wrapping_add(1);
+            let request = normal_origin_put_request(
+                node,
+                at,
+                call,
+                origin,
+                loaded,
+                etag,
+            );
+            let store_result = fresh_store_delivery_result(
+                store,
+                Pid::Node(0),
+                op,
+                request,
+            );
+            let delivered = normal_origin_put_delivered_world(
+                issued_world,
+                store_at,
+                op,
+                request,
+            );
+            let response = StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            };
+            let node_event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let node_result = normal_origin_write_response_result(
+                issued,
+                op,
+                write_response_at,
+                written_etag,
+            );
+            let completed = land(
+                delivered,
+                0,
+                Pid::Node(0),
+                write_response_at,
+                node_result,
+            );
+            &&& step(
+                ProductionModel,
+                config,
+                issued_world,
+                Label::Process {
+                    process: Pid::Store,
+                    at: store_at,
+                    event: ProcessEvent::Receive {
+                        sender: Pid::Node(0),
+                        message: Message::StoreReq { op, request },
+                    },
+                    send: store_result.send,
+                },
+                delivered,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                delivered,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at: write_response_at,
+                    event: node_event,
+                    send: node_result.send,
+                },
+                completed,
+            )
+            &&& completed.network == delivered.network
+                + echod_rover::rover::semantics::envelopes(
+                    Pid::Node(0),
+                    node_result.send,
+                )
+            &&& forall|i: int|
+                0 <= i < issued_world.process.len()
+                    && i != 0 && i != 1
+                ==> completed.process[i] == issued_world.process[i]
+        }),
+{
+    let issued = issued_world.process[0].1->Node_0;
+    let store = issued_world.process[1].1->Store_0;
+    let op = node.core.next_op.wrapping_add(1);
+    let request = normal_origin_put_request(
+        node,
+        at,
+        call,
+        origin,
+        loaded,
+        etag,
+    );
+    let delivered = normal_origin_put_delivered_world(
+        issued_world,
+        store_at,
+        op,
+        request,
+    );
+    let response = StoreRes::PutIfMatch {
+        result: Ok(written_etag),
+    };
+    let node_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes { op, response },
+    };
+    let node_result = normal_origin_write_response_result(
+        issued,
+        op,
+        write_response_at,
+        written_etag,
+    );
+    lemma_fresh_store_rover_step(
+        config,
+        issued_world,
+        1,
+        store_at,
+        Pid::Node(0),
+        op,
+        request,
+    );
+    lemma_normal_origin_direct_write_response_node_step(
+        node,
+        at,
+        get_response_at,
+        write_response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+        written_etag,
+    );
+    assert(delivered.process[0] == issued_world.process[0]);
+    lemma_node_rover_step(
+        config,
+        delivered,
+        0,
+        write_response_at,
+        node_event,
+        node_result,
+    );
+    let completed = land(
+        delivered,
+        0,
+        Pid::Node(0),
+        write_response_at,
+        node_result,
+    );
+    assert forall|i: int|
+        0 <= i < issued_world.process.len() && i != 0 && i != 1
+        implies completed.process[i] == issued_world.process[i] by {
+        assert(delivered.process[i] == issued_world.process[i]);
+    }
+}
+
+/// Exact bounded preconditions for the previous-key suffix. Every request,
+/// response, and freshness fact is tied to the deterministic world produced
+/// by the preceding real Rover transition.
+pub open spec fn normal_origin_previous_key_put_delete_completion_ready(
+    issued_world: World<ProductionModel>,
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    put_store_at: u64,
+    write_response_at: u64,
+    delete_store_at: u64,
+    delete_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+    previous: AKey,
+) -> bool {
+    let issued = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        get_response_at,
+        bytes,
+        etag,
+        loaded,
+    ).state->Node_0;
+    let write_op = node.core.next_op.wrapping_add(1);
+    let delete_op = node.core.next_op.wrapping_add(2);
+    let put = normal_origin_put_request(
+        node,
+        at,
+        call,
+        origin,
+        loaded,
+        etag,
+    );
+    let put_store = issued_world.process[1].1->Store_0;
+    let put_delivered = normal_origin_put_delivered_world(
+        issued_world,
+        put_store_at,
+        write_op,
+        put,
+    );
+    let write_response = StoreRes::PutIfMatch {
+        result: Ok(written_etag),
+    };
+    let write_result = normal_origin_write_response_result(
+        issued,
+        write_op,
+        write_response_at,
+        written_etag,
+    );
+    let delete_issued = land(
+        put_delivered,
+        0,
+        Pid::Node(0),
+        write_response_at,
+        write_result,
+    );
+    let waiting = write_result.state->Node_0;
+    let delete_name = waiting.core.flights.inflight[
+        node.core.next_flight
+    ].phase->Origin_commit.issued->Some_0->Key_name;
+    let delete = spec_store_request(
+        StoreReqSpec::Del { key: delete_name },
+    );
+    let delete_store = delete_issued.process[1].1->Store_0;
+    let delete_delivered = land(
+        delete_issued,
+        1,
+        Pid::Store,
+        delete_store_at,
+        fresh_store_delivery_result(
+            delete_store,
+            Pid::Node(0),
+            delete_op,
+            delete,
+        ),
+    );
+    &&& issued_world.process.len() > 1
+    &&& issued_world.process[0]
+        == (Pid::Node(0), LocalV::Node(issued))
+    &&& issued_world.process[1].0 == Pid::Store
+    &&& issued_world.process[1].1 is Store
+    &&& issued_world.now <= put_store_at
+    &&& put_store_at <= write_response_at
+    &&& write_response_at <= delete_store_at
+    &&& delete_store_at <= delete_response_at
+    &&& at <= get_response_at <= write_response_at
+    &&& pending_id_fresh(node.pending, call.id)
+    &&& crate::rover::spec_target(call.request)
+        == Some(TargetSpec::Origin(origin))
+    &&& spec_decode_workflow(bytes@) == Ok(loaded)
+    &&& normal_origin_get_write_ready(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        loaded,
+        etag,
+    )
+    &&& normal_origin_previous_deadline_key(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+    ) == Some(previous)
+    &&& !put_store.seen.contains((Pid::Node(0), write_op))
+    &&& spec_apply(put_store, put).1 == write_response
+    &&& event_valid(
+        issued_world,
+        Pid::Store,
+        ProcessEvent::Receive {
+            sender: Pid::Node(0),
+            message: Message::StoreReq {
+                op: write_op,
+                request: put,
+            },
+        },
+    )
+    &&& event_valid(
+        put_delivered,
+        Pid::Node(0),
+        ProcessEvent::Receive {
+            sender: Pid::Store,
+            message: Message::StoreRes {
+                op: write_op,
+                response: write_response,
+            },
+        },
+    )
+    &&& delete.deep_view()
+        == StoreReqSpec::Del { key: delete_name }
+    &&& !delete_store.seen.contains((Pid::Node(0), delete_op))
+    &&& spec_apply(delete_store, delete).1
+        == StoreRes::Del { result: Ok(()) }
+    &&& event_valid(
+        delete_issued,
+        Pid::Store,
+        ProcessEvent::Receive {
+            sender: Pid::Node(0),
+            message: Message::StoreReq {
+                op: delete_op,
+                request: delete,
+            },
+        },
+    )
+    &&& event_valid(
+        delete_delivered,
+        Pid::Node(0),
+        ProcessEvent::Receive {
+            sender: Pid::Store,
+            message: Message::StoreRes {
+                op: delete_op,
+                response: StoreRes::Del { result: Ok(()) },
+            },
+        },
+    )
+}
+
+/// Four real Rover transitions close the previous-key suffix: CAS delivery,
+/// successful CAS response and exact Del issuance, Del delivery, and the
+/// successful Del response ending in the original boundary Reply.
+#[verifier::rlimit(30)]
+pub proof fn lemma_normal_origin_previous_key_put_delete_and_reply_rover_steps(
+    config: crate::Config,
+    issued_world: World<ProductionModel>,
+    node: NodeV,
+    at: u64,
+    get_response_at: u64,
+    put_store_at: u64,
+    write_response_at: u64,
+    delete_store_at: u64,
+    delete_response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+    written_etag: Etag,
+    previous: AKey,
+)
+    requires
+        normal_origin_previous_key_put_delete_completion_ready(
+            issued_world,
+            node,
+            at,
+            get_response_at,
+            put_store_at,
+            write_response_at,
+            delete_store_at,
+            delete_response_at,
+            call,
+            origin,
+            bytes,
+            etag,
+            loaded,
+            written_etag,
+            previous,
+        ),
+    ensures
+        ({
+            let issued = issued_world.process[0].1->Node_0;
+            let put_store = issued_world.process[1].1->Store_0;
+            let write_op = node.core.next_op.wrapping_add(1);
+            let delete_op = node.core.next_op.wrapping_add(2);
+            let put = normal_origin_put_request(
+                node,
+                at,
+                call,
+                origin,
+                loaded,
+                etag,
+            );
+            let put_store_result = fresh_store_delivery_result(
+                put_store,
+                Pid::Node(0),
+                write_op,
+                put,
+            );
+            let put_delivered = normal_origin_put_delivered_world(
+                issued_world,
+                put_store_at,
+                write_op,
+                put,
+            );
+            let write_response = StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            };
+            let write_result = normal_origin_write_response_result(
+                issued,
+                write_op,
+                write_response_at,
+                written_etag,
+            );
+            let delete_issued = land(
+                put_delivered,
+                0,
+                Pid::Node(0),
+                write_response_at,
+                write_result,
+            );
+            let waiting = write_result.state->Node_0;
+            let delete_name = waiting.core.flights.inflight[
+                node.core.next_flight
+            ].phase->Origin_commit.issued->Some_0->Key_name;
+            let delete = spec_store_request(
+                StoreReqSpec::Del { key: delete_name },
+            );
+            let delete_store = delete_issued.process[1].1->Store_0;
+            let delete_store_result = fresh_store_delivery_result(
+                delete_store,
+                Pid::Node(0),
+                delete_op,
+                delete,
+            );
+            let delete_delivered = land(
+                delete_issued,
+                1,
+                Pid::Store,
+                delete_store_at,
+                delete_store_result,
+            );
+            let delete_result = normal_origin_delete_response_result(
+                waiting,
+                delete_op,
+                delete_response_at,
+            );
+            let completed = land(
+                delete_delivered,
+                0,
+                Pid::Node(0),
+                delete_response_at,
+                delete_result,
+            );
+            &&& step(
+                ProductionModel,
+                config,
+                issued_world,
+                Label::Process {
+                    process: Pid::Store,
+                    at: put_store_at,
+                    event: ProcessEvent::Receive {
+                        sender: Pid::Node(0),
+                        message: Message::StoreReq {
+                            op: write_op,
+                            request: put,
+                        },
+                    },
+                    send: put_store_result.send,
+                },
+                put_delivered,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                put_delivered,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at: write_response_at,
+                    event: ProcessEvent::Receive {
+                        sender: Pid::Store,
+                        message: Message::StoreRes {
+                            op: write_op,
+                            response: write_response,
+                        },
+                    },
+                    send: write_result.send,
+                },
+                delete_issued,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                delete_issued,
+                Label::Process {
+                    process: Pid::Store,
+                    at: delete_store_at,
+                    event: ProcessEvent::Receive {
+                        sender: Pid::Node(0),
+                        message: Message::StoreReq {
+                            op: delete_op,
+                            request: delete,
+                        },
+                    },
+                    send: delete_store_result.send,
+                },
+                delete_delivered,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                delete_delivered,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at: delete_response_at,
+                    event: ProcessEvent::Receive {
+                        sender: Pid::Store,
+                        message: Message::StoreRes {
+                            op: delete_op,
+                            response: StoreRes::Del { result: Ok(()) },
+                        },
+                    },
+                    send: delete_result.send,
+                },
+                completed,
+            )
+            &&& completed.network == delete_delivered.network
+                + echod_rover::rover::semantics::envelopes(
+                    Pid::Node(0),
+                    delete_result.send,
+                )
+            &&& forall|i: int|
+                0 <= i < issued_world.process.len()
+                    && i != 0 && i != 1
+                ==> completed.process[i] == issued_world.process[i]
+        }),
+{
+    let issued = issued_world.process[0].1->Node_0;
+    let put_store = issued_world.process[1].1->Store_0;
+    let write_op = node.core.next_op.wrapping_add(1);
+    let delete_op = node.core.next_op.wrapping_add(2);
+    let put = normal_origin_put_request(
+        node,
+        at,
+        call,
+        origin,
+        loaded,
+        etag,
+    );
+    let put_delivered = normal_origin_put_delivered_world(
+        issued_world,
+        put_store_at,
+        write_op,
+        put,
+    );
+    let write_response = StoreRes::PutIfMatch {
+        result: Ok(written_etag),
+    };
+    let write_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: write_op,
+            response: write_response,
+        },
+    };
+    let write_result = normal_origin_write_response_result(
+        issued,
+        write_op,
+        write_response_at,
+        written_etag,
+    );
+    let delete_issued = land(
+        put_delivered,
+        0,
+        Pid::Node(0),
+        write_response_at,
+        write_result,
+    );
+    let waiting = write_result.state->Node_0;
+    let delete_name = waiting.core.flights.inflight[
+        node.core.next_flight
+    ].phase->Origin_commit.issued->Some_0->Key_name;
+    let delete = spec_store_request(
+        StoreReqSpec::Del { key: delete_name },
+    );
+    let delete_store = delete_issued.process[1].1->Store_0;
+    let delete_delivered = land(
+        delete_issued,
+        1,
+        Pid::Store,
+        delete_store_at,
+        fresh_store_delivery_result(
+            delete_store,
+            Pid::Node(0),
+            delete_op,
+            delete,
+        ),
+    );
+    let delete_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: delete_op,
+            response: StoreRes::Del { result: Ok(()) },
+        },
+    };
+    let delete_result = normal_origin_delete_response_result(
+        waiting,
+        delete_op,
+        delete_response_at,
+    );
+    lemma_fresh_store_rover_step(
+        config,
+        issued_world,
+        1,
+        put_store_at,
+        Pid::Node(0),
+        write_op,
+        put,
+    );
+    lemma_normal_origin_previous_key_write_response_node_step(
+        node,
+        at,
+        get_response_at,
+        write_response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+        written_etag,
+        previous,
+    );
+    lemma_node_rover_step(
+        config,
+        put_delivered,
+        0,
+        write_response_at,
+        write_event,
+        write_result,
+    );
+    lemma_fresh_store_rover_step(
+        config,
+        delete_issued,
+        1,
+        delete_store_at,
+        Pid::Node(0),
+        delete_op,
+        delete,
+    );
+    lemma_normal_origin_previous_key_delete_response_node_step(
+        node,
+        at,
+        get_response_at,
+        write_response_at,
+        delete_response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+        written_etag,
+        previous,
+    );
+    lemma_node_rover_step(
+        config,
+        delete_delivered,
+        0,
+        delete_response_at,
+        delete_event,
+        delete_result,
+    );
+    let completed = land(
+        delete_delivered,
+        0,
+        Pid::Node(0),
+        delete_response_at,
+        delete_result,
+    );
+    assert forall|i: int|
+        0 <= i < issued_world.process.len() && i != 0 && i != 1
+        implies completed.process[i] == issued_world.process[i] by {
+        assert(put_delivered.process[i] == issued_world.process[i]);
+        assert(delete_issued.process[i] == put_delivered.process[i]);
+        assert(delete_delivered.process[i] == delete_issued.process[i]);
+    }
 }
 
 /// The bounded normal-request happy path: the actual Rover admission step is

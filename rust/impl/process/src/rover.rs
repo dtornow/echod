@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_loaded_request_issues_conditional_write() {
+    fn successful_loaded_request_closes_direct_write_branch() {
         let config = Config::memory("node-0");
         let model = Model;
         let initial = model.initial(&config);
@@ -1553,6 +1553,64 @@ mod tests {
                         request: StoreReq::PutIfMatch { .. },
                         ..
                     }
+                )
+        }));
+        let (write_op, write) = continued
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreReq {
+                    op,
+                    request: request @ StoreReq::PutIfMatch { .. },
+                } => Some((*op, request.clone())),
+                _ => None,
+            })
+            .expect("successful load emits the conditional write");
+        let write_answer = &model.on_event(
+            &config,
+            &Pid::Store,
+            &get_answer.state,
+            5,
+            &ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: write_op,
+                    request: write,
+                },
+            },
+        )[0];
+        let write_response = write_answer
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreRes { op, response } if *op == write_op =>
+                    Some(response.clone()),
+                _ => None,
+            })
+            .expect("the Store returns the matching write response");
+        assert!(matches!(
+            write_response,
+            StoreRes::PutIfMatch { result: Ok(_) }
+        ));
+
+        let after_write = &model.on_event(
+            &config,
+            &Pid::Node(0),
+            &continued.state,
+            6,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: write_op,
+                    response: write_response,
+                },
+            },
+        )[0];
+        assert!(after_write.send.iter().any(|(recipient, message)| {
+            *recipient == Pid::Outside
+                && matches!(
+                    message,
+                    Message::Reply(Output::Response { id: 9, .. })
                 )
         }));
     }

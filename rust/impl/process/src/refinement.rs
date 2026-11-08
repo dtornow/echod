@@ -51,19 +51,21 @@ use crate::document::{spec_decode_workflow, spec_encode, spec_loaded_body, Loade
 use crate::handler::{spec_on_event, spec_request, spec_schedule_wake};
 #[cfg(verus_keep_ghost)]
 use crate::handler_docs::{
-    spec_answered_loading, spec_answered_origin, spec_begin,
-    spec_answered_phase, spec_commit_advance, spec_commit_failed,
-    spec_commit_new, spec_committed, spec_decide, spec_dispatch,
-    spec_dispatches, spec_flight_completed, spec_inflight, spec_issue_write,
-    spec_load_origin, spec_loaded_origin, spec_retry, spec_run_origin,
-    spec_send_all, spec_slot_of, spec_start, spec_submit, spec_take_flight,
-    CommittingSpec, DoneSpec, FlightSpec, FlightsSpec, IssuedSpec, PhaseSpec,
-    ProgressSpec, WorkSpec, WorkingSpec,
+    spec_answered, spec_answered_loading, spec_answered_origin,
+    spec_answered_phase, spec_begin, spec_commit_advance, spec_commit_new,
+    spec_commit_failed, spec_committed, spec_decide, spec_dispatch,
+    spec_dispatches, spec_finish, spec_flight_completed, spec_inflight,
+    spec_issue_write, spec_load_origin, spec_loaded_origin, spec_release,
+    spec_retry, spec_run_origin, spec_send_all, spec_slot_of, spec_start,
+    spec_submit, spec_take_flight, CommittingSpec, DoneSpec, FlightSpec,
+    FlightsSpec, IssuedSpec, PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec,
 };
 #[cfg(verus_keep_ghost)]
 use crate::keys::spec_doc_key;
 #[cfg(verus_keep_ghost)]
-use crate::state::{spec_state_new, Owner, S};
+use crate::state::{
+    spec_emit, spec_note, spec_state_new, spec_store, Owner, S,
+};
 #[cfg(verus_keep_ghost)]
 use crate::state_node::RefreshSpec;
 #[cfg(verus_keep_ghost)]
@@ -75,6 +77,14 @@ use crate::types::{
     AnswerSpec, Armed, CacheResult, CallSpec, EffectSpec, EventSpec,
     Fired, MessageSpec, NoteSpec, OpId, RequestEventSpec,
 };
+#[cfg(verus_keep_ghost)]
+use crate::verified::commit_spec::spec_to_disarm;
+#[cfg(verus_keep_ghost)]
+use crate::verified::flight_spec::{
+    answer_v, spec_advance, AAnswer, AAct, AOutcome, AStep,
+};
+#[cfg(verus_keep_ghost)]
+use crate::verified::node::AKey;
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{empty_store, StateV as AbstractStateV};
@@ -232,6 +242,186 @@ pub open spec fn observe_effects(
                 seq![BoundaryObservationV::Send { address, message }] + tail,
             _ => tail,
         }
+    }
+}
+
+pub open spec fn outbound_send_effects(
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+) -> Seq<EffectSpec>
+    decreases outbox.len(),
+{
+    if outbox.len() == 0 {
+        Seq::empty()
+    } else {
+        seq![EffectSpec::Send {
+            address: outbox[0].0,
+            message: outbox[0].1,
+        }] + outbound_send_effects(outbox.drop_first())
+    }
+}
+
+pub open spec fn no_reply_effects(effects: Seq<EffectSpec>) -> bool
+    decreases effects.len(),
+{
+    if effects.len() == 0 {
+        true
+    } else {
+        !(effects.last() is Reply)
+            && no_reply_effects(effects.drop_last())
+    }
+}
+
+pub proof fn lemma_no_reply_effects_drop_last(
+    effects: Seq<EffectSpec>,
+)
+    requires
+        no_reply_effects(effects),
+        effects.len() > 0,
+    ensures
+        no_reply_effects(effects.drop_last()),
+        !(effects.last() is Reply),
+    decreases effects.len(),
+{
+    reveal_with_fuel(no_reply_effects, 2);
+}
+
+proof fn lemma_no_reply_effects_push(
+    effects: Seq<EffectSpec>,
+    effect: EffectSpec,
+)
+    requires
+        no_reply_effects(effects),
+        !(effect is Reply),
+    ensures
+        no_reply_effects(effects.push(effect)),
+{
+    assert(effects.push(effect).len() > 0);
+    assert(effects.push(effect).last() == effect);
+    assert(effects.push(effect).drop_last() =~= effects);
+    reveal_with_fuel(no_reply_effects, 2);
+}
+
+proof fn lemma_no_reply_effects_concat(
+    left: Seq<EffectSpec>,
+    right: Seq<EffectSpec>,
+)
+    requires
+        no_reply_effects(left),
+        no_reply_effects(right),
+    ensures
+        no_reply_effects(left + right),
+    decreases right.len(),
+{
+    reveal_with_fuel(no_reply_effects, 2);
+    if right.len() == 0 {
+        assert(right =~= Seq::<EffectSpec>::empty());
+    } else {
+        lemma_no_reply_effects_concat(
+            left,
+            right.drop_last(),
+        );
+        assert((left + right).drop_last()
+            =~= left + right.drop_last());
+        assert((left + right).last() == right.last());
+    }
+}
+
+proof fn lemma_outbound_send_effects_no_reply(
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+)
+    ensures
+        no_reply_effects(outbound_send_effects(outbox)),
+    decreases outbox.len(),
+{
+    reveal_with_fuel(no_reply_effects, 2);
+    if outbox.len() > 0 {
+        lemma_outbound_send_effects_no_reply(outbox.drop_first());
+        assert(no_reply_effects(seq![EffectSpec::Send {
+            address: outbox[0].0,
+            message: outbox[0].1,
+        }]));
+        lemma_no_reply_effects_concat(
+            seq![EffectSpec::Send {
+                address: outbox[0].0,
+                message: outbox[0].1,
+            }],
+            outbound_send_effects(outbox.drop_first()),
+        );
+    }
+}
+
+proof fn lemma_answered_write_success_no_reply(
+    s: S,
+    c: CommittingSpec,
+    issued: IssuedSpec,
+    written_etag: Etag,
+)
+    requires
+        no_reply_effects(s.out),
+        issued is Write,
+    ensures
+        no_reply_effects(spec_answered(
+            s,
+            c,
+            issued,
+            Some(StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            }),
+        ).0.out),
+{
+    reveal(spec_answered);
+    reveal(crate::state::spec_remember);
+    let note = EffectSpec::Note(NoteSpec::DocumentWrite {
+        mode: issued->Write_mode,
+        bytes: issued->Write_len,
+    });
+    lemma_no_reply_effects_push(s.out, note);
+}
+
+proof fn lemma_answered_key_delete_success_no_reply(
+    s: S,
+    c: CommittingSpec,
+    issued: IssuedSpec,
+)
+    requires
+        no_reply_effects(s.out),
+        issued is Key,
+    ensures
+        no_reply_effects(spec_answered(
+            s,
+            c,
+            issued,
+            Some(StoreRes::Del { result: Ok(()) }),
+        ).0.out),
+{
+    reveal(spec_answered);
+}
+
+proof fn lemma_send_all_frame(
+    s: S,
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+)
+    ensures
+        spec_send_all(s, outbox) == (S {
+            out: s.out + outbound_send_effects(outbox),
+            ..s
+        }),
+    decreases outbox.len(),
+{
+    if outbox.len() == 0 {
+        assert(s.out + Seq::<EffectSpec>::empty() =~= s.out);
+    } else {
+        let first = EffectSpec::Send {
+            address: outbox[0].0,
+            message: outbox[0].1,
+        };
+        lemma_send_all_frame(
+            spec_emit(s, first),
+            outbox.drop_first(),
+        );
+        assert(s.out.push(first)
+            + outbound_send_effects(outbox.drop_first())
+            =~= s.out + outbound_send_effects(outbox));
     }
 }
 
@@ -441,6 +631,7 @@ pub open spec fn normal_origin_get_write_ready(
     &&& normal_origin_request_ready(s, origin)
     &&& s.next_op < u64::MAX
     &&& !s.ops.contains_key(s.next_op.wrapping_add(1))
+    &&& !s.ops.contains_key(s.next_op.wrapping_add(2))
     &&& !s.cfg.appendable
     &&& well_formed(loaded.document)
     &&& routed(loaded.document, call.request)
@@ -500,7 +691,7 @@ pub proof fn lemma_normal_origin_successful_get_issues_put_if_match(
                 clock: response_at,
             };
             let (next, effects) = spec_on_event(admitted, store_event);
-            let (after_body, _, _, _) = spec_request_transition(
+            let (after_body, response, _, _) = spec_request_transition(
                 spec_stored_body(loaded.document),
                 call.request,
                 at,
@@ -520,12 +711,35 @@ pub proof fn lemma_normal_origin_successful_get_issues_put_if_match(
                 request: write,
             }]
             &&& next.out.len() == 0
+            &&& !next.loops
+            &&& next.node.members.refreshing()
+            &&& next.next_op == s.next_op.wrapping_add(2)
+            &&& !next.ops.contains_key(next.next_op)
             &&& next.ops.contains_key(write_op)
             &&& next.ops[write_op] == Owner::Flight(fid)
             &&& next.flights.inflight.contains_key(fid)
             &&& next.flights.inflight[fid].target
                 == TargetSpec::Origin(origin)
+            &&& next.flights.inflight[fid].id == fid
+            &&& next.flights.inflight[fid].work is Request
+            &&& next.flights.inflight[fid].work->Request_id == call.id
+            &&& next.flights.inflight[fid].work->Request_kind == call.kind
+            &&& next.flights.inflight[fid].work->Request_corr == call.corr
+            &&& next.flights.inflight[fid].work->Request_action_kind
+                == call.action_kind
+            &&& next.flights.inflight[fid].firing is None
+            &&& !next.flights.inflight[fid].debug
             &&& next.flights.inflight[fid].phase is Origin
+            &&& next.flights.inflight[fid].phase->Origin_done.response
+                == Some(response)
+            &&& next.flights.inflight[fid].phase->Origin_commit.seq.step
+                == (AStep::Writing { idle: false })
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.seq.changed
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.seq.fired is None
             &&& next.flights.inflight[fid].phase->Origin_commit.after
                 == after_document
             &&& next.flights.inflight[fid].phase->Origin_commit.issued
@@ -538,6 +752,15 @@ pub proof fn lemma_normal_origin_successful_get_issues_put_if_match(
                     bytes: spec_encode(after_document).len() as u64,
                     len: spec_encode(after_document).len() as usize,
                 })
+            &&& next.flights.slots.contains_key(
+                crate::target::spec_name(TargetSpec::Origin(origin)),
+            )
+            &&& next.flights.slots[
+                crate::target::spec_name(TargetSpec::Origin(origin))
+            ].busy == Some(fid)
+            &&& next.flights.slots[
+                crate::target::spec_name(TargetSpec::Origin(origin))
+            ].queue.len() == 0
             &&& well_formed(after_document)
         }),
 {
@@ -568,6 +791,805 @@ pub proof fn lemma_normal_origin_successful_get_issues_put_if_match(
     reveal(crate::verified::flight_spec::spec_advance);
     reveal(crate::verified::commit_spec::spec_prepare);
     assert(s.node.members.refreshing());
+}
+
+pub open spec fn normal_origin_write_issued_state(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    at: u64,
+    get_response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+) -> S {
+    let admitted = spec_on_event(
+        s,
+        EventSpec::Request {
+            clock: at,
+            request: RequestEventSpec::Protocol(call),
+        },
+    ).0;
+    spec_on_event(
+        admitted,
+        EventSpec::Store {
+            op: s.next_op,
+            response: StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            },
+            clock: get_response_at,
+        },
+    ).0
+}
+
+pub open spec fn normal_origin_write_commit(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    at: u64,
+    get_response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+) -> CommittingSpec {
+    normal_origin_write_issued_state(
+        s,
+        call,
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+    ).flights.inflight[s.next_flight].phase->Origin_commit
+}
+
+/// The exact deadline-key branch selected after a successful document CAS.
+/// `None` completes directly; `Some(key)` must issue and await deletion of
+/// that previously armed key before the request can reply.
+pub open spec fn normal_origin_previous_deadline_key(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    at: u64,
+    get_response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+) -> Option<AKey> {
+    spec_to_disarm(normal_origin_write_commit(
+        s,
+        call,
+        origin,
+        at,
+        get_response_at,
+        bytes,
+        etag,
+    ).seq.plan)
+}
+
+pub open spec fn normal_request_reply_effect(
+    flight: FlightSpec,
+    done: crate::handler_docs::DoneSpec,
+) -> EffectSpec {
+    let response = match done.response {
+        Some(response) => Ok(AnswerSpec::Step {
+            kind: flight.work->Request_kind,
+            corr: flight.work->Request_corr,
+            action_kind: flight.work->Request_action_kind,
+            response,
+            why: done.why,
+        }),
+        None => Err("no answer"@),
+    };
+    EffectSpec::Reply {
+        id: flight.work->Request_id,
+        response,
+    }
+}
+
+/// A successful document write completes directly when the exact production
+/// commit waiting on it has no previous deadline key to disarm.
+#[verifier::rlimit(20)]
+pub proof fn lemma_successful_origin_write_completes_directly(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+    written_etag: Etag,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].firing is None,
+        !s.flights.inflight[fid].debug,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == (AStep::Writing { idle: false }),
+        s.flights.inflight[fid].phase->Origin_commit.seq.changed,
+        s.flights.inflight[fid].phase->Origin_commit.seq.fired is None,
+        s.flights.slots.contains_key(crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].busy == Some(fid),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].queue.len() == 0,
+        s.flights.inflight[fid].phase->Origin_commit.issued
+            is Some,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            is Write,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            ->Write_op == op,
+        spec_to_disarm(
+            s.flights.inflight[fid].phase->Origin_commit.seq.plan,
+        ) is None,
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Ok(written_etag),
+                    },
+                    clock: response_at,
+                },
+            );
+            &&& !next.ops.contains_key(op)
+            &&& !next.flights.inflight.contains_key(fid)
+            &&& effects.len() > 0
+            &&& effects.last() == normal_request_reply_effect(
+                s.flights.inflight[fid],
+                s.flights.inflight[fid].phase->Origin_done,
+            )
+            &&& no_reply_effects(effects.drop_last())
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_committed);
+    reveal(spec_send_all);
+    reveal(spec_finish);
+    reveal(spec_release);
+    reveal(spec_schedule_wake);
+    reveal(spec_advance);
+    let clocked = S { clock: response_at, ..s };
+    assert(clocked.node.members.refreshing());
+    assert(!(clocked.node.members.next_heartbeat is None
+        && !clocked.node.members.refreshing()));
+    let without_op = S {
+        ops: clocked.ops.remove(op),
+        ..clocked
+    };
+    assert(spec_flight_completed(
+        without_op,
+        fid,
+        op,
+        StoreRes::PutIfMatch { result: Ok(written_etag) },
+    ) == spec_answered_phase(
+        crate::handler_docs::spec_take_flight(without_op, fid),
+        fid,
+        FlightSpec {
+            phase: PhaseSpec::Idle,
+            ..s.flights.inflight[fid]
+        },
+        s.flights.inflight[fid].phase,
+        StoreRes::PutIfMatch { result: Ok(written_etag) },
+    ));
+    let commit = s.flights.inflight[fid].phase->Origin_commit;
+    let (advanced, core, outcome) = spec_advance(
+        commit.seq,
+        without_op.node.core,
+        AAnswer::Written(written_etag.0@),
+    );
+    assert(outcome == AOutcome::Act(AAct::Done { deleted: false }));
+    let taken = crate::handler_docs::spec_take_flight(
+        without_op,
+        fid,
+    );
+    assert(no_reply_effects(taken.out));
+    lemma_answered_write_success_no_reply(
+        taken,
+        CommittingSpec { issued: None, ..commit },
+        commit.issued->Some_0,
+        written_etag,
+    );
+    let (answered, commit2, progress) = spec_commit_advance(
+        taken,
+        fid,
+        commit,
+        Some(StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        }),
+    );
+    assert(progress == ProgressSpec::Done(Fired::Kept));
+    let flight0 = FlightSpec {
+        phase: PhaseSpec::Idle,
+        ..s.flights.inflight[fid]
+    };
+    assert(spec_answered_origin(
+        taken,
+        fid,
+        flight0,
+        commit,
+        s.flights.inflight[fid].phase->Origin_done,
+        StoreRes::PutIfMatch { result: Ok(written_etag) },
+    ) == spec_committed(
+        answered,
+        flight0,
+        s.flights.inflight[fid].phase->Origin_done,
+        Fired::Kept,
+    ));
+    let committed = spec_committed(
+        answered,
+        flight0,
+        s.flights.inflight[fid].phase->Origin_done,
+        Fired::Kept,
+    );
+    let done = s.flights.inflight[fid].phase->Origin_done;
+    let response = match done.response {
+        Some(response) => Ok(AnswerSpec::Step {
+            kind: s.flights.inflight[fid].work->Request_kind,
+            corr: s.flights.inflight[fid].work->Request_corr,
+            action_kind:
+                s.flights.inflight[fid].work->Request_action_kind,
+            response,
+            why: done.why,
+        }),
+        None => Err("no answer"@),
+    };
+    let noted = spec_note(
+        answered,
+        NoteSpec::Commit(crate::types::CommitOutcome::Committed),
+    );
+    let sent = spec_send_all(noted, done.outbox);
+    lemma_send_all_frame(noted, done.outbox);
+    assert(no_reply_effects(answered.out));
+    lemma_no_reply_effects_push(
+        answered.out,
+        EffectSpec::Note(NoteSpec::Commit(
+            crate::types::CommitOutcome::Committed,
+        )),
+    );
+    assert(no_reply_effects(noted.out));
+    lemma_outbound_send_effects_no_reply(done.outbox);
+    lemma_no_reply_effects_concat(
+        noted.out,
+        outbound_send_effects(done.outbox),
+    );
+    assert(no_reply_effects(sent.out));
+    let replied = spec_emit(sent, EffectSpec::Reply {
+        id: s.flights.inflight[fid].work->Request_id,
+        response,
+    });
+    assert(replied.out.last() is Reply);
+    assert(replied.out.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(replied.out.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    assert(replied.out.drop_last() == sent.out);
+    assert(committed == spec_finish(
+        replied,
+        FlightSpec { idle: !done.did, ..flight0 },
+        Ok(Fired::Kept),
+    ));
+    assert(answered.ops == taken.ops);
+    assert(taken.ops == without_op.ops);
+    assert(replied.ops == without_op.ops);
+    assert(replied.flights.inflight == taken.flights.inflight);
+    assert(!committed.ops.contains_key(op));
+    assert(!committed.flights.inflight.contains_key(fid));
+    assert(committed.out.len() > 0);
+    assert(committed.out.last() is Reply);
+    assert(committed.out.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(committed.out.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            },
+            clock: response_at,
+        },
+    );
+    assert(!next.ops.contains_key(op));
+    assert(!next.flights.inflight.contains_key(fid));
+    assert(effects.len() > 0);
+    assert(effects.last() is Reply);
+    assert(effects.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(effects.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    assert(no_reply_effects(effects.drop_last()));
+}
+
+/// The other successful-write branch emits the exact delete for the
+/// production commit's previous deadline key.
+#[verifier::rlimit(20)]
+pub proof fn lemma_successful_origin_write_issues_previous_key_delete(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+    written_etag: Etag,
+    previous: AKey,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        !s.ops.contains_key(s.next_op),
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].firing is None,
+        !s.flights.inflight[fid].debug,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == (AStep::Writing { idle: false }),
+        s.flights.inflight[fid].phase->Origin_commit.seq.changed,
+        s.flights.inflight[fid].phase->Origin_commit.seq.fired is None,
+        s.flights.inflight[fid].phase->Origin_commit.issued
+            is Some,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            is Write,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            ->Write_op == op,
+        spec_to_disarm(
+            s.flights.inflight[fid].phase->Origin_commit.seq.plan,
+        ) == Some(previous),
+        s.flights.slots.contains_key(crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].busy == Some(fid),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].queue.len() == 0,
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Ok(written_etag),
+                    },
+                    clock: response_at,
+                },
+            );
+            let delete_name = next.flights.inflight[
+                fid
+            ].phase->Origin_commit.issued->Some_0->Key_name;
+            &&& effects.len() > 0
+            &&& effects.last() == EffectSpec::Store {
+                op: s.next_op,
+                request: StoreReqSpec::Del { key: delete_name },
+            }
+            &&& no_reply_effects(effects)
+            &&& next.out.len() == 0
+            &&& next.node.members.refreshing()
+            &&& !next.loops
+            &&& next.ops.contains_key(s.next_op)
+            &&& next.ops[s.next_op] == Owner::Flight(fid)
+            &&& next.flights.inflight.contains_key(fid)
+            &&& next.flights.inflight[fid].id == fid
+            &&& next.flights.inflight[fid].work
+                == s.flights.inflight[fid].work
+            &&& next.flights.inflight[fid].work is Request
+            &&& next.flights.inflight[fid].firing is None
+            &&& !next.flights.inflight[fid].debug
+            &&& next.flights.inflight[fid].phase is Origin
+            &&& next.flights.inflight[fid].phase->Origin_done
+                == s.flights.inflight[fid].phase->Origin_done
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.seq.step
+                == AStep::DeletingPrevious(previous)
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.seq.fired is None
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.issued == Some(IssuedSpec::Key {
+                op: s.next_op,
+                key: previous,
+                name: delete_name,
+                arm: false,
+            })
+            &&& next.flights.slots.contains_key(crate::target::spec_name(
+                next.flights.inflight[fid].target,
+            ))
+            &&& next.flights.slots[crate::target::spec_name(
+                next.flights.inflight[fid].target,
+            )].busy == Some(fid)
+            &&& next.flights.slots[crate::target::spec_name(
+                next.flights.inflight[fid].target,
+            )].queue.len() == 0
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_inflight);
+    reveal(spec_store);
+    reveal(spec_schedule_wake);
+    reveal(spec_advance);
+    let clocked = S { clock: response_at, ..s };
+    assert(clocked.node.members.refreshing());
+    let without_op = S {
+        ops: clocked.ops.remove(op),
+        ..clocked
+    };
+    let taken = crate::handler_docs::spec_take_flight(
+        without_op,
+        fid,
+    );
+    let commit = s.flights.inflight[fid].phase->Origin_commit;
+    assert(no_reply_effects(taken.out));
+    lemma_answered_write_success_no_reply(
+        taken,
+        CommittingSpec { issued: None, ..commit },
+        commit.issued->Some_0,
+        written_etag,
+    );
+    let (advanced, core, outcome) = spec_advance(
+        commit.seq,
+        without_op.node.core,
+        AAnswer::Written(written_etag.0@),
+    );
+    assert(outcome == AOutcome::Act(AAct::DeleteKey {
+        key: previous,
+        by: without_op.node.core.id,
+    }));
+    let (after_answer, commit2, progress) = spec_commit_advance(
+        taken,
+        fid,
+        commit,
+        Some(StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        }),
+    );
+    assert(progress == ProgressSpec::Issued);
+    assert(commit2.issued is Some);
+    assert(commit2.issued->Some_0 is Key);
+    assert(commit2.issued->Some_0->Key_op == s.next_op);
+    assert(commit2.issued->Some_0->Key_key == previous);
+    assert(!commit2.issued->Some_0->Key_arm);
+    let issued_delete_name = commit2.issued->Some_0->Key_name;
+    assert(after_answer.ops.contains_key(s.next_op));
+    assert(after_answer.ops[s.next_op] == Owner::Flight(fid));
+    assert(after_answer.out.last() == EffectSpec::Store {
+        op: s.next_op,
+        request: StoreReqSpec::Del { key: issued_delete_name },
+    });
+    let flight0 = FlightSpec {
+        phase: PhaseSpec::Idle,
+        ..s.flights.inflight[fid]
+    };
+    let waiting_flight = FlightSpec {
+        phase: PhaseSpec::Origin {
+            commit: commit2,
+            done: s.flights.inflight[fid].phase->Origin_done,
+        },
+        ..flight0
+    };
+    let waiting = S {
+        flights: FlightsSpec {
+            inflight: after_answer.flights.inflight.insert(
+                fid,
+                waiting_flight,
+            ),
+            ..after_answer.flights
+        },
+        ..after_answer
+    };
+    assert(spec_inflight(after_answer, waiting_flight) == waiting);
+    assert(spec_answered_origin(
+        taken,
+        fid,
+        flight0,
+        commit,
+        s.flights.inflight[fid].phase->Origin_done,
+        StoreRes::PutIfMatch { result: Ok(written_etag) },
+    ) == waiting);
+    assert(spec_flight_completed(
+        without_op,
+        fid,
+        op,
+        StoreRes::PutIfMatch { result: Ok(written_etag) },
+    ) == waiting);
+    assert(waiting.flights.inflight
+        == after_answer.flights.inflight.insert(
+            fid,
+            waiting_flight,
+        ));
+    assert(waiting.flights.inflight.contains_key(fid));
+    assert(waiting.out == after_answer.out);
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::PutIfMatch {
+                result: Ok(written_etag),
+            },
+            clock: response_at,
+        },
+    );
+    let delete_name = next.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued->Some_0->Key_name;
+    assert(effects == waiting.out);
+    assert(next == (S { out: Seq::empty(), ..waiting }));
+    assert(next.out.len() == 0);
+    assert(effects.last() == EffectSpec::Store {
+        op: s.next_op,
+        request: StoreReqSpec::Del { key: delete_name },
+    });
+    let (answered, answered_commit) = spec_answered(
+        taken,
+        CommittingSpec { issued: None, ..commit },
+        commit.issued->Some_0,
+        Some(StoreRes::PutIfMatch {
+            result: Ok(written_etag),
+        }),
+    );
+    assert(no_reply_effects(answered.out));
+    assert(after_answer.out == answered.out.push(
+        EffectSpec::Store {
+            op: s.next_op,
+            request: StoreReqSpec::Del { key: delete_name },
+        },
+    ));
+    assert(after_answer.out.len() > 0);
+    lemma_no_reply_effects_push(
+        answered.out,
+        EffectSpec::Store {
+            op: s.next_op,
+            request: StoreReqSpec::Del { key: delete_name },
+        },
+    );
+    assert(no_reply_effects(effects));
+    assert(effects.len() > 0);
+    assert(next.ops.contains_key(s.next_op));
+    assert(next.ops[s.next_op] == Owner::Flight(fid));
+    assert(next.flights.inflight.contains_key(fid));
+    assert(next.flights.inflight[fid].phase is Origin);
+    assert(next.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued == Some(IssuedSpec::Key {
+        op: s.next_op,
+        key: previous,
+        name: delete_name,
+        arm: false,
+    }));
+}
+
+/// A successful response to that exact previous-key delete closes the flight
+/// and emits its final Reply after any request Send effects.
+#[verifier::rlimit(20)]
+pub proof fn lemma_successful_previous_key_delete_completes(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].firing is None,
+        !s.flights.inflight[fid].debug,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.issued
+            is Some,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            is Key,
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == AStep::DeletingPrevious(
+                s.flights.inflight[fid].phase->Origin_commit.issued
+                    ->Some_0->Key_key,
+            ),
+        s.flights.inflight[fid].phase->Origin_commit.seq.fired is None,
+        s.flights.slots.contains_key(crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].busy == Some(fid),
+        s.flights.slots[crate::target::spec_name(
+            s.flights.inflight[fid].target,
+        )].queue.len() == 0,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            ->Key_op == op,
+        !s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            ->Key_arm,
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::Del { result: Ok(()) },
+                    clock: response_at,
+                },
+            );
+            &&& !next.ops.contains_key(op)
+            &&& !next.flights.inflight.contains_key(fid)
+            &&& effects.len() > 0
+            &&& effects.last() == normal_request_reply_effect(
+                s.flights.inflight[fid],
+                s.flights.inflight[fid].phase->Origin_done,
+            )
+            &&& no_reply_effects(effects.drop_last())
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_committed);
+    reveal(spec_send_all);
+    reveal(spec_finish);
+    reveal(spec_release);
+    reveal(spec_schedule_wake);
+    reveal(spec_advance);
+    let clocked = S { clock: response_at, ..s };
+    assert(clocked.node.members.refreshing());
+    let without_op = S {
+        ops: clocked.ops.remove(op),
+        ..clocked
+    };
+    let taken = crate::handler_docs::spec_take_flight(
+        without_op,
+        fid,
+    );
+    let commit = s.flights.inflight[fid].phase->Origin_commit;
+    let (advanced, core, outcome) = spec_advance(
+        commit.seq,
+        without_op.node.core,
+        AAnswer::Done,
+    );
+    assert(outcome == AOutcome::Act(AAct::Done { deleted: false }));
+    assert(no_reply_effects(taken.out));
+    lemma_answered_key_delete_success_no_reply(
+        taken,
+        CommittingSpec { issued: None, ..commit },
+        commit.issued->Some_0,
+    );
+    let (answered, commit2, progress) = spec_commit_advance(
+        taken,
+        fid,
+        commit,
+        Some(StoreRes::Del { result: Ok(()) }),
+    );
+    assert(progress == ProgressSpec::Done(Fired::Kept));
+    let flight0 = FlightSpec {
+        phase: PhaseSpec::Idle,
+        ..s.flights.inflight[fid]
+    };
+    let done = s.flights.inflight[fid].phase->Origin_done;
+    let response = match done.response {
+        Some(response) => Ok(AnswerSpec::Step {
+            kind: s.flights.inflight[fid].work->Request_kind,
+            corr: s.flights.inflight[fid].work->Request_corr,
+            action_kind:
+                s.flights.inflight[fid].work->Request_action_kind,
+            response,
+            why: done.why,
+        }),
+        None => Err("no answer"@),
+    };
+    let noted = spec_note(
+        answered,
+        NoteSpec::Commit(crate::types::CommitOutcome::Committed),
+    );
+    let sent = spec_send_all(noted, done.outbox);
+    lemma_send_all_frame(noted, done.outbox);
+    assert(no_reply_effects(answered.out));
+    lemma_no_reply_effects_push(
+        answered.out,
+        EffectSpec::Note(NoteSpec::Commit(
+            crate::types::CommitOutcome::Committed,
+        )),
+    );
+    assert(no_reply_effects(noted.out));
+    lemma_outbound_send_effects_no_reply(done.outbox);
+    lemma_no_reply_effects_concat(
+        noted.out,
+        outbound_send_effects(done.outbox),
+    );
+    assert(no_reply_effects(sent.out));
+    let replied = spec_emit(sent, EffectSpec::Reply {
+        id: s.flights.inflight[fid].work->Request_id,
+        response,
+    });
+    assert(replied.out.last() is Reply);
+    assert(replied.out.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(replied.out.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    assert(replied.out.drop_last() == sent.out);
+    let committed = spec_committed(
+        answered,
+        flight0,
+        done,
+        Fired::Kept,
+    );
+    assert(committed == spec_finish(
+        replied,
+        FlightSpec { idle: !done.did, ..flight0 },
+        Ok(Fired::Kept),
+    ));
+    assert(answered.ops == taken.ops);
+    assert(taken.ops == without_op.ops);
+    assert(replied.ops == without_op.ops);
+    assert(replied.flights.inflight == taken.flights.inflight);
+    assert(!committed.ops.contains_key(op));
+    assert(!committed.flights.inflight.contains_key(fid));
+    assert(committed.out.len() > 0);
+    assert(committed.out.last() is Reply);
+    assert(committed.out.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(committed.out.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::Del { result: Ok(()) },
+            clock: response_at,
+        },
+    );
+    assert(!next.ops.contains_key(op));
+    assert(!next.flights.inflight.contains_key(fid));
+    assert(effects.len() > 0);
+    assert(effects.last() is Reply);
+    assert(effects.last()->Reply_id
+        == s.flights.inflight[fid].work->Request_id);
+    assert(effects.last() == normal_request_reply_effect(
+        s.flights.inflight[fid],
+        done,
+    ));
+    assert(no_reply_effects(effects.drop_last()));
 }
 
 // ---------------------------------------------------------------------------
