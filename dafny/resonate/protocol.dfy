@@ -21,10 +21,10 @@ module Protocol {
   // The phase is named for what runs next. Prepare: the document is in flight.
   // Process: the effects still to send. Process is rescheduled until that list
   // is empty. `remember` writes `keep` into the armed map when the write lands.
-  // `cid` is the caller's request. A store request's id is a hash of a request id.
+  // `id` is the promise. `cid` is the caller's correlation id, the one the reply cites.
   datatype Cont =
-    | Prepare(caller: Pid, job: Job, cid: Uuid)
-    | Process(caller: Pid, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: Uuid)
+    | Prepare(caller: Pid, id: string, job: Job, cid: Uuid)
+    | Process(caller: Pid, id: string, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: Uuid)
 
   predicate AwaitsGet(c: Cont) { c.Prepare? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
@@ -48,7 +48,9 @@ module Protocol {
   type Msg = RR<ReqBody, ResBody>
   datatype State =
     | AtClient(id: string, node: nat, kind: Kind, waiting: bool)
-    | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat)
+    // `open` is keyed by the correlation id of the request in flight.
+    // The response cites that same id.
+    | AtNode(open: map<Uuid, Cont>, armed: map<string, Clock>, next: nat, owner: nat)
     | AtBucket(docs: map<string, Temp.Doc>, ver: map<string, nat>, timeouts: set<Clock>, anchor: map<string, Clock>)
 
   function Empty(): Temp.Doc { Temp.Origin(0, map[]) }

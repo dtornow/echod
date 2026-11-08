@@ -27,8 +27,8 @@ module Claim {
       && a(k) == Deliver(Packet(Bucket, node, Res(Hash(cid), Got(id, doc, version))))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
-      && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid)
+      && Hash(cid) in b(k).procs[node].open
+      && b(k).procs[node].open[Hash(cid)] == Prepare(from, id, AskGet, cid)
       && answer == Temp.Get(doc, id, b(k).now).answer
       && (id !in Temp.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))
       && (id in Temp.ObjectsOf(doc) ==>
@@ -48,8 +48,8 @@ module Claim {
       && a(k) == Deliver(GotPacket(node, Hash(cid), id, doc, version))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
-      && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid)
+      && Hash(cid) in b(k).procs[node].open
+      && b(k).procs[node].open[Hash(cid)] == Prepare(from, id, AskGet, cid)
       && answer == Temp.Get(doc, id, b(k).now).answer;
     Cases(doc, id, b(k).now);
   }

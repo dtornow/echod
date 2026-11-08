@@ -23,19 +23,11 @@ module Network {
   datatype TimerOp = Keep | Set(delay: nat) | Cancel   // delay is relative to "now"
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
 
-  // An id is a number. The next request's id is the hash of the request it
-  // follows. Nothing is counted, and the id holds nothing about that request.
+  // An id is a number. The next request's id is the hash of the request it follows.
   datatype Uuid = Uuid(n: nat)
 
   function Hash(id: Uuid): Uuid {
     Uuid(2 * id.n + 1)
-  }
-
-  // `Hash` applied `times` times. Zero times is `id` itself.
-  function Hashed(id: Uuid, times: nat): Uuid
-    decreases times
-  {
-    if times == 0 then id else Hash(Hashed(id, times - 1))
   }
 
   // A request carries an id. The response cites that same id, so a reply is

@@ -21,43 +21,43 @@ module Node {
     if self.Node? && s.AtNode? then
       match i {
         case Request(from, Req(cid, PromiseGet(id))) =>
-          if id in s.open then
+          var rpc := Hash(cid);
+          if rpc in s.open then
             Result(s, [], Keep)
           else
-            var rpc := Hash(cid);
-            Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid)], s.armed, s.next, s.owner),
+            Result(AtNode(s.open[rpc := Cont.Prepare(from, id, AskGet, cid)], s.armed, s.next, s.owner),
                    [ReqTo(Bucket, rpc, Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
-          if req.id in s.open then
+          var rpc := Hash(cid);
+          if rpc in s.open then
             Result(s, [], Keep)
           else
-            var rpc := Hash(cid);
-            Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid)], s.armed, s.next, s.owner),
+            Result(AtNode(s.open[rpc := Cont.Prepare(from, req.id, AskCreate(req), cid)], s.armed, s.next, s.owner),
                    [ReqTo(Bucket, rpc, Get(req.id))], Keep)
         case Request(_, Res(rpc, Got(id, doc, version))) =>
-          if id in s.open && s.open[id].Prepare? && rpc == Hash(s.open[id].cid) then
-            var plan := Prepare(s, s.open[id].job, id, doc, version, now);
-            Process(s, id, s.open[id].caller, s.open[id].cid, plan)
+          if rpc in s.open && s.open[rpc].Prepare? && s.open[rpc].id == id then
+            var plan := Prepare(s, s.open[rpc].job, id, doc, version, now);
+            Process(s, rpc, plan)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutPut(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Put(clock)) then
-            Reschedule(s, id)
+          if rpc in s.open && s.open[rpc].id == id && Head(s, rpc, Put(clock)) then
+            Reschedule(s, rpc)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, DocWrote(id, _))) =>
-          if Live(s, id, rpc) && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0].Write? then
-            Reschedule(s, id)
+          if rpc in s.open && s.open[rpc].id == id && s.open[rpc].Process? && |s.open[rpc].effects| > 0 && s.open[rpc].effects[0].Write? then
+            Reschedule(s, rpc)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, DocRejected(id))) =>
-          if Live(s, id, rpc) && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0].Write? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [], Keep)
+          if rpc in s.open && s.open[rpc].id == id && s.open[rpc].Process? && |s.open[rpc].effects| > 0 && s.open[rpc].effects[0].Write? then
+            Result(AtNode(s.open - {rpc}, s.armed, s.next, s.owner), [], Keep)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Effect.Drop(clock)) then
-            Reschedule(s, id)
+          if rpc in s.open && s.open[rpc].id == id && Head(s, rpc, Effect.Drop(clock)) then
+            Reschedule(s, rpc)
           else
             Result(s, [], Keep)
         case _ =>
@@ -147,45 +147,38 @@ module Node {
     else armed
   }
 
-  // An empty effect list answers the caller. Otherwise the head goes to the
-  // store and Process stays scheduled on the whole list. The read's id is the
-  // hash of the caller's request. An effect hashes that id once more for each
-  // effect still to send.
-  function Process(s: State, id: string, caller: Pid, cid: Uuid, plan: Plan): Result<Pid, Msg, State>
-    requires s.AtNode?
+  // An empty effect list answers the caller and drops the registration.
+  // Otherwise the next request is the hash of this one, and the continuation
+  // moves to that id. The response will cite it.
+  function Process(s: State, rpc: Uuid, plan: Plan): Result<Pid, Msg, State>
+    requires s.AtNode? && rpc in s.open
   {
+    var c := s.open[rpc];
     if plan.effects == [] then
-      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner),
-             [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
+      Result(AtNode(s.open - {rpc}, s.armed, plan.next, s.owner),
+             [ResTo(c.caller, c.cid, Reply(plan.created, plan.reply))], Keep)
     else
-      var rpc := Hash(Hashed(cid, |plan.effects|));
-      var phase := Cont.Process(caller, plan.reply, plan.effects, plan.keep, plan.remember, cid);
-      Result(AtNode(s.open[id := phase], s.armed, plan.next, s.owner),
-             [ReqTo(Bucket, rpc, SendEffect(id, plan.effects[0]))], Keep)
+      var next := Hash(rpc);
+      var phase := Cont.Process(c.caller, c.id, plan.reply, plan.effects, plan.keep, plan.remember, c.cid);
+      Result(AtNode((s.open - {rpc})[next := phase], s.armed, plan.next, s.owner),
+             [ReqTo(Bucket, next, SendEffect(c.id, plan.effects[0]))], Keep)
   }
 
   // The head effect landed. Remember a write, then schedule Process on what remains.
-  function Reschedule(s: State, id: string): Result<Pid, Msg, State>
-    requires s.AtNode? && id in s.open && s.open[id].Process? && |s.open[id].effects| > 0
+  function Reschedule(s: State, rpc: Uuid): Result<Pid, Msg, State>
+    requires s.AtNode? && rpc in s.open && s.open[rpc].Process? && |s.open[rpc].effects| > 0
   {
-    var phase := s.open[id];
+    var phase := s.open[rpc];
     var head := phase.effects[0];
     var armed := Remember(s.armed, head, phase.keep, phase.remember);
     var plan := Plan(phase.reply, true, phase.effects[1..], phase.keep, phase.remember && !head.Write?, s.next);
-    Process(AtNode(s.open, armed, s.next, s.owner), id, phase.caller, phase.cid, plan)
+    Process(AtNode(s.open, armed, s.next, s.owner), rpc, plan)
   }
 
-  predicate Live(s: State, id: string, rpc: Uuid)
+  predicate Head(s: State, rpc: Uuid, effect: Effect)
     requires s.AtNode?
   {
-    && id in s.open && s.open[id].Process?
-    && rpc == Hash(Hashed(s.open[id].cid, |s.open[id].effects|))
-  }
-
-  predicate Head(s: State, id: string, effect: Effect)
-    requires s.AtNode?
-  {
-    && id in s.open && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0] == effect
+    && rpc in s.open && s.open[rpc].Process? && |s.open[rpc].effects| > 0 && s.open[rpc].effects[0] == effect
   }
 
 
