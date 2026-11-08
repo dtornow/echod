@@ -21,8 +21,14 @@ include "../framework/order.dfy"
 // A callback is recorded only while both promises are still pending, and
 // only for another id of the same origin. A listener is recorded only while
 // the promise is still pending. A schedule is opened into an empty origin
-// before get, settle, and the two registrations look it up. The sweep and
-// the handler each leave a well-formed document well-formed.
+// before a lookup. The task calls read that same projection. Create reads
+// or creates the promise, then takes a pending task. Acquire takes a
+// pending task. Release, halt, and continue park it. Fulfill settles the
+// task's own promise and fulfills the task, and does not resume what was
+// registered on it. A fence that settles uses Settle, so that resume
+// happens there. Suspend records the task on each awaited promise, then
+// parks it. A heartbeat extends the lease of each acquired task it names.
+// The sweep and the handler each leave a well-formed document well-formed.
 
 module Node {
   import opened Keys
@@ -83,13 +89,33 @@ module Node {
   datatype SettleReq = SettleReq(id: string, state: PromiseState, value: Value)
   datatype CallbackReq = CallbackReq(awaited: string, awaiter: string)
   datatype ListenerReq = ListenerReq(awaited: string, address: string)
+  datatype TaskRef = TaskRef(id: string, version: nat)
+  datatype FenceAction = FenceCreate(create: CreateReq) | FenceSettle(settle: SettleReq)
+  datatype FenceInner =
+    | FenceCreated(status: nat, promise: Opt<Promise>)
+    | FenceSettled(status: nat, promise: Opt<Promise>)
   datatype Request =
     | PromiseGet(id: string)
     | PromiseCreate(create: CreateReq)
     | PromiseSettle(settle: SettleReq)
     | PromiseRegisterCallback(callback: CallbackReq)
     | PromiseRegisterListener(listener: ListenerReq)
-  datatype Answer = Answer(status: nat, promise: Opt<Promise>)
+    | TaskGet(id: string)
+    | TaskCreate(pid: string, ttl: nat, create: CreateReq)
+    | TaskAcquire(id: string, version: nat, pid: string, ttl: nat)
+    | TaskRelease(id: string, version: nat)
+    | TaskFulfill(id: string, version: nat, settle: SettleReq)
+    | TaskHalt(id: string)
+    | TaskContinue(id: string)
+    | TaskHeartbeat(pid: string, refs: seq<TaskRef>)
+    | TaskSuspend(id: string, version: nat, suspend: seq<CallbackReq>)
+    | TaskFence(id: string, version: nat, fence: FenceAction)
+    | TaskFenceCheck(id: string, version: nat)
+  datatype Answer =
+    | Answer(status: nat, promise: Opt<Promise>)
+    | Claim(status: nat, task: Opt<Task>, promise: Opt<Promise>)
+    | Status(status: nat)
+    | Fenced(status: nat, action: Opt<FenceInner>)
   datatype Applied = Applied(doc: Doc, answer: Answer, notes: seq<Note>)
 
   datatype Occurrence = Occurrence(promise: string, at: nat, timeout: nat, param: Value, tags: Tags)
@@ -445,6 +471,461 @@ module Node {
         Applied(doc', Answer(200, Some(awaited.promise)), [])
       else
         Applied(shown, Answer(200, Some(awaited.promise)), [])
+  }
+
+  // The task taken by `pid` for `ttl`, from `now`. The version moves, and
+  // the resumes of the previous attempt are dropped.
+  function ToAcquired(t: Task, pid: string, ttl: nat, now: nat): Task {
+    Task(TaskState.Acquired, t.version + 1, Some(pid), Some(ttl), Some(now + ttl), None, [])
+  }
+
+  function ToHalted(t: Task): Task {
+    Task(TaskState.Halted, t.version, None, None, None, None, t.resumes)
+  }
+
+  function ToSuspended(t: Task): Task {
+    Task(TaskState.Suspended, t.version, None, None, None, None, [])
+  }
+
+  function ToPending(t: Task, now: nat): Task {
+    t.(state := TaskState.Pending, retryTimeoutAt := Some(now))
+  }
+
+  function TtlOf(t: Task): nat {
+    if t.ttl.Some? then t.ttl.value else 0
+  }
+
+  datatype Held = HeldOk(obj: Obj) | HeldMissing | HeldStale
+
+  // The task `id` at `version`, acquired, its promise still pending.
+  function Hold(objects: map<string, Obj>, id: string, version: nat, now: nat): Held {
+    if id !in objects then HeldMissing
+    else
+      var obj := Project(objects[id], now);
+      match obj.task
+      case None => HeldMissing
+      case Some(t) =>
+        if t.state == TaskState.Acquired && t.version == version && obj.promise.state == PromiseState.Pending then
+          HeldOk(obj)
+        else
+          HeldStale
+  }
+
+  function PromiseStatus(a: Answer): nat {
+    match a
+    case Answer(status, _) => status
+    case Claim(status, _, _) => status
+    case Status(status) => status
+    case Fenced(status, _) => status
+  }
+
+  function PromiseBody(a: Answer): Opt<Promise> {
+    match a
+    case Answer(_, promise) => promise
+    case Claim(_, _, promise) => promise
+    case Status(_) => None
+    case Fenced(_, _) => None
+  }
+
+  predicate BadSuspend(actions: seq<CallbackReq>, id: string) {
+    exists i :: 0 <= i < |actions| && (actions[i].awaited == id || OriginOf(actions[i].awaited) != OriginOf(id))
+  }
+
+  predicate DistinctAwaited(actions: seq<CallbackReq>) {
+    forall i, j :: 0 <= i < j < |actions| ==> actions[i].awaited != actions[j].awaited
+  }
+
+  predicate MissingAwaited(objects: map<string, Obj>, actions: seq<CallbackReq>) {
+    exists i :: 0 <= i < |actions| && actions[i].awaited !in objects
+  }
+
+  predicate Unawaitable(objects: map<string, Obj>, actions: seq<CallbackReq>) {
+    exists i :: 0 <= i < |actions| && actions[i].awaited in objects && !Awaitable(objects[actions[i].awaited].promise.tags)
+  }
+
+  predicate AnySettled(objects: map<string, Obj>, actions: seq<CallbackReq>, now: nat) {
+    exists i :: 0 <= i < |actions| &&
+      actions[i].awaited in objects &&
+      Project(objects[actions[i].awaited], now).promise.state != PromiseState.Pending
+  }
+
+  predicate OneOrigin(refs: seq<TaskRef>)
+    requires |refs| > 0
+  {
+    forall i :: 0 <= i < |refs| ==> OriginOf(refs[i].id) == OriginOf(refs[0].id)
+  }
+
+  function AddSuspends(objects: map<string, Obj>, awaiter: string, actions: seq<CallbackReq>, i: nat): (r: map<string, Obj>)
+    requires i <= |actions|
+    ensures r.Keys == objects.Keys
+    decreases |actions| - i
+  {
+    if i == |actions| then objects
+    else
+      var awaited := actions[i].awaited;
+      if awaited !in objects then AddSuspends(objects, awaiter, actions, i + 1)
+      else AddSuspends(objects[awaited := AddCallback(objects[awaited], awaiter)], awaiter, actions, i + 1)
+  }
+
+  function Extend(objects: map<string, Obj>, pid: string, refs: seq<TaskRef>, i: nat, now: nat): (r: map<string, Obj>)
+    requires i <= |refs|
+    ensures r.Keys == objects.Keys
+    decreases |refs| - i
+  {
+    if i == |refs| then objects
+    else
+      var id := refs[i].id;
+      if id !in objects then Extend(objects, pid, refs, i + 1, now)
+      else
+        var seen := Project(objects[id], now);
+        match seen.task
+        case None => Extend(objects, pid, refs, i + 1, now)
+        case Some(t) =>
+          if t.state == TaskState.Acquired && t.version == refs[i].version && t.pid == Some(pid) then
+            var next := Obj(seen.promise, Some(t.(leaseTimeoutAt := Some(now + TtlOf(t)))));
+            Extend(objects[id := next], pid, refs, i + 1, now)
+          else
+            Extend(objects, pid, refs, i + 1, now)
+  }
+
+  function GetTask(doc: Doc, id: string, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if id !in objects then Applied(shown, Claim(404, None, None), [])
+    else
+      var seen := Project(objects[id], now);
+      match seen.task
+      case None => Applied(shown, Claim(404, None, None), [])
+      case Some(t) => Applied(shown, Claim(200, Some(t), None), [])
+  }
+
+  function CreateTask(doc: Doc, pid: string, ttl: nat, action: CreateReq, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if !Targeted(action.tags) || Timer(action.tags) then
+      Applied(doc, Claim(400, None, None), [])
+    else
+      var done := Create(doc, action, now);
+      var objects := ObjectsOf(done.doc);
+      if action.id !in objects then
+        Applied(done.doc, Claim(422, None, None), [])
+      else
+        var seen := Project(objects[action.id], now);
+        if !Targeted(seen.promise.tags) then
+          Applied(done.doc, Claim(422, None, None), [])
+        else
+          match seen.task
+          case None => Applied(done.doc, Claim(409, None, None), [])
+          case Some(t) =>
+            if t.state == TaskState.Fulfilled then
+              Applied(done.doc, Claim(200, Some(t), Some(seen.promise)), [])
+            else if t.state == TaskState.Pending && seen.promise.state == PromiseState.Pending then
+              var u := ToAcquired(t, pid, ttl, now);
+              var obj := Obj(seen.promise, Some(u));
+              var doc' := Origin(objects[action.id := obj]);
+              assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+                if WellFormed(doc, now) {
+                  assert WellFormed(done.doc, now);
+                  OriginMap(done.doc, action.id, now);
+                  StillPending(objects[action.id], now);
+                  assert seen == objects[action.id];
+                  AcquireOk(t, pid, ttl, now);
+                  assert obj.promise == objects[action.id].promise;
+                  ReplaceOk(objects, action.id, obj, now);
+                }
+              }
+              Applied(doc', Claim(200, Some(u), Some(obj.promise)), [])
+            else
+              Applied(done.doc, Claim(409, None, None), [])
+  }
+
+  function AcquireTask(doc: Doc, id: string, version: nat, pid: string, ttl: nat, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if id !in objects then Applied(shown, Claim(404, None, None), [])
+    else
+      var seen := Project(objects[id], now);
+      match seen.task
+      case None => Applied(shown, Claim(404, None, None), [])
+      case Some(t) =>
+        if t.state != TaskState.Pending || t.version != version || seen.promise.state != PromiseState.Pending then
+          Applied(shown, Claim(409, None, None), [])
+        else
+          var u := ToAcquired(t, pid, ttl, now);
+          var obj := Obj(seen.promise, Some(u));
+          var doc' := Origin(objects[id := obj]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              assert WellFormed(shown, now);
+              assert MapOk(objects, now);
+              StillPending(objects[id], now);
+              assert seen == objects[id];
+              AcquireOk(t, pid, ttl, now);
+              assert obj.promise == objects[id].promise;
+              ReplaceOk(objects, id, obj, now);
+            }
+          }
+          Applied(doc', Claim(200, Some(u), Some(obj.promise)), [])
+  }
+
+  function ReleaseTask(doc: Doc, id: string, version: nat, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    match Hold(objects, id, version, now)
+    case HeldMissing => Applied(shown, Status(404), [])
+    case HeldStale => Applied(shown, Status(409), [])
+    case HeldOk(obj) =>
+      var t := obj.task.value;
+      var u := Unlease(t, now);
+      var next := Obj(obj.promise, Some(u));
+      var doc' := Origin(objects[id := next]);
+      assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+        if WellFormed(doc, now) {
+          assert WellFormed(shown, now);
+          assert MapOk(objects, now);
+          HeldFacts(objects, id, version, now);
+          assert obj == objects[id];
+          UnleaseOk(t, now);
+          assert next.promise == objects[id].promise;
+          ReplaceOk(objects, id, next, now);
+        }
+      }
+      Applied(doc', Status(200), [])
+  }
+
+  function FulfillTask(doc: Doc, id: string, version: nat, action: SettleReq, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if !Settable(action.state) then Applied(doc, Answer(400, None), [])
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      match Hold(objects, id, version, now)
+      case HeldMissing => Applied(shown, Answer(404, None), [])
+      case HeldStale => Applied(shown, Answer(409, None), [])
+      case HeldOk(obj) =>
+        var settled := Settled(obj, action.state, action.value, now);
+        var doc' := Origin(objects[id := settled]);
+        assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+          if WellFormed(doc, now) {
+            assert WellFormed(shown, now);
+            assert MapOk(objects, now);
+            HeldFacts(objects, id, version, now);
+            assert obj == objects[id];
+            SettledOk(id, obj, action.state, action.value, now);
+            ReplaceOk(objects, id, settled, now);
+          }
+        }
+        Applied(doc', Answer(200, Some(settled.promise)), [])
+  }
+
+  function HaltTask(doc: Doc, id: string, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if id !in objects then Applied(shown, Status(404), [])
+    else
+      var seen := Project(objects[id], now);
+      match seen.task
+      case None => Applied(shown, Status(404), [])
+      case Some(t) =>
+        if t.state == TaskState.Fulfilled then Applied(shown, Status(409), [])
+        else if t.state == TaskState.Halted then Applied(shown, Status(200), [])
+        else
+          var u := ToHalted(t);
+          var obj := Obj(seen.promise, Some(u));
+          var doc' := Origin(objects[id := obj]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              assert WellFormed(shown, now);
+              assert MapOk(objects, now);
+              Stored(objects[id], now, t);
+              assert seen == objects[id];
+              HaltOk(t);
+              assert obj.promise == objects[id].promise;
+              ReplaceOk(objects, id, obj, now);
+            }
+          }
+          Applied(doc', Status(200), [])
+  }
+
+  function ContinueTask(doc: Doc, id: string, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    if id !in objects then Applied(shown, Status(404), [])
+    else
+      var seen := Project(objects[id], now);
+      match seen.task
+      case None => Applied(shown, Status(404), [])
+      case Some(t) =>
+        if t.state != TaskState.Halted || seen.promise.state != PromiseState.Pending then
+          Applied(shown, Status(409), [])
+        else
+          var u := ToPending(t, now);
+          var obj := Obj(seen.promise, Some(u));
+          var doc' := Origin(objects[id := obj]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              assert WellFormed(shown, now);
+              assert MapOk(objects, now);
+              StillPending(objects[id], now);
+              assert seen == objects[id];
+              ContinueOk(t, now);
+              assert obj.promise == objects[id].promise;
+              ReplaceOk(objects, id, obj, now);
+            }
+          }
+          Applied(doc', Status(200), [])
+  }
+
+  function Heartbeat(doc: Doc, pid: string, refs: seq<TaskRef>, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if |refs| == 0 then Applied(doc, Status(200), [])
+    else if !OneOrigin(refs) then Applied(doc, Status(400), [])
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      var next := Extend(objects, pid, refs, 0, now);
+      var doc' := Origin(next);
+      assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+        if WellFormed(doc, now) {
+          assert WellFormed(shown, now);
+          assert MapOk(objects, now);
+          ExtendOk(objects, pid, refs, 0, now);
+        }
+      }
+      Applied(doc', Status(200), [])
+  }
+
+  function SuspendTask(doc: Doc, id: string, version: nat, actions: seq<CallbackReq>, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    if |actions| == 0 || BadSuspend(actions, id) || !DistinctAwaited(actions) then
+      Applied(doc, Status(400), [])
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      match Hold(objects, id, version, now)
+      case HeldMissing => Applied(shown, Status(404), [])
+      case HeldStale => Applied(shown, Status(409), [])
+      case HeldOk(obj) =>
+        if MissingAwaited(objects, actions) || Unawaitable(objects, actions) then
+          Applied(shown, Status(422), [])
+        else if AnySettled(objects, actions, now) then
+          var t := obj.task.value;
+          var next := Obj(obj.promise, Some(t.(resumes := [])));
+          var doc' := Origin(objects[id := next]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              assert WellFormed(shown, now);
+              assert MapOk(objects, now);
+              HeldFacts(objects, id, version, now);
+              assert obj == objects[id];
+              DropResumesOk(t);
+              assert next.promise == objects[id].promise;
+              ReplaceOk(objects, id, next, now);
+            }
+          }
+          Applied(doc', Status(300), [])
+        else
+          var placed := AddSuspends(objects, id, actions, 0);
+          var t := obj.task.value;
+          var next := Obj(obj.promise, Some(ToSuspended(t)));
+          var doc' := Origin(placed[id := next]);
+          assert WellFormed(doc, now) ==> WellFormed(doc', now) by {
+            if WellFormed(doc, now) {
+              assert WellFormed(shown, now);
+              assert MapOk(objects, now);
+              HeldFacts(objects, id, version, now);
+              assert obj == objects[id];
+              SuspendReady(objects, id, actions, now);
+              AddSuspendsOk(objects, id, actions, 0, now);
+              assert placed[id] == objects[id];
+              SuspendOk(t);
+              assert next.promise == placed[id].promise;
+              ReplaceOk(placed, id, next, now);
+            }
+          }
+          Applied(doc', Status(200), [])
+  }
+
+  function Fence(doc: Doc, id: string, version: nat, action: FenceAction, now: nat, retry: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var target := match action case FenceCreate(req) => req.id case FenceSettle(req) => req.id;
+    if target == id || OriginOf(target) != OriginOf(id) then
+      Applied(doc, Fenced(400, None), [])
+    else
+      var shown := Opened(doc);
+      assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+        if WellFormed(doc, now) { OpenOk(doc, now); }
+      }
+      var objects := ObjectsOf(shown);
+      match Hold(objects, id, version, now)
+      case HeldMissing => Applied(shown, Fenced(404, None), [])
+      case HeldStale => Applied(shown, Fenced(409, None), [])
+      case HeldOk(_) =>
+        match action
+        case FenceCreate(req) =>
+          var done := Create(shown, req, now);
+          assert WellFormed(doc, now) ==> WellFormed(done.doc, now) by {
+            if WellFormed(doc, now) { assert WellFormed(shown, now); }
+          }
+          Applied(done.doc, Fenced(200, Some(FenceCreated(PromiseStatus(done.answer), PromiseBody(done.answer)))), [])
+        case FenceSettle(req) =>
+          var done := Settle(shown, req, now, retry);
+          assert WellFormed(doc, now) ==> WellFormed(done.doc, now) by {
+            if WellFormed(doc, now) { assert WellFormed(shown, now); }
+          }
+          Applied(done.doc, Fenced(200, Some(FenceSettled(PromiseStatus(done.answer), PromiseBody(done.answer)))), done.notes)
+  }
+
+  function FenceCheck(doc: Doc, id: string, version: nat, now: nat): (r: Applied)
+    ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
+  {
+    var shown := Opened(doc);
+    assert WellFormed(doc, now) ==> WellFormed(shown, now) by {
+      if WellFormed(doc, now) { OpenOk(doc, now); }
+    }
+    var objects := ObjectsOf(shown);
+    match Hold(objects, id, version, now)
+    case HeldMissing => Applied(shown, Status(404), [])
+    case HeldStale => Applied(shown, Status(409), [])
+    case HeldOk(_) => Applied(shown, Status(200), [])
   }
 
   function Unlease(t: Task, at: nat): Task {
@@ -1145,6 +1626,247 @@ module Node {
     assert added.task == o.task;
   }
 
+  lemma OriginMap(doc: Doc, id: string, now: nat)
+    requires WellFormed(doc, now)
+    requires id in ObjectsOf(doc)
+    ensures doc.Origin?
+    ensures MapOk(ObjectsOf(doc), now)
+  {
+    match doc
+    case Origin(objects) =>
+    case Schedule(_) =>
+      assert ObjectsOf(doc) == map[];
+      assert false;
+  }
+
+  lemma AcquireOk(t: Task, pid: string, ttl: nat, now: nat)
+    requires TaskOk(Some(t))
+    ensures TaskOk(Some(ToAcquired(t, pid, ttl, now)))
+  {
+  }
+
+  lemma HaltOk(t: Task)
+    requires TaskOk(Some(t))
+    ensures TaskOk(Some(ToHalted(t)))
+  {
+  }
+
+  lemma SuspendOk(t: Task)
+    requires TaskOk(Some(t))
+    ensures TaskOk(Some(ToSuspended(t)))
+  {
+    assert Distinct([]);
+  }
+
+  lemma ContinueOk(t: Task, now: nat)
+    requires TaskOk(Some(t))
+    requires t.state == TaskState.Halted
+    ensures TaskOk(Some(ToPending(t, now)))
+  {
+    assert Cleared(t);
+  }
+
+  lemma DropResumesOk(t: Task)
+    requires TaskOk(Some(t))
+    ensures TaskOk(Some(t.(resumes := [])))
+  {
+    assert Distinct([]);
+  }
+
+  lemma LeaseOk(t: Task, at: nat)
+    requires TaskOk(Some(t))
+    ensures TaskOk(Some(t.(leaseTimeoutAt := Some(at))))
+  {
+  }
+
+  // A projected task that is not fulfilled is the stored row, still pending.
+  lemma Stored(o: Obj, now: nat, t: Task)
+    requires Project(o, now).task == Some(t)
+    requires t.state != TaskState.Fulfilled
+    ensures Project(o, now) == o
+    ensures o.promise.state == PromiseState.Pending
+    ensures now < o.promise.timeoutAt
+    ensures o.task == Some(t)
+  {
+    var seen := Project(o, now);
+    if seen.promise.state != PromiseState.Pending {
+      match o.task
+      case None =>
+        assert seen.task.None?;
+        assert false;
+      case Some(u) =>
+        if u.state == TaskState.Fulfilled {
+          assert seen.task == Some(u);
+          assert false;
+        } else {
+          assert seen.task == Some(Fulfill(u));
+          assert Fulfill(u).state == TaskState.Fulfilled;
+          assert false;
+        }
+    }
+    StillPending(o, now);
+  }
+
+  lemma HeldFacts(objects: map<string, Obj>, id: string, version: nat, now: nat)
+    requires MapOk(objects, now)
+    requires Hold(objects, id, version, now).HeldOk?
+    ensures var obj := Hold(objects, id, version, now).obj;
+      && id in objects
+      && obj == objects[id]
+      && obj.promise.state == PromiseState.Pending
+      && now < obj.promise.timeoutAt
+      && obj.task.Some?
+      && obj.task.value.state == TaskState.Acquired
+      && obj.task.value.version == version
+      && obj.task.value.ttl.Some?
+      && ObjectOk(id, obj, now)
+  {
+    if id !in objects {
+      assert Hold(objects, id, version, now) == HeldMissing;
+      assert false;
+    }
+    var seen := Project(objects[id], now);
+    match seen.task
+    case None =>
+      assert Hold(objects, id, version, now) == HeldMissing;
+      assert false;
+    case Some(t) =>
+      if !(t.state == TaskState.Acquired && t.version == version && seen.promise.state == PromiseState.Pending) {
+        assert Hold(objects, id, version, now) == HeldStale;
+        assert false;
+      }
+      assert Hold(objects, id, version, now) == HeldOk(seen);
+      Stored(objects[id], now, t);
+      assert seen == objects[id];
+      assert TaskOk(Some(t));
+      assert t.ttl.Some?;
+  }
+
+  lemma ProjectIfPending(o: Obj, now: nat)
+    requires o.promise.state == PromiseState.Pending
+    requires now < o.promise.timeoutAt
+    ensures Project(o, now) == o
+  {
+    assert ProjectPromise(o.promise, now) == o.promise;
+  }
+
+  lemma SuspendReady(objects: map<string, Obj>, awaiter: string, actions: seq<CallbackReq>, now: nat)
+    requires !BadSuspend(actions, awaiter)
+    requires !MissingAwaited(objects, actions)
+    requires !AnySettled(objects, actions, now)
+    ensures forall k :: 0 <= k < |actions| ==>
+      actions[k].awaited in objects &&
+      actions[k].awaited != awaiter &&
+      OriginOf(actions[k].awaited) == OriginOf(awaiter) &&
+      Project(objects[actions[k].awaited], now).promise.state == PromiseState.Pending
+  {
+    forall k | 0 <= k < |actions|
+      ensures actions[k].awaited in objects
+      ensures actions[k].awaited != awaiter
+      ensures OriginOf(actions[k].awaited) == OriginOf(awaiter)
+      ensures Project(objects[actions[k].awaited], now).promise.state == PromiseState.Pending
+    {
+      if actions[k].awaited !in objects {
+        assert MissingAwaited(objects, actions);
+        assert false;
+      }
+      if actions[k].awaited == awaiter || OriginOf(actions[k].awaited) != OriginOf(awaiter) {
+        assert BadSuspend(actions, awaiter);
+        assert false;
+      }
+      if Project(objects[actions[k].awaited], now).promise.state != PromiseState.Pending {
+        assert AnySettled(objects, actions, now);
+        assert false;
+      }
+    }
+  }
+
+  lemma AddSuspendsOk(objects: map<string, Obj>, awaiter: string, actions: seq<CallbackReq>, i: nat, now: nat)
+    requires i <= |actions|
+    requires MapOk(objects, now)
+    requires forall k :: i <= k < |actions| ==>
+      actions[k].awaited in objects &&
+      actions[k].awaited != awaiter &&
+      OriginOf(actions[k].awaited) == OriginOf(awaiter) &&
+      Project(objects[actions[k].awaited], now).promise.state == PromiseState.Pending
+    ensures MapOk(AddSuspends(objects, awaiter, actions, i), now)
+    ensures awaiter in objects ==> AddSuspends(objects, awaiter, actions, i)[awaiter] == objects[awaiter]
+    decreases |actions| - i
+  {
+    if i < |actions| {
+      var awaited := actions[i].awaited;
+      assert awaited in objects;
+      assert awaited != awaiter;
+      var stored := objects[awaited];
+      assert Project(stored, now).promise.state == PromiseState.Pending;
+      StillPending(stored, now);
+      AddCallbackOk(awaited, stored, awaiter, now);
+      var added := AddCallback(stored, awaiter);
+      assert added.promise.state == stored.promise.state;
+      assert added.promise.timeoutAt == stored.promise.timeoutAt;
+      ProjectIfPending(added, now);
+      ReplaceOk(objects, awaited, added, now);
+      var objects' := objects[awaited := added];
+      forall k | i + 1 <= k < |actions|
+        ensures actions[k].awaited in objects'
+        ensures actions[k].awaited != awaiter
+        ensures OriginOf(actions[k].awaited) == OriginOf(awaiter)
+        ensures Project(objects'[actions[k].awaited], now).promise.state == PromiseState.Pending
+      {
+        var id := actions[k].awaited;
+        assert id in objects;
+        if id == awaited {
+          assert objects'[id] == added;
+          assert Project(added, now) == added;
+        } else {
+          assert objects'[id] == objects[id];
+        }
+      }
+      if awaiter in objects {
+        assert objects'[awaiter] == objects[awaiter];
+      }
+      AddSuspendsOk(objects', awaiter, actions, i + 1, now);
+    }
+  }
+
+  lemma ExtendOk(objects: map<string, Obj>, pid: string, refs: seq<TaskRef>, i: nat, now: nat)
+    requires i <= |refs|
+    requires MapOk(objects, now)
+    ensures MapOk(Extend(objects, pid, refs, i, now), now)
+    decreases |refs| - i
+  {
+    if i < |refs| {
+      var id := refs[i].id;
+      if id in objects {
+        var seen := Project(objects[id], now);
+        match seen.task
+        case None =>
+          ExtendOk(objects, pid, refs, i + 1, now);
+        case Some(t) =>
+          if t.state == TaskState.Acquired && t.version == refs[i].version && t.pid == Some(pid) {
+            Stored(objects[id], now, t);
+            assert objects[id].task == Some(t);
+            assert TaskOk(Some(t));
+            assert t.ttl.Some?;
+            assert TtlOf(t) == t.ttl.value;
+            var at := now + TtlOf(t);
+            LeaseOk(t, at);
+            var bumped := t.(leaseTimeoutAt := Some(at));
+            var next := Obj(seen.promise, Some(bumped));
+            assert seen == objects[id];
+            assert next.promise == objects[id].promise;
+            assert next.promise.callbacks == objects[id].promise.callbacks;
+            ReplaceOk(objects, id, next, now);
+            ExtendOk(objects[id := next], pid, refs, i + 1, now);
+          } else {
+            ExtendOk(objects, pid, refs, i + 1, now);
+          }
+      } else {
+        ExtendOk(objects, pid, refs, i + 1, now);
+      }
+    }
+  }
+
   function Handle(doc: Doc, request: Request, now: nat, retry: nat): (r: Applied)
     ensures WellFormed(doc, now) ==> WellFormed(r.doc, now)
   {
@@ -1153,10 +1875,21 @@ module Node {
     var done :=
       match request
       case PromiseGet(id) => Get(swept.doc, id, now)
-      case PromiseCreate(req) => Create(swept.doc, req, now)
-      case PromiseSettle(req) => Settle(swept.doc, req, now, retry)
-      case PromiseRegisterCallback(req) => RegisterCallback(swept.doc, req, now)
-      case PromiseRegisterListener(req) => RegisterListener(swept.doc, req, now);
+      case PromiseCreate(create) => Create(swept.doc, create, now)
+      case PromiseSettle(settle) => Settle(swept.doc, settle, now, retry)
+      case PromiseRegisterCallback(callback) => RegisterCallback(swept.doc, callback, now)
+      case PromiseRegisterListener(listener) => RegisterListener(swept.doc, listener, now)
+      case TaskGet(id) => GetTask(swept.doc, id, now)
+      case TaskCreate(pid, ttl, create) => CreateTask(swept.doc, pid, ttl, create, now)
+      case TaskAcquire(id, version, pid, ttl) => AcquireTask(swept.doc, id, version, pid, ttl, now)
+      case TaskRelease(id, version) => ReleaseTask(swept.doc, id, version, now)
+      case TaskFulfill(id, version, settle) => FulfillTask(swept.doc, id, version, settle, now)
+      case TaskHalt(id) => HaltTask(swept.doc, id, now)
+      case TaskContinue(id) => ContinueTask(swept.doc, id, now)
+      case TaskHeartbeat(pid, refs) => Heartbeat(swept.doc, pid, refs, now)
+      case TaskSuspend(id, version, suspend) => SuspendTask(swept.doc, id, version, suspend, now)
+      case TaskFence(id, version, fence) => Fence(swept.doc, id, version, fence, now, retry)
+      case TaskFenceCheck(id, version) => FenceCheck(swept.doc, id, version, now);
     Applied(done.doc, done.answer, swept.notes + done.notes)
   }
 
