@@ -1450,6 +1450,12 @@ pub open spec fn codec_delta_append_round_trip(
         bytes: bytes.len() as u64,
     };
     &&& before.bytes == base.len() as u64
+    &&& match before.document {
+        echod_concrete::node::StoredDocumentV::Workflow(_) =>
+            crate::document::spec_decode_workflow(base) == Ok(before),
+        echod_concrete::node::StoredDocumentV::Schedule(_) =>
+            crate::document::spec_decode_schedule(base) == Ok(before),
+    }
     &&& match after {
         echod_concrete::node::StoredDocumentV::Workflow(_) =>
             crate::document::spec_decode_workflow(bytes) == Ok(loaded),
