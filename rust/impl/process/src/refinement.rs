@@ -938,10 +938,21 @@ pub open spec fn timer_wheel_ownership_consistent(s: S) -> bool {
         || timer_slots_owned(s, s.timers.wheel.armed)
 }
 
+pub open spec fn timer_backlog_keys_valid(s: S) -> bool {
+    timer_slots_keys_valid(s.timers.backlog)
+}
+
+pub open spec fn timer_backlog_ownership_consistent(s: S) -> bool {
+    s.timers.reload_pending
+        || timer_slots_owned(s, s.timers.backlog)
+}
+
 pub open spec fn timer_activity_consistent(s: S) -> bool {
     &&& timers_consistent(s.timers)
     &&& timer_wheel_keys_valid(s)
     &&& timer_wheel_ownership_consistent(s)
+    &&& timer_backlog_keys_valid(s)
+    &&& timer_backlog_ownership_consistent(s)
 }
 
 pub proof fn lemma_timer_activity_preserved_by_control_state(
@@ -989,6 +1000,37 @@ pub proof fn lemma_timer_activity_preserved_by_control_state(
                     before,
                     crate::keys::spec_parse_timer_key(
                         before.timers.wheel.armed[i].1,
+                    )->Some_0,
+                ));
+            }
+        }
+        assert(timer_slots_owned(
+            after,
+            after.timers.backlog,
+        )) by {
+            assert forall|i: int|
+                0 <= i < after.timers.backlog.len() implies {
+                    let slot = #[trigger] after.timers.backlog[i];
+                    match crate::keys::spec_parse_timer_key(slot.1) {
+                        Some(entry) =>
+                            crate::handler_timers::spec_owns_entry(
+                                after,
+                                entry,
+                            ),
+                        None => false,
+                    }
+                } by {
+                assert(after.timers.backlog[i]
+                    == before.timers.backlog[i]);
+                assert(crate::handler_timers::spec_owns_entry(
+                    after,
+                    crate::keys::spec_parse_timer_key(
+                        after.timers.backlog[i].1,
+                    )->Some_0,
+                ) == crate::handler_timers::spec_owns_entry(
+                    before,
+                    crate::keys::spec_parse_timer_key(
+                        before.timers.backlog[i].1,
                     )->Some_0,
                 ));
             }
@@ -1432,6 +1474,158 @@ pub proof fn lemma_arm_preserves_timer_ownership(
                 assert(result[i] == tail[i - 1]);
             }
         }
+    }
+}
+
+pub proof fn lemma_timer_fire_preserves_activity(
+    s: S,
+    key: Seq<char>,
+    at: u64,
+    entry: crate::keys::TimerEntrySpec,
+    now: u64,
+)
+    requires
+        timer_activity_consistent(s),
+        crate::keys::spec_parse_timer_key(key) == Some(entry),
+        at >= entry.deadline(),
+        s.timers.reload_pending
+            || crate::handler_timers::spec_owns_entry(s, entry),
+        s.timers.inflight < crate::state_timers::CONCURRENCY,
+    ensures
+        timer_activity_consistent(
+            crate::handler_timers::spec_timer_fire(
+                s,
+                key,
+                at,
+                now,
+            ),
+        ),
+{
+    lemma_timer_fire_preserves_accounting(s, key, at, now);
+    let retry = crate::state_timers::spec_max(now, at)
+        .saturating_add(crate::state_timers::RETRY_AFTER_MS);
+    assert(retry >= at);
+    assert(retry >= entry.deadline());
+    lemma_arm_preserves_timer_wheel_order(
+        s.timers.wheel.armed,
+        retry,
+        key,
+    );
+    lemma_arm_preserves_timer_key_deadlines(
+        s.timers.wheel.armed,
+        retry,
+        key,
+        entry,
+    );
+    if !s.timers.reload_pending {
+        lemma_arm_preserves_timer_ownership(
+            s,
+            s.timers.wheel.armed,
+            retry,
+            key,
+            entry,
+        );
+    }
+    reveal(crate::handler_timers::spec_timer_fire);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::handler_docs::spec_submit);
+    reveal(crate::handler_docs::spec_start);
+    reveal(crate::handler_docs::spec_begin);
+    reveal(crate::handler_docs::spec_load_origin);
+    reveal(crate::handler_docs::spec_inflight);
+    reveal(crate::handler_docs::spec_slot_of);
+    reveal(crate::handler_docs::spec_with_slot);
+    reveal(crate::state::spec_store);
+    reveal(crate::state::spec_note);
+}
+
+/// Every queued key carries the same parse/deadline/ownership facts as wheel
+/// entries. Recursive dispatch may consume, defer/rearm, or submit each head
+/// while preserving the full timer relation.
+pub proof fn lemma_dispatch_due_preserves_activity(
+    s: S,
+    now: u64,
+    fuel: nat,
+)
+    requires
+        timer_activity_consistent(s),
+    ensures
+        timer_activity_consistent(
+            crate::handler_timers::spec_dispatch_due(s, now, fuel),
+        ),
+    decreases fuel,
+{
+    reveal(crate::handler_timers::spec_dispatch_due);
+    if fuel > 0
+        && s.timers.inflight < crate::state_timers::CONCURRENCY
+        && s.timers.backlog.len() > 0
+    {
+        let slot = s.timers.backlog[0];
+        let entry = crate::keys::spec_parse_timer_key(slot.1)->Some_0;
+        let popped = crate::handler_timers::spec_with_timers(
+            s,
+            TimersSpec {
+                backlog: s.timers.backlog.drop_first(),
+                ..s.timers
+            },
+        );
+        reveal(crate::handler_timers::spec_with_timers);
+        assert(crate::keys::spec_parse_timer_key(slot.1) is Some);
+        assert(slot.0 >= entry.deadline());
+        assert(s.timers.reload_pending
+            || crate::handler_timers::spec_owns_entry(s, entry));
+        assert(timer_slots_keys_valid(popped.timers.backlog)) by {
+            assert forall|i: int|
+                0 <= i < popped.timers.backlog.len() implies {
+                    let queued = #[trigger] popped.timers.backlog[i];
+                    match crate::keys::spec_parse_timer_key(queued.1) {
+                        Some(parsed) => queued.0 >= parsed.deadline(),
+                        None => false,
+                    }
+                } by {
+                assert(popped.timers.backlog[i]
+                    == s.timers.backlog[i + 1]);
+            }
+        }
+        if !s.timers.reload_pending {
+            assert(timer_slots_owned(popped, popped.timers.backlog)) by {
+                assert forall|i: int|
+                    0 <= i < popped.timers.backlog.len() implies {
+                        let queued =
+                            #[trigger] popped.timers.backlog[i];
+                        match crate::keys::spec_parse_timer_key(queued.1) {
+                            Some(parsed) =>
+                                crate::handler_timers::spec_owns_entry(
+                                    popped,
+                                    parsed,
+                                ),
+                            None => false,
+                        }
+                    } by {
+                    assert(popped.timers.backlog[i]
+                        == s.timers.backlog[i + 1]);
+                }
+            }
+        }
+        assert(timer_activity_consistent(popped));
+        lemma_timer_fire_preserves_activity(
+            popped,
+            slot.1,
+            slot.0,
+            entry,
+            now,
+        );
+        let fired = crate::handler_timers::spec_timer_fire(
+            popped,
+            slot.1,
+            slot.0,
+            now,
+        );
+        lemma_dispatch_due_preserves_activity(
+            fired,
+            now,
+            (fuel - 1) as nat,
+        );
     }
 }
 
@@ -2327,6 +2521,394 @@ pub proof fn lemma_sweep_stops_after_one_due(
         =~= first.3);
 }
 
+/// A bounded production sweep may change several objects.  Relaxed closure is
+/// inductive across every `spec_run_due` step; full document well-formedness is
+/// recovered exactly when the configured budget leaves no due object behind.
+/// The latter premise is intentionally explicit: production otherwise commits
+/// the partially swept body when `SWEEP_STEPS` is exhausted.
+pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
+    workflow: echod_concrete::document::WorkflowDocumentV,
+    now: u64,
+    retry_timeout: u64,
+    limit: nat,
+)
+    requires
+        echod_concrete::document::workflow_well_formed(workflow),
+        workflow.committed_at <= now,
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
+                now,
+                retry_timeout,
+                limit,
+            ).0;
+            echod_concrete::node::spec_earliest_in(swept, now) is None
+        }),
+    ensures
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
+                now,
+                retry_timeout,
+                limit,
+            ).0;
+            well_formed(echod_concrete::node::spec_advance_stored(
+                StoredDocumentV::Workflow(workflow),
+                swept,
+                now,
+            ))
+        }),
+{
+    echod_concrete::quick_n_dirty::lemma_full_implies_relaxed(workflow, now);
+    echod_concrete::quick_n_dirty::lemma_sweep_preserves_relaxed(
+        workflow.document,
+        workflow.objects,
+        now,
+        retry_timeout,
+        limit,
+    );
+    let swept = echod_concrete::node::spec_sweep(
+        echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
+        now,
+        retry_timeout,
+        limit,
+    ).0;
+    assert(swept is Workflow);
+    echod_concrete::quick_n_dirty::lemma_relaxed_closed(
+        workflow.document,
+        swept->Workflow_0,
+        now,
+    );
+    reveal(echod_concrete::document::well_formed);
+    reveal(echod_concrete::document::workflow_well_formed);
+    reveal(echod_concrete::node::spec_advance_stored);
+}
+
+/// Exact abstract trace for every changing step of a bounded origin sweep.
+/// Each witness is an actual index in `spec_run_timeout` and must reproduce
+/// the concrete Store projection, dispatch notes, and queued occurrences.
+pub open spec fn origin_sweep_matches(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    limit: nat,
+) -> bool
+    decreases limit,
+{
+    if limit == 0 {
+        true
+    } else {
+        let (next, _, born, notes) = echod_concrete::node::spec_run_due(
+            document,
+            now,
+            config.retry_timeout,
+        );
+        if next == document {
+            true
+        } else {
+            exists|j: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[j]]
+            {
+                let results =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= j < results.len()
+                &&& results[j].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& results[j].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, results[j].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    results[j].state.store,
+                )
+                &&& finite_store(results[j].state.store)
+                &&& origin_sweep_matches(
+                    config,
+                    key,
+                    next,
+                    results[j].state,
+                    now,
+                    (limit - 1) as nat,
+                )
+            }
+        }
+    }
+}
+
+/// Compose all changing `spec_run_due` steps in the production sweep with the
+/// corresponding sequence of exact abstract internal transitions.
+pub proof fn lemma_origin_sweep_matches_abstract_trace(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    limit: nat,
+)
+    requires
+        doc_rel(key, document, abstract_state.store),
+        finite_store(abstract_state.store),
+    ensures
+        origin_sweep_matches(
+            config,
+            key,
+            document,
+            abstract_state,
+            now,
+            limit,
+        ),
+    decreases limit,
+{
+    if limit > 0 {
+        echod_concrete::timers::lemma_due_agrees(
+            config,
+            key,
+            document,
+            abstract_state,
+            now,
+        );
+        let (next, _, born, notes) =
+            echod_concrete::node::spec_run_due(
+                document,
+                now,
+                config.retry_timeout,
+            );
+        reveal(echod_concrete::relation::due_agrees);
+        if next != document {
+            let j = choose|j: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[j]]
+            {
+                let results =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= j < results.len()
+                &&& results[j].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& results[j].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, results[j].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    results[j].state.store,
+                )
+                &&& finite_store(results[j].state.store)
+            };
+            let results = echod_abstract::model::spec_run_timeout(
+                config,
+                abstract_state,
+                now,
+            );
+            lemma_origin_sweep_matches_abstract_trace(
+                config,
+                key,
+                next,
+                results[j].state,
+                now,
+                (limit - 1) as nat,
+            );
+            assert(origin_sweep_matches(
+                config,
+                key,
+                next,
+                results[j].state,
+                now,
+                (limit - 1) as nat,
+            ));
+            assert(exists|k: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[k]]
+            {
+                let outcomes =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= k < outcomes.len()
+                &&& outcomes[k].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& outcomes[k].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, outcomes[k].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    outcomes[k].state.store,
+                )
+                &&& finite_store(outcomes[k].state.store)
+                &&& origin_sweep_matches(
+                    config,
+                    key,
+                    next,
+                    outcomes[k].state,
+                    now,
+                    (limit - 1) as nat,
+                )
+            }) by {
+                assert({
+                    let outcomes =
+                        echod_abstract::model::spec_run_timeout(
+                            config,
+                            abstract_state,
+                            now,
+                        );
+                    &&& 0 <= j < outcomes.len()
+                    &&& outcomes[j].send
+                        == echod_concrete::relation::note_sends(notes)
+                    &&& outcomes[j].state.pending
+                        == abstract_state.pending
+                            + echod_concrete::relation::items(born)
+                    &&& doc_rel(key, next, outcomes[j].state.store)
+                    &&& echod_concrete::interpret::others_kept(
+                        key,
+                        abstract_state.store,
+                        outcomes[j].state.store,
+                    )
+                    &&& finite_store(outcomes[j].state.store)
+                    &&& origin_sweep_matches(
+                        config,
+                        key,
+                        next,
+                        outcomes[j].state,
+                        now,
+                        (limit - 1) as nat,
+                    )
+                });
+            }
+        }
+    }
+    reveal(origin_sweep_matches);
+}
+
+/// `spec_commit_new` stores the fully closed multi-step sweep result, not an
+/// intermediate body.  The sequence may subsequently issue deadline-key
+/// actions before its conditional document write, but its committed payload is
+/// already fixed here.
+pub proof fn lemma_origin_commit_new_records_closed_sweep(
+    s: S,
+    w: crate::handler_docs::WorkingSpec,
+    workflow: echod_concrete::document::WorkflowDocumentV,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        w.loaded.document == StoredDocumentV::Workflow(workflow),
+        echod_concrete::document::workflow_well_formed(workflow),
+        workflow.committed_at <= now,
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                now,
+                retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            echod_concrete::node::spec_earliest_in(swept, now) is None
+        }),
+    ensures
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                now,
+                retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            let (_, commit) = crate::handler_docs::spec_commit_new(
+                s,
+                w,
+                swept,
+                echod_concrete::node::spec_body_deadline(swept),
+                now,
+                None,
+            );
+            &&& commit.after
+                == echod_concrete::node::spec_advance_stored(
+                    StoredDocumentV::Workflow(workflow),
+                    swept,
+                    now,
+                )
+            &&& well_formed(commit.after)
+            &&& commit.issued is None
+        }),
+{
+    lemma_closed_origin_sweep_preserves_well_formed(
+        workflow,
+        now,
+        retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+    reveal(crate::handler_docs::spec_commit_new);
+}
+
+/// A successful conditional document response records the exact committed
+/// origin payload and etag while leaving timer accounting, wheel/backlog
+/// activity, and concurrent document lanes untouched.
+pub proof fn lemma_successful_origin_write_answer_preserves_timer_lanes(
+    s: S,
+    commit: crate::handler_docs::CommittingSpec,
+    issued: crate::handler_docs::IssuedSpec,
+    answer: Option<StoreRes>,
+)
+    requires
+        issued is Write,
+        commit.after is Workflow,
+        match answer {
+            Some(StoreRes::PutIfMatch { result: Ok(_) })
+            | Some(StoreRes::PutIfNoneMatch { result: Ok(_) })
+            | Some(StoreRes::AppIfMatch { result: Ok(_) }) => true,
+            _ => false,
+        },
+    ensures
+        ({
+            let (after, next) = crate::handler_docs::spec_answered(
+                s,
+                commit,
+                issued,
+                answer,
+            );
+            &&& next.after == commit.after
+            &&& next.issued == commit.issued
+            &&& after.timers == s.timers
+            &&& after.flights == s.flights
+        }),
+{
+    reveal(crate::handler_docs::spec_answered);
+    reveal(crate::state::spec_note);
+    reveal(crate::state::spec_remember);
+}
+
 /// Bounded production decision slice: if the loaded origin has exactly one
 /// changing due step, the production Sweep body is that matched abstract
 /// timeout and then stops. Commit construction and its Store response remain
@@ -2558,10 +3140,82 @@ pub proof fn lemma_retry_slot_preserves_key_deadline(
     );
 }
 
-/// With no older due key waiting, a completed timer flight decrements its
-/// reservation and, for Kept/failed outcomes, rearms at the operational retry
-/// slot while preserving wheel order, key validity, ownership, and capacity.
-pub proof fn lemma_timer_fired_empty_backlog_preserves_activity(
+pub open spec fn timer_fired_ready(
+    s: S,
+    firing: crate::handler_docs::FiringSpec,
+    now: u64,
+    result: Result<crate::types::Fired, Seq<char>>,
+) -> S {
+    let decremented = crate::handler_timers::spec_with_timers(
+        s,
+        TimersSpec {
+            inflight: s.timers.inflight.saturating_sub(1),
+            ..s.timers
+        },
+    );
+    let retry = crate::state_timers::spec_max(now, firing.at)
+        .saturating_add(crate::state_timers::RETRY_AFTER_MS);
+    let (staged, outcome) = match result {
+        Ok(crate::types::Fired::Deleted) => (
+            decremented,
+            crate::types::FireOutcome::Deleted,
+        ),
+        Ok(crate::types::Fired::Kept) => (
+            crate::handler_timers::spec_with_timers(
+                decremented,
+                TimersSpec {
+                    wheel: crate::state_timers::TimerWheelSpec {
+                        armed: crate::state_timers::spec_arm(
+                            decremented.timers.wheel.armed,
+                            retry,
+                            firing.key,
+                        ),
+                    },
+                    ..decremented.timers
+                },
+            ),
+            crate::types::FireOutcome::Kept,
+        ),
+        Err(error) => {
+            let noted = crate::state::spec_note(
+                decremented,
+                crate::types::NoteSpec::FireFailed {
+                    key: firing.key,
+                    error,
+                },
+            );
+            (
+                crate::handler_timers::spec_with_timers(
+                    noted,
+                    TimersSpec {
+                        wheel: crate::state_timers::TimerWheelSpec {
+                            armed: crate::state_timers::spec_arm(
+                                noted.timers.wheel.armed,
+                                retry,
+                                firing.key,
+                            ),
+                        },
+                        ..noted.timers
+                    },
+                ),
+                crate::types::FireOutcome::Failed,
+            )
+        },
+    };
+    crate::state::spec_note(
+        staged,
+        crate::types::NoteSpec::TimerFire {
+            kind: firing.kind,
+            outcome,
+            lag_ms: firing.lag,
+        },
+    )
+}
+
+/// A completed timer flight decrements its reservation and, for Kept/failed
+/// outcomes, rearms at the operational retry slot. Arbitrary valid backlog
+/// entries are then recursively redispatched under the full timer relation.
+pub proof fn lemma_timer_fired_preserves_activity(
     s: S,
     firing: crate::handler_docs::FiringSpec,
     entry: crate::keys::TimerEntrySpec,
@@ -2570,8 +3224,6 @@ pub proof fn lemma_timer_fired_empty_backlog_preserves_activity(
 )
     requires
         timer_activity_consistent(s),
-        s.timers.backlog
-            == Seq::<crate::state_timers::SlotSpec>::empty(),
         crate::keys::spec_parse_timer_key(firing.key) == Some(entry),
         firing.at >= entry.deadline(),
         s.timers.reload_pending
@@ -2612,10 +3264,27 @@ pub proof fn lemma_timer_fired_empty_backlog_preserves_activity(
             entry,
         );
     }
-    reveal(crate::handler_timers::spec_timer_fired);
+    let ready = timer_fired_ready(s, firing, now, result);
+    reveal(timer_fired_ready);
     reveal(crate::handler_timers::spec_with_timers);
-    reveal(crate::handler_timers::spec_dispatch_due);
     reveal(crate::state::spec_note);
+    assert(timer_activity_consistent(ready));
+    lemma_dispatch_due_preserves_activity(
+        ready,
+        now,
+        ready.timers.backlog.len(),
+    );
+    reveal(crate::handler_timers::spec_timer_fired);
+    assert(crate::handler_timers::spec_timer_fired(
+        s,
+        firing,
+        now,
+        result,
+    ) == crate::handler_timers::spec_dispatch_due(
+        ready,
+        now,
+        ready.timers.backlog.len(),
+    ));
     assert(timer_activity_consistent(
         crate::handler_timers::spec_timer_fired(
             s,
