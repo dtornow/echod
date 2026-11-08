@@ -46,18 +46,19 @@ use crate::cache::{CacheSpec, CachedSpec};
 #[cfg(verus_keep_ghost)]
 use crate::config::ConfigSpec;
 #[cfg(verus_keep_ghost)]
-use crate::document::spec_loaded_body;
+use crate::document::{spec_decode_workflow, spec_encode, spec_loaded_body, LoadedSpec};
 #[cfg(verus_keep_ghost)]
 use crate::handler::{spec_on_event, spec_request, spec_schedule_wake};
 #[cfg(verus_keep_ghost)]
 use crate::handler_docs::{
     spec_answered_loading, spec_answered_origin, spec_begin,
-    spec_commit_advance, spec_commit_failed, spec_committed, spec_decide,
-    spec_dispatch, spec_dispatches, spec_flight_completed, spec_inflight,
+    spec_answered_phase, spec_commit_advance, spec_commit_failed,
+    spec_commit_new, spec_committed, spec_decide, spec_dispatch,
+    spec_dispatches, spec_flight_completed, spec_inflight, spec_issue_write,
     spec_load_origin, spec_loaded_origin, spec_retry, spec_run_origin,
     spec_send_all, spec_slot_of, spec_start, spec_submit, spec_take_flight,
-    CommittingSpec, DoneSpec, FlightSpec, FlightsSpec, PhaseSpec, ProgressSpec,
-    WorkSpec, WorkingSpec,
+    CommittingSpec, DoneSpec, FlightSpec, FlightsSpec, IssuedSpec, PhaseSpec,
+    ProgressSpec, WorkSpec, WorkingSpec,
 };
 #[cfg(verus_keep_ghost)]
 use crate::keys::spec_doc_key;
@@ -98,13 +99,14 @@ use echod_concrete::interpret::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete::node::{
-    spec_request_transition, spec_stored_body, NoteV,
+    spec_advance_stored, spec_body_deadline, spec_request_transition,
+    spec_stored_body, spec_unavailable, NoteV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, request_preserves_well_formed, routed};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{
-    spec_before, StoreError, StoreErrorSpec, StoreReqSpec, StoreRes,
+    spec_before, Etag, StoreError, StoreErrorSpec, StoreReqSpec, StoreRes,
 };
 #[cfg(verus_keep_ghost)]
 use echod_types::{Request, Response, StatusRes, MAX_TIME};
@@ -411,6 +413,161 @@ pub proof fn lemma_normal_origin_request_starts_load(
         s,
         crate::target::spec_name(TargetSpec::Origin(origin)),
     ).busy is None);
+}
+
+/// Exact preconditions under which the successful cache-miss Get continuation
+/// decodes a workflow, decides a changing request, and can issue its document
+/// CAS immediately (there is no deadline key to arm first).
+pub open spec fn normal_origin_get_write_ready(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    at: u64,
+    loaded: LoadedSpec,
+    etag: Etag,
+) -> bool {
+    let (after_body, response, _, _) = spec_request_transition(
+        spec_stored_body(loaded.document),
+        call.request,
+        at,
+        s.cfg.retry_timeout,
+    );
+    let after_document =
+        spec_advance_stored(loaded.document, after_body, at);
+    &&& call.target == TargetSpec::Origin(origin)
+    &&& !call.pinned
+    &&& call.now == at
+    &&& s.node.fleet_at <= at
+    &&& normal_origin_request_ready(s, origin)
+    &&& s.next_op < u64::MAX
+    &&& !s.ops.contains_key(s.next_op.wrapping_add(1))
+    &&& !s.cfg.appendable
+    &&& well_formed(loaded.document)
+    &&& routed(loaded.document, call.request)
+    &&& echod_concrete::node::spec_stored_committed_at(
+        loaded.document,
+    ) <= at
+    &&& at <= MAX_TIME
+    &&& 0 < s.cfg.retry_timeout <= MAX_TIME
+    &&& safe_effect_config(at, s.cfg.retry_timeout)
+    &&& document_ids_bounded(loaded.document)
+    &&& response != spec_unavailable(call.request)
+    &&& after_body != spec_stored_body(loaded.document)
+    &&& spec_body_deadline(after_body) is None
+    &&& spec_encode(after_document).len() <= usize::MAX as int
+    &&& etag.0@.len() <= usize::MAX as int
+}
+
+/// The production `State::on_event` continuation for a decoded successful
+/// Get. Under [`normal_origin_get_write_ready`] it emits exactly one
+/// `PutIfMatch` owned by the same flight and preserves `well_formed` for the
+/// document selected for that write.
+#[verifier::rlimit(30)]
+pub proof fn lemma_normal_origin_successful_get_issues_put_if_match(
+    s: S,
+    call: CallSpec,
+    origin: Seq<char>,
+    at: u64,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        at <= response_at,
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        normal_origin_get_write_ready(
+            s,
+            call,
+            origin,
+            at,
+            loaded,
+            etag,
+        ),
+    ensures
+        ({
+            let request_event = EventSpec::Request {
+                clock: at,
+                request: RequestEventSpec::Protocol(call),
+            };
+            let admitted = spec_on_event(s, request_event).0;
+            let get_response = StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            };
+            let store_event = EventSpec::Store {
+                op: s.next_op,
+                response: get_response,
+                clock: response_at,
+            };
+            let (next, effects) = spec_on_event(admitted, store_event);
+            let (after_body, _, _, _) = spec_request_transition(
+                spec_stored_body(loaded.document),
+                call.request,
+                at,
+                s.cfg.retry_timeout,
+            );
+            let after_document =
+                spec_advance_stored(loaded.document, after_body, at);
+            let write_op = s.next_op.wrapping_add(1);
+            let fid = s.next_flight;
+            let write = StoreReqSpec::PutIfMatch {
+                key: spec_doc_key(s.keys.prefix, origin),
+                body: spec_encode(after_document),
+                etag: etag.deep_view(),
+            };
+            &&& effects == seq![EffectSpec::Store {
+                op: write_op,
+                request: write,
+            }]
+            &&& next.out.len() == 0
+            &&& next.ops.contains_key(write_op)
+            &&& next.ops[write_op] == Owner::Flight(fid)
+            &&& next.flights.inflight.contains_key(fid)
+            &&& next.flights.inflight[fid].target
+                == TargetSpec::Origin(origin)
+            &&& next.flights.inflight[fid].phase is Origin
+            &&& next.flights.inflight[fid].phase->Origin_commit.after
+                == after_document
+            &&& next.flights.inflight[fid].phase->Origin_commit.issued
+                == Some(IssuedSpec::Write {
+                    op: write_op,
+                    mode: crate::types::WriteMode::Rewrite,
+                    change_count:
+                        echod_concrete::node::spec_body_len(after_body)
+                            as usize,
+                    bytes: spec_encode(after_document).len() as u64,
+                    len: spec_encode(after_document).len() as usize,
+                })
+            &&& well_formed(after_document)
+        }),
+{
+    lemma_normal_origin_request_starts_load(s, call, origin, at);
+    lemma_normal_request_happy_path(
+        loaded.document,
+        call.request,
+        at,
+        s.cfg.retry_timeout,
+    );
+    reveal(spec_on_event);
+    reveal(spec_request);
+    reveal(spec_submit);
+    reveal(spec_start);
+    reveal(spec_begin);
+    reveal(spec_load_origin);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_loading);
+    reveal(spec_loaded_origin);
+    reveal(spec_run_origin);
+    reveal(spec_decide);
+    reveal(spec_commit_new);
+    reveal(spec_commit_advance);
+    reveal(spec_issue_write);
+    reveal(spec_schedule_wake);
+    reveal(echod_concrete::quick_n_dirty::on_request);
+    reveal(crate::verified::flight_spec::spec_advance);
+    reveal(crate::verified::commit_spec::spec_prepare);
+    assert(s.node.members.refreshing());
 }
 
 // ---------------------------------------------------------------------------

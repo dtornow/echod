@@ -9,31 +9,37 @@
 //! also proves the deterministic startup Wake and successful membership
 //! announcement completion as real Rover process steps matched by empty
 //! abstract executions.
-//! It also proves two bounded slices
-//! of the real Rover transition relation: a quiet empty task heartbeat and
-//! the admission/cache-miss load of one normal origin request. The latter is
-//! composed with the already-proved document decision theorem, but does not
-//! claim the still-missing StoreRes/commit world invariant.
+//! It also proves bounded slices of
+//! the real Rover transition relation: a quiet empty task heartbeat and a
+//! normal origin request through admission, hidden Store Get delivery, the
+//! matching successful StoreRes, decode/decision, and conditional-write
+//! issuance. The latter stops before delivery of the conditional write and
+//! therefore does not claim that the commit has replied yet.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
+use crate::document::{spec_decode_workflow, spec_encode, LoadedSpec};
+#[cfg(verus_keep_ghost)]
 use crate::refinement::{
     document_ids_bounded,
     lemma_empty_heartbeat_core_step,
     lemma_normal_origin_request_starts_load,
+    lemma_normal_origin_successful_get_issues_put_if_match,
     lemma_normal_request_matches_abstract_handler,
     normal_origin_request_ready,
+    normal_origin_get_write_ready,
     quiet_request_ready,
 };
 #[cfg(verus_keep_ghost)]
 use crate::rover::{
     spec_call, spec_effect, spec_effects, spec_node_step,
-    spec_initial_node, spec_store_request, spec_take_pending, LocalV, Message,
-    Model as ProductionModel, NodeV, LocalV as ProductionLocalV,
-    Message as ProductionMessage, NodeV as ProductionNodeV,
+    spec_initial_node, spec_store_request, spec_store_step, spec_take_pending,
+    LocalV, Message, Model as ProductionModel, NodeV,
+    LocalV as ProductionLocalV, Message as ProductionMessage,
+    NodeV as ProductionNodeV,
 };
 #[cfg(verus_keep_ghost)]
 use crate::state::{Owner, S};
@@ -68,7 +74,9 @@ use echod_concrete::model::Pid;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::relation::agreement;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreReq, StoreReqSpec, StoreRes, StoreV};
+use echod_concrete::store::{
+    spec_apply, Etag, StoreReq, StoreReqSpec, StoreRes, StoreV,
+};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
@@ -4539,6 +4547,821 @@ pub proof fn lemma_normal_origin_request_rover_step(
             request_event(call),
         ) == seq![result]);
     }
+}
+
+pub open spec fn normal_origin_get_request(
+    node: NodeV,
+    origin: Seq<char>,
+) -> StoreReq {
+    spec_store_request(StoreReqSpec::Get {
+        key: crate::keys::spec_doc_key(
+            node.core.keys.prefix,
+            origin,
+        ),
+    })
+}
+
+pub open spec fn normal_origin_admitted_world(
+    before: World<ProductionModel>,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> World<ProductionModel> {
+    land(
+        before,
+        0,
+        Pid::Node(0),
+        at,
+        normal_origin_admission_result(
+            before.process[0].1->Node_0,
+            at,
+            call,
+            origin,
+        ),
+    )
+}
+
+pub open spec fn fresh_store_delivery_result(
+    store: StoreV,
+    sender: Pid,
+    op: u64,
+    request: StoreReq,
+) -> StepResultV<LocalV, Pid, Message> {
+    let (next, response) = spec_apply(store, request);
+    StepResultV {
+        state: LocalV::Store(StoreV {
+            seen: store.seen.push((sender, op)),
+            ..next
+        }),
+        send: seq![(
+            sender,
+            Message::StoreRes { op, response },
+        )],
+    }
+}
+
+/// A fresh hidden StoreReq envelope executes the production store's
+/// `spec_apply` transition exactly once and returns its matching StoreRes.
+pub proof fn lemma_fresh_store_request_delivery(
+    store: StoreV,
+    sender: Pid,
+    op: u64,
+    request: StoreReq,
+)
+    requires
+        !store.seen.contains((sender, op)),
+    ensures
+        spec_store_step(
+            store,
+            ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq { op, request },
+            },
+        ) == seq![fresh_store_delivery_result(
+            store,
+            sender,
+            op,
+            request,
+        )],
+{
+}
+
+pub open spec fn normal_origin_store_delivery_ready(
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let request = normal_origin_get_request(node, origin);
+    &&& normal_origin_slice_ready(before, at, call, origin)
+    &&& before.process.len() > 1
+    &&& before.process[1].0 == Pid::Store
+    &&& before.process[1].1 is Store
+    &&& at <= store_at
+    &&& !before.process[1].1->Store_0.seen.contains((
+        Pid::Node(0),
+        node.core.next_op,
+    ))
+    &&& request.deep_view() == StoreReqSpec::Get {
+        key: crate::keys::spec_doc_key(
+            node.core.keys.prefix,
+            origin,
+        ),
+    }
+}
+
+pub open spec fn normal_origin_store_delivered_world(
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> World<ProductionModel> {
+    let node = before.process[0].1->Node_0;
+    let store = before.process[1].1->Store_0;
+    let request = normal_origin_get_request(node, origin);
+    land(
+        normal_origin_admitted_world(before, at, call, origin),
+        1,
+        Pid::Store,
+        store_at,
+        fresh_store_delivery_result(
+            store,
+            Pid::Node(0),
+            node.core.next_op,
+            request,
+        ),
+    )
+}
+
+/// The first two real Rover process transitions: Node admission emits the
+/// hidden Get, then the production Store consumes that exact envelope.
+pub open spec fn normal_origin_get_store_delivery_rover_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let store = before.process[1].1->Store_0;
+    let request = normal_origin_get_request(node, origin);
+    let admitted =
+        normal_origin_admitted_world(before, at, call, origin);
+    let store_result = fresh_store_delivery_result(
+        store,
+        Pid::Node(0),
+        node.core.next_op,
+        request,
+    );
+    let delivered = normal_origin_store_delivered_world(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    );
+    &&& normal_origin_store_delivery_ready(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    )
+    &&& normal_origin_request_rover_step(
+        config,
+        before,
+        at,
+        call,
+        origin,
+        admitted,
+    )
+    &&& step(
+        ProductionModel,
+        config,
+        admitted,
+        Label::Process {
+            process: Pid::Store,
+            at: store_at,
+            event: ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: node.core.next_op,
+                    request,
+                },
+            },
+            send: store_result.send,
+        },
+        delivered,
+    )
+}
+
+#[verifier::rlimit(30)]
+pub proof fn lemma_normal_origin_get_store_delivery_rover_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+)
+    requires
+        normal_origin_store_delivery_ready(
+            before,
+            at,
+            store_at,
+            call,
+            origin,
+        ),
+    ensures
+        normal_origin_get_store_delivery_rover_steps(
+            config,
+            before,
+            at,
+            store_at,
+            call,
+            origin,
+        ),
+{
+    let node = before.process[0].1->Node_0;
+    let store = before.process[1].1->Store_0;
+    let request = normal_origin_get_request(node, origin);
+    let admitted =
+        normal_origin_admitted_world(before, at, call, origin);
+    let admission_result =
+        normal_origin_admission_result(node, at, call, origin);
+    let result = fresh_store_delivery_result(
+        store,
+        Pid::Node(0),
+        node.core.next_op,
+        request,
+    );
+    let envelope = echod_rover::rover::Envelope {
+        sender: Pid::Node(0),
+        recipient: Pid::Store,
+        message: Message::StoreReq {
+            op: node.core.next_op,
+            request,
+        },
+    };
+    lemma_normal_origin_request_rover_step(
+        config,
+        before,
+        at,
+        call,
+        origin,
+    );
+    lemma_fresh_store_request_delivery(
+        store,
+        Pid::Node(0),
+        node.core.next_op,
+        request,
+    );
+    assert(admission_result.send == seq![(
+        Pid::Store,
+        Message::StoreReq {
+            op: node.core.next_op,
+            request,
+        },
+    )]);
+    assert(echod_rover::rover::semantics::envelopes(
+        Pid::Node(0),
+        admission_result.send,
+    ) =~= seq![envelope]);
+    assert(admitted.network == before.network + seq![envelope]);
+    let k = before.network.len() as int;
+    vstd::seq::lemma_seq_add_index2(
+        before.network,
+        seq![envelope],
+        k,
+    );
+    assert(admitted.network[k] == envelope);
+    assert(event_valid(
+        admitted,
+        Pid::Store,
+        ProcessEvent::Receive {
+            sender: Pid::Node(0),
+            message: Message::StoreReq {
+                op: node.core.next_op,
+                request,
+            },
+        },
+    ));
+    assert(is_process(ProductionModel, admitted, Pid::Store)) by {
+        assert(admitted.process[1].0 == Pid::Store);
+    }
+    assert(admitted.process[1] == before.process[1]);
+    assert(admitted.process[1].1 == LocalV::Store(store));
+    let store_event = ProcessEvent::Receive {
+        sender: Pid::Node(0),
+        message: Message::StoreReq {
+            op: node.core.next_op,
+            request,
+        },
+    };
+    assert(spec_store_step(store, store_event) == seq![result]);
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Store,
+        admitted.process[1].1,
+        store_at,
+        store_event,
+    ) == seq![result]);
+    assert(0 <= 1int < admitted.process.len());
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Store,
+        admitted.process[1].1,
+        store_at,
+        store_event,
+    ).len() == 1);
+    echod_concrete::simulation::lemma_process_step(
+        ProductionModel,
+        config,
+        admitted,
+        1,
+        store_at,
+        store_event,
+        0,
+    );
+    assert(normal_origin_store_delivered_world(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    ) == land(
+        admitted,
+        1,
+        Pid::Store,
+        store_at,
+        result,
+    ));
+}
+
+pub open spec fn normal_origin_get_response_result(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+) -> StepResultV<LocalV, Pid, Message> {
+    let admitted =
+        normal_origin_admission_result(node, at, call, origin)
+            .state->Node_0;
+    let event = EventSpec::Store {
+        op: node.core.next_op,
+        response: StoreRes::Get {
+            result: Ok(Some((bytes, etag))),
+        },
+        clock: response_at,
+    };
+    let (core, _) = crate::handler::spec_on_event(admitted.core, event);
+    let process_call =
+        spec_call(call, TargetSpec::Origin(origin), at);
+    let (after_body, _, _, _) =
+        echod_concrete::node::spec_request_transition(
+            spec_stored_body(loaded.document),
+            process_call.request,
+            at,
+            node.core.cfg.retry_timeout,
+        );
+    let after_document = echod_concrete::node::spec_advance_stored(
+        loaded.document,
+        after_body,
+        at,
+    );
+    let write = StoreReqSpec::PutIfMatch {
+        key: crate::keys::spec_doc_key(
+            node.core.keys.prefix,
+            origin,
+        ),
+        body: spec_encode(after_document),
+        etag: etag.deep_view(),
+    };
+    StepResultV {
+        state: LocalV::Node(NodeV {
+            core,
+            pending: admitted.pending,
+            wake: admitted.wake,
+        }),
+        send: seq![(
+            Pid::Store,
+            Message::StoreReq {
+                op: node.core.next_op.wrapping_add(1),
+                request: spec_store_request(write),
+            },
+        )],
+    }
+}
+
+/// The Node continuation for the matching successful Get StoreRes. It uses
+/// the same production `spec_on_event` and adapter effect interpretation as
+/// executable `Node::step`.
+pub proof fn lemma_normal_origin_successful_get_node_step(
+    node: NodeV,
+    at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        at <= response_at,
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        normal_origin_get_write_ready(
+            node.core,
+            spec_call(call, TargetSpec::Origin(origin), at),
+            origin,
+            at,
+            loaded,
+            etag,
+        ),
+    ensures
+        ({
+            let admitted =
+                normal_origin_admission_result(node, at, call, origin)
+                    .state->Node_0;
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: node.core.next_op,
+                    response: StoreRes::Get {
+                        result: Ok(Some((bytes, etag))),
+                    },
+                },
+            };
+            let result = normal_origin_get_response_result(
+                node,
+                at,
+                call,
+                origin,
+                response_at,
+                bytes,
+                etag,
+                loaded,
+            );
+            &&& spec_node_step(admitted, response_at, event)
+                == seq![result]
+            &&& result.state->Node_0.core.ops.contains_key(
+                node.core.next_op.wrapping_add(1),
+            )
+            &&& result.state->Node_0.core.ops[
+                node.core.next_op.wrapping_add(1)
+            ] == crate::state::Owner::Flight(node.core.next_flight)
+            &&& result.state->Node_0.core.flights.inflight.contains_key(
+                node.core.next_flight,
+            )
+            &&& result.state->Node_0.core.flights.inflight[
+                node.core.next_flight
+            ].phase is Origin
+            &&& well_formed(
+                result.state->Node_0.core.flights.inflight[
+                    node.core.next_flight
+                ].phase->Origin_commit.after,
+            )
+        }),
+{
+    let process_call =
+        spec_call(call, TargetSpec::Origin(origin), at);
+    lemma_normal_origin_successful_get_issues_put_if_match(
+        node.core,
+        process_call,
+        origin,
+        at,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    reveal(spec_node_step);
+    reveal_with_fuel(spec_effects, 3);
+    reveal(spec_effect);
+}
+
+pub open spec fn normal_origin_get_to_write_ready(
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let store = before.process[1].1->Store_0;
+    let request = normal_origin_get_request(node, origin);
+    &&& normal_origin_store_delivery_ready(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    )
+    &&& store_at <= response_at
+    &&& spec_apply(store, request).1 == StoreRes::Get {
+        result: Ok(Some((bytes, etag))),
+    }
+    &&& spec_decode_workflow(bytes@) == Ok(loaded)
+    &&& normal_origin_get_write_ready(
+        node.core,
+        spec_call(call, TargetSpec::Origin(origin), at),
+        origin,
+        at,
+        loaded,
+        etag,
+    )
+}
+
+pub open spec fn normal_origin_write_issued_world(
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+) -> World<ProductionModel> {
+    land(
+        normal_origin_store_delivered_world(
+            before,
+            at,
+            store_at,
+            call,
+            origin,
+        ),
+        0,
+        Pid::Node(0),
+        response_at,
+        normal_origin_get_response_result(
+            before.process[0].1->Node_0,
+            at,
+            call,
+            origin,
+            response_at,
+            bytes,
+            etag,
+            loaded,
+        ),
+    )
+}
+
+/// Three real hidden Rover process transitions, from external request
+/// admission through Store Get delivery and the matching successful Get
+/// response, ending when the Node emits its `PutIfMatch`.
+pub open spec fn normal_origin_get_to_conditional_write_rover_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+) -> bool {
+    let node = before.process[0].1->Node_0;
+    let delivered = normal_origin_store_delivered_world(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    );
+    let result = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    let response = StoreRes::Get {
+        result: Ok(Some((bytes, etag))),
+    };
+    &&& normal_origin_get_to_write_ready(
+        before,
+        at,
+        store_at,
+        response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+    )
+    &&& normal_origin_get_store_delivery_rover_steps(
+        config,
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    )
+    &&& step(
+        ProductionModel,
+        config,
+        delivered,
+        Label::Process {
+            process: Pid::Node(0),
+            at: response_at,
+            event: ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: node.core.next_op,
+                    response,
+                },
+            },
+            send: result.send,
+        },
+        normal_origin_write_issued_world(
+            before,
+            at,
+            store_at,
+            response_at,
+            call,
+            origin,
+            bytes,
+            etag,
+            loaded,
+        ),
+    )
+}
+
+#[verifier::rlimit(40)]
+pub proof fn lemma_normal_origin_get_to_conditional_write_rover_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    at: u64,
+    store_at: u64,
+    response_at: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        normal_origin_get_to_write_ready(
+            before,
+            at,
+            store_at,
+            response_at,
+            call,
+            origin,
+            bytes,
+            etag,
+            loaded,
+        ),
+    ensures
+        normal_origin_get_to_conditional_write_rover_steps(
+            config,
+            before,
+            at,
+            store_at,
+            response_at,
+            call,
+            origin,
+            bytes,
+            etag,
+            loaded,
+        ),
+{
+    let node = before.process[0].1->Node_0;
+    let store = before.process[1].1->Store_0;
+    let request = normal_origin_get_request(node, origin);
+    let admitted =
+        normal_origin_admitted_world(before, at, call, origin);
+    let delivered = normal_origin_store_delivered_world(
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    );
+    let result = normal_origin_get_response_result(
+        node,
+        at,
+        call,
+        origin,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    let response = StoreRes::Get {
+        result: Ok(Some((bytes, etag))),
+    };
+    let store_result = fresh_store_delivery_result(
+        store,
+        Pid::Node(0),
+        node.core.next_op,
+        request,
+    );
+    let response_envelope = echod_rover::rover::Envelope {
+        sender: Pid::Store,
+        recipient: Pid::Node(0),
+        message: Message::StoreRes {
+            op: node.core.next_op,
+            response,
+        },
+    };
+    lemma_normal_origin_get_store_delivery_rover_steps(
+        config,
+        before,
+        at,
+        store_at,
+        call,
+        origin,
+    );
+    lemma_normal_origin_successful_get_node_step(
+        node,
+        at,
+        call,
+        origin,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: node.core.next_op,
+            response,
+        },
+    };
+    assert(spec_apply(store, request).1 == response);
+    assert(store_result.send == seq![(
+        Pid::Node(0),
+        Message::StoreRes {
+            op: node.core.next_op,
+            response,
+        },
+    )]);
+    assert(echod_rover::rover::semantics::envelopes(
+        Pid::Store,
+        store_result.send,
+    ) =~= seq![response_envelope]);
+    assert(delivered.network
+        == admitted.network + seq![response_envelope]);
+    let response_index = admitted.network.len() as int;
+    vstd::seq::lemma_seq_add_index2(
+        admitted.network,
+        seq![response_envelope],
+        response_index,
+    );
+    assert(delivered.network[response_index] == response_envelope);
+    assert(event_valid(
+        delivered,
+        Pid::Node(0),
+        event,
+    ));
+    assert(delivered.process[0].0 == Pid::Node(0));
+    assert(is_process(
+        ProductionModel,
+        delivered,
+        Pid::Node(0),
+    )) by {
+        assert(delivered.process[0].0 == Pid::Node(0));
+    }
+    assert(delivered.process[0].1
+        == normal_origin_admission_result(
+            node,
+            at,
+            call,
+            origin,
+        ).state);
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Node(0),
+        delivered.process[0].1,
+        response_at,
+        event,
+    ) == seq![result]);
+    echod_concrete::simulation::lemma_process_step(
+        ProductionModel,
+        config,
+        delivered,
+        0,
+        response_at,
+        event,
+        0,
+    );
+    assert(normal_origin_write_issued_world(
+        before,
+        at,
+        store_at,
+        response_at,
+        call,
+        origin,
+        bytes,
+        etag,
+        loaded,
+    ) == land(
+        delivered,
+        0,
+        Pid::Node(0),
+        response_at,
+        result,
+    ));
 }
 
 /// The bounded normal-request happy path: the actual Rover admission step is

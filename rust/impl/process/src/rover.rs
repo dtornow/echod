@@ -1243,7 +1243,10 @@ pub open spec fn spec_store_step(
 mod tests {
     use super::*;
     use echod_rover::rover::RoverModel;
-    use echod_types::{ScheduleGetReq, TaskGetReq, TaskHeartbeatReq};
+    use echod_types::{
+        PromiseCreateReq, PromiseSettleReq, PromiseState, ScheduleGetReq,
+        TaskGetReq, TaskHeartbeatReq, Value,
+    };
 
     #[test]
     fn initial_timeout_runs_the_production_heartbeat() {
@@ -1429,6 +1432,128 @@ mod tests {
         assert!(outcomes[0].send.iter().any(|(recipient, message)| {
             *recipient == Pid::Store
                 && matches!(message, Message::StoreReq { .. })
+        }));
+    }
+
+    #[test]
+    fn successful_loaded_request_issues_conditional_write() {
+        let config = Config::memory("node-0");
+        let model = Model;
+        let initial = model.initial(&config);
+        let value = |data: &str| Value {
+            headers: Vec::new(),
+            data: Some(data.to_string()),
+        };
+        let create = Request::PromiseCreate(PromiseCreateReq {
+            id: "order:promise".to_string(),
+            timeout_at: 10_000,
+            param: value("input"),
+            tags: Vec::new(),
+        });
+        let empty =
+            echod_concrete::empty_stored_workflow("order".to_string());
+        let (body, _, _, _) = echod_concrete::request_transition(
+            echod_concrete::stored_body(&empty),
+            &create,
+            1,
+            config.retry_timeout,
+        );
+        let stored = echod_concrete::advance_stored(&empty, body, 1);
+        let bytes =
+            echod_concrete::document::codec::encode(&stored).unwrap();
+
+        let call = BoundaryCall {
+            client: "client".to_string(),
+            id: 9,
+            request: Request::PromiseSettle(PromiseSettleReq {
+                id: "order:promise".to_string(),
+                state: PromiseState::Resolved,
+                value: value("done"),
+            }),
+        };
+        let admitted = &model.on_event(
+            &config,
+            &initial[0].0,
+            &initial[0].1,
+            2,
+            &ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        )[0];
+        let (get_op, get) = admitted
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreReq {
+                    op,
+                    request: request @ StoreReq::Get { .. },
+                } => Some((*op, request.clone())),
+                _ => None,
+            })
+            .expect("admission emits the workflow Get");
+        let key = match &get {
+            StoreReq::Get { key } => key.clone(),
+            _ => unreachable!(),
+        };
+        let store = Local::Store(Store {
+            entries: vec![echod_concrete::store::Entry {
+                key,
+                body: bytes,
+                version: 1,
+            }],
+            appendable: false,
+            seen: Vec::new(),
+        });
+        let get_answer = &model.on_event(
+            &config,
+            &Pid::Store,
+            &store,
+            3,
+            &ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: get_op,
+                    request: get,
+                },
+            },
+        )[0];
+        let response = get_answer
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreRes { op, response } if *op == get_op =>
+                    Some(response.clone()),
+                _ => None,
+            })
+            .expect("the Store returns the matching Get response");
+        assert!(matches!(
+            response,
+            StoreRes::Get { result: Ok(Some(_)) }
+        ));
+
+        let continued = &model.on_event(
+            &config,
+            &Pid::Node(0),
+            &admitted.state,
+            4,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: get_op,
+                    response,
+                },
+            },
+        )[0];
+        assert!(continued.send.iter().any(|(recipient, message)| {
+            *recipient == Pid::Store
+                && matches!(
+                    message,
+                    Message::StoreReq {
+                        request: StoreReq::PutIfMatch { .. },
+                        ..
+                    }
+                )
         }));
     }
 }
