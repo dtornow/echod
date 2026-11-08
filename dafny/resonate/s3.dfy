@@ -286,10 +286,12 @@ module S3 {
   {
     match i
     case Timeout => Result(s, [], Cancel)
-    case Request(from, Req(id, op)) =>
-      var a := Apply(s, op);
-      Result(a.state, [ResTo(from, id, a.out)], Keep)
-    case Request(_, Res(_, _)) => Result(s, [], Keep)
+    case Request(from, req) =>
+      if req.Req? then
+        var a := Apply(s, req.ask);
+        Result(a.state, [Answer(from, req, a.out)], Keep)
+      else
+        Result(s, [], Keep)
   }
 
   function Processes(self: Pid): Process<Pid, Msg, State> { Process(step) }

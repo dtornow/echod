@@ -37,6 +37,13 @@ module Network {
     Send(to, Res(id, body))
   }
 
+  // Answer the request in hand. The response cites that request's id.
+  function Answer<P(!new), Q(==, !new), A(==, !new)>(to: P, request: RR<Q, A>, body: A): Send<P, RR<Q, A>>
+    requires request.Req?
+  {
+    ResTo(to, request.id, body)
+  }
+
   // The same shape for every process: who it is, the state it holds, what
   // arrived, and the time.
   datatype Process<!P(==, !new), !M(==, !new), !S(!new)> = Process(

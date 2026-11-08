@@ -28,21 +28,24 @@ module Protocol {
 
   predicate AwaitsGet(c: Cont) { c.Prepare? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
-  datatype Body =
+  // The two bodies of one exchange. A request carries a ReqBody. A response
+  // carries a ResBody and cites the request's id.
+  datatype ReqBody =
     | PromiseGet(id: string)
     | PromiseCreate(req: Temp.CreateReq)
+    | Get(id: string)
+    | PutTimeout(id: string, clock: Clock)
+    | WriteDoc(id: string, key: string, doc: Temp.Doc, version: nat, cover: Temp.Opt<Clock>)
+    | DropTimeout(id: string, clock: Clock)
+  datatype ResBody =
     | PromiseReply(answer: Temp.Answer)
     | Created(answer: Temp.Answer)
-    | Get(id: string)
     | Got(id: string, doc: Temp.Doc, version: nat)
-    | PutTimeout(id: string, clock: Clock)
     | TimeoutPut(id: string, clock: Clock)
-    | WriteDoc(id: string, key: string, doc: Temp.Doc, version: nat, cover: Temp.Opt<Clock>)
     | DocWrote(id: string, key: string)
     | DocRejected(id: string)
-    | DropTimeout(id: string, clock: Clock)
     | TimeoutDropped(id: string, clock: Clock)
-  type Msg = RR<Body, Body>
+  type Msg = RR<ReqBody, ResBody>
   datatype State =
     | AtClient(id: string, node: nat, kind: Kind, waiting: bool)
     | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat, mint: nat)

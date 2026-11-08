@@ -82,7 +82,7 @@ module Proof {
   }
 
   function GotPacket(node: Pid, rpc: nat, id: string, doc: Temp.Doc, version: nat): Packet<Pid, Msg> {
-    Packet(Bucket, node, Res(rpc, Body.Got(id, doc, version)))
+    Packet(Bucket, node, Res(rpc, Got(id, doc, version)))
   }
 
   ghost predicate Justified(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
@@ -860,8 +860,8 @@ module Proof {
       var caller := p.src;
       var rpc := s.mint;
       var open' := s.open[id := Prepare(caller, AskGet, cid, rpc)];
-      assert r == Result(AtNode(open', s.armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, Body.Get(id))], Keep);
-      var born := Packet(self, Bucket, Req(rpc, Body.Get(id)));
+      assert r == Result(AtNode(open', s.armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, Get(id))], Keep);
+      var born := Packet(self, Bucket, Req(rpc, Get(id)));
       ShapeAt(docs, b(n), self, r.state);
       assert b(n+1).procs == b(n).procs[self := r.state];
       assert b(n+1).procs.Keys == b(n).procs.Keys;
@@ -1007,7 +1007,7 @@ module Proof {
       if req.id !in s.open {
         var rpc := s.mint;
         var open' := s.open[req.id := Prepare(from, AskCreate(req), cid, rpc)];
-        assert r == Result(AtNode(open', s.armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, Body.Get(req.id))], Keep);
+        assert r == Result(AtNode(open', s.armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, Get(req.id))], Keep);
         forall id | id in open' && AwaitsGet(open'[id])
           ensures id in s.open && s.open[id] == open'[id]
         {

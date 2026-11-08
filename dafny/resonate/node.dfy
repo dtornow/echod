@@ -26,14 +26,14 @@ module Node {
           else
             var rpc := s.mint;
             Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
-                   [ReqTo(Bucket, rpc, Body.Get(id))], Keep)
+                   [ReqTo(Bucket, rpc, Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
           if req.id in s.open then
             Result(s, [], Keep)
           else
             var rpc := s.mint;
             Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
-                   [ReqTo(Bucket, rpc, Body.Get(req.id))], Keep)
+                   [ReqTo(Bucket, rpc, Get(req.id))], Keep)
         case Request(_, Res(rpc, Got(id, doc, version))) =>
           if id in s.open && s.open[id].Prepare? && s.open[id].rpc == rpc then
             var plan := Prepare(s, s.open[id].job, id, doc, version, now);
@@ -127,11 +127,11 @@ module Node {
                Temp.Some(put), true, s.next + 1)
   }
 
-  function Reply(created: bool, answer: Temp.Answer): Body {
+  function Reply(created: bool, answer: Temp.Answer): ResBody {
     if created then Created(answer) else PromiseReply(answer)
   }
 
-  function SendEffect(id: string, effect: Effect): Body {
+  function SendEffect(id: string, effect: Effect): ReqBody {
     match effect
     case Put(clock) => PutTimeout(id, clock)
     case Write(key, doc, version, cover) => WriteDoc(id, key, doc, version, cover)
