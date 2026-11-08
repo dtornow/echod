@@ -63,28 +63,30 @@ module Bucket {
     && (t.key in s.docs ==> Temp.Nearest(s.docs[t.key]).Some?)
   }
 
-  function BucketOn(s: State, i: Input<Pid, Msg>): Result<Pid, Msg, State>
-    requires s.AtBucket?
+  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
   {
-    match i
-    case Request(from, Get(id)) =>
-      var key := DocKey(id);
-      Result(s, [Send(from, Got(id, DocumentAt(s.docs, id), VersionOf(s.ver, key)))], Keep)
-    case Request(from, PutTimeout(id, clock)) =>
-      Result(AtBucket(s.docs, s.ver, s.timeouts + {clock}, s.anchor), [Send(from, TimeoutPut(id, clock))], Keep)
-    case Request(from, WriteDoc(id, key, doc, version, cover)) =>
-      if VersionOf(s.ver, key) == version && Accept(s, key, doc, cover) then
-        var anchor' :=
-          match (Temp.Nearest(doc), cover)
-          case (None, _) => s.anchor - {key}
-          case (Some(_), Some(clock)) => s.anchor[key := clock]
-          case (Some(_), None) => s.anchor;
-        Result(AtBucket(s.docs[key := doc], s.ver[key := version + 1], s.timeouts, anchor'),
-               [Send(from, DocWrote(id, key))], Keep)
-      else Result(s, [Send(from, DocRejected(id))], Keep)
-    case Request(from, DropTimeout(id, clock)) =>
-      if LiveAnchor(s, clock) then Result(s, [Send(from, TimeoutDropped(id, clock))], Keep)
-      else Result(AtBucket(s.docs, s.ver, s.timeouts - {clock}, s.anchor), [Send(from, TimeoutDropped(id, clock))], Keep)
-    case _ => Result(s, [], Keep)
+    if self.Bucket? && s.AtBucket? then
+      match i {
+        case Request(from, Get(id)) =>
+          var key := DocKey(id);
+          Result(s, [Send(from, Got(id, DocumentAt(s.docs, id), VersionOf(s.ver, key)))], Keep)
+        case Request(from, PutTimeout(id, clock)) =>
+          Result(AtBucket(s.docs, s.ver, s.timeouts + {clock}, s.anchor), [Send(from, TimeoutPut(id, clock))], Keep)
+        case Request(from, WriteDoc(id, key, doc, version, cover)) =>
+          if VersionOf(s.ver, key) == version && Accept(s, key, doc, cover) then
+            var anchor' :=
+              match (Temp.Nearest(doc), cover)
+              case (None, _) => s.anchor - {key}
+              case (Some(_), Some(clock)) => s.anchor[key := clock]
+              case (Some(_), None) => s.anchor;
+            Result(AtBucket(s.docs[key := doc], s.ver[key := version + 1], s.timeouts, anchor'),
+                   [Send(from, DocWrote(id, key))], Keep)
+          else Result(s, [Send(from, DocRejected(id))], Keep)
+        case Request(from, DropTimeout(id, clock)) =>
+          if LiveAnchor(s, clock) then Result(s, [Send(from, TimeoutDropped(id, clock))], Keep)
+          else Result(AtBucket(s.docs, s.ver, s.timeouts - {clock}, s.anchor), [Send(from, TimeoutDropped(id, clock))], Keep)
+        case _ => Result(s, [], Keep)
+      }
+    else Result(s, [], Keep)
   }
 }

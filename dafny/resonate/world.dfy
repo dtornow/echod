@@ -7,9 +7,9 @@ include "node.dfy"
 module Worlds {
   import opened Network
   import opened Protocol
-  import opened Client
-  import opened Bucket
-  import opened Node
+  import Client
+  import Bucket
+  import Node
   import Temp
 
   function Pids(clients: set<nat>, nodes: set<nat>): set<Pid> {
@@ -24,14 +24,15 @@ module Worlds {
     match self
     case Client(c) => AtClient(ask(c).id, ask(c).node, ask(c).kind, true)
     case Node(i) => AtNode(map[], map[], 0, i + 1)
-    case Bucket => AtBucket(docs, map[], BootTimeouts(docs), BootAnchor(docs))
+    case Bucket => AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs))
   }
 
+  // The network calls this. It drives the step of whichever process was named.
   function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State> {
     match self
-    case Client(_) => if s.AtClient? then ClientOn(s, i) else Result(s, [], Keep)
-    case Node(_) => if s.AtNode? then NodeOn(s, i, now) else Result(s, [], Keep)
-    case Bucket => if s.AtBucket? then BucketOn(s, i) else Result(s, [], Keep)
+    case Client(_) => Client.Step(self, s, i, now)
+    case Node(_) => Node.Step(self, s, i, now)
+    case Bucket => Bucket.Step(self, s, i, now)
   }
 
   function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask): Sys<Pid, Msg, State>

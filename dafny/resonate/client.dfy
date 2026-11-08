@@ -8,10 +8,9 @@ module Client {
   import opened Protocol
   import Temp
 
-  function ClientOn(s: State, i: Input<Pid, Msg>): Result<Pid, Msg, State>
-    requires s.AtClient?
+  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
   {
-    if s.waiting && i.Timeout? then
+    if self.Client? && s.AtClient? && s.waiting && i.Timeout? then
       var msg :=
         match s.kind
         case Read => PromiseGet(s.id)

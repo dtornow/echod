@@ -5,9 +5,8 @@ include "world.dfy"
 module Proof {
   import opened Network
   import opened Protocol
-  import opened Client
-  import opened Bucket
-  import opened Node
+  import Bucket
+  import Node
   import opened Worlds
   import Keys
   import Temp
@@ -360,8 +359,8 @@ module Proof {
   lemma CoverStep(docs: map<string, Temp.Doc>, keys: seq<string>)
     requires forall i :: 0 <= i < |keys| ==> keys[i] in docs
     requires forall i, j :: 0 <= i < j < |keys| ==> Keys.Lt(keys[i], keys[j])
-    ensures var timeouts := CoverOf(docs, keys);
-            var anchor := AnchorOf(docs, keys);
+    ensures var timeouts := Bucket.CoverOf(docs, keys);
+            var anchor := Bucket.AnchorOf(docs, keys);
       forall i | 0 <= i < |keys| ::
         match Temp.Nearest(docs[keys[i]])
         case None => true
@@ -374,10 +373,10 @@ module Proof {
     if |keys| > 0 {
       CoverStep(docs, keys[1..]);
       var head := keys[0];
-      var timeouts := CoverOf(docs, keys);
-      var anchor := AnchorOf(docs, keys);
-      var restT := CoverOf(docs, keys[1..]);
-      var restA := AnchorOf(docs, keys[1..]);
+      var timeouts := Bucket.CoverOf(docs, keys);
+      var anchor := Bucket.AnchorOf(docs, keys);
+      var restT := Bucket.CoverOf(docs, keys[1..]);
+      var restA := Bucket.AnchorOf(docs, keys[1..]);
       forall i | 0 <= i < |keys|
         ensures match Temp.Nearest(docs[keys[i]])
           case None => true
@@ -415,13 +414,13 @@ module Proof {
   }
 
   lemma CoverLemma(docs: map<string, Temp.Doc>)
-    ensures Anchored(AtBucket(docs, map[], BootTimeouts(docs), BootAnchor(docs)))
+    ensures Anchored(AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs)))
   {
     var keys := Keys.Sorted(docs.Keys);
     Keys.SortedProps(docs.Keys);
     assert forall i :: 0 <= i < |keys| ==> keys[i] in docs.Keys && keys[i] in docs;
     CoverStep(docs, keys);
-    var bucket := AtBucket(docs, map[], BootTimeouts(docs), BootAnchor(docs));
+    var bucket := AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs));
     forall key | key in docs
       ensures match Temp.Nearest(docs[key])
         case None => true
@@ -677,7 +676,7 @@ module Proof {
   }
 
   lemma DropKeeps(s: State, clock: Clock)
-    requires s.AtBucket? && Anchored(s) && !LiveAnchor(s, clock)
+    requires s.AtBucket? && Anchored(s) && !Bucket.LiveAnchor(s, clock)
     ensures Anchored(AtBucket(s.docs, s.ver, s.timeouts - {clock}, s.anchor))
   {
     var s' := AtBucket(s.docs, s.ver, s.timeouts - {clock}, s.anchor);
@@ -692,7 +691,7 @@ module Proof {
         assert s.anchor[key] in s.timeouts;
         if s.anchor[key] == clock {
           assert clock.key == key;
-          assert LiveAnchor(s, clock);
+          assert Bucket.LiveAnchor(s, clock);
         }
         assert s.anchor[key] != clock;
         assert s.anchor[key] in s'.timeouts;
@@ -701,7 +700,7 @@ module Proof {
 
   lemma WriteKeeps(s: State, key: string, doc: Temp.Doc, version: nat, cover: Temp.Opt<Clock>)
     requires s.AtBucket? && Anchored(s)
-    requires VersionOf(s.ver, key) == version && Accept(s, key, doc, cover)
+    requires VersionOf(s.ver, key) == version && Bucket.Accept(s, key, doc, cover)
     ensures var anchor' :=
               match (Temp.Nearest(doc), cover)
               case (None, _) => s.anchor - {key}
@@ -810,7 +809,7 @@ module Proof {
       PutKeeps(s0, clock);
       BucketKept(docs, b, a, n, base, r);
     case WriteDoc(id, key, doc, version, cover) =>
-      if VersionOf(s0.ver, key) == version && Accept(s0, key, doc, cover) {
+      if VersionOf(s0.ver, key) == version && Bucket.Accept(s0, key, doc, cover) {
         WriteKeeps(s0, key, doc, version, cover);
         var anchor' :=
           match (Temp.Nearest(doc), cover)
@@ -825,7 +824,7 @@ module Proof {
         BucketKept(docs, b, a, n, base, r);
       }
     case DropTimeout(id, clock) =>
-      if LiveAnchor(s0, clock) {
+      if Bucket.LiveAnchor(s0, clock) {
         assert r == Result(s0, [Send(p.src, TimeoutDropped(id, clock))], Keep);
         BucketKept(docs, b, a, n, base, r);
       } else {
@@ -975,23 +974,23 @@ module Proof {
         }
       }
     } else {
-      KeepsGets(s, Request(p.src, p.msg), b(n).now);
+      KeepsGets(self, s, Request(p.src, p.msg), b(n).now);
       NodeKept(docs, b, a, n, base, p, r);
     }
   }
 
-  lemma KeepsGets(s: State, i: Input<Pid, Msg>, now: nat)
-    requires s.AtNode?
+  lemma KeepsGets(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
+    requires self.Node? && s.AtNode?
     requires !(i.Request? && i.msg.PromiseGet? && i.msg.id !in s.open)
     requires !(i.Request? && i.msg.Got? && i.msg.id in s.open && s.open[i.msg.id].WaitGet?)
-    ensures var r := NodeOn(s, i, now);
+    ensures var r := Node.Step(self, s, i, now);
       && r.state.AtNode?
       && (forall id :: id in r.state.open && r.state.open[id].WaitGet? ==>
            id in s.open && s.open[id] == r.state.open[id])
       && (forall j :: 0 <= j < |r.sends| ==> !r.sends[j].msg.PromiseReply? && !r.sends[j].msg.Got?)
       && (forall j :: 0 <= j < |r.sends| && r.sends[j].msg.Get? ==> r.sends[j].to == Bucket)
   {
-    var r := NodeOn(s, i, now);
+    var r := Node.Step(self, s, i, now);
     match i
     case Request(from, PromiseCreate(req)) =>
       if req.id !in s.open {
@@ -1005,7 +1004,7 @@ module Proof {
       }
     case Request(_, Got(id, doc, version)) =>
       if id in s.open && s.open[id].Load? {
-        var decided := Decide(s, id, doc, version, now);
+        var decided := Node.Decide(s, id, doc, version, now);
         assert r == decided;
         assert decided.state.AtNode?;
       }
@@ -1027,7 +1026,7 @@ module Proof {
   {
     var self := p.dst;
     var s := b(n).procs[self];
-    KeepsGets(s, Request(p.src, p.msg), b(n).now);
+    KeepsGets(self, s, Request(p.src, p.msg), b(n).now);
     assert r.state.AtNode?;
     ShapeAt(docs, b(n), self, r.state);
     assert b(n+1).procs == b(n).procs[self := r.state];
