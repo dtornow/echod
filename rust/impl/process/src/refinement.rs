@@ -872,9 +872,9 @@ pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
     &&& timer_accounting_consistent(timers)
 }
 
-/// Every wheel slot is a real timer key and carries the deadline encoded by
-/// that key. This is the representation invariant needed before a listed key
-/// can safely join the ordered wheel.
+/// Every wheel slot is a real timer key and wakes no earlier than the logical
+/// deadline encoded by that key. Fresh listing uses equality; retry rearming
+/// may move only the operational wake slot later.
 pub open spec fn timer_slots_keys_valid(
     slots: Seq<crate::state_timers::SlotSpec>,
 ) -> bool {
@@ -882,10 +882,33 @@ pub open spec fn timer_slots_keys_valid(
         0 <= i < slots.len() ==> {
             let slot = #[trigger] slots[i];
             match crate::keys::spec_parse_timer_key(slot.1) {
-                Some(entry) => slot.0 == entry.deadline(),
+                Some(entry) => slot.0 >= entry.deadline(),
                 None => false,
             }
         }
+}
+
+pub open spec fn timer_slot_key_deadline_exact(
+    slot: crate::state_timers::SlotSpec,
+) -> bool {
+    match crate::keys::spec_parse_timer_key(slot.1) {
+        Some(entry) => slot.0 == entry.deadline(),
+        None => false,
+    }
+}
+
+/// Keys read from Store are initially armed at their encoded logical
+/// deadline, before any operational retry delay is applied.
+pub proof fn lemma_fresh_timer_slot_has_exact_deadline(
+    key: Seq<char>,
+    entry: crate::keys::TimerEntrySpec,
+)
+    requires
+        crate::keys::spec_parse_timer_key(key) == Some(entry),
+    ensures
+        timer_slot_key_deadline_exact((entry.deadline(), key)),
+        timer_slots_keys_valid(seq![(entry.deadline(), key)]),
+{
 }
 
 pub open spec fn timer_wheel_keys_valid(s: S) -> bool {
@@ -1295,33 +1318,36 @@ pub proof fn lemma_timer_fired_preserves_accounting(
 
 pub proof fn lemma_arm_preserves_timer_key_deadlines(
     slots: Seq<crate::state_timers::SlotSpec>,
+    at: u64,
     key: Seq<char>,
     entry: crate::keys::TimerEntrySpec,
 )
     requires
         timer_slots_keys_valid(slots),
         crate::keys::spec_parse_timer_key(key) == Some(entry),
+        at >= entry.deadline(),
     ensures
         timer_slots_keys_valid(crate::state_timers::spec_arm(
             slots,
-            entry.deadline(),
+            at,
             key,
         )),
     decreases slots.len(),
 {
-    let added = (entry.deadline(), key);
+    let added = (at, key);
     if slots.len() > 0
         && slots[0] != added
         && !spec_slot_before(added, slots[0])
     {
         lemma_arm_preserves_timer_key_deadlines(
             slots.drop_first(),
+            at,
             key,
             entry,
         );
         let result = crate::state_timers::spec_arm(
             slots,
-            entry.deadline(),
+            at,
             key,
         );
         assert forall|i: int|
@@ -1329,14 +1355,14 @@ pub proof fn lemma_arm_preserves_timer_key_deadlines(
                 < result.len() implies {
                 let slot = #[trigger] result[i];
                 match crate::keys::spec_parse_timer_key(slot.1) {
-                    Some(parsed) => slot.0 == parsed.deadline(),
+                    Some(parsed) => slot.0 >= parsed.deadline(),
                     None => false,
                 }
             } by {
             if i > 0 {
                 let tail = crate::state_timers::spec_arm(
                     slots.drop_first(),
-                    entry.deadline(),
+                    at,
                     key,
                 );
                 assert(result[i] == tail[i - 1]);
@@ -1348,6 +1374,7 @@ pub proof fn lemma_arm_preserves_timer_key_deadlines(
 pub proof fn lemma_arm_preserves_timer_ownership(
     s: S,
     slots: Seq<crate::state_timers::SlotSpec>,
+    at: u64,
     key: Seq<char>,
     entry: crate::keys::TimerEntrySpec,
 )
@@ -1360,13 +1387,13 @@ pub proof fn lemma_arm_preserves_timer_ownership(
             s,
             crate::state_timers::spec_arm(
                 slots,
-                entry.deadline(),
+                at,
                 key,
             ),
         ),
     decreases slots.len(),
 {
-    let added = (entry.deadline(), key);
+    let added = (at, key);
     if slots.len() > 0
         && slots[0] != added
         && !spec_slot_before(added, slots[0])
@@ -1374,12 +1401,13 @@ pub proof fn lemma_arm_preserves_timer_ownership(
         lemma_arm_preserves_timer_ownership(
             s,
             slots.drop_first(),
+            at,
             key,
             entry,
         );
         let result = crate::state_timers::spec_arm(
             slots,
-            entry.deadline(),
+            at,
             key,
         );
         assert forall|i: int|
@@ -1398,7 +1426,7 @@ pub proof fn lemma_arm_preserves_timer_ownership(
             if i > 0 {
                 let tail = crate::state_timers::spec_arm(
                     slots.drop_first(),
-                    entry.deadline(),
+                    at,
                     key,
                 );
                 assert(result[i] == tail[i - 1]);
@@ -1456,6 +1484,7 @@ pub proof fn lemma_take_bucket_preserves_timer_activity(
                     );
                     lemma_arm_preserves_timer_key_deadlines(
                         s.timers.wheel.armed,
+                        entry.deadline(),
                         key,
                         entry,
                     );
@@ -1463,6 +1492,7 @@ pub proof fn lemma_take_bucket_preserves_timer_activity(
                         lemma_arm_preserves_timer_ownership(
                             s,
                             s.timers.wheel.armed,
+                            entry.deadline(),
                             key,
                             entry,
                         );
@@ -2236,6 +2266,149 @@ pub proof fn lemma_loaded_origin_identifies_timeout(
     );
 }
 
+pub proof fn lemma_sweep_stops_after_one_due(
+    document: echod_concrete::node::DocumentBodyV,
+    now: u64,
+    retry_timeout: u64,
+    limit: nat,
+)
+    requires
+        limit > 0,
+        ({
+            let first = echod_concrete::node::spec_run_due(
+                document,
+                now,
+                retry_timeout,
+            );
+            &&& first.0 != document
+            &&& echod_concrete::node::spec_run_due(
+                first.0,
+                now,
+                retry_timeout,
+            ).0 == first.0
+        }),
+    ensures
+        ({
+            let first = echod_concrete::node::spec_run_due(
+                document,
+                now,
+                retry_timeout,
+            );
+            echod_concrete::node::spec_sweep(
+                document,
+                now,
+                retry_timeout,
+                limit,
+            ) == (first.0, first.2, first.3)
+        }),
+{
+    let first = echod_concrete::node::spec_run_due(
+        document,
+        now,
+        retry_timeout,
+    );
+    let remaining = (limit - 1) as nat;
+    assert(echod_concrete::node::spec_sweep(
+        first.0,
+        now,
+        retry_timeout,
+        remaining,
+    ) == (
+        first.0,
+        Seq::<echod_concrete::node::PendingV>::empty(),
+        Seq::<echod_concrete::node::NoteV>::empty(),
+    )) by {
+        reveal(echod_concrete::node::spec_sweep);
+    }
+    reveal(echod_concrete::node::spec_sweep);
+    assert(first.2 + Seq::<echod_concrete::node::PendingV>::empty()
+        =~= first.2);
+    assert(first.3 + Seq::<echod_concrete::node::NoteV>::empty()
+        =~= first.3);
+}
+
+/// Bounded production decision slice: if the loaded origin has exactly one
+/// changing due step, the production Sweep body is that matched abstract
+/// timeout and then stops. Commit construction and its Store response remain
+/// the next linearization frontier.
+pub proof fn lemma_loaded_origin_single_timeout_decision_matches(
+    config: ServerConfig,
+    key: Seq<char>,
+    origin: Seq<char>,
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    abstract_state: AbstractStateV,
+    now: u64,
+)
+    requires
+        key == echod_concrete::node::spec_origin_key(origin),
+        map.dom().finite(),
+        echod_concrete::interpret::origin_rel(
+            map,
+            origin,
+            abstract_state.store,
+        ),
+        finite_store(abstract_state.store),
+        origin_due_internal(map, now) is Some,
+        ({
+            let document =
+                echod_concrete::node::DocumentBodyV::Workflow(map);
+            let first = echod_concrete::node::spec_run_due(
+                document,
+                now,
+                config.retry_timeout,
+            );
+            &&& first.0 != document
+            &&& echod_concrete::node::spec_run_due(
+                first.0,
+                now,
+                config.retry_timeout,
+            ).0 == first.0
+        }),
+    ensures
+        ({
+            let document =
+                echod_concrete::node::DocumentBodyV::Workflow(map);
+            let first = echod_concrete::node::spec_run_due(
+                document,
+                now,
+                config.retry_timeout,
+            );
+            &&& echod_concrete::relation::due_agrees(
+                config,
+                key,
+                document,
+                abstract_state,
+                now,
+            )
+            &&& crate::verified::flight_spec::spec_step(
+                crate::verified::flight_spec::AJob::Sweep,
+                document,
+                now,
+                config.retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ) == (first.0, None, first.2, first.3)
+        }),
+{
+    lemma_loaded_origin_identifies_timeout(
+        config,
+        key,
+        origin,
+        map,
+        abstract_state,
+        now,
+    );
+    let document =
+        echod_concrete::node::DocumentBodyV::Workflow(map);
+    assert(REQUEST_SWEEP_STEPS as nat > 0);
+    lemma_sweep_stops_after_one_due(
+        document,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+    reveal(crate::verified::flight_spec::spec_step);
+}
+
 /// A successfully loaded due schedule determines the promise carried by the
 /// exact abstract `ScheduleTimeout`; no occurrence is committed by this
 /// identification theorem.
@@ -2342,44 +2515,115 @@ pub proof fn lemma_timeout_load_phases_are_prelinearized(
 {
 }
 
-/// Kept/failed completion rearms the old encoded key at a later retry slot.
-/// When the retry addition does not saturate, the slot is strictly later than
-/// the key's encoded deadline and therefore violates the current
-/// key/deadline-equality representation invariant.
-pub proof fn lemma_retry_slot_conflicts_with_key_deadline(
+/// Kept/failed completion retains the encoded logical deadline and moves only
+/// the operational wake slot. Saturation at `u64::MAX` is harmless: the slot
+/// remains no earlier than both the firing slot and encoded deadline.
+pub proof fn lemma_retry_slot_preserves_key_deadline(
+    slots: Seq<crate::state_timers::SlotSpec>,
     key: Seq<char>,
     entry: crate::keys::TimerEntrySpec,
+    firing_at: u64,
     now: u64,
 )
     requires
+        timer_slots_keys_valid(slots),
         crate::keys::spec_parse_timer_key(key) == Some(entry),
-        crate::state_timers::spec_max(now, entry.deadline())
-            <= u64::MAX - crate::state_timers::RETRY_AFTER_MS,
+        firing_at >= entry.deadline(),
     ensures
         ({
             let retry =
-                crate::state_timers::spec_max(now, entry.deadline())
+                crate::state_timers::spec_max(now, firing_at)
                     .saturating_add(
                         crate::state_timers::RETRY_AFTER_MS,
                     );
-            &&& retry > entry.deadline()
-            &&& !timer_slots_keys_valid(seq![(retry, key)])
+            &&& retry >= firing_at
+            &&& retry >= entry.deadline()
+            &&& timer_slots_keys_valid(
+                crate::state_timers::spec_arm(slots, retry, key),
+            )
         }),
 {
-    let retry = crate::state_timers::spec_max(now, entry.deadline())
+    let retry = crate::state_timers::spec_max(now, firing_at)
         .saturating_add(crate::state_timers::RETRY_AFTER_MS);
-    assert(retry > entry.deadline());
-    assert(!timer_slots_keys_valid(seq![(retry, key)])) by {
-        if timer_slots_keys_valid(seq![(retry, key)]) {
-            assert((seq![(retry, key)])[0] == (retry, key));
-            assert(match crate::keys::spec_parse_timer_key(key) {
-                Some(parsed) => retry == parsed.deadline(),
-                None => false,
-            });
-            assert(retry == entry.deadline());
-            assert(false);
-        }
+    assert(crate::state_timers::spec_max(now, firing_at)
+        >= firing_at);
+    assert(retry >= crate::state_timers::spec_max(now, firing_at));
+    assert(retry >= firing_at);
+    assert(retry >= entry.deadline());
+    lemma_arm_preserves_timer_key_deadlines(
+        slots,
+        retry,
+        key,
+        entry,
+    );
+}
+
+/// With no older due key waiting, a completed timer flight decrements its
+/// reservation and, for Kept/failed outcomes, rearms at the operational retry
+/// slot while preserving wheel order, key validity, ownership, and capacity.
+pub proof fn lemma_timer_fired_empty_backlog_preserves_activity(
+    s: S,
+    firing: crate::handler_docs::FiringSpec,
+    entry: crate::keys::TimerEntrySpec,
+    now: u64,
+    result: Result<crate::types::Fired, Seq<char>>,
+)
+    requires
+        timer_activity_consistent(s),
+        s.timers.backlog
+            == Seq::<crate::state_timers::SlotSpec>::empty(),
+        crate::keys::spec_parse_timer_key(firing.key) == Some(entry),
+        firing.at >= entry.deadline(),
+        s.timers.reload_pending
+            || crate::handler_timers::spec_owns_entry(s, entry),
+    ensures
+        timer_activity_consistent(
+            crate::handler_timers::spec_timer_fired(
+                s,
+                firing,
+                now,
+                result,
+            ),
+        ),
+{
+    lemma_timer_fired_preserves_accounting(s, firing, now, result);
+    let retry = crate::state_timers::spec_max(now, firing.at)
+        .saturating_add(crate::state_timers::RETRY_AFTER_MS);
+    assert(retry >= firing.at);
+    assert(retry >= entry.deadline());
+    lemma_arm_preserves_timer_wheel_order(
+        s.timers.wheel.armed,
+        retry,
+        firing.key,
+    );
+    lemma_retry_slot_preserves_key_deadline(
+        s.timers.wheel.armed,
+        firing.key,
+        entry,
+        firing.at,
+        now,
+    );
+    if !s.timers.reload_pending {
+        lemma_arm_preserves_timer_ownership(
+            s,
+            s.timers.wheel.armed,
+            retry,
+            firing.key,
+            entry,
+        );
     }
+    reveal(crate::handler_timers::spec_timer_fired);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::handler_timers::spec_dispatch_due);
+    reveal(crate::state::spec_note);
+    assert(timer_activity_consistent(
+        crate::handler_timers::spec_timer_fired(
+            s,
+            firing,
+            now,
+            result,
+        ),
+    ));
 }
 
 /// Runtime bookkeeping agrees with the operation table held by the core.
