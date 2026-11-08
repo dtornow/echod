@@ -4,10 +4,11 @@ include "temp.dfy"
 // A promise get, across the client, the node, and the bucket.
 //
 // The bucket holds documents. A missing key is the empty origin. The node
-// asks for the origin document of the id and replies with that document's
-// Get at the instant the answer arrives. A delivered reply is that Get of
-// a document the bucket held at the read, and the read sits between the
-// request and the reply. A dropped reply never arrives, so this says
+// holds the set of gets in flight, one continuation per id: the caller to
+// answer when the bucket returns that id. Many gets sit in the set at once.
+// A delivered reply is the Get of a document the bucket held at the read,
+// and the read sits between the request and the reply, while that
+// continuation was in the set. A dropped reply never arrives, so this says
 // nothing about a client that received nothing.
 
 module Node {
@@ -15,7 +16,7 @@ module Node {
   import Temp
 
   datatype Pid = Client | Node | Bucket
-  datatype Phase = Idle | Getting(caller: Pid, id: string)
+  datatype Cont = WaitGet(caller: Pid)
   datatype Msg =
     | PromiseGet(id: string)
     | PromiseReply(answer: Temp.Answer)
@@ -23,7 +24,7 @@ module Node {
     | Got(id: string, doc: Temp.Doc)
   datatype State =
     | AtClient(id: string, waiting: bool)
-    | AtNode(phase: Phase)
+    | AtNode(open: map<string, Cont>)
     | AtBucket(docs: map<string, Temp.Doc>)
 
   const Pids: set<Pid> := {Client, Node, Bucket}
@@ -39,7 +40,7 @@ module Node {
   function Boot(docs: map<string, Temp.Doc>, id: string, self: Pid): State {
     match self
     case Client => AtClient(id, true)
-    case Node => AtNode(Idle)
+    case Node => AtNode(map[])
     case Bucket => AtBucket(docs)
   }
 
@@ -63,20 +64,16 @@ module Node {
   function NodeOn(s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
     requires s.AtNode?
   {
-    match s.phase
-    case Idle =>
-      (match i
-       case Request(from, PromiseGet(id)) =>
-         Result(AtNode(Getting(from, id)), [Send(Bucket, Get(id))], Keep)
-       case _ => Result(s, [], Keep))
-    case Getting(caller, id) =>
-      (match i
-       case Request(_, Got(got, doc)) =>
-         if got == id then
-           var answer := Temp.Get(doc, id, now).answer;
-           Result(AtNode(Idle), [Send(caller, PromiseReply(answer))], Keep)
-         else Result(s, [], Keep)
-       case _ => Result(s, [], Keep))
+    match i
+    case Request(from, PromiseGet(id)) =>
+      if id in s.open then Result(s, [], Keep)
+      else Result(AtNode(s.open[id := WaitGet(from)]), [Send(Bucket, Get(id))], Keep)
+    case Request(_, Got(id, doc)) =>
+      if id in s.open then
+        var answer := Temp.Get(doc, id, now).answer;
+        Result(AtNode(s.open - {id}), [Send(s.open[id].caller, PromiseReply(answer))], Keep)
+      else Result(s, [], Keep)
+    case _ => Result(s, [], Keep)
   }
 
   function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State> {
@@ -113,19 +110,29 @@ module Node {
 
   function {:opaque} Lt(i: nat, n: nat): bool { i < n }
 
-  ghost predicate Still(b: nat -> Net<Pid, Msg, State>, phase: Phase, i: nat, n: nat) {
+  // `id` has waited for `caller` at every state strictly after the request.
+  ghost predicate Held(b: nat -> Net<Pid, Msg, State>, id: string, caller: Pid, i: nat, n: nat) {
     forall m {:trigger b(m)} :: Lt(i, m) && Lt(m, n + 1) ==>
-      Node in b(m).procs && b(m).procs[Node] == AtNode(phase)
+      && Node in b(m).procs
+      && b(m).procs[Node].AtNode?
+      && id in b(m).procs[Node].open
+      && b(m).procs[Node].open[id] == WaitGet(caller)
+  }
+
+  ghost predicate Entry(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat, id: string) {
+    && Node in b(n).procs && b(n).procs[Node].AtNode?
+    && id in b(n).procs[Node].open
+    && (var caller := b(n).procs[Node].open[id].caller;
+        exists i {:trigger a(i)} ::
+          && Lt(i, n)
+          && a(i) == Deliver(Packet(caller, Node, PromiseGet(id)))
+          && Held(b, id, caller, i, n))
   }
 
   ghost predicate OpenOk(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat) {
-    Node in b(n).procs && b(n).procs[Node].AtNode? &&
-     (var phase := b(n).procs[Node].phase;
-     phase.Getting? ==>
-       exists i {:trigger a(i)} ::
-         && Lt(i, n)
-         && a(i) == Deliver(Packet(phase.caller, Node, PromiseGet(phase.id)))
-         && Still(b, phase, i, n))
+    && Node in b(n).procs && b(n).procs[Node].AtNode?
+    && (forall id {:trigger b(n).procs[Node].open[id]} ::
+         id in b(n).procs[Node].open ==> Entry(b, a, n, id))
   }
 
   ghost predicate Justified(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
@@ -139,7 +146,9 @@ module Node {
       && answer == Temp.Get(doc, id, b(k).now).answer
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && b(k).procs[Bucket].docs == docs
-      && Node in b(k).procs && b(k).procs[Node] == AtNode(Getting(caller, id))
+      && Node in b(k).procs && b(k).procs[Node].AtNode?
+      && id in b(k).procs[Node].open
+      && b(k).procs[Node].open[id] == WaitGet(caller)
   }
 
   ghost predicate RepliesOk(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
@@ -200,33 +209,39 @@ module Node {
     if self != Node { assert n'.procs[Node] == n.procs[Node]; }
   }
 
-  lemma StillLater(b: nat -> Net<Pid, Msg, State>, phase: Phase, i: nat, n: nat)
-    requires Still(b, phase, i, n)
-    requires Node in b(n+1).procs && b(n+1).procs[Node] == AtNode(phase)
-    ensures Still(b, phase, i, n+1)
+  lemma HeldLater(b: nat -> Net<Pid, Msg, State>, id: string, caller: Pid, i: nat, n: nat)
+    requires Held(b, id, caller, i, n)
+    requires Node in b(n+1).procs && b(n+1).procs[Node].AtNode?
+    requires id in b(n+1).procs[Node].open && b(n+1).procs[Node].open[id] == WaitGet(caller)
+    ensures Held(b, id, caller, i, n+1)
   {
     reveal Lt();
     forall m {:trigger b(m)} | i < m < n + 2
-      ensures Node in b(m).procs && b(m).procs[Node] == AtNode(phase)
+      ensures Node in b(m).procs && b(m).procs[Node].AtNode?
+        && id in b(m).procs[Node].open && b(m).procs[Node].open[id] == WaitGet(caller)
     {
       if m < n + 1 {
-        assert b(m).procs[Node] == AtNode(phase);
+        assert b(m).procs[Node].open[id] == WaitGet(caller);
       }
     }
   }
 
-  lemma OpenLater(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
+  lemma OpenSame(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
     requires OpenOk(b, a, n)
     requires Node in b(n).procs && Node in b(n+1).procs
     requires b(n).procs[Node].AtNode? && b(n+1).procs[Node] == b(n).procs[Node]
     ensures OpenOk(b, a, n+1)
   {
     reveal Lt();
-    var phase := b(n+1).procs[Node].phase;
-    if phase.Getting? {
-      assert b(n).procs[Node].phase == phase;
-      var i :| Lt(i, n) && a(i) == Deliver(Packet(phase.caller, Node, PromiseGet(phase.id))) && Still(b, phase, i, n);
-      StillLater(b, phase, i, n);
+    var open := b(n+1).procs[Node].open;
+    forall id | id in open
+      ensures Entry(b, a, n+1, id)
+    {
+      var caller := open[id].caller;
+      assert Entry(b, a, n, id);
+      var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, Node, PromiseGet(id))) && Held(b, id, caller, i, n);
+      HeldLater(b, id, caller, i, n);
+      assert Lt(i, n + 1);
     }
   }
 
@@ -244,7 +259,9 @@ module Node {
       && answer == Temp.Get(doc, id, b(k).now).answer
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && b(k).procs[Bucket].docs == docs
-      && Node in b(k).procs && b(k).procs[Node] == AtNode(Getting(caller, id));
+      && Node in b(k).procs && b(k).procs[Node].AtNode?
+      && id in b(k).procs[Node].open
+      && b(k).procs[Node].open[id] == WaitGet(caller);
     assert Lt(k, n + 1);
   }
 
@@ -274,7 +291,7 @@ module Node {
       assert Justified(docs, b, a, n, p.dst, p.msg.answer);
       JustifyLater(docs, b, a, n, p.dst, p.msg.answer);
     }
-    OpenLater(b, a, n);
+    OpenSame(b, a, n);
   }
 
   lemma NoSuch(self: Pid, sends: seq<Send<Pid, Msg>>, q: Packet<Pid, Msg>)
@@ -319,12 +336,12 @@ module Node {
     requires IsInit(World(docs, ask), n)
     ensures Shaped(docs, n)
     ensures n.inflight == multiset{}
-    ensures n.procs[Node] == AtNode(Idle)
+    ensures n.procs[Node] == AtNode(map[])
   {
     var w := World(docs, ask);
     assert n.procs == (map p | p in w.pids :: w.init(p));
-    assert w.init(Node) == Boot(docs, ask, Node) == AtNode(Idle);
-    assert n.procs[Node] == AtNode(Idle);
+    assert w.init(Node) == Boot(docs, ask, Node) == AtNode(map[]);
+    assert n.procs[Node] == AtNode(map[]);
     assert n.procs[Bucket] == AtBucket(docs);
     assert n.procs[Client] == AtClient(ask, true);
     assert n.procs.Keys == Pids;
@@ -491,7 +508,7 @@ module Node {
           assert q in b(n).inflight;
         }
       }
-      OpenLater(b, a, n);
+      OpenSame(b, a, n);
     case _ =>
       assert r == Result(b(n).procs[Bucket], [], Keep);
       QuietStep(docs, b, a, n, base, Bucket, r);
@@ -509,20 +526,36 @@ module Node {
     ensures Inv(docs, b, a, n+1)
   {
     var s := b(n).procs[Node];
-    if s.phase.Idle? && p.msg.PromiseGet? {
+    if p.msg.PromiseGet? && p.msg.id !in s.open {
       var id := p.msg.id;
-      assert r == Result(AtNode(Getting(p.src, id)), [Send(Bucket, Get(id))], Keep);
-      var phase := Getting(p.src, id);
+      var caller := p.src;
+      var open' := s.open[id := WaitGet(caller)];
+      assert r == Result(AtNode(open'), [Send(Bucket, Get(id))], Keep);
       var born := Packet(Node, Bucket, Get(id));
       ShapeAt(docs, b(n), Node, r.state);
       assert b(n+1).procs == b(n).procs[Node := r.state];
-      assert b(n+1).procs[Node] == AtNode(phase);
+      assert b(n+1).procs[Node] == AtNode(open');
       reveal Lt();
       forall m {:trigger b(m)} | n < m < n + 2
-        ensures Node in b(m).procs && b(m).procs[Node] == AtNode(phase)
-      { assert m == n+1; }
-      assert Still(b, phase, n, n+1);
-      assert a(n) == Deliver(Packet(p.src, Node, PromiseGet(id)));
+        ensures Node in b(m).procs && b(m).procs[Node].AtNode?
+          && id in b(m).procs[Node].open && b(m).procs[Node].open[id] == WaitGet(caller)
+      { assert m == n + 1; }
+      assert Held(b, id, caller, n, n + 1);
+      assert a(n) == Deliver(Packet(caller, Node, PromiseGet(id)));
+      forall oid | oid in open'
+        ensures Entry(b, a, n+1, oid)
+      {
+        if oid == id {
+          assert Lt(n, n + 1);
+        } else {
+          assert oid in s.open && open'[oid] == s.open[oid];
+          var c := s.open[oid].caller;
+          assert Entry(b, a, n, oid);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(c, Node, PromiseGet(oid))) && Held(b, oid, c, i, n);
+          HeldLater(b, oid, c, i, n);
+          assert Lt(i, n + 1);
+        }
+      }
       forall q | q in b(n+1).inflight && q.msg.Got? ensures q in b(n).inflight {
         OldPackets(base, Node, r, q, true);
         assert q in base.inflight;
@@ -540,17 +573,29 @@ module Node {
           assert q in base.inflight && q in b(n).inflight;
         }
       }
-    } else if s.phase.Getting? && p.msg.Got? && p.msg.id == s.phase.id {
-      var caller := s.phase.caller;
-      var id := s.phase.id;
+    } else if p.msg.Got? && p.msg.id in s.open {
+      var id := p.msg.id;
+      var caller := s.open[id].caller;
       var doc := p.msg.doc;
       assert p.src == Bucket && doc == DocumentAt(docs, id);
       var answer := Temp.Get(doc, id, b(n).now).answer;
-      assert r == Result(AtNode(Idle), [Send(caller, PromiseReply(answer))], Keep);
+      var open' := s.open - {id};
+      assert r == Result(AtNode(open'), [Send(caller, PromiseReply(answer))], Keep);
       ShapeAt(docs, b(n), Node, r.state);
       assert b(n+1).procs == b(n).procs[Node := r.state];
-      assert b(n+1).procs[Node] == AtNode(Idle);
+      assert b(n+1).procs[Node] == AtNode(open');
       var born := Packet(Node, caller, PromiseReply(answer));
+      reveal Lt();
+      forall oid | oid in open'
+        ensures Entry(b, a, n+1, oid)
+      {
+        assert oid in s.open && oid != id && open'[oid] == s.open[oid];
+        var c := s.open[oid].caller;
+        assert Entry(b, a, n, oid);
+        var i :| Lt(i, n) && a(i) == Deliver(Packet(c, Node, PromiseGet(oid))) && Held(b, oid, c, i, n);
+        HeldLater(b, oid, c, i, n);
+        assert Lt(i, n + 1);
+      }
       forall q | q in b(n+1).inflight && q.msg.Get? ensures q in b(n).inflight {
         OldKind(base, Node, r, q);
         assert q in base.inflight;
@@ -563,11 +608,10 @@ module Node {
         ensures q.src == Node && Justified(docs, b, a, n+1, q.dst, q.msg.answer)
       {
         if q == born {
-          reveal Lt();
-          var phase := Getting(caller, id);
-          var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, Node, PromiseGet(id))) && Still(b, phase, i, n);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, Node, PromiseGet(id))) && Held(b, id, caller, i, n);
           assert Lt(n, n + 1);
           assert a(n) == Deliver(Packet(Bucket, Node, Got(id, doc)));
+          assert id in b(n).procs[Node].open && b(n).procs[Node].open[id] == WaitGet(caller);
           assert Justified(docs, b, a, n+1, caller, answer);
         } else {
           Split(base, Node, r, q);
