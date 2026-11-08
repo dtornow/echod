@@ -363,8 +363,17 @@ verus! {
 /// The steps an object or schedule offers, keeping those the handler will
 /// perform. Occurrences are not here: a schedule step queues those, and the
 /// queue is the only one. The handler is the guard.
+pub uninterp spec fn spec_timeout_work(
+    m: ServerConfig,
+    s: Store,
+    now: Time,
+) -> Seq<Sched<Work>>;
+
 #[verifier::external_body]
-pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
+pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> (r: Vec<Sched<Work>>)
+    ensures
+        r@ == spec_timeout_work(*m, *s, now),
+{
     timeout_work_plain(m, s, now)
 }
 

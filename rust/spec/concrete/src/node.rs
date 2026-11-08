@@ -3333,6 +3333,9 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
+    if now > MAX_TIME {
+        return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
+    }
     let next_run_at = next_cron(&req.cron, now);
     if !deadline_bounded(next_run_at, req.promise_timeout)
         || (targeted(&req.promise_tags) && timer(&req.promise_tags))
@@ -3581,7 +3584,7 @@ pub fn run_due(doc: DocumentBody, now: u64, retry_timeout: u64) -> (r: (Document
     }
     match doc {
         DocumentBody::Schedule(Some(schedule)) => {
-            if schedule.next_run_at <= now {
+            if schedule.next_run_at <= now && schedule.next_run_at <= MAX_TIME {
                 let at = schedule.next_run_at;
                 let pending = Pending {
                     promise: expand(&schedule.promise_id, &schedule.id, at),
@@ -4616,7 +4619,7 @@ impl Node {
             let op = self.next_op;
             let body = encode_body(&next);
             proof {
-                crate::simulation::lemma_bytes(spec_encode_body(next@));
+                crate::simulation::lemma_bytes_of(body);
                 axiom_vec_ext(body, spec_bytes(spec_encode_body(next@)));
                 crate::interpret::lemma_string_of(key);
             }
@@ -6378,28 +6381,32 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
-        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
-    {
+    if now > MAX_TIME {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
-        match doc {
-            DocumentBodyV::Schedule(Some(schedule)) => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
-            _ => {
-                let schedule = Schedule {
-                    id: req.id,
-                    cron: req.cron,
-                    promise_id: req.promise_id,
-                    promise_timeout: req.promise_timeout,
-                    promise_param: req.promise_param,
-                    promise_tags: req.promise_tags,
-                next_run_at,
-                    last_run_at: None,
-                    created_at: now,
-                };
-                (DocumentBodyV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) }))
-            },
+        let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
+        if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
+        {
+            (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
+        } else {
+            match doc {
+                DocumentBodyV::Schedule(Some(schedule)) => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
+                _ => {
+                    let schedule = Schedule {
+                        id: req.id,
+                        cron: req.cron,
+                        promise_id: req.promise_id,
+                        promise_timeout: req.promise_timeout,
+                        promise_param: req.promise_param,
+                        promise_tags: req.promise_tags,
+                        next_run_at,
+                        last_run_at: None,
+                        created_at: now,
+                    };
+                    (DocumentBodyV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) }))
+                },
+            }
         }
     }
 }
@@ -6413,7 +6420,8 @@ pub open spec fn spec_schedule_delete(doc: DocumentBodyV, id: String) -> (Docume
 
 pub open spec fn spec_run_due(doc: DocumentBodyV, now: Time, retry_timeout: u64) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match doc {
-        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
+        DocumentBodyV::Schedule(Some(schedule))
+            if schedule.next_run_at <= now && schedule.next_run_at <= MAX_TIME => {
             let at = schedule.next_run_at;
             let pending = PendingV {
                 promise: echod_abstract::trusted::spec_expand(schedule.promise_id@, schedule.id@, at),

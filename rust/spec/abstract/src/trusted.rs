@@ -17,6 +17,8 @@ use vstd::prelude::*;
 
 pub use echod_types::same_origin;
 #[cfg(verus_keep_ghost)]
+use echod_types::MAX_TIME;
+#[cfg(verus_keep_ghost)]
 pub use echod_types::origin;
 
 verus! {
@@ -208,11 +210,14 @@ pub fn cron_valid(cron: &String) -> (r: bool)
     super::footprint::cron_valid(cron)
 }
 
-/// Lean's `nextCron`, as the spec sees it: strictly after `after`.
+/// Lean's `nextCron`, as the spec sees it. Protocol times leave enough
+/// headroom for a strictly later `u64` result.
 pub uninterp spec fn spec_next_cron(cron: Seq<char>, after: u64) -> u64;
 
 #[verifier::external_body]
 pub proof fn axiom_next_cron_after(cron: Seq<char>, after: u64)
+    requires
+        after <= MAX_TIME,
     ensures
         spec_next_cron(cron, after) > after,
 {
@@ -222,6 +227,8 @@ pub proof fn axiom_next_cron_after(cron: Seq<char>, after: u64)
 /// as the reference server computes it (whole seconds, in milliseconds).
 #[verifier::external_body]
 pub fn next_cron(cron: &String, after: u64) -> (r: u64)
+    requires
+        after <= MAX_TIME,
     ensures
         r == spec_next_cron(cron@, after),
         r > after,
@@ -279,14 +286,19 @@ pub axiom fn axiom_vec_ext<T>(a: Vec<T>, b: Vec<T>)
         a == b,
 ;
 
-/// Any characters are some string's characters.
+/// Any characters that fit the executable carrier are some string's
+/// characters. Unbounded mathematical sequences are not Rust strings.
 pub axiom fn axiom_string_realised(chars: Seq<char>)
+    requires
+        chars.len() <= usize::MAX as int,
     ensures
         exists|s: String| s@ == chars,
 ;
 
-/// Any bytes are some vector's bytes.
+/// Any bytes that fit the executable carrier are some vector's bytes.
 pub axiom fn axiom_bytes_realised(bytes: Seq<u8>)
+    requires
+        bytes.len() <= usize::MAX as int,
     ensures
         exists|v: Vec<u8>| v@ == bytes,
 ;

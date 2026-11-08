@@ -29,6 +29,10 @@ impl Model for Register {
     fn internal(&self, _: &(), _: &u8, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
     }
+
+    fn due(&self, _: &u8, _: Time) -> Vec<echod_rover::Sched<()>> {
+        Vec::new()
+    }
 }
 
 /// Many writes in flight, never answered, then a read: which value it sees

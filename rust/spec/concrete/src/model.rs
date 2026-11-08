@@ -193,7 +193,7 @@ impl View for Local {
 /// Opaque: the choice is read through the string lemmas alone.
 #[verifier::opaque]
 pub open spec fn spec_string(chars: Seq<char>) -> String {
-    choose|s: String| s@ == chars
+    echod_abstract::machine::spec_string(chars)
 }
 
 /// Opaque: the choice is read through [`crate::simulation::lemma_bytes`] alone.

@@ -124,10 +124,9 @@ pub struct InternalOutcome<M: Model + ?Sized> {
 /// the trace says when time moved ([`Event::Clock`]).
 ///
 /// Each method has a `spec` twin the proofs use ([`semantics`]), and must
-/// compute what its twin says (its `ensures`). A model written outside
-/// `verus!` keeps the default twins, which then stand for whatever the methods
-/// compute: they must be pure, and nothing checks that. A model written in
-/// Verus overrides the twins and has its methods verified against them.
+/// compute what its twin says (its `ensures`). The twins are proof-only trait
+/// items, so ordinary Rust implementations need not mention them; a model
+/// compiled by Verus must define them and prove its executable methods agree.
 pub trait Model {
     type State: Clone + Eq + Hash + Debug;
     /// External: a request a client sends.
@@ -166,25 +165,24 @@ pub trait Model {
             };
 
     /// What [`Model::external`] computes, for the proofs.
-    open spec fn spec_external(&self, req: Self::External, state: Self::State, now: Time) -> Seq<
+    spec fn spec_external(&self, req: Self::External, state: Self::State, now: Time) -> Seq<
         semantics::ExternalOutcomeV<Self::State, Self::Response, Self::Internal, Self::Dispatch>,
-    > {
-        arbitrary()
-    }
+    >;
 
     /// What [`Model::internal`] computes, for the proofs.
-    open spec fn spec_internal(&self, req: Self::Internal, state: Self::State, now: Time) -> Seq<
+    spec fn spec_internal(&self, req: Self::Internal, state: Self::State, now: Time) -> Seq<
         semantics::InternalOutcomeV<Self::State, Self::Internal, Self::Dispatch>,
-    > {
-        arbitrary()
-    }
+    >;
 
     /// Work the state and the clock already imply, without anything having
     /// queued it. Empty unless a model derives its timers from its state.
     /// The checker offers these alongside pending work and does not store them.
-    fn due(&self, _state: &Self::State, _now: Time) -> (r: Vec<Sched<Self::Internal>>) {
-        Vec::new()
-    }
+    fn due(&self, state: &Self::State, now: Time) -> (r: Vec<Sched<Self::Internal>>)
+        ensures
+            r@ == self.spec_due(*state, now);
+
+    /// What [`Model::due`] computes.
+    spec fn spec_due(&self, state: Self::State, now: Time) -> Seq<Sched<Self::Internal>>;
 }
 
 } // verus!

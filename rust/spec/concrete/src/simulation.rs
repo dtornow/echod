@@ -1331,19 +1331,36 @@ pub proof fn lemma_owner(fleet: Fleet, world: World<CModel>, i: int, key: Seq<ch
 
 /// The realised string and bytes.
 pub proof fn lemma_string(chars: Seq<char>)
+    requires
+        chars.len() <= usize::MAX as int,
     ensures
         spec_string(chars)@ == chars,
 {
     reveal(crate::model::spec_string);
+    reveal(echod_abstract::machine::spec_string);
     axiom_string_realised(chars);
 }
 
 pub proof fn lemma_bytes(bytes: Seq<u8>)
+    requires
+        bytes.len() <= usize::MAX as int,
     ensures
         crate::model::spec_bytes(bytes)@ == bytes,
 {
     reveal(crate::model::spec_bytes);
     echod_abstract::trusted::axiom_bytes_realised(bytes);
+}
+
+pub proof fn lemma_bytes_of(bytes: Vec<u8>)
+    ensures
+        crate::model::spec_bytes(bytes@) == bytes,
+{
+    reveal(crate::model::spec_bytes);
+    assert(exists|v: Vec<u8>| v@ == bytes@) by {
+        assert(bytes@ == bytes@);
+    }
+    assert(crate::model::spec_bytes(bytes@)@ == bytes@);
+    echod_abstract::trusted::axiom_vec_ext(crate::model::spec_bytes(bytes@), bytes);
 }
 
 /// `spec_notes` sends each note's output to the outside.
@@ -1387,8 +1404,7 @@ pub proof fn lemma_reply_is_output(call: Call, response: Response)
             response,
         }),
 {
-    lemma_string(call.client@);
-    axiom_string_ext(spec_string(call.client@), call.client);
+    crate::interpret::lemma_string_of(call.client);
 }
 
 /// `decision` reads the job and the time of a flight.

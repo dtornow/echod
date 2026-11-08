@@ -40,6 +40,10 @@ impl Model for Flag {
     fn internal(&self, _: &(), s: &bool, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::same(s)]
     }
+
+    fn due(&self, _: &bool, _: Time) -> Vec<echod_rover::Sched<()>> {
+        Vec::new()
+    }
 }
 
 impl Footprint for Flag {

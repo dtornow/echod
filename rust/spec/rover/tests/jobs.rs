@@ -94,6 +94,10 @@ impl Model for JobModel {
             _ => vec![InternalOutcome::same(s)], // finished: nothing to do
         }
     }
+
+    fn due(&self, _: &Queue, _: Time) -> Vec<echod_rover::Sched<u32>> {
+        Vec::new()
+    }
 }
 
 impl Footprint for JobModel {

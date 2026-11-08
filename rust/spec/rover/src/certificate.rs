@@ -162,6 +162,25 @@ fn ready<I>(now: Time, s: &Sched<I>) -> (r: bool)
     }
 }
 
+fn sched_overdue<M: Model>(
+    m: &M,
+    state: &M::State,
+    now: Time,
+    w: &Sched<M::Internal>,
+) -> (r: bool)
+    ensures
+        r == match *w {
+            Sched::Timer(t, req) =>
+                t <= now && m.spec_internal(req, *state, now).len() > 0,
+            Sched::Later(_) => false,
+        },
+{
+    match w {
+        Sched::Timer(t, req) => *t <= now && !m.internal(req, state, now).is_empty(),
+        Sched::Later(_) => false,
+    }
+}
+
 impl<'m, M: Model> Config<'m, M> {
     pub(crate) fn initial(m: &'m M, init: M::State) -> (c: Self)
         ensures
@@ -175,6 +194,7 @@ impl<'m, M: Model> Config<'m, M> {
     fn work_overdue(&self, i: usize) -> (r: bool)
         requires
             i < self.internals.len(),
+            self.internals@ == semantics::effective(*self.m, self@),
         ensures
             r == semantics::is_overdue(*self.m, self@, i as int),
     {
@@ -188,11 +208,15 @@ impl<'m, M: Model> Config<'m, M> {
         ensures
             r == semantics::overdue(*self.m, self@),
     {
-        for i in 0..self.internals.len()
+        let full = self.augmented();
+        for i in 0..full.len()
             invariant
+                full@ == semantics::effective(*self.m, self@),
                 forall|k: int| 0 <= k < i ==> !semantics::is_overdue(*self.m, self@, k),
         {
-            if self.work_overdue(i) {
+            let is_due = sched_overdue(self.m, &self.state, self.now, &full[i]);
+            assert(is_due == semantics::is_overdue(*self.m, self@, i as int));
+            if is_due {
                 return true;
             }
         }
@@ -204,21 +228,29 @@ impl<'m, M: Model> Config<'m, M> {
     fn may_run(&self, i: usize) -> (r: bool)
         requires
             i < self.internals.len(),
+            self.internals@ == semantics::effective(*self.m, self@),
         ensures
             r == (!semantics::overdue(*self.m, self@) || semantics::is_first(*self.m, self@, i as int)),
     {
         if !self.overdue() {
             return true;
         }
+        assert(self.internals@ == semantics::effective(*self.m, self@));
         if !self.work_overdue(i) {
             return false;
         }
         for v in 0..self.internals.len()
             invariant
                 i < self.internals.len(),
+                i < semantics::effective(*self.m, self@).len(),
+                self.internals@ == semantics::effective(*self.m, self@),
                 forall|k: int| 0 <= k < v && #[trigger] semantics::is_overdue(*self.m, self@, k)
-                    ==> semantics::due_le(self@.internals[i as int], self@.internals[k]),
+                    ==> semantics::due_le(
+                        semantics::effective(*self.m, self@)[i as int],
+                        semantics::effective(*self.m, self@)[k],
+                    ),
         {
+            assert(self.internals@ == semantics::effective(*self.m, self@));
             if self.work_overdue(v) && !due_le(&self.internals[i], &self.internals[v]) {
                 return false;
             }
@@ -335,37 +367,75 @@ impl<'m, M: Model> Config<'m, M> {
     /// Append what [`Model::due`] reads off the state, unless it is already
     /// queued. The checker's search does not store these; a certificate names
     /// them by their place in this list, so replay builds the same list.
-    pub(crate) fn augmented(&self) -> (v: Vec<Sched<M::Internal>>) {
-        let mut v = self.internals.clone();
+    pub(crate) fn augmented(&self) -> (v: Vec<Sched<M::Internal>>)
+        ensures
+            v@ == semantics::effective(*self.m, self@),
+    {
+        let mut v = copy(&self.internals);
         let due = self.m.due(&self.state, self.now);
+        let ghost base = self.internals@;
+        let ghost all = due@;
+        assert(v@ == base);
         let mut k = 0;
+        assert(semantics::augment(base, all.take(0)) == base);
         while k < due.len()
             invariant
                 k <= due.len(),
+                due@ == all,
+                v@ == semantics::augment(base, all.take(k as int)),
             decreases due.len() - k,
         {
-            let sched = due[k].clone();
+            let sched = copy(&due[k]);
+            let ghost before = v@;
             let mut found = false;
             let mut i = 0;
             while i < v.len()
                 invariant
                     i <= v.len(),
+                    v@ == before,
+                    found ==> exists|j: int| 0 <= j < i && before[j] == sched,
+                    !found ==> forall|j: int| 0 <= j < i ==> before[j] != sched,
                 decreases v.len() - i,
             {
-                if v[i] == sched {
+                if same(&v[i], &sched) {
                     found = true;
                 }
                 i += 1;
             }
+            assert(found == before.contains(sched)) by {
+                if found {
+                    let j = choose|j: int| 0 <= j < i && before[j] == sched;
+                    assert(0 <= j < before.len() && before[j] == sched);
+                } else if before.contains(sched) {
+                    let j = choose|j: int| 0 <= j < before.len() && before[j] == sched;
+                    assert(false);
+                }
+            }
             if !found {
                 v.push(sched);
             }
+            assert(v@ == semantics::insert_missing(before, sched));
+            assert(all.take(k as int + 1).drop_last() =~= all.take(k as int));
+            assert(all.take(k as int + 1).last() == all[k as int]);
+            assert(semantics::augment(base, all.take(k as int + 1))
+                == semantics::insert_missing(
+                    semantics::augment(base, all.take(k as int)),
+                    all[k as int],
+                ));
             k += 1;
         }
+        assert(all.take(all.len() as int) =~= all);
         v
     }
 
-    fn sync_due(&mut self) {
+    fn sync_due(&mut self)
+        ensures
+            final(self)@ == (semantics::Config {
+                internals: semantics::effective(*old(self).m, old(self)@),
+                ..old(self)@
+            }),
+            final(self).m == old(self).m,
+    {
         let full = self.augmented();
         self.internals = full;
     }
@@ -376,7 +446,19 @@ impl<'m, M: Model> Config<'m, M> {
             r is Ok ==> semantics::step(*old(self).m, old(self)@, Label::Silent, final(self)@),
             final(self).m == old(self).m,
     {
+        let ghost pending = self.internals@;
+        let ghost derived = self.m.spec_due(self.state, self.now);
         self.sync_due();
+        proof {
+            semantics::lemma_augment_idempotent(pending, derived);
+            assert(self.internals@ == semantics::effective(*self.m, self@));
+            assert(semantics::effective(*self.m, self@)
+                == semantics::effective(*old(self).m, old(self)@));
+            assert forall|i: int| semantics::is_overdue(*self.m, self@, i)
+                == semantics::is_overdue(*old(self).m, old(self)@, i) by {};
+            assert(semantics::overdue(*self.m, self@)
+                == semantics::overdue(*old(self).m, old(self)@));
+        }
         match s {
             Silent::Effect { call, j } => {
                 let Some(op) = self.externals.get(&call) else { return Err(()) };

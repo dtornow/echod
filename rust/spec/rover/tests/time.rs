@@ -64,6 +64,10 @@ impl Model for Chain {
             }
         }]
     }
+
+    fn due(&self, _: &State, _: Time) -> Vec<echod_rover::Sched<Work>> {
+        Vec::new()
+    }
 }
 
 /// A call, answered before the next; or the clock moving.

@@ -691,17 +691,26 @@ pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
 // Strings, records, tags: the two sides name the same things
 // ---------------------------------------------------------------------------
 
+pub proof fn lemma_string_same(chars: Seq<char>)
+    ensures
+        crate::model::spec_string(chars)
+            == echod_abstract::machine::spec_string(chars),
+{
+    reveal(crate::model::spec_string);
+}
+
 /// The chosen string of some characters is the string of those characters.
 pub proof fn lemma_string_view(chars: Seq<char>)
+    requires
+        chars.len() <= usize::MAX as int,
     ensures
         crate::model::spec_string(chars)@ == chars,
         echod_abstract::machine::spec_string(chars)@ == chars,
         crate::model::spec_string(chars) == echod_abstract::machine::spec_string(chars),
 {
-    reveal(crate::model::spec_string);
+    lemma_string_same(chars);
     reveal(echod_abstract::machine::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(crate::model::spec_string(chars), echod_abstract::machine::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
@@ -710,7 +719,12 @@ pub proof fn lemma_string_of(s: String)
         crate::model::spec_string(s@) == s,
         echod_abstract::machine::spec_string(s@) == s,
 {
-    lemma_string_view(s@);
+    reveal(crate::model::spec_string);
+    reveal(echod_abstract::machine::spec_string);
+    assert(exists|x: String| x@ == s@) by {
+        assert(s@ == s@);
+    }
+    assert(echod_abstract::machine::spec_string(s@)@ == s@);
     axiom_string_ext(crate::model::spec_string(s@), s);
 }
 
@@ -721,7 +735,7 @@ pub proof fn lemma_task_record(id: String, c: TkV, a: TaskV)
         spec_task_record(id, c) == a_task_record(id, a),
 {
     match c.pid {
-        Some(chars) => lemma_string_view(chars),
+        Some(chars) => lemma_string_same(chars),
         None => {},
     }
 }

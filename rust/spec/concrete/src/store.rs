@@ -1101,7 +1101,7 @@ impl Store {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
                     proof {
-                        crate::simulation::lemma_bytes(entry.body@);
+                        crate::simulation::lemma_bytes_of(body);
                         echod_abstract::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
                     StoreRes::Get { result: Ok(Some((body, etag(&entry.body)))) }
@@ -1120,7 +1120,7 @@ impl Store {
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
-                            crate::simulation::lemma_bytes(entry.body@);
+                            crate::simulation::lemma_bytes_of(body);
                             echod_abstract::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
                         StoreRes::GetIfNoneMatch { result: Ok(Read::Body(body, have)) }

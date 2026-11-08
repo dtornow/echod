@@ -1999,7 +1999,7 @@ pub proof fn lemma_schedule_create_agrees(
     lemma_schedule_key(req.id@);
     let slot = doc->Schedule_0;
     let next_run_at = echod_abstract::trusted::spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+    if now > MAX_TIME || !spec_deadline_bounded(next_run_at, req.promise_timeout)
         || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         assert(outs == spec_out(spec_schedule_res(400, None), s));
         lemma_others_same(key, s);

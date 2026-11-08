@@ -9,7 +9,7 @@ use vstd::prelude::*;
 use echod_rover::Sched;
 #[cfg(verus_keep_ghost)]
 use echod_types::origin;
-use echod_types::{PromiseState, TaskState, Value};
+use echod_types::{PromiseState, TaskState, Value, MAX_TIME};
 
 use super::super::trusted::*;
 #[cfg(verus_keep_ghost)]
@@ -215,6 +215,9 @@ impl ServerConfig {
             return self.noop(s);
         }
         let at_ = c.next_run_at;
+        if at_ > MAX_TIME {
+            return self.noop(s);
+        }
         let promise = expand(&c.promise_id, id, at_);
         let mut n = copy_store(s);
         let mut d = copy(c);
@@ -467,7 +470,7 @@ pub open spec fn spec_schedule_step(s: StoreV, id: Seq<char>, now: Time) -> InOu
         spec_noop(s)
     } else {
         let c = s.schedules[id];
-        if c.next_run_at > now {
+        if c.next_run_at > now || c.next_run_at > MAX_TIME {
             spec_noop(s)
         } else {
             let at = c.next_run_at;

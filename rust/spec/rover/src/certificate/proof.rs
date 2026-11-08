@@ -26,7 +26,7 @@ pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: Call
             Config {
                 state: o.next,
                 externals: c.externals.insert(call, ExternalOp { req: c.externals[call].req, res: Some(o.resp) }),
-                internals: start_all(c.internals, o.work, c.now),
+                internals: start_all(effective(m, c), o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }
@@ -40,15 +40,15 @@ pub(super) proof fn effect_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, call: Call
 /// An internal op runs: what `Config::silent` computes is a [`run`] step.
 pub(super) proof fn run_step<M: Model>(m: M, c: Cfg<M>, d: Cfg<M>, i: int, j: int)
     requires
-        0 <= i < c.internals.len(),
-        ready(c.now, c.internals[i]),
+        0 <= i < effective(m, c).len(),
+        ready(c.now, effective(m, c)[i]),
         overdue(m, c) ==> is_first(m, c, i),
-        0 <= j < m.spec_internal(req_of(c.internals[i]), c.state, c.now).len(),
+        0 <= j < m.spec_internal(req_of(effective(m, c)[i]), c.state, c.now).len(),
         d == ({
-            let o = m.spec_internal(req_of(c.internals[i]), c.state, c.now)[j];
+            let o = m.spec_internal(req_of(effective(m, c)[i]), c.state, c.now)[j];
             Config {
                 state: o.next,
-                internals: start_all(c.internals.remove(i), o.work, c.now),
+                internals: start_all(effective(m, c).remove(i), o.work, c.now),
                 sent: c.sent + o.send,
                 ..c
             }

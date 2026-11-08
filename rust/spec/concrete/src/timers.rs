@@ -23,7 +23,7 @@ use crate::interpret::{
     abstract_task, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
     lemma_empty_to_set, lemma_offer, lemma_origin_doc, lemma_origin_reads, lemma_origin_update,
     lemma_others_kept_schedule, lemma_others_kept_within, lemma_project_object, lemma_record,
-    lemma_sat_add, lemma_schedule_key, lemma_starts_split, lemma_string_view, lemma_targeted,
+    lemma_sat_add, lemma_schedule_key, lemma_starts_split, lemma_targeted,
     lemma_timer, object_rel, origin_prefix, origin_rel, promise_rel, schedule_prefix, schedule_rel,
     slot_rel, task_rel,
 };
@@ -59,7 +59,7 @@ use echod_abstract::model::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::{
     DispatchV, InOutV, InternalV, least as a_least, lemma_least_exists as a_lemma_least_exists,
-    lemma_lift_dispatch, lemma_min_key as a_lemma_min_key, lift_dispatch, PromiseV, sat_add,
+    lemma_min_key as a_lemma_min_key, lift_dispatch, PromiseV, sat_add,
     ScheduleV, spec_before as a_before, spec_keys, spec_min_key as a_min_key,
     spec_sorted as a_sorted, StoreV as AStore, TaskV,
 };
@@ -74,7 +74,7 @@ use echod_rover::rover::semantics::StepResultV;
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, PromiseRecord, PromiseState, Response, Schedule, TaskState};
+use echod_types::{origin, PromiseRecord, PromiseState, Response, Schedule, TaskState, MAX_TIME};
 
 verus! {
 
@@ -819,10 +819,8 @@ pub proof fn lemma_lift_execute(id: Seq<char>, version: u64)
     ensures
         lift_dispatch(DispatchV::Execute { id, version }) == (Dispatch::Execute { id: c_string(id), version }),
 {
-    let d = Dispatch::Execute { id: c_string(id), version };
-    lemma_string_view(id);
-    assert(d@ == DispatchV::Execute { id, version });
-    lemma_lift_dispatch(d);
+    crate::interpret::lemma_string_same(id);
+    reveal(lift_dispatch);
 }
 
 /// A lifted unblock is the unblock of the string.
@@ -833,10 +831,8 @@ pub proof fn lemma_lift_unblock(address: Seq<char>, promise: PromiseRecord)
             promise,
         }),
 {
-    let d = Dispatch::Unblock { address: c_string(address), promise };
-    lemma_string_view(address);
-    assert(d@ == DispatchV::Unblock { address, promise });
-    lemma_lift_dispatch(d);
+    crate::interpret::lemma_string_same(address);
+    reveal(lift_dispatch);
 }
 
 /// The sends of a due result, from its dispatches.
@@ -1513,7 +1509,7 @@ pub proof fn lemma_listener_due(
     lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now) == p);
-    lemma_string_view(id);
+    crate::interpret::lemma_string_same(id);
     assert(c_string(id) == a_string(id));
     lemma_record(c_string(id), obj.promise, p);
     let rec = spec_promise_record(a_string(id), p);
@@ -1637,6 +1633,7 @@ pub proof fn lemma_schedule_due(
         slot_rel(Some(sch), id, state.store),
         finite_store(state.store),
         sch.next_run_at <= now,
+        sch.next_run_at <= MAX_TIME,
     ensures
         due_agrees(config, key, DocumentBodyV::Schedule(Some(sch)), state, now),
 {
@@ -1718,7 +1715,7 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: Documen
         assert(key == spec_schedule_key(id));
         match doc {
             DocumentBodyV::Schedule(Some(sch)) => {
-                if sch.next_run_at <= now {
+                if sch.next_run_at <= now && sch.next_run_at <= MAX_TIME {
                     lemma_schedule_due(config, key, id, sch, state, now);
                 } else {
                     assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));

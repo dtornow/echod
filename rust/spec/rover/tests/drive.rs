@@ -30,6 +30,10 @@ impl Model for Mailbox {
     fn internal(&self, v: &u8, s: &Option<u8>, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::same(s).send(*v).mark("sent")]
     }
+
+    fn due(&self, _: &Option<u8>, _: Time) -> Vec<echod_rover::Sched<u8>> {
+        Vec::new()
+    }
 }
 
 impl Explore for Mailbox {

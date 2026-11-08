@@ -61,6 +61,10 @@ impl Model for BankModel {
     fn internal(&self, _: &(), _: &Bank, _: Time) -> Vec<InternalOutcome<Self>> {
         Vec::new()
     }
+
+    fn due(&self, _: &Bank, _: Time) -> Vec<echod_rover::Sched<()>> {
+        Vec::new()
+    }
 }
 
 impl Footprint for BankModel {

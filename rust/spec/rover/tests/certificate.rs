@@ -31,6 +31,10 @@ impl Model for Counter {
     fn internal(&self, _: &(), _: &u64, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::new(0)]
     }
+
+    fn due(&self, _: &u64, _: Time) -> Vec<echod_rover::Sched<()>> {
+        Vec::new()
+    }
 }
 
 type Ev = Event<Req, u64, ()>;

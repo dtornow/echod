@@ -5,10 +5,10 @@
 //! protocol.
 //!
 //! Ids and strings view as `Seq<char>`, the persistent maps as `Map`, the
-//! sets as `Set`. A dispatch with a given view is obtained by `choose`; that
-//! every dispatch view is realised by some value is the axiom this module
-//! adds (`axiom_realised`), true of the type as built; that a value is its
-//! view (`trusted.rs`) makes the choice the value itself.
+//! sets as `Set`. A value with a realised view is obtained by `choose`; the
+//! executable value itself witnesses existence, and the extensionality
+//! lemmas in this module make the choice that value. No axiom claims that an
+//! unbounded mathematical sequence has a Rust carrier.
 //!
 //! The order the specification walks a map in, `spec_keys`, is at the end:
 //! the keys of a map view, sorted, the order `PMap::keys` returns.
@@ -19,6 +19,7 @@
 
 use vstd::prelude::*;
 
+use echod_rover::semantics::{ExternalOutcomeV, InternalOutcomeV};
 use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
 
 use echod_types::{
@@ -35,13 +36,29 @@ verus! {
 /// addressable range prevents document size from becoming a semantic cutoff.
 pub const REQUEST_STEPS: usize = usize::MAX;
 
+/// The view of the atomic workflow closure implemented in `footprint.rs`.
+///
+/// The closure uses ordinary Rust iterators and is kept outside `verus!`.
+/// Its executable boundary below is trusted, but unlike the former
+/// unconstrained declaration it now has one explicit specification that the
+/// Rover model consumes.
+pub uninterp spec fn spec_request_transition(
+    config: ServerConfig,
+    request: Request,
+    state: StoreV,
+    now: Time,
+    limit: usize,
+) -> Seq<OutV>;
+
 pub assume_specification [ServerConfig::request_transition](
     config: &ServerConfig,
     request: &Request,
     state: &Store,
     now: Time,
     limit: usize,
-) -> Vec<Out>;
+) -> (r: Vec<Out>)
+    ensures
+        outs_v(r@) == spec_request_transition(*config, *request, state@, now, limit);
 
 // ------------------------------------------------------------------- views
 
@@ -442,22 +459,214 @@ pub open spec fn all_in_origin(ids: Seq<Chars>, id: Chars) -> bool {
     forall|i: int| 0 <= i < ids.len() ==> origin(#[trigger] ids[i]) == origin(id)
 }
 
-// ----------------------------------------------- a value for a view
+// ----------------------------------------------- a value for a realised view
 
-pub open spec fn lift_dispatch(v: DispatchV) -> Dispatch {
-    choose|x: Dispatch| x@ == v
+pub open spec fn lift_store(v: StoreV) -> Store {
+    choose|x: Store| x@ == v
 }
 
-/// Every dispatch view is some dispatch's view. Trusted: a string is any
-/// characters, and a record is its fields.
-#[verifier::external_body]
-pub proof fn axiom_realised(d: DispatchV)
-    ensures
-        lift_dispatch(d)@ == d,
-{
+pub open spec fn lift_work(v: InternalV) -> Work {
+    choose|x: Work| x@ == v
+}
+
+pub open spec fn lift_dispatch(v: DispatchV) -> Dispatch {
+    match v {
+        DispatchV::Execute { id, version } => Dispatch::Execute {
+            id: spec_string(id),
+            version,
+        },
+        DispatchV::Unblock { address, promise } => Dispatch::Unblock {
+            address: spec_string(address),
+            promise,
+        },
+    }
+}
+
+pub open spec fn lift_sched(s: Sched<InternalV>) -> Sched<Work> {
+    match s {
+        Sched::Later(r) => Sched::Later(lift_work(r)),
+        Sched::Timer(t, r) => Sched::Timer(t, lift_work(r)),
+    }
+}
+
+pub open spec fn lift_out(o: OutV) -> ExternalOutcomeV<Store, Response, Work, Dispatch> {
+    ExternalOutcomeV {
+        next: lift_store(o.next),
+        resp: o.resp,
+        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
+        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
+    }
+}
+
+pub open spec fn lift_inout(o: InOutV) -> InternalOutcomeV<Store, Work, Dispatch> {
+    InternalOutcomeV {
+        next: lift_store(o.next),
+        work: o.work.map_values(|w: Sched<InternalV>| lift_sched(w)),
+        send: o.send.map_values(|d: DispatchV| lift_dispatch(d)),
+    }
 }
 
 // --------------------------------------------------- a value is its view
+
+pub proof fn lemma_ostr_ext(a: Option<String>, b: Option<String>)
+    requires
+        ostr(a) == ostr(b),
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Some(x), Some(y)) => axiom_string_ext(x, y),
+        _ => {},
+    }
+}
+
+pub proof fn lemma_strs_ext(a: Vec<String>, b: Vec<String>)
+    requires
+        strs(a@) == strs(b@),
+    ensures
+        a == b,
+{
+    broadcast use group_views;
+    assert(strs(a@).len() == a@.len());
+    assert(strs(b@).len() == b@.len());
+    assert forall|i: int| 0 <= i < a@.len() implies a@[i] == b@[i] by {
+        assert(strs(a@)[i] == a@[i]@);
+        assert(strs(b@)[i] == b@[i]@);
+        axiom_string_ext(a@[i], b@[i]);
+    }
+    assert(a@ =~= b@);
+    axiom_vec_ext(a, b);
+}
+
+pub proof fn lemma_promise_ext(a: Promise, b: Promise)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_pset_ext(a.callbacks, b.callbacks);
+    axiom_pset_ext(a.listeners, b.listeners);
+}
+
+pub proof fn lemma_task_ext(a: Task, b: Task)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    lemma_ostr_ext(a.pid, b.pid);
+    lemma_strs_ext(a.resumes, b.resumes);
+}
+
+pub proof fn lemma_promises_ext(a: PMap<Promise>, b: PMap<Promise>)
+    requires
+        a@.map_values(|p: Promise| p@) == b@.map_values(|p: Promise| p@),
+    ensures
+        a == b,
+{
+    let f = |p: Promise| p@;
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        assert(a@[k]@ == b@[k]@);
+        lemma_promise_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_tasks_ext(a: PMap<Task>, b: PMap<Task>)
+    requires
+        a@.map_values(|t: Task| t@) == b@.map_values(|t: Task| t@),
+    ensures
+        a == b,
+{
+    let f = |t: Task| t@;
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        assert(a@[k]@ == b@[k]@);
+        lemma_task_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_schedules_ext(a: PMap<Schedule>, b: PMap<Schedule>)
+    requires
+        a@.map_values(|c: Schedule| schedule_v(c))
+            == b@.map_values(|c: Schedule| schedule_v(c)),
+    ensures
+        a == b,
+{
+    let f = |c: Schedule| schedule_v(c);
+    assert forall|k: Chars| a@.contains_key(k) implies b@.contains_key(k) && a@[k] == b@[k] by {
+        assert(a@.map_values(f).contains_key(k));
+        assert(b@.map_values(f).contains_key(k));
+        assert(a@.map_values(f)[k] == b@.map_values(f)[k]);
+        assert(schedule_v(a@[k]) == schedule_v(b@[k]));
+        assert(a@[k]@ == b@[k]@);
+        lemma_schedule_ext(a@[k], b@[k]);
+    }
+    assert forall|k: Chars| b@.contains_key(k) implies a@.contains_key(k) by {
+        assert(b@.map_values(f).contains_key(k));
+    }
+    assert(a@ =~= b@);
+    axiom_pmap_ext(a, b);
+}
+
+pub proof fn lemma_store_ext(a: Store, b: Store)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    lemma_promises_ext(a.promises, b.promises);
+    lemma_tasks_ext(a.tasks, b.tasks);
+    lemma_schedules_ext(a.schedules, b.schedules);
+}
+
+pub proof fn lemma_work_ext(a: Work, b: Work)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Work::PromiseTimeout(x), Work::PromiseTimeout(y))
+        | (Work::TaskLeaseTimeout(x), Work::TaskLeaseTimeout(y))
+        | (Work::TaskRetryTimeout(x), Work::TaskRetryTimeout(y)) => {
+            axiom_string_ext(x, y);
+        },
+        (
+            Work::Callback { awaited: xa, awaiter: xb },
+            Work::Callback { awaited: ya, awaiter: yb },
+        )
+        | (
+            Work::Listener { awaited: xa, address: xb },
+            Work::Listener { awaited: ya, address: yb },
+        )
+        | (
+            Work::ScheduleTimeout { id: xa, promise: xb },
+            Work::ScheduleTimeout { id: ya, promise: yb },
+        ) => {
+            axiom_string_ext(xa, ya);
+            axiom_string_ext(xb, yb);
+        },
+        (Work::Occurrence { promise: x, .. }, Work::Occurrence { promise: y, .. }) => {
+            axiom_string_ext(x, y);
+        },
+        _ => {},
+    }
+}
 
 pub proof fn lemma_prec_ext(a: PromiseRecord, b: PromiseRecord)
     requires
@@ -486,12 +695,91 @@ pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)
 
 // ----------------------------------------------- the lift of a value's view
 
+pub proof fn lemma_lift_store(s: Store)
+    ensures
+        lift_store(s@) == s,
+{
+    reveal(lift_store);
+    assert(exists|x: Store| x@ == s@) by {
+        assert(s@ == s@);
+    }
+    assert(lift_store(s@)@ == s@);
+    lemma_store_ext(lift_store(s@), s);
+}
+
+pub proof fn lemma_lift_work(w: Work)
+    ensures
+        lift_work(w@) == w,
+{
+    reveal(lift_work);
+    assert(exists|x: Work| x@ == w@) by {
+        assert(w@ == w@);
+    }
+    assert(lift_work(w@)@ == w@);
+    lemma_work_ext(lift_work(w@), w);
+}
+
 pub proof fn lemma_lift_dispatch(d: Dispatch)
     ensures
         lift_dispatch(d@) == d,
 {
-    axiom_realised(d@);
-    lemma_dispatch_ext(lift_dispatch(d@), d);
+    match d {
+        Dispatch::Execute { id, .. } => lemma_string_of(id),
+        Dispatch::Unblock { address, .. } => lemma_string_of(address),
+    }
+}
+
+pub proof fn lemma_lift_sched(w: Sched<Work>)
+    ensures
+        lift_sched(sched_v(w)) == w,
+{
+    match w {
+        Sched::Later(r) => lemma_lift_work(r),
+        Sched::Timer(_, r) => lemma_lift_work(r),
+    }
+}
+
+pub proof fn lemma_lift_out(o: ExternalOutcomeV<Store, Response, Work, Dispatch>, v: OutV)
+    requires
+        o.next@ == v.next,
+        o.resp == v.resp,
+        o.work.map_values(|w: Sched<Work>| sched_v(w)) == v.work,
+        o.send.map_values(|d: Dispatch| d@) == v.send,
+    ensures
+        lift_out(v) == o,
+{
+    lemma_lift_store(o.next);
+    assert forall|j: int| 0 <= j < o.work.len() implies
+        #[trigger] lift_sched(v.work[j]) == o.work[j] by {
+        lemma_lift_sched(o.work[j]);
+    }
+    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
+    assert forall|j: int| 0 <= j < o.send.len() implies
+        #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
+        lemma_lift_dispatch(o.send[j]);
+    }
+    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
+}
+
+pub proof fn lemma_lift_inout(o: InternalOutcomeV<Store, Work, Dispatch>, v: InOutV)
+    requires
+        o.next@ == v.next,
+        o.work.map_values(|w: Sched<Work>| sched_v(w)) == v.work,
+        o.send.map_values(|d: Dispatch| d@) == v.send,
+    ensures
+        lift_inout(v) == o,
+{
+    lemma_lift_store(o.next);
+    assert forall|j: int| 0 <= j < o.work.len() implies
+        #[trigger] lift_sched(v.work[j]) == o.work[j] by {
+        lemma_lift_sched(o.work[j]);
+    }
+    assert(v.work.map_values(|w: Sched<InternalV>| lift_sched(w)) =~= o.work);
+    assert forall|j: int| 0 <= j < o.send.len() implies
+        #[trigger] lift_dispatch(v.send[j]) == o.send[j] by {
+        lemma_lift_dispatch(o.send[j]);
+    }
+    assert(v.send.map_values(|d: DispatchV| lift_dispatch(d)) =~= o.send);
 }
 
 // ------------------------------------------------------------- the model
@@ -546,32 +834,107 @@ impl Model for ServerConfig {
 
     type Dispatch = Dispatch;
 
+    open spec fn spec_external(
+        &self,
+        req: Request,
+        state: Store,
+        now: Time,
+    ) -> Seq<ExternalOutcomeV<Store, Response, Work, Dispatch>> {
+        spec_request_transition(*self, req, state@, now, REQUEST_STEPS)
+            .map_values(|o: OutV| lift_out(o))
+    }
+
+    open spec fn spec_internal(
+        &self,
+        req: Work,
+        state: Store,
+        now: Time,
+    ) -> Seq<InternalOutcomeV<Store, Work, Dispatch>> {
+        let o = spec_process_work(*self, req@, state@, now);
+        if o.not_due { Seq::empty() } else { seq![lift_inout(o)] }
+    }
+
     fn external(&self, op: &Request, s: &Store, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
         let mut outs = self.request_transition(op, s, now, REQUEST_STEPS);
+        let ghost all = outs@;
+        let ghost twin = spec_request_transition(*self, *op, s@, now, REQUEST_STEPS);
+        assert(twin == outs_v(all));
         let mut r: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
         while outs.len() > 0
+            invariant
+                twin == outs_v(all),
+                r@.len() + outs@.len() == all.len(),
+                outs@ == all.skip(r@.len() as int),
+                forall|j: int| 0 <= j < r@.len() ==> {
+                    let o = #[trigger] r@[j];
+                    ExternalOutcomeV {
+                        next: o.next,
+                        resp: o.resp,
+                        work: o.work@,
+                        send: o.send@,
+                    } == lift_out(all[j]@)
+                },
             decreases outs@.len(),
         {
+            let ghost k = r@.len() as int;
             let o = outs.remove(0);
+            assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+            assert(o == all[k]);
             let Out { resp, next, work, send, marks } = o;
             let work = items(work);
             let e = ExternalOutcome { next, resp, work, send, marks };
+            proof {
+                lemma_lift_out(ExternalOutcomeV {
+                    next: e.next,
+                    resp: e.resp,
+                    work: e.work@,
+                    send: e.send@,
+                }, all[k]@);
+            }
             r.push(e);
+        }
+        proof {
+            assert(r@.len() == all.len());
+            assert forall|i: int| 0 <= i < r@.len() implies {
+                let o = #[trigger] r@[i];
+                ExternalOutcomeV {
+                    next: o.next,
+                    resp: o.resp,
+                    work: o.work@,
+                    send: o.send@,
+                } == self.spec_external(*op, *s, now)[i]
+            } by {
+                assert(self.spec_external(*op, *s, now)[i] == lift_out(twin[i]));
+                assert(twin[i] == all[i]@);
+            }
         }
         r
     }
 
     fn internal(&self, step: &Work, s: &Store, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
         let o = self.process_work(step, s, now);
+        assert(o@ == spec_process_work(*self, step@, s@, now));
         let mut r: Vec<InternalOutcome<ServerConfig>> = Vec::new();
         if o.not_due {
             return r;
         }
+        let ghost v = o@;
         let InOut { next, work, send, marks, not_due: _ } = o;
         let work = items(work);
         let e = InternalOutcome { next, work, send, marks };
+        proof {
+            lemma_lift_inout(InternalOutcomeV {
+                next: e.next,
+                work: e.work@,
+                send: e.send@,
+            }, v);
+        }
         r.push(e);
         r
+    }
+
+    open spec fn spec_due(&self, s: Store, now: Time) -> Seq<Sched<Work>> {
+        super::footprint::spec_timeout_work(*self, s, now)
     }
 
     fn due(&self, s: &Store, now: Time) -> (r: Vec<Sched<Work>>) {

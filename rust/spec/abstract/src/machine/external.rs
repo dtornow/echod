@@ -571,6 +571,9 @@ impl ServerConfig {
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_views;
+        if now > MAX_TIME {
+            return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
+        }
         let next_run_at = next_cron(&req.cron, now);
         if !deadline_bounded(next_run_at, req.promise_timeout)
             || (is_timer(&req.promise_tags) && has_target(&req.promise_tags))
@@ -1245,37 +1248,41 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    let next_run_at = spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
-        || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
-    {
+    if now > MAX_TIME {
         spec_out(spec_schedule_res(400, None), s)
-    } else if s.schedules.contains_key(req.id@) {
-        spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
     } else {
-        let c = ScheduleV {
-            id: req.id@,
-            cron: req.cron@,
-            promise_id: req.promise_id@,
-            promise_timeout: req.promise_timeout,
-            promise_param: req.promise_param,
-            promise_tags: req.promise_tags,
-            created_at: now,
-            next_run_at,
-            last_run_at: None,
-        };
-        let rec = Schedule {
-            id: req.id,
-            cron: req.cron,
-            promise_id: req.promise_id,
-            promise_timeout: req.promise_timeout,
-            promise_param: req.promise_param,
-            promise_tags: req.promise_tags,
-            created_at: now,
-            next_run_at,
-            last_run_at: None,
-        };
-        spec_out(spec_schedule_res(200, Some(rec)), StoreV { schedules: s.schedules.insert(req.id@, c), ..s })
+        let next_run_at = spec_next_cron(req.cron@, now);
+        if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+            || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
+        {
+            spec_out(spec_schedule_res(400, None), s)
+        } else if s.schedules.contains_key(req.id@) {
+            spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
+        } else {
+            let c = ScheduleV {
+                id: req.id@,
+                cron: req.cron@,
+                promise_id: req.promise_id@,
+                promise_timeout: req.promise_timeout,
+                promise_param: req.promise_param,
+                promise_tags: req.promise_tags,
+                created_at: now,
+                next_run_at,
+                last_run_at: None,
+            };
+            let rec = Schedule {
+                id: req.id,
+                cron: req.cron,
+                promise_id: req.promise_id,
+                promise_timeout: req.promise_timeout,
+                promise_param: req.promise_param,
+                promise_tags: req.promise_tags,
+                created_at: now,
+                next_run_at,
+                last_run_at: None,
+            };
+            spec_out(spec_schedule_res(200, Some(rec)), StoreV { schedules: s.schedules.insert(req.id@, c), ..s })
+        }
     }
 }
 

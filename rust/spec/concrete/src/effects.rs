@@ -388,6 +388,7 @@ proof fn lemma_unblock_notes_for(
     requires
         count <= listeners.len(),
         listeners.take(count as int).no_duplicates(),
+        promise.len() <= usize::MAX as int,
     ensures
         ({
             let notes =
@@ -594,7 +595,7 @@ proof fn lemma_unblock_notes_for(
                         promise,
                         address,
                     ) {
-                        crate::interpret::lemma_string_view(promise);
+                        crate::interpret::lemma_string_same(promise);
                         let note = NoteV::Unblock {
                             address,
                             promise: crate::node::spec_record(
@@ -676,6 +677,8 @@ proof fn lemma_unblock_notes(
     requires
         count <= keys.len(),
         keys.take(count as int).no_duplicates(),
+        forall|i: int| 0 <= i < count ==>
+            (#[trigger] keys[i]).len() <= usize::MAX as int,
         forall|i: int| 0 <= i < count ==> {
             &&& before.contains_key(#[trigger] keys[i])
             &&& before[keys[i]].promise.listeners.no_duplicates()
@@ -888,9 +891,12 @@ proof fn lemma_committed_notes_match(
 )
     requires
         match before {
-            DocumentBodyV::Workflow(old) =>
-                forall|id: Seq<char>| old.contains_key(id) ==>
-                    old[id].promise.listeners.no_duplicates(),
+            DocumentBodyV::Workflow(old) => {
+                &&& forall|id: Seq<char>| old.contains_key(id) ==>
+                    old[id].promise.listeners.no_duplicates()
+                &&& forall|id: Seq<char>| old.contains_key(id) ==>
+                    id.len() <= usize::MAX as int
+            },
             DocumentBodyV::Schedule(_) => true,
         },
     ensures
@@ -1049,6 +1055,12 @@ pub proof fn lemma_request_transition_effects(
         routed(document, request),
         spec_stored_committed_at(document) <= now,
         safe_effect_config(now, retry_timeout),
+        match document {
+            StoredDocumentV::Workflow(workflow) =>
+                forall|id: Seq<char>| workflow.objects.contains_key(id) ==>
+                    id.len() <= usize::MAX as int,
+            StoredDocumentV::Schedule(_) => true,
+        },
     ensures
         ({
             let final_document =
@@ -1072,9 +1084,12 @@ pub proof fn lemma_request_transition_effects(
         limit,
     );
     assert(match initial_body {
-        DocumentBodyV::Workflow(old) =>
-            forall|id: Seq<char>| old.contains_key(id) ==>
-                old[id].promise.listeners.no_duplicates(),
+        DocumentBodyV::Workflow(old) => {
+            &&& forall|id: Seq<char>| old.contains_key(id) ==>
+                old[id].promise.listeners.no_duplicates()
+            &&& forall|id: Seq<char>| old.contains_key(id) ==>
+                id.len() <= usize::MAX as int
+        },
         DocumentBodyV::Schedule(_) => true,
     }) by {
         match document {

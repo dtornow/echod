@@ -33,6 +33,10 @@ impl Model for Twice {
     fn internal(&self, _: &(), n: &u32, _: Time) -> Vec<InternalOutcome<Self>> {
         vec![InternalOutcome::new(n + 1)]
     }
+
+    fn due(&self, _: &u32, _: Time) -> Vec<echod_rover::Sched<()>> {
+        Vec::new()
+    }
 }
 
 impl echod_rover::Footprint for Twice {

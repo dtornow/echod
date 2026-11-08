@@ -124,6 +124,148 @@ pub open spec fn due<I>(s: Sched<I>) -> Option<Time> {
     }
 }
 
+/// Add one derived item unless the pending queue already contains it.
+pub open spec fn insert_missing<I>(pending: Seq<Sched<I>>, item: Sched<I>) -> Seq<Sched<I>> {
+    if pending.contains(item) { pending } else { pending.push(item) }
+}
+
+/// Materialize state-derived work in its model-defined order, without
+/// duplicating an item already pending or derived earlier.
+pub open spec fn augment<I>(pending: Seq<Sched<I>>, derived: Seq<Sched<I>>) -> Seq<Sched<I>>
+    decreases derived.len(),
+{
+    if derived.len() == 0 {
+        pending
+    } else {
+        insert_missing(augment(pending, derived.drop_last()), derived.last())
+    }
+}
+
+pub proof fn lemma_augment_preserves<I>(
+    pending: Seq<Sched<I>>,
+    derived: Seq<Sched<I>>,
+    item: Sched<I>,
+)
+    requires
+        pending.contains(item),
+    ensures
+        augment(pending, derived).contains(item),
+    decreases derived.len(),
+{
+    if derived.len() == 0 {
+        assert(augment(pending, derived) == pending);
+    } else {
+        lemma_augment_preserves(pending, derived.drop_last(), item);
+        let before = augment(pending, derived.drop_last());
+        let i = choose|i: int| 0 <= i < before.len() && before[i] == item;
+        if !before.contains(derived.last()) {
+            assert(0 <= i < before.push(derived.last()).len());
+            assert(before.push(derived.last())[i] == item);
+            assert(exists|j: int|
+                0 <= j < before.push(derived.last()).len()
+                    && before.push(derived.last())[j] == item);
+        }
+        assert(augment(pending, derived)
+            == insert_missing(before, derived.last()));
+    }
+}
+
+pub proof fn lemma_augment_adds<I>(
+    pending: Seq<Sched<I>>,
+    derived: Seq<Sched<I>>,
+    item: Sched<I>,
+)
+    requires
+        derived.contains(item),
+    ensures
+        augment(pending, derived).contains(item),
+    decreases derived.len(),
+{
+    if derived.len() == 0 {
+        assert(!derived.contains(item));
+    } else {
+        let i = choose|i: int| 0 <= i < derived.len() && derived[i] == item;
+        if i < derived.len() - 1 {
+            assert(0 <= i < derived.drop_last().len());
+            assert(derived.drop_last()[i] == item);
+            assert(derived.drop_last().contains(item));
+            lemma_augment_adds(pending, derived.drop_last(), item);
+            lemma_augment_preserves(
+                augment(pending, derived.drop_last()),
+                seq![derived.last()],
+                item,
+            );
+        } else {
+            assert(i == derived.len() - 1);
+            assert(derived.last() == item);
+            let before = augment(pending, derived.drop_last());
+            if !before.contains(item) {
+                let j = before.len() as int;
+                assert(0 <= j < before.push(item).len());
+                assert(before.push(item)[j] == item);
+                assert(exists|k: int| 0 <= k < before.push(item).len()
+                    && before.push(item)[k] == item);
+            }
+        }
+        let before = augment(pending, derived.drop_last());
+        assert(before.contains(item) || derived.last() == item);
+        if before.contains(derived.last()) {
+            assert(before.contains(item));
+        } else if before.contains(item) {
+            let j = choose|j: int| 0 <= j < before.len() && before[j] == item;
+            assert(0 <= j < before.push(derived.last()).len());
+            assert(before.push(derived.last())[j] == item);
+        } else {
+            let j = before.len() as int;
+            assert(derived.last() == item);
+            assert(0 <= j < before.push(derived.last()).len());
+            assert(before.push(derived.last())[j] == item);
+        }
+        assert(insert_missing(before, derived.last()).contains(item));
+        assert(augment(pending, derived)
+            == insert_missing(augment(pending, derived.drop_last()), derived.last()));
+    }
+}
+
+pub proof fn lemma_augment_idempotent<I>(
+    pending: Seq<Sched<I>>,
+    derived: Seq<Sched<I>>,
+)
+    ensures
+        augment(augment(pending, derived), derived) == augment(pending, derived),
+    decreases derived.len(),
+{
+    assert forall|item: Sched<I>| derived.contains(item) implies
+        augment(pending, derived).contains(item) by {
+        lemma_augment_adds(pending, derived, item);
+    }
+    lemma_augment_noop(augment(pending, derived), derived);
+}
+
+pub proof fn lemma_augment_noop<I>(
+    pending: Seq<Sched<I>>,
+    derived: Seq<Sched<I>>,
+)
+    requires
+        forall|item: Sched<I>| derived.contains(item) ==> pending.contains(item),
+    ensures
+        augment(pending, derived) == pending,
+    decreases derived.len(),
+{
+    if derived.len() != 0 {
+        assert forall|item: Sched<I>| derived.drop_last().contains(item) implies
+            pending.contains(item) by {};
+        lemma_augment_noop(pending, derived.drop_last());
+        assert(pending.contains(derived.last()));
+    }
+}
+
+/// Pending work as the model sees it: explicitly queued items followed by
+/// state-derived items that are not already present.
+pub open spec fn effective<M: Model>(m: M, c: Cfg<M>) -> Seq<Sched<M::Internal>> {
+    augment(c.internals, m.spec_due(c.state, c.now))
+}
+
 /// Whether the op may run at `now`.
 pub open spec fn ready<I>(now: Time, s: Sched<I>) -> bool {
     match s {
@@ -135,7 +277,7 @@ pub open spec fn ready<I>(now: Time, s: Sched<I>) -> bool {
 /// A timer whose time has come and that can run: it runs before anything
 /// else happens.
 pub open spec fn is_overdue<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    0 <= i < c.internals.len() && match c.internals[i] {
+    0 <= i < effective(m, c).len() && match effective(m, c)[i] {
         Sched::Timer(t, req) => t <= c.now && m.spec_internal(req, c.state, c.now).len() > 0,
         Sched::Later(_) => false,
     }
@@ -156,7 +298,8 @@ pub open spec fn due_le<I>(w: Sched<I>, v: Sched<I>) -> bool {
 /// Op `i` is overdue with the earliest deadline: when the clock jumped past
 /// several deadlines, their ops run in deadline order.
 pub open spec fn is_first<M: Model>(m: M, c: Cfg<M>, i: int) -> bool {
-    is_overdue(m, c, i) && forall|k: int| #[trigger] is_overdue(m, c, k) ==> due_le(c.internals[i], c.internals[k])
+    is_overdue(m, c, i) && forall|k: int| #[trigger] is_overdue(m, c, k) ==>
+        due_le(effective(m, c)[i], effective(m, c)[k])
 }
 
 // -------------------------------------------- steps: how the system evolves
@@ -208,7 +351,7 @@ pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
                 externals: c.externals.insert(call, ExternalOp { req: c.externals[call].req, res: Some(outs[j].resp) }),
-                internals: start_all(c.internals, outs[j].work, c.now),
+                internals: start_all(effective(m, c), outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }
@@ -220,12 +363,13 @@ pub open spec fn effect<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool
 /// Silent.
 pub open spec fn run<M: Model>(m: M, c: Cfg<M>, l: Lab<M>, d: Cfg<M>) -> bool {
     l is Silent && exists|i: int, j: int|
-        #![trigger c.internals[i], m.spec_internal(req_of(c.internals[i]), c.state, c.now)[j]]
-        0 <= i < c.internals.len() && ready(c.now, c.internals[i]) && (overdue(m, c) ==> is_first(m, c, i)) && {
-            let outs = m.spec_internal(req_of(c.internals[i]), c.state, c.now);
+        #![trigger effective(m, c)[i], m.spec_internal(req_of(effective(m, c)[i]), c.state, c.now)[j]]
+        0 <= i < effective(m, c).len() && ready(c.now, effective(m, c)[i])
+            && (overdue(m, c) ==> is_first(m, c, i)) && {
+            let outs = m.spec_internal(req_of(effective(m, c)[i]), c.state, c.now);
             0 <= j < outs.len() && d == Config {
                 state: outs[j].next,
-                internals: start_all(c.internals.remove(i), outs[j].work, c.now),
+                internals: start_all(effective(m, c).remove(i), outs[j].work, c.now),
                 sent: c.sent + outs[j].send,
                 ..c
             }

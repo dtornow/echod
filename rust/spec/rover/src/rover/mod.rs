@@ -124,36 +124,26 @@ pub trait RoverModel {
                 } == self.spec_on_event(*config, *pid, state@, now, *event)[i]
             };
 
-    open spec fn spec_outside(&self) -> Self::Pid {
-        arbitrary()
-    }
+    spec fn spec_outside(&self) -> Self::Pid;
 
-    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)> {
-        arbitrary()
-    }
+    spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)>;
 
-    open spec fn spec_injectable(&self, config: Self::Config, message: Self::Message) -> bool {
-        arbitrary()
-    }
+    spec fn spec_injectable(&self, config: Self::Config, message: Self::Message) -> bool;
 
-    open spec fn spec_on_event(
+    spec fn spec_on_event(
         &self,
         config: Self::Config,
         pid: Self::Pid,
         state: Self::StateV,
         now: Time,
         event: ProcessEvent<Self::Pid, Self::Message>,
-    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
-        arbitrary()
-    }
+    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>>;
 
     /// Project one world label to zero or more clean boundary observations.
-    open spec fn spec_observe(
+    spec fn spec_observe(
         &self,
         label: semantics::Lab<Self>,
-    ) -> Seq<Self::Boundary> {
-        arbitrary()
-    }
+    ) -> Seq<Self::Boundary>;
 }
 
 /// One process in a [`RoverModel`].
