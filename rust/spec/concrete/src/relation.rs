@@ -33,7 +33,7 @@ use crate::node::{
     spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome};
+use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreReq, StoreRes};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
@@ -425,17 +425,17 @@ pub open spec fn flight_op(node: NodeV) -> Option<u64> {
 
 /// The call a flight sent: a read of its key, or the conditional write of
 /// what it decided.
-pub open spec fn request_of(flight: FlightV) -> StoreCall {
+pub open spec fn request_of(flight: FlightV) -> StoreReq {
     if !flight.writing {
-        StoreCall::Get { key: spec_string(flight.key) }
+        StoreReq::Get { key: spec_string(flight.key) }
     } else {
         match flight.etag {
-            Some(chars) => StoreCall::PutIfMatch {
+            Some(chars) => StoreReq::PutIfMatch {
                 key: spec_string(flight.key),
                 body: crate::model::spec_bytes(flight.decided.unwrap()),
                 etag: Etag(spec_string(chars)),
             },
-            None => StoreCall::PutIfNoneMatch {
+            None => StoreReq::PutIfNoneMatch {
                 key: spec_string(flight.key),
                 body: crate::model::spec_bytes(flight.decided.unwrap()),
             },
@@ -445,11 +445,18 @@ pub open spec fn request_of(flight: FlightV) -> StoreCall {
 
 /// The reply the store gives a flight's call, once the caches agree with
 /// the store.
-pub open spec fn outcome_of(flight: FlightV) -> StoreOutcome {
+pub open spec fn response_of(flight: FlightV) -> StoreRes {
     if flight.writing {
-        StoreOutcome::Written(spec_etag(flight.decided.unwrap()))
+        match flight.etag {
+            Some(_) => StoreRes::PutIfMatch {
+                result: Ok(spec_etag(flight.decided.unwrap())),
+            },
+            None => StoreRes::PutIfNoneMatch {
+                result: Ok(spec_etag(flight.decided.unwrap())),
+            },
+        }
     } else {
-        StoreOutcome::Got(None)
+        StoreRes::Get { result: Ok(None) }
     }
 }
 
@@ -459,7 +466,7 @@ pub open spec fn outcome_of(flight: FlightV) -> StoreOutcome {
 pub open spec fn requests_ok(fleet: Fleet, world: World<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
-            CMessage::StoreReq { op, call } => {
+            CMessage::StoreReq { op, request } => {
                 let env = world.network[k];
                 &&& env.recipient == CPid::Store
                 &&& env.sender is Node
@@ -468,7 +475,7 @@ pub open spec fn requests_ok(fleet: Fleet, world: World<CModel>) -> bool {
                     let node = node_at(world, i);
                     &&& 0 <= i < fleet.nodes
                     &&& op < node.next_op
-                    &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                    &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                     &&& (!store_at(fleet, world).seen.contains((env.sender, op)) ==> flight_op(node)
                         == Some(op))
                 }
@@ -479,11 +486,11 @@ pub open spec fn requests_ok(fleet: Fleet, world: World<CModel>) -> bool {
 
 /// Every store reply on the network answers a node under an op the store
 /// has executed. One under the node's open flight's op is the reply
-/// [`outcome_of`] says.
+/// [`response_of`] says.
 pub open spec fn replies_ok(fleet: Fleet, world: World<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
-            CMessage::StoreReply { op, outcome } => {
+            CMessage::StoreRes { op, response } => {
                 let env = world.network[k];
                 &&& env.sender == CPid::Store
                 &&& env.recipient is Node
@@ -492,7 +499,7 @@ pub open spec fn replies_ok(fleet: Fleet, world: World<CModel>) -> bool {
                     let node = node_at(world, i);
                     &&& 0 <= i < fleet.nodes
                     &&& store_at(fleet, world).seen.contains((env.recipient, op))
-                    &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(
+                    &&& (flight_op(node) == Some(op) ==> response == response_of(
                         node.flight.unwrap(),
                     ))
                 }

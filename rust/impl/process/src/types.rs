@@ -2,7 +2,7 @@
 //! with, and the shapes those two carry.
 //!
 //! Everything here is data. `Event` is the only way in, `Effect` the only
-//! way out. A store call goes out as an `Effect::Store` under an `OpId`
+//! way out. A `StoreReq` goes out as an `Effect::Store` under an `OpId`
 //! and its answer comes back as `Event::Store` under the same id; the
 //! core keeps, per id, which machine is waiting for it. No decision is made
 //! in this file: that is `State` in the crate root and the machines beside
@@ -18,13 +18,13 @@ use echod_types::{PromiseRecord, Request, Response, Schedule};
 
 use crate::target::Target;
 
-pub use echod_concrete::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+pub use echod_concrete::{Etag, Read, StoreError, StoreReq, StoreRes};
 pub use crate::verified::flight::FiredKey;
 
 #[cfg(verus_keep_ghost)]
 use echod_types::{PromiseRecordSpec, ScheduleSpec, AResponse};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreCallSpec, StoreErrorSpec};
+use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::node::DocumentBodyV;
 #[cfg(verus_keep_ghost)]
@@ -165,7 +165,7 @@ pub enum Event {
     /// `Effect::Reply`. The runtime has already admitted and decoded it.
     Request { clock: u64, request: RequestEvent },
     /// A store call the core issued has an answer.
-    Store { op: OpId, outcome: StoreOutcome, clock: u64 },
+    Store { op: OpId, response: StoreRes, clock: u64 },
     /// The runtime slept until a loop this process armed, and that instant
     /// has come. `armed` is the loop the sleep was for. A late wake still
     /// runs the other loop when its time has come.
@@ -182,7 +182,7 @@ pub enum Event {
 #[cfg(verus_keep_ghost)]
 pub ghost enum EventSpec {
     Request { clock: u64, request: RequestEventSpec },
-    Store { op: OpId, outcome: StoreOutcome, clock: u64 },
+    Store { op: OpId, response: StoreRes, clock: u64 },
     Wake { clock: u64, armed: Armed },
     Start { clock: u64, loops: bool },
     Stop { clock: u64 },
@@ -195,7 +195,7 @@ impl DeepView for Event {
         match self {
             Event::Start { clock, loops } => EventSpec::Start { clock: *clock, loops: *loops },
             Event::Request { clock, request } => EventSpec::Request { clock: *clock, request: request.deep_view() },
-            Event::Store { op, outcome, clock } => EventSpec::Store { op: *op, outcome: *outcome, clock: *clock },
+            Event::Store { op, response, clock } => EventSpec::Store { op: *op, response: *response, clock: *clock },
             Event::Wake { clock, armed } => EventSpec::Wake { clock: *clock, armed: *armed },
             Event::Stop { clock } => EventSpec::Stop { clock: *clock },
         }
@@ -272,7 +272,7 @@ pub enum Effect {
     /// could not serve it.
     Reply { id: RequestId, response: Result<Answer, String> },
     /// Make this call on the store and answer with `Event::Store { op }`.
-    Store { op: OpId, call: StoreCall },
+    Store { op: OpId, request: StoreReq },
     /// Send `Event::Wake` for `armed` once `after_ms` have passed, replacing
     /// any wake asked for before.
     Wake { after_ms: u64, armed: Armed },
@@ -286,7 +286,7 @@ pub enum Effect {
 #[cfg(verus_keep_ghost)]
 pub ghost enum EffectSpec {
     Reply { id: RequestId, response: Result<AnswerSpec, Seq<char>> },
-    Store { op: OpId, call: StoreCallSpec },
+    Store { op: OpId, request: StoreReqSpec },
     Wake { after_ms: u64, armed: Armed },
     Send { address: Seq<char>, message: MessageSpec },
     Note(NoteSpec),
@@ -297,7 +297,7 @@ impl DeepView for Effect {
     type V = EffectSpec;
     open spec fn deep_view(&self) -> EffectSpec {
         match self {
-            Effect::Store { op, call } => EffectSpec::Store { op: *op, call: call.deep_view() },
+            Effect::Store { op, request } => EffectSpec::Store { op: *op, request: request.deep_view() },
             Effect::Reply { id, response } => EffectSpec::Reply { id: *id, response: response.deep_view() },
             Effect::Send { address, message } => EffectSpec::Send { address: address@, message: message.deep_view() },
             Effect::Wake { after_ms, armed } => EffectSpec::Wake { after_ms: *after_ms, armed: *armed },

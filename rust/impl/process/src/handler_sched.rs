@@ -37,16 +37,16 @@ verus! {
 
 /// The store answered a load of schedule `id`, read in full: not cached.
 #[verifier::opaque]
-pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreOutcome) -> (S, Result<WorkingSpec, Seq<char>>) {
+pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreRes) -> (S, Result<WorkingSpec, Seq<char>>) {
     let key = spec_sched_key(s.keys.prefix, id);
     let target = crate::target::spec_name(crate::target::TargetSpec::Schedule(id));
     match outcome {
-        StoreOutcome::Got(None) => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
-        StoreOutcome::Got(Some((bytes, etag))) => match document::spec_decode_schedule(bytes@) {
+        StoreRes::Get { result: Ok(None) } => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
+        StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::spec_decode_schedule(bytes@) {
             Ok(loaded) => (s, Ok(spec_working(target, key, loaded, Some(etag.deep_view())))),
             Err(e) => (s, Err(e)),
         },
-        StoreOutcome::Failed(e) => (s, Err(spec_error_text(e.deep_view()))),
+        StoreRes::Get { result: Err(e) } => (s, Err(spec_error_text(e.deep_view()))),
         _ => (s, Err(spec_error_text(spec_unexpected()))),
     }
 }
@@ -213,7 +213,7 @@ pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>
 
 impl State {
     /// The store answered a load of schedule `id`, read in full: not cached.
-    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> (r: Result<Working, String>)
+    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreRes) -> (r: Result<Working, String>)
         ensures
             (final(self).deep_view(), r.deep_view()) == spec_loaded_schedule(old(self).deep_view(), id@, outcome),
     {
@@ -223,15 +223,15 @@ impl State {
         let key = self.keys.sched_key(id);
         let target = Target::Schedule(text(id)).name();
         match outcome {
-            StoreOutcome::Got(None) => {
+            StoreRes::Get { result: Ok(None) } => {
                 let loaded = Loaded::empty_schedule(text(id));
                 Ok(Working { target, key, loaded, etag: None })
             },
-            StoreOutcome::Got(Some((bytes, etag))) => match document::decode_schedule(bytes.as_slice()) {
+            StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::decode_schedule(bytes.as_slice()) {
                 Ok(loaded) => Ok(Working { target, key, loaded, etag: Some(etag) }),
                 Err(e) => Err(e),
             },
-            StoreOutcome::Failed(e) => Err(error_text(&e)),
+            StoreRes::Get { result: Err(e) } => Err(error_text(&e)),
             _ => Err(error_text(&unexpected())),
         }
     }

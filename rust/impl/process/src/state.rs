@@ -33,7 +33,7 @@ use crate::verified::node_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreCallSpec;
+use echod_concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -141,12 +141,12 @@ pub open spec fn spec_note(s: S, n: NoteSpec) -> S {
 }
 
 /// Issue a store call; `owner` gets its answer.
-pub open spec fn spec_store(s: S, call: StoreCallSpec, owner: Owner) -> (S, OpId) {
+pub open spec fn spec_store(s: S, request: StoreReqSpec, owner: Owner) -> (S, OpId) {
     let op = s.next_op;
     (S {
         next_op: s.next_op.wrapping_add(1),
         ops: s.ops.insert(op, owner),
-        out: s.out.push(EffectSpec::Store { op, call }),
+        out: s.out.push(EffectSpec::Store { op, request }),
         ..s
     }, op)
 }
@@ -313,14 +313,14 @@ impl State {
     }
 
     /// Issue a store call; `owner` gets its answer.
-    pub fn store(&mut self, call: StoreCall, owner: Owner) -> (op: OpId)
+    pub fn store(&mut self, request: StoreReq, owner: Owner) -> (op: OpId)
         ensures
-            (final(self).deep_view(), op) == spec_store(old(self).deep_view(), call.deep_view(), owner),
+            (final(self).deep_view(), op) == spec_store(old(self).deep_view(), request.deep_view(), owner),
     {
         let op = self.next_op;
         self.next_op = self.next_op.wrapping_add(1);
         self.ops.insert(op, owner);
-        self.emit(Effect::Store { op, call });
+        self.emit(Effect::Store { op, request });
         op
     }
 

@@ -5,7 +5,7 @@ use echod_abstract::{Call, Dispatch, Output};
 use echod_concrete::model::{Fleet, Local, Message, Model, Pid, Store};
 use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
-    PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
+    PromiseSettleReq, PromiseState, Request, Response, StoreError, StoreReq, StoreRes, Value,
 };
 use echod_rover::rover::{ProcessEvent, RoverModel, StepResult};
 
@@ -64,7 +64,7 @@ fn the_outside_injects_requests_and_stop() {
         &config,
         &Message::StoreReq {
             op: 1,
-            call: StoreCall::Get { key: "k".into() }
+            request: StoreReq::Get { key: "k".into() }
         },
     ));
 }
@@ -110,7 +110,7 @@ fn deliver(
     let mut store_state = store_state;
     let mut send = stepped[0].send.clone();
     // A flight is one store round trip at a time. Answer it, then the node finishes.
-    while let [(Pid::Store, Message::StoreReq { op, call })] = send.as_slice() {
+    while let [(Pid::Store, Message::StoreReq { op, request })] = send.as_slice() {
         let stored = step(
             &Pid::Store,
             &store_state,
@@ -119,7 +119,7 @@ fn deliver(
                 sender: node_pid,
                 message: Message::StoreReq {
                     op: *op,
-                    call: call.clone(),
+                    request: request.clone(),
                 },
             },
         );
@@ -174,7 +174,7 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
             Pid::Store,
             Message::StoreReq {
                 op: 1,
-                call: StoreCall::Get { key: "o/a".into() },
+                request: StoreReq::Get { key: "o/a".into() },
             },
         )]
     );
@@ -186,9 +186,9 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
         3,
         &ProcessEvent::Receive {
             sender: Pid::Store,
-            message: Message::StoreReply {
+            message: Message::StoreRes {
                 op: 1,
-                outcome: StoreOutcome::Got(None),
+                response: StoreRes::Get { result: Ok(None) },
             },
         },
     );
@@ -309,7 +309,7 @@ fn stop_ends_the_loop() {
 fn the_store_commits_a_conditional_write_and_answers_the_node() {
     let world = Model.initial(&Fleet::new(1, false));
     let store = world[1].1.clone();
-    let call = StoreCall::PutIfNoneMatch {
+    let request = StoreReq::PutIfNoneMatch {
         key: "doc".into(),
         body: b"one".to_vec(),
     };
@@ -321,7 +321,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 8,
-                call: call.clone(),
+                request: request.clone(),
             },
         },
     );
@@ -329,9 +329,9 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
     let tag = match &created[0].send[..] {
         [(
             Pid::Node(0),
-            Message::StoreReply {
+            Message::StoreRes {
                 op: 8,
-                outcome: StoreOutcome::Written(tag),
+                response: StoreRes::PutIfNoneMatch { result: Ok(tag) },
             },
         )] => tag.clone(),
         other => panic!("reply {other:?}"),
@@ -343,18 +343,18 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         1,
         &ProcessEvent::Receive {
             sender: Pid::Node(0),
-            message: Message::StoreReq { op: 9, call },
+            message: Message::StoreReq { op: 9, request },
         },
     );
     assert!(matches!(
         again[0].send[0].1,
-        Message::StoreReply {
-            outcome: StoreOutcome::Failed(StoreError::PreconditionFailed),
+        Message::StoreRes {
+            response: StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) },
             ..
         }
     ));
 
-    let wrong = StoreCall::PutIfMatch {
+    let wrong = StoreReq::PutIfMatch {
         key: "doc".into(),
         body: b"two".to_vec(),
         etag: Etag("nope".into()),
@@ -367,14 +367,14 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 10,
-                call: wrong,
+                request: wrong,
             },
         },
     );
     assert!(matches!(
         rejected[0].send[0].1,
-        Message::StoreReply {
-            outcome: StoreOutcome::Failed(StoreError::PreconditionFailed),
+        Message::StoreRes {
+            response: StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) },
             ..
         }
     ));
@@ -386,7 +386,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         _ => panic!("store"),
     }
 
-    let right = StoreCall::PutIfMatch {
+    let right = StoreReq::PutIfMatch {
         key: "doc".into(),
         body: b"two".to_vec(),
         etag: tag,
@@ -399,14 +399,14 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
             sender: Pid::Node(0),
             message: Message::StoreReq {
                 op: 11,
-                call: right,
+                request: right,
             },
         },
     );
     match &wrote[0].send[0].1 {
-        Message::StoreReply {
+        Message::StoreRes {
             op: 11,
-            outcome: StoreOutcome::Written(_),
+            response: StoreRes::PutIfMatch { result: Ok(_) },
         } => {}
         other => panic!("write {other:?}"),
     }
@@ -429,7 +429,7 @@ fn the_store_executes_each_op_once() {
         sender: Pid::Node(0),
         message: Message::StoreReq {
             op: 3,
-            call: StoreCall::PutIfNoneMatch {
+            request: StoreReq::PutIfNoneMatch {
                 key: "doc".into(),
                 body: b"one".to_vec(),
             },
@@ -448,7 +448,7 @@ fn the_store_executes_each_op_once() {
         sender: Pid::Node(1),
         message: Message::StoreReq {
             op: 3,
-            call: StoreCall::Get { key: "doc".into() },
+            request: StoreReq::Get { key: "doc".into() },
         },
     };
     let read = step(&Pid::Store, &first[0].state, 2, &other_node);
@@ -464,7 +464,7 @@ fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
         sender: Pid::Node(0),
         message: Message::StoreReq {
             op: 1,
-            call: StoreCall::Get { key: "k".into() },
+            request: StoreReq::Get { key: "k".into() },
         },
     };
     assert!(step(node_pid, node_state, 0, &ask).is_empty());

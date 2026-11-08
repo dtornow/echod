@@ -1,8 +1,9 @@
 //! The store: the protocol the concrete Rover model speaks, and the store
 //! that answers it.
 //!
-//! One definition of the calls. The process re-exports these types and sends
-//! them as `Effect::Store`. `Store::apply` applies one call; `spec_apply` is
+//! One definition of the request/response protocol. The process re-exports
+//! these types and sends requests as `Effect::Store`. `Store::apply` applies
+//! one request; `spec_apply` is
 //! that step as a specification, and Verus checks that `apply` computes it.
 //! Trusted here: `content_etag` computes `spec_etag`, and a string is its
 //! characters (`chars_of`, `string_of`).
@@ -40,56 +41,55 @@ pub enum Read {
     Absent,
 }
 
-/// A call on the store, as the executor makes it.
+/// A request to the store, as the executor makes it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub enum StoreCall {
+pub enum StoreReq {
     Get { key: String },
     GetIfNoneMatch { key: String, etag: Etag },
     PutIfMatch { key: String, body: Vec<u8>, etag: Etag },
     PutIfNoneMatch { key: String, body: Vec<u8> },
-    AppendIfMatch { key: String, offset: u64, body: Vec<u8>, etag: Etag },
+    AppIfMatch { key: String, offset: u64, body: Vec<u8>, etag: Etag },
     Put { key: String, body: Vec<u8> },
-    Delete { key: String },
+    Del { key: String },
     List { prefix: String, max_keys: usize },
     ListPrefixes { prefix: String },
 }
 
-impl StoreCall {
+impl StoreReq {
     #[verifier::external_body]
     pub fn key(&self) -> &str {
         match self {
-            StoreCall::Get { key }
-            | StoreCall::GetIfNoneMatch { key, .. }
-            | StoreCall::PutIfMatch { key, .. }
-            | StoreCall::PutIfNoneMatch { key, .. }
-            | StoreCall::AppendIfMatch { key, .. }
-            | StoreCall::Put { key, .. }
-            | StoreCall::Delete { key } => key,
-            StoreCall::List { prefix, .. } | StoreCall::ListPrefixes { prefix } => prefix,
+            StoreReq::Get { key }
+            | StoreReq::GetIfNoneMatch { key, .. }
+            | StoreReq::PutIfMatch { key, .. }
+            | StoreReq::PutIfNoneMatch { key, .. }
+            | StoreReq::AppIfMatch { key, .. }
+            | StoreReq::Put { key, .. }
+            | StoreReq::Del { key } => key,
+            StoreReq::List { prefix, .. } | StoreReq::ListPrefixes { prefix } => prefix,
         }
     }
 }
 
-/// What a store call answered.
+/// The operation-shaped response from the store.
+#[allow(inconsistent_fields)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub enum StoreOutcome {
-    /// `Get`: the object and its version, or nothing.
-    Got(Option<(Vec<u8>, Etag)>),
-    /// `GetIfNoneMatch`.
-    Read(Read),
-    /// A conditional write landed at this version.
-    Written(Etag),
-    /// `Put` or `Delete` landed.
-    Done,
-    /// `List` or `ListPrefixes`.
-    Listed(Vec<String>),
-    Failed(StoreError),
+pub enum StoreRes {
+    Get { result: Result<Option<(Vec<u8>, Etag)>, StoreError> },
+    GetIfNoneMatch { result: Result<Read, StoreError> },
+    PutIfMatch { result: Result<Etag, StoreError> },
+    PutIfNoneMatch { result: Result<Etag, StoreError> },
+    AppIfMatch { result: Result<Etag, StoreError> },
+    Put { result: Result<(), StoreError> },
+    Del { result: Result<(), StoreError> },
+    List { result: Result<Vec<String>, StoreError> },
+    ListPrefixes { result: Result<Vec<String>, StoreError> },
 }
 
 // ---------------------------------------------------------------------------
-// The calls and outcomes as views: strings as their characters
+// The requests and responses as views: strings as their characters
 // ---------------------------------------------------------------------------
 
 pub ghost enum StoreErrorSpec {
@@ -127,41 +127,41 @@ impl DeepView for Read {
 }
 
 #[cfg(verus_keep_ghost)]
-pub ghost enum StoreCallSpec {
+pub ghost enum StoreReqSpec {
     Get { key: Seq<char> },
     GetIfNoneMatch { key: Seq<char>, etag: EtagSpec },
     PutIfMatch { key: Seq<char>, body: Seq<u8>, etag: EtagSpec },
     PutIfNoneMatch { key: Seq<char>, body: Seq<u8> },
-    AppendIfMatch { key: Seq<char>, offset: u64, body: Seq<u8>, etag: EtagSpec },
+    AppIfMatch { key: Seq<char>, offset: u64, body: Seq<u8>, etag: EtagSpec },
     Put { key: Seq<char>, body: Seq<u8> },
-    Delete { key: Seq<char> },
+    Del { key: Seq<char> },
     List { prefix: Seq<char>, max_keys: usize },
     ListPrefixes { prefix: Seq<char> },
 }
 
 #[cfg(verus_keep_ghost)]
-impl DeepView for StoreCall {
-    type V = StoreCallSpec;
-    open spec fn deep_view(&self) -> StoreCallSpec {
+impl DeepView for StoreReq {
+    type V = StoreReqSpec;
+    open spec fn deep_view(&self) -> StoreReqSpec {
         match self {
-            StoreCall::Get { key } => StoreCallSpec::Get { key: key@ },
-            StoreCall::GetIfNoneMatch { key, etag } => StoreCallSpec::GetIfNoneMatch { key: key@, etag: etag.deep_view() },
-            StoreCall::PutIfMatch { key, body, etag } => StoreCallSpec::PutIfMatch { key: key@, body: body@, etag: etag.deep_view() },
-            StoreCall::PutIfNoneMatch { key, body } => StoreCallSpec::PutIfNoneMatch { key: key@, body: body@ },
-            StoreCall::AppendIfMatch { key, offset, body, etag } => StoreCallSpec::AppendIfMatch { key: key@, offset: *offset, body: body@, etag: etag.deep_view() },
-            StoreCall::Put { key, body } => StoreCallSpec::Put { key: key@, body: body@ },
-            StoreCall::Delete { key } => StoreCallSpec::Delete { key: key@ },
-            StoreCall::List { prefix, max_keys } => StoreCallSpec::List { prefix: prefix@, max_keys: *max_keys },
-            StoreCall::ListPrefixes { prefix } => StoreCallSpec::ListPrefixes { prefix: prefix@ },
+            StoreReq::Get { key } => StoreReqSpec::Get { key: key@ },
+            StoreReq::GetIfNoneMatch { key, etag } => StoreReqSpec::GetIfNoneMatch { key: key@, etag: etag.deep_view() },
+            StoreReq::PutIfMatch { key, body, etag } => StoreReqSpec::PutIfMatch { key: key@, body: body@, etag: etag.deep_view() },
+            StoreReq::PutIfNoneMatch { key, body } => StoreReqSpec::PutIfNoneMatch { key: key@, body: body@ },
+            StoreReq::AppIfMatch { key, offset, body, etag } => StoreReqSpec::AppIfMatch { key: key@, offset: *offset, body: body@, etag: etag.deep_view() },
+            StoreReq::Put { key, body } => StoreReqSpec::Put { key: key@, body: body@ },
+            StoreReq::Del { key } => StoreReqSpec::Del { key: key@ },
+            StoreReq::List { prefix, max_keys } => StoreReqSpec::List { prefix: prefix@, max_keys: *max_keys },
+            StoreReq::ListPrefixes { prefix } => StoreReqSpec::ListPrefixes { prefix: prefix@ },
         }
     }
 }
 
 /// A store's answer is a value a process takes as it is: its deep view is
 /// itself.
-impl DeepView for StoreOutcome {
-    type V = StoreOutcome;
-    open spec fn deep_view(&self) -> StoreOutcome {
+impl DeepView for StoreRes {
+    type V = StoreRes;
+    open spec fn deep_view(&self) -> StoreRes {
         *self
     }
 }
@@ -496,87 +496,89 @@ pub open spec fn spec_bump(version: nat) -> nat {
     if version < u64::MAX as nat { version + 1 } else { version }
 }
 
-/// One store call. The same cases as `Store::apply`.
-pub open spec fn spec_apply(store: StoreV, call: StoreCall) -> (StoreV, StoreOutcome) {
-    match call {
-        StoreCall::Get { key } => {
+/// One store request. The same cases as `Store::apply`.
+pub open spec fn spec_apply(store: StoreV, req: StoreReq) -> (StoreV, StoreRes) {
+    match req {
+        StoreReq::Get { key } => {
             match spec_find(store.entries, key@, 0) {
-                None => (store, StoreOutcome::Got(None)),
+                None => (store, StoreRes::Get { result: Ok(None) }),
                 Some(i) => {
                     let body = store.entries[i].body;
-                    (store, StoreOutcome::Got(Some((spec_bytes(body), spec_etag(body)))))
+                    (store, StoreRes::Get { result: Ok(Some((spec_bytes(body), spec_etag(body)))) })
                 },
             }
         },
-        StoreCall::GetIfNoneMatch { key, etag } => {
+        StoreReq::GetIfNoneMatch { key, etag } => {
             match spec_find(store.entries, key@, 0) {
-                None => (store, StoreOutcome::Read(Read::Absent)),
+                None => (store, StoreRes::GetIfNoneMatch { result: Ok(Read::Absent) }),
                 Some(i) => {
                     let body = store.entries[i].body;
                     let have = spec_etag(body);
                     if have == etag {
-                        (store, StoreOutcome::Read(Read::NotModified))
+                        (store, StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) })
                     } else {
-                        (store, StoreOutcome::Read(Read::Body(spec_bytes(body), have)))
+                        (store, StoreRes::GetIfNoneMatch { result: Ok(Read::Body(spec_bytes(body), have)) })
                     }
                 },
             }
         },
-        StoreCall::PutIfNoneMatch { key, body } => {
+        StoreReq::PutIfNoneMatch { key, body } => {
             if spec_find(store.entries, key@, 0) is Some {
-                (store, StoreOutcome::Failed(StoreError::PreconditionFailed))
+                (store, StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) })
             } else {
                 let entries = spec_put(store.entries, EntryV { key: key@, body: body@, version: 1 });
-                (StoreV { entries, ..store }, StoreOutcome::Written(spec_etag(body@)))
+                (StoreV { entries, ..store }, StoreRes::PutIfNoneMatch { result: Ok(spec_etag(body@)) })
             }
         },
-        StoreCall::PutIfMatch { key, body, etag } => {
+        StoreReq::PutIfMatch { key, body, etag } => {
             match spec_find(store.entries, key@, 0) {
                 Some(i) if spec_etag(store.entries[i].body) == etag => {
                     let version = spec_bump(store.entries[i].version);
                     let entries = spec_put(store.entries, EntryV { key: key@, body: body@, version });
-                    (StoreV { entries, ..store }, StoreOutcome::Written(spec_etag(body@)))
+                    (StoreV { entries, ..store }, StoreRes::PutIfMatch { result: Ok(spec_etag(body@)) })
                 },
-                _ => (store, StoreOutcome::Failed(StoreError::PreconditionFailed)),
+                _ => (store, StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) }),
             }
         },
-        StoreCall::AppendIfMatch { key, offset, body, etag } => {
+        StoreReq::AppIfMatch { key, offset, body, etag } => {
             if !store.appendable {
-                (store, StoreOutcome::Failed(StoreError::Unavailable(spec_string(seq![
-                    't', 'h', 'i', 's', ' ', 's', 't', 'o', 'r', 'e', ' ', 'd', 'o', 'e', 's', ' ',
-                    'n', 'o', 't', ' ', 'a', 'p', 'p', 'e', 'n', 'd',
-                ]))))
+                (store, StoreRes::AppIfMatch {
+                    result: Err(StoreError::Unavailable(spec_string(seq![
+                        't', 'h', 'i', 's', ' ', 's', 't', 'o', 'r', 'e', ' ', 'd', 'o', 'e', 's', ' ',
+                        'n', 'o', 't', ' ', 'a', 'p', 'p', 'e', 'n', 'd',
+                    ]))),
+                })
             } else {
                 match spec_find(store.entries, key@, 0) {
                     Some(i) if spec_etag(store.entries[i].body) == etag && store.entries[i].body.len() == offset => {
                         let joined = store.entries[i].body + body@;
                         let version = spec_bump(store.entries[i].version);
                         let entries = spec_put(store.entries, EntryV { key: key@, body: joined, version });
-                        (StoreV { entries, ..store }, StoreOutcome::Written(spec_etag(joined)))
+                        (StoreV { entries, ..store }, StoreRes::AppIfMatch { result: Ok(spec_etag(joined)) })
                     },
-                    _ => (store, StoreOutcome::Failed(StoreError::PreconditionFailed)),
+                    _ => (store, StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) }),
                 }
             }
         },
-        StoreCall::Put { key, body } => {
+        StoreReq::Put { key, body } => {
             let version = match spec_find(store.entries, key@, 0) {
                 Some(i) => spec_bump(store.entries[i].version),
                 None => 1,
             };
             let entries = spec_put(store.entries, EntryV { key: key@, body: body@, version });
-            (StoreV { entries, ..store }, StoreOutcome::Done)
+            (StoreV { entries, ..store }, StoreRes::Put { result: Ok(()) })
         },
-        StoreCall::Delete { key } => {
+        StoreReq::Del { key } => {
             match spec_find(store.entries, key@, 0) {
-                Some(i) => (StoreV { entries: spec_remove_at(store.entries, i), ..store }, StoreOutcome::Done),
-                None => (store, StoreOutcome::Done),
+                Some(i) => (StoreV { entries: spec_remove_at(store.entries, i), ..store }, StoreRes::Del { result: Ok(()) }),
+                None => (store, StoreRes::Del { result: Ok(()) }),
             }
         },
-        StoreCall::List { prefix, max_keys } => {
-            (store, StoreOutcome::Listed(spec_bytes_keys(spec_list(store.entries, prefix@, max_keys as nat, 0, Seq::empty()))))
+        StoreReq::List { prefix, max_keys } => {
+            (store, StoreRes::List { result: Ok(spec_bytes_keys(spec_list(store.entries, prefix@, max_keys as nat, 0, Seq::empty()))) })
         },
-        StoreCall::ListPrefixes { prefix } => {
-            (store, StoreOutcome::Listed(spec_bytes_keys(spec_prefixes(store.entries, prefix@, 0, Seq::empty()))))
+        StoreReq::ListPrefixes { prefix } => {
+            (store, StoreRes::ListPrefixes { result: Ok(spec_bytes_keys(spec_prefixes(store.entries, prefix@, 0, Seq::empty()))) })
         },
     }
 }
@@ -1087,14 +1089,14 @@ impl Store {
     }
 
     /// One call: `spec_apply`.
-    pub fn apply(&self, call: &StoreCall) -> (r: (Store, StoreOutcome))
+    pub fn apply(&self, req: &StoreReq) -> (r: (Store, StoreRes))
         ensures
-            (r.0@, r.1) == spec_apply(self@, *call),
+            (r.0@, r.1) == spec_apply(self@, *req),
     {
         let mut next = self.copy();
-        let outcome = match call {
-            StoreCall::Get { key } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Got(None),
+        let response = match req {
+            StoreReq::Get { key } => match find_entry(&self.entries, key) {
+                None => StoreRes::Get { result: Ok(None) },
                 Some(i) => {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
@@ -1102,11 +1104,11 @@ impl Store {
                         crate::simulation::lemma_bytes(entry.body@);
                         echod_abstract::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
-                    StoreOutcome::Got(Some((body, etag(&entry.body))))
+                    StoreRes::Get { result: Ok(Some((body, etag(&entry.body)))) }
                 },
             },
-            StoreCall::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Read(Read::Absent),
+            StoreReq::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
+                None => StoreRes::GetIfNoneMatch { result: Ok(Read::Absent) },
                 Some(i) => {
                     let entry = &self.entries[i];
                     let have = etag(&entry.body);
@@ -1114,26 +1116,26 @@ impl Store {
                         proof {
                             echod_abstract::trusted::axiom_string_ext(have.0, want.0);
                         }
-                        StoreOutcome::Read(Read::NotModified)
+                        StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
                             crate::simulation::lemma_bytes(entry.body@);
                             echod_abstract::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
-                        StoreOutcome::Read(Read::Body(body, have))
+                        StoreRes::GetIfNoneMatch { result: Ok(Read::Body(body, have)) }
                     }
                 },
             },
-            StoreCall::PutIfNoneMatch { key, body } => {
+            StoreReq::PutIfNoneMatch { key, body } => {
                 if find_entry(&self.entries, key).is_some() {
-                    StoreOutcome::Failed(StoreError::PreconditionFailed)
+                    StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) }
                 } else {
                     put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version: 1 });
-                    StoreOutcome::Written(etag(body))
+                    StoreRes::PutIfNoneMatch { result: Ok(etag(body)) }
                 }
             },
-            StoreCall::PutIfMatch { key, body, etag: want } => match find_entry(&self.entries, key) {
+            StoreReq::PutIfMatch { key, body, etag: want } => match find_entry(&self.entries, key) {
                 Some(i) => {
                     let have = etag(&self.entries[i].body);
                     if have.0 == want.0 {
@@ -1142,19 +1144,19 @@ impl Store {
                         }
                         let version = bump(self.entries[i].version);
                         put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
-                        StoreOutcome::Written(etag(body))
+                        StoreRes::PutIfMatch { result: Ok(etag(body)) }
                     } else {
                         proof {
                             if have.0@ != want.0@ {
                                 assert(have != *want);
                             }
                         }
-                        StoreOutcome::Failed(StoreError::PreconditionFailed)
+                        StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) }
                     }
                 },
-                None => StoreOutcome::Failed(StoreError::PreconditionFailed),
+                None => StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) },
             },
-            StoreCall::AppendIfMatch { key, offset, body, etag: want } => {
+            StoreReq::AppIfMatch { key, offset, body, etag: want } => {
                 if !self.appendable {
                     let text = "this store does not append".to_owned();
                     proof {
@@ -1165,7 +1167,7 @@ impl Store {
                         ]);
                         crate::interpret::lemma_string_of(text);
                     }
-                    StoreOutcome::Failed(StoreError::Unavailable(text))
+                    StoreRes::AppIfMatch { result: Err(StoreError::Unavailable(text)) }
                 } else {
                     match find_entry(&self.entries, key) {
                         Some(i) => {
@@ -1180,29 +1182,29 @@ impl Store {
                                 let version = bump(self.entries[i].version);
                                 let tag = etag(&joined);
                                 put_entry(&mut next.entries, Entry { key: key.clone(), body: joined, version });
-                                StoreOutcome::Written(tag)
+                                StoreRes::AppIfMatch { result: Ok(tag) }
                             } else {
                                 proof {
                                     if have.0@ != want.0@ {
                                         assert(have != *want);
                                     }
                                 }
-                                StoreOutcome::Failed(StoreError::PreconditionFailed)
+                                StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) }
                             }
                         },
-                        None => StoreOutcome::Failed(StoreError::PreconditionFailed),
+                        None => StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) },
                     }
                 }
             },
-            StoreCall::Put { key, body } => {
+            StoreReq::Put { key, body } => {
                 let version = match find_entry(&self.entries, key) {
                     Some(i) => bump(self.entries[i].version),
                     None => 1,
                 };
                 put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
-                StoreOutcome::Done
+                StoreRes::Put { result: Ok(()) }
             },
-            StoreCall::Delete { key } => {
+            StoreReq::Del { key } => {
                 match find_entry(&next.entries, key) {
                     Some(i) => {
                         let ghost before_v = entries_v(next.entries@);
@@ -1213,12 +1215,14 @@ impl Store {
                     },
                     None => {},
                 }
-                StoreOutcome::Done
+                StoreRes::Del { result: Ok(()) }
             },
-            StoreCall::List { prefix, max_keys } => StoreOutcome::Listed(list_keys(&self.entries, prefix, *max_keys)),
-            StoreCall::ListPrefixes { prefix } => StoreOutcome::Listed(prefix_children(&self.entries, prefix)),
+            StoreReq::List { prefix, max_keys } =>
+                StoreRes::List { result: Ok(list_keys(&self.entries, prefix, *max_keys)) },
+            StoreReq::ListPrefixes { prefix } =>
+                StoreRes::ListPrefixes { result: Ok(prefix_children(&self.entries, prefix)) },
         };
-        (next, outcome)
+        (next, response)
     }
 }
 

@@ -25,7 +25,7 @@ use crate::state_node::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_read_config;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
+use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
 
 verus! {
 
@@ -48,7 +48,7 @@ pub open spec fn spec_members_refresh(s: S, now: u64) -> S {
         let s = spec_with_members(s, MembersSpec { me, ..s.node.members });
         let body = spec_announcement_bytes(me);
         let key = spec_node_key(s.keys.prefix, me.id);
-        let (s, op) = spec_store(s, StoreCallSpec::Put { key, body }, Owner::Members);
+        let (s, op) = spec_store(s, StoreReqSpec::Put { key, body }, Owner::Members);
         spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Announcing { op, now }), ..s.node.members })
     }
 }
@@ -73,7 +73,7 @@ pub open spec fn spec_read_nodes(s: S, keys: Seq<Seq<char>>, pending: Map<OpId, 
         let (s, pending) = if spec_node_of_key(s.keys.prefix, key) == Some(s.node.members.me.id) {
             (s, pending)
         } else {
-            let (s, op) = spec_store(s, StoreCallSpec::Get { key }, Owner::Members);
+            let (s, op) = spec_store(s, StoreReqSpec::Get { key }, Owner::Members);
             (s, pending.insert(op, true))
         };
         spec_read_nodes(s, keys.drop_first(), pending)
@@ -81,7 +81,7 @@ pub open spec fn spec_read_nodes(s: S, keys: Seq<Seq<char>>, pending: Map<OpId, 
 }
 
 #[verifier::opaque]
-pub open spec fn spec_members_completed(s: S, op: OpId, outcome: StoreOutcome) -> S {
+pub open spec fn spec_members_completed(s: S, op: OpId, outcome: StoreRes) -> S {
     match s.node.members.refresh {
         None => s,
         Some(refresh) => {
@@ -103,22 +103,22 @@ pub open spec fn spec_members_completed(s: S, op: OpId, outcome: StoreOutcome) -
 
 /// Announced: list the nodes.
 #[verifier::opaque]
-pub open spec fn spec_announced(s: S, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_announced(s: S, now: u64, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Done => {
-            let (s, op) = spec_store(s, StoreCallSpec::List { prefix: spec_node_prefix(s.keys.prefix), max_keys: 10_000 }, Owner::Members);
+        StoreRes::Put { result: Ok(()) } => {
+            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_node_prefix(s.keys.prefix), max_keys: 10_000 }, Owner::Members);
             spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Listing { op, now }), ..s.node.members })
         },
-        StoreOutcome::Failed(e) => spec_refresh_ended(s, Err(e.deep_view())),
+        StoreRes::Put { result: Err(e) } => spec_refresh_ended(s, Err(e.deep_view())),
         _ => spec_refresh_ended(s, Err(spec_unexpected())),
     }
 }
 
 /// Listed: read every node's announcement, this node's known already.
 #[verifier::opaque]
-pub open spec fn spec_listed(s: S, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_listed(s: S, now: u64, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Listed(keys) => {
+        StoreRes::List { result: Ok(keys) } => {
             let nodes = RosterSpec { entries: spec_roster_insert(Seq::empty(), s.node.members.me.id, s.node.members.me) };
             let (s, pending) = spec_read_nodes(s, keys.deep_view(), Map::empty());
             if pending =~= Map::<OpId, bool>::empty() {
@@ -127,7 +127,7 @@ pub open spec fn spec_listed(s: S, now: u64, outcome: StoreOutcome) -> S {
                 spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Reading { pending, nodes, now, failed: None }), ..s.node.members })
             }
         },
-        StoreOutcome::Failed(e) => spec_refresh_ended(s, Err(e.deep_view())),
+        StoreRes::List { result: Err(e) } => spec_refresh_ended(s, Err(e.deep_view())),
         _ => spec_refresh_ended(s, Err(spec_unexpected())),
     }
 }
@@ -135,9 +135,9 @@ pub open spec fn spec_listed(s: S, now: u64, outcome: StoreOutcome) -> S {
 /// One announcement read: a live node joins the roster, a long dead one
 /// is collected, anything unreadable is not a node.
 #[verifier::opaque]
-pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec, now: u64, failed: Option<StoreErrorSpec>, outcome: StoreOutcome) -> S {
+pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec, now: u64, failed: Option<StoreErrorSpec>, outcome: StoreRes) -> S {
     let (s, nodes, failed) = match outcome {
-        StoreOutcome::Got(Some((bytes, _))) => match spec_parse_announcement(bytes@) {
+        StoreRes::Get { result: Ok(Some((bytes, _))) } => match spec_parse_announcement(bytes@) {
             Some(a) => {
                 let fleet_at = if s.node.fleet_at > a.at { s.node.fleet_at } else { a.at };
                 let s = S { node: NodeSpec { fleet_at, ..s.node }, ..s };
@@ -145,7 +145,7 @@ pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec
                     (s, RosterSpec { entries: spec_roster_insert(nodes.entries, a.id, a) }, failed)
                 } else if a.at.saturating_add((2 as u64).saturating_mul(s.node.members.ttl)) < now {
                     let key = spec_node_key(s.keys.prefix, a.id);
-                    let (s, _op) = spec_store(s, StoreCallSpec::Delete { key }, Owner::Ignored);
+                    let (s, _op) = spec_store(s, StoreReqSpec::Del { key }, Owner::Ignored);
                     (s, nodes, failed)
                 } else {
                     (s, nodes, failed)
@@ -153,8 +153,8 @@ pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec
             },
             None => (s, nodes, failed),
         },
-        StoreOutcome::Got(None) => (s, nodes, failed),
-        StoreOutcome::Failed(e) => (s, nodes, Some(e.deep_view())),
+        StoreRes::Get { result: Ok(None) } => (s, nodes, failed),
+        StoreRes::Get { result: Err(e) } => (s, nodes, Some(e.deep_view())),
         _ => (s, nodes, Some(spec_unexpected())),
     };
     if !(pending =~= Map::<OpId, bool>::empty()) {
@@ -169,34 +169,35 @@ pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec
 
 /// The configuration read: take it on.
 #[verifier::opaque]
-pub open spec fn spec_configured(s: S, nodes: RosterSpec, outcome: StoreOutcome) -> S {
+pub open spec fn spec_configured(s: S, nodes: RosterSpec, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Got(read) => {
+        StoreRes::Get { result: Ok(read) } => {
             let (config, etag) = match read {
                 Some((bytes, etag)) => (spec_parse_configuration(bytes@), Some(etag.deep_view())),
                 None => (ConfigurationSpec { epoch: 0, members: Seq::empty() }, None),
             };
             spec_take_on(s, config, etag, nodes)
         },
-        StoreOutcome::Failed(e) => spec_refresh_ended(s, Err(e.deep_view())),
+        StoreRes::Get { result: Err(e) } => spec_refresh_ended(s, Err(e.deep_view())),
         _ => spec_refresh_ended(s, Err(spec_unexpected())),
     }
 }
 
 /// The configuration written, or not.
 #[verifier::opaque]
-pub open spec fn spec_written(s: S, next: ConfigurationSpec, outcome: StoreOutcome) -> S {
+pub open spec fn spec_written(s: S, next: ConfigurationSpec, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Written(_) => {
+        StoreRes::PutIfMatch { result: Ok(_) } | StoreRes::PutIfNoneMatch { result: Ok(_) } => {
             let s = spec_note(s, NoteSpec::ConfigurationWrite(ConfigWrite::Written));
             let s = spec_note(s, NoteSpec::ConfigurationWritten { epoch: next.epoch, members: next.members });
             spec_refresh_ended(s, Ok(()))
         },
-        StoreOutcome::Failed(StoreError::PreconditionFailed) => {
+        StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) }
+        | StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) } => {
             let s = spec_note(s, NoteSpec::ConfigurationWrite(ConfigWrite::Conflict));
             spec_refresh_ended(s, Ok(()))
         },
-        StoreOutcome::Failed(e) => {
+        StoreRes::PutIfMatch { result: Err(e) } | StoreRes::PutIfNoneMatch { result: Err(e) } => {
             let s = spec_note(s, NoteSpec::ConfigurationWrite(ConfigWrite::Failed));
             spec_refresh_ended(s, Err(e.deep_view()))
         },
@@ -207,7 +208,7 @@ pub open spec fn spec_written(s: S, next: ConfigurationSpec, outcome: StoreOutco
 /// The configuration: read it, and take it on.
 #[verifier::opaque]
 pub open spec fn spec_read_configuration(s: S, nodes: RosterSpec) -> S {
-    let (s, op) = spec_store(s, StoreCallSpec::Get { key: spec_members_key(s.keys.prefix) }, Owner::Members);
+    let (s, op) = spec_store(s, StoreReqSpec::Get { key: spec_members_key(s.keys.prefix) }, Owner::Members);
     spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Config { op, nodes }), ..s.node.members })
 }
 
@@ -237,8 +238,8 @@ pub open spec fn spec_write_members(s: S, config: ConfigurationSpec, etag: Optio
         let body = spec_configuration_bytes(next);
         let key = spec_members_key(s.keys.prefix);
         let call = match etag {
-            Some(etag) => StoreCallSpec::PutIfMatch { key, body, etag },
-            None => StoreCallSpec::PutIfNoneMatch { key, body },
+            Some(etag) => StoreReqSpec::PutIfMatch { key, body, etag },
+            None => StoreReqSpec::PutIfNoneMatch { key, body },
         };
         let (s, op) = spec_store(s, call, Owner::Members);
         spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Writing { op, next }), ..s.node.members })
@@ -300,7 +301,7 @@ impl State {
         self.node.members.me.at = now;
         let body = announcement_bytes(&self.node.members.me);
         let key = self.keys.node_key(self.node.members.me.id.as_str());
-        let op = self.store(StoreCall::Put { key, body }, Owner::Members);
+        let op = self.store(StoreReq::Put { key, body }, Owner::Members);
         self.node.members.refresh = Some(Refresh::Announcing { op, now });
     }
 
@@ -349,7 +350,7 @@ impl State {
                 None => false,
             };
             if !mine {
-                let op = self.store(StoreCall::Get { key }, Owner::Members);
+                let op = self.store(StoreReq::Get { key }, Owner::Members);
                 pending.insert(op, true);
             }
             i += 1;
@@ -359,7 +360,7 @@ impl State {
         }
     }
 
-    pub fn members_completed(&mut self, op: OpId, outcome: StoreOutcome)
+    pub fn members_completed(&mut self, op: OpId, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_members_completed(old(self).deep_view(), op, outcome),
     {
@@ -387,7 +388,7 @@ impl State {
     }
 
     /// Announced: list the nodes.
-    fn announced(&mut self, now: u64, outcome: StoreOutcome)
+    fn announced(&mut self, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_announced(old(self).deep_view(), now, outcome),
     {
@@ -395,18 +396,18 @@ impl State {
             reveal(spec_announced);
         }
         match outcome {
-            StoreOutcome::Done => {
+            StoreRes::Put { result: Ok(()) } => {
                 let prefix = self.keys.node_prefix();
-                let op = self.store(StoreCall::List { prefix, max_keys: 10_000 }, Owner::Members);
+                let op = self.store(StoreReq::List { prefix, max_keys: 10_000 }, Owner::Members);
                 self.node.members.refresh = Some(Refresh::Listing { op, now });
             },
-            StoreOutcome::Failed(e) => self.refresh_ended(Err(e)),
+            StoreRes::Put { result: Err(e) } => self.refresh_ended(Err(e)),
             _ => self.refresh_ended(Err(unexpected())),
         }
     }
 
     /// Listed: read every node's announcement, this node's known already.
-    fn listed(&mut self, now: u64, outcome: StoreOutcome)
+    fn listed(&mut self, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_listed(old(self).deep_view(), now, outcome),
     {
@@ -414,7 +415,7 @@ impl State {
             reveal(spec_listed);
         }
         match outcome {
-            StoreOutcome::Listed(keys) => {
+            StoreRes::List { result: Ok(keys) } => {
                 let mut nodes = Roster::new();
                 nodes.insert(copy_string(&self.node.members.me.id), self.node.members.me.copy());
                 let mut pending: Table<OpId, bool> = Table::new();
@@ -425,14 +426,14 @@ impl State {
                     self.node.members.refresh = Some(Refresh::Reading { pending, nodes, now, failed: None });
                 }
             },
-            StoreOutcome::Failed(e) => self.refresh_ended(Err(e)),
+            StoreRes::List { result: Err(e) } => self.refresh_ended(Err(e)),
             _ => self.refresh_ended(Err(unexpected())),
         }
     }
 
     /// One announcement read: a live node joins the roster, a long dead one
     /// is collected, anything unreadable is not a node.
-    fn read_one(&mut self, pending: Table<OpId, bool>, mut nodes: Roster, now: u64, failed: Option<StoreError>, outcome: StoreOutcome)
+    fn read_one(&mut self, pending: Table<OpId, bool>, mut nodes: Roster, now: u64, failed: Option<StoreError>, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_read_one(old(self).deep_view(), pending@, nodes.deep_view(), now, failed.deep_view(), outcome),
     {
@@ -440,7 +441,7 @@ impl State {
             reveal(spec_read_one);
         }
         let failed = match outcome {
-            StoreOutcome::Got(Some((bytes, _))) => {
+            StoreRes::Get { result: Ok(Some((bytes, _))) } => {
                 if let Some(a) = parse_announcement(bytes.as_slice()) {
                     if a.at > self.node.fleet_at {
                         self.node.fleet_at = a.at;
@@ -450,13 +451,13 @@ impl State {
                     } else if a.at.saturating_add((2 as u64).saturating_mul(self.node.members.ttl)) < now {
                         // Long dead: collect it. A node that is merely slow writes again.
                         let key = self.keys.node_key(a.id.as_str());
-                        self.store(StoreCall::Delete { key }, Owner::Ignored);
+                        self.store(StoreReq::Del { key }, Owner::Ignored);
                     }
                 }
                 failed
             },
-            StoreOutcome::Got(None) => failed,
-            StoreOutcome::Failed(e) => Some(e),
+            StoreRes::Get { result: Ok(None) } => failed,
+            StoreRes::Get { result: Err(e) } => Some(e),
             _ => Some(unexpected()),
         };
         if !pending.is_empty() {
@@ -470,7 +471,7 @@ impl State {
     }
 
     /// The configuration read: take it on.
-    fn configured(&mut self, nodes: Roster, outcome: StoreOutcome)
+    fn configured(&mut self, nodes: Roster, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_configured(old(self).deep_view(), nodes.deep_view(), outcome),
     {
@@ -478,7 +479,7 @@ impl State {
             reveal(spec_configured);
         }
         match outcome {
-            StoreOutcome::Got(read) => {
+            StoreRes::Get { result: Ok(read) } => {
                 let (config, etag) = match read {
                     Some((bytes, etag)) => (parse_configuration(bytes.as_slice()), Some(etag)),
                     None => {
@@ -491,13 +492,13 @@ impl State {
                 };
                 self.take_on(config, etag, nodes);
             },
-            StoreOutcome::Failed(e) => self.refresh_ended(Err(e)),
+            StoreRes::Get { result: Err(e) } => self.refresh_ended(Err(e)),
             _ => self.refresh_ended(Err(unexpected())),
         }
     }
 
     /// The configuration written, or not.
-    fn written(&mut self, next: Configuration, outcome: StoreOutcome)
+    fn written(&mut self, next: Configuration, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_written(old(self).deep_view(), next.deep_view(), outcome),
     {
@@ -505,18 +506,19 @@ impl State {
             reveal(spec_written);
         }
         match outcome {
-            StoreOutcome::Written(_) => {
+            StoreRes::PutIfMatch { result: Ok(_) } | StoreRes::PutIfNoneMatch { result: Ok(_) } => {
                 self.note(Note::ConfigurationWrite(ConfigWrite::Written));
                 let Configuration { epoch, members } = next;
                 self.note(Note::ConfigurationWritten { epoch, members });
                 self.refresh_ended(Ok(()));
             },
-            StoreOutcome::Failed(StoreError::PreconditionFailed) => {
+            StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) }
+            | StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) } => {
                 // A lost race is read next time.
                 self.note(Note::ConfigurationWrite(ConfigWrite::Conflict));
                 self.refresh_ended(Ok(()));
             },
-            StoreOutcome::Failed(e) => {
+            StoreRes::PutIfMatch { result: Err(e) } | StoreRes::PutIfNoneMatch { result: Err(e) } => {
                 self.note(Note::ConfigurationWrite(ConfigWrite::Failed));
                 self.refresh_ended(Err(e));
             },
@@ -533,7 +535,7 @@ impl State {
             reveal(spec_read_configuration);
         }
         let key = self.keys.members_key();
-        let op = self.store(StoreCall::Get { key }, Owner::Members);
+        let op = self.store(StoreReq::Get { key }, Owner::Members);
         self.node.members.refresh = Some(Refresh::Config { op, nodes });
     }
 
@@ -578,8 +580,8 @@ impl State {
             let body = configuration_bytes(&next);
             let key = self.keys.members_key();
             let call = match etag {
-                Some(etag) => StoreCall::PutIfMatch { key, body, etag },
-                None => StoreCall::PutIfNoneMatch { key, body },
+                Some(etag) => StoreReq::PutIfMatch { key, body, etag },
+                None => StoreReq::PutIfNoneMatch { key, body },
             };
             let op = self.store(call, Owner::Members);
             self.node.members.refresh = Some(Refresh::Writing { op, next });

@@ -28,7 +28,7 @@ pub use crate::node::{Node, NodeV};
 #[cfg(verus_keep_ghost)]
 use crate::store::spec_apply;
 pub use crate::store::{Entry, EntryV, Store, StoreV};
-use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+use crate::store::{Etag, Read, StoreError, StoreReq, StoreRes};
 
 verus! {
 
@@ -72,8 +72,8 @@ pub struct Model;
 pub enum Message {
     Request(Call),
     Output(Output),
-    StoreReq { op: u64, call: StoreCall },
-    StoreReply { op: u64, outcome: StoreOutcome },
+    StoreReq { op: u64, request: StoreReq },
+    StoreRes { op: u64, response: StoreRes },
     Stop,
 }
 
@@ -241,11 +241,11 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
                 }), send)
             }
         },
-        ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
+        ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreRes { op, response } } => {
             if node.flight is None || node.next_op == u64::MAX {
                 spec_one(LocalV::Node(node), Seq::empty())
             } else {
-                let (next, send) = spec_store_reply(node, op, outcome);
+                let (next, send) = spec_store_reply(node, op, response);
                 spec_one(LocalV::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     wake: spec_wake(next),
@@ -267,14 +267,14 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
 /// is a stutter, the same arm as `Store::on_event`.
 pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
     match event {
-        ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+        ProcessEvent::Receive { sender, message: Message::StoreReq { op, request } } => {
             if store.seen.contains((sender, op)) {
                 spec_one(LocalV::Store(store), Seq::empty())
             } else {
-                let (next, outcome) = spec_apply(store, call);
+                let (next, response) = spec_apply(store, request);
                 spec_one(
                     LocalV::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
-                    seq![(sender, Message::StoreReply { op, outcome })],
+                    seq![(sender, Message::StoreRes { op, response })],
                 )
             }
         },
@@ -301,7 +301,7 @@ pub open spec fn spec_reply(client: Seq<char>, id: u64, response: Response) -> (
 }
 
 pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
-    (Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key: spec_string(key) } })
+    (Pid::Store, Message::StoreReq { op, request: StoreReq::Get { key: spec_string(key) } })
 }
 
 pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
@@ -394,7 +394,7 @@ impl Store {
     {
         let mut r: Vec<(Store, Vec<(Pid, Message)>)> = Vec::new();
         match event {
-            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+            ProcessEvent::Receive { sender, message: Message::StoreReq { op, request } } => {
                 if seen_has(&self.seen, *sender, *op) {
                     r.push((self.copy(), Vec::new()));
                     proof {
@@ -402,10 +402,10 @@ impl Store {
                     }
                     return r;
                 }
-                let (mut next, outcome) = self.apply(call);
+                let (mut next, response) = self.apply(request);
                 next.seen.push((*sender, *op));
                 let mut send: Vec<(Pid, Message)> = Vec::new();
-                send.push((*sender, Message::StoreReply { op: *op, outcome }));
+                send.push((*sender, Message::StoreRes { op: *op, response }));
                 r.push((next, send));
                 proof {
                     assert(store_results_v(r@) =~~= spec_store(self@, *event));
@@ -567,7 +567,7 @@ impl RoverModel for Model {
     open spec fn spec_injectable(&self, _config: Fleet, message: Message) -> bool {
         match message {
             Message::Request(_) | Message::Stop => true,
-            Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
+            Message::Output(_) | Message::StoreReq { .. } | Message::StoreRes { .. } => false,
         }
     }
 

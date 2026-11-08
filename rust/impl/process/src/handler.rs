@@ -28,7 +28,7 @@ use crate::state_node::MembersSpec;
 #[cfg(verus_keep_ghost)]
 use crate::state_timers::spec_next_wake;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreCallSpec;
+use echod_concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -48,15 +48,15 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
             let s = S { clock, loops, ..s };
             spec_members_refresh(s, spec_now(s))
         },
-        EventSpec::Store { op, outcome, clock } => {
+        EventSpec::Store { op, response, clock } => {
             let s = S { clock, ..s };
             let owner = if s.ops.contains_key(op) { Some(s.ops[op]) } else { None };
             let s = S { ops: s.ops.remove(op), ..s };
             match owner {
-                Some(Owner::Flight(f)) => spec_flight_completed(s, f, op, outcome),
-                Some(Owner::Members) => spec_members_completed(s, op, outcome),
-                Some(Owner::Timers) => spec_timers_completed(s, op, outcome),
-                Some(Owner::Debug) => spec_debug_completed(s, op, outcome),
+                Some(Owner::Flight(f)) => spec_flight_completed(s, f, op, response),
+                Some(Owner::Members) => spec_members_completed(s, op, response),
+                Some(Owner::Timers) => spec_timers_completed(s, op, response),
+                Some(Owner::Debug) => spec_debug_completed(s, op, response),
                 Some(Owner::Leaving) => S { stopped: true, ..s },
                 _ => s,
             }
@@ -103,7 +103,7 @@ pub open spec fn spec_stop(s: S) -> S {
 #[verifier::opaque]
 pub open spec fn spec_leave(s: S) -> S {
     let key = spec_node_key(s.keys.prefix, s.cfg.node_id);
-    spec_store(s, StoreCallSpec::Delete { key }, Owner::Leaving).0
+    spec_store(s, StoreReqSpec::Del { key }, Owner::Leaving).0
 }
 
 /// Ask the runtime to sleep until the next heartbeat or the next time the
@@ -173,13 +173,13 @@ impl State {
                 let now = self.now();
                 self.members_refresh(now);
             },
-            Event::Store { op, outcome, clock } => {
+            Event::Store { op, response, clock } => {
                 self.set_clock(clock);
                 match self.ops.remove(&op) {
-                    Some(Owner::Flight(f)) => self.flight_completed(f, op, outcome),
-                    Some(Owner::Members) => self.members_completed(op, outcome),
-                    Some(Owner::Timers) => self.timers_completed(op, outcome),
-                    Some(Owner::Debug) => self.debug_completed(op, outcome),
+                    Some(Owner::Flight(f)) => self.flight_completed(f, op, response),
+                    Some(Owner::Members) => self.members_completed(op, response),
+                    Some(Owner::Timers) => self.timers_completed(op, response),
+                    Some(Owner::Debug) => self.debug_completed(op, response),
                     Some(Owner::Leaving) => self.mark_stopped(),
                     Some(Owner::Ignored) | None => {},
                 }
@@ -255,7 +255,7 @@ impl State {
             reveal(spec_leave);
         }
         let key = self.keys.node_key(self.cfg.node_id.as_str());
-        self.store(StoreCall::Delete { key }, Owner::Leaving);
+        self.store(StoreReq::Del { key }, Owner::Leaving);
     }
 
     /// Ask the runtime to sleep until the next heartbeat or the next time

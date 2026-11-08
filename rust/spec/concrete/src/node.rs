@@ -52,7 +52,7 @@ pub use crate::document::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Read, StoreError};
-use crate::store::{fnv1a, Etag, StoreCall, StoreOutcome};
+use crate::store::{fnv1a, Etag, StoreReq, StoreRes};
 
 verus! {
 
@@ -4562,7 +4562,7 @@ impl Node {
                 proof {
                     crate::interpret::lemma_string_of(key);
                 }
-                (next, one((Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key } })))
+                (next, one((Pid::Store, Message::StoreReq { op, request: StoreReq::Get { key } })))
             },
         }
     }
@@ -4620,14 +4620,14 @@ impl Node {
                 axiom_vec_ext(body, spec_bytes(spec_encode_body(next@)));
                 crate::interpret::lemma_string_of(key);
             }
-            let call = match &etag {
+            let request = match &etag {
                 Some(tag) => {
                     proof {
                         crate::interpret::lemma_string_of(tag.0);
                     }
-                    StoreCall::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
+                    StoreReq::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
                 },
-                None => StoreCall::PutIfNoneMatch { key: key.clone(), body },
+                None => StoreReq::PutIfNoneMatch { key: key.clone(), body },
             };
             let flight = Flight {
                 op,
@@ -4645,7 +4645,7 @@ impl Node {
             let mut node = self;
             node.flight = Some(flight);
             node.next_op = op + 1;
-            (node, one((Pid::Store, Message::StoreReq { op, call })))
+            (node, one((Pid::Store, Message::StoreReq { op, request })))
         }
     }
 
@@ -4691,11 +4691,11 @@ impl Node {
     }
 
     /// `spec_store_reply`: the open flight continues with what the store answered.
-    fn store_reply(self, op: u64, outcome: &StoreOutcome) -> (r: (Node, Vec<(Pid, Message)>))
+    fn store_reply(self, op: u64, response: &StoreRes) -> (r: (Node, Vec<(Pid, Message)>))
         requires
             self.next_op < u64::MAX,
         ensures
-            (r.0@, r.1@) == spec_store_reply(self@, op, *outcome),
+            (r.0@, r.1@) == spec_store_reply(self@, op, *response),
     {
         match &self.flight {
             None => (self, Vec::new()),
@@ -4705,8 +4705,8 @@ impl Node {
                     return (self, Vec::new());
                 }
                 if !flight.writing {
-                    match outcome {
-                        StoreOutcome::Got(got) => {
+                    match response {
+                        StoreRes::Get { result: Ok(got) } => {
                             let (doc, etag): (DocumentBody, Option<Etag>) = match got {
                                 Some(pair) => (decode_body(&flight.key, &pair.0), Some(copy(&pair.1))),
                                 None => (empty_body(&flight.key), None),
@@ -4717,7 +4717,7 @@ impl Node {
                             node.flight = None;
                             node.decide(flight, doc)
                         },
-                        StoreOutcome::Failed(_) => {
+                        StoreRes::Get { result: Err(_) } => {
                             let mut node = self;
                             node.flight = None;
                             node.fail(flight)
@@ -4725,9 +4725,12 @@ impl Node {
                         _ => (self, Vec::new()),
                     }
                 } else {
-                    match outcome {
-                        StoreOutcome::Written(tag) => self.commit(flight, copy(tag)),
-                        StoreOutcome::Failed(_) => {
+                    match response {
+                        StoreRes::PutIfMatch { result: Ok(tag) }
+                        | StoreRes::PutIfNoneMatch { result: Ok(tag) } =>
+                            self.commit(flight, copy(tag)),
+                        StoreRes::PutIfMatch { result: Err(_) }
+                        | StoreRes::PutIfNoneMatch { result: Err(_) } => {
                             let mut node = self;
                             node.flight = None;
                             node.fail(flight)
@@ -4968,18 +4971,18 @@ impl Node {
     }
 
     /// The store-reply arm of `spec_node`.
-    fn after_store_reply(&self, now: u64, op: u64, outcome: &StoreOutcome) -> (r: (Node, Vec<(Pid, Message)>))
+    fn after_store_reply(&self, now: u64, op: u64, response: &StoreRes) -> (r: (Node, Vec<(Pid, Message)>))
         requires
             self.flight is Some,
             self.next_op < u64::MAX,
         ensures
             ({
-                let (next, send) = spec_store_reply(self@, op, *outcome);
+                let (next, send) = spec_store_reply(self@, op, *response);
                 r.0@ == (NodeV { logic: spec_clock(self@.logic, now), wake: spec_wake(next), ..next })
                 && r.1@ == send
             }),
     {
-        let (next, send) = copy(self).store_reply(op, outcome);
+        let (next, send) = copy(self).store_reply(op, response);
         let mut next = next;
         let w = next.next_wake();
         next.wake = w;
@@ -5040,11 +5043,11 @@ impl Node {
                     results_one(next, send)
                 }
             },
-            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
+            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreRes { op, response } } => {
                 if self.flight.is_none() || self.next_op == u64::MAX {
                     results_one(copy(self), Vec::new())
                 } else {
-                    let (next, send) = self.after_store_reply(now, *op, outcome);
+                    let (next, send) = self.after_store_reply(now, *op, response);
                     results_one(next, send)
                 }
             },
@@ -5463,15 +5466,15 @@ pub open spec fn spec_timeout(node: NodeV, now: Time) -> (NodeV, Seq<(Pid, Messa
     }
 }
 
-pub open spec fn spec_store_reply(node: NodeV, op: u64, outcome: StoreOutcome) -> (NodeV, Seq<(Pid, Message)>) {
+pub open spec fn spec_store_reply(node: NodeV, op: u64, response: StoreRes) -> (NodeV, Seq<(Pid, Message)>) {
     match node.flight {
         None => (node, Seq::empty()),
         Some(flight) => {
             if flight.op != op {
                 (node, Seq::empty())
             } else if !flight.writing {
-                match outcome {
-                    StoreOutcome::Got(got) => {
+                match response {
+                    StoreRes::Get { result: Ok(got) } => {
                         let (doc, etag) = match got {
                             Some((body, tag)) => (spec_read(flight.key, body@), Some(tag.0@)),
                             None => (spec_empty_body(flight.key), None),
@@ -5479,13 +5482,17 @@ pub open spec fn spec_store_reply(node: NodeV, op: u64, outcome: StoreOutcome) -
                         let flight = FlightV { etag, ..flight };
                         spec_decide(NodeV { flight: None, ..node }, flight, doc)
                     },
-                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                    StoreRes::Get { result: Err(_) } => spec_fail(NodeV { flight: None, ..node }, flight),
                     _ => (node, Seq::empty()),
                 }
             } else {
-                match outcome {
-                    StoreOutcome::Written(tag) => spec_commit(node, flight, tag),
-                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                match response {
+                    StoreRes::PutIfMatch { result: Ok(tag) }
+                    | StoreRes::PutIfNoneMatch { result: Ok(tag) } =>
+                        spec_commit(node, flight, tag),
+                    StoreRes::PutIfMatch { result: Err(_) }
+                    | StoreRes::PutIfNoneMatch { result: Err(_) } =>
+                        spec_fail(NodeV { flight: None, ..node }, flight),
                     _ => (node, Seq::empty()),
                 }
             }
@@ -5551,13 +5558,13 @@ pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV) -
     } else {
         let op = node.next_op;
         let body = spec_encode_body(next);
-        let call = match flight.etag {
-            Some(chars) => StoreCall::PutIfMatch {
+        let request = match flight.etag {
+            Some(chars) => StoreReq::PutIfMatch {
                 key: spec_string(flight.key),
                 body: spec_bytes(body),
                 etag: Etag(spec_string(chars)),
             },
-            None => StoreCall::PutIfNoneMatch { key: spec_string(flight.key), body: spec_bytes(body) },
+            None => StoreReq::PutIfNoneMatch { key: spec_string(flight.key), body: spec_bytes(body) },
         };
         let flight = FlightV {
             op,
@@ -5568,7 +5575,7 @@ pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV) -
             decided: Some(body),
             ..flight
         };
-        (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![(Pid::Store, Message::StoreReq { op, call })])
+        (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![(Pid::Store, Message::StoreReq { op, request })])
     }
 }
 

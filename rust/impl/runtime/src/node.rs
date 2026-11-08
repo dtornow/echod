@@ -184,7 +184,7 @@ impl Node {
 
     fn perform(&self, e: Effect) {
         match e {
-            Effect::Store { op, call } => {
+            Effect::Store { op, request } => {
                 let node = self.me();
                 let store = Arc::clone(&self.store);
                 let mut crashed = self.crashed();
@@ -192,9 +192,9 @@ impl Node {
                     tokio::select! {
                         biased;
                         _ = crashed.changed() => {}
-                        outcome = store::call(&*store, call) => {
+                        response = store::call(&*store, request) => {
                             let clock = node.clock.now();
-                            node.apply(Event::Store { op, outcome, clock });
+                            node.apply(Event::Store { op, response, clock });
                         }
                     }
                 });

@@ -39,7 +39,7 @@ use crate::node::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{
-    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreCall, StoreOutcome,
+    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreReq, StoreRes,
 };
 #[cfg(verus_keep_ghost)]
 use crate::relation::*;
@@ -171,7 +171,7 @@ pub open spec fn node_pid(i: int) -> CPid {
 }
 
 pub open spec fn no_store_traffic(env: Envelope<CPid, CMessage>) -> bool {
-    !(env.message is StoreReq) && !(env.message is StoreReply)
+    !(env.message is StoreReq) && !(env.message is StoreRes)
 }
 
 pub open spec fn process_label(label: Label<CPid, CMessage>) -> bool {
@@ -1458,7 +1458,7 @@ pub proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV)
             } else {
                 let w = written(node, flight, doc);
                 &&& after == NodeV { flight: Some(w), next_op: (node.next_op + 1) as u64, ..node }
-                &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node.next_op, call: request_of(w) })]
+                &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node.next_op, request: request_of(w) })]
             }
         }),
 {
@@ -1472,14 +1472,14 @@ pub proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV)
         assert(w.writing);
         match flight.etag {
             Some(chars) => {
-                assert(request_of(w) == StoreCall::PutIfMatch {
+                assert(request_of(w) == StoreReq::PutIfMatch {
                     key: spec_string(flight.key),
                     body: spec_bytes(spec_encode_body(next)),
                     etag: Etag(spec_string(chars)),
                 });
             },
             None => {
-                assert(request_of(w) == StoreCall::PutIfNoneMatch {
+                assert(request_of(w) == StoreReq::PutIfNoneMatch {
                     key: spec_string(flight.key),
                     body: spec_bytes(spec_encode_body(next)),
                 });
@@ -1808,7 +1808,7 @@ pub proof fn lemma_invariant_grow(fleet: Fleet, cb: World<CModel>, ca: World<CMo
         assert(node_ok(k, node_at(cb, k), store_at(fleet, cb)));
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -1817,7 +1817,7 @@ pub proof fn lemma_invariant_grow(fleet: Fleet, cb: World<CModel>, ca: World<CMo
                 let node = node_at(ca, i);
                 &&& 0 <= i < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -1830,7 +1830,7 @@ pub proof fn lemma_invariant_grow(fleet: Fleet, cb: World<CModel>, ca: World<CMo
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -1839,7 +1839,7 @@ pub proof fn lemma_invariant_grow(fleet: Fleet, cb: World<CModel>, ca: World<CMo
                 let node = node_at(ca, i);
                 &&& 0 <= i < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == response_of(node.flight.unwrap()))
             }
         },
         _ => true,
@@ -2078,7 +2078,7 @@ pub proof fn lemma_silent(
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -2087,7 +2087,7 @@ pub proof fn lemma_silent(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -2095,7 +2095,7 @@ pub proof fn lemma_silent(
     } by {
         assert(ca.network[k] == cb.network[k]);
         match cb.network[k].message {
-            CMessage::StoreReq { op, call } => {
+            CMessage::StoreReq { op, request } => {
                 let n = cb.network[k].sender->Node_0 as int;
                 if n == i {
                     assert(node_at(ca, n).flight == node_at(cb, n).flight);
@@ -2106,7 +2106,7 @@ pub proof fn lemma_silent(
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -2115,14 +2115,14 @@ pub proof fn lemma_silent(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == response_of(node.flight.unwrap()))
             }
         },
         _ => true,
     } by {
         assert(ca.network[k] == cb.network[k]);
         match cb.network[k].message {
-            CMessage::StoreReply { op, outcome } => {
+            CMessage::StoreRes { op, response } => {
                 let n = cb.network[k].recipient->Node_0 as int;
                 if n == i {
                     assert(node_at(ca, n).flight == node_at(cb, n).flight);
@@ -2419,7 +2419,7 @@ pub proof fn lemma_traffic_ok(
                 recipient: CPid::Store,
                 message: CMessage::StoreReq {
                     op: node2.flight.unwrap().op,
-                    call: request_of(node2.flight.unwrap()),
+                    request: request_of(node2.flight.unwrap()),
                 },
             }),
     ensures
@@ -2430,7 +2430,7 @@ pub proof fn lemma_traffic_ok(
     let node0 = node_at(cb, i);
     let store = store_at(fleet, cb);
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -2439,7 +2439,7 @@ pub proof fn lemma_traffic_ok(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -2448,7 +2448,7 @@ pub proof fn lemma_traffic_ok(
         if k < cb.network.len() {
             assert(ca.network[k] == cb.network[k]);
             match cb.network[k].message {
-                CMessage::StoreReq { op, call } => {
+                CMessage::StoreReq { op, request } => {
                     let n = cb.network[k].sender->Node_0 as int;
                     if n == i {
                         assert(requested(cb, node_pid(i), op));
@@ -2467,13 +2467,13 @@ pub proof fn lemma_traffic_ok(
         } else {
             if !no_store_traffic(ca.network[k]) {
                 let flight = node2.flight.unwrap();
-                assert(ca.network[k].message == CMessage::StoreReq { op: flight.op, call: request_of(flight) });
+                assert(ca.network[k].message == CMessage::StoreReq { op: flight.op, request: request_of(flight) });
                 assert(flight_op(node2) == Some(flight.op));
             }
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -2482,7 +2482,7 @@ pub proof fn lemma_traffic_ok(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == response_of(node.flight.unwrap()))
             }
         },
         _ => true,
@@ -2490,7 +2490,7 @@ pub proof fn lemma_traffic_ok(
         if k < cb.network.len() {
             assert(ca.network[k] == cb.network[k]);
             match cb.network[k].message {
-                CMessage::StoreReply { op, outcome } => {
+                CMessage::StoreRes { op, response } => {
                     let n = cb.network[k].recipient->Node_0 as int;
                     if n == i {
                         lemma_seen_issued(fleet, cb, i, op);
@@ -2505,7 +2505,7 @@ pub proof fn lemma_traffic_ok(
                 _ => {},
             }
         } else {
-            assert(!(ca.network[k].message is StoreReply));
+            assert(!(ca.network[k].message is StoreRes));
         }
     };
     assert forall|pair: (CPid, u64)| #[trigger] store_at(fleet, ca).seen.contains(pair) implies requested(
@@ -2640,7 +2640,7 @@ pub proof fn lemma_begin_related(
             let r = spec_flight(op, key, None, at, caller, job);
             assert(node2 == NodeV { flight: Some(r), next_op: (op + 1) as u64, ..node1 });
             assert(send == seq![spec_get(op, key)]);
-            assert(request_of(r) == StoreCall::Get { key: spec_string(key) });
+            assert(request_of(r) == StoreReq::Get { key: spec_string(key) });
             lemma_decision_same(r, probe_flight, doc, node0.retry_timeout);
             lemma_reply_same(r, probe_flight, reply);
             assert(loaded(node2, key) == doc);
@@ -2669,7 +2669,7 @@ pub proof fn lemma_begin_related(
                     recipient: CPid::Store,
                     message: CMessage::StoreReq {
                         op: node2.flight.unwrap().op,
-                        call: request_of(node2.flight.unwrap()),
+                        request: request_of(node2.flight.unwrap()),
                     },
                 }) by {
                 assert(k == cb.network.len());
@@ -2744,7 +2744,7 @@ pub proof fn lemma_begin_related(
                         recipient: CPid::Store,
                         message: CMessage::StoreReq {
                             op: node2.flight.unwrap().op,
-                            call: request_of(node2.flight.unwrap()),
+                            request: request_of(node2.flight.unwrap()),
                         },
                     }) by {
                     let m = k - cb.network.len();
@@ -2803,7 +2803,7 @@ pub proof fn lemma_begin_related(
                 // the node opens the write
                 let w = written(node1, f, doc);
                 assert(node2 == NodeV { flight: Some(w), next_op: (op + 1) as u64, ..node1 });
-                assert(send == seq![(CPid::Store, CMessage::StoreReq { op, call: request_of(w) })]);
+                assert(send == seq![(CPid::Store, CMessage::StoreReq { op, request: request_of(w) })]);
                 assert(w.op == op);
                 assert(w.key == key);
                 assert(w.job == job);
@@ -2838,7 +2838,7 @@ pub proof fn lemma_begin_related(
                         recipient: CPid::Store,
                         message: CMessage::StoreReq {
                             op: node2.flight.unwrap().op,
-                            call: request_of(node2.flight.unwrap()),
+                            request: request_of(node2.flight.unwrap()),
                         },
                     }) by {
                     assert(k == cb.network.len());
@@ -3633,7 +3633,7 @@ pub proof fn lemma_write_after_read(
             let rest = NodeV { flight: None, ..node0 };
             let w = written(rest, flight, spec_empty_body(flight.key));
             &&& node2 == NodeV { flight: Some(w), next_op: (node0.next_op + 1) as u64, ..rest }
-            &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node0.next_op, call: request_of(w) })]
+            &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node0.next_op, request: request_of(w) })]
         }),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
@@ -3704,7 +3704,7 @@ pub proof fn lemma_write_after_read(
             recipient: CPid::Store,
             message: CMessage::StoreReq {
                 op: node2.flight.unwrap().op,
-                call: request_of(node2.flight.unwrap()),
+                request: request_of(node2.flight.unwrap()),
             },
         }) by {
         assert(k == cb.network.len());
@@ -3765,7 +3765,7 @@ pub proof fn lemma_store_reply(
     i: int,
     at: Time,
     op: u64,
-    outcome: StoreOutcome,
+    response: StoreRes,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
     ca: World<CModel>,
@@ -3774,10 +3774,10 @@ pub proof fn lemma_store_reply(
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
         cb.now <= at,
-        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } }),
+        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreRes { op, response } }),
         node_at(cb, i).flight is Some,
         node_at(cb, i).next_op < u64::MAX,
-        (node2, send) == spec_store_reply(node_at(cb, i), op, outcome),
+        (node2, send) == spec_store_reply(node_at(cb, i), op, response),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
         matches(abstract_model(), config, ab, Seq::<BoundaryEvent>::empty(), ab),
@@ -3796,17 +3796,17 @@ pub proof fn lemma_store_reply(
         let wanted = Envelope {
             sender: CPid::Store,
             recipient: node_pid(i),
-            message: CMessage::StoreReply { op, outcome },
+            message: CMessage::StoreRes { op, response },
         };
         let k = choose|k: int| 0 <= k < cb.network.len() && #[trigger] cb.network[k] == wanted;
         assert(store.seen.contains((node_pid(i), op)));
         assert(flight_op(node0) == Some(op));
-        assert(outcome == outcome_of(flight));
+        assert(response == response_of(flight));
         assert(flight_ok(node0));
         let doc0 = loaded(node0, key);
         let (next, reply, born, notes) = decision(flight, doc0, node0.retry_timeout);
         if !flight.writing {
-            assert(outcome == StoreOutcome::Got(None));
+            assert(response == StoreRes::Get { result: Ok(None) });
             assert(flight.etag is None);
             assert(spec_cached(node0, key) is None);
             assert(doc0 == spec_empty_body(key));
@@ -3846,7 +3846,10 @@ pub proof fn lemma_store_reply(
             let decided = flight.decided.unwrap();
             assert(decided == spec_encode_body(next));
             let tag = spec_etag(decided);
-            assert(outcome == StoreOutcome::Written(tag));
+            match flight.etag {
+                Some(_) => assert(response == StoreRes::PutIfMatch { result: Ok(tag) }),
+                None => assert(response == StoreRes::PutIfNoneMatch { result: Ok(tag) }),
+            }
             assert((node2, send) == spec_commit(node0, flight, tag));
             lemma_string(spec_etag_chars(decided));
             let chars = spec_etag_chars(decided);
@@ -3910,8 +3913,8 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
         ({
             let flight = node_at(world, n).flight.unwrap();
             let store = store_at(fleet, world);
-            let (next, outcome) = spec_apply(store, request_of(flight));
-            &&& outcome == outcome_of(flight)
+            let (next, response) = spec_apply(store, request_of(flight));
+            &&& response == response_of(flight)
             &&& entries_distinct(next)
             &&& next.seen == store.seen
             &&& if flight.writing {
@@ -3935,13 +3938,13 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
         assert(spec_cached(node, key) is None);
         assert(physical(store, key) is None);
         assert(spec_find(store.entries, key, 0) is None);
-        assert(request_of(flight) == StoreCall::Get { key: spec_string(key) });
+        assert(request_of(flight) == StoreReq::Get { key: spec_string(key) });
     } else {
         let decided = flight.decided.unwrap();
         lemma_bytes(decided);
         match flight.etag {
             None => {
-                assert(request_of(flight) == StoreCall::PutIfNoneMatch {
+                assert(request_of(flight) == StoreReq::PutIfNoneMatch {
                     key: spec_string(key),
                     body: spec_bytes(decided),
                 });
@@ -3959,7 +3962,7 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
                 lemma_put(store, entry);
             },
             Some(chars) => {
-                assert(request_of(flight) == StoreCall::PutIfMatch {
+                assert(request_of(flight) == StoreReq::PutIfMatch {
                     key: spec_string(key),
                     body: spec_bytes(decided),
                     etag: Etag(spec_string(chars)),
@@ -3973,9 +3976,9 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: World<CModel>, n: int)
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
                 assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
                 let entry = EntryV { key, body: decided, version: crate::store::spec_bump(store.entries[idx].version) };
-                let (next, outcome) = spec_apply(store, request_of(flight));
+                let (next, response) = spec_apply(store, request_of(flight));
                 assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
-                assert(outcome == StoreOutcome::Written(spec_etag(decided)));
+                assert(response == StoreRes::PutIfMatch { result: Ok(spec_etag(decided)) });
                 lemma_put(store, entry);
                 assert(physical(next, key) == Some(decided));
                 assert(entries_distinct(next));
@@ -4010,8 +4013,8 @@ pub proof fn lemma_store(
     let store = store_at(fleet, cb);
     let slot = fleet.nodes as int;
     match event {
-        ProcessEvent::Receive { sender, message: CMessage::StoreReq { op, call } } => {
-            let wanted = Envelope { sender, recipient: CPid::Store, message: CMessage::StoreReq { op, call } };
+        ProcessEvent::Receive { sender, message: CMessage::StoreReq { op, request } } => {
+            let wanted = Envelope { sender, recipient: CPid::Store, message: CMessage::StoreReq { op, request } };
             let k = choose|k: int| 0 <= k < cb.network.len() && #[trigger] cb.network[k] == wanted;
             assert(sender is Node);
             let n = sender->Node_0 as int;
@@ -4033,20 +4036,20 @@ pub proof fn lemma_store(
                 assert(flight_op(node) == Some(op));
                 let flight = node.flight.unwrap();
                 assert(flight.op == op);
-                assert(call == request_of(flight));
+                assert(request == request_of(flight));
                 let key = flight.key;
                 assert(node_ok(n, node, store));
                 assert(flight_ok(node));
                 assert(spec_owns(node, key));
-                let (next, outcome) = spec_apply(store, call);
+                let (next, response) = spec_apply(store, request);
                 let store2 = CStore { seen: store.seen.push((sender, op)), ..next };
-                let send = seq![(sender, CMessage::StoreReply { op, outcome })];
+                let send = seq![(sender, CMessage::StoreRes { op, response })];
                 assert(spec_store(store, event) == spec_one(LocalV::Store(store2), send));
                 assert(j == 0);
                 assert(ca == land(cb, slot, CPid::Store, at, store_result(store2, send)));
                 lemma_land_store(fleet, cb, at, store2, send);
                 lemma_store_answers(fleet, cb, n);
-                assert(outcome == outcome_of(flight));
+                assert(response == response_of(flight));
                 assert(entries_distinct(store2));
                 assert forall|other: Seq<char>| #[trigger] physical(store2, other) == physical(next, other) by {};
                 assert forall|x: (CPid, u64)| #[trigger] store2.seen.contains(x) == (store.seen.contains(x) || x == (sender, op)) by {
@@ -4097,9 +4100,9 @@ pub proof fn lemma_store(
                 // the traffic
                 lemma_envelope_at(CPid::Store, send, 0);
                 let sent = envelopes(CPid::Store, send);
-                assert(sent[0] == Envelope { sender: CPid::Store, recipient: sender, message: CMessage::StoreReply { op, outcome } });
+                assert(sent[0] == Envelope { sender: CPid::Store, recipient: sender, message: CMessage::StoreRes { op, response } });
                 assert forall|m: int| 0 <= m < ca.network.len() implies match (#[trigger] ca.network[m]).message {
-                    CMessage::StoreReq { op: op2, call: call2 } => {
+                    CMessage::StoreReq { op: op2, request: request2 } => {
                         let env = ca.network[m];
                         &&& env.recipient == CPid::Store
                         &&& env.sender is Node
@@ -4108,7 +4111,7 @@ pub proof fn lemma_store(
                             let nq = node_at(ca, q);
                             &&& 0 <= q < fleet.nodes
                             &&& op2 < nq.next_op
-                            &&& (flight_op(nq) == Some(op2) ==> call2 == request_of(nq.flight.unwrap()))
+                            &&& (flight_op(nq) == Some(op2) ==> request2 == request_of(nq.flight.unwrap()))
                             &&& (!store_at(fleet, ca).seen.contains((env.sender, op2)) ==> flight_op(nq) == Some(op2))
                         }
                     },
@@ -4117,7 +4120,7 @@ pub proof fn lemma_store(
                     if m < cb.network.len() {
                         assert(ca.network[m] == cb.network[m]);
                         match cb.network[m].message {
-                            CMessage::StoreReq { op: op2, call: call2 } => {
+                            CMessage::StoreReq { op: op2, request: request2 } => {
                                 let q = cb.network[m].sender->Node_0 as int;
                                 assert(node_at(ca, q) == node_at(cb, q));
                                 if !store2.seen.contains((cb.network[m].sender, op2)) {
@@ -4131,7 +4134,7 @@ pub proof fn lemma_store(
                     }
                 };
                 assert forall|m: int| 0 <= m < ca.network.len() implies match (#[trigger] ca.network[m]).message {
-                    CMessage::StoreReply { op: op2, outcome: outcome2 } => {
+                    CMessage::StoreRes { op: op2, response: response2 } => {
                         let env = ca.network[m];
                         &&& env.sender == CPid::Store
                         &&& env.recipient is Node
@@ -4140,7 +4143,7 @@ pub proof fn lemma_store(
                             let nq = node_at(ca, q);
                             &&& 0 <= q < fleet.nodes
                             &&& store_at(fleet, ca).seen.contains((env.recipient, op2))
-                            &&& (flight_op(nq) == Some(op2) ==> outcome2 == outcome_of(nq.flight.unwrap()))
+                            &&& (flight_op(nq) == Some(op2) ==> response2 == response_of(nq.flight.unwrap()))
                         }
                     },
                     _ => true,
@@ -4148,7 +4151,7 @@ pub proof fn lemma_store(
                     if m < cb.network.len() {
                         assert(ca.network[m] == cb.network[m]);
                         match cb.network[m].message {
-                            CMessage::StoreReply { op: op2, outcome: outcome2 } => {
+                            CMessage::StoreRes { op: op2, response: response2 } => {
                                 let q = cb.network[m].recipient->Node_0 as int;
                                 assert(node_at(ca, q) == node_at(cb, q));
                                 assert(store.seen.contains((cb.network[m].recipient, op2)));
@@ -4288,7 +4291,7 @@ pub proof fn lemma_node(
                 aa
             }
         },
-        ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } } => {
+        ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreRes { op, response } } => {
             if node.flight is None || node.next_op == u64::MAX {
                 assert(results == spec_one(LocalV::Node(node), Seq::empty()));
                 assert(j == 0);
@@ -4296,7 +4299,7 @@ pub proof fn lemma_node(
                 lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
                 ab
             } else {
-                let (next, send) = spec_store_reply(node, op, outcome);
+                let (next, send) = spec_store_reply(node, op, response);
                 let node2 = NodeV {
                     logic: crate::model::spec_clock(node.logic, at),
                     wake: crate::node::spec_wake(next),
@@ -4306,7 +4309,7 @@ pub proof fn lemma_node(
                 assert(j == 0);
                 assert(results[0] == node_result(node2, send));
                 let cw = land(cb, i, node_pid(i), at, node_result(next, send));
-                lemma_store_reply(fleet, config, cb, ab, i, at, op, outcome, next, send, cw);
+                lemma_store_reply(fleet, config, cb, ab, i, at, op, response, next, send, cw);
                 lemma_reshell(fleet, config, cb, ab, i, at, next, node2, send, ca);
                 ab
             }

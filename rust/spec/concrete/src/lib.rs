@@ -64,4 +64,4 @@ pub use node::{
     keys_within, peek, request_transition, run_due, same_body, stored_body, stored_committed_at,
     stored_is_workflow, stored_next_wake_at, stored_version, sweep, Outbound, Pending,
 };
-pub use store::{content_etag, fnv1a, Etag, Read, StoreCall, StoreError, StoreOutcome};
+pub use store::{content_etag, fnv1a, Etag, Read, StoreError, StoreReq, StoreRes};

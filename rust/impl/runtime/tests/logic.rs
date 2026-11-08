@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, RequestEvent, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, RequestEvent, StoreReq, StoreRes, SweepOutcome};
 use echod_logic::Message;
 use echod_logic::{Call, Config, DebugCall, State};
 use echod::admit::{self, Admission, DebugOp};
@@ -23,43 +23,43 @@ impl Bucket {
         Etag(format!("{}-{v}", b.len()))
     }
 
-    fn call(&mut self, c: StoreCall) -> StoreOutcome {
-        match c {
-            StoreCall::Get { key } => StoreOutcome::Got(self.objects.get(&key).map(|(b, v)| (b.clone(), Self::etag(b, *v)))),
-            StoreCall::GetIfNoneMatch { key, etag } => StoreOutcome::Read(match self.objects.get(&key) {
+    fn call(&mut self, request: StoreReq) -> StoreRes {
+        match request {
+            StoreReq::Get { key } => StoreRes::Get { result: Ok(self.objects.get(&key).map(|(b, v)| (b.clone(), Self::etag(b, *v)))) },
+            StoreReq::GetIfNoneMatch { key, etag } => StoreRes::GetIfNoneMatch { result: Ok(match self.objects.get(&key) {
                 None => Read::Absent,
                 Some((b, v)) if Self::etag(b, *v) == etag => Read::NotModified,
                 Some((b, v)) => Read::Body(b.clone(), Self::etag(b, *v)),
-            }),
-            StoreCall::PutIfMatch { key, body, etag } => match self.objects.get(&key) {
+            }) },
+            StoreReq::PutIfMatch { key, body, etag } => match self.objects.get(&key) {
                 Some((b, v)) if Self::etag(b, *v) == etag => {
                     let nv = v + 1;
                     let e = Self::etag(&body, nv);
                     self.objects.insert(key, (body, nv));
-                    StoreOutcome::Written(e)
+                    StoreRes::PutIfMatch { result: Ok(e) }
                 }
-                _ => StoreOutcome::Failed(echod_logic::types::StoreError::PreconditionFailed),
+                _ => StoreRes::PutIfMatch { result: Err(echod_logic::types::StoreError::PreconditionFailed) },
             },
-            StoreCall::PutIfNoneMatch { key, body } => {
+            StoreReq::PutIfNoneMatch { key, body } => {
                 if self.objects.contains_key(&key) {
-                    return StoreOutcome::Failed(echod_logic::types::StoreError::PreconditionFailed);
+                    return StoreRes::PutIfNoneMatch { result: Err(echod_logic::types::StoreError::PreconditionFailed) };
                 }
                 let e = Self::etag(&body, 1);
                 self.objects.insert(key, (body, 1));
-                StoreOutcome::Written(e)
+                StoreRes::PutIfNoneMatch { result: Ok(e) }
             }
-            StoreCall::AppendIfMatch { .. } => StoreOutcome::Failed(echod_logic::types::StoreError::Unavailable("no appends".into())),
-            StoreCall::Put { key, body } => {
+            StoreReq::AppIfMatch { .. } => StoreRes::AppIfMatch { result: Err(echod_logic::types::StoreError::Unavailable("no appends".into())) },
+            StoreReq::Put { key, body } => {
                 let v = self.objects.get(&key).map(|(_, v)| v + 1).unwrap_or(1);
                 self.objects.insert(key, (body, v));
-                StoreOutcome::Done
+                StoreRes::Put { result: Ok(()) }
             }
-            StoreCall::Delete { key } => {
+            StoreReq::Del { key } => {
                 self.objects.remove(&key);
-                StoreOutcome::Done
+                StoreRes::Del { result: Ok(()) }
             }
-            StoreCall::List { prefix, max_keys } => StoreOutcome::Listed(self.objects.keys().filter(|k| k.starts_with(&prefix)).take(max_keys).cloned().collect()),
-            StoreCall::ListPrefixes { prefix } => {
+            StoreReq::List { prefix, max_keys } => StoreRes::List { result: Ok(self.objects.keys().filter(|k| k.starts_with(&prefix)).take(max_keys).cloned().collect()) },
+            StoreReq::ListPrefixes { prefix } => {
                 let mut out: Vec<String> = Vec::new();
                 for k in self.objects.keys().filter(|k| k.starts_with(&prefix)) {
                     if let Some(i) = k[prefix.len()..].find('/') {
@@ -69,7 +69,7 @@ impl Bucket {
                         }
                     }
                 }
-                StoreOutcome::Listed(out)
+                StoreRes::ListPrefixes { result: Ok(out) }
             }
         }
     }
@@ -106,9 +106,9 @@ impl Harness {
             let mut next = Vec::new();
             for e in pending {
                 match e {
-                    Effect::Store { op, call } => {
-                        let outcome = self.bucket.call(call);
-                        next.extend(self.state.on_event(Event::Store { op, outcome, clock: self.clock }));
+                    Effect::Store { op, request } => {
+                        let response = self.bucket.call(request);
+                        next.extend(self.state.on_event(Event::Store { op, response, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => {
