@@ -45,12 +45,21 @@ module Protocol {
     | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat)
     | AtBucket(docs: map<string, Temp.Doc>, ver: map<string, nat>, timeouts: set<Clock>, anchor: map<string, Clock>)
 
-  function Empty(): Temp.Doc { Temp.Origin(0, map[]) }
-  function DocKey(id: string): string { "wf/" + Temp.OriginOf(id) }
+  // Everything before the first `:`, or the whole string when there is none.
+  function OriginOf(s: string): string
+    decreases |s|
+  {
+    if |s| == 0 then ""
+    else if s[0] == ':' then ""
+    else [s[0]] + OriginOf(s[1..])
+  }
+
+  function EmptyDoc(): Temp.Doc { Temp.Origin(0, map[]) }
+  function DocKey(id: string): string { "wf/" + OriginOf(id) }
 
   function DocumentAt(docs: map<string, Temp.Doc>, id: string): Temp.Doc {
     var key := DocKey(id);
-    if key in docs then docs[key] else Empty()
+    if key in docs then docs[key] else EmptyDoc()
   }
 
   function VersionOf(ver: map<string, nat>, key: string): nat {
