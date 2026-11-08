@@ -88,24 +88,15 @@ module Node {
     ensures Temp.CaughtUp(r.doc, now)
   {
     var swept := Temp.Sweep(doc, now, Retry);
-    assert Temp.WellFormed(doc, now) ==> Temp.WellFormed(swept.doc, now);
-    var objects := Temp.ObjectsOf(swept.doc);
-    if Temp.Timer(req.tags) && Temp.Targeted(req.tags) then
-      Temp.Applied(swept.doc, Temp.Answer(400, Temp.None), swept.notes)
-    else if req.id in objects then
-      var seen := Temp.Project(objects[req.id], now);
-      Temp.Applied(swept.doc, Temp.Answer(200, Temp.Some(seen.promise)), swept.notes)
-    else
-      var obj := Temp.NewObj(req.timeoutAt, now, req.param, req.tags, Temp.Targeted(req.tags));
-      var doc' := Temp.Origin(now, objects[req.id := obj]);
-      assert Temp.WellFormed(swept.doc, now) ==> Temp.WellFormed(doc', now) by {
-        if Temp.WellFormed(swept.doc, now) { Temp.InsertOk(swept.doc, req.id, obj, now); }
-      }
-      Temp.Applied(doc', Temp.Answer(200, Temp.Some(obj.promise)), swept.notes)
+    var done := Temp.Create(swept.doc, req, now);
+    Temp.Applied(done.doc, done.answer, swept.notes + done.notes)
   }
 
-  function Prepare(s: State, job: Job, id: string, doc: Temp.Doc, version: nat, now: nat): Plan
+  function Prepare(s: State, job: Job, id: string, doc: Temp.Doc, version: nat, now: nat): (plan: Plan)
     requires s.AtNode?
+    ensures Temp.WellFormed(doc, now) ==>
+      forall i | 0 <= i < |plan.effects| && plan.effects[i].Write? ::
+        Temp.WellFormed(plan.effects[i].doc, now)
   {
     match job
     case AskGet => Plan(HandlePromiseGet(doc, id, now).answer, false, [], Temp.None, false, s.next)
@@ -125,6 +116,51 @@ module Node {
           Plan(applied.answer, true,
                [Put(put), Write(key, applied.doc, version, Temp.Some(put))] + drop,
                Temp.Some(put), true, s.next + 1)
+  }
+
+  // Any request. A well-formed document comes back well-formed in every write the plan schedules.
+  lemma RequestKeepsWellFormed(s: State, job: Job, id: string, doc: Temp.Doc, version: nat, now: nat)
+    requires s.AtNode?
+    requires Temp.WellFormed(doc, now)
+    ensures var plan := Prepare(s, job, id, doc, version, now);
+      forall i | 0 <= i < |plan.effects| && plan.effects[i].Write? ::
+        Temp.WellFormed(plan.effects[i].doc, now)
+  {
+  }
+
+  // The same fact over `step`, for whichever request the continuation was preparing.
+  // A write the step sends, and a write it stores on the new continuation, is one the plan scheduled.
+  lemma StepKeepsWellFormed(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
+    requires self.Node? ==> s.AtNode?
+    requires i.Request? && IsGot(i.msg) ==> Temp.WellFormed(i.msg.ans.doc, now)
+    ensures var r := step(self, s, i, now);
+      i.Request? && IsGot(i.msg) && self.Node? && s.AtNode? &&
+      i.msg.id in s.open && s.open[i.msg.id].Prepare? && s.open[i.msg.id].id == i.msg.ans.id ==>
+        var plan := Prepare(s, s.open[i.msg.id].job, i.msg.ans.id, i.msg.ans.doc, i.msg.ans.version, now);
+        && (forall j | 0 <= j < |r.sends| && r.sends[j].msg.Req? && r.sends[j].msg.ask.WriteDoc? ::
+             Temp.WellFormed(r.sends[j].msg.ask.doc, now))
+        && (|plan.effects| > 0 ==>
+             var next := Hash(i.msg.id);
+             && next in r.state.open && r.state.open[next].effects == plan.effects)
+  {
+    if i.Request? && IsGot(i.msg) && self.Node? && s.AtNode? &&
+       i.msg.id in s.open && s.open[i.msg.id].Prepare? && s.open[i.msg.id].id == i.msg.ans.id {
+      var job := s.open[i.msg.id].job;
+      var id := i.msg.ans.id;
+      var doc := i.msg.ans.doc;
+      var version := i.msg.ans.version;
+      var plan := Prepare(s, job, id, doc, version, now);
+      RequestKeepsWellFormed(s, job, id, doc, version, now);
+      var r := step(self, s, i, now);
+      if |plan.effects| > 0 {
+        var next := Hash(i.msg.id);
+        assert r.sends == [ReqTo(Bucket, next, SendEffect(id, plan.effects[0]))];
+        assert r.state.open[next].effects == plan.effects;
+        if r.sends[0].msg.ask.WriteDoc? {
+          assert plan.effects[0].Write? && r.sends[0].msg.ask.doc == plan.effects[0].doc;
+        }
+      }
+    }
   }
 
   function Reply(created: bool, answer: Temp.Answer): ResBody {
