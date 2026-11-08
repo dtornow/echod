@@ -25,7 +25,7 @@ use crate::node::{
     spec_due_id, spec_handle, spec_key, spec_obj_due, spec_project_obj, spec_request_document, spec_request_transition,
     spec_resume, spec_run_due, spec_sorted, spec_sorted_present, spec_stored_body, spec_sweep,
     spec_stored_committed_at, spec_stored_name, spec_targeted, spec_unavailable,
-    spec_unlease, DocumentBodyV, REQUEST_SWEEP_STEPS,
+    spec_unlease, DocumentBodyV, PendingV, REQUEST_SWEEP_STEPS,
 };
 #[cfg(verus_keep_ghost)]
 use crate::interpret::{lemma_origin_key, lemma_schedule_key};
@@ -944,6 +944,151 @@ pub proof fn lemma_sweep_preserves_relaxed(
                 (limit - 1) as nat,
             );
         }
+    }
+}
+
+/// Inserting a schedule occurrence into a closed workflow preserves every
+/// relaxed workflow clause.  The schedule validity condition excludes the
+/// invalid target+timer tag combination; due insertion and retry dispatch are
+/// closed by the caller's following sweep.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(10)]
+pub proof fn lemma_occurrence_preserves_relaxed(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    pending: PendingV,
+    now: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        spec_earliest_in(DocumentBodyV::Workflow(objects), now) is None,
+        exists|id: String| id@ == pending.promise,
+        origin(pending.promise) == name,
+        pending.at <= now,
+        spec_sat_add(pending.at, pending.timeout) <= MAX_TIME,
+        !(crate::node::spec_timer(pending.tags)
+            && spec_targeted(pending.tags)),
+    ensures
+        ({
+            let next = crate::node::spec_occurrence(
+                DocumentBodyV::Workflow(objects),
+                pending,
+                now,
+            );
+            next is Workflow
+                && workflow_relaxed(name, next->Workflow_0, now)
+        }),
+{
+    reveal(workflow_relaxed);
+    reveal(promise_relaxed);
+    reveal(task_relaxed);
+    reveal(value_empty);
+    reveal(unique);
+    reveal(crate::node::spec_occurrence);
+    reveal(crate::node::spec_new_obj);
+    reveal(spec_sat_add);
+    if !objects.contains_key(pending.promise) {
+        let timeout_at = spec_sat_add(
+            pending.at,
+            pending.timeout,
+        );
+        let runnable = spec_targeted(pending.tags)
+            && !crate::node::spec_timer(pending.tags);
+        let born = crate::node::spec_new_obj(
+            timeout_at,
+            now,
+            pending.param,
+            pending.tags,
+            runnable,
+        );
+        let promise = if timeout_at > pending.at {
+            PromV { created_at: pending.at, ..born.promise }
+        } else {
+            born.promise
+        };
+        let task = match born.task {
+            Some(t) if t.state == TaskState::Pending =>
+                Some(TkV {
+                    retry_timeout_at: Some(now),
+                    ..t
+                }),
+            other => other,
+        };
+        let object = ObjV { promise, task };
+        let updated = objects.insert(pending.promise, object);
+        let id = choose|id: String| id@ == pending.promise;
+        let request = PromiseCreateReq {
+            id,
+            timeout_at,
+            param: pending.param,
+            tags: pending.tags,
+        };
+        lemma_promise_create_preserves_relaxed(
+            name,
+            objects,
+            request,
+            now,
+        );
+        reveal(spec_handle);
+        reveal(crate::node::spec_promise_create);
+        assert(workflow_relaxed(
+            name,
+            objects.insert(pending.promise, born),
+            now,
+        ));
+        assert(objects.insert(pending.promise, born)
+            .dom().contains(pending.promise));
+        assert(objects.insert(pending.promise, born)[pending.promise]
+            == born);
+        assert(promise_relaxed(pending.promise, born, now));
+        assert(value_empty(born.promise.value));
+        assert(object.promise.value == born.promise.value);
+        assert(object.promise.callbacks
+            =~= Seq::<Seq<char>>::empty());
+        assert(object.promise.listeners
+            =~= Seq::<Seq<char>>::empty());
+        assert(value_empty(object.promise.value));
+        assert(object.promise.timeout_at <= MAX_TIME);
+        assert(object.promise.created_at
+            <= object.promise.timeout_at);
+        assert(object.promise.created_at <= now);
+        assert((object.promise.state == PromiseState::Pending)
+            == (object.promise.settled_at is None));
+        assert(match object.promise.settled_at {
+            Some(at) =>
+                object.promise.created_at <= at
+                    && at <= object.promise.timeout_at
+                    && at <= now,
+            None => true,
+        });
+        assert(object.promise.state == PromiseState::Pending
+            ==> value_empty(object.promise.value));
+        assert(object.promise.state
+                == PromiseState::RejectedTimedout
+            ==> object.promise.settled_at
+                == Some(object.promise.timeout_at));
+        assert(object.promise.settled_at
+                == Some(object.promise.timeout_at)
+            ==> value_empty(object.promise.value));
+        assert(unique(object.promise.callbacks));
+        assert(unique(object.promise.listeners));
+        assert(!object.promise.callbacks.contains(pending.promise));
+        assert(promise_relaxed(pending.promise, object, now));
+        assert(task_relaxed(object));
+        assert(callback_targets_well_formed(updated, object));
+        assert(suspended_rung_relaxed(
+            updated,
+            pending.promise,
+            object,
+            now,
+        ));
+        lemma_insert_fresh(
+            name,
+            objects,
+            pending.promise,
+            object,
+            now,
+        );
     }
 }
 

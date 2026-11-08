@@ -1,6 +1,7 @@
 use echod_concrete::node::REQUEST_SWEEP_STEPS;
 use echod_concrete::{
-    clone_body, empty_schedule, empty_workflow, peek, request_transition, DocumentBody, Outbound,
+    clone_body, empty_schedule, empty_workflow, occurrence_transition, peek, request_transition,
+    DocumentBody, Outbound, Pending,
 };
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
@@ -362,4 +363,126 @@ fn schedule_request_leaves_due_timer_for_internal_processing() {
     assert_eq!(doc, original);
     assert!(born.is_empty());
     assert!(notes.is_empty());
+}
+
+#[test]
+fn runnable_occurrence_dispatches_with_configured_retry_after_atomic_closure() {
+    let pending = Pending {
+        promise: "wf:scheduled".into(),
+        at: NOW,
+        timeout: 1_000,
+        param: value("scheduled"),
+        tags: target(),
+    };
+
+    let (doc, notes, closed) = occurrence_transition(
+        empty_workflow(),
+        &pending,
+        NOW,
+        RETRY,
+        REQUEST_SWEEP_STEPS,
+    );
+
+    assert!(closed);
+    assert_eq!(
+        notes,
+        vec![Outbound::Execute {
+            id: "wf:scheduled".into(),
+            version: 0,
+        }]
+    );
+    let task = peek(&doc, &pending.promise).unwrap().task.unwrap();
+    assert_eq!(task.state, TaskState::Pending);
+    assert_eq!(task.retry_timeout_at, Some(NOW + RETRY));
+}
+
+#[test]
+fn expired_occurrence_never_emits_stale_execute() {
+    let pending = Pending {
+        promise: "wf:expired".into(),
+        at: NOW - 10,
+        timeout: 10,
+        param: value("expired"),
+        tags: target(),
+    };
+
+    let (doc, notes, closed) = occurrence_transition(
+        empty_workflow(),
+        &pending,
+        NOW,
+        RETRY,
+        REQUEST_SWEEP_STEPS,
+    );
+
+    assert!(closed);
+    assert!(notes.is_empty());
+    let object = peek(&doc, &pending.promise).unwrap();
+    assert_eq!(object.promise.state, PromiseState::RejectedTimedout);
+    let task = object.task.unwrap();
+    assert_eq!(task.state, TaskState::Fulfilled);
+    assert_eq!(task.retry_timeout_at, None);
+}
+
+#[test]
+fn occurrence_closes_unrelated_overdue_work_before_insertion() {
+    let (doc, _, first_notes) = step(empty_workflow(), create("wf:old", target()), NOW);
+    assert_eq!(first_notes.len(), 1);
+    let due = NOW + RETRY;
+    let pending = Pending {
+        promise: "wf:new".into(),
+        at: due,
+        timeout: 1_000,
+        param: value("new"),
+        tags: target(),
+    };
+
+    let (doc, notes, closed) =
+        occurrence_transition(doc, &pending, due, RETRY, REQUEST_SWEEP_STEPS);
+
+    assert!(closed);
+    assert!(notes.contains(&Outbound::Execute {
+        id: "wf:old".into(),
+        version: 0,
+    }));
+    assert!(notes.contains(&Outbound::Execute {
+        id: "wf:new".into(),
+        version: 0,
+    }));
+    assert_eq!(
+        peek(&doc, &"wf:old".into())
+            .unwrap()
+            .task
+            .unwrap()
+            .retry_timeout_at,
+        Some(due + RETRY),
+    );
+    assert_eq!(
+        peek(&doc, &pending.promise)
+            .unwrap()
+            .task
+            .unwrap()
+            .retry_timeout_at,
+        Some(due + RETRY),
+    );
+}
+
+#[test]
+fn occurrence_closure_exhaustion_is_atomic() {
+    let (doc, _, _) = step(empty_workflow(), create("wf:old", target()), NOW);
+    let original = clone_body(&doc);
+    let pending = Pending {
+        promise: "wf:new".into(),
+        at: NOW + RETRY,
+        timeout: 1_000,
+        param: value("new"),
+        tags: target(),
+    };
+
+    let (after, notes, closed) =
+        occurrence_transition(doc, &pending, NOW + RETRY, RETRY, 0);
+
+    assert!(!closed);
+    assert_eq!(after, original);
+    assert!(notes.is_empty());
+    assert!(peek(&after, &pending.promise).is_none());
 }

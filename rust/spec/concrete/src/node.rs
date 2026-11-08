@@ -3651,6 +3651,45 @@ pub fn create_occurrence(doc: DocumentBody, pending: &Pending, now: u64) -> (r: 
     DocumentBody::Workflow(objs.put(&pending.promise, Obj { promise, task }))
 }
 
+/// Close an occurrence's origin before inserting it, then close the newly
+/// inserted object before returning.  Effects are derived from the committed
+/// endpoints, so callers may release them only after the same document CAS
+/// succeeds.  Exhausting either closure returns the original document and no
+/// effects; in particular, a partial sweep is never persisted.
+pub fn occurrence_transition(
+    doc: DocumentBody,
+    pending: &Pending,
+    now: u64,
+    retry_timeout: u64,
+    limit: u64,
+) -> (r: (DocumentBody, Vec<Outbound>, bool))
+    ensures
+        (r.0@, notes_v(r.1@), r.2)
+            == spec_occurrence_transition(
+                doc@,
+                pending@,
+                now,
+                retry_timeout,
+                limit as nat,
+            ),
+{
+    proof {
+        lemma_notes_empty();
+    }
+    let original = copy(&doc);
+    let (before, _, _) = sweep(doc, now, retry_timeout, limit);
+    if due(&before, now) {
+        return (original, Vec::new(), false);
+    }
+    let created = create_occurrence(before, pending, now);
+    let (after, _, _) = sweep(created, now, retry_timeout, limit);
+    if due(&after, now) {
+        return (original, Vec::new(), false);
+    }
+    let notes = committed_notes(&original, &after, now);
+    (after, notes, true)
+}
+
 /// `spec_sweep`: `run_due` again and again, until a step leaves the document
 /// as it was or `limit` steps have run. What the steps queue and tell, in order.
 pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r: (DocumentBody, Vec<Pending>, Vec<Outbound>))
@@ -6537,6 +6576,34 @@ pub open spec fn spec_occurrence(doc: DocumentBodyV, pending: PendingV, now: Tim
             other => other,
         };
         spec_with_workflow(doc, map.insert(pending.promise, ObjV { promise, task }))
+    }
+}
+
+/// The atomic document transition used by production schedule firing.
+///
+/// Existing due work is closed before insertion.  The post-insert closure
+/// offers a live runnable occurrence immediately, advancing its retry slot to
+/// `now + retry_timeout`; an already expired occurrence is born settled and
+/// therefore emits no stale Execute.  Exhaustion of either bounded closure is
+/// an atomic failure.
+pub open spec fn spec_occurrence_transition(
+    doc: DocumentBodyV,
+    pending: PendingV,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> (DocumentBodyV, Seq<NoteV>, bool) {
+    let (before, _, _) = spec_sweep(doc, now, retry_timeout, limit);
+    if spec_earliest_in(before, now) is Some {
+        (doc, Seq::empty(), false)
+    } else {
+        let created = spec_occurrence(before, pending, now);
+        let (after, _, _) = spec_sweep(created, now, retry_timeout, limit);
+        if spec_earliest_in(after, now) is Some {
+            (doc, Seq::empty(), false)
+        } else {
+            (after, spec_committed_notes(doc, after, now), true)
+        }
     }
 }
 

@@ -319,7 +319,7 @@ pub enum Phase {
     FireWaitingOrigin(FireCtx),
     FireLoadingOrigin { op: OpId, revalidating: Option<Cached>, ctx: FireCtx },
     FireIdle { commit: Committing },
-    FireOrigin { commit: Committing, ctx: FireCtx, t: u64 },
+    FireOrigin { commit: Committing, ctx: FireCtx, t: u64, outbox: Vec<(String, Message)> },
     FireSchedule { commit: Committing },
 }
 
@@ -333,7 +333,7 @@ pub ghost enum PhaseSpec {
     FireWaitingOrigin(FireCtxSpec),
     FireLoadingOrigin { op: OpId, revalidating: Option<CachedSpec>, ctx: FireCtxSpec },
     FireIdle { commit: CommittingSpec },
-    FireOrigin { commit: CommittingSpec, ctx: FireCtxSpec, t: u64 },
+    FireOrigin { commit: CommittingSpec, ctx: FireCtxSpec, t: u64, outbox: Seq<(Seq<char>, MessageSpec)> },
     FireSchedule { commit: CommittingSpec },
 }
 
@@ -350,7 +350,7 @@ impl DeepView for Phase {
             Phase::FireWaitingOrigin(ctx) => PhaseSpec::FireWaitingOrigin(ctx.deep_view()),
             Phase::FireLoadingOrigin { op, revalidating, ctx } => PhaseSpec::FireLoadingOrigin { op: *op, revalidating: revalidating.deep_view(), ctx: ctx.deep_view() },
             Phase::FireIdle { commit } => PhaseSpec::FireIdle { commit: commit.deep_view() },
-            Phase::FireOrigin { commit, ctx, t } => PhaseSpec::FireOrigin { commit: commit.deep_view(), ctx: ctx.deep_view(), t: *t },
+            Phase::FireOrigin { commit, ctx, t, outbox } => PhaseSpec::FireOrigin { commit: commit.deep_view(), ctx: ctx.deep_view(), t: *t, outbox: outbox.deep_view() },
             Phase::FireSchedule { commit } => PhaseSpec::FireSchedule { commit: commit.deep_view() },
         }
     }
@@ -720,7 +720,7 @@ pub open spec fn spec_answered_phase(s: S, fid: FlightId, f0: FlightSpec, phase:
         PhaseSpec::FireLoadingSchedule { .. } => spec_answered_fire_loading_schedule(s, f0, outcome),
         PhaseSpec::FireLoadingOrigin { revalidating, ctx, .. } => spec_answered_fire_loading_origin(s, f0, revalidating, ctx, outcome),
         PhaseSpec::FireIdle { commit } => spec_answered_fire_idle(s, fid, f0, commit, outcome),
-        PhaseSpec::FireOrigin { commit, ctx, t } => spec_answered_fire_origin(s, fid, f0, commit, ctx, t, outcome),
+        PhaseSpec::FireOrigin { commit, ctx, t, outbox } => spec_answered_fire_origin(s, fid, f0, commit, ctx, t, outbox, outcome),
         PhaseSpec::FireSchedule { commit } => spec_answered_fire_schedule(s, fid, f0, commit, outcome),
         _ => spec_fail(s, f0, "an answer the flight did not wait for"@),
     }
@@ -807,13 +807,23 @@ pub open spec fn spec_answered_fire_idle(s: S, fid: FlightId, f0: FlightSpec, co
 }
 
 #[verifier::opaque]
-pub open spec fn spec_answered_fire_origin(s: S, fid: FlightId, f0: FlightSpec, commit: CommittingSpec, ctx: FireCtxSpec, t: u64, outcome: StoreRes) -> S {
+pub open spec fn spec_answered_fire_origin(
+    s: S,
+    fid: FlightId,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    ctx: FireCtxSpec,
+    t: u64,
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+    outcome: StoreRes,
+) -> S {
     let (s, commit, p) = spec_commit_advance(s, fid, commit, Some(outcome));
     match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t }, ..f0 }),
+        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t, outbox }, ..f0 }),
         ProgressSpec::Done(_) => {
             let s = spec_note(s, NoteSpec::FireEnd { flight: fid, committed: true });
             let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
+            let s = spec_send_all(s, outbox);
             let s = spec_release(s, ctx.origin);
             crate::handler_sched::spec_fire_advance(s, f0, ctx, t)
         },
@@ -1460,7 +1470,7 @@ impl State {
             Phase::FireLoadingSchedule { .. } => self.answered_fire_loading_schedule(f, outcome),
             Phase::FireLoadingOrigin { revalidating, ctx, .. } => self.answered_fire_loading_origin(f, revalidating, ctx, outcome),
             Phase::FireIdle { commit } => self.answered_fire_idle(fid, f, commit, outcome),
-            Phase::FireOrigin { commit, ctx, t } => self.answered_fire_origin(fid, f, commit, ctx, t, outcome),
+            Phase::FireOrigin { commit, ctx, t, outbox } => self.answered_fire_origin(fid, f, commit, ctx, t, outbox, outcome),
             Phase::FireSchedule { commit } => self.answered_fire_schedule(fid, f, commit, outcome),
             _ => self.fail(f, text("an answer the flight did not wait for")),
         }
@@ -1584,21 +1594,40 @@ impl State {
         }
     }
 
-    fn answered_fire_origin(&mut self, fid: FlightId, f: Flight, mut commit: Committing, ctx: FireCtx, t: u64, outcome: StoreRes)
+    fn answered_fire_origin(
+        &mut self,
+        fid: FlightId,
+        f: Flight,
+        mut commit: Committing,
+        ctx: FireCtx,
+        t: u64,
+        outbox: Vec<(String, Message)>,
+        outcome: StoreRes,
+    )
         ensures
-            final(self).deep_view() == spec_answered_fire_origin(old(self).deep_view(), fid, f.deep_view(), commit.deep_view(), ctx.deep_view(), t, outcome),
+            final(self).deep_view() == spec_answered_fire_origin(
+                old(self).deep_view(),
+                fid,
+                f.deep_view(),
+                commit.deep_view(),
+                ctx.deep_view(),
+                t,
+                outbox.deep_view(),
+                outcome,
+            ),
     {
         proof {
             reveal(spec_answered_fire_origin);
         }
         match self.commit_advance(fid, &mut commit, Some(outcome)) {
             Progress::Issued => {
-                let f = Flight { phase: Phase::FireOrigin { commit, ctx, t }, ..f };
+                let f = Flight { phase: Phase::FireOrigin { commit, ctx, t, outbox }, ..f };
                 self.inflight(f);
             },
             Progress::Done(_) => {
                 self.note(Note::FireEnd { flight: fid, committed: true });
                 self.note(Note::Commit(CommitOutcome::Committed));
+                self.send_all(outbox);
                 self.release(ctx.origin.as_str());
                 self.fire_advance(f, ctx, t);
             },
@@ -1792,7 +1821,7 @@ impl State {
         (commit, Done { response, why, outbox, did })
     }
 
-    fn send_all(&mut self, outbox: Vec<(String, Message)>)
+    pub(crate) fn send_all(&mut self, outbox: Vec<(String, Message)>)
         ensures
             final(self).deep_view() == spec_send_all(old(self).deep_view(), outbox.deep_view()),
     {
