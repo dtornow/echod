@@ -2045,6 +2045,343 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
     assert(timer_activity_consistent(after));
 }
 
+/// The exact abstract work selected by the first due object in a loaded
+/// origin document.  This is deterministic: no existential relation chooses
+/// a more convenient timeout.
+pub open spec fn origin_due_internal(
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    now: u64,
+) -> Option<echod_abstract::view::InternalV> {
+    let keys = echod_concrete::node::spec_sorted(map.dom());
+    match echod_concrete::node::spec_due_id(map, keys, now) {
+        None => None,
+        Some(id) => {
+            let object = map[id];
+            if object.promise.state == echod_types::PromiseState::Pending
+                && object.promise.timeout_at <= now
+            {
+                Some(echod_abstract::view::InternalV::PromiseTimeout(id))
+            } else if object.promise.state
+                == echod_types::PromiseState::Pending
+            {
+                match object.task {
+                    Some(task)
+                        if task.state == echod_types::TaskState::Acquired
+                            && match task.lease_timeout_at {
+                                Some(at) => at <= now,
+                                None => false,
+                            } =>
+                        Some(
+                            echod_abstract::view::InternalV::TaskLeaseTimeout(
+                                id,
+                            ),
+                        ),
+                    Some(task)
+                        if task.state == echod_types::TaskState::Pending
+                            && match task.retry_timeout_at {
+                                Some(at) => at <= now,
+                                None => false,
+                            } =>
+                        Some(
+                            echod_abstract::view::InternalV::TaskRetryTimeout(
+                                id,
+                            ),
+                        ),
+                    _ => None,
+                }
+            } else if object.promise.callbacks.len() > 0 {
+                Some(echod_abstract::view::InternalV::Callback {
+                    awaited: id,
+                    awaiter: object.promise.callbacks[0],
+                })
+            } else if object.promise.listeners.len() > 0 {
+                Some(echod_abstract::view::InternalV::Listener {
+                    awaited: id,
+                    address: object.promise.listeners[0],
+                })
+            } else {
+                None
+            }
+        },
+    }
+}
+
+/// At the origin decision boundary, the loaded document identifies one exact
+/// abstract timeout.  The concrete one-step due transition and that abstract
+/// work are both outcomes of the same timeout event.  Store loading before
+/// this boundary remains hidden.
+pub proof fn lemma_loaded_origin_identifies_timeout(
+    config: ServerConfig,
+    key: Seq<char>,
+    origin: Seq<char>,
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    abstract_state: AbstractStateV,
+    now: u64,
+)
+    requires
+        key == echod_concrete::node::spec_origin_key(origin),
+        map.dom().finite(),
+        echod_concrete::interpret::origin_rel(
+            map,
+            origin,
+            abstract_state.store,
+        ),
+        finite_store(abstract_state.store),
+        origin_due_internal(map, now) is Some,
+    ensures
+        ({
+            let work = origin_due_internal(map, now)->Some_0;
+            &&& echod_concrete::timers::work_known(
+                abstract_state.store,
+                work,
+            )
+            &&& echod_concrete::timers::offered(
+                config,
+                abstract_state,
+                now,
+                work,
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                ),
+            )
+            &&& echod_concrete::relation::due_agrees(
+                config,
+                key,
+                echod_concrete::node::DocumentBodyV::Workflow(map),
+                abstract_state,
+                now,
+            )
+        }),
+{
+    reveal(origin_due_internal);
+    let keys = echod_concrete::node::spec_sorted(map.dom());
+    echod_concrete::timers::lemma_sorted(map.dom());
+    assert forall|i: int| 0 <= i < keys.len() implies
+        map.contains_key(#[trigger] keys[i]) by {
+        assert(map.dom().contains(keys[i]));
+    }
+    echod_concrete::timers::lemma_due_id(map, keys, now);
+    let id = echod_concrete::node::spec_due_id(map, keys, now)
+        ->Some_0;
+    assert(map.contains_key(id));
+    assert(echod_types::origin(id) == origin);
+    assert(abstract_state.store.promises.contains_key(id));
+    assert(echod_concrete::interpret::object_rel(
+        map[id],
+        abstract_state.store.promises[id],
+        echod_concrete::interpret::abstract_task(
+            abstract_state.store,
+            id,
+        ),
+    ));
+    let work = origin_due_internal(map, now)->Some_0;
+    match work {
+        echod_abstract::view::InternalV::Callback {
+            awaited,
+            awaiter,
+        } => {
+            assert(awaited == id);
+            assert(map[id].promise.callbacks.contains(awaiter));
+            echod_concrete::interpret::lemma_contains_to_set(
+                map[id].promise.callbacks,
+                awaiter,
+            );
+        },
+        echod_abstract::view::InternalV::Listener {
+            awaited,
+            address,
+        } => {
+            assert(awaited == id);
+            assert(map[id].promise.listeners.contains(address));
+            echod_concrete::interpret::lemma_contains_to_set(
+                map[id].promise.listeners,
+                address,
+            );
+        },
+        echod_abstract::view::InternalV::TaskLeaseTimeout(task_id)
+        | echod_abstract::view::InternalV::TaskRetryTimeout(task_id) => {
+            assert(task_id == id);
+            assert(echod_concrete::interpret::abstract_task(
+                abstract_state.store,
+                id,
+            ) is Some);
+            assert(abstract_state.store.tasks.contains_key(id));
+        },
+        echod_abstract::view::InternalV::PromiseTimeout(promise_id) => {
+            assert(promise_id == id);
+        },
+        _ => {
+            assert(false);
+        },
+    }
+    assert(echod_concrete::timers::work_known(
+        abstract_state.store,
+        work,
+    ));
+    echod_concrete::timers::lemma_work_offered(
+        config,
+        abstract_state,
+        now,
+        work,
+    );
+    echod_concrete::timers::lemma_origin_due(
+        config,
+        key,
+        origin,
+        map,
+        abstract_state,
+        now,
+    );
+}
+
+/// A successfully loaded due schedule determines the promise carried by the
+/// exact abstract `ScheduleTimeout`; no occurrence is committed by this
+/// identification theorem.
+pub proof fn lemma_loaded_schedule_identifies_timeout(
+    config: ServerConfig,
+    key: Seq<char>,
+    id: Seq<char>,
+    schedule: echod_types::Schedule,
+    abstract_state: AbstractStateV,
+    now: u64,
+)
+    requires
+        key == echod_concrete::node::spec_schedule_key(id),
+        echod_concrete::interpret::slot_rel(
+            Some(schedule),
+            id,
+            abstract_state.store,
+        ),
+        finite_store(abstract_state.store),
+        schedule.next_run_at <= now,
+        schedule.next_run_at <= MAX_TIME,
+    ensures
+        ({
+            let work = echod_concrete::timers::schedule_work(
+                abstract_state.store,
+                id,
+            );
+            let abstract_schedule = abstract_state.store.schedules[id];
+            &&& work
+                == echod_abstract::view::InternalV::ScheduleTimeout {
+                    id,
+                    promise:
+                        echod_abstract::trusted::spec_expand(
+                            abstract_schedule.promise_id,
+                            id,
+                            abstract_schedule.next_run_at,
+                        ),
+                }
+            &&& echod_concrete::timers::work_known(
+                abstract_state.store,
+                work,
+            )
+            &&& echod_concrete::timers::offered(
+                config,
+                abstract_state,
+                now,
+                work,
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                ),
+            )
+            &&& echod_concrete::relation::due_agrees(
+                config,
+                key,
+                echod_concrete::node::DocumentBodyV::Schedule(
+                    Some(schedule),
+                ),
+                abstract_state,
+                now,
+            )
+        }),
+{
+    let work = echod_concrete::timers::schedule_work(
+        abstract_state.store,
+        id,
+    );
+    assert(abstract_state.store.schedules.contains_key(id));
+    assert(echod_concrete::timers::work_known(
+        abstract_state.store,
+        work,
+    ));
+    echod_concrete::timers::lemma_work_offered(
+        config,
+        abstract_state,
+        now,
+        work,
+    );
+    echod_concrete::timers::lemma_schedule_due(
+        config,
+        key,
+        id,
+        schedule,
+        abstract_state,
+        now,
+    );
+}
+
+/// Store-loading phases have not selected a durable document transition yet,
+/// so they remain hidden before either identification theorem applies.
+pub proof fn lemma_timeout_load_phases_are_prelinearized(
+    load_op: OpId,
+    cached: Option<crate::cache::CachedSpec>,
+)
+    ensures
+        phase_after(PhaseSpec::Loading {
+            op: load_op,
+            revalidating: cached,
+        }) is None,
+        phase_after(PhaseSpec::FireLoadingSchedule {
+            op: load_op,
+        }) is None,
+{
+}
+
+/// Kept/failed completion rearms the old encoded key at a later retry slot.
+/// When the retry addition does not saturate, the slot is strictly later than
+/// the key's encoded deadline and therefore violates the current
+/// key/deadline-equality representation invariant.
+pub proof fn lemma_retry_slot_conflicts_with_key_deadline(
+    key: Seq<char>,
+    entry: crate::keys::TimerEntrySpec,
+    now: u64,
+)
+    requires
+        crate::keys::spec_parse_timer_key(key) == Some(entry),
+        crate::state_timers::spec_max(now, entry.deadline())
+            <= u64::MAX - crate::state_timers::RETRY_AFTER_MS,
+    ensures
+        ({
+            let retry =
+                crate::state_timers::spec_max(now, entry.deadline())
+                    .saturating_add(
+                        crate::state_timers::RETRY_AFTER_MS,
+                    );
+            &&& retry > entry.deadline()
+            &&& !timer_slots_keys_valid(seq![(retry, key)])
+        }),
+{
+    let retry = crate::state_timers::spec_max(now, entry.deadline())
+        .saturating_add(crate::state_timers::RETRY_AFTER_MS);
+    assert(retry > entry.deadline());
+    assert(!timer_slots_keys_valid(seq![(retry, key)])) by {
+        if timer_slots_keys_valid(seq![(retry, key)]) {
+            assert((seq![(retry, key)])[0] == (retry, key));
+            assert(match crate::keys::spec_parse_timer_key(key) {
+                Some(parsed) => retry == parsed.deadline(),
+                None => false,
+            });
+            assert(retry == entry.deadline());
+            assert(false);
+        }
+    }
+}
+
 /// Runtime bookkeeping agrees with the operation table held by the core.
 pub open spec fn pending_store_consistent(p: ProcessV) -> bool {
     &&& forall|op: OpId|
