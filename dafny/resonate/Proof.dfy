@@ -1,10 +1,14 @@
-include "node.dfy"
+include "world.dfy"
 
-// The lemmas that prove Claim. The steps of a world stay in Node.
+// The lemmas that prove Claim.
 
 module Proof {
   import opened Network
+  import opened Protocol
+  import opened Client
+  import opened Bucket
   import opened Node
+  import opened Worlds
   import Keys
   import Temp
 

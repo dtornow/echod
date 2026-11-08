@@ -5,7 +5,8 @@ include "Proof.dfy"
 
 module Claim {
   import opened Network
-  import opened Node
+  import opened Protocol
+  import opened Worlds
   import Temp
   import opened Proof
 
