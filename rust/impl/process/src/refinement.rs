@@ -42,11 +42,14 @@ use crate::config::ConfigSpec;
 #[cfg(verus_keep_ghost)]
 use crate::document::spec_loaded_body;
 #[cfg(verus_keep_ghost)]
-use crate::handler::spec_on_event;
+use crate::handler::{spec_on_event, spec_schedule_wake};
 #[cfg(verus_keep_ghost)]
 use crate::handler_docs::{
-    spec_decide, spec_dispatch, spec_dispatches, spec_send_all, FlightSpec,
-    FlightsSpec, PhaseSpec, WorkSpec, WorkingSpec, SWEEP_STEPS,
+    spec_answered_origin, spec_commit_advance, spec_commit_failed,
+    spec_committed, spec_decide, spec_dispatch, spec_dispatches,
+    spec_flight_completed, spec_inflight, spec_run_origin, spec_send_all,
+    spec_take_flight, CommittingSpec, DoneSpec, FlightSpec, FlightsSpec,
+    PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec, SWEEP_STEPS,
 };
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
@@ -55,7 +58,9 @@ use crate::state_timers::{spec_slot_before, TimersSpec};
 #[cfg(verus_keep_ghost)]
 use crate::target::TargetSpec;
 #[cfg(verus_keep_ghost)]
-use crate::types::{AnswerSpec, Armed, EffectSpec, EventSpec, MessageSpec, OpId};
+use crate::types::{
+    AnswerSpec, Armed, EffectSpec, EventSpec, Fired, MessageSpec, OpId,
+};
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{empty_store, StateV as AbstractStateV};
@@ -85,11 +90,13 @@ use echod_concrete::node::{
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, request_preserves_well_formed, routed};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreReqSpec, StoreRes};
+use echod_concrete::store::{StoreError, StoreErrorSpec, StoreReqSpec, StoreRes};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Request, MAX_TIME};
 #[cfg(verus_keep_ghost)]
-use crate::verified::flight_spec::{spec_advance, AAct, AAnswer, AOutcome};
+use crate::verified::flight_spec::{
+    answer_v, spec_advance, AAct, AAnswer, AOutcome, AStep,
+};
 
 #[cfg(verus_keep_ghost)]
 verus! {
@@ -1009,7 +1016,11 @@ proof fn lemma_spec_decide_request_shape(
                 s.cfg.retry_timeout,
                 SWEEP_STEPS as nat,
             );
+            &&& next.cfg == s.cfg
             &&& done.outbox == spec_dispatches(body, notes)
+            &&& commit.w == w
+            &&& commit.now == now
+            &&& commit.issued is None
             &&& commit.after
                 == echod_concrete::node::spec_advance_stored(
                     w.loaded.document,
@@ -1220,6 +1231,8 @@ pub proof fn lemma_normal_request_decision_kernel(
                 s.cfg.retry_timeout,
                 SWEEP_STEPS as nat,
             );
+            &&& next.cfg == s.cfg
+            &&& logical_after is Workflow
             &&& well_formed(logical_after)
             &&& effects_match(w.loaded.document, logical_after, notes)
             &&& spec_stored_body(logical_after) == body
@@ -1229,6 +1242,9 @@ pub proof fn lemma_normal_request_decision_kernel(
                 notes,
             )
             &&& done.outbox == spec_dispatches(body, notes)
+            &&& commit.w == w
+            &&& commit.now == now
+            &&& commit.issued is None
             &&& commit.seq.changed
                 == (body != spec_stored_body(w.loaded.document))
             &&& commit.seq.fired is None
@@ -1314,6 +1330,726 @@ pub proof fn lemma_normal_request_decision_kernel(
         logical_after,
         notes,
     );
+}
+
+// ---------------------------------------------------------------------------
+// A changed normal request while its origin commit is in flight
+// ---------------------------------------------------------------------------
+
+/// The semantic payload carried through one changed normal-request commit.
+/// `candidate` is only an in-flight value; this witness says nothing about
+/// the contents of the external Store.
+pub ghost struct NormalRequestCommitV {
+    pub before: StoredDocumentV,
+    pub candidate: StoredDocumentV,
+    pub notes: Seq<NoteV>,
+}
+
+/// A changed normal request in an actual `PhaseSpec::Origin` commit phase.
+///
+/// The loaded document and candidate remain in `CommittingSpec`, while
+/// `DoneSpec` retains the exact outbox.  The allowed sequence steps are the
+/// only waiting phases reachable by a normal request: optional key put,
+/// conditional document write, and optional previous-key delete.
+pub open spec fn normal_request_origin_phase(
+    flight: FlightSpec,
+    retry_timeout: u64,
+    witness: NormalRequestCommitV,
+) -> bool {
+    match (flight.work, flight.phase) {
+        (
+            WorkSpec::Request {
+                req,
+                now: offered_now,
+                ..
+            },
+            PhaseSpec::Origin { commit, done },
+        ) => {
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(commit.w.loaded),
+                offered_now,
+            );
+            let (body, _, _, notes) = spec_request_transition(
+                spec_stored_body(witness.before),
+                req,
+                now,
+                retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            &&& commit.w.loaded.document == witness.before
+            &&& commit.after == witness.candidate
+            &&& commit.now == now
+            &&& commit.seq.changed
+            &&& commit.seq.fired is None
+            &&& (
+                commit.seq.step is PuttingKey
+                || commit.seq.step is Writing
+                || commit.seq.step is DeletingPrevious
+            )
+            &&& witness.before is Workflow
+            &&& witness.candidate is Workflow
+            &&& routed(witness.before, req)
+            &&& witness.candidate == on_request(
+                witness.before,
+                req,
+                now,
+                retry_timeout,
+                SWEEP_STEPS as nat,
+            )
+            &&& well_formed(witness.before)
+            &&& well_formed(witness.candidate)
+            &&& witness.notes == notes
+            &&& effects_match(
+                witness.before,
+                witness.candidate,
+                witness.notes,
+            )
+            &&& spec_stored_body(witness.candidate) == body
+            &&& notes_dispatchable(
+                spec_stored_body(witness.candidate),
+                witness.notes,
+            )
+            &&& note_effect_keys(witness.notes).no_duplicates()
+            &&& done.outbox == spec_dispatches(
+                spec_stored_body(witness.candidate),
+                witness.notes,
+            )
+        },
+        _ => false,
+    }
+}
+
+pub open spec fn normal_request_inflight(
+    s: S,
+    fid: u64,
+    witness: NormalRequestCommitV,
+) -> bool {
+    s.flights.inflight.contains_key(fid)
+        && normal_request_origin_phase(
+            s.flights.inflight[fid],
+            s.cfg.retry_timeout,
+            witness,
+        )
+}
+
+/// A changed decision always issues the first commit call and enters the
+/// actual Origin phase carrying the decision witness.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(20)]
+pub proof fn lemma_changed_normal_request_enters_origin_phase(
+    s: S,
+    f: FlightSpec,
+    w: WorkingSpec,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    request: Request,
+    action_kind: Option<Seq<char>>,
+    offered_now: u64,
+)
+    requires
+        f.id == id,
+        f.work == (WorkSpec::Request {
+            id,
+            kind,
+            corr,
+            req: request,
+            action_kind,
+            now: offered_now,
+        }),
+        f.phase is Idle,
+        f.target == TargetSpec::Origin(w.target),
+        f.firing is None,
+        !f.debug,
+        w.loaded.document is Workflow,
+        w.target
+            == echod_concrete::node::spec_stored_name(w.loaded.document),
+        well_formed(w.loaded.document),
+        routed(w.loaded.document, request),
+        crate::document::spec_clamp_now(
+            crate::document::spec_loaded_committed_at(w.loaded),
+            offered_now,
+        ) <= MAX_TIME,
+        0 < s.cfg.retry_timeout <= MAX_TIME,
+        safe_effect_config(
+            crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            ),
+            s.cfg.retry_timeout,
+        ),
+        document_ids_bounded(w.loaded.document),
+        ({
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            ).0 != spec_stored_body(w.loaded.document)
+        }),
+    ensures
+        ({
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            let notes = spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            ).3;
+            let candidate = on_request(
+                w.loaded.document,
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            normal_request_inflight(
+                spec_run_origin(s, f, w),
+                f.id,
+                NormalRequestCommitV {
+                    before: w.loaded.document,
+                    candidate,
+                    notes,
+                },
+            )
+        }),
+{
+    let work = WorkSpec::Request {
+        id,
+        kind,
+        corr,
+        req: request,
+        action_kind,
+        now: offered_now,
+    };
+    let now = crate::document::spec_clamp_now(
+        crate::document::spec_loaded_committed_at(w.loaded),
+        offered_now,
+    );
+    let notes = spec_request_transition(
+        spec_stored_body(w.loaded.document),
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    ).3;
+    let candidate = on_request(
+        w.loaded.document,
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    );
+    lemma_normal_request_decision_kernel(
+        s,
+        w,
+        id,
+        kind,
+        corr,
+        request,
+        action_kind,
+        offered_now,
+    );
+    let (decided, commit, done) = spec_decide(s, work, w);
+    assert(commit.issued is None);
+    assert(commit.seq.step is Start);
+    assert(commit.seq.changed);
+    reveal(spec_commit_advance);
+    let (advanced, next_commit, progress) =
+        spec_commit_advance(decided, f.id, commit, None);
+    reveal(crate::handler_docs::spec_issue_write);
+    match commit.seq.plan.deadline {
+        Some(_) => {
+            if commit.seq.plan.rearm {
+                assert(progress is Issued);
+                assert(next_commit.seq.step is PuttingKey);
+            } else {
+                assert(progress is Issued);
+                assert(next_commit.seq.step is Writing);
+            }
+        },
+        None => {
+            assert(progress is Issued);
+            assert(next_commit.seq.step is Writing);
+        },
+    }
+    assert(next_commit.w == commit.w);
+    assert(next_commit.after == commit.after);
+    assert(next_commit.now == commit.now);
+    assert(next_commit.seq.changed == commit.seq.changed);
+    assert(next_commit.seq.fired == commit.seq.fired);
+    assert(next_commit.w.loaded.document == w.loaded.document);
+    assert(next_commit.after == candidate);
+    assert(next_commit.now == now);
+    assert(next_commit.seq.changed);
+    assert(next_commit.seq.fired is None);
+    assert(now == crate::document::spec_clamp_now(
+        crate::document::spec_loaded_committed_at(
+            next_commit.w.loaded,
+        ),
+        offered_now,
+    ));
+    assert(candidate is Workflow);
+    assert(candidate == on_request(
+        w.loaded.document,
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    ));
+    assert(well_formed(candidate));
+    assert(effects_match(
+        w.loaded.document,
+        candidate,
+        notes,
+    ));
+    assert(notes == spec_request_transition(
+        spec_stored_body(w.loaded.document),
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    ).3);
+    assert(spec_stored_body(candidate)
+        == spec_request_transition(
+            spec_stored_body(w.loaded.document),
+            request,
+            now,
+            s.cfg.retry_timeout,
+            SWEEP_STEPS as nat,
+        ).0);
+    assert(done.outbox == spec_dispatches(
+        spec_stored_body(candidate),
+        notes,
+    ));
+    assert(notes_dispatchable(
+        spec_stored_body(candidate),
+        notes,
+    ));
+    assert(note_effect_keys(notes).no_duplicates());
+    reveal(spec_run_origin);
+    reveal(spec_inflight);
+    let next_flight = FlightSpec {
+        phase: PhaseSpec::Origin {
+            commit: next_commit,
+            done,
+        },
+        ..f
+    };
+    assert(normal_request_origin_phase(
+        next_flight,
+        s.cfg.retry_timeout,
+        NormalRequestCommitV {
+            before: w.loaded.document,
+            candidate,
+            notes,
+        },
+    ));
+    assert(spec_run_origin(s, f, w)
+        == spec_inflight(advanced, next_flight));
+    assert(decided.cfg == s.cfg);
+    assert(advanced.cfg == decided.cfg);
+    let result = spec_run_origin(s, f, w);
+    assert(result.cfg == s.cfg);
+    assert(result.flights.inflight.contains_key(f.id));
+    assert(result.flights.inflight[f.id] == next_flight);
+    assert(normal_request_inflight(
+        result,
+        f.id,
+        NormalRequestCommitV {
+            before: w.loaded.document,
+            candidate,
+            notes,
+        },
+    ));
+}
+
+/// Any response that makes the production commit driver issue another call
+/// preserves the whole in-flight witness.  In this normal-request slice that
+/// covers key-put success (next: write) and write success when an old key must
+/// be deleted (next: delete).
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_issued_phase_preserves(
+    s: S,
+    fid: u64,
+    f: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    witness: NormalRequestCommitV,
+)
+    requires
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        spec_commit_advance(s, fid, commit, Some(response)).2 is Issued,
+    ensures
+        ({
+            let next = spec_commit_advance(s, fid, commit, Some(response)).1;
+            normal_request_origin_phase(
+                FlightSpec {
+                    phase: PhaseSpec::Origin { commit: next, done },
+                    ..f
+                },
+                s.cfg.retry_timeout,
+                witness,
+            )
+        }),
+{
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(crate::handler_docs::spec_issue_write);
+    match commit.seq.step {
+        AStep::PuttingKey(_) => {},
+        AStep::Writing { .. } => {},
+        AStep::DeletingPrevious(_) => {},
+        _ => {},
+    }
+}
+
+/// A successful answer to the key put advances the production driver to the
+/// conditional document write without changing the request witness.
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_key_put_success(
+    s: S,
+    fid: u64,
+    f: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    witness: NormalRequestCommitV,
+)
+    requires
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is PuttingKey,
+        answer_v(commit.seq.step, Some(response))
+            == AAnswer::Done,
+    ensures
+        spec_commit_advance(s, fid, commit, Some(response)).2 is Issued,
+        ({
+            let next = spec_commit_advance(
+                s,
+                fid,
+                commit,
+                Some(response),
+            ).1;
+            &&& next.seq.step is Writing
+            &&& normal_request_origin_phase(
+                FlightSpec {
+                    phase: PhaseSpec::Origin { commit: next, done },
+                    ..f
+                },
+                s.cfg.retry_timeout,
+                witness,
+            )
+        }),
+{
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(crate::handler_docs::spec_issue_write);
+    lemma_normal_request_issued_phase_preserves(
+        s,
+        fid,
+        f,
+        commit,
+        done,
+        response,
+        witness,
+    );
+}
+
+/// A successful conditional document-write answer either completes the
+/// normal commit or issues the best-effort deletion of the previous key.
+/// This is a response-path statement only; it does not assert that the Store
+/// durably performed the write.
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_document_write_success(
+    s: S,
+    fid: u64,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    tag: Seq<char>,
+    witness: NormalRequestCommitV,
+)
+    requires
+        f0.phase is Idle,
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f0
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is Writing,
+        answer_v(commit.seq.step, Some(response))
+            == AAnswer::Written(tag),
+    ensures
+        ({
+            let advanced =
+                spec_commit_advance(s, fid, commit, Some(response));
+            &&& (
+                advanced.2 is Issued
+                || advanced.2 == ProgressSpec::Done(Fired::Kept)
+            )
+            &&& if advanced.2 is Issued {
+                &&& advanced.1.seq.step is DeletingPrevious
+                &&& normal_request_origin_phase(
+                    FlightSpec {
+                        phase: PhaseSpec::Origin {
+                            commit: advanced.1,
+                            done,
+                        },
+                        ..f0
+                    },
+                    s.cfg.retry_timeout,
+                    witness,
+                )
+            } else {
+                spec_answered_origin(
+                    s,
+                    fid,
+                    f0,
+                    commit,
+                    done,
+                    response,
+                ) == spec_committed(
+                    advanced.0,
+                    f0,
+                    done,
+                    Fired::Kept,
+                )
+            }
+        }),
+{
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(crate::handler_docs::spec_issue_write);
+    reveal(spec_answered_origin);
+    let advanced = spec_commit_advance(
+        s,
+        fid,
+        commit,
+        Some(response),
+    );
+    if advanced.2 is Issued {
+        lemma_normal_request_issued_phase_preserves(
+            s,
+            fid,
+            f0,
+            commit,
+            done,
+            response,
+            witness,
+        );
+    }
+}
+
+/// Once the previous-key deletion is answered (successfully or not), the
+/// normal sequence is complete.  Deletion is deliberately best effort.
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_previous_key_delete_completes(
+    s: S,
+    fid: u64,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    witness: NormalRequestCommitV,
+)
+    requires
+        f0.phase is Idle,
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f0
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is DeletingPrevious,
+    ensures
+        spec_commit_advance(s, fid, commit, Some(response)).2
+            == ProgressSpec::Done(Fired::Kept),
+        ({
+            let advanced =
+                spec_commit_advance(s, fid, commit, Some(response));
+            spec_answered_origin(
+                s,
+                fid,
+                f0,
+                commit,
+                done,
+                response,
+            ) == spec_committed(
+                advanced.0,
+                f0,
+                done,
+                Fired::Kept,
+            )
+        }),
+{
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(spec_answered_origin);
+}
+
+/// A precondition race from either the key-put or conditional-write phase
+/// strips the Origin phase before retry.  In particular,
+/// `spec_commit_failed` receives `f0`, whose phase is Idle: neither the
+/// candidate in `commit` nor `done.outbox` is passed to `spec_retry`.
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_precondition_failed_discards(
+    s: S,
+    fid: u64,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    witness: NormalRequestCommitV,
+)
+    requires
+        f0.phase is Idle,
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f0
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is PuttingKey
+            || commit.seq.step is Writing,
+        answer_v(commit.seq.step, Some(response))
+            == AAnswer::Failed(StoreError::PreconditionFailed),
+    ensures
+        spec_commit_advance(s, fid, commit, Some(response)).2
+            == ProgressSpec::Failed(
+                StoreErrorSpec::PreconditionFailed,
+            ),
+        ({
+            let advanced =
+                spec_commit_advance(s, fid, commit, Some(response));
+            spec_answered_origin(
+                s,
+                fid,
+                f0,
+                commit,
+                done,
+                response,
+            ) == spec_commit_failed(
+                advanced.0,
+                f0,
+                StoreErrorSpec::PreconditionFailed,
+            )
+        }),
+        !normal_request_origin_phase(
+            f0,
+            s.cfg.retry_timeout,
+            witness,
+        ),
+{
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(spec_answered_origin);
+}
+
+/// A matching flight-owned operation whose flight is in Origin reaches
+/// `spec_answered_origin` with an Idle copy of the flight.  This is the point
+/// at which failed commits cannot accidentally retain the candidate/outbox.
+#[verifier::spinoff_prover]
+pub proof fn lemma_matching_origin_store_response_routes_answer(
+    s: S,
+    fid: u64,
+    op: u64,
+    response: StoreRes,
+    flight: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+)
+    requires
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid] == flight,
+        flight.phase == (PhaseSpec::Origin { commit, done }),
+        flight.phase.expects() == Some(op),
+    ensures
+        spec_flight_completed(s, fid, op, response)
+            == spec_answered_origin(
+                spec_take_flight(s, fid),
+                fid,
+                FlightSpec { phase: PhaseSpec::Idle, ..flight },
+                commit,
+                done,
+                response,
+            ),
+{
+    reveal(spec_flight_completed);
+    reveal(crate::handler_docs::spec_answered_phase);
+}
+
+/// The matching production `EventSpec::Store` arm removes the operation,
+/// routes the response to the owning flight, schedules the next wake, and
+/// returns (then clears) the accumulated outbox.  This is the direct bridge
+/// from the response lemmas above to `spec_on_event`; it still says nothing
+/// about a Rover Store transition or durable bytes.
+#[verifier::spinoff_prover]
+pub proof fn lemma_owned_store_event_runs_flight_completion(
+    s: S,
+    fid: u64,
+    op: u64,
+    response: StoreRes,
+    clock: u64,
+)
+    requires
+        s.node.members.next_heartbeat is Some
+            || s.node.members.refreshing(),
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].phase.expects() == Some(op),
+    ensures
+        ({
+            let timed = S { clock, ..s };
+            let without_op = S {
+                ops: timed.ops.remove(op),
+                ..timed
+            };
+            let handled =
+                spec_flight_completed(without_op, fid, op, response);
+            let scheduled = spec_schedule_wake(handled);
+            spec_on_event(
+                s,
+                EventSpec::Store { op, response, clock },
+            ) == (
+                S { out: Seq::empty(), ..scheduled },
+                scheduled.out,
+            )
+        }),
+{
+    reveal(spec_on_event);
 }
 
 /// The linearization kernel for a normal external request. In addition to the
