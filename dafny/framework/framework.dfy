@@ -3,10 +3,11 @@ include "order.dfy"
 // A network of processes, generic in the process.
 //
 // A process is a value: its step, told the time. A system is the set of ids,
-// how each one boots, the step, and whether the network may drop or duplicate
-// packets. One network runs any system. Deliver, fire, tick,
-// drop and duplicate are the same transitions; a trace invariant is an
-// argument of the safety theorem, not a module each system has to refine.
+// how each one boots, the process installed at each id, and whether the
+// network may drop or duplicate packets. One network runs any system.
+// Deliver, fire, tick, drop and duplicate are the same transitions; a trace
+// invariant is an argument of the safety theorem, not a module each system
+// has to refine.
 //
 // Liveness ("eventually") holds only under fairness, otherwise the network
 // may drop every message or never let time pass:
@@ -23,17 +24,18 @@ module Network {
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
 
   // The same shape for every process: who it is, the state it holds, what
-  // arrived, and the time. The world drives this, whichever process the id names.
+  // arrived, and the time.
   datatype Process<!P(==, !new), !M(==, !new), !S(!new)> = Process(
     step: (P, S, Input<P, M>, nat) -> Result<P, M, S>)
 
-  // The process, plugged in. `!` because each type occurs under a function arrow.
+  // The processes, plugged in. `!` because each type occurs under a function arrow.
   // `!new` because a trace quantifies over these values, so they are not references.
+  // One process per id. A delivery or a timer calls that process's step.
   datatype Sys<!P(==, !new), !M(==, !new), !S(!new)> = Sys(
     pids: set<P>,
     faults: bool,
     init: P -> S,
-    step: (P, S, Input<P, M>, nat) -> Result<P, M, S>)   // the nat is the time
+    process: P -> Process<P, M, S>)
 
   datatype Packet<P(==, !new), M(==, !new)> = Packet(src: P, dst: P, msg: M)
 
@@ -98,11 +100,11 @@ module Network {
     case Deliver(p) =>
       && p in n.inflight && p.dst in n.procs
       && n' == Advance(n.(inflight := n.inflight - multiset{p}), p.dst,
-                       w.step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now))
+                       w.process(p.dst).step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now))
     case Fire(pid) =>
       && pid in n.timers && pid in n.procs && n.timers[pid] <= n.now
       && n' == Advance(n.(timers := n.timers - {pid}), pid,
-                       w.step(pid, n.procs[pid], Timeout, n.now))
+                       w.process(pid).step(pid, n.procs[pid], Timeout, n.now))
     case Tick =>
       n' == n.(now := n.now + 1)
     case Drop(p) =>

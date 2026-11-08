@@ -534,7 +534,7 @@ module Proof {
     requires self.Client? ==> s.AtClient?
     requires self.Node? ==> s.AtNode?
     requires self.Bucket? ==> s.AtBucket?
-    ensures var r := Step(self, s, Timeout, now);
+    ensures var r := Processes(self).step(self, s, Timeout, now);
       if self.Client? && s.waiting then
         var msg :=
           match s.kind
@@ -552,7 +552,7 @@ module Proof {
     ensures Inv(docs, b, a, n+1)
   {
     var w := World(docs, clients, nodes, ask);
-    assert w.step == Step;
+    assert w.process == Processes;
     assert NextStep(w, b(n), b(n+1), a(n));
     match a(n)
     case Tick =>
@@ -586,7 +586,7 @@ module Proof {
       Carry(docs, b, a, n);
     case Fire(pid) =>
       var base := b(n).(timers := b(n).timers - {pid});
-      var r := Step(pid, b(n).procs[pid], Timeout, b(n).now);
+      var r := w.process(pid).step(pid, b(n).procs[pid], Timeout, b(n).now);
       assert base.inflight == b(n).inflight && base.procs == b(n).procs;
       assert b(n+1) == Advance(base, pid, r);
       OnTimeout(pid, b(n).procs[pid], b(n).now);
@@ -608,10 +608,10 @@ module Proof {
     ensures Inv(docs, b, a, n+1)
   {
     var w := World(docs, clients, nodes, ask);
-    assert w.step == Step;
+    assert w.process == Processes;
     assert NextStep(w, b(n), b(n+1), Deliver(p));
     var base := b(n).(inflight := b(n).inflight - multiset{p});
-    var r := Step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now);
+    var r := w.process(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now);
     assert base.procs == b(n).procs && b(n+1) == Advance(base, p.dst, r);
     forall q | q in base.inflight ensures q in b(n).inflight {}
     match p.dst
@@ -753,7 +753,7 @@ module Proof {
     requires Inv(docs, b, a, n)
     requires p.dst == Bucket && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Step(Bucket, b(n).procs[Bucket], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(Bucket).step(Bucket, b(n).procs[Bucket], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, Bucket, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     ensures Inv(docs, b, a, n+1)
@@ -843,7 +843,7 @@ module Proof {
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     ensures Inv(docs, b, a, n+1)
@@ -1017,7 +1017,7 @@ module Proof {
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires !(p.msg.PromiseGet? && p.msg.id !in b(n).procs[p.dst].open)

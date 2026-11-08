@@ -292,7 +292,9 @@ module S3 {
     case Request(_, Reply(_)) => Result(s, [], Keep)
   }
 
-  function World(): Sys<Pid, Msg, State> { Sys(Pids, true, Init, Step) }
+  function Processes(self: Pid): Process<Pid, Msg, State> { Process(Step) }
+
+  function World(): Sys<Pid, Msg, State> { Sys(Pids, true, Init, Processes) }
 
   // Boot starts empty, in order, with append off. A step keeps both.
   ghost predicate HeldOk(n: Net<Pid, Msg, State>) {
@@ -307,7 +309,8 @@ module S3 {
     ensures HeldOk(n')
   {
     var w := World();
-    assert w.step == Step;
+    assert w.process == Processes;
+    assert w.process(Bucket).step == Step;
     match a
     case Deliver(p) =>
       var r := Step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
