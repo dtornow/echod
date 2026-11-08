@@ -3750,6 +3750,16 @@ pub open spec fn schedule_fire_atomic_trace(
             && schedule_results[schedule_index].state == scheduled
     &&& scheduled.pending == seq![occurrence_work]
     &&& occurrence_result.state == occurred
+    &&& echod_abstract::model::spec_run_timeout(
+        config,
+        scheduled,
+        now,
+    ).len() > 0
+    &&& echod_abstract::model::spec_run_timeout(
+        config,
+        scheduled,
+        now,
+    )[0] == occurrence_result
     &&& occurred.pending.len() == 0
     &&& exists|retry_index: int|
         #![trigger retry_results[retry_index]]
@@ -4148,6 +4158,25 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
             occurrence_out,
         );
     let occurred = occurrence_result.state;
+    reveal(echod_concrete::node::spec_run_due);
+    assert(pending.at <= now);
+    reveal(echod_concrete::relation::as_item);
+    reveal(echod_abstract::machine::spec_body);
+    reveal(echod_abstract::model::spec_ready);
+    reveal(echod_abstract::machine::spec_process_work);
+    reveal(echod_abstract::machine::spec_create_if_absent);
+    assert(echod_abstract::model::spec_ready(
+        echod_abstract::machine::spec_body(occurrence_work),
+        now,
+    ));
+    assert(!occurrence_out.not_due);
+    reveal(echod_abstract::model::spec_run_timeout);
+    reveal(echod_abstract::model::spec_queue);
+    assert(echod_abstract::model::spec_run_timeout(
+        config,
+        scheduled,
+        now,
+    )[0] == occurrence_result);
     reveal(echod_abstract::model::spec_internal_result);
     reveal(echod_abstract::model::remove_at);
     assert(occurred.pending.len() == 0);
@@ -4848,6 +4877,325 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
     reveal(echod_concrete::document::well_formed);
     reveal(echod_concrete::document::workflow_well_formed);
     reveal(echod_concrete::node::spec_advance_stored);
+}
+
+/// The exact conditional document request selected by the production write
+/// path.  This is a definition of production control, not a codec premise:
+/// key, CAS kind, base offset, etag, and full-vs-delta choice are all fixed by
+/// `CommittingSpec` and the process configuration.
+pub open spec fn commit_write_request(
+    s: S,
+    commit: crate::handler_docs::CommittingSpec,
+    cond: Option<Seq<char>>,
+) -> StoreReqSpec {
+    match cond {
+        None => StoreReqSpec::PutIfNoneMatch {
+            key: commit.w.key,
+            body: crate::document::spec_encode(commit.after),
+        },
+        Some(etag) => {
+            let after =
+                echod_concrete::node::spec_stored_body(commit.after);
+            let (delta, changed) =
+                crate::document::spec_encode_delta(
+                    commit.w.loaded.document,
+                    commit.after,
+                );
+            let removed = crate::document::spec_removed_any(
+                crate::document::spec_loaded_body(commit.w.loaded),
+                after,
+            );
+            let after_len =
+                echod_concrete::node::spec_body_len(after) as usize;
+            let stale_after = commit.w.loaded.change_count
+                .saturating_add(changed)
+                .saturating_sub(after_len);
+            let append =
+                crate::document::spec_loaded_version(commit.w.loaded) > 0
+                && !removed
+                && s.cfg.appendable
+                && s.cfg.compact > 0
+                && stale_after < s.cfg.compact as usize;
+            if append {
+                StoreReqSpec::AppIfMatch {
+                    key: commit.w.key,
+                    offset: commit.w.loaded.bytes,
+                    body: delta,
+                    etag: echod_concrete::store::EtagSpec(etag),
+                }
+            } else {
+                StoreReqSpec::PutIfMatch {
+                    key: commit.w.key,
+                    body: crate::document::spec_encode(commit.after),
+                    etag: echod_concrete::store::EtagSpec(etag),
+                }
+            }
+        },
+    }
+}
+
+/// The state and commit after consuming the previous sequence action's
+/// answer, immediately before `spec_advance` selects the next action.
+pub open spec fn settled_commit(
+    s: S,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+) -> (S, crate::handler_docs::CommittingSpec) {
+    match commit.issued {
+        Some(issued) => crate::handler_docs::spec_answered(
+            s,
+            crate::handler_docs::CommittingSpec {
+                issued: None,
+                ..commit
+            },
+            issued,
+            answer,
+        ),
+        None => (s, commit),
+    }
+}
+
+/// The real verified commit sequence is at its document-write action.
+pub open spec fn commit_write_phase(
+    s: S,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+    cond: Option<Seq<char>>,
+    idle: bool,
+) -> bool {
+    let settled = settled_commit(s, commit, answer);
+    crate::verified::flight_spec::spec_advance(
+        settled.1.seq,
+        settled.0.node.core,
+        crate::verified::flight_spec::answer_v(
+            settled.1.seq.step,
+            answer,
+        ),
+    ).2 == crate::verified::flight_spec::AOutcome::Act(
+        crate::verified::flight_spec::AAct::Write { cond, idle },
+    )
+}
+
+/// Exact observable consequences of a write action.  In particular, the
+/// request is appended by `spec_store` with the flight owner and the issued
+/// phase records that same operation id.
+pub open spec fn commit_advance_issues_write(
+    s: S,
+    fid: u64,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+    cond: Option<Seq<char>>,
+    idle: bool,
+) -> bool {
+    let settled = settled_commit(s, commit, answer);
+    let request = commit_write_request(settled.0, settled.1, cond);
+    let op = settled.0.next_op;
+    let advanced =
+        crate::handler_docs::spec_commit_advance(
+            s,
+            fid,
+            commit,
+            answer,
+        );
+    &&& advanced.0.out == settled.0.out.push(
+        EffectSpec::Store { op, request },
+    )
+    &&& advanced.0.ops
+        == settled.0.ops.insert(op, Owner::Flight(fid))
+    &&& advanced.0.next_op == settled.0.next_op.wrapping_add(1)
+    &&& advanced.1.issued is Some
+    &&& match advanced.1.issued->Some_0 {
+        crate::handler_docs::IssuedSpec::Write {
+            op: issued_op,
+            ..
+        } => issued_op == op,
+        _ => false,
+    }
+    &&& advanced.2 == crate::handler_docs::ProgressSpec::Issued
+}
+
+/// Production derives every Store control field from the commit itself.
+pub proof fn lemma_commit_write_request_fields(
+    s: S,
+    commit: crate::handler_docs::CommittingSpec,
+    cond: Option<Seq<char>>,
+)
+    ensures
+        ({
+            let request = commit_write_request(s, commit, cond);
+            match cond {
+                None => request == StoreReqSpec::PutIfNoneMatch {
+                    key: commit.w.key,
+                    body: crate::document::spec_encode(commit.after),
+                },
+                Some(etag) => {
+                    let after =
+                        echod_concrete::node::spec_stored_body(
+                            commit.after,
+                        );
+                    let (delta, changed) =
+                        crate::document::spec_encode_delta(
+                            commit.w.loaded.document,
+                            commit.after,
+                        );
+                    let removed = crate::document::spec_removed_any(
+                        crate::document::spec_loaded_body(
+                            commit.w.loaded,
+                        ),
+                        after,
+                    );
+                    let after_len =
+                        echod_concrete::node::spec_body_len(after)
+                            as usize;
+                    let stale_after = commit.w.loaded.change_count
+                        .saturating_add(changed)
+                        .saturating_sub(after_len);
+                    let append =
+                        crate::document::spec_loaded_version(
+                            commit.w.loaded,
+                        ) > 0
+                        && !removed
+                        && s.cfg.appendable
+                        && s.cfg.compact > 0
+                        && stale_after < s.cfg.compact as usize;
+                    if append {
+                        request == StoreReqSpec::AppIfMatch {
+                            key: commit.w.key,
+                            offset: commit.w.loaded.bytes,
+                            body: delta,
+                            etag: echod_concrete::store::EtagSpec(etag),
+                        }
+                    } else {
+                        request == StoreReqSpec::PutIfMatch {
+                            key: commit.w.key,
+                            body: crate::document::spec_encode(
+                                commit.after,
+                            ),
+                            etag: echod_concrete::store::EtagSpec(etag),
+                        }
+                    }
+                },
+            }
+        }),
+{
+    reveal(commit_write_request);
+}
+
+pub proof fn lemma_commit_write_phase_issues_exact_request(
+    s: S,
+    fid: u64,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+    cond: Option<Seq<char>>,
+    idle: bool,
+)
+    requires
+        commit_write_phase(s, commit, answer, cond, idle),
+    ensures
+        commit_advance_issues_write(
+            s,
+            fid,
+            commit,
+            answer,
+            cond,
+            idle,
+        ),
+{
+    reveal(commit_write_phase);
+    reveal(commit_advance_issues_write);
+    reveal(settled_commit);
+    reveal(crate::handler_docs::spec_commit_advance);
+    reveal(crate::handler_docs::spec_issue_write);
+    reveal(crate::state::spec_store);
+}
+
+pub open spec fn is_fire_origin_commit(
+    phase: PhaseSpec,
+    commit: crate::handler_docs::CommittingSpec,
+) -> bool {
+    match phase {
+        PhaseSpec::FireOrigin {
+            commit: actual,
+            ..
+        } => actual == commit,
+        _ => false,
+    }
+}
+
+pub open spec fn is_fire_schedule_commit(
+    phase: PhaseSpec,
+    commit: crate::handler_docs::CommittingSpec,
+) -> bool {
+    match phase {
+        PhaseSpec::FireSchedule {
+            commit: actual,
+        } => actual == commit,
+        _ => false,
+    }
+}
+
+pub proof fn lemma_schedule_fire_origin_phase_issues_exact_write(
+    s: S,
+    fid: u64,
+    phase: PhaseSpec,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+    cond: Option<Seq<char>>,
+    idle: bool,
+)
+    requires
+        is_fire_origin_commit(phase, commit),
+        commit_write_phase(s, commit, answer, cond, idle),
+    ensures
+        commit_advance_issues_write(
+            s,
+            fid,
+            commit,
+            answer,
+            cond,
+            idle,
+        ),
+{
+    lemma_commit_write_phase_issues_exact_request(
+        s,
+        fid,
+        commit,
+        answer,
+        cond,
+        idle,
+    );
+}
+
+pub proof fn lemma_schedule_fire_schedule_phase_issues_exact_write(
+    s: S,
+    fid: u64,
+    phase: PhaseSpec,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<StoreRes>,
+    cond: Option<Seq<char>>,
+    idle: bool,
+)
+    requires
+        is_fire_schedule_commit(phase, commit),
+        commit_write_phase(s, commit, answer, cond, idle),
+    ensures
+        commit_advance_issues_write(
+            s,
+            fid,
+            commit,
+            answer,
+            cond,
+            idle,
+        ),
+{
+    lemma_commit_write_phase_issues_exact_request(
+        s,
+        fid,
+        commit,
+        answer,
+        cond,
+        idle,
+    );
 }
 
 /// Exhausting either origin closure ends the schedule flight before

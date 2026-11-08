@@ -1027,8 +1027,68 @@ proof fn lemma_abstract_timeout_lands_index(
 
 /// The three exact abstract timeout edges represented by the split schedule
 /// fire: schedule advancement, queued occurrence insertion, and retry
-/// dispatch. Explicit result indices keep this bounded relation tied to real
-/// abstract machine outcomes.
+/// dispatch.
+pub open spec fn abstract_timeout_endpoint_index(
+    config: ServerConfig,
+    state: echod_abstract::model::StateV,
+    now: u64,
+    endpoint: echod_abstract::model::StateV,
+) -> int {
+    let results =
+        echod_abstract::model::spec_run_timeout(config, state, now);
+    choose|index: int|
+        #![trigger results[index]]
+        0 <= index < results.len()
+            && results[index].state == endpoint
+}
+
+pub proof fn lemma_abstract_timeout_endpoint_index(
+    config: ServerConfig,
+    state: echod_abstract::model::StateV,
+    now: u64,
+    endpoint: echod_abstract::model::StateV,
+)
+    requires
+        exists|index: int|
+            #![trigger echod_abstract::model::spec_run_timeout(
+                config,
+                state,
+                now,
+            )[index]]
+            0 <= index
+                < echod_abstract::model::spec_run_timeout(
+                    config,
+                    state,
+                    now,
+                ).len()
+                && echod_abstract::model::spec_run_timeout(
+                    config,
+                    state,
+                    now,
+                )[index].state == endpoint,
+    ensures
+        ({
+            let results =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    state,
+                    now,
+                );
+            let index = abstract_timeout_endpoint_index(
+                config,
+                state,
+                now,
+                endpoint,
+            );
+            &&& 0 <= index < results.len()
+            &&& results[index].state == endpoint
+        }),
+{
+}
+
+/// Schedule and retry indices are canonical functions of their established
+/// endpoint states. The singleton runnable occurrence is exactly result zero,
+/// so no timeout index is supplied by the caller.
 pub proof fn lemma_abstract_schedule_fire_world_execution(
     config: ServerConfig,
     before: World<AbstractModel>,
@@ -1042,9 +1102,6 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
     scheduled: echod_abstract::model::StateV,
     occurred: echod_abstract::model::StateV,
     abstract_after: echod_abstract::model::StateV,
-    schedule_index: int,
-    occurrence_index: int,
-    retry_index: int,
 )
     requires
         0 <= service_slot < before.process.len(),
@@ -1066,43 +1123,23 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
             occurred,
             abstract_after,
         ),
+    ensures
         ({
-            let schedule_results =
-                echod_abstract::model::spec_run_timeout(
+            let schedule_index =
+                abstract_timeout_endpoint_index(
                     config,
                     abstract_before,
                     now,
-                );
-            &&& 0 <= schedule_index
-                < schedule_results.len()
-            &&& schedule_results[schedule_index].state
-                == scheduled
-        }),
-        ({
-            let occurrence_results =
-                echod_abstract::model::spec_run_timeout(
-                    config,
                     scheduled,
-                    now,
                 );
-            &&& 0 <= occurrence_index
-                < occurrence_results.len()
-            &&& occurrence_results[occurrence_index].state
-                == occurred
-        }),
-        ({
-            let retry_results =
-                echod_abstract::model::spec_run_timeout(
+            let occurrence_index = 0int;
+            let retry_index =
+                abstract_timeout_endpoint_index(
                     config,
                     occurred,
                     now,
+                    abstract_after,
                 );
-            &&& 0 <= retry_index < retry_results.len()
-            &&& retry_results[retry_index].state
-                == abstract_after
-        }),
-    ensures
-        ({
             let event =
                 ProcessEvent::<
                     echod_abstract::model::Pid,
@@ -1189,6 +1226,72 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
             )
         }),
 {
+    let schedule_index =
+        abstract_timeout_endpoint_index(
+            config,
+            abstract_before,
+            now,
+            scheduled,
+        );
+    let occurrence_index = 0int;
+    let retry_index =
+        abstract_timeout_endpoint_index(
+            config,
+            occurred,
+            now,
+            abstract_after,
+        );
+    assert(exists|index: int|
+        #![trigger echod_abstract::model::spec_run_timeout(
+            config,
+            abstract_before,
+            now,
+        )[index]]
+        0 <= index
+            < echod_abstract::model::spec_run_timeout(
+                config,
+                abstract_before,
+                now,
+            ).len()
+            && echod_abstract::model::spec_run_timeout(
+                config,
+                abstract_before,
+                now,
+            )[index].state == scheduled);
+    lemma_abstract_timeout_endpoint_index(
+        config,
+        abstract_before,
+        now,
+        scheduled,
+    );
+    assert(echod_abstract::model::spec_run_timeout(
+        config,
+        scheduled,
+        now,
+    )[0].state == occurred);
+    assert(exists|index: int|
+        #![trigger echod_abstract::model::spec_run_timeout(
+            config,
+            occurred,
+            now,
+        )[index]]
+        0 <= index
+            < echod_abstract::model::spec_run_timeout(
+                config,
+                occurred,
+                now,
+            ).len()
+            && echod_abstract::model::spec_run_timeout(
+                config,
+                occurred,
+                now,
+            )[index].state == abstract_after);
+    lemma_abstract_timeout_endpoint_index(
+        config,
+        occurred,
+        now,
+        abstract_after,
+    );
     let event =
         ProcessEvent::<
             echod_abstract::model::Pid,
@@ -1311,58 +1414,101 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
     ));
 }
 
-/// Bounded related-world lift for the split physical commit. The production
-/// side takes four real Store delivery/response steps and frames arbitrary
-/// unrelated process slots. The abstract side takes the three exact indexed
-/// timeout results hidden behind those Store events. Equality between the
-/// executable Store requests and the handler's chosen codec requests remains
-/// an explicit premise rather than an assumed codec theorem.
-pub open spec fn codec_write_request_matches(
-    request: echod_concrete::store::StoreReqSpec,
-    key: Seq<char>,
-    before: echod_concrete::node::StoredDocumentV,
+/// Irreducible full-document serialization law needed only when a future
+/// global Store relation interprets bytes back into a logical document.
+/// Request kind, key, etag, and body selection are deliberately absent.
+pub open spec fn codec_full_write_round_trip(
     after: echod_concrete::node::StoredDocumentV,
-    before_bytes: u64,
-    etag: Option<Seq<char>>,
 ) -> bool {
-    match request {
-        echod_concrete::store::StoreReqSpec::PutIfNoneMatch {
-            key: request_key,
-            body,
-        } => {
-            &&& etag is None
-            &&& request_key == key
-            &&& body == crate::document::spec_encode(after)
-        },
-        echod_concrete::store::StoreReqSpec::PutIfMatch {
-            key: request_key,
-            body,
-            etag: request_etag,
-        } => {
-            &&& etag is Some
-            &&& request_key == key
-            &&& request_etag.0 == etag->Some_0
-            &&& body == crate::document::spec_encode(after)
-        },
-        echod_concrete::store::StoreReqSpec::AppIfMatch {
-            key: request_key,
-            offset,
-            body,
-            etag: request_etag,
-        } => {
-            &&& etag is Some
-            &&& request_key == key
-            &&& offset == before_bytes
-            &&& request_etag.0 == etag->Some_0
-            &&& body
-                == crate::document::spec_encode_delta(
-                    before,
-                    after,
-                ).0
-        },
-        _ => false,
+    let bytes = crate::document::spec_encode(after);
+    let loaded = crate::document::LoadedSpec {
+        document: after,
+        change_count: 1,
+        bytes: bytes.len() as u64,
+    };
+    match after {
+        echod_concrete::node::StoredDocumentV::Workflow(_) =>
+            crate::document::spec_decode_workflow(bytes) == Ok(loaded),
+        echod_concrete::node::StoredDocumentV::Schedule(_) =>
+            crate::document::spec_decode_schedule(bytes) == Ok(loaded),
     }
 }
+
+/// Irreducible append serialization law. `base` is the exact physical object
+/// previously decoded as `before`; all CAS controls remain outside this law.
+pub open spec fn codec_delta_append_round_trip(
+    base: Seq<u8>,
+    before: crate::document::LoadedSpec,
+    after: echod_concrete::node::StoredDocumentV,
+) -> bool {
+    let encoded =
+        crate::document::spec_encode_delta(before.document, after);
+    let bytes = base + encoded.0;
+    let loaded = crate::document::LoadedSpec {
+        document: after,
+        change_count: before.change_count.saturating_add(encoded.1),
+        bytes: bytes.len() as u64,
+    };
+    &&& before.bytes == base.len() as u64
+    &&& match after {
+        echod_concrete::node::StoredDocumentV::Workflow(_) =>
+            crate::document::spec_decode_workflow(bytes) == Ok(loaded),
+        echod_concrete::node::StoredDocumentV::Schedule(_) =>
+            crate::document::spec_decode_schedule(bytes) == Ok(loaded),
+    }
+}
+
+pub open spec fn commit_store_request(
+    s: crate::state::S,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<echod_concrete::store::StoreRes>,
+    cond: Option<Seq<char>>,
+) -> StoreReq {
+    let settled =
+        crate::refinement::settled_commit(s, commit, answer);
+    crate::rover::spec_store_request(
+        crate::refinement::commit_write_request(
+            settled.0,
+            settled.1,
+            cond,
+        ),
+    )
+}
+
+pub open spec fn commit_store_op(
+    s: crate::state::S,
+    commit: crate::handler_docs::CommittingSpec,
+    answer: Option<echod_concrete::store::StoreRes>,
+) -> u64 {
+    crate::refinement::settled_commit(s, commit, answer).0.next_op
+}
+
+pub open spec fn fire_phase_with_commit(
+    phase: crate::handler_docs::PhaseSpec,
+    commit: crate::handler_docs::CommittingSpec,
+) -> crate::handler_docs::PhaseSpec {
+    match phase {
+        crate::handler_docs::PhaseSpec::FireOrigin {
+            ctx,
+            t,
+            outbox,
+            ..
+        } => crate::handler_docs::PhaseSpec::FireOrigin {
+            commit,
+            ctx,
+            t,
+            outbox,
+        },
+        crate::handler_docs::PhaseSpec::FireSchedule { .. } =>
+            crate::handler_docs::PhaseSpec::FireSchedule { commit },
+        other => other,
+    }
+}
+
+/// Bounded related-world lift for the split physical commit. Both executable
+/// requests are now constructed from their real `CommittingSpec` write
+/// phases; codec control fields are conclusions of the production sequence,
+/// not caller-supplied premises.
 
 pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
     production_config: crate::Config,
@@ -1371,22 +1517,19 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
     production_store_slot: int,
     production_node: ProductionNodeV,
     production_store: StoreV,
-    origin_op: u64,
-    origin_request: StoreReq,
-    origin_expected: echod_concrete::store::StoreReqSpec,
-    origin_store_key: Seq<char>,
-    origin_loaded: echod_concrete::node::StoredDocumentV,
-    origin_after: echod_concrete::node::StoredDocumentV,
-    origin_loaded_bytes: u64,
-    origin_etag: Option<Seq<char>>,
-    schedule_op: u64,
-    schedule_request: StoreReq,
-    schedule_expected: echod_concrete::store::StoreReqSpec,
-    schedule_store_key: Seq<char>,
-    schedule_loaded: echod_concrete::node::StoredDocumentV,
-    schedule_after: echod_concrete::node::StoredDocumentV,
-    schedule_loaded_bytes: u64,
-    schedule_etag: Option<Seq<char>>,
+    flight_id: u64,
+    origin_write_state: crate::state::S,
+    origin_phase: crate::handler_docs::PhaseSpec,
+    origin_commit: crate::handler_docs::CommittingSpec,
+    origin_answer: Option<echod_concrete::store::StoreRes>,
+    origin_cond: Option<Seq<char>>,
+    origin_idle: bool,
+    schedule_write_state: crate::state::S,
+    schedule_phase: crate::handler_docs::PhaseSpec,
+    schedule_commit: crate::handler_docs::CommittingSpec,
+    schedule_answer: Option<echod_concrete::store::StoreRes>,
+    schedule_cond: Option<Seq<char>>,
+    schedule_idle: bool,
     origin_store_at: u64,
     origin_node_at: u64,
     schedule_store_at: u64,
@@ -1402,33 +1545,49 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
     scheduled: echod_abstract::model::StateV,
     occurred: echod_abstract::model::StateV,
     abstract_after: echod_abstract::model::StateV,
-    schedule_index: int,
-    occurrence_index: int,
-    retry_index: int,
 )
     requires
-        origin_request.deep_view() == origin_expected,
-        schedule_request.deep_view() == schedule_expected,
-        codec_write_request_matches(
-            origin_expected,
-            origin_store_key,
-            origin_loaded,
-            origin_after,
-            origin_loaded_bytes,
-            origin_etag,
+        crate::refinement::is_fire_origin_commit(
+            origin_phase,
+            origin_commit,
         ),
-        codec_write_request_matches(
-            schedule_expected,
-            schedule_store_key,
-            schedule_loaded,
-            schedule_after,
-            schedule_loaded_bytes,
-            schedule_etag,
+        crate::refinement::commit_write_phase(
+            origin_write_state,
+            origin_commit,
+            origin_answer,
+            origin_cond,
+            origin_idle,
         ),
-        echod_concrete::node::spec_stored_body(origin_loaded)
-            == origin_doc,
-        echod_concrete::node::spec_stored_body(origin_after)
-            == echod_concrete::node::spec_occurrence_transition(
+        crate::refinement::is_fire_schedule_commit(
+            schedule_phase,
+            schedule_commit,
+        ),
+        crate::refinement::commit_write_phase(
+            schedule_write_state,
+            schedule_commit,
+            schedule_answer,
+            schedule_cond,
+            schedule_idle,
+        ),
+        ({
+            let settled = crate::refinement::settled_commit(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+            );
+            &&& crate::rover::store_request_bounded(
+                crate::refinement::commit_write_request(
+                    settled.0,
+                    settled.1,
+                    origin_cond,
+                ),
+            )
+            &&& echod_concrete::node::spec_stored_body(
+                settled.1.w.loaded.document,
+            ) == origin_doc
+            &&& echod_concrete::node::spec_stored_body(
+                settled.1.after,
+            ) == echod_concrete::node::spec_occurrence_transition(
                 origin_doc,
                 echod_concrete::node::spec_run_due(
                     schedule_doc,
@@ -1438,15 +1597,32 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
                 now,
                 abstract_config(production_config).retry_timeout,
                 crate::handler_docs::SWEEP_STEPS as nat,
-            ).0,
-        echod_concrete::node::spec_stored_body(schedule_loaded)
-            == schedule_doc,
-        echod_concrete::node::spec_stored_body(schedule_after)
-            == echod_concrete::node::spec_run_due(
+            ).0
+        }),
+        ({
+            let settled = crate::refinement::settled_commit(
+                schedule_write_state,
+                schedule_commit,
+                schedule_answer,
+            );
+            &&& crate::rover::store_request_bounded(
+                crate::refinement::commit_write_request(
+                    settled.0,
+                    settled.1,
+                    schedule_cond,
+                ),
+            )
+            &&& echod_concrete::node::spec_stored_body(
+                settled.1.w.loaded.document,
+            ) == schedule_doc
+            &&& echod_concrete::node::spec_stored_body(
+                settled.1.after,
+            ) == echod_concrete::node::spec_run_due(
                 schedule_doc,
                 now,
                 abstract_config(production_config).retry_timeout,
-            ).0,
+            ).0
+        }),
         0 <= production_node_slot
             < production_before.process.len(),
         0 <= production_store_slot
@@ -1464,28 +1640,65 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
                 Pid::Store,
                 ProductionLocalV::Store(production_store),
             ),
+        production_node.core.flights.inflight.contains_key(flight_id),
+        ({
+            let advanced =
+                crate::handler_docs::spec_commit_advance(
+                    origin_write_state,
+                    flight_id,
+                    origin_commit,
+                    origin_answer,
+                );
+            production_node.core.flights.inflight[flight_id].phase
+                == fire_phase_with_commit(
+                    origin_phase,
+                    advanced.1,
+                )
+        }),
         production_before.now <= origin_store_at,
         origin_store_at <= origin_node_at,
         origin_node_at <= schedule_store_at,
         schedule_store_at <= schedule_node_at,
         !production_store.seen.contains((
             Pid::Node(0),
-            origin_op,
+            commit_store_op(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+            ),
         )),
         production_before.network.contains(Envelope {
             sender: Pid::Node(0),
             recipient: Pid::Store,
             message: ProductionMessage::StoreReq {
-                op: origin_op,
-                request: origin_request,
+                op: commit_store_op(
+                    origin_write_state,
+                    origin_commit,
+                    origin_answer,
+                ),
+                request: commit_store_request(
+                    origin_write_state,
+                    origin_commit,
+                    origin_answer,
+                    origin_cond,
+                ),
             },
         }),
         ({
             let origin_request_event = ProcessEvent::Receive {
                 sender: Pid::Node(0),
                 message: ProductionMessage::StoreReq {
-                    op: origin_op,
-                    request: origin_request,
+                    op: commit_store_op(
+                        origin_write_state,
+                        origin_commit,
+                        origin_answer,
+                    ),
+                    request: commit_store_request(
+                        origin_write_state,
+                        origin_commit,
+                        origin_answer,
+                        origin_cond,
+                    ),
                 },
             };
             let origin_store_outcome =
@@ -1506,6 +1719,13 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
                 ProductionLocalV::Store(next) => next,
                 _ => production_store,
             };
+            let schedule_advanced =
+                crate::handler_docs::spec_commit_advance(
+                    schedule_write_state,
+                    flight_id,
+                    schedule_commit,
+                    schedule_answer,
+                );
             &&& spec_node_step(
                 production_node,
                 origin_node_at,
@@ -1514,13 +1734,38 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             &&& origin_node_outcome.send.contains((
                 Pid::Store,
                 ProductionMessage::StoreReq {
-                    op: schedule_op,
-                    request: schedule_request,
+                    op: commit_store_op(
+                        schedule_write_state,
+                        schedule_commit,
+                        schedule_answer,
+                    ),
+                    request: commit_store_request(
+                        schedule_write_state,
+                        schedule_commit,
+                        schedule_answer,
+                        schedule_cond,
+                    ),
                 },
             ))
+            &&& match origin_node_outcome.state {
+                ProductionLocalV::Node(next) => {
+                    &&& next.core.flights.inflight
+                        .contains_key(flight_id)
+                    &&& next.core.flights.inflight[flight_id].phase
+                        == fire_phase_with_commit(
+                            schedule_phase,
+                            schedule_advanced.1,
+                        )
+                },
+                _ => false,
+            }
             &&& !origin_store.seen.contains((
                 Pid::Node(0),
-                schedule_op,
+                commit_store_op(
+                    schedule_write_state,
+                    schedule_commit,
+                    schedule_answer,
+                ),
             ))
         }),
         0 <= abstract_service_slot
@@ -1543,42 +1788,57 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             occurred,
             abstract_after,
         ),
-        ({
-            let schedule_results =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    abstract_before,
-                    now,
-                );
-            &&& 0 <= schedule_index
-                < schedule_results.len()
-            &&& schedule_results[schedule_index].state
-                == scheduled
-        }),
-        ({
-            let occurrence_results =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    scheduled,
-                    now,
-                );
-            &&& 0 <= occurrence_index
-                < occurrence_results.len()
-            &&& occurrence_results[occurrence_index].state
-                == occurred
-        }),
-        ({
-            let retry_results =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    occurred,
-                    now,
-                );
-            &&& 0 <= retry_index < retry_results.len()
-            &&& retry_results[retry_index].state
-                == abstract_after
-        }),
     ensures
+        crate::refinement::commit_advance_issues_write(
+            origin_write_state,
+            flight_id,
+            origin_commit,
+            origin_answer,
+            origin_cond,
+            origin_idle,
+        ),
+        crate::refinement::commit_advance_issues_write(
+            schedule_write_state,
+            flight_id,
+            schedule_commit,
+            schedule_answer,
+            schedule_cond,
+            schedule_idle,
+        ),
+        ({
+            let settled = crate::refinement::settled_commit(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+            );
+            commit_store_request(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+                origin_cond,
+            ).deep_view() == crate::refinement::commit_write_request(
+                settled.0,
+                settled.1,
+                origin_cond,
+            )
+        }),
+        ({
+            let settled = crate::refinement::settled_commit(
+                schedule_write_state,
+                schedule_commit,
+                schedule_answer,
+            );
+            commit_store_request(
+                schedule_write_state,
+                schedule_commit,
+                schedule_answer,
+                schedule_cond,
+            ).deep_view() == crate::refinement::commit_write_request(
+                settled.0,
+                settled.1,
+                schedule_cond,
+            )
+        }),
         production_split_store_trace(
             production_config,
             production_before,
@@ -1586,16 +1846,49 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             production_store_slot,
             production_node,
             production_store,
-            origin_op,
-            origin_request,
-            schedule_op,
-            schedule_request,
+            commit_store_op(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+            ),
+            commit_store_request(
+                origin_write_state,
+                origin_commit,
+                origin_answer,
+                origin_cond,
+            ),
+            commit_store_op(
+                schedule_write_state,
+                schedule_commit,
+                schedule_answer,
+            ),
+            commit_store_request(
+                schedule_write_state,
+                schedule_commit,
+                schedule_answer,
+                schedule_cond,
+            ),
             origin_store_at,
             origin_node_at,
             schedule_store_at,
             schedule_node_at,
         ),
         ({
+            let schedule_index =
+                abstract_timeout_endpoint_index(
+                    abstract_config(production_config),
+                    abstract_before,
+                    now,
+                    scheduled,
+                );
+            let occurrence_index = 0int;
+            let retry_index =
+                abstract_timeout_endpoint_index(
+                    abstract_config(production_config),
+                    occurred,
+                    now,
+                    abstract_after,
+                );
             let event =
                 ProcessEvent::<
                     echod_abstract::model::Pid,
@@ -1649,6 +1942,46 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             )
         }),
 {
+    crate::refinement::lemma_schedule_fire_origin_phase_issues_exact_write(
+        origin_write_state,
+        flight_id,
+        origin_phase,
+        origin_commit,
+        origin_answer,
+        origin_cond,
+        origin_idle,
+    );
+    crate::refinement::lemma_schedule_fire_schedule_phase_issues_exact_write(
+        schedule_write_state,
+        flight_id,
+        schedule_phase,
+        schedule_commit,
+        schedule_answer,
+        schedule_cond,
+        schedule_idle,
+    );
+    let origin_settled = crate::refinement::settled_commit(
+        origin_write_state,
+        origin_commit,
+        origin_answer,
+    );
+    let origin_expected = crate::refinement::commit_write_request(
+        origin_settled.0,
+        origin_settled.1,
+        origin_cond,
+    );
+    crate::rover::lemma_store_request_realised(origin_expected);
+    let schedule_settled = crate::refinement::settled_commit(
+        schedule_write_state,
+        schedule_commit,
+        schedule_answer,
+    );
+    let schedule_expected = crate::refinement::commit_write_request(
+        schedule_settled.0,
+        schedule_settled.1,
+        schedule_cond,
+    );
+    crate::rover::lemma_store_request_realised(schedule_expected);
     lemma_production_split_store_trace(
         production_config,
         production_before,
@@ -1656,10 +1989,28 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
         production_store_slot,
         production_node,
         production_store,
-        origin_op,
-        origin_request,
-        schedule_op,
-        schedule_request,
+        commit_store_op(
+            origin_write_state,
+            origin_commit,
+            origin_answer,
+        ),
+        commit_store_request(
+            origin_write_state,
+            origin_commit,
+            origin_answer,
+            origin_cond,
+        ),
+        commit_store_op(
+            schedule_write_state,
+            schedule_commit,
+            schedule_answer,
+        ),
+        commit_store_request(
+            schedule_write_state,
+            schedule_commit,
+            schedule_answer,
+            schedule_cond,
+        ),
         origin_store_at,
         origin_node_at,
         schedule_store_at,
@@ -1678,9 +2029,6 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
         scheduled,
         occurred,
         abstract_after,
-        schedule_index,
-        occurrence_index,
-        retry_index,
     );
 }
 
