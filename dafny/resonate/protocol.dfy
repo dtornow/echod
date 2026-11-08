@@ -23,8 +23,8 @@ module Protocol {
   // is empty. `remember` writes `keep` into the armed map when the write lands.
   // `cid` is the caller's request. `rpc` is the store request in flight.
   datatype Cont =
-    | Prepare(caller: Pid, job: Job, cid: nat, rpc: nat)
-    | Process(caller: Pid, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: nat, rpc: nat)
+    | Prepare(caller: Pid, job: Job, cid: Uuid, rpc: Uuid)
+    | Process(caller: Pid, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: Uuid, rpc: Uuid)
 
   predicate AwaitsGet(c: Cont) { c.Prepare? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
@@ -48,7 +48,7 @@ module Protocol {
   type Msg = RR<ReqBody, ResBody>
   datatype State =
     | AtClient(id: string, node: nat, kind: Kind, waiting: bool)
-    | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat, mint: nat)
+    | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat, ids: Supply)
     | AtBucket(docs: map<string, Temp.Doc>, ver: map<string, nat>, timeouts: set<Clock>, anchor: map<string, Clock>)
 
   function Empty(): Temp.Doc { Temp.Origin(0, map[]) }

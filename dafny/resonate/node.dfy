@@ -24,16 +24,16 @@ module Node {
           if id in s.open then
             Result(s, [], Keep)
           else
-            var rpc := s.mint;
-            Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
-                   [ReqTo(Bucket, rpc, Get(id))], Keep)
+            var drawn := Draw(s.ids);
+            Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid, drawn.id)], s.armed, s.next, s.owner, drawn.supply),
+                   [ReqTo(Bucket, drawn.id, Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
           if req.id in s.open then
             Result(s, [], Keep)
           else
-            var rpc := s.mint;
-            Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
-                   [ReqTo(Bucket, rpc, Get(req.id))], Keep)
+            var drawn := Draw(s.ids);
+            Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid, drawn.id)], s.armed, s.next, s.owner, drawn.supply),
+                   [ReqTo(Bucket, drawn.id, Get(req.id))], Keep)
         case Request(_, Res(rpc, Got(id, doc, version))) =>
           if id in s.open && s.open[id].Prepare? && s.open[id].rpc == rpc then
             var plan := Prepare(s, s.open[id].job, id, doc, version, now);
@@ -52,7 +52,7 @@ module Node {
             Result(s, [], Keep)
         case Request(_, Res(rpc, DocRejected(id))) =>
           if Live(s, id, rpc) && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0].Write? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner, s.mint), [], Keep)
+            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner, s.ids), [], Keep)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
@@ -149,17 +149,17 @@ module Node {
 
   // An empty effect list answers the caller. Otherwise the head goes to the
   // store and Process stays scheduled on the whole list.
-  function Process(s: State, id: string, caller: Pid, cid: nat, plan: Plan): Result<Pid, Msg, State>
+  function Process(s: State, id: string, caller: Pid, cid: Uuid, plan: Plan): Result<Pid, Msg, State>
     requires s.AtNode?
   {
     if plan.effects == [] then
-      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner, s.mint),
+      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner, s.ids),
              [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
     else
-      var rpc := s.mint;
-      var phase := Cont.Process(caller, plan.reply, plan.effects, plan.keep, plan.remember, cid, rpc);
-      Result(AtNode(s.open[id := phase], s.armed, plan.next, s.owner, s.mint + 1),
-             [ReqTo(Bucket, rpc, SendEffect(id, plan.effects[0]))], Keep)
+      var drawn := Draw(s.ids);
+      var phase := Cont.Process(caller, plan.reply, plan.effects, plan.keep, plan.remember, cid, drawn.id);
+      Result(AtNode(s.open[id := phase], s.armed, plan.next, s.owner, drawn.supply),
+             [ReqTo(Bucket, drawn.id, SendEffect(id, plan.effects[0]))], Keep)
   }
 
   // The head effect landed. Remember a write, then schedule Process on what remains.
@@ -170,10 +170,10 @@ module Node {
     var head := phase.effects[0];
     var armed := Remember(s.armed, head, phase.keep, phase.remember);
     var plan := Plan(phase.reply, true, phase.effects[1..], phase.keep, phase.remember && !head.Write?, s.next);
-    Process(AtNode(s.open, armed, s.next, s.owner, s.mint), id, phase.caller, phase.cid, plan)
+    Process(AtNode(s.open, armed, s.next, s.owner, s.ids), id, phase.caller, phase.cid, plan)
   }
 
-  predicate Live(s: State, id: string, rpc: nat)
+  predicate Live(s: State, id: string, rpc: Uuid)
     requires s.AtNode?
   {
     id in s.open && s.open[id].rpc == rpc

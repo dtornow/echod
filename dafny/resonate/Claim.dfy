@@ -16,7 +16,7 @@ module Claim {
   // projection of that promise at the instant of the read.
   lemma PromiseGetReceived(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                            b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
-                           r: nat, node: Pid, from: Pid, cid: nat, answer: Temp.Answer)
+                           r: nat, node: Pid, from: Pid, cid: Uuid, answer: Temp.Answer)
     requires Routed(clients, nodes, ask)
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     requires node.Node?
