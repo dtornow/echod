@@ -21,10 +21,10 @@ module Claim {
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     requires node.Node?
     requires a(r) == Deliver(Packet(node, from, Res(cid, PromiseReply(answer))))
-    ensures exists i: nat, k: nat, id, doc, version {:trigger a(i), a(k), GotPacket(node, Fetch(id, cid), id, doc, version)} ::
+    ensures exists i: nat, k: nat, id, doc, version {:trigger a(i), a(k), GotPacket(node, Hash(cid), id, doc, version)} ::
       && i < k < r
       && a(i) == Deliver(Packet(from, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(Packet(Bucket, node, Res(Fetch(id, cid), Got(id, doc, version))))
+      && a(k) == Deliver(Packet(Bucket, node, Res(Hash(cid), Got(id, doc, version))))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
@@ -45,7 +45,7 @@ module Claim {
       && Lt(i, k) && Lt(k, r)
       && node.Node?
       && a(i) == Deliver(Packet(from, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(GotPacket(node, Fetch(id, cid), id, doc, version))
+      && a(k) == Deliver(GotPacket(node, Hash(cid), id, doc, version))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open

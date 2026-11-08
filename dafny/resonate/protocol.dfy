@@ -21,7 +21,7 @@ module Protocol {
   // The phase is named for what runs next. Prepare: the document is in flight.
   // Process: the effects still to send. Process is rescheduled until that list
   // is empty. `remember` writes `keep` into the armed map when the write lands.
-  // `cid` is the caller's request. A store request's id is `Fetch` or `Step` of it.
+  // `cid` is the caller's request. A store request's id is a hash of a request id.
   datatype Cont =
     | Prepare(caller: Pid, job: Job, cid: Uuid)
     | Process(caller: Pid, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: Uuid)

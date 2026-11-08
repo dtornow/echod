@@ -24,18 +24,18 @@ module Node {
           if id in s.open then
             Result(s, [], Keep)
           else
-            var rpc := Fetch(id, cid);
+            var rpc := Hash(cid);
             Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid)], s.armed, s.next, s.owner),
                    [ReqTo(Bucket, rpc, Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
           if req.id in s.open then
             Result(s, [], Keep)
           else
-            var rpc := Fetch(req.id, cid);
+            var rpc := Hash(cid);
             Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid)], s.armed, s.next, s.owner),
                    [ReqTo(Bucket, rpc, Get(req.id))], Keep)
         case Request(_, Res(rpc, Got(id, doc, version))) =>
-          if id in s.open && s.open[id].Prepare? && rpc == Fetch(id, s.open[id].cid) then
+          if id in s.open && s.open[id].Prepare? && rpc == Hash(s.open[id].cid) then
             var plan := Prepare(s, s.open[id].job, id, doc, version, now);
             Process(s, id, s.open[id].caller, s.open[id].cid, plan)
           else
@@ -148,7 +148,9 @@ module Node {
   }
 
   // An empty effect list answers the caller. Otherwise the head goes to the
-  // store and Process stays scheduled on the whole list.
+  // store and Process stays scheduled on the whole list. The read's id is the
+  // hash of the caller's request. An effect hashes that id once more for each
+  // effect still to send.
   function Process(s: State, id: string, caller: Pid, cid: Uuid, plan: Plan): Result<Pid, Msg, State>
     requires s.AtNode?
   {
@@ -156,7 +158,7 @@ module Node {
       Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner),
              [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
     else
-      var rpc := Step(id, cid, |plan.effects|);
+      var rpc := Hash(Hashed(cid, |plan.effects|));
       var phase := Cont.Process(caller, plan.reply, plan.effects, plan.keep, plan.remember, cid);
       Result(AtNode(s.open[id := phase], s.armed, plan.next, s.owner),
              [ReqTo(Bucket, rpc, SendEffect(id, plan.effects[0]))], Keep)
@@ -177,7 +179,7 @@ module Node {
     requires s.AtNode?
   {
     && id in s.open && s.open[id].Process?
-    && rpc == Step(id, s.open[id].cid, |s.open[id].effects|)
+    && rpc == Hash(Hashed(s.open[id].cid, |s.open[id].effects|))
   }
 
   predicate Head(s: State, id: string, effect: Effect)
