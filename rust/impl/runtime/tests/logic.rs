@@ -145,9 +145,13 @@ impl Harness {
         match admit::admit(&envelope, self.clock, self.state.config().debug) {
             Admission::Rejected(resp) => (resp.head.status as u16, resp.data),
             Admission::Request(d) => {
+                let request = match d.target {
+                    Some(target) => RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
+                    None => RequestEvent::EmptyHeartbeat { id, kind: d.kind, corr: d.corr, action_kind: d.action_kind },
+                };
                 self.apply(Event::Request {
                     clock: self.clock,
-                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
+                    request,
                 });
                 self.take(id)
             }
@@ -441,4 +445,21 @@ fn admission_rejects_protocol_bounds_before_any_core_effect() {
     assert!(h.sent.is_empty());
     assert!(h.notes.is_empty());
     assert!(h.wake_after.is_none());
+}
+
+#[test]
+fn empty_heartbeat_is_a_document_free_success() {
+    let mut h = Harness::new("n1");
+    h.start(true);
+    let (status, _) = h.request(
+        "task.heartbeat",
+        json!({ "pid": "worker", "tasks": [] }),
+    );
+    assert_eq!(status, 200);
+
+    let (status, _) = h.request(
+        "task.heartbeat",
+        json!({ "pid": "", "tasks": [] }),
+    );
+    assert_eq!(status, 400);
 }

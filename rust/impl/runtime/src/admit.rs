@@ -34,7 +34,7 @@ pub enum DebugOp {
 pub struct Decoded {
     pub kind: String,
     pub corr: String,
-    pub target: Target,
+    pub target: Option<Target>,
     pub request: rows::Request,
     pub action_kind: Option<String>,
     /// The instant offered to the step. `pinned` says the request named it.
@@ -124,6 +124,11 @@ pub fn origin_of_request(req: &RequestEnvelope) -> Result<Option<String>, String
         "schedule.get" | "schedule.create" | "schedule.delete" => id("id"),
         _ => return Ok(None),
     };
+    if req.kind == "task.heartbeat"
+        && d.get("tasks").and_then(|tasks| tasks.as_array()).is_some_and(Vec::is_empty)
+    {
+        return Ok(None);
+    }
     match origin {
         Some(o) if !o.is_empty() => Ok(Some(o)),
         _ => Err("Request data does not name an id".to_string()),
@@ -266,7 +271,21 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
             }
         }
         "task.heartbeat" => {
-            let d = parsed!(w::TaskHeartbeatData);
+            // The imported protocol schema predates document-free heartbeats
+            // and rejects an empty `tasks` array. Keep its validation for
+            // ordinary heartbeats, but admit the empty form after validating
+            // the only remaining semantic field.
+            let d: w::TaskHeartbeatData = match serde_json::from_value(req.data.clone()) {
+                Ok(d) => d,
+                Err(e) => return err(400, &format!("Invalid request: {e}")),
+            };
+            if d.tasks.is_empty() {
+                if d.pid.is_empty() {
+                    return err(400, "Process ID is required");
+                }
+            } else if let Err(e) = d.validate() {
+                return err(400, &w::format_validation_errors(&e));
+            }
             let mut tasks = Vec::with_capacity(d.tasks.len());
             for t in d.tasks {
                 match codec::nat(t.version, "version") {
@@ -332,8 +351,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
     // A request about a schedule is served on its document; the rest on
     // their id's origin.
     let target = match (schedule, origin) {
-        (Some(id), _) => Target::Schedule(id),
-        (None, Some(o)) => Target::Origin(o),
+        (Some(id), _) => Some(Target::Schedule(id)),
+        (None, Some(o)) => Some(Target::Origin(o)),
+        (None, None) if matches!(&q, rows::Request::TaskHeartbeat(h) if h.tasks.is_empty()) => None,
         (None, None) => return err(400, "Request data does not name an id"),
     };
     Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned })

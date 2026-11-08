@@ -337,9 +337,13 @@ impl ResonateServer for Node {
             }
             crate::admit::Admission::Request(d) => {
                 let (id, rx) = self.begin();
+                let request = match d.target {
+                    Some(target) => RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
+                    None => RequestEvent::EmptyHeartbeat { id, kind: d.kind, corr: d.corr, action_kind: d.action_kind },
+                };
                 self.apply(Event::Request {
                     clock,
-                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
+                    request,
                 });
                 self.finish(&req.kind, started, rx).await
             }

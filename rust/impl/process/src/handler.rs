@@ -9,6 +9,7 @@ use vstd::prelude::*;
 use crate::handler_docs::Work;
 use crate::state::{Owner, State};
 use crate::types::*;
+use echod_types::{Response, StatusRes};
 
 #[cfg(verus_keep_ghost)]
 use crate::debug::*;
@@ -50,6 +51,17 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
     let s = match event {
         EventSpec::Request { clock, request } => match request {
             RequestEventSpec::Protocol(call) => spec_request(s, call),
+            RequestEventSpec::EmptyHeartbeat { id, kind, corr, action_kind } =>
+                spec_emit(s, EffectSpec::Reply {
+                    id,
+                    response: Ok(AnswerSpec::Step {
+                        kind,
+                        corr,
+                        action_kind,
+                        response: Response::Status(StatusRes { status: 200 }),
+                        why: None,
+                    }),
+                }),
             RequestEventSpec::Debug(call) => spec_debug_begin(s, call),
         },
         EventSpec::Store { op, response, .. } => {
@@ -153,6 +165,17 @@ impl State {
             Event::Request { request, .. } => {
                 match request {
                     RequestEvent::Protocol(call) => self.request(call),
+                    RequestEvent::EmptyHeartbeat { id, kind, corr, action_kind } =>
+                        self.emit(Effect::Reply {
+                            id,
+                            response: Ok(Answer::Step {
+                                kind,
+                                corr,
+                                action_kind,
+                                response: Response::Status(StatusRes { status: 200 }),
+                                why: None,
+                            }),
+                        }),
                     RequestEvent::Debug(call) => self.debug_begin(call),
                 }
             },

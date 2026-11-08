@@ -140,6 +140,23 @@ pub open spec fn spec_target(request: Request) -> Option<TargetSpec> {
     }
 }
 
+pub open spec fn spec_empty_heartbeat(request: Request) -> bool {
+    match request {
+        Request::TaskHeartbeat(q) => q.tasks@.len() == 0,
+        _ => false,
+    }
+}
+
+pub fn empty_heartbeat(request: &Request) -> (result: bool)
+    ensures
+        result == spec_empty_heartbeat(*request),
+{
+    match request {
+        Request::TaskHeartbeat(q) => q.tasks.is_empty(),
+        _ => false,
+    }
+}
+
 fn origin_target(id: &String) -> (result: Target)
     ensures
         result.deep_view() == TargetSpec::Origin(echod_types::origin(id@)),
@@ -677,14 +694,20 @@ impl Node {
                 sender: Pid::Outside,
                 message: Message::Request(call),
             } => {
-                let target = match target(&call.request) {
-                    Some(target) => target,
+                let request = match target(&call.request) {
+                    Some(target) => RequestEvent::Protocol(process_call(call, target, now)),
+                    None if empty_heartbeat(&call.request) => RequestEvent::EmptyHeartbeat {
+                        id: call.id,
+                        kind: String::new(),
+                        corr: copy(&call.client),
+                        action_kind: None,
+                    },
                     None => return Vec::new(),
                 };
                 next.pending.push((call.id, copy(call)));
                 Event::Request {
                     clock: now,
-                    request: RequestEvent::Protocol(process_call(call, target, now)),
+                    request,
                 }
             }
             ProcessEvent::Receive {
@@ -855,7 +878,8 @@ impl RoverModel for Model {
 
     fn injectable(&self, _config: &Config, message: &Message) -> bool {
         match message {
-            Message::Request(call) => target(&call.request).is_some(),
+            Message::Request(call) =>
+                target(&call.request).is_some() || empty_heartbeat(&call.request),
             _ => false,
         }
     }
@@ -955,7 +979,8 @@ impl RoverModel for Model {
 
     open spec fn spec_injectable(&self, _config: Config, message: Message) -> bool {
         match message {
-            Message::Request(call) => spec_target(call.request) is Some,
+            Message::Request(call) =>
+                spec_target(call.request) is Some || spec_empty_heartbeat(call.request),
             _ => false,
         }
     }
@@ -1039,14 +1064,26 @@ pub open spec fn spec_node_step(
         ProcessEvent::Receive {
             sender: Pid::Outside,
             message: Message::Request(call),
-        } => match spec_target(call.request) {
-            Some(target) => {
+        } => {
+            let request = match spec_target(call.request) {
+                Some(target) => Some(RequestEventSpec::Protocol(
+                    spec_call(call, target, now),
+                )),
+                None if spec_empty_heartbeat(call.request) =>
+                    Some(RequestEventSpec::EmptyHeartbeat {
+                        id: call.id,
+                        kind: Seq::empty(),
+                        corr: call.client@,
+                        action_kind: None,
+                    }),
+                None => None,
+            };
+            match request {
+            Some(request) => {
                 let pending = node.pending.push((call.id, call));
                 let event = EventSpec::Request {
                     clock: now,
-                    request: RequestEventSpec::Protocol(
-                        spec_call(call, target, now),
-                    ),
+                    request,
                 };
                 let (core, effects) = spec_on_event(node.core, event);
                 let (next, send) = spec_effects(
@@ -1057,7 +1094,7 @@ pub open spec fn spec_node_step(
                 seq![StepResultV { state: LocalV::Node(next), send }]
             }
             None => Seq::empty(),
-        },
+        }},
         ProcessEvent::Receive {
             sender: Pid::Store,
             message: Message::StoreRes { op, response },
@@ -1263,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_routes_schedules_and_rejects_pure_heartbeats() {
+    fn admission_routes_schedules_and_serves_empty_heartbeats() {
         let schedule = Request::ScheduleGet(ScheduleGetReq {
             id: "daily".to_string(),
         });
@@ -1277,5 +1314,31 @@ mod tests {
             tasks: Vec::new(),
         });
         assert!(target(&heartbeat).is_none());
+        assert!(empty_heartbeat(&heartbeat));
+
+        let config = Config::memory("node-0");
+        let model = Model;
+        let call = BoundaryCall {
+            client: "client".to_string(),
+            id: 7,
+            request: heartbeat,
+        };
+        assert!(model.injectable(&config, &Message::Request(call.clone())));
+        let initial = model.initial(&config);
+        let outcomes = model.on_event(
+            &config,
+            &initial[0].0,
+            &initial[0].1,
+            1,
+            &ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        );
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].send.iter().any(|(recipient, message)| {
+            *recipient == Pid::Outside
+                && matches!(message, Message::Reply(Output::Response { id: 7, .. }))
+        }));
     }
 }

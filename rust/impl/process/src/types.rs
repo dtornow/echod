@@ -124,12 +124,24 @@ impl DeepView for DebugCall {
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum RequestEvent {
     Protocol(Call),
+    EmptyHeartbeat {
+        id: RequestId,
+        kind: String,
+        corr: String,
+        action_kind: Option<String>,
+    },
     Debug(DebugCall),
 }
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum RequestEventSpec {
     Protocol(CallSpec),
+    EmptyHeartbeat {
+        id: RequestId,
+        kind: Seq<char>,
+        corr: Seq<char>,
+        action_kind: Option<Seq<char>>,
+    },
     Debug(DebugCallSpec),
 }
 
@@ -139,6 +151,13 @@ impl DeepView for RequestEvent {
     open spec fn deep_view(&self) -> RequestEventSpec {
         match self {
             RequestEvent::Protocol(call) => RequestEventSpec::Protocol(call.deep_view()),
+            RequestEvent::EmptyHeartbeat { id, kind, corr, action_kind } =>
+                RequestEventSpec::EmptyHeartbeat {
+                    id: *id,
+                    kind: kind@,
+                    corr: corr@,
+                    action_kind: action_kind.deep_view(),
+                },
             RequestEvent::Debug(call) => RequestEventSpec::Debug(call.deep_view()),
         }
     }
