@@ -52,12 +52,12 @@ module Proof {
   function {:opaque} Lt(i: nat, n: nat): bool { i < n }
 
   // `id` has waited for `caller` on `node` at every state strictly after the request.
-  ghost predicate Held(b: nat -> Net<Pid, Msg, State>, node: Pid, id: string, caller: Pid, cid: Uuid, rpc: Uuid, i: nat, n: nat) {
+  ghost predicate Held(b: nat -> Net<Pid, Msg, State>, node: Pid, id: string, caller: Pid, cid: Uuid, i: nat, n: nat) {
     forall m {:trigger b(m)} :: Lt(i, m) && Lt(m, n + 1) ==>
       && node in b(m).procs
       && b(m).procs[node].AtNode?
       && id in b(m).procs[node].open
-      && b(m).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc)
+      && b(m).procs[node].open[id] == Prepare(caller, AskGet, cid)
   }
 
   ghost predicate Entry(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat, node: Pid, id: string) {
@@ -67,7 +67,7 @@ module Proof {
         exists i {:trigger a(i)} ::
           && Lt(i, n)
           && a(i) == Deliver(Packet(c.caller, node, Req(c.cid, PromiseGet(id))))
-          && Held(b, node, id, c.caller, c.cid, c.rpc, i, n))
+          && Held(b, node, id, c.caller, c.cid, i, n))
   }
 
   ghost predicate NodeOpen(b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat, node: Pid) {
@@ -88,16 +88,16 @@ module Proof {
   ghost predicate Justified(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
                              a: nat -> Action<Pid, Msg>, limit: nat, node: Pid, caller: Pid, cid: Uuid, answer: Temp.Answer)
   {
-    exists i, k, id, doc, version, rpc {:trigger a(i), a(k), GotPacket(node, rpc, id, doc, version)} ::
+    exists i, k, id, doc, version {:trigger a(i), a(k), GotPacket(node, Fetch(id, cid), id, doc, version)} ::
       && Lt(i, k) && Lt(k, limit)
       && node.Node?
       && a(i) == Deliver(Packet(caller, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(GotPacket(node, rpc, id, doc, version))
+      && a(k) == Deliver(GotPacket(node, Fetch(id, cid), id, doc, version))
       && answer == Temp.Get(doc, id, b(k).now).answer
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc)
+      && b(k).procs[node].open[id] == Prepare(caller, AskGet, cid)
   }
 
   ghost predicate RepliesOk(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
@@ -218,19 +218,19 @@ module Proof {
     }
   }
 
-  lemma HeldLater(b: nat -> Net<Pid, Msg, State>, node: Pid, id: string, caller: Pid, cid: Uuid, rpc: Uuid, i: nat, n: nat)
-    requires Held(b, node, id, caller, cid, rpc, i, n)
+  lemma HeldLater(b: nat -> Net<Pid, Msg, State>, node: Pid, id: string, caller: Pid, cid: Uuid, i: nat, n: nat)
+    requires Held(b, node, id, caller, cid, i, n)
     requires node in b(n+1).procs && b(n+1).procs[node].AtNode?
-    requires id in b(n+1).procs[node].open && b(n+1).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc)
-    ensures Held(b, node, id, caller, cid, rpc, i, n+1)
+    requires id in b(n+1).procs[node].open && b(n+1).procs[node].open[id] == Prepare(caller, AskGet, cid)
+    ensures Held(b, node, id, caller, cid, i, n+1)
   {
     reveal Lt();
     forall m {:trigger b(m)} | i < m < n + 2
       ensures node in b(m).procs && b(m).procs[node].AtNode?
-        && id in b(m).procs[node].open && b(m).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc)
+        && id in b(m).procs[node].open && b(m).procs[node].open[id] == Prepare(caller, AskGet, cid)
     {
       if m < n + 1 {
-        assert b(m).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc);
+        assert b(m).procs[node].open[id] == Prepare(caller, AskGet, cid);
       }
     }
   }
@@ -248,8 +248,8 @@ module Proof {
     {
       var c := open[id];
       assert Entry(b, a, n, node, id);
-      var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, node, Req(c.cid, PromiseGet(id)))) && Held(b, node, id, c.caller, c.cid, c.rpc, i, n);
-      HeldLater(b, node, id, c.caller, c.cid, c.rpc, i, n);
+      var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, node, Req(c.cid, PromiseGet(id)))) && Held(b, node, id, c.caller, c.cid, i, n);
+      HeldLater(b, node, id, c.caller, c.cid, i, n);
       assert Lt(i, n + 1);
     }
   }
@@ -274,16 +274,16 @@ module Proof {
     ensures Justified(docs, b, a, n+1, node, caller, cid, answer)
   {
     reveal Lt();
-    var i, k, id, doc, version, rpc :|
+    var i, k, id, doc, version :|
       && Lt(i, k) && Lt(k, n)
       && node.Node?
       && a(i) == Deliver(Packet(caller, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(GotPacket(node, rpc, id, doc, version))
+      && a(k) == Deliver(GotPacket(node, Fetch(id, cid), id, doc, version))
       && answer == Temp.Get(doc, id, b(k).now).answer
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(caller, AskGet, cid, rpc);
+      && b(k).procs[node].open[id] == Prepare(caller, AskGet, cid);
     assert Lt(k, n + 1);
   }
 
@@ -450,7 +450,7 @@ module Proof {
     ensures Shaped(docs, n)
     ensures n.inflight == multiset{}
     ensures Anchored(n.procs[Bucket])
-    ensures forall p {:trigger n.procs[p]} :: p in n.procs && p.Node? ==> n.procs[p] == AtNode(map[], map[], 0, p.i + 1, Supply(0))
+    ensures forall p {:trigger n.procs[p]} :: p in n.procs && p.Node? ==> n.procs[p] == AtNode(map[], map[], 0, p.i + 1)
   {
     var w := World(docs, clients, nodes, ask);
     assert n.procs == (map p | p in w.pids :: w.init(p));
@@ -469,9 +469,9 @@ module Proof {
       assert Node(ask(c).node) in n.procs.Keys;
     }
     forall p | p in n.procs && p.Node?
-      ensures n.procs[p] == AtNode(map[], map[], 0, p.i + 1, Supply(0))
+      ensures n.procs[p] == AtNode(map[], map[], 0, p.i + 1)
     {
-      assert n.procs[p] == w.init(p) == Boot(docs, ask, p) == AtNode(map[], map[], 0, p.i + 1, Supply(0));
+      assert n.procs[p] == w.init(p) == Boot(docs, ask, p) == AtNode(map[], map[], 0, p.i + 1);
     }
   }
 
@@ -544,7 +544,7 @@ module Proof {
           match s.kind
           case Read => PromiseGet(s.id)
           case Create(timeout) => PromiseCreate(Temp.CreateReq(s.id, timeout, Temp.Empty(), []));
-        r == Result(AtClient(s.id, s.node, s.kind, false), [ReqTo(Node(s.node), Uuid(0), body)], Keep)
+        r == Result(AtClient(s.id, s.node, s.kind, false), [ReqTo(Node(s.node), Given(0), body)], Keep)
       else r == Result(s, [], Keep)
   {
   }
@@ -858,23 +858,22 @@ module Proof {
       var id := p.msg.ask.id;
       var cid := p.msg.id;
       var caller := p.src;
-      var drawn := Draw(s.ids);
-      var rpc := drawn.id;
-      var open' := s.open[id := Prepare(caller, AskGet, cid, rpc)];
-      assert r == Result(AtNode(open', s.armed, s.next, s.owner, drawn.supply), [ReqTo(Bucket, rpc, Get(id))], Keep);
+      var rpc := Fetch(id, cid);
+      var open' := s.open[id := Prepare(caller, AskGet, cid)];
+      assert r == Result(AtNode(open', s.armed, s.next, s.owner), [ReqTo(Bucket, rpc, Get(id))], Keep);
       var born := Packet(self, Bucket, Req(rpc, Get(id)));
       ShapeAt(docs, b(n), self, r.state);
       assert b(n+1).procs == b(n).procs[self := r.state];
       assert b(n+1).procs.Keys == b(n).procs.Keys;
-      assert b(n+1).procs[self] == AtNode(open', s.armed, s.next, s.owner, drawn.supply);
+      assert b(n+1).procs[self] == AtNode(open', s.armed, s.next, s.owner);
       assert b(n+1).procs[Bucket] == b(n).procs[Bucket];
       assert Anchored(b(n+1).procs[Bucket]);
       reveal Lt();
       forall m {:trigger b(m)} | n < m < n + 2
         ensures self in b(m).procs && b(m).procs[self].AtNode?
-          && id in b(m).procs[self].open && b(m).procs[self].open[id] == Prepare(caller, AskGet, cid, rpc)
+          && id in b(m).procs[self].open && b(m).procs[self].open[id] == Prepare(caller, AskGet, cid)
       { assert m == n + 1; }
-      assert Held(b, self, id, caller, cid, rpc, n, n + 1);
+      assert Held(b, self, id, caller, cid, n, n + 1);
       assert a(n) == Deliver(Packet(caller, self, Req(cid, PromiseGet(id))));
       forall node | node in b(n+1).procs && node.Node?
         ensures NodeOpen(b, a, n+1, node)
@@ -889,8 +888,8 @@ module Proof {
               assert oid in s.open && open'[oid] == s.open[oid];
               var c := s.open[oid];
               assert Entry(b, a, n, self, oid);
-              var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, c.rpc, i, n);
-              HeldLater(b, self, oid, c.caller, c.cid, c.rpc, i, n);
+              var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, i, n);
+              HeldLater(b, self, oid, c.caller, c.cid, i, n);
               assert Lt(i, n + 1);
             }
           }
@@ -922,7 +921,7 @@ module Proof {
           assert self in b(n+1).procs.Keys;
         }
       }
-    } else if IsGot(p.msg) && p.msg.ans.id in s.open && AwaitsGet(s.open[p.msg.ans.id]) && p.msg.id == s.open[p.msg.ans.id].rpc {
+    } else if IsGot(p.msg) && p.msg.ans.id in s.open && AwaitsGet(s.open[p.msg.ans.id]) && p.msg.id == Fetch(p.msg.ans.id, s.open[p.msg.ans.id].cid) {
       var id := p.msg.ans.id;
       var rpc := p.msg.id;
       var caller := s.open[id].caller;
@@ -932,11 +931,11 @@ module Proof {
       assert p.src == Bucket;
       var answer := Temp.Get(doc, id, b(n).now).answer;
       var open' := s.open - {id};
-      assert r == Result(AtNode(open', s.armed, s.next, s.owner, s.ids), [ResTo(caller, cid, PromiseReply(answer))], Keep);
+      assert r == Result(AtNode(open', s.armed, s.next, s.owner), [ResTo(caller, cid, PromiseReply(answer))], Keep);
       ShapeAt(docs, b(n), self, r.state);
       assert b(n+1).procs == b(n).procs[self := r.state];
       assert b(n+1).procs.Keys == b(n).procs.Keys;
-      assert b(n+1).procs[self] == AtNode(open', s.armed, s.next, s.owner, s.ids);
+      assert b(n+1).procs[self] == AtNode(open', s.armed, s.next, s.owner);
       assert b(n+1).procs[Bucket] == b(n).procs[Bucket];
       assert Anchored(b(n+1).procs[Bucket]);
       var born := Packet(self, caller, Res(cid, PromiseReply(answer)));
@@ -951,8 +950,8 @@ module Proof {
             assert oid in s.open && oid != id && open'[oid] == s.open[oid];
             var c := s.open[oid];
             assert Entry(b, a, n, self, oid);
-            var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, c.rpc, i, n);
-            HeldLater(b, self, oid, c.caller, c.cid, c.rpc, i, n);
+            var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, i, n);
+            HeldLater(b, self, oid, c.caller, c.cid, i, n);
             assert Lt(i, n + 1);
           }
         } else {
@@ -972,10 +971,10 @@ module Proof {
         ensures q.src.Node? && Justified(docs, b, a, n+1, q.src, q.dst, q.msg.id, q.msg.ans.answer)
       {
         if q == born {
-          var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, self, Req(cid, PromiseGet(id)))) && Held(b, self, id, caller, cid, rpc, i, n);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, self, Req(cid, PromiseGet(id)))) && Held(b, self, id, caller, cid, i, n);
           assert Lt(n, n + 1);
-          assert a(n) == Deliver(GotPacket(self, rpc, id, doc, version));
-          assert id in b(n).procs[self].open && b(n).procs[self].open[id] == Prepare(caller, AskGet, cid, rpc);
+          assert a(n) == Deliver(GotPacket(self, Fetch(id, cid), id, doc, version));
+          assert id in b(n).procs[self].open && b(n).procs[self].open[id] == Prepare(caller, AskGet, cid);
           assert Justified(docs, b, a, n+1, self, caller, cid, answer);
         } else {
           Split(base, self, r, q);
@@ -994,7 +993,7 @@ module Proof {
   lemma KeepsGets(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
     requires self.Node? && s.AtNode?
     requires !(i.Request? && IsPromiseGet(i.msg) && i.msg.ask.id !in s.open)
-    requires !(i.Request? && IsGot(i.msg) && i.msg.ans.id in s.open && AwaitsGet(s.open[i.msg.ans.id]) && i.msg.id == s.open[i.msg.ans.id].rpc)
+    requires !(i.Request? && IsGot(i.msg) && i.msg.ans.id in s.open && AwaitsGet(s.open[i.msg.ans.id]) && i.msg.id == Fetch(i.msg.ans.id, s.open[i.msg.ans.id].cid))
     ensures var r := Node.step(self, s, i, now);
       && r.state.AtNode?
       && (forall id :: id in r.state.open && AwaitsGet(r.state.open[id]) ==>
@@ -1006,9 +1005,9 @@ module Proof {
     match i
     case Request(from, Req(cid, PromiseCreate(req))) =>
       if req.id !in s.open {
-        var drawn := Draw(s.ids);
-        var open' := s.open[req.id := Prepare(from, AskCreate(req), cid, drawn.id)];
-        assert r == Result(AtNode(open', s.armed, s.next, s.owner, drawn.supply), [ReqTo(Bucket, drawn.id, Get(req.id))], Keep);
+        var rpc := Fetch(req.id, cid);
+        var open' := s.open[req.id := Prepare(from, AskCreate(req), cid)];
+        assert r == Result(AtNode(open', s.armed, s.next, s.owner), [ReqTo(Bucket, rpc, Get(req.id))], Keep);
         forall id | id in open' && AwaitsGet(open'[id])
           ensures id in s.open && s.open[id] == open'[id]
         {
@@ -1016,8 +1015,8 @@ module Proof {
         }
       }
     case Request(_, Res(rpc, Got(id, doc, version))) =>
-      if id in s.open && AwaitsGet(s.open[id]) && s.open[id].rpc == rpc {
-      } else if id in s.open && s.open[id].Prepare? && s.open[id].job.AskCreate? && s.open[id].rpc == rpc {
+      if id in s.open && AwaitsGet(s.open[id]) && rpc == Fetch(id, s.open[id].cid) {
+      } else if id in s.open && s.open[id].Prepare? && s.open[id].job.AskCreate? && rpc == Fetch(id, s.open[id].cid) {
         assert r.state.AtNode?;
       }
     case _ =>
@@ -1033,7 +1032,7 @@ module Proof {
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires !(IsPromiseGet(p.msg) && p.msg.ask.id !in b(n).procs[p.dst].open)
-    requires !(IsGot(p.msg) && p.msg.ans.id in b(n).procs[p.dst].open && AwaitsGet(b(n).procs[p.dst].open[p.msg.ans.id]) && p.msg.id == b(n).procs[p.dst].open[p.msg.ans.id].rpc)
+    requires !(IsGot(p.msg) && p.msg.ans.id in b(n).procs[p.dst].open && AwaitsGet(b(n).procs[p.dst].open[p.msg.ans.id]) && p.msg.id == Fetch(p.msg.ans.id, b(n).procs[p.dst].open[p.msg.ans.id].cid))
     ensures Inv(docs, b, a, n+1)
   {
     var self := p.dst;
@@ -1057,10 +1056,10 @@ module Proof {
           assert oid in s.open && s.open[oid] == open'[oid];
           var c := s.open[oid];
           assert Entry(b, a, n, self, oid);
-          var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, c.rpc, i, n);
-          HeldLater(b, self, oid, c.caller, c.cid, c.rpc, i, n);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(c.caller, self, Req(c.cid, PromiseGet(oid)))) && Held(b, self, oid, c.caller, c.cid, i, n);
+          HeldLater(b, self, oid, c.caller, c.cid, i, n);
           assert Lt(i, n + 1);
-          assert open'[oid] == Prepare(c.caller, AskGet, c.cid, c.rpc);
+          assert open'[oid] == Prepare(c.caller, AskGet, c.cid);
         }
       } else {
         assert b(n+1).procs[node] == b(n).procs[node];

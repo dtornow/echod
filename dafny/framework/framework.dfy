@@ -23,15 +23,14 @@ module Network {
   datatype TimerOp = Keep | Set(delay: nat) | Cancel   // delay is relative to "now"
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
 
-  // An id is opaque: equality is the only operation. A supply draws the next
-  // fresh one. The sequence that makes it fresh stays inside the supply.
-  datatype Uuid = Uuid(n: nat)
-  datatype Supply = Supply(next: nat)
-  datatype Drawn = Drawn(id: Uuid, supply: Supply)
-
-  function Draw(s: Supply): Drawn {
-    Drawn(Uuid(s.next), Supply(s.next + 1))
-  }
+  // An id is built from the request it names, so sending one consults no counter.
+  // `Given` is chosen by the sender. `Fetch` is the document read for a promise
+  // on behalf of that request. `Step` is one effect: `left` is how many effects
+  // are still to send, including this one, which the plan already holds.
+  datatype Uuid =
+    | Given(n: nat)
+    | Fetch(promise: string, caller: Uuid)
+    | Step(promise: string, caller: Uuid, left: nat)
 
   // A request carries an id. The response cites that same id, so a reply is
   // the answer to one request and not to whatever else is in flight.

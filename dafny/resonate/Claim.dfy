@@ -21,14 +21,14 @@ module Claim {
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     requires node.Node?
     requires a(r) == Deliver(Packet(node, from, Res(cid, PromiseReply(answer))))
-    ensures exists i: nat, k: nat, id, doc, version, rpc {:trigger a(i), a(k), GotPacket(node, rpc, id, doc, version)} ::
+    ensures exists i: nat, k: nat, id, doc, version {:trigger a(i), a(k), GotPacket(node, Fetch(id, cid), id, doc, version)} ::
       && i < k < r
       && a(i) == Deliver(Packet(from, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(Packet(Bucket, node, Res(rpc, Got(id, doc, version))))
+      && a(k) == Deliver(Packet(Bucket, node, Res(Fetch(id, cid), Got(id, doc, version))))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid, rpc)
+      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid)
       && answer == Temp.Get(doc, id, b(k).now).answer
       && (id !in Temp.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))
       && (id in Temp.ObjectsOf(doc) ==>
@@ -41,15 +41,15 @@ module Claim {
     reveal Lt();
     assert pk in b(r).inflight;
     assert Justified(docs, b, a, r, node, from, cid, answer);
-    var i, k, id, doc, version, rpc :|
+    var i, k, id, doc, version :|
       && Lt(i, k) && Lt(k, r)
       && node.Node?
       && a(i) == Deliver(Packet(from, node, Req(cid, PromiseGet(id))))
-      && a(k) == Deliver(GotPacket(node, rpc, id, doc, version))
+      && a(k) == Deliver(GotPacket(node, Fetch(id, cid), id, doc, version))
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid, rpc)
+      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid)
       && answer == Temp.Get(doc, id, b(k).now).answer;
     Cases(doc, id, b(k).now);
   }
