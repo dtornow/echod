@@ -2,8 +2,8 @@ include "protocol.dfy"
 
 // The Resonate server. One continuation per id in flight.
 //
-// A handler reads the document, prepares, then runs the store commands in
-// order. A promise get prepares a reply and no commands. A promise create
+// A handler reads the document, prepares, then processes the store commands
+// in order. A promise get prepares a reply and no commands. A promise create
 // runs the handler, sweep then create. When the document changes, the
 // commands are the timeout for the nearest deadline, the write, and the
 // timeout that write replaces. The head command is the one in flight.
@@ -66,8 +66,8 @@ module Node {
     else armed
   }
 
-  // Run the commands. An empty list answers the caller.
-  function Drive(s: State, id: string, caller: Pid, plan: Plan): Result<Pid, Msg, State>
+  // Process the commands. An empty list answers the caller.
+  function Process(s: State, id: string, caller: Pid, plan: Plan): Result<Pid, Msg, State>
     requires s.AtNode?
   {
     if plan.cmds == [] then
@@ -109,7 +109,7 @@ module Node {
           else Result(AtNode(s.open[req.id := Reading(from, AskCreate(req))], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
         case Request(_, Got(id, doc, version)) =>
           if id in s.open && s.open[id].Reading? then
-            Drive(s, id, s.open[id].caller, Prepare(s, s.open[id].job, id, doc, version, now))
+            Process(s, id, s.open[id].caller, Prepare(s, s.open[id].job, id, doc, version, now))
           else Result(s, [], Keep)
         case Request(_, TimeoutPut(id, clock)) =>
           if Head(s, id, Cmd.Put(clock)) then Advance(s, id) else Result(s, [], Keep)
