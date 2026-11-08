@@ -14,7 +14,10 @@
 //! normal origin request through admission, hidden Store Get delivery, the
 //! matching successful StoreRes, decode/decision, conditional-write delivery,
 //! and final Reply. The previous-deadline-key branch additionally proves the
-//! exact hidden Del delivery and matching successful response.
+//! exact hidden Del delivery and matching successful response. Bounded
+//! production-step theorems also cover CAS-race reload/redecision, unavailable
+//! and wrong-shaped write failures, stale responses, and unrelated-lane
+//! framing.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -29,12 +32,18 @@ use crate::refinement::{
     lemma_normal_origin_request_starts_load,
     lemma_normal_origin_successful_get_issues_put_if_match,
     lemma_normal_request_matches_abstract_handler,
+    lemma_origin_write_mismatched_response_replies_once,
+    lemma_origin_write_precondition_failed_reloads,
+    lemma_origin_write_unavailable_replies_once,
+    lemma_origin_retry_reload_success_issues_put_if_match,
+    lemma_stale_store_response_stutters,
     lemma_successful_origin_write_completes_directly,
     lemma_successful_origin_write_issues_previous_key_delete,
     lemma_successful_previous_key_delete_completes,
     lemma_no_reply_effects_drop_last,
     no_reply_effects,
     normal_origin_previous_deadline_key,
+    origin_retry_reload_write_ready,
     normal_request_reply_effect,
     normal_origin_request_ready,
     normal_origin_get_write_ready,
@@ -73,7 +82,9 @@ use echod_concrete::effects::{effects_match, safe_effect_config};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::interpret::{doc_rel, finite_store, request_agrees};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::spec_stored_body;
+use echod_concrete::node::{
+    spec_stored_body, spec_unavailable,
+};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, routed};
 #[cfg(verus_keep_ghost)]
@@ -82,7 +93,8 @@ use echod_concrete::model::Pid;
 use echod_concrete::relation::agreement;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{
-    spec_apply, Etag, StoreReq, StoreReqSpec, StoreRes, StoreV,
+    spec_apply, Etag, StoreError, StoreReq, StoreReqSpec, StoreRes,
+    StoreV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
@@ -4268,6 +4280,7 @@ pub open spec fn empty_heartbeat_rover_step(
     )
 }
 
+#[verifier::rlimit(10)]
 pub proof fn lemma_empty_heartbeat_rover_step(
     config: crate::Config,
     before: World<ProductionModel>,
@@ -4298,50 +4311,14 @@ pub proof fn lemma_empty_heartbeat_rover_step(
     let node = before.process[0].1->Node_0;
     let result = empty_heartbeat_result(node, at, call);
     lemma_empty_heartbeat_node_step(node, at, call);
-    assert(spec_node_step(node, at, request_event(call))
-        == seq![result]);
-    assert(spec_node_step(node, at, request_event(call)).len() == 1);
-    reveal(step);
-    assert(spec_node_step(node, at, request_event(call))[0] == result);
-    assert(is_process(ProductionModel, before, Pid::Node(0))) by {
-        assert(before.process[0].0 == Pid::Node(0));
-    }
-    assert(exists|i: int, j: int|
-        #![trigger ProductionModel.spec_on_event(
-            config,
-            Pid::Node(0),
-            before.process[i].1,
-            at,
-            request_event(call),
-        )[j]]
-        {
-            &&& 0 <= i < before.process.len()
-            &&& before.process[i].0 == Pid::Node(0)
-            &&& {
-                let outcomes = ProductionModel.spec_on_event(
-                    config,
-                    Pid::Node(0),
-                    before.process[i].1,
-                    at,
-                    request_event(call),
-                );
-                &&& 0 <= j < outcomes.len()
-                &&& outcomes[j].send == result.send
-                &&& land(before, i, Pid::Node(0), at, outcomes[j])
-                    == land(before, 0, Pid::Node(0), at, result)
-            }
-        }
-    ) by {
-        let i: int = 0;
-        let j: int = 0;
-        assert(ProductionModel.spec_on_event(
-            config,
-            Pid::Node(0),
-            before.process[i].1,
-            at,
-            request_event(call),
-        ) == seq![result]);
-    }
+    lemma_node_rover_step(
+        config,
+        before,
+        0,
+        at,
+        request_event(call),
+        result,
+    );
 }
 
 pub open spec fn normal_origin_admission_result(
@@ -4825,6 +4802,1526 @@ pub proof fn lemma_node_rover_step(
         at,
         event,
         0,
+    );
+}
+
+/// A real production Node transition changes only its selected local lane.
+/// Unrelated concurrent process lanes are byte-for-byte framed, while the
+/// network changes only by the exact envelopes emitted by this result.
+pub proof fn lemma_node_rover_step_preserves_unrelated_lanes(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    at: u64,
+    event: ProcessEvent<Pid, Message>,
+    result: StepResultV<LocalV, Pid, Message>,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        event_valid(before, Pid::Node(0), event),
+        spec_node_step(
+            before.process[node_slot].1->Node_0,
+            at,
+            event,
+        ) == seq![result],
+    ensures
+        ({
+            let after =
+                land(before, node_slot, Pid::Node(0), at, result);
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at,
+                    event,
+                    send: result.send,
+                },
+                after,
+            )
+            &&& forall|j: int|
+                0 <= j < before.process.len() && j != node_slot
+                    ==> #[trigger] after.process[j]
+                        == before.process[j]
+            &&& after.network == before.network
+                + echod_rover::rover::semantics::envelopes(
+                    Pid::Node(0),
+                    result.send,
+                )
+        }),
+{
+    lemma_node_rover_step(
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        result,
+    );
+}
+
+/// The production Node adapter exposes a stale Store response as one local
+/// stutter result: only the observed clock advances and no envelope is sent.
+pub proof fn lemma_stale_store_response_node_step(
+    node: NodeV,
+    op: u64,
+    response: StoreRes,
+    at: u64,
+)
+    requires
+        node.core.out.len() == 0,
+        node.core.node.members.refreshing(),
+        !node.core.loops,
+        !node.core.ops.contains_key(op),
+    ensures
+        spec_node_step(
+            node,
+            at,
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            },
+        ) == seq![StepResultV {
+            state: LocalV::Node(NodeV {
+                core: S {
+                    clock: at,
+                    ..node.core
+                },
+                ..node
+            }),
+            send: Seq::empty(),
+        }],
+{
+    lemma_stale_store_response_stutters(
+        node.core,
+        op,
+        response,
+        at,
+    );
+    reveal(spec_node_step);
+    reveal(spec_effects);
+}
+
+/// A stale or duplicate Store response is a real Rover Node step with an
+/// empty send set and full framing of every unrelated process lane.
+pub proof fn lemma_stale_store_response_rover_step_frames_lanes(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    op: u64,
+    response: StoreRes,
+    at: u64,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        before.process[node_slot].1->Node_0.core.out.len() == 0,
+        before.process[
+            node_slot
+        ].1->Node_0.core.node.members.refreshing(),
+        !before.process[node_slot].1->Node_0.core.loops,
+        !before.process[
+            node_slot
+        ].1->Node_0.core.ops.contains_key(op),
+        event_valid(
+            before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            },
+        ),
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let result = StepResultV {
+                state: LocalV::Node(NodeV {
+                    core: S {
+                        clock: at,
+                        ..before.process[node_slot].1->Node_0.core
+                    },
+                    ..before.process[node_slot].1->Node_0
+                }),
+                send: Seq::empty(),
+            };
+            let after =
+                land(before, node_slot, Pid::Node(0), at, result);
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at,
+                    event,
+                    send: Seq::empty(),
+                },
+                after,
+            )
+            &&& after.network == before.network
+            &&& forall|j: int|
+                0 <= j < before.process.len() && j != node_slot
+                    ==> #[trigger] after.process[j]
+                        == before.process[j]
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes { op, response },
+    };
+    let result = StepResultV {
+        state: LocalV::Node(NodeV {
+            core: S { clock: at, ..node.core },
+            ..node
+        }),
+        send: Seq::empty(),
+    };
+    lemma_stale_store_response_node_step(
+        node,
+        op,
+        response,
+        at,
+    );
+    lemma_node_rover_step_preserves_unrelated_lanes(
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        result,
+    );
+    assert(echod_rover::rover::semantics::envelopes(
+        Pid::Node(0),
+        Seq::<(Pid, Message)>::empty(),
+    ) =~= Seq::empty());
+}
+
+/// Exact production state premises for the retryable write-race branch.
+pub open spec fn origin_write_retry_ready(
+    node: NodeV,
+    fid: u64,
+    op: u64,
+) -> bool {
+    &&& node.core.out.len() == 0
+    &&& node.core.node.members.refreshing()
+    &&& !node.core.loops
+    &&& node.core.ops.contains_key(op)
+    &&& node.core.ops[op] == Owner::Flight(fid)
+    &&& !node.core.ops.contains_key(node.core.next_op)
+    &&& node.core.flights.inflight.contains_key(fid)
+    &&& node.core.flights.inflight[fid].id == fid
+    &&& node.core.flights.inflight[fid].target is Origin
+    &&& node.core.flights.inflight[fid].work is Request
+    &&& node.core.flights.inflight[fid].firing is None
+    &&& !node.core.flights.inflight[fid].debug
+    &&& node.core.flights.inflight[fid].phase is Origin
+    &&& node.core.flights.inflight[fid].phase.expects() == Some(op)
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.seq.step
+        == (crate::verified::flight_spec::AStep::Writing {
+            idle: false,
+        })
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued is Some
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued->Some_0 is Write
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued->Some_0->Write_op == op
+    &&& node.core.flights.inflight[fid].attempt < u32::MAX
+    &&& node.core.flights.inflight[fid].attempt + 1
+        <= node.core.flights.max_retries
+    &&& crate::cache::spec_find(
+        crate::cache::spec_remove(
+            node.core.cache,
+            node.core.flights.inflight[fid].target->Origin_0,
+        ).entries,
+        node.core.flights.inflight[fid].target->Origin_0,
+    ) is None
+}
+
+/// A retryable CAS race passes through the real Node adapter, emits the exact
+/// cache-miss Get, and emits neither a boundary Reply nor an application Send.
+pub proof fn lemma_origin_write_precondition_failed_node_reloads(
+    node: NodeV,
+    fid: u64,
+    op: u64,
+    at: u64,
+)
+    requires
+        origin_write_retry_ready(node, fid, op),
+    ensures
+        ({
+            let origin =
+                node.core.flights.inflight[fid].target->Origin_0;
+            let response = StoreRes::PutIfMatch {
+                result: Err(StoreError::PreconditionFailed),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store { op, response, clock: at },
+            ).0;
+            &&& spec_node_step(node, at, event)
+                == seq![StepResultV {
+                    state: LocalV::Node(NodeV { core, ..node }),
+                    send: seq![(
+                        Pid::Store,
+                        Message::StoreReq {
+                            op: node.core.next_op,
+                            request: spec_store_request(
+                                StoreReqSpec::Get {
+                                    key: crate::keys::spec_doc_key(
+                                        node.core.keys.prefix,
+                                        origin,
+                                    ),
+                                },
+                            ),
+                        },
+                    )],
+                }]
+            &&& core.flights.inflight.contains_key(fid)
+            &&& core.flights.inflight[fid].attempt
+                == node.core.flights.inflight[fid].attempt + 1
+        }),
+{
+    lemma_origin_write_precondition_failed_reloads(
+        node.core,
+        fid,
+        op,
+        at,
+    );
+    reveal(spec_node_step);
+    reveal_with_fuel(spec_effects, 10);
+    reveal(spec_effect);
+}
+
+/// The retryable CAS race is one actual Rover Node transition whose only
+/// emitted envelope is the hidden reload Get.
+pub proof fn lemma_origin_write_precondition_failed_rover_step_reloads(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    fid: u64,
+    op: u64,
+    at: u64,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        origin_write_retry_ready(
+            before.process[node_slot].1->Node_0,
+            fid,
+            op,
+        ),
+        event_valid(
+            before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Err(StoreError::PreconditionFailed),
+                    },
+                },
+            },
+        ),
+    ensures
+        ({
+            let node = before.process[node_slot].1->Node_0;
+            let origin =
+                node.core.flights.inflight[fid].target->Origin_0;
+            let response = StoreRes::PutIfMatch {
+                result: Err(StoreError::PreconditionFailed),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store { op, response, clock: at },
+            ).0;
+            let result = StepResultV {
+                state: LocalV::Node(NodeV { core, ..node }),
+                send: seq![(
+                    Pid::Store,
+                    Message::StoreReq {
+                        op: node.core.next_op,
+                        request: spec_store_request(
+                            StoreReqSpec::Get {
+                                key: crate::keys::spec_doc_key(
+                                    node.core.keys.prefix,
+                                    origin,
+                                ),
+                            },
+                        ),
+                    },
+                )],
+            };
+            step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at,
+                    event,
+                    send: result.send,
+                },
+                land(
+                    before,
+                    node_slot,
+                    Pid::Node(0),
+                    at,
+                    result,
+                ),
+            )
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let origin = node.core.flights.inflight[fid].target->Origin_0;
+    let response = StoreRes::PutIfMatch {
+        result: Err(StoreError::PreconditionFailed),
+    };
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes { op, response },
+    };
+    let core = crate::handler::spec_on_event(
+        node.core,
+        EventSpec::Store { op, response, clock: at },
+    ).0;
+    let result = StepResultV {
+        state: LocalV::Node(NodeV { core, ..node }),
+        send: seq![(
+            Pid::Store,
+            Message::StoreReq {
+                op: node.core.next_op,
+                request: spec_store_request(StoreReqSpec::Get {
+                    key: crate::keys::spec_doc_key(
+                        node.core.keys.prefix,
+                        origin,
+                    ),
+                }),
+            },
+        )],
+    };
+    lemma_origin_write_precondition_failed_node_reloads(
+        node,
+        fid,
+        op,
+        at,
+    );
+    lemma_node_rover_step(
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        result,
+    );
+}
+
+/// The emitted retry Get is delivered by an actual hidden Store lane step.
+/// The executable request is tied explicitly to the production document key.
+pub proof fn lemma_origin_retry_reload_store_delivery_rover_step(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    store_slot: int,
+    sender: Pid,
+    reload_op: u64,
+    origin: Seq<char>,
+    prefix: Seq<char>,
+    request: StoreReq,
+    at: u64,
+)
+    requires
+        before.now <= at,
+        0 <= store_slot < before.process.len(),
+        before.process[store_slot].0 == Pid::Store,
+        before.process[store_slot].1 is Store,
+        request.deep_view() == (StoreReqSpec::Get {
+            key: crate::keys::spec_doc_key(prefix, origin),
+        }),
+        event_valid(
+            before,
+            Pid::Store,
+            ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq {
+                    op: reload_op,
+                    request,
+                },
+            },
+        ),
+        !before.process[
+            store_slot
+        ].1->Store_0.seen.contains((sender, reload_op)),
+    ensures
+        ({
+            let store = before.process[store_slot].1->Store_0;
+            let event = ProcessEvent::Receive {
+                sender,
+                message: Message::StoreReq {
+                    op: reload_op,
+                    request,
+                },
+            };
+            let result = fresh_store_delivery_result(
+                store,
+                sender,
+                reload_op,
+                request,
+            );
+            step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Store,
+                    at,
+                    event,
+                    send: result.send,
+                },
+                land(
+                    before,
+                    store_slot,
+                    Pid::Store,
+                    at,
+                    result,
+                ),
+            )
+        }),
+{
+    lemma_fresh_store_rover_step(
+        config,
+        before,
+        store_slot,
+        at,
+        sender,
+        reload_op,
+        request,
+    );
+}
+
+/// The matching successful reload response is interpreted by the real Node
+/// adapter as the newly re-decided conditional write and nothing else.
+#[verifier::rlimit(40)]
+pub proof fn lemma_origin_retry_reload_success_node_issues_put_if_match(
+    node: NodeV,
+    fid: u64,
+    reload_op: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    request_at: u64,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        request_at <= response_at,
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        origin_retry_reload_write_ready(
+            node.core,
+            fid,
+            reload_op,
+            spec_call(
+                call,
+                TargetSpec::Origin(origin),
+                request_at,
+            ),
+            origin,
+            loaded,
+            etag,
+        ),
+    ensures
+        ({
+            let response = StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: reload_op,
+                    response,
+                },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store {
+                    op: reload_op,
+                    response,
+                    clock: response_at,
+                },
+            ).0;
+            let (after_body, _, _, _) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    request_at,
+                    node.core.cfg.retry_timeout,
+                );
+            let after_document =
+                echod_concrete::node::spec_advance_stored(
+                    loaded.document,
+                    after_body,
+                    request_at,
+                );
+            &&& spec_node_step(node, response_at, event)
+                == seq![StepResultV {
+                    state: LocalV::Node(NodeV { core, ..node }),
+                    send: seq![(
+                        Pid::Store,
+                        Message::StoreReq {
+                            op: node.core.next_op,
+                            request: spec_store_request(
+                                StoreReqSpec::PutIfMatch {
+                                    key: crate::keys::spec_doc_key(
+                                        node.core.keys.prefix,
+                                        origin,
+                                    ),
+                                    body: spec_encode(after_document),
+                                    etag: etag.deep_view(),
+                                },
+                            ),
+                        },
+                    )],
+                }]
+            &&& well_formed(after_document)
+        }),
+{
+    lemma_origin_retry_reload_success_issues_put_if_match(
+        node.core,
+        fid,
+        reload_op,
+        spec_call(
+            call,
+            TargetSpec::Origin(origin),
+            request_at,
+        ),
+        origin,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    reveal(spec_node_step);
+    reveal_with_fuel(spec_effects, 8);
+    reveal(spec_effect);
+}
+
+/// The successful reload/redecision is an actual Rover Node transition that
+/// emits exactly the next hidden `PutIfMatch`.
+pub proof fn lemma_origin_retry_reload_success_rover_step_issues_put_if_match(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    fid: u64,
+    reload_op: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    request_at: u64,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        before.now <= response_at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        request_at <= response_at,
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        origin_retry_reload_write_ready(
+            before.process[node_slot].1->Node_0.core,
+            fid,
+            reload_op,
+            spec_call(
+                call,
+                TargetSpec::Origin(origin),
+                request_at,
+            ),
+            origin,
+            loaded,
+            etag,
+        ),
+        event_valid(
+            before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: reload_op,
+                    response: StoreRes::Get {
+                        result: Ok(Some((bytes, etag))),
+                    },
+                },
+            },
+        ),
+    ensures
+        ({
+            let node = before.process[node_slot].1->Node_0;
+            let response = StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: reload_op,
+                    response,
+                },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store {
+                    op: reload_op,
+                    response,
+                    clock: response_at,
+                },
+            ).0;
+            let (after_body, _, _, _) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    request_at,
+                    node.core.cfg.retry_timeout,
+                );
+            let after_document =
+                echod_concrete::node::spec_advance_stored(
+                    loaded.document,
+                    after_body,
+                    request_at,
+                );
+            let result = StepResultV {
+                state: LocalV::Node(NodeV { core, ..node }),
+                send: seq![(
+                    Pid::Store,
+                    Message::StoreReq {
+                        op: node.core.next_op,
+                        request: spec_store_request(
+                            StoreReqSpec::PutIfMatch {
+                                key: crate::keys::spec_doc_key(
+                                    node.core.keys.prefix,
+                                    origin,
+                                ),
+                                body: spec_encode(after_document),
+                                etag: etag.deep_view(),
+                            },
+                        ),
+                    },
+                )],
+            };
+            step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at: response_at,
+                    event,
+                    send: result.send,
+                },
+                land(
+                    before,
+                    node_slot,
+                    Pid::Node(0),
+                    response_at,
+                    result,
+                ),
+            )
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let response = StoreRes::Get {
+        result: Ok(Some((bytes, etag))),
+    };
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes {
+            op: reload_op,
+            response,
+        },
+    };
+    let core = crate::handler::spec_on_event(
+        node.core,
+        EventSpec::Store {
+            op: reload_op,
+            response,
+            clock: response_at,
+        },
+    ).0;
+    let (after_body, _, _, _) =
+        echod_concrete::node::spec_request_transition(
+            spec_stored_body(loaded.document),
+            call.request,
+            request_at,
+            node.core.cfg.retry_timeout,
+        );
+    let after_document =
+        echod_concrete::node::spec_advance_stored(
+            loaded.document,
+            after_body,
+            request_at,
+        );
+    let result = StepResultV {
+        state: LocalV::Node(NodeV { core, ..node }),
+        send: seq![(
+            Pid::Store,
+            Message::StoreReq {
+                op: node.core.next_op,
+                request: spec_store_request(
+                    StoreReqSpec::PutIfMatch {
+                        key: crate::keys::spec_doc_key(
+                            node.core.keys.prefix,
+                            origin,
+                        ),
+                        body: spec_encode(after_document),
+                        etag: etag.deep_view(),
+                    },
+                ),
+            },
+        )],
+    };
+    lemma_origin_retry_reload_success_node_issues_put_if_match(
+        node,
+        fid,
+        reload_op,
+        call,
+        origin,
+        request_at,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+    lemma_node_rover_step(
+        config,
+        before,
+        node_slot,
+        response_at,
+        event,
+        result,
+    );
+}
+
+/// From a world where the raced write has emitted its reload Get, this
+/// bounded slice proves the actual hidden Store delivery followed by the
+/// matching successful Node reload/redecision. All key, decode, freshness,
+/// response, and envelope-validity facts are explicit premises.
+pub proof fn lemma_origin_retry_reload_delivery_and_redecision_rover_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    store_slot: int,
+    fid: u64,
+    reload_op: u64,
+    call: BoundaryCall,
+    origin: Seq<char>,
+    request_at: u64,
+    store_at: u64,
+    response_at: u64,
+    request: StoreReq,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        before.now <= store_at <= response_at,
+        0 <= node_slot < before.process.len(),
+        0 <= store_slot < before.process.len(),
+        node_slot != store_slot,
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        before.process[store_slot].0 == Pid::Store,
+        before.process[store_slot].1 is Store,
+        request_at <= response_at,
+        crate::rover::spec_target(call.request)
+            == Some(TargetSpec::Origin(origin)),
+        request.deep_view() == (StoreReqSpec::Get {
+            key: crate::keys::spec_doc_key(
+                before.process[
+                    node_slot
+                ].1->Node_0.core.keys.prefix,
+                origin,
+            ),
+        }),
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        origin_retry_reload_write_ready(
+            before.process[node_slot].1->Node_0.core,
+            fid,
+            reload_op,
+            spec_call(
+                call,
+                TargetSpec::Origin(origin),
+                request_at,
+            ),
+            origin,
+            loaded,
+            etag,
+        ),
+        event_valid(
+            before,
+            Pid::Store,
+            ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: reload_op,
+                    request,
+                },
+            },
+        ),
+        !before.process[
+            store_slot
+        ].1->Store_0.seen.contains((Pid::Node(0), reload_op)),
+        spec_apply(
+            before.process[store_slot].1->Store_0,
+            request,
+        ).1 == (StoreRes::Get {
+            result: Ok(Some((bytes, etag))),
+        }),
+        ({
+            let store = before.process[store_slot].1->Store_0;
+            let store_result = fresh_store_delivery_result(
+                store,
+                Pid::Node(0),
+                reload_op,
+                request,
+            );
+            let delivered = land(
+                before,
+                store_slot,
+                Pid::Store,
+                store_at,
+                store_result,
+            );
+            event_valid(
+                delivered,
+                Pid::Node(0),
+                ProcessEvent::Receive {
+                    sender: Pid::Store,
+                    message: Message::StoreRes {
+                        op: reload_op,
+                        response: StoreRes::Get {
+                            result: Ok(Some((bytes, etag))),
+                        },
+                    },
+                },
+            )
+        }),
+    ensures
+        ({
+            let node = before.process[node_slot].1->Node_0;
+            let store = before.process[store_slot].1->Store_0;
+            let store_event = ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: reload_op,
+                    request,
+                },
+            };
+            let store_result = fresh_store_delivery_result(
+                store,
+                Pid::Node(0),
+                reload_op,
+                request,
+            );
+            let delivered = land(
+                before,
+                store_slot,
+                Pid::Store,
+                store_at,
+                store_result,
+            );
+            let response = StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            };
+            let node_event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: reload_op,
+                    response,
+                },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store {
+                    op: reload_op,
+                    response,
+                    clock: response_at,
+                },
+            ).0;
+            let (after_body, _, _, _) =
+                echod_concrete::node::spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    request_at,
+                    node.core.cfg.retry_timeout,
+                );
+            let after_document =
+                echod_concrete::node::spec_advance_stored(
+                    loaded.document,
+                    after_body,
+                    request_at,
+                );
+            let node_result = StepResultV {
+                state: LocalV::Node(NodeV { core, ..node }),
+                send: seq![(
+                    Pid::Store,
+                    Message::StoreReq {
+                        op: node.core.next_op,
+                        request: spec_store_request(
+                            StoreReqSpec::PutIfMatch {
+                                key: crate::keys::spec_doc_key(
+                                    node.core.keys.prefix,
+                                    origin,
+                                ),
+                                body: spec_encode(after_document),
+                                etag: etag.deep_view(),
+                            },
+                        ),
+                    },
+                )],
+            };
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Store,
+                    at: store_at,
+                    event: store_event,
+                    send: store_result.send,
+                },
+                delivered,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                delivered,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at: response_at,
+                    event: node_event,
+                    send: node_result.send,
+                },
+                land(
+                    delivered,
+                    node_slot,
+                    Pid::Node(0),
+                    response_at,
+                    node_result,
+                ),
+            )
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let store = before.process[store_slot].1->Store_0;
+    let store_result = fresh_store_delivery_result(
+        store,
+        Pid::Node(0),
+        reload_op,
+        request,
+    );
+    let delivered = land(
+        before,
+        store_slot,
+        Pid::Store,
+        store_at,
+        store_result,
+    );
+    lemma_origin_retry_reload_store_delivery_rover_step(
+        config,
+        before,
+        store_slot,
+        Pid::Node(0),
+        reload_op,
+        origin,
+        node.core.keys.prefix,
+        request,
+        store_at,
+    );
+    assert(delivered.process[node_slot] == before.process[node_slot]);
+    assert(delivered.process[node_slot].1->Node_0 == node);
+    lemma_origin_retry_reload_success_rover_step_issues_put_if_match(
+        config,
+        delivered,
+        node_slot,
+        fid,
+        reload_op,
+        call,
+        origin,
+        request_at,
+        response_at,
+        bytes,
+        etag,
+        loaded,
+    );
+}
+
+/// Exact adapter premises for a normal request waiting on its document CAS.
+pub open spec fn origin_write_failure_ready(
+    node: NodeV,
+    fid: u64,
+    op: u64,
+    call: BoundaryCall,
+) -> bool {
+    &&& node.core.out.len() == 0
+    &&& node.core.node.members.refreshing()
+    &&& !node.core.loops
+    &&& node.core.ops.contains_key(op)
+    &&& node.core.ops[op] == Owner::Flight(fid)
+    &&& node.core.flights.inflight.contains_key(fid)
+    &&& node.core.flights.inflight[fid].id == fid
+    &&& node.core.flights.inflight[fid].target is Origin
+    &&& node.core.flights.inflight[fid].work is Request
+    &&& node.core.flights.inflight[fid].work->Request_id == call.id
+    &&& node.core.flights.inflight[fid].firing is None
+    &&& !node.core.flights.inflight[fid].debug
+    &&& node.core.flights.inflight[fid].phase is Origin
+    &&& node.core.flights.inflight[fid].phase.expects() == Some(op)
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.seq.step
+        == (crate::verified::flight_spec::AStep::Writing {
+            idle: false,
+        })
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued is Some
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued->Some_0 is Write
+    &&& node.core.flights.inflight[
+        fid
+    ].phase->Origin_commit.issued->Some_0->Write_op == op
+    &&& crate::handler_docs::spec_slot_of(
+        node.core,
+        crate::target::spec_name(
+            node.core.flights.inflight[fid].target,
+        ),
+    ).busy == Some(fid)
+    &&& crate::handler_docs::spec_slot_of(
+        node.core,
+        crate::target::spec_name(
+            node.core.flights.inflight[fid].target,
+        ),
+    ).queue.len() == 0
+    &&& spec_take_pending(node.pending, call.id).0 == Some(call)
+}
+
+/// The adapter turns an unavailable CAS answer into exactly one boundary
+/// failure response. No application `Message::Send` or Store request escapes.
+pub proof fn lemma_origin_write_unavailable_node_replies_once_no_send(
+    node: NodeV,
+    fid: u64,
+    op: u64,
+    call: BoundaryCall,
+    message: String,
+    at: u64,
+)
+    requires
+        origin_write_failure_ready(node, fid, op, call),
+    ensures
+        ({
+            let response = StoreRes::PutIfMatch {
+                result: Err(StoreError::Unavailable(message)),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core_event = EventSpec::Store {
+                op,
+                response,
+                clock: at,
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                core_event,
+            ).0;
+            let pending = spec_take_pending(node.pending, call.id).1;
+            &&& spec_node_step(node, at, event)
+                == seq![StepResultV {
+                    state: LocalV::Node(NodeV {
+                        core,
+                        pending,
+                        ..node
+                    }),
+                    send: seq![(
+                        Pid::Outside,
+                        Message::Reply(Output::Response {
+                            client: call.client,
+                            id: call.id,
+                            response: spec_unavailable(call.request),
+                        }),
+                    )],
+                }]
+            &&& !core.ops.contains_key(op)
+            &&& !core.flights.inflight.contains_key(fid)
+        }),
+{
+    lemma_origin_write_unavailable_replies_once(
+        node.core,
+        fid,
+        op,
+        at,
+        message,
+    );
+    reveal(spec_node_step);
+    reveal_with_fuel(spec_effects, 8);
+    reveal(spec_effect);
+}
+
+/// A wrong-shaped Store answer follows the same one-failure/no-Send adapter
+/// path, with the production unexpected-response error.
+pub proof fn lemma_origin_write_mismatched_node_replies_once_no_send(
+    node: NodeV,
+    fid: u64,
+    op: u64,
+    call: BoundaryCall,
+    at: u64,
+)
+    requires
+        origin_write_failure_ready(node, fid, op, call),
+    ensures
+        ({
+            let response = StoreRes::Del { result: Ok(()) };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core_event = EventSpec::Store {
+                op,
+                response,
+                clock: at,
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                core_event,
+            ).0;
+            let pending = spec_take_pending(node.pending, call.id).1;
+            &&& spec_node_step(node, at, event)
+                == seq![StepResultV {
+                    state: LocalV::Node(NodeV {
+                        core,
+                        pending,
+                        ..node
+                    }),
+                    send: seq![(
+                        Pid::Outside,
+                        Message::Reply(Output::Response {
+                            client: call.client,
+                            id: call.id,
+                            response: spec_unavailable(call.request),
+                        }),
+                    )],
+                }]
+            &&& !core.ops.contains_key(op)
+            &&& !core.flights.inflight.contains_key(fid)
+        }),
+{
+    lemma_origin_write_mismatched_response_replies_once(
+        node.core,
+        fid,
+        op,
+        at,
+    );
+    reveal(spec_node_step);
+    reveal_with_fuel(spec_effects, 8);
+    reveal(spec_effect);
+}
+
+/// The unavailable-CAS failure is an actual Rover transition carrying one
+/// boundary Reply envelope and preserving every unrelated local lane.
+pub proof fn lemma_origin_write_unavailable_rover_step_replies_once_no_send(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    fid: u64,
+    op: u64,
+    call: BoundaryCall,
+    message: String,
+    at: u64,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        origin_write_failure_ready(
+            before.process[node_slot].1->Node_0,
+            fid,
+            op,
+            call,
+        ),
+        event_valid(
+            before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Err(StoreError::Unavailable(message)),
+                    },
+                },
+            },
+        ),
+    ensures
+        ({
+            let node = before.process[node_slot].1->Node_0;
+            let response = StoreRes::PutIfMatch {
+                result: Err(StoreError::Unavailable(message)),
+            };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store { op, response, clock: at },
+            ).0;
+            let result = StepResultV {
+                state: LocalV::Node(NodeV {
+                    core,
+                    pending: spec_take_pending(
+                        node.pending,
+                        call.id,
+                    ).1,
+                    ..node
+                }),
+                send: seq![(
+                    Pid::Outside,
+                    Message::Reply(Output::Response {
+                        client: call.client,
+                        id: call.id,
+                        response: spec_unavailable(call.request),
+                    }),
+                )],
+            };
+            let after = land(
+                before,
+                node_slot,
+                Pid::Node(0),
+                at,
+                result,
+            );
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at,
+                    event,
+                    send: result.send,
+                },
+                after,
+            )
+            &&& forall|j: int|
+                0 <= j < before.process.len() && j != node_slot
+                    ==> #[trigger] after.process[j]
+                        == before.process[j]
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let response = StoreRes::PutIfMatch {
+        result: Err(StoreError::Unavailable(message)),
+    };
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes { op, response },
+    };
+    let core = crate::handler::spec_on_event(
+        node.core,
+        EventSpec::Store { op, response, clock: at },
+    ).0;
+    let result = StepResultV {
+        state: LocalV::Node(NodeV {
+            core,
+            pending: spec_take_pending(node.pending, call.id).1,
+            ..node
+        }),
+        send: seq![(
+            Pid::Outside,
+            Message::Reply(Output::Response {
+                client: call.client,
+                id: call.id,
+                response: spec_unavailable(call.request),
+            }),
+        )],
+    };
+    lemma_origin_write_unavailable_node_replies_once_no_send(
+        node,
+        fid,
+        op,
+        call,
+        message,
+        at,
+    );
+    lemma_node_rover_step_preserves_unrelated_lanes(
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        result,
+    );
+}
+
+/// The wrong-shaped Store answer is likewise one actual Rover failure Reply
+/// with no application Send and full unrelated-lane framing.
+pub proof fn lemma_origin_write_mismatched_rover_step_replies_once_no_send(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    fid: u64,
+    op: u64,
+    call: BoundaryCall,
+    at: u64,
+)
+    requires
+        before.now <= at,
+        0 <= node_slot < before.process.len(),
+        before.process[node_slot].0 == Pid::Node(0),
+        before.process[node_slot].1 is Node,
+        origin_write_failure_ready(
+            before.process[node_slot].1->Node_0,
+            fid,
+            op,
+            call,
+        ),
+        event_valid(
+            before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op,
+                    response: StoreRes::Del { result: Ok(()) },
+                },
+            },
+        ),
+    ensures
+        ({
+            let node = before.process[node_slot].1->Node_0;
+            let response = StoreRes::Del { result: Ok(()) };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes { op, response },
+            };
+            let core = crate::handler::spec_on_event(
+                node.core,
+                EventSpec::Store { op, response, clock: at },
+            ).0;
+            let result = StepResultV {
+                state: LocalV::Node(NodeV {
+                    core,
+                    pending: spec_take_pending(
+                        node.pending,
+                        call.id,
+                    ).1,
+                    ..node
+                }),
+                send: seq![(
+                    Pid::Outside,
+                    Message::Reply(Output::Response {
+                        client: call.client,
+                        id: call.id,
+                        response: spec_unavailable(call.request),
+                    }),
+                )],
+            };
+            let after = land(
+                before,
+                node_slot,
+                Pid::Node(0),
+                at,
+                result,
+            );
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                Label::Process {
+                    process: Pid::Node(0),
+                    at,
+                    event,
+                    send: result.send,
+                },
+                after,
+            )
+            &&& forall|j: int|
+                0 <= j < before.process.len() && j != node_slot
+                    ==> #[trigger] after.process[j]
+                        == before.process[j]
+        }),
+{
+    let node = before.process[node_slot].1->Node_0;
+    let response = StoreRes::Del { result: Ok(()) };
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: Message::StoreRes { op, response },
+    };
+    let core = crate::handler::spec_on_event(
+        node.core,
+        EventSpec::Store { op, response, clock: at },
+    ).0;
+    let result = StepResultV {
+        state: LocalV::Node(NodeV {
+            core,
+            pending: spec_take_pending(node.pending, call.id).1,
+            ..node
+        }),
+        send: seq![(
+            Pid::Outside,
+            Message::Reply(Output::Response {
+                client: call.client,
+                id: call.id,
+                response: spec_unavailable(call.request),
+            }),
+        )],
+    };
+    lemma_origin_write_mismatched_node_replies_once_no_send(
+        node,
+        fid,
+        op,
+        call,
+        at,
+    );
+    lemma_node_rover_step_preserves_unrelated_lanes(
+        config,
+        before,
+        node_slot,
+        at,
+        event,
+        result,
     );
 }
 

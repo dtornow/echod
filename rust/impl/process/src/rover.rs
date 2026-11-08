@@ -1614,4 +1614,234 @@ mod tests {
                 )
         }));
     }
+
+    #[test]
+    fn successful_loaded_request_closes_previous_deadline_delete_branch() {
+        use crate::verified::node::{Armed as RememberedArmed, Key};
+
+        let config = Config::memory("node-0");
+        let model = Model;
+        let value = |data: &str| Value {
+            headers: Vec::new(),
+            data: Some(data.to_string()),
+        };
+        let create = Request::PromiseCreate(PromiseCreateReq {
+            id: "order:promise".to_string(),
+            timeout_at: 10_000,
+            param: value("input"),
+            tags: Vec::new(),
+        });
+        let empty =
+            echod_concrete::empty_stored_workflow("order".to_string());
+        let (body, _, _, _) = echod_concrete::request_transition(
+            echod_concrete::stored_body(&empty),
+            &create,
+            1,
+            config.retry_timeout,
+        );
+        let stored = echod_concrete::advance_stored(&empty, body, 1);
+        let bytes =
+            echod_concrete::document::codec::encode(&stored).unwrap();
+        let loaded_etag = echod_concrete::store::etag(&bytes).0;
+        let mut initial = model.initial(&config);
+        match &mut initial[0].1 {
+            Local::Node(node) => node.core.node.core.set_armed(
+                "order",
+                Some(RememberedArmed {
+                    key: Key {
+                        origin: "order".to_string(),
+                        at: 10_000,
+                        token: 77,
+                    },
+                    etag: loaded_etag,
+                }),
+            ),
+            Local::Store(_) => panic!("slot zero is the node"),
+        }
+
+        let call = BoundaryCall {
+            client: "client".to_string(),
+            id: 10,
+            request: Request::PromiseSettle(PromiseSettleReq {
+                id: "order:promise".to_string(),
+                state: PromiseState::Resolved,
+                value: value("done"),
+            }),
+        };
+        let admitted = &model.on_event(
+            &config,
+            &initial[0].0,
+            &initial[0].1,
+            2,
+            &ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        )[0];
+        let (get_op, get) = admitted
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreReq {
+                    op,
+                    request: request @ StoreReq::Get { .. },
+                } => Some((*op, request.clone())),
+                _ => None,
+            })
+            .expect("admission emits the workflow Get");
+        let key = match &get {
+            StoreReq::Get { key } => key.clone(),
+            _ => unreachable!(),
+        };
+        let store = Local::Store(Store {
+            entries: vec![echod_concrete::store::Entry {
+                key,
+                body: bytes,
+                version: 1,
+            }],
+            appendable: false,
+            seen: Vec::new(),
+        });
+        let get_answer = &model.on_event(
+            &config,
+            &Pid::Store,
+            &store,
+            3,
+            &ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: get_op,
+                    request: get,
+                },
+            },
+        )[0];
+        let get_response = get_answer
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreRes { op, response } if *op == get_op =>
+                    Some(response.clone()),
+                _ => None,
+            })
+            .expect("the Store returns the matching Get response");
+        let continued = &model.on_event(
+            &config,
+            &Pid::Node(0),
+            &admitted.state,
+            4,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: get_op,
+                    response: get_response,
+                },
+            },
+        )[0];
+        let (write_op, write) = continued
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreReq {
+                    op,
+                    request: request @ StoreReq::PutIfMatch { .. },
+                } => Some((*op, request.clone())),
+                _ => None,
+            })
+            .expect("successful load emits the conditional write");
+        let write_answer = &model.on_event(
+            &config,
+            &Pid::Store,
+            &get_answer.state,
+            5,
+            &ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: write_op,
+                    request: write,
+                },
+            },
+        )[0];
+        let write_response = write_answer
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreRes { op, response } if *op == write_op =>
+                    Some(response.clone()),
+                _ => None,
+            })
+            .expect("the Store returns the matching write response");
+        let after_write = &model.on_event(
+            &config,
+            &Pid::Node(0),
+            &continued.state,
+            6,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: write_op,
+                    response: write_response,
+                },
+            },
+        )[0];
+        let (delete_op, delete) = after_write
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreReq {
+                    op,
+                    request: request @ StoreReq::Del { .. },
+                } => Some((*op, request.clone())),
+                _ => None,
+            })
+            .expect("the previous deadline key is deleted");
+        assert!(!after_write.send.iter().any(|(_, message)| {
+            matches!(message, Message::Reply(_))
+        }));
+        let delete_answer = &model.on_event(
+            &config,
+            &Pid::Store,
+            &write_answer.state,
+            7,
+            &ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: Message::StoreReq {
+                    op: delete_op,
+                    request: delete,
+                },
+            },
+        )[0];
+        let delete_response = delete_answer
+            .send
+            .iter()
+            .find_map(|(_, message)| match message {
+                Message::StoreRes { op, response } if *op == delete_op =>
+                    Some(response.clone()),
+                _ => None,
+            })
+            .expect("the Store returns the matching delete response");
+        assert!(matches!(
+            delete_response,
+            StoreRes::Del { result: Ok(()) }
+        ));
+        let completed = &model.on_event(
+            &config,
+            &Pid::Node(0),
+            &after_write.state,
+            8,
+            &ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: Message::StoreRes {
+                    op: delete_op,
+                    response: delete_response,
+                },
+            },
+        )[0];
+        assert!(completed.send.iter().any(|(recipient, message)| {
+            *recipient == Pid::Outside
+                && matches!(
+                    message,
+                    Message::Reply(Output::Response { id: 10, .. })
+                )
+        }));
+    }
 }

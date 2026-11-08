@@ -30,12 +30,12 @@
 //! They do not establish persistence, a Store-step invariant, or a global
 //! refinement theorem.
 //!
-//! Failure, racing-CAS, concurrent flights, membership listing/configuration
-//! completions, and timer fire/commit steps remain classified by
-//! [`open_case`]. The bounded startup wake and successful announcement
-//! completion are proved below: they advance membership from announce to list,
-//! leave document and timer state unchanged, and preserve the full relation as
-//! abstract stutters. There are no admits or axioms in this module.
+//! Bounded normal-origin theorems also cover a racing CAS reload/redecision,
+//! unavailable and wrong-shaped write responses, and stale responses.
+//! Detached two-document requests, whole-system concurrent-flight simulation,
+//! membership refresh, and timer/fire steps remain classified by
+//! [`open_case`] without a global refinement theorem.
+//! There are no admits or axioms in this module.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code))]
 
@@ -54,11 +54,12 @@ use crate::handler_docs::{
     spec_answered, spec_answered_loading, spec_answered_origin,
     spec_answered_phase, spec_begin, spec_commit_advance, spec_commit_new,
     spec_commit_failed, spec_committed, spec_decide, spec_dispatch,
-    spec_dispatches, spec_finish, spec_flight_completed, spec_inflight,
-    spec_issue_write, spec_load_origin, spec_loaded_origin, spec_release,
-    spec_retry, spec_run_origin, spec_send_all, spec_slot_of, spec_start,
-    spec_submit, spec_take_flight, CommittingSpec, DoneSpec, FlightSpec,
-    FlightsSpec, IssuedSpec, PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec,
+    spec_dispatches, spec_fail, spec_finish, spec_flight_completed,
+    spec_inflight, spec_issue_write, spec_load_origin, spec_loaded_origin,
+    spec_release, spec_retry, spec_run_origin, spec_send_all, spec_slot_of,
+    spec_start, spec_submit, spec_take_flight, CommittingSpec, DoneSpec,
+    FlightSpec, FlightsSpec, IssuedSpec, PhaseSpec, ProgressSpec, WorkSpec,
+    WorkingSpec,
 };
 #[cfg(verus_keep_ghost)]
 use crate::keys::spec_doc_key;
@@ -76,6 +77,7 @@ use crate::target::TargetSpec;
 use crate::types::{
     AnswerSpec, Armed, CacheResult, CallSpec, EffectSpec, EventSpec,
     Fired, MessageSpec, NoteSpec, OpId, RequestEventSpec,
+    spec_error_text, spec_unexpected,
 };
 #[cfg(verus_keep_ghost)]
 use crate::verified::commit_spec::spec_to_disarm;
@@ -85,6 +87,8 @@ use crate::verified::flight_spec::{
 };
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
+#[cfg(verus_keep_ghost)]
+use crate::verified::node_spec::spec_forget;
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{empty_store, StateV as AbstractStateV};
@@ -9236,7 +9240,711 @@ pub proof fn lemma_normal_request_matches_abstract_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Explicit frontier: represented, but not yet simulated
+// Normal-origin failure, retry, and stale-response slices
+// ---------------------------------------------------------------------------
+
+/// A lost conditional-write race does not answer the request. The production
+/// commit forgets the stale cache entry, increments the same flight's attempt,
+/// and emits the exact document Get used to re-decide the request.
+#[verifier::rlimit(30)]
+pub proof fn lemma_origin_write_precondition_failed_reloads(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        !s.ops.contains_key(s.next_op),
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].target is Origin,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == (AStep::Writing { idle: false }),
+        s.flights.inflight[fid].phase->Origin_commit.issued is Some,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            is Write,
+        s.flights.inflight[fid].phase->Origin_commit.issued->Some_0
+            ->Write_op == op,
+        s.flights.inflight[fid].attempt < u32::MAX,
+        s.flights.inflight[fid].attempt + 1
+            <= s.flights.max_retries,
+        crate::cache::spec_find(
+            crate::cache::spec_remove(
+                s.cache,
+                s.flights.inflight[fid].target->Origin_0,
+            ).entries,
+            s.flights.inflight[fid].target->Origin_0,
+        ) is None,
+    ensures
+        ({
+            let origin = s.flights.inflight[fid].target->Origin_0;
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Err(StoreError::PreconditionFailed),
+                    },
+                    clock: response_at,
+                },
+            );
+            &&& !next.ops.contains_key(op)
+            &&& next.ops.contains_key(s.next_op)
+            &&& next.ops[s.next_op] == Owner::Flight(fid)
+            &&& next.flights.inflight.contains_key(fid)
+            &&& next.flights.inflight[fid].id == fid
+            &&& next.flights.inflight[fid].target
+                == s.flights.inflight[fid].target
+            &&& next.flights.inflight[fid].work
+                == s.flights.inflight[fid].work
+            &&& next.flights.inflight[fid].attempt
+                == s.flights.inflight[fid].attempt + 1
+            &&& next.flights.inflight[fid].phase
+                == PhaseSpec::Loading {
+                    op: s.next_op,
+                    revalidating: None,
+                }
+            &&& effects == seq![
+                EffectSpec::Note(NoteSpec::Commit(
+                    crate::types::CommitOutcome::Raced,
+                )),
+                EffectSpec::Note(NoteSpec::Raced {
+                    target: origin,
+                    attempt: s.flights.inflight[fid].attempt,
+                }),
+                EffectSpec::Note(NoteSpec::Cache(CacheResult::Miss)),
+                EffectSpec::Store {
+                    op: s.next_op,
+                    request: StoreReqSpec::Get {
+                        key: spec_doc_key(s.keys.prefix, origin),
+                    },
+                },
+            ]
+            &&& no_reply_effects(effects)
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_advance);
+    reveal(spec_commit_failed);
+    reveal(spec_retry);
+    reveal(spec_begin);
+    reveal(spec_load_origin);
+    reveal(crate::state::spec_forget_origin);
+    reveal(crate::cache::spec_remove);
+    reveal(crate::cache::spec_get);
+    reveal(spec_store);
+    reveal(spec_inflight);
+    reveal(spec_schedule_wake);
+    let clocked = S { clock: response_at, ..s };
+    let without_op = S {
+        ops: clocked.ops.remove(op),
+        ..clocked
+    };
+    let taken = crate::handler_docs::spec_take_flight(
+        without_op,
+        fid,
+    );
+    let commit = s.flights.inflight[fid].phase->Origin_commit;
+    let (answered, commit2, progress) = spec_commit_advance(
+        taken,
+        fid,
+        commit,
+        Some(StoreRes::PutIfMatch {
+            result: Err(StoreError::PreconditionFailed),
+        }),
+    );
+    assert(progress == ProgressSpec::Failed(
+        StoreErrorSpec::PreconditionFailed,
+    ));
+    let origin = s.flights.inflight[fid].target->Origin_0;
+    assert(s.flights.inflight[fid].attempt.wrapping_add(1)
+        == s.flights.inflight[fid].attempt + 1);
+    assert(s.flights.inflight[fid].attempt.wrapping_add(1)
+        <= s.flights.max_retries);
+    let retrying = spec_commit_failed(
+        answered,
+        FlightSpec {
+            phase: PhaseSpec::Idle,
+            ..s.flights.inflight[fid]
+        },
+        StoreErrorSpec::PreconditionFailed,
+    );
+    assert(retrying.flights.inflight.contains_key(fid));
+    assert(retrying.flights.inflight[fid].phase
+        == PhaseSpec::Loading {
+            op: s.next_op,
+            revalidating: None,
+        });
+    assert(retrying.out.len() > 0);
+    assert(retrying.out.last() == EffectSpec::Store {
+        op: s.next_op,
+        request: StoreReqSpec::Get {
+            key: spec_doc_key(s.keys.prefix, origin),
+        },
+    });
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::PutIfMatch {
+                result: Err(StoreError::PreconditionFailed),
+            },
+            clock: response_at,
+        },
+    );
+    assert(effects == retrying.out);
+    assert(next == S {
+        out: Seq::empty(),
+        ..retrying
+    });
+    assert(next.node.core == spec_forget(s.node.core, origin));
+    assert(next.ops == s.ops.remove(op).insert(
+        s.next_op,
+        Owner::Flight(fid),
+    ));
+    assert(!next.ops.contains_key(op));
+    assert(next.ops.contains_key(s.next_op));
+    assert(next.ops[s.next_op] == Owner::Flight(fid));
+    assert(next.next_op == s.next_op.wrapping_add(1));
+    assert(next.flights.inflight.contains_key(fid));
+    assert(next.flights.inflight[fid].id == fid);
+    assert(next.flights.inflight[fid].target
+        == s.flights.inflight[fid].target);
+    assert(next.flights.inflight[fid].work
+        == s.flights.inflight[fid].work);
+    assert(next.flights.inflight[fid].attempt
+        == s.flights.inflight[fid].attempt + 1);
+    assert(next.flights.inflight[fid].phase
+        == PhaseSpec::Loading {
+            op: s.next_op,
+            revalidating: None,
+        });
+    assert(effects.len() > 0);
+    assert(effects.last() == EffectSpec::Store {
+        op: s.next_op,
+        request: StoreReqSpec::Get {
+            key: spec_doc_key(s.keys.prefix, origin),
+        },
+    });
+    assert(effects == seq![
+        EffectSpec::Note(NoteSpec::Commit(
+            crate::types::CommitOutcome::Raced,
+        )),
+        EffectSpec::Note(NoteSpec::Raced {
+            target: origin,
+            attempt: s.flights.inflight[fid].attempt,
+        }),
+        EffectSpec::Note(NoteSpec::Cache(CacheResult::Miss)),
+        EffectSpec::Store {
+            op: s.next_op,
+            request: StoreReqSpec::Get {
+                key: spec_doc_key(s.keys.prefix, origin),
+            },
+        },
+    ]);
+    reveal_with_fuel(no_reply_effects, 10);
+    assert(no_reply_effects(effects));
+}
+
+/// Exact state and document premises for deciding the same request after a
+/// raced conditional write has re-entered its cache-miss load phase.
+pub open spec fn origin_retry_reload_write_ready(
+    s: S,
+    fid: u64,
+    reload_op: u64,
+    call: CallSpec,
+    origin: Seq<char>,
+    loaded: LoadedSpec,
+    etag: Etag,
+) -> bool {
+    let at = call.now;
+    let (after_body, response, _, _) = spec_request_transition(
+        spec_stored_body(loaded.document),
+        call.request,
+        at,
+        s.cfg.retry_timeout,
+    );
+    let after_document =
+        spec_advance_stored(loaded.document, after_body, at);
+    &&& s.out.len() == 0
+    &&& s.node.members.refreshing()
+    &&& !s.loops
+    &&& s.ops.contains_key(reload_op)
+    &&& s.ops[reload_op] == Owner::Flight(fid)
+    &&& !s.ops.contains_key(s.next_op)
+    &&& s.flights.inflight.contains_key(fid)
+    &&& s.flights.inflight[fid].id == fid
+    &&& s.flights.inflight[fid].target
+        == TargetSpec::Origin(origin)
+    &&& s.flights.inflight[fid].work == WorkSpec::Request {
+        id: call.id,
+        kind: call.kind,
+        corr: call.corr,
+        req: call.request,
+        action_kind: call.action_kind,
+        now: at,
+    }
+    &&& s.flights.inflight[fid].firing is None
+    &&& !s.flights.inflight[fid].debug
+    &&& s.flights.inflight[fid].phase == PhaseSpec::Loading {
+        op: reload_op,
+        revalidating: None,
+    }
+    &&& spec_slot_of(
+        s,
+        crate::target::spec_name(TargetSpec::Origin(origin)),
+    ).busy == Some(fid)
+    &&& spec_slot_of(
+        s,
+        crate::target::spec_name(TargetSpec::Origin(origin)),
+    ).queue.len() == 0
+    &&& !s.cfg.appendable
+    &&& well_formed(loaded.document)
+    &&& routed(loaded.document, call.request)
+    &&& echod_concrete::node::spec_stored_committed_at(
+        loaded.document,
+    ) <= at
+    &&& at <= MAX_TIME
+    &&& 0 < s.cfg.retry_timeout <= MAX_TIME
+    &&& safe_effect_config(at, s.cfg.retry_timeout)
+    &&& document_ids_bounded(loaded.document)
+    &&& response != spec_unavailable(call.request)
+    &&& after_body != spec_stored_body(loaded.document)
+    &&& spec_body_deadline(after_body) is None
+    &&& spec_encode(after_document).len() <= usize::MAX as int
+    &&& etag.0@.len() <= usize::MAX as int
+}
+
+/// The matching successful reload after a CAS race decodes the newly loaded
+/// workflow, decides the original request again, and emits the next real
+/// `PutIfMatch` from `State::on_event`.
+#[verifier::rlimit(30)]
+pub proof fn lemma_origin_retry_reload_success_issues_put_if_match(
+    s: S,
+    fid: u64,
+    reload_op: u64,
+    call: CallSpec,
+    origin: Seq<char>,
+    response_at: u64,
+    bytes: Vec<u8>,
+    etag: Etag,
+    loaded: LoadedSpec,
+)
+    requires
+        call.now <= response_at,
+        spec_decode_workflow(bytes@) == Ok(loaded),
+        origin_retry_reload_write_ready(
+            s,
+            fid,
+            reload_op,
+            call,
+            origin,
+            loaded,
+            etag,
+        ),
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op: reload_op,
+                    response: StoreRes::Get {
+                        result: Ok(Some((bytes, etag))),
+                    },
+                    clock: response_at,
+                },
+            );
+            let (after_body, response, _, _) =
+                spec_request_transition(
+                    spec_stored_body(loaded.document),
+                    call.request,
+                    call.now,
+                    s.cfg.retry_timeout,
+                );
+            let after_document = spec_advance_stored(
+                loaded.document,
+                after_body,
+                call.now,
+            );
+            &&& !next.ops.contains_key(reload_op)
+            &&& next.ops.contains_key(s.next_op)
+            &&& next.ops[s.next_op] == Owner::Flight(fid)
+            &&& next.next_op == s.next_op.wrapping_add(1)
+            &&& next.flights.inflight.contains_key(fid)
+            &&& next.flights.inflight[fid].work
+                == s.flights.inflight[fid].work
+            &&& next.flights.inflight[fid].attempt
+                == s.flights.inflight[fid].attempt
+            &&& next.flights.inflight[fid].phase is Origin
+            &&& next.flights.inflight[fid].phase->Origin_done.response
+                == Some(response)
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.after == after_document
+            &&& next.flights.inflight[
+                fid
+            ].phase->Origin_commit.issued == Some(IssuedSpec::Write {
+                op: s.next_op,
+                mode: crate::types::WriteMode::Rewrite,
+                change_count:
+                    echod_concrete::node::spec_body_len(after_body)
+                        as usize,
+                bytes: spec_encode(after_document).len() as u64,
+                len: spec_encode(after_document).len() as usize,
+            })
+            &&& effects == seq![EffectSpec::Store {
+                op: s.next_op,
+                request: StoreReqSpec::PutIfMatch {
+                    key: spec_doc_key(s.keys.prefix, origin),
+                    body: spec_encode(after_document),
+                    etag: etag.deep_view(),
+                },
+            }]
+            &&& no_reply_effects(effects)
+            &&& well_formed(after_document)
+        }),
+{
+    lemma_normal_request_happy_path(
+        loaded.document,
+        call.request,
+        call.now,
+        s.cfg.retry_timeout,
+    );
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_loading);
+    reveal(spec_loaded_origin);
+    reveal(spec_run_origin);
+    reveal(spec_decide);
+    reveal(spec_commit_new);
+    reveal(spec_commit_advance);
+    reveal(spec_issue_write);
+    reveal(spec_schedule_wake);
+    reveal(echod_concrete::quick_n_dirty::on_request);
+    reveal(crate::verified::flight_spec::spec_advance);
+    reveal(crate::verified::commit_spec::spec_prepare);
+    reveal_with_fuel(no_reply_effects, 6);
+    let (after_body, _, _, _) = spec_request_transition(
+        spec_stored_body(loaded.document),
+        call.request,
+        call.now,
+        s.cfg.retry_timeout,
+    );
+    let after_document =
+        spec_advance_stored(loaded.document, after_body, call.now);
+    let effects = spec_on_event(
+        s,
+        EventSpec::Store {
+            op: reload_op,
+            response: StoreRes::Get {
+                result: Ok(Some((bytes, etag))),
+            },
+            clock: response_at,
+        },
+    ).1;
+    assert(effects == seq![EffectSpec::Store {
+        op: s.next_op,
+        request: StoreReqSpec::PutIfMatch {
+            key: spec_doc_key(s.keys.prefix, origin),
+            body: spec_encode(after_document),
+            etag: etag.deep_view(),
+        },
+    }]);
+}
+
+/// An unavailable answer to the currently owned document write fails the
+/// request exactly once. With an empty lane queue and no timer/debug owner,
+/// cleanup cannot start another flight or emit a Send/Store effect.
+pub proof fn lemma_origin_write_unavailable_replies_once(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+    message: String,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].target is Origin,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].firing is None,
+        !s.flights.inflight[fid].debug,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == (AStep::Writing { idle: false }),
+        s.flights.inflight[fid].phase->Origin_commit.issued
+            is Some,
+        s.flights.inflight[
+            fid
+        ].phase->Origin_commit.issued->Some_0 is Write,
+        s.flights.inflight[
+            fid
+        ].phase->Origin_commit.issued->Some_0->Write_op == op,
+        spec_slot_of(
+            s,
+            crate::target::spec_name(
+                s.flights.inflight[fid].target,
+            ),
+        ).busy == Some(fid),
+        spec_slot_of(
+            s,
+            crate::target::spec_name(
+                s.flights.inflight[fid].target,
+            ),
+        ).queue.len() == 0,
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::PutIfMatch {
+                        result: Err(StoreError::Unavailable(message)),
+                    },
+                    clock: response_at,
+                },
+            );
+            &&& !next.ops.contains_key(op)
+            &&& !next.flights.inflight.contains_key(fid)
+            &&& effects == seq![
+                EffectSpec::Note(NoteSpec::Commit(
+                    crate::types::CommitOutcome::Failed,
+                )),
+                EffectSpec::Reply {
+                    id: s.flights.inflight[fid].work->Request_id,
+                    response: Err(spec_error_text(
+                        StoreErrorSpec::Unavailable(message@),
+                    )),
+                },
+            ]
+            &&& no_reply_effects(effects.drop_last())
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_advance);
+    reveal(spec_commit_failed);
+    reveal(spec_fail);
+    reveal(spec_finish);
+    reveal(spec_release);
+    reveal(crate::state::spec_forget_origin);
+    reveal(spec_schedule_wake);
+    reveal_with_fuel(no_reply_effects, 5);
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::PutIfMatch {
+                result: Err(StoreError::Unavailable(message)),
+            },
+            clock: response_at,
+        },
+    );
+    assert(!next.ops.contains_key(op));
+    assert(!next.flights.inflight.contains_key(fid));
+    assert(effects.len() > 0);
+    assert(effects.last() == EffectSpec::Reply {
+        id: s.flights.inflight[fid].work->Request_id,
+        response: Err(spec_error_text(
+            StoreErrorSpec::Unavailable(message@),
+        )),
+    });
+    assert(effects == seq![
+        EffectSpec::Note(NoteSpec::Commit(
+            crate::types::CommitOutcome::Failed,
+        )),
+        EffectSpec::Reply {
+            id: s.flights.inflight[fid].work->Request_id,
+            response: Err(spec_error_text(
+                StoreErrorSpec::Unavailable(message@),
+            )),
+        },
+    ]);
+    assert(no_reply_effects(effects.drop_last()));
+}
+
+/// A response of the wrong Store shape for an owned `PutIfMatch` is the
+/// production "unexpected store response" failure: one Reply, no Send.
+pub proof fn lemma_origin_write_mismatched_response_replies_once(
+    s: S,
+    fid: u64,
+    op: u64,
+    response_at: u64,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid].id == fid,
+        s.flights.inflight[fid].target is Origin,
+        s.flights.inflight[fid].work is Request,
+        s.flights.inflight[fid].firing is None,
+        !s.flights.inflight[fid].debug,
+        s.flights.inflight[fid].phase is Origin,
+        s.flights.inflight[fid].phase.expects() == Some(op),
+        s.flights.inflight[fid].phase->Origin_commit.seq.step
+            == (AStep::Writing { idle: false }),
+        s.flights.inflight[fid].phase->Origin_commit.issued
+            is Some,
+        s.flights.inflight[
+            fid
+        ].phase->Origin_commit.issued->Some_0 is Write,
+        s.flights.inflight[
+            fid
+        ].phase->Origin_commit.issued->Some_0->Write_op == op,
+        spec_slot_of(
+            s,
+            crate::target::spec_name(
+                s.flights.inflight[fid].target,
+            ),
+        ).busy == Some(fid),
+        spec_slot_of(
+            s,
+            crate::target::spec_name(
+                s.flights.inflight[fid].target,
+            ),
+        ).queue.len() == 0,
+    ensures
+        ({
+            let (next, effects) = spec_on_event(
+                s,
+                EventSpec::Store {
+                    op,
+                    response: StoreRes::Del {
+                        result: Ok(()),
+                    },
+                    clock: response_at,
+                },
+            );
+            &&& !next.ops.contains_key(op)
+            &&& !next.flights.inflight.contains_key(fid)
+            &&& effects == seq![
+                EffectSpec::Note(NoteSpec::Commit(
+                    crate::types::CommitOutcome::Failed,
+                )),
+                EffectSpec::Reply {
+                    id: s.flights.inflight[fid].work->Request_id,
+                    response: Err(spec_error_text(spec_unexpected())),
+                },
+            ]
+            &&& no_reply_effects(effects.drop_last())
+        }),
+{
+    reveal(spec_on_event);
+    reveal(spec_flight_completed);
+    reveal(spec_answered_phase);
+    reveal(spec_answered_origin);
+    reveal(spec_commit_advance);
+    reveal(spec_answered);
+    reveal(spec_advance);
+    reveal(spec_commit_failed);
+    reveal(spec_fail);
+    reveal(spec_finish);
+    reveal(spec_release);
+    reveal(crate::state::spec_forget_origin);
+    reveal(spec_schedule_wake);
+    reveal_with_fuel(no_reply_effects, 5);
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response: StoreRes::Del { result: Ok(()) },
+            clock: response_at,
+        },
+    );
+    assert(!next.ops.contains_key(op));
+    assert(!next.flights.inflight.contains_key(fid));
+    assert(effects.len() > 0);
+    assert(effects.last() == EffectSpec::Reply {
+        id: s.flights.inflight[fid].work->Request_id,
+        response: Err(spec_error_text(spec_unexpected())),
+    });
+    assert(effects == seq![
+        EffectSpec::Note(NoteSpec::Commit(
+            crate::types::CommitOutcome::Failed,
+        )),
+        EffectSpec::Reply {
+            id: s.flights.inflight[fid].work->Request_id,
+            response: Err(spec_error_text(spec_unexpected())),
+        },
+    ]);
+    assert(no_reply_effects(effects.drop_last()));
+}
+
+/// A Store completion for an op that is no longer owned is stale. It only
+/// advances the production clock; it cannot alter the core flight state,
+/// pending operations, or emit an effect.
+pub proof fn lemma_stale_store_response_stutters(
+    s: S,
+    op: u64,
+    response: StoreRes,
+    response_at: u64,
+)
+    requires
+        s.out.len() == 0,
+        s.node.members.refreshing(),
+        !s.loops,
+        !s.ops.contains_key(op),
+    ensures
+        spec_on_event(
+            s,
+            EventSpec::Store {
+                op,
+                response,
+                clock: response_at,
+            },
+        ) == (
+            S {
+                clock: response_at,
+                ..s
+            },
+            Seq::<EffectSpec>::empty(),
+        ),
+{
+    reveal(spec_on_event);
+    reveal(spec_schedule_wake);
+    assert(s.ops.remove(op) =~= s.ops);
+    let (next, effects) = spec_on_event(
+        s,
+        EventSpec::Store {
+            op,
+            response,
+            clock: response_at,
+        },
+    );
+    assert(effects =~= Seq::<EffectSpec>::empty());
+    assert(next == S { clock: response_at, ..s });
+}
+
+// ---------------------------------------------------------------------------
+// Explicit global frontier beyond the bounded slices above
 // ---------------------------------------------------------------------------
 
 pub ghost enum OpenCase {
@@ -9251,8 +9959,9 @@ pub ghost enum OpenCase {
     CacheEvictionDuringFlight,
 }
 
-/// Machine-checkable classification of steps outside the proved sequential
-/// request/successful-store fragment. This is a predicate, not an assumption.
+/// Machine-checkable classification of cases still outside the global
+/// simulation theorem. Some variants have bounded normal-origin lemmas above;
+/// this predicate remains useful for all other owners and request shapes.
 pub open spec fn open_case(
     before: ProcessV,
     event: EventSpec,
