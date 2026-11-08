@@ -573,6 +573,15 @@ pub open spec fn initial_abstract() -> AbstractStateV {
     }
 }
 
+pub open spec fn document_ids_bounded(document: StoredDocumentV) -> bool {
+    match document {
+        StoredDocumentV::Workflow(workflow) =>
+            forall|id: Seq<char>| workflow.objects.contains_key(id) ==>
+                id.len() <= usize::MAX as int,
+        StoredDocumentV::Schedule(_) => true,
+    }
+}
+
 pub proof fn lemma_initial_related(cfg: ConfigSpec)
     ensures
         related(initial_process(cfg), initial_abstract()),
@@ -610,6 +619,7 @@ pub proof fn lemma_normal_request_happy_path(
         now <= MAX_TIME,
         0 < retry_timeout <= MAX_TIME,
         safe_effect_config(now, retry_timeout),
+        document_ids_bounded(document),
     ensures
         ({
             let after = on_request(
@@ -673,6 +683,7 @@ pub proof fn lemma_normal_request_matches_abstract_handler(
         now <= MAX_TIME,
         0 < config.retry_timeout <= MAX_TIME,
         safe_effect_config(now, config.retry_timeout),
+        document_ids_bounded(document),
     ensures
         ({
             let after = on_request(
@@ -726,7 +737,6 @@ pub ghost enum OpenCase {
     StoreUnavailable,
     StoreResponseShapeMismatch,
     ConditionalWriteRace,
-    DetachedTwoDocumentRequest,
     ConcurrentFlight,
     MembershipRefresh,
     TimerWake,
@@ -778,14 +788,6 @@ pub open spec fn open_case(
                 | StoreRes::AppIfMatch {
                     result: Err(echod_concrete::StoreError::PreconditionFailed),
                 } => true,
-                _ => false,
-            },
-            _ => false,
-        },
-        OpenCase::DetachedTwoDocumentRequest => match event {
-            EventSpec::Request { request, .. } => match request {
-                crate::types::RequestEventSpec::Protocol(call) =>
-                    call.then is Some,
                 _ => false,
             },
             _ => false,

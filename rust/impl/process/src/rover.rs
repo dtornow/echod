@@ -279,7 +279,62 @@ pub open spec fn spec_store_request(request: StoreReqSpec) -> StoreReq {
     choose|result: StoreReq| result.deep_view() == request
 }
 
+pub open spec fn store_request_bounded(request: StoreReqSpec) -> bool {
+    match request {
+        StoreReqSpec::Get { key }
+        | StoreReqSpec::Del { key } =>
+            key.len() <= usize::MAX as int,
+        StoreReqSpec::GetIfNoneMatch { key, etag } =>
+            key.len() <= usize::MAX as int
+                && etag.0.len() <= usize::MAX as int,
+        StoreReqSpec::PutIfMatch { key, body, etag }
+        | StoreReqSpec::AppIfMatch { key, body, etag, .. } =>
+            key.len() <= usize::MAX as int
+                && body.len() <= usize::MAX as int
+                && etag.0.len() <= usize::MAX as int,
+        StoreReqSpec::PutIfNoneMatch { key, body }
+        | StoreReqSpec::Put { key, body } =>
+            key.len() <= usize::MAX as int
+                && body.len() <= usize::MAX as int,
+        StoreReqSpec::List { prefix, .. }
+        | StoreReqSpec::ListPrefixes { prefix } =>
+            prefix.len() <= usize::MAX as int,
+    }
+}
+
+pub proof fn lemma_store_request_bounded(request: StoreReq)
+    ensures
+        store_request_bounded(request.deep_view()),
+{
+    match request {
+        StoreReq::Get { key } | StoreReq::Del { key } => {
+            crate::verified::text::string_bounded(&key);
+        },
+        StoreReq::GetIfNoneMatch { key, etag } => {
+            crate::verified::text::string_bounded(&key);
+            crate::verified::text::string_bounded(&etag.0);
+        },
+        StoreReq::PutIfMatch { key, body, etag }
+        | StoreReq::AppIfMatch { key, body, etag, .. } => {
+            crate::verified::text::string_bounded(&key);
+            assert(body@.len() == body.len());
+            crate::verified::text::string_bounded(&etag.0);
+        },
+        StoreReq::PutIfNoneMatch { key, body }
+        | StoreReq::Put { key, body } => {
+            crate::verified::text::string_bounded(&key);
+            assert(body@.len() == body.len());
+        },
+        StoreReq::List { prefix, .. }
+        | StoreReq::ListPrefixes { prefix } => {
+            crate::verified::text::string_bounded(&prefix);
+        },
+    }
+}
+
 pub proof fn lemma_store_request_realised(request: StoreReqSpec)
+    requires
+        store_request_bounded(request),
     ensures
         spec_store_request(request).deep_view() == request,
 {
@@ -514,6 +569,7 @@ fn apply_effect(
         Effect::Store { op, request } => {
             reveal(spec_effect);
             proof {
+                lemma_store_request_bounded(request);
                 lemma_store_request_realised(request.deep_view());
                 lemma_store_request_ext(
                     request,

@@ -74,6 +74,10 @@ pub open spec fn job_of(job: JobV) -> AJob {
 pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
     requires
         !(flight.job is External),
+        match flight.etag {
+            Some(chars) => chars.len() <= usize::MAX as int,
+            None => true,
+        },
     ensures
         ({
             let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
