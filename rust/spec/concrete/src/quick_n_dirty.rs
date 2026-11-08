@@ -2180,6 +2180,68 @@ proof fn lemma_routed_document(document: StoredDocumentV, request: Request)
     }
 }
 
+/// A standalone workflow sweep preserves the full document invariant once
+/// the bounded sweep has actually closed every deadline at `now`.
+///
+/// The closure premise is essential: `spec_sweep` is bounded by `limit`, so a
+/// partial sweep is only known to satisfy `workflow_relaxed`, not the full
+/// persisted-document invariant.
+pub proof fn closed_sweep_preserves_well_formed(
+    workflow: WorkflowDocumentV,
+    now: u64,
+    retry_timeout: u64,
+    limit: nat,
+)
+    requires
+        crate::document::workflow_well_formed(workflow),
+        workflow.committed_at <= now,
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+        spec_earliest_in(
+            spec_sweep(
+                DocumentBodyV::Workflow(workflow.objects),
+                now,
+                retry_timeout,
+                limit,
+            ).0,
+            now,
+        ) is None,
+    ensures
+        well_formed(spec_advance_stored(
+            StoredDocumentV::Workflow(workflow),
+            spec_sweep(
+                DocumentBodyV::Workflow(workflow.objects),
+                now,
+                retry_timeout,
+                limit,
+            ).0,
+            now,
+        )),
+{
+    let original = DocumentBodyV::Workflow(workflow.objects);
+    let swept = spec_sweep(original, now, retry_timeout, limit).0;
+    lemma_full_implies_relaxed(workflow, now);
+    lemma_sweep_preserves_relaxed(
+        workflow.document,
+        workflow.objects,
+        now,
+        retry_timeout,
+        limit,
+    );
+    assert(swept is Workflow);
+    lemma_relaxed_closed(
+        workflow.document,
+        swept->Workflow_0,
+        now,
+    );
+    reveal(crate::document::workflow_well_formed);
+    assert(well_formed(spec_advance_stored(
+        StoredDocumentV::Workflow(workflow),
+        swept,
+        now,
+    )));
+}
+
 /// A complete request transition preserves the full stored-document
 /// invariant.  The process clamps `now` to the previous commit instant and
 /// validates client time values against `MAX_TIME`; the explicit hypotheses
