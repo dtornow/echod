@@ -231,6 +231,27 @@ module Temp {
     case Schedule(_, slot) => slot.Some? ==> ScheduleOk(slot.value)
   }
 
+  // A later instant does not break the catalogue. The bounds are `<= now`.
+  lemma WellFormedLater(doc: Doc, now: nat, later: nat)
+    requires WellFormed(doc, now)
+    requires now <= later
+    ensures WellFormed(doc, later)
+  {
+    match doc
+    case Schedule(_, _) =>
+    case Origin(_, objects) =>
+      forall id | id in objects
+        ensures ObjectOk(id, objects[id], later)
+      {
+        assert ObjectOk(id, objects[id], now);
+        var p := objects[id].promise;
+        assert p.createdAt <= later;
+        if p.settledAt.Some? {
+          assert p.settledAt.value <= later;
+        }
+      }
+  }
+
   // No promise deadline at or before `now` is still pending.
   ghost predicate OnTime(objects: map<string, Obj>, now: nat) {
     forall id :: id in objects ==>

@@ -1122,6 +1122,446 @@ module Proof {
     }
   }
 
+  // Every document the world is holding: stored, in flight, or waiting in a continuation.
+  ghost predicate StoredOk(s: State, now: nat) {
+    s.AtBucket? ==> forall key | key in s.docs :: Temp.WellFormed(s.docs[key], now)
+  }
+
+  ghost predicate HeldOk(s: State, now: nat) {
+    s.AtNode? ==>
+      forall rpc | rpc in s.open && s.open[rpc].Process? ::
+        forall k | 0 <= k < |s.open[rpc].effects| && s.open[rpc].effects[k].Write? ::
+          Temp.WellFormed(s.open[rpc].effects[k].doc, now)
+  }
+
+  ghost predicate FlightOk(flight: multiset<Packet<Pid, Msg>>, now: nat) {
+    && (forall p {:trigger flight[p]} :: flight[p] > 0 && p.msg.Res? && p.msg.ans.Got? ==>
+         Temp.WellFormed(p.msg.ans.doc, now))
+    && (forall p {:trigger flight[p]} :: flight[p] > 0 && p.msg.Req? && p.msg.ask.WriteDoc? ==>
+         Temp.WellFormed(p.msg.ask.doc, now))
+  }
+
+  ghost predicate Formed(n: Net<Pid, Msg, State>) {
+    && (forall pid {:trigger n.procs[pid]} :: pid in n.procs ==>
+         && StoredOk(n.procs[pid], n.now)
+         && HeldOk(n.procs[pid], n.now))
+    && FlightOk(n.inflight, n.now)
+  }
+
+  lemma EmptyFormed(now: nat)
+    ensures Temp.WellFormed(Empty(), now)
+  {
+  }
+
+  lemma NodeStepForms(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
+    requires self.Node? && s.AtNode?
+    requires HeldOk(s, now)
+    requires i.Request? && IsGot(i.msg) ==> Temp.WellFormed(i.msg.ans.doc, now)
+    ensures var r := Node.step(self, s, i, now);
+      && r.state.AtNode?
+      && HeldOk(r.state, now)
+      && (forall j | 0 <= j < |r.sends| && r.sends[j].msg.Req? && r.sends[j].msg.ask.WriteDoc? ::
+           Temp.WellFormed(r.sends[j].msg.ask.doc, now))
+      && (forall j | 0 <= j < |r.sends| && r.sends[j].msg.Res? && r.sends[j].msg.ans.Got? ::
+           Temp.WellFormed(r.sends[j].msg.ans.doc, now))
+  {
+    var r := Node.step(self, s, i, now);
+    match i
+    case Timeout =>
+      assert r == Result(s, [], Keep);
+    case Request(_, Res(rpc, Got(id, doc, version))) =>
+      if rpc in s.open && s.open[rpc].Prepare? && s.open[rpc].id == id {
+        Node.StepKeepsWellFormed(self, s, i, now);
+        var plan := Node.Prepare(s, s.open[rpc].job, id, doc, version, now);
+        if |plan.effects| == 0 {
+          assert r.state.open == s.open - {rpc};
+        } else {
+          var next := Hash(rpc);
+          assert next in r.state.open && r.state.open[next].effects == plan.effects;
+          forall rpc' | rpc' in r.state.open && r.state.open[rpc'].Process?
+            ensures forall k | 0 <= k < |r.state.open[rpc'].effects| && r.state.open[rpc'].effects[k].Write? ::
+              Temp.WellFormed(r.state.open[rpc'].effects[k].doc, now)
+          {
+            if rpc' == next {
+              forall k | 0 <= k < |plan.effects| && plan.effects[k].Write?
+                ensures Temp.WellFormed(plan.effects[k].doc, now)
+              {
+                Node.RequestKeepsWellFormed(s, s.open[rpc].job, id, doc, version, now);
+              }
+            } else {
+              assert rpc' in s.open && r.state.open[rpc'] == s.open[rpc'];
+            }
+          }
+        }
+      } else {
+        assert r == Result(s, [], Keep);
+      }
+    case Request(_, Res(rpc, TimeoutPut(id, clock))) =>
+      if rpc in s.open && s.open[rpc].id == id && Node.Head(s, rpc, Put(clock)) {
+        assert r == Node.Reschedule(s, rpc);
+        KeptTail(s, rpc, now, r);
+      } else {
+        assert r == Result(s, [], Keep);
+      }
+    case Request(_, Res(rpc, DocWrote(id, _))) =>
+      if rpc in s.open && s.open[rpc].id == id && s.open[rpc].Process? && |s.open[rpc].effects| > 0 && s.open[rpc].effects[0].Write? {
+        assert r == Node.Reschedule(s, rpc);
+        KeptTail(s, rpc, now, r);
+      } else {
+        assert r == Result(s, [], Keep);
+      }
+    case Request(_, Res(rpc, DocRejected(id))) =>
+      if rpc in s.open && s.open[rpc].id == id && s.open[rpc].Process? && |s.open[rpc].effects| > 0 && s.open[rpc].effects[0].Write? {
+        assert r.state.open == s.open - {rpc};
+        assert r.sends == [];
+      } else {
+        assert r == Result(s, [], Keep);
+      }
+    case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
+      if rpc in s.open && s.open[rpc].id == id && Node.Head(s, rpc, Effect.Drop(clock)) {
+        assert r == Node.Reschedule(s, rpc);
+        KeptTail(s, rpc, now, r);
+      } else {
+        assert r == Result(s, [], Keep);
+      }
+    case _ =>
+      assert |r.sends| == 0 || r.sends[0].msg.Req?;
+      if |r.sends| == 1 {
+        assert !r.sends[0].msg.ask.WriteDoc?;
+      }
+      forall rpc' | rpc' in r.state.open && r.state.open[rpc'].Process?
+        ensures forall k | 0 <= k < |r.state.open[rpc'].effects| && r.state.open[rpc'].effects[k].Write? ::
+          Temp.WellFormed(r.state.open[rpc'].effects[k].doc, now)
+      {
+        if r.state == s {
+        } else {
+          assert !r.state.open[rpc'].Process? || rpc' in s.open;
+          if rpc' in s.open && r.state.open[rpc'] == s.open[rpc'] {
+          } else {
+            assert !r.state.open[rpc'].Process?;
+          }
+        }
+      }
+  }
+
+  lemma KeptTail(s: State, rpc: Uuid, now: nat, r: Result<Pid, Msg, State>)
+    requires s.AtNode? && rpc in s.open && s.open[rpc].Process? && |s.open[rpc].effects| > 0
+    requires HeldOk(s, now)
+    requires r == Node.Reschedule(s, rpc)
+    ensures HeldOk(r.state, now)
+    ensures forall j | 0 <= j < |r.sends| && r.sends[j].msg.Req? && r.sends[j].msg.ask.WriteDoc? ::
+      Temp.WellFormed(r.sends[j].msg.ask.doc, now)
+    ensures forall j | 0 <= j < |r.sends| && r.sends[j].msg.Res? && r.sends[j].msg.ans.Got? ::
+      true
+  {
+    var phase := s.open[rpc];
+    var tail := phase.effects[1..];
+    if |tail| == 0 {
+      assert r.state.open == s.open - {rpc};
+      assert |r.sends| == 1 && r.sends[0].msg.Res?;
+    } else {
+      var next := Hash(rpc);
+      assert r.state.open[next].effects == tail;
+      assert r.sends == [ReqTo(Bucket, next, Node.SendEffect(phase.id, tail[0]))];
+      forall rpc' | rpc' in r.state.open && r.state.open[rpc'].Process?
+        ensures forall k | 0 <= k < |r.state.open[rpc'].effects| && r.state.open[rpc'].effects[k].Write? ::
+          Temp.WellFormed(r.state.open[rpc'].effects[k].doc, now)
+      {
+        if rpc' == next {
+          forall k | 0 <= k < |tail| && tail[k].Write?
+            ensures Temp.WellFormed(tail[k].doc, now)
+          {
+            assert phase.effects[k + 1] == tail[k];
+          }
+        } else {
+          assert rpc' in s.open && r.state.open[rpc'] == s.open[rpc'];
+        }
+      }
+      if r.sends[0].msg.ask.WriteDoc? {
+        assert tail[0].Write? && r.sends[0].msg.ask.doc == tail[0].doc;
+      }
+    }
+  }
+
+  lemma BucketStepForms(self: Pid, s: State, i: Input<Pid, Msg>, now: nat)
+    requires self.Bucket? && s.AtBucket?
+    requires StoredOk(s, now)
+    requires i.Request? && i.msg.Req? && i.msg.ask.WriteDoc? ==> Temp.WellFormed(i.msg.ask.doc, now)
+    ensures var r := Bucket.step(self, s, i, now);
+      && StoredOk(r.state, now)
+      && (forall j | 0 <= j < |r.sends| && r.sends[j].msg.Res? && r.sends[j].msg.ans.Got? ::
+           Temp.WellFormed(r.sends[j].msg.ans.doc, now))
+      && (forall j | 0 <= j < |r.sends| && r.sends[j].msg.Req? && r.sends[j].msg.ask.WriteDoc? ::
+           Temp.WellFormed(r.sends[j].msg.ask.doc, now))
+  {
+    var r := Bucket.step(self, s, i, now);
+    match i
+    case Timeout =>
+      assert r == Result(s, [], Keep);
+    case Request(_, Req(_, Get(id))) =>
+      var got := DocumentAt(s.docs, id);
+      if DocKey(id) in s.docs {
+        assert got == s.docs[DocKey(id)];
+      } else {
+        EmptyFormed(now);
+        assert got == Empty();
+      }
+      assert r.sends == [Answer(i.from, i.msg, Got(id, got, VersionOf(s.ver, DocKey(id))))];
+      assert r.state == s;
+    case Request(_, Req(_, WriteDoc(_, key, doc, version, cover))) =>
+      if VersionOf(s.ver, key) == version && Bucket.Accept(s, key, doc, cover) {
+        assert r.state.docs == s.docs[key := doc];
+        forall k | k in r.state.docs
+          ensures Temp.WellFormed(r.state.docs[k], now)
+        {
+          if k == key {
+            assert r.state.docs[k] == doc;
+          } else {
+            assert r.state.docs[k] == s.docs[k];
+          }
+        }
+      } else {
+        assert r.state == s;
+      }
+      assert |r.sends| == 1 && r.sends[0].msg.Res? && !r.sends[0].msg.ans.Got?;
+    case _ =>
+      assert r.state.AtBucket? && r.state.docs == s.docs;
+      assert forall j :: 0 <= j < |r.sends| ==> r.sends[j].msg.Res? && !r.sends[j].msg.ans.Got?;
+  }
+
+  lemma FlightAdd(before: multiset<Packet<Pid, Msg>>, src: Pid, sends: seq<Send<Pid, Msg>>, now: nat, gone: Packet<Pid, Msg>)
+    requires FlightOk(before, now)
+    requires gone in before
+    requires forall j | 0 <= j < |sends| && sends[j].msg.Res? && sends[j].msg.ans.Got? ::
+      Temp.WellFormed(sends[j].msg.ans.doc, now)
+    requires forall j | 0 <= j < |sends| && sends[j].msg.Req? && sends[j].msg.ask.WriteDoc? ::
+      Temp.WellFormed(sends[j].msg.ask.doc, now)
+    ensures FlightOk(before - multiset{gone} + ToPackets(src, sends), now)
+  {
+    var flight := before - multiset{gone} + ToPackets(src, sends);
+    forall p | p in flight && p.msg.Res? && p.msg.ans.Got?
+      ensures Temp.WellFormed(p.msg.ans.doc, now)
+    {
+      if p in before - multiset{gone} {
+        assert p in before;
+      } else {
+        InToPackets(src, sends, p);
+        var j :| 0 <= j < |sends| && p == Packet(src, sends[j].to, sends[j].msg);
+      }
+    }
+    forall p | p in flight && p.msg.Req? && p.msg.ask.WriteDoc?
+      ensures Temp.WellFormed(p.msg.ask.doc, now)
+    {
+      if p in before - multiset{gone} {
+        assert p in before;
+      } else {
+        InToPackets(src, sends, p);
+        var j :| 0 <= j < |sends| && p == Packet(src, sends[j].to, sends[j].msg);
+      }
+    }
+  }
+
+  lemma FormedLater(n: Net<Pid, Msg, State>)
+    requires Formed(n)
+    ensures Formed(n.(now := n.now + 1))
+  {
+    var n' := n.(now := n.now + 1);
+    forall pid | pid in n'.procs
+      ensures StoredOk(n'.procs[pid], n'.now) && HeldOk(n'.procs[pid], n'.now)
+    {
+      assert n'.procs[pid] == n.procs[pid];
+      if n.procs[pid].AtBucket? {
+        forall key | key in n.procs[pid].docs
+          ensures Temp.WellFormed(n.procs[pid].docs[key], n'.now)
+        { Temp.WellFormedLater(n.procs[pid].docs[key], n.now, n'.now); }
+      }
+      if n.procs[pid].AtNode? {
+        forall rpc | rpc in n.procs[pid].open && n.procs[pid].open[rpc].Process?
+          ensures forall k | 0 <= k < |n.procs[pid].open[rpc].effects| && n.procs[pid].open[rpc].effects[k].Write? ::
+            Temp.WellFormed(n.procs[pid].open[rpc].effects[k].doc, n'.now)
+        {
+          forall k | 0 <= k < |n.procs[pid].open[rpc].effects| && n.procs[pid].open[rpc].effects[k].Write?
+            ensures Temp.WellFormed(n.procs[pid].open[rpc].effects[k].doc, n'.now)
+          { Temp.WellFormedLater(n.procs[pid].open[rpc].effects[k].doc, n.now, n'.now); }
+        }
+      }
+    }
+    forall p | p in n'.inflight && p.msg.Res? && p.msg.ans.Got?
+      ensures Temp.WellFormed(p.msg.ans.doc, n'.now)
+    { Temp.WellFormedLater(p.msg.ans.doc, n.now, n'.now); }
+    forall p | p in n'.inflight && p.msg.Req? && p.msg.ask.WriteDoc?
+      ensures Temp.WellFormed(p.msg.ask.doc, n'.now)
+    { Temp.WellFormedLater(p.msg.ask.doc, n.now, n'.now); }
+  }
+
+  // One step. Documents that were well-formed are well-formed afterwards.
+  lemma FormedStep(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+                   n: Net<Pid, Msg, State>, n': Net<Pid, Msg, State>, a: Action<Pid, Msg>)
+    requires Routed(clients, nodes, ask)
+    requires Formed(n)
+    requires NextStep(World(docs, clients, nodes, ask), n, n', a)
+    ensures Formed(n')
+  {
+    var w := World(docs, clients, nodes, ask);
+    assert w.process == Processes;
+    match a
+    case Tick =>
+      assert n' == n.(now := n.now + 1);
+      FormedLater(n);
+    case Drop(p) =>
+      assert n'.procs == n.procs && n'.now == n.now;
+      forall q | q in n'.inflight ensures q in n.inflight {}
+    case Duplicate(p) =>
+      assert n'.procs == n.procs && n'.now == n.now;
+      forall q | q in n'.inflight
+        ensures q in n.inflight
+      {
+        if q != p { assert n.inflight[q] == n'.inflight[q]; }
+      }
+    case Fire(pid) =>
+      var s0 := n.procs[pid];
+      var r := w.process(pid).step(pid, s0, Timeout, n.now);
+      if pid.Client? && s0.AtClient? && s0.waiting {
+        OnTimeout(pid, s0, n.now);
+        assert |r.sends| == 1 && r.sends[0].msg.Req? && !r.sends[0].msg.ask.WriteDoc?;
+        assert r.state.AtClient?;
+      } else {
+        assert r == Result(s0, [], Keep);
+      }
+      var base := n.(timers := n.timers - {pid});
+      assert n' == Advance(base, pid, r);
+      assert n'.now == n.now;
+      forall id | id in n'.procs
+        ensures StoredOk(n'.procs[id], n'.now) && HeldOk(n'.procs[id], n'.now)
+      {
+        if id == pid {
+          if pid.Client? && s0.AtClient? && s0.waiting {
+            assert n'.procs[id].AtClient?;
+          } else {
+            assert n'.procs[id] == n.procs[id];
+          }
+        } else {
+          assert n'.procs[id] == n.procs[id];
+        }
+      }
+      if |r.sends| == 0 {
+        assert n'.inflight == base.inflight;
+        forall q | q in n'.inflight ensures q in n.inflight {}
+      } else {
+        assert n'.inflight == n.inflight + ToPackets(pid, r.sends);
+        forall q | q in n'.inflight && q.msg.Res? && q.msg.ans.Got?
+          ensures Temp.WellFormed(q.msg.ans.doc, n.now)
+        {
+          if q in n.inflight {
+          } else {
+            InToPackets(pid, r.sends, q);
+            var j :| 0 <= j < |r.sends| && q == Packet(pid, r.sends[j].to, r.sends[j].msg);
+            assert !r.sends[j].msg.Res?;
+          }
+        }
+        forall q | q in n'.inflight && q.msg.Req? && q.msg.ask.WriteDoc?
+          ensures Temp.WellFormed(q.msg.ask.doc, n.now)
+        {
+          if q in n.inflight {
+          } else {
+            InToPackets(pid, r.sends, q);
+            var j :| 0 <= j < |r.sends| && q == Packet(pid, r.sends[j].to, r.sends[j].msg);
+            assert !r.sends[j].msg.ask.WriteDoc?;
+          }
+        }
+      }
+    case Deliver(p) =>
+      var r := w.process(p.dst).step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
+      var base := n.(inflight := n.inflight - multiset{p});
+      assert n' == Advance(base, p.dst, r);
+      assert n'.now == n.now;
+      match p.dst
+      case Client(_) =>
+        assert r == Result(n.procs[p.dst], [], Keep);
+        assert n'.procs == n.procs;
+        assert n'.inflight == base.inflight;
+        forall q | q in n'.inflight ensures q in n.inflight {}
+      case Bucket =>
+        if n.procs[Bucket].AtBucket? {
+          BucketStepForms(Bucket, n.procs[Bucket], Request(p.src, p.msg), n.now);
+        } else {
+          assert r == Result(n.procs[Bucket], [], Keep);
+        }
+        assert n'.procs == n.procs[Bucket := r.state];
+        forall id | id in n'.procs
+          ensures StoredOk(n'.procs[id], n'.now) && HeldOk(n'.procs[id], n'.now)
+        {
+          if id == Bucket {
+            assert n'.procs[id] == r.state;
+          } else {
+            assert n'.procs[id] == n.procs[id];
+          }
+        }
+        FlightAdd(n.inflight, Bucket, r.sends, n.now, p);
+      case Node(i) =>
+        if n.procs[p.dst].AtNode? {
+          NodeStepForms(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
+        } else {
+          assert r == Result(n.procs[p.dst], [], Keep);
+        }
+        assert n'.procs == n.procs[p.dst := r.state];
+        forall id | id in n'.procs
+          ensures StoredOk(n'.procs[id], n'.now) && HeldOk(n'.procs[id], n'.now)
+        {
+          if id == p.dst {
+            assert n'.procs[id] == r.state;
+            if n.procs[p.dst].AtNode? {
+              assert r.state.AtNode?;
+            } else {
+              assert r.state == n.procs[p.dst];
+            }
+          } else {
+            assert n'.procs[id] == n.procs[id];
+          }
+        }
+        FlightAdd(n.inflight, p.dst, r.sends, n.now, p);
+  }
+
+  lemma FormedBoot(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+                   n: Net<Pid, Msg, State>)
+    requires Routed(clients, nodes, ask)
+    requires IsInit(World(docs, clients, nodes, ask), n)
+    requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
+    ensures Formed(n)
+  {
+    Booted(docs, clients, nodes, ask, n);
+    var bucket := n.procs[Bucket];
+    assert bucket == AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs));
+    forall key | key in bucket.docs
+      ensures Temp.WellFormed(bucket.docs[key], 0)
+    {
+      assert bucket.docs[key] == docs[key];
+    }
+    assert n.inflight == multiset{};
+    forall pid | pid in n.procs && pid.Node?
+      ensures n.procs[pid].open == map[]
+    {
+      assert n.procs[pid] == AtNode(map[], map[], 0, pid.i + 1);
+    }
+  }
+
+  lemma DocumentsStay(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+                      b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
+    requires Routed(clients, nodes, ask)
+    requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
+    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
+    ensures Formed(b(n))
+    decreases n
+  {
+    if n == 0 {
+      assert IsInit(World(docs, clients, nodes, ask), b(0));
+      FormedBoot(docs, clients, nodes, ask, b(0));
+    } else {
+      DocumentsStay(docs, clients, nodes, ask, b, a, n - 1);
+      FormedStep(docs, clients, nodes, ask, b(n - 1), b(n), a(n - 1));
+    }
+  }
+
   lemma Cases(doc: Temp.Doc, id: string, now: nat)
     ensures var answer := Temp.Get(doc, id, now).answer;
       && (id !in Temp.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))

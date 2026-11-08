@@ -54,6 +54,18 @@ module Claim {
     Cases(doc, id, b(k).now);
   }
 
+  // If the documents are well-formed at the start, they stay well-formed after every step.
+  // Stored in the bucket, in flight, or waiting on a continuation.
+  lemma DocumentsStayWellFormed(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+                                b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
+    requires Routed(clients, nodes, ask)
+    requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
+    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
+    ensures Formed(b(n))
+  {
+    DocumentsStay(docs, clients, nodes, ask, b, a, n);
+  }
+
   // Every stored document that owes a deadline has a timeout at or before it.
   // A document that owes nothing does not need one.
   lemma WorkflowsHaveTimeouts(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
