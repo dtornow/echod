@@ -8,7 +8,7 @@ module Client {
   import opened Protocol
   import Temp
 
-  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+  function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
   {
     if self.Client? && s.AtClient? && s.waiting && i.Timeout? then
       var msg :=

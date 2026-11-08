@@ -983,14 +983,14 @@ module Proof {
     requires self.Node? && s.AtNode?
     requires !(i.Request? && i.msg.PromiseGet? && i.msg.id !in s.open)
     requires !(i.Request? && i.msg.Got? && i.msg.id in s.open && s.open[i.msg.id].WaitGet?)
-    ensures var r := Node.Step(self, s, i, now);
+    ensures var r := Node.step(self, s, i, now);
       && r.state.AtNode?
       && (forall id :: id in r.state.open && r.state.open[id].WaitGet? ==>
            id in s.open && s.open[id] == r.state.open[id])
       && (forall j :: 0 <= j < |r.sends| ==> !r.sends[j].msg.PromiseReply? && !r.sends[j].msg.Got?)
       && (forall j :: 0 <= j < |r.sends| && r.sends[j].msg.Get? ==> r.sends[j].to == Bucket)
   {
-    var r := Node.Step(self, s, i, now);
+    var r := Node.step(self, s, i, now);
     match i
     case Request(from, PromiseCreate(req)) =>
       if req.id !in s.open {

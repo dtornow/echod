@@ -63,7 +63,7 @@ module Bucket {
     && (t.key in s.docs ==> Temp.Nearest(s.docs[t.key]).Some?)
   }
 
-  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+  function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
   {
     if self.Bucket? && s.AtBucket? then
       match i {

@@ -16,6 +16,32 @@ module Node {
 
   const Retry: nat := 1
 
+  function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+  {
+    if self.Node? && s.AtNode? then
+      match i {
+        case Request(from, PromiseGet(id)) =>
+          if id in s.open then Result(s, [], Keep)
+          else Result(AtNode(s.open[id := WaitGet(from)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(id))], Keep)
+        case Request(from, PromiseCreate(req)) =>
+          if req.id in s.open then Result(s, [], Keep)
+          else Result(AtNode(s.open[req.id := Load(from, req)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
+        case Request(_, Got(id, doc, version)) => GotOn(s, id, doc, version, now)
+        case Request(_, TimeoutPut(id, clock)) => ArmOn(s, id, clock)
+        case Request(_, DocWrote(id, _)) => WroteOn(s, id)
+        case Request(_, DocRejected(id)) =>
+          if id in s.open && s.open[id].Writing? then
+            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [], Keep)
+          else Result(s, [], Keep)
+        case Request(_, TimeoutDropped(id, _)) =>
+          if id in s.open && s.open[id].Disarm? then
+            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [Send(s.open[id].caller, Created(s.open[id].answer))], Keep)
+          else Result(s, [], Keep)
+        case _ => Result(s, [], Keep)
+      }
+    else Result(s, [], Keep)
+  }
+
   function Decide(s: State, id: string, doc: Temp.Doc, version: nat, now: nat): Result<Pid, Msg, State>
     requires s.AtNode? && id in s.open && s.open[id].Load?
   {
@@ -83,31 +109,5 @@ module Node {
         }
       case _ => Result(s, [], Keep)
     }
-  }
-
-  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
-  {
-    if self.Node? && s.AtNode? then
-      match i {
-        case Request(from, PromiseGet(id)) =>
-          if id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[id := WaitGet(from)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(id))], Keep)
-        case Request(from, PromiseCreate(req)) =>
-          if req.id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[req.id := Load(from, req)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
-        case Request(_, Got(id, doc, version)) => GotOn(s, id, doc, version, now)
-        case Request(_, TimeoutPut(id, clock)) => ArmOn(s, id, clock)
-        case Request(_, DocWrote(id, _)) => WroteOn(s, id)
-        case Request(_, DocRejected(id)) =>
-          if id in s.open && s.open[id].Writing? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [], Keep)
-          else Result(s, [], Keep)
-        case Request(_, TimeoutDropped(id, _)) =>
-          if id in s.open && s.open[id].Disarm? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [Send(s.open[id].caller, Created(s.open[id].answer))], Keep)
-          else Result(s, [], Keep)
-        case _ => Result(s, [], Keep)
-      }
-    else Result(s, [], Keep)
   }
 }
