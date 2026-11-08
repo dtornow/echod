@@ -21,7 +21,7 @@ module Claim {
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     requires node.Node?
     requires a(r) == Deliver(Packet(node, from, PromiseReply(answer)))
-    ensures exists i: nat, k: nat, id, doc, version: nat {:trigger a(i), a(k), Got(id, doc, version)} ::
+    ensures exists i: nat, k: nat, id, doc, version {:trigger a(i), a(k), Got(id, doc, version)} ::
       && i < k < r
       && a(i) == Deliver(Packet(from, node, PromiseGet(id)))
       && a(k) == Deliver(Packet(Bucket, node, Got(id, doc, version)))
@@ -41,7 +41,7 @@ module Claim {
     reveal Lt();
     assert pk in b(r).inflight;
     assert Justified(docs, b, a, r, node, from, answer);
-    var i: nat, k: nat, id, doc, version: nat :|
+    var i, k, id, doc, version :|
       && Lt(i, k) && Lt(k, r)
       && node.Node?
       && a(i) == Deliver(Packet(from, node, PromiseGet(id)))

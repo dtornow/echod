@@ -1,5 +1,0 @@
-# Datatypes implement the process trait. The refreshed checker is what
-# makes a datatype a subtype of a trait it extends.
-[options]
-type-system-refresh = true
-general-traits = "datatype"

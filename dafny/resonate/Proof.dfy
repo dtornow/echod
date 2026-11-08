@@ -53,7 +53,7 @@ module Proof {
 
   // `id` has waited for `caller` on `node` at every state strictly after the request.
   ghost predicate Held(b: nat -> Net<Pid, Msg, State>, node: Pid, id: string, caller: Pid, i: nat, n: nat) {
-    forall m: nat {:trigger b(m)} :: Lt(i, m) && Lt(m, n + 1) ==>
+    forall m {:trigger b(m)} :: Lt(i, m) && Lt(m, n + 1) ==>
       && node in b(m).procs
       && b(m).procs[node].AtNode?
       && id in b(m).procs[node].open
@@ -64,7 +64,7 @@ module Proof {
     && node in b(n).procs && node.Node? && b(n).procs[node].AtNode?
     && id in b(n).procs[node].open
     && (var caller := b(n).procs[node].open[id].caller;
-        exists i: nat {:trigger a(i)} ::
+        exists i {:trigger a(i)} ::
           && Lt(i, n)
           && a(i) == Deliver(Packet(caller, node, PromiseGet(id)))
           && Held(b, node, id, caller, i, n))
@@ -84,7 +84,7 @@ module Proof {
   ghost predicate Justified(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
                              a: nat -> Action<Pid, Msg>, limit: nat, node: Pid, caller: Pid, answer: Temp.Answer)
   {
-    exists i: nat, k: nat, id, doc, version: nat {:trigger a(i), a(k), Got(id, doc, version)} ::
+    exists i, k, id, doc, version {:trigger a(i), a(k), Got(id, doc, version)} ::
       && Lt(i, k) && Lt(k, limit)
       && node.Node?
       && a(i) == Deliver(Packet(caller, node, PromiseGet(id)))
@@ -244,7 +244,7 @@ module Proof {
     {
       var caller := open[id].caller;
       assert Entry(b, a, n, node, id);
-      var i: nat :| Lt(i, n) && a(i) == Deliver(Packet(caller, node, PromiseGet(id))) && Held(b, node, id, caller, i, n);
+      var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, node, PromiseGet(id))) && Held(b, node, id, caller, i, n);
       HeldLater(b, node, id, caller, i, n);
       assert Lt(i, n + 1);
     }
@@ -270,7 +270,7 @@ module Proof {
     ensures Justified(docs, b, a, n+1, node, caller, answer)
   {
     reveal Lt();
-    var i: nat, k: nat, id, doc, version: nat :|
+    var i, k, id, doc, version :|
       && Lt(i, k) && Lt(k, n)
       && node.Node?
       && a(i) == Deliver(Packet(caller, node, PromiseGet(id)))
@@ -543,7 +543,6 @@ module Proof {
         r == Result(AtClient(s.id, s.node, s.kind, false), [Send(Node(s.node), msg)], Keep)
       else r == Result(s, [], Keep)
   {
-    Installed(self, s, Timeout, now);
   }
 
   lemma StepOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
@@ -588,7 +587,6 @@ module Proof {
     case Fire(pid) =>
       var base := b(n).(timers := b(n).timers - {pid});
       var r := w.process(pid).step(pid, b(n).procs[pid], Timeout, b(n).now);
-      Installed(pid, b(n).procs[pid], Timeout, b(n).now);
       assert base.inflight == b(n).inflight && base.procs == b(n).procs;
       assert b(n+1) == Advance(base, pid, r);
       OnTimeout(pid, b(n).procs[pid], b(n).now);
@@ -614,7 +612,6 @@ module Proof {
     assert NextStep(w, b(n), b(n+1), Deliver(p));
     var base := b(n).(inflight := b(n).inflight - multiset{p});
     var r := w.process(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now);
-    Installed(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now);
     assert base.procs == b(n).procs && b(n+1) == Advance(base, p.dst, r);
     forall q | q in base.inflight ensures q in b(n).inflight {}
     match p.dst
@@ -756,7 +753,7 @@ module Proof {
     requires Inv(docs, b, a, n)
     requires p.dst == Bucket && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Bucket.Step(Bucket, b(n).procs[Bucket], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(Bucket).step(Bucket, b(n).procs[Bucket], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, Bucket, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     ensures Inv(docs, b, a, n+1)
@@ -846,7 +843,7 @@ module Proof {
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Node.Step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     ensures Inv(docs, b, a, n+1)
@@ -885,7 +882,7 @@ module Proof {
               assert oid in s.open && open'[oid] == s.open[oid];
               var c := s.open[oid].caller;
               assert Entry(b, a, n, self, oid);
-              var i: nat :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
+              var i :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
               HeldLater(b, self, oid, c, i, n);
               assert Lt(i, n + 1);
             }
@@ -942,7 +939,7 @@ module Proof {
             assert oid in s.open && oid != id && open'[oid] == s.open[oid];
             var c := s.open[oid].caller;
             assert Entry(b, a, n, self, oid);
-            var i: nat :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
+            var i :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
             HeldLater(b, self, oid, c, i, n);
             assert Lt(i, n + 1);
           }
@@ -963,7 +960,7 @@ module Proof {
         ensures q.src.Node? && Justified(docs, b, a, n+1, q.src, q.dst, q.msg.answer)
       {
         if q == born {
-          var i: nat :| Lt(i, n) && a(i) == Deliver(Packet(caller, self, PromiseGet(id))) && Held(b, self, id, caller, i, n);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(caller, self, PromiseGet(id))) && Held(b, self, id, caller, i, n);
           assert Lt(n, n + 1);
           assert a(n) == Deliver(Packet(Bucket, self, Got(id, doc, version)));
           assert id in b(n).procs[self].open && b(n).procs[self].open[id] == WaitGet(caller);
@@ -1020,7 +1017,7 @@ module Proof {
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
-    requires r == Node.Step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
+    requires r == Processes(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires !(p.msg.PromiseGet? && p.msg.id !in b(n).procs[p.dst].open)
@@ -1048,7 +1045,7 @@ module Proof {
           assert oid in s.open && s.open[oid] == open'[oid];
           var c := s.open[oid].caller;
           assert Entry(b, a, n, self, oid);
-          var i: nat :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
+          var i :| Lt(i, n) && a(i) == Deliver(Packet(c, self, PromiseGet(oid))) && Held(b, self, oid, c, i, n);
           HeldLater(b, self, oid, c, i, n);
           assert Lt(i, n + 1);
           assert open'[oid] == WaitGet(c);
