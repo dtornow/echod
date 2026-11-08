@@ -8,7 +8,6 @@ module Claim {
   import opened Protocol
   import opened Worlds
   import Temp
-  import Node
   import opened Proof
 
   // A delivered promise reply is the Get of the document the bucket returned
@@ -30,10 +29,10 @@ module Claim {
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
       && b(k).procs[node].open[id] == Reading(from, AskGet)
-      && answer == Node.Get(doc, id, b(k).now).answer
-      && (id !in Node.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))
-      && (id in Node.ObjectsOf(doc) ==>
-           answer == Temp.Answer(200, Temp.Some(Node.Project(Node.ObjectsOf(doc)[id], b(k).now).promise)))
+      && answer == Temp.Get(doc, id, b(k).now).answer
+      && (id !in Temp.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))
+      && (id in Temp.ObjectsOf(doc) ==>
+           answer == Temp.Answer(200, Temp.Some(Temp.Project(Temp.ObjectsOf(doc)[id], b(k).now).promise)))
   {
     Safe(docs, clients, nodes, ask, b, a, r);
     var w := World(docs, clients, nodes, ask);
@@ -51,7 +50,7 @@ module Claim {
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
       && b(k).procs[node].open[id] == Reading(from, AskGet)
-      && answer == Node.Get(doc, id, b(k).now).answer;
+      && answer == Temp.Get(doc, id, b(k).now).answer;
     Cases(doc, id, b(k).now);
   }
 
@@ -63,7 +62,7 @@ module Claim {
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     ensures Bucket in b(n).procs && b(n).procs[Bucket].AtBucket?
     ensures forall key | key in b(n).procs[Bucket].docs ::
-      match Node.Nearest(b(n).procs[Bucket].docs[key])
+      match Temp.Nearest(b(n).procs[Bucket].docs[key])
       case None => true
       case Some(d) => exists t :: t in b(n).procs[Bucket].timeouts && t.key == key && t.at <= d
   {
@@ -71,11 +70,11 @@ module Claim {
     var bucket := b(n).procs[Bucket];
     assert Anchored(bucket);
     forall key | key in bucket.docs
-      ensures match Node.Nearest(bucket.docs[key])
+      ensures match Temp.Nearest(bucket.docs[key])
         case None => true
         case Some(d) => exists t :: t in bucket.timeouts && t.key == key && t.at <= d
     {
-      match Node.Nearest(bucket.docs[key])
+      match Temp.Nearest(bucket.docs[key])
       case None =>
       case Some(d) =>
         var t := bucket.anchor[key];

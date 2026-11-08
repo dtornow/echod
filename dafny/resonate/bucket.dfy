@@ -10,7 +10,6 @@ module Bucket {
   import opened Network
   import opened Protocol
   import Keys
-  import Node
   import Temp
 
   function CoverOf(docs: map<string, Temp.Doc>, keys: seq<string>): set<Clock>
@@ -20,7 +19,7 @@ module Bucket {
     else
       var rest := CoverOf(docs, keys[1..]);
       if keys[0] in docs then
-        match Node.Nearest(docs[keys[0]])
+        match Temp.Nearest(docs[keys[0]])
         case None => rest
         case Some(d) => rest + {Due(keys[0], d, 0, 0)}
       else rest
@@ -33,7 +32,7 @@ module Bucket {
     else
       var rest := AnchorOf(docs, keys[1..]);
       if keys[0] in docs then
-        match Node.Nearest(docs[keys[0]])
+        match Temp.Nearest(docs[keys[0]])
         case None => rest
         case Some(d) => rest[keys[0] := Due(keys[0], d, 0, 0)]
       else rest
@@ -50,7 +49,7 @@ module Bucket {
   predicate Accept(s: State, key: string, doc: Temp.Doc, cover: Temp.Opt<Clock>)
     requires s.AtBucket?
   {
-    match Node.Nearest(doc)
+    match Temp.Nearest(doc)
     case None => true
     case Some(d) =>
       && cover.Some?
@@ -61,7 +60,7 @@ module Bucket {
     requires s.AtBucket?
   {
     && t.key in s.docs && t.key in s.anchor && s.anchor[t.key] == t
-    && (t.key in s.docs ==> Node.Nearest(s.docs[t.key]).Some?)
+    && (t.key in s.docs ==> Temp.Nearest(s.docs[t.key]).Some?)
   }
 
   function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
@@ -76,7 +75,7 @@ module Bucket {
         case Request(from, WriteDoc(id, key, doc, version, cover)) =>
           if VersionOf(s.ver, key) == version && Accept(s, key, doc, cover) then
             var anchor' :=
-              match (Node.Nearest(doc), cover)
+              match (Temp.Nearest(doc), cover)
               case (None, _) => s.anchor - {key}
               case (Some(_), Some(clock)) => s.anchor[key := clock]
               case (Some(_), None) => s.anchor;
