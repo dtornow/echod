@@ -36,7 +36,7 @@ use echod_concrete::model::Pid;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::relation::agreement;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreRes;
+use echod_concrete::store::{StoreReq, StoreRes, StoreV};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
@@ -46,7 +46,7 @@ use echod_rover::rover::semantics::{
     event_valid, initial, land, legal, step, Execution, Label, StepResultV, World,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{ProcessEvent, RoverModel};
+use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
 
 verus! {
 
@@ -158,6 +158,1530 @@ proof fn lemma_node_zero_lands_first_outcome(
         let i: int = 0;
         let j: int = 0;
     }
+}
+
+proof fn lemma_store_one_lands_first_outcome(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    store: StoreV,
+    at: u64,
+    event: ProcessEvent<Pid, ProductionMessage>,
+)
+    requires
+        before.process.len() > 1,
+        before.process[1]
+            == (Pid::Store, ProductionLocalV::Store(store)),
+        before.now <= at,
+        event_valid(before, Pid::Store, event),
+        crate::rover::spec_store_step(store, event).len() > 0,
+    ensures
+        ({
+            let outcomes =
+                crate::rover::spec_store_step(store, event);
+            let outcome = outcomes[0];
+            let label = Label::Process {
+                process: Pid::Store,
+                at,
+                event,
+                send: outcome.send,
+            };
+            step(
+                ProductionModel,
+                config,
+                before,
+                label,
+                land(before, 1, Pid::Store, at, outcome),
+            )
+        }),
+{
+    reveal(step);
+    reveal(echod_rover::rover::semantics::is_process);
+    assert(Pid::Store != ProductionModel.spec_outside());
+    assert(before.process[1].0 == Pid::Store);
+    assert(exists|i: int|
+        0 <= i < before.process.len()
+            && #[trigger] before.process[i].0 == Pid::Store) by {
+        let i: int = 1;
+    }
+    assert(echod_rover::rover::semantics::is_process(
+        ProductionModel,
+        before,
+        Pid::Store,
+    ));
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Store,
+        before.process[1].1,
+        at,
+        event,
+    ) == crate::rover::spec_store_step(store, event));
+    let outcomes = crate::rover::spec_store_step(store, event);
+    let m = ProductionModel;
+    assert(exists|i: int, j: int|
+        #![trigger m.spec_on_event(
+            config,
+            Pid::Store,
+            before.process[i].1,
+            at,
+            event,
+        )[j]]
+        {
+            &&& 0 <= i < before.process.len()
+            &&& before.process[i].0 == Pid::Store
+            &&& {
+                let produced = m.spec_on_event(
+                    config,
+                    Pid::Store,
+                    before.process[i].1,
+                    at,
+                    event,
+                );
+                &&& 0 <= j < produced.len()
+                &&& produced[j].send == outcomes[0].send
+                &&& land(
+                    before,
+                    i,
+                    Pid::Store,
+                    at,
+                    produced[j],
+                ) == land(
+                    before,
+                    1,
+                    Pid::Store,
+                    at,
+                    outcomes[0],
+                )
+            }
+        }) by {
+        let i: int = 1;
+        let j: int = 0;
+    }
+    let outcome = outcomes[0];
+    let label = Label::Process {
+        process: Pid::Store,
+        at,
+        event,
+        send: outcome.send,
+    };
+    assert(step(
+        ProductionModel,
+        config,
+        before,
+        label,
+        land(before, 1, Pid::Store, at, outcome),
+    ));
+}
+
+/// One actual production Store request delivery followed by its response
+/// delivery to the node. The model's standard node/store slots are used; the
+/// rest of the world and append-only network are arbitrary, so unrelated
+/// production lanes and messages are framed by the two `land` updates.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(50)]
+pub proof fn lemma_production_store_round_trip_steps(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    store_slot: int,
+    node: ProductionNodeV,
+    store: StoreV,
+    op: u64,
+    request: StoreReq,
+    store_at: u64,
+    node_at: u64,
+)
+    requires
+        0 <= node_slot < before.process.len(),
+        0 <= store_slot < before.process.len(),
+        node_slot == 0,
+        store_slot == 1,
+        before.process[node_slot]
+            == (Pid::Node(0), ProductionLocalV::Node(node)),
+        before.process[store_slot]
+            == (Pid::Store, ProductionLocalV::Store(store)),
+        before.now <= store_at,
+        store_at <= node_at,
+        !store.seen.contains((Pid::Node(0), op)),
+        before.network.contains(Envelope {
+            sender: Pid::Node(0),
+            recipient: Pid::Store,
+            message: ProductionMessage::StoreReq { op, request },
+        }),
+    ensures
+        ({
+            let request_event = ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: ProductionMessage::StoreReq { op, request },
+            };
+            let store_outcome =
+                crate::rover::spec_store_step(store, request_event)[0];
+            let store_label = Label::Process {
+                process: Pid::Store,
+                at: store_at,
+                event: request_event,
+                send: store_outcome.send,
+            };
+            let after_store = land(
+                before,
+                store_slot,
+                Pid::Store,
+                store_at,
+                store_outcome,
+            );
+            let response = match store_outcome.send[0].1 {
+                ProductionMessage::StoreRes { response, .. } => response,
+                _ => echod_concrete::store::spec_apply(
+                    store,
+                    request,
+                ).1,
+            };
+            let response_event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: ProductionMessage::StoreRes { op, response },
+            };
+            let node_outcome =
+                spec_node_step(node, node_at, response_event)[0];
+            let node_label = Label::Process {
+                process: Pid::Node(0),
+                at: node_at,
+                event: response_event,
+                send: node_outcome.send,
+            };
+            let after_node = land(
+                after_store,
+                node_slot,
+                Pid::Node(0),
+                node_at,
+                node_outcome,
+            );
+            &&& crate::rover::spec_store_step(
+                store,
+                request_event,
+            ).len() == 1
+            &&& store_outcome.send.len() == 1
+            &&& match store_outcome.send[0] {
+                (
+                    Pid::Node(0),
+                    ProductionMessage::StoreRes {
+                        op: response_op,
+                        ..
+                    },
+                ) => response_op == op,
+                _ => false,
+            }
+            &&& spec_node_step(
+                node,
+                node_at,
+                response_event,
+            ).len() == 1
+            &&& step(
+                ProductionModel,
+                config,
+                before,
+                store_label,
+                after_store,
+            )
+            &&& step(
+                ProductionModel,
+                config,
+                after_store,
+                node_label,
+                after_node,
+            )
+            &&& after_node.network
+                == before.network
+                    + echod_rover::rover::semantics::envelopes(
+                        Pid::Store,
+                        store_outcome.send,
+                    )
+                    + echod_rover::rover::semantics::envelopes(
+                        Pid::Node(0),
+                        node_outcome.send,
+                    )
+        }),
+{
+    let request_event = ProcessEvent::Receive {
+        sender: Pid::Node(0),
+        message: ProductionMessage::StoreReq { op, request },
+    };
+    let store_outcomes =
+        crate::rover::spec_store_step(store, request_event);
+    reveal(crate::rover::spec_store_step);
+    assert(store_outcomes.len() == 1);
+    let store_outcome = store_outcomes[0];
+    assert(store_outcome.send.len() == 1);
+    let store_label = Label::Process {
+        process: Pid::Store,
+        at: store_at,
+        event: request_event,
+        send: store_outcome.send,
+    };
+    let after_store = land(
+        before,
+        store_slot,
+        Pid::Store,
+        store_at,
+        store_outcome,
+    );
+    assert(event_valid(before, Pid::Store, request_event));
+    lemma_store_one_lands_first_outcome(
+        config,
+        before,
+        store,
+        store_at,
+        request_event,
+    );
+
+    let response = match store_outcome.send[0].1 {
+        ProductionMessage::StoreRes { response, .. } => response,
+        _ => echod_concrete::store::spec_apply(
+            store,
+            request,
+        ).1,
+    };
+    let response_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: ProductionMessage::StoreRes { op, response },
+    };
+    reveal(echod_rover::rover::semantics::land);
+    reveal(echod_rover::rover::semantics::envelopes);
+    reveal(event_valid);
+    assert(store_outcome.send =~= seq![(
+        Pid::Node(0),
+        ProductionMessage::StoreRes { op, response },
+    )]);
+    assert(after_store.network
+        =~= before.network.push(Envelope {
+            sender: Pid::Store,
+            recipient: Pid::Node(0),
+            message: ProductionMessage::StoreRes {
+                op,
+                response,
+            },
+        }));
+    assert(after_store.network[before.network.len() as int]
+        == Envelope {
+            sender: Pid::Store,
+            recipient: Pid::Node(0),
+            message: ProductionMessage::StoreRes {
+                op,
+                response,
+            },
+        });
+    assert(event_valid(after_store, Pid::Node(0), response_event));
+    let node_outcomes = spec_node_step(node, node_at, response_event);
+    assert(node_outcomes.len() == 1);
+    let node_outcome = node_outcomes[0];
+    let node_label = Label::Process {
+        process: Pid::Node(0),
+        at: node_at,
+        event: response_event,
+        send: node_outcome.send,
+    };
+    let after_node = land(
+        after_store,
+        node_slot,
+        Pid::Node(0),
+        node_at,
+        node_outcome,
+    );
+    lemma_node_zero_lands_first_outcome(
+        config,
+        after_store,
+        node,
+        node_at,
+        response_event,
+    );
+}
+
+/// A Rover process step updates exactly its selected process slot.
+pub proof fn lemma_land_frames_other_process<S, M>(
+    before: echod_rover::rover::semantics::WorldV<Pid, S, M>,
+    slot: int,
+    process: Pid,
+    at: u64,
+    outcome: StepResultV<S, Pid, M>,
+    other: int,
+)
+    requires
+        0 <= slot < before.process.len(),
+        0 <= other < before.process.len(),
+        other != slot,
+    ensures
+        land(
+            before,
+            slot,
+            process,
+            at,
+            outcome,
+        ).process[other] == before.process[other],
+{
+    reveal(echod_rover::rover::semantics::land);
+}
+
+/// The exact four real Rover steps for the split document commit: origin
+/// request delivery, origin response delivery, schedule request delivery, and
+/// schedule response delivery. The node/store slots are updated in place while
+/// every unrelated process slot and pre-existing network envelope is framed.
+pub open spec fn production_split_store_trace(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    store_slot: int,
+    node: ProductionNodeV,
+    store: StoreV,
+    origin_op: u64,
+    origin_request: StoreReq,
+    schedule_op: u64,
+    schedule_request: StoreReq,
+    origin_store_at: u64,
+    origin_node_at: u64,
+    schedule_store_at: u64,
+    schedule_node_at: u64,
+) -> bool {
+    let origin_request_event = ProcessEvent::Receive {
+        sender: Pid::Node(0),
+        message: ProductionMessage::StoreReq {
+            op: origin_op,
+            request: origin_request,
+        },
+    };
+    let origin_store_outcome =
+        crate::rover::spec_store_step(store, origin_request_event)[0];
+    let origin_store_label = Label::Process {
+        process: Pid::Store,
+        at: origin_store_at,
+        event: origin_request_event,
+        send: origin_store_outcome.send,
+    };
+    let after_origin_store = land(
+        before,
+        store_slot,
+        Pid::Store,
+        origin_store_at,
+        origin_store_outcome,
+    );
+    let origin_response =
+        crate::rover::spec_store_step(
+            store,
+            origin_request_event,
+        )[0].send[0].1;
+    let origin_response_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: origin_response,
+    };
+    let origin_node_outcome =
+        spec_node_step(node, origin_node_at, origin_response_event)[0];
+    let origin_node_label = Label::Process {
+        process: Pid::Node(0),
+        at: origin_node_at,
+        event: origin_response_event,
+        send: origin_node_outcome.send,
+    };
+    let after_origin_node = land(
+        after_origin_store,
+        node_slot,
+        Pid::Node(0),
+        origin_node_at,
+        origin_node_outcome,
+    );
+    let origin_node = match origin_node_outcome.state {
+        ProductionLocalV::Node(next) => next,
+        _ => node,
+    };
+    let origin_store = match origin_store_outcome.state {
+        ProductionLocalV::Store(next) => next,
+        _ => store,
+    };
+    let schedule_request_event = ProcessEvent::Receive {
+        sender: Pid::Node(0),
+        message: ProductionMessage::StoreReq {
+            op: schedule_op,
+            request: schedule_request,
+        },
+    };
+    let schedule_store_outcome =
+        crate::rover::spec_store_step(
+            origin_store,
+            schedule_request_event,
+        )[0];
+    let schedule_store_label = Label::Process {
+        process: Pid::Store,
+        at: schedule_store_at,
+        event: schedule_request_event,
+        send: schedule_store_outcome.send,
+    };
+    let after_schedule_store = land(
+        after_origin_node,
+        store_slot,
+        Pid::Store,
+        schedule_store_at,
+        schedule_store_outcome,
+    );
+    let schedule_response_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: schedule_store_outcome.send[0].1,
+    };
+    let schedule_node_outcome = spec_node_step(
+        origin_node,
+        schedule_node_at,
+        schedule_response_event,
+    )[0];
+    let schedule_node_label = Label::Process {
+        process: Pid::Node(0),
+        at: schedule_node_at,
+        event: schedule_response_event,
+        send: schedule_node_outcome.send,
+    };
+    let after_schedule_node = land(
+        after_schedule_store,
+        node_slot,
+        Pid::Node(0),
+        schedule_node_at,
+        schedule_node_outcome,
+    );
+    &&& step(
+        ProductionModel,
+        config,
+        before,
+        origin_store_label,
+        after_origin_store,
+    )
+    &&& step(
+        ProductionModel,
+        config,
+        after_origin_store,
+        origin_node_label,
+        after_origin_node,
+    )
+    &&& step(
+        ProductionModel,
+        config,
+        after_origin_node,
+        schedule_store_label,
+        after_schedule_store,
+    )
+    &&& step(
+        ProductionModel,
+        config,
+        after_schedule_store,
+        schedule_node_label,
+        after_schedule_node,
+    )
+}
+
+#[verifier::spinoff_prover]
+#[verifier::rlimit(50)]
+pub proof fn lemma_production_split_store_trace(
+    config: crate::Config,
+    before: World<ProductionModel>,
+    node_slot: int,
+    store_slot: int,
+    node: ProductionNodeV,
+    store: StoreV,
+    origin_op: u64,
+    origin_request: StoreReq,
+    schedule_op: u64,
+    schedule_request: StoreReq,
+    origin_store_at: u64,
+    origin_node_at: u64,
+    schedule_store_at: u64,
+    schedule_node_at: u64,
+)
+    requires
+        0 <= node_slot < before.process.len(),
+        0 <= store_slot < before.process.len(),
+        node_slot == 0,
+        store_slot == 1,
+        node_slot != store_slot,
+        before.process[node_slot]
+            == (Pid::Node(0), ProductionLocalV::Node(node)),
+        before.process[store_slot]
+            == (Pid::Store, ProductionLocalV::Store(store)),
+        before.now <= origin_store_at,
+        origin_store_at <= origin_node_at,
+        origin_node_at <= schedule_store_at,
+        schedule_store_at <= schedule_node_at,
+        !store.seen.contains((Pid::Node(0), origin_op)),
+        before.network.contains(Envelope {
+            sender: Pid::Node(0),
+            recipient: Pid::Store,
+            message: ProductionMessage::StoreReq {
+                op: origin_op,
+                request: origin_request,
+            },
+        }),
+        ({
+            let origin_request_event = ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: ProductionMessage::StoreReq {
+                    op: origin_op,
+                    request: origin_request,
+                },
+            };
+            let origin_store_outcome =
+                crate::rover::spec_store_step(
+                    store,
+                    origin_request_event,
+                )[0];
+            let origin_response_event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: origin_store_outcome.send[0].1,
+            };
+            let origin_node_outcome =
+                spec_node_step(
+                    node,
+                    origin_node_at,
+                    origin_response_event,
+                )[0];
+            let origin_store = match origin_store_outcome.state {
+                ProductionLocalV::Store(next) => next,
+                _ => store,
+            };
+            &&& spec_node_step(
+                node,
+                origin_node_at,
+                origin_response_event,
+            ).len() == 1
+            &&& origin_node_outcome.send.contains((
+                Pid::Store,
+                ProductionMessage::StoreReq {
+                    op: schedule_op,
+                    request: schedule_request,
+                },
+            ))
+            &&& !origin_store.seen.contains((
+                Pid::Node(0),
+                schedule_op,
+            ))
+        }),
+    ensures
+        production_split_store_trace(
+            config,
+            before,
+            node_slot,
+            store_slot,
+            node,
+            store,
+            origin_op,
+            origin_request,
+            schedule_op,
+            schedule_request,
+            origin_store_at,
+            origin_node_at,
+            schedule_store_at,
+            schedule_node_at,
+        ),
+{
+    let origin_request_event = ProcessEvent::Receive {
+        sender: Pid::Node(0),
+        message: ProductionMessage::StoreReq {
+            op: origin_op,
+            request: origin_request,
+        },
+    };
+    let origin_store_outcome =
+        crate::rover::spec_store_step(store, origin_request_event)[0];
+    lemma_production_store_round_trip_steps(
+        config,
+        before,
+        node_slot,
+        store_slot,
+        node,
+        store,
+        origin_op,
+        origin_request,
+        origin_store_at,
+        origin_node_at,
+    );
+    let after_origin_store = land(
+        before,
+        store_slot,
+        Pid::Store,
+        origin_store_at,
+        origin_store_outcome,
+    );
+    let origin_response_event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: origin_store_outcome.send[0].1,
+    };
+    let origin_node_outcome =
+        spec_node_step(
+            node,
+            origin_node_at,
+            origin_response_event,
+        )[0];
+    let after_origin_node = land(
+        after_origin_store,
+        node_slot,
+        Pid::Node(0),
+        origin_node_at,
+        origin_node_outcome,
+    );
+    let origin_node = match origin_node_outcome.state {
+        ProductionLocalV::Node(next) => next,
+        _ => node,
+    };
+    let origin_store = match origin_store_outcome.state {
+        ProductionLocalV::Store(next) => next,
+        _ => store,
+    };
+    assert(after_origin_node.network
+        == before.network
+            + echod_rover::rover::semantics::envelopes(
+                Pid::Store,
+                origin_store_outcome.send,
+            )
+            + echod_rover::rover::semantics::envelopes(
+                Pid::Node(0),
+                origin_node_outcome.send,
+            ));
+    reveal(echod_rover::rover::semantics::envelopes);
+    let sent_index = choose|i: int|
+        0 <= i < origin_node_outcome.send.len()
+            && origin_node_outcome.send[i] == (
+                Pid::Store,
+                ProductionMessage::StoreReq {
+                    op: schedule_op,
+                    request: schedule_request,
+                },
+            );
+    let network_index = before.network.len()
+        + origin_store_outcome.send.len()
+        + sent_index;
+    assert(after_origin_node.network[network_index]
+        == Envelope {
+            sender: Pid::Node(0),
+            recipient: Pid::Store,
+            message: ProductionMessage::StoreReq {
+                op: schedule_op,
+                request: schedule_request,
+            },
+        });
+    assert(after_origin_node.network.contains(Envelope {
+        sender: Pid::Node(0),
+        recipient: Pid::Store,
+        message: ProductionMessage::StoreReq {
+            op: schedule_op,
+            request: schedule_request,
+        },
+    }));
+    lemma_production_store_round_trip_steps(
+        config,
+        after_origin_node,
+        node_slot,
+        store_slot,
+        origin_node,
+        origin_store,
+        schedule_op,
+        schedule_request,
+        schedule_store_at,
+        schedule_node_at,
+    );
+    reveal(production_split_store_trace);
+}
+
+proof fn lemma_abstract_timeout_lands_index(
+    config: ServerConfig,
+    before: World<AbstractModel>,
+    service_slot: int,
+    state: echod_abstract::model::StateV,
+    at: u64,
+    index: int,
+)
+    requires
+        0 <= service_slot < before.process.len(),
+        before.process[service_slot]
+            == (
+                echod_abstract::model::Pid::Service,
+                state,
+            ),
+        before.now <= at,
+        0 <= index
+            < echod_abstract::model::spec_run_timeout(
+                config,
+                state,
+                at,
+            ).len(),
+    ensures
+        ({
+            let event =
+                ProcessEvent::<
+                    echod_abstract::model::Pid,
+                    echod_abstract::Message,
+                >::Timeout;
+            let outcome =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    state,
+                    at,
+                )[index];
+            let label = Label::Process {
+                process: echod_abstract::model::Pid::Service,
+                at,
+                event,
+                send: outcome.send,
+            };
+            step(
+                AbstractModel,
+                config,
+                before,
+                label,
+                land(
+                    before,
+                    service_slot,
+                    echod_abstract::model::Pid::Service,
+                    at,
+                    outcome,
+                ),
+            )
+        }),
+{
+    let event =
+        ProcessEvent::<
+            echod_abstract::model::Pid,
+            echod_abstract::Message,
+        >::Timeout;
+    let outcomes =
+        echod_abstract::model::spec_run_timeout(config, state, at);
+    let outcome = outcomes[index];
+    let label = Label::Process {
+        process: echod_abstract::model::Pid::Service,
+        at,
+        event,
+        send: outcome.send,
+    };
+    reveal(step);
+    reveal(echod_rover::rover::semantics::is_process);
+    reveal(echod_abstract::model::spec_step);
+    reveal(echod_abstract::model::spec_service);
+    assert(AbstractModel.spec_on_event(
+        config,
+        echod_abstract::model::Pid::Service,
+        before.process[service_slot].1,
+        at,
+        event,
+    ) == outcomes);
+    assert(exists|i: int, j: int|
+        #![trigger AbstractModel.spec_on_event(
+            config,
+            echod_abstract::model::Pid::Service,
+            before.process[i].1,
+            at,
+            event,
+        )[j]]
+        0 <= i < before.process.len()
+            && before.process[i].0
+                == echod_abstract::model::Pid::Service
+            && 0 <= j < AbstractModel.spec_on_event(
+                config,
+                echod_abstract::model::Pid::Service,
+                before.process[i].1,
+                at,
+                event,
+            ).len()
+            && AbstractModel.spec_on_event(
+                config,
+                echod_abstract::model::Pid::Service,
+                before.process[i].1,
+                at,
+                event,
+            )[j].send == outcome.send
+            && land(
+                before,
+                i,
+                echod_abstract::model::Pid::Service,
+                at,
+                AbstractModel.spec_on_event(
+                    config,
+                    echod_abstract::model::Pid::Service,
+                    before.process[i].1,
+                    at,
+                    event,
+                )[j],
+            ) == land(
+                before,
+                service_slot,
+                echod_abstract::model::Pid::Service,
+                at,
+                outcome,
+            )
+    ) by {
+        let i = service_slot;
+        let j = index;
+    }
+    assert(step(
+        AbstractModel,
+        config,
+        before,
+        label,
+        land(
+            before,
+            service_slot,
+            echod_abstract::model::Pid::Service,
+            at,
+            outcome,
+        ),
+    ));
+}
+
+/// The three exact abstract timeout edges represented by the split schedule
+/// fire: schedule advancement, queued occurrence insertion, and retry
+/// dispatch. Explicit result indices keep this bounded relation tied to real
+/// abstract machine outcomes.
+pub proof fn lemma_abstract_schedule_fire_world_execution(
+    config: ServerConfig,
+    before: World<AbstractModel>,
+    service_slot: int,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: echod_abstract::model::StateV,
+    now: u64,
+    scheduled: echod_abstract::model::StateV,
+    occurred: echod_abstract::model::StateV,
+    abstract_after: echod_abstract::model::StateV,
+    schedule_index: int,
+    occurrence_index: int,
+    retry_index: int,
+)
+    requires
+        0 <= service_slot < before.process.len(),
+        before.process[service_slot]
+            == (
+                echod_abstract::model::Pid::Service,
+                abstract_before,
+            ),
+        before.now <= now,
+        crate::refinement::schedule_fire_atomic_trace(
+            config,
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            scheduled,
+            occurred,
+            abstract_after,
+        ),
+        ({
+            let schedule_results =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_before,
+                    now,
+                );
+            &&& 0 <= schedule_index
+                < schedule_results.len()
+            &&& schedule_results[schedule_index].state
+                == scheduled
+        }),
+        ({
+            let occurrence_results =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    scheduled,
+                    now,
+                );
+            &&& 0 <= occurrence_index
+                < occurrence_results.len()
+            &&& occurrence_results[occurrence_index].state
+                == occurred
+        }),
+        ({
+            let retry_results =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    occurred,
+                    now,
+                );
+            &&& 0 <= retry_index < retry_results.len()
+            &&& retry_results[retry_index].state
+                == abstract_after
+        }),
+    ensures
+        ({
+            let event =
+                ProcessEvent::<
+                    echod_abstract::model::Pid,
+                    echod_abstract::Message,
+                >::Timeout;
+            let schedule_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_before,
+                    now,
+                )[schedule_index];
+            let schedule_label = Label::Process {
+                process: echod_abstract::model::Pid::Service,
+                at: now,
+                event,
+                send: schedule_outcome.send,
+            };
+            let after_schedule = land(
+                before,
+                service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                schedule_outcome,
+            );
+            let occurrence_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    scheduled,
+                    now,
+                )[occurrence_index];
+            let occurrence_label = Label::Process {
+                process: echod_abstract::model::Pid::Service,
+                at: now,
+                event,
+                send: occurrence_outcome.send,
+            };
+            let after_occurrence = land(
+                after_schedule,
+                service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                occurrence_outcome,
+            );
+            let retry_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    config,
+                    occurred,
+                    now,
+                )[retry_index];
+            let retry_label = Label::Process {
+                process: echod_abstract::model::Pid::Service,
+                at: now,
+                event,
+                send: retry_outcome.send,
+            };
+            let after_retry = land(
+                after_occurrence,
+                service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                retry_outcome,
+            );
+            let execution = seq![
+                (schedule_label, after_schedule),
+                (occurrence_label, after_occurrence),
+                (retry_label, after_retry),
+            ];
+            &&& legal(
+                AbstractModel,
+                config,
+                before,
+                execution,
+            )
+            &&& end::<AbstractModel>(before, execution)
+                == after_retry
+            &&& after_retry.process[service_slot].1
+                == abstract_after
+            &&& matches(
+                AbstractModel,
+                config,
+                before,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                after_retry,
+            )
+        }),
+{
+    let event =
+        ProcessEvent::<
+            echod_abstract::model::Pid,
+            echod_abstract::Message,
+        >::Timeout;
+    let schedule_outcome =
+        echod_abstract::model::spec_run_timeout(
+            config,
+            abstract_before,
+            now,
+        )[schedule_index];
+    lemma_abstract_timeout_lands_index(
+        config,
+        before,
+        service_slot,
+        abstract_before,
+        now,
+        schedule_index,
+    );
+    let schedule_label = Label::Process {
+        process: echod_abstract::model::Pid::Service,
+        at: now,
+        event,
+        send: schedule_outcome.send,
+    };
+    let after_schedule = land(
+        before,
+        service_slot,
+        echod_abstract::model::Pid::Service,
+        now,
+        schedule_outcome,
+    );
+    assert(after_schedule.process[service_slot].1 == scheduled);
+    let occurrence_outcome =
+        echod_abstract::model::spec_run_timeout(
+            config,
+            scheduled,
+            now,
+        )[occurrence_index];
+    lemma_abstract_timeout_lands_index(
+        config,
+        after_schedule,
+        service_slot,
+        scheduled,
+        now,
+        occurrence_index,
+    );
+    let occurrence_label = Label::Process {
+        process: echod_abstract::model::Pid::Service,
+        at: now,
+        event,
+        send: occurrence_outcome.send,
+    };
+    let after_occurrence = land(
+        after_schedule,
+        service_slot,
+        echod_abstract::model::Pid::Service,
+        now,
+        occurrence_outcome,
+    );
+    assert(after_occurrence.process[service_slot].1 == occurred);
+    let retry_outcome =
+        echod_abstract::model::spec_run_timeout(
+            config,
+            occurred,
+            now,
+        )[retry_index];
+    lemma_abstract_timeout_lands_index(
+        config,
+        after_occurrence,
+        service_slot,
+        occurred,
+        now,
+        retry_index,
+    );
+    let retry_label = Label::Process {
+        process: echod_abstract::model::Pid::Service,
+        at: now,
+        event,
+        send: retry_outcome.send,
+    };
+    let after_retry = land(
+        after_occurrence,
+        service_slot,
+        echod_abstract::model::Pid::Service,
+        now,
+        retry_outcome,
+    );
+    let execution = seq![
+        (schedule_label, after_schedule),
+        (occurrence_label, after_occurrence),
+        (retry_label, after_retry),
+    ];
+    reveal(legal);
+    reveal(echod_rover::rover::semantics::before);
+    assert(legal(
+        AbstractModel,
+        config,
+        before,
+        execution,
+    ));
+    assert(AbstractModel.spec_observe(schedule_label)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    assert(AbstractModel.spec_observe(occurrence_label)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    assert(AbstractModel.spec_observe(retry_label)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    reveal_with_fuel(project, 4);
+    reveal(end);
+    assert(project::<AbstractModel>(AbstractModel, execution)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    assert(end::<AbstractModel>(before, execution)
+        == after_retry);
+    assert(matches(
+        AbstractModel,
+        config,
+        before,
+        Seq::<echod_abstract::BoundaryEvent>::empty(),
+        after_retry,
+    ));
+}
+
+/// Bounded related-world lift for the split physical commit. The production
+/// side takes four real Store delivery/response steps and frames arbitrary
+/// unrelated process slots. The abstract side takes the three exact indexed
+/// timeout results hidden behind those Store events. Equality between the
+/// executable Store requests and the handler's chosen codec requests remains
+/// an explicit premise rather than an assumed codec theorem.
+pub open spec fn codec_write_request_matches(
+    request: echod_concrete::store::StoreReqSpec,
+    key: Seq<char>,
+    before: echod_concrete::node::StoredDocumentV,
+    after: echod_concrete::node::StoredDocumentV,
+    before_bytes: u64,
+    etag: Option<Seq<char>>,
+) -> bool {
+    match request {
+        echod_concrete::store::StoreReqSpec::PutIfNoneMatch {
+            key: request_key,
+            body,
+        } => {
+            &&& etag is None
+            &&& request_key == key
+            &&& body == crate::document::spec_encode(after)
+        },
+        echod_concrete::store::StoreReqSpec::PutIfMatch {
+            key: request_key,
+            body,
+            etag: request_etag,
+        } => {
+            &&& etag is Some
+            &&& request_key == key
+            &&& request_etag.0 == etag->Some_0
+            &&& body == crate::document::spec_encode(after)
+        },
+        echod_concrete::store::StoreReqSpec::AppIfMatch {
+            key: request_key,
+            offset,
+            body,
+            etag: request_etag,
+        } => {
+            &&& etag is Some
+            &&& request_key == key
+            &&& offset == before_bytes
+            &&& request_etag.0 == etag->Some_0
+            &&& body
+                == crate::document::spec_encode_delta(
+                    before,
+                    after,
+                ).0
+        },
+        _ => false,
+    }
+}
+
+pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
+    production_config: crate::Config,
+    production_before: World<ProductionModel>,
+    production_node_slot: int,
+    production_store_slot: int,
+    production_node: ProductionNodeV,
+    production_store: StoreV,
+    origin_op: u64,
+    origin_request: StoreReq,
+    origin_expected: echod_concrete::store::StoreReqSpec,
+    origin_store_key: Seq<char>,
+    origin_loaded: echod_concrete::node::StoredDocumentV,
+    origin_after: echod_concrete::node::StoredDocumentV,
+    origin_loaded_bytes: u64,
+    origin_etag: Option<Seq<char>>,
+    schedule_op: u64,
+    schedule_request: StoreReq,
+    schedule_expected: echod_concrete::store::StoreReqSpec,
+    schedule_store_key: Seq<char>,
+    schedule_loaded: echod_concrete::node::StoredDocumentV,
+    schedule_after: echod_concrete::node::StoredDocumentV,
+    schedule_loaded_bytes: u64,
+    schedule_etag: Option<Seq<char>>,
+    origin_store_at: u64,
+    origin_node_at: u64,
+    schedule_store_at: u64,
+    schedule_node_at: u64,
+    abstract_before_world: World<AbstractModel>,
+    abstract_service_slot: int,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: echod_abstract::model::StateV,
+    now: u64,
+    scheduled: echod_abstract::model::StateV,
+    occurred: echod_abstract::model::StateV,
+    abstract_after: echod_abstract::model::StateV,
+    schedule_index: int,
+    occurrence_index: int,
+    retry_index: int,
+)
+    requires
+        origin_request.deep_view() == origin_expected,
+        schedule_request.deep_view() == schedule_expected,
+        codec_write_request_matches(
+            origin_expected,
+            origin_store_key,
+            origin_loaded,
+            origin_after,
+            origin_loaded_bytes,
+            origin_etag,
+        ),
+        codec_write_request_matches(
+            schedule_expected,
+            schedule_store_key,
+            schedule_loaded,
+            schedule_after,
+            schedule_loaded_bytes,
+            schedule_etag,
+        ),
+        echod_concrete::node::spec_stored_body(origin_loaded)
+            == origin_doc,
+        echod_concrete::node::spec_stored_body(origin_after)
+            == echod_concrete::node::spec_occurrence_transition(
+                origin_doc,
+                echod_concrete::node::spec_run_due(
+                    schedule_doc,
+                    now,
+                    abstract_config(production_config).retry_timeout,
+                ).2[0],
+                now,
+                abstract_config(production_config).retry_timeout,
+                crate::handler_docs::SWEEP_STEPS as nat,
+            ).0,
+        echod_concrete::node::spec_stored_body(schedule_loaded)
+            == schedule_doc,
+        echod_concrete::node::spec_stored_body(schedule_after)
+            == echod_concrete::node::spec_run_due(
+                schedule_doc,
+                now,
+                abstract_config(production_config).retry_timeout,
+            ).0,
+        0 <= production_node_slot
+            < production_before.process.len(),
+        0 <= production_store_slot
+            < production_before.process.len(),
+        production_node_slot == 0,
+        production_store_slot == 1,
+        production_node_slot != production_store_slot,
+        production_before.process[production_node_slot]
+            == (
+                Pid::Node(0),
+                ProductionLocalV::Node(production_node),
+            ),
+        production_before.process[production_store_slot]
+            == (
+                Pid::Store,
+                ProductionLocalV::Store(production_store),
+            ),
+        production_before.now <= origin_store_at,
+        origin_store_at <= origin_node_at,
+        origin_node_at <= schedule_store_at,
+        schedule_store_at <= schedule_node_at,
+        !production_store.seen.contains((
+            Pid::Node(0),
+            origin_op,
+        )),
+        production_before.network.contains(Envelope {
+            sender: Pid::Node(0),
+            recipient: Pid::Store,
+            message: ProductionMessage::StoreReq {
+                op: origin_op,
+                request: origin_request,
+            },
+        }),
+        ({
+            let origin_request_event = ProcessEvent::Receive {
+                sender: Pid::Node(0),
+                message: ProductionMessage::StoreReq {
+                    op: origin_op,
+                    request: origin_request,
+                },
+            };
+            let origin_store_outcome =
+                crate::rover::spec_store_step(
+                    production_store,
+                    origin_request_event,
+                )[0];
+            let origin_response_event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: origin_store_outcome.send[0].1,
+            };
+            let origin_node_outcome = spec_node_step(
+                production_node,
+                origin_node_at,
+                origin_response_event,
+            )[0];
+            let origin_store = match origin_store_outcome.state {
+                ProductionLocalV::Store(next) => next,
+                _ => production_store,
+            };
+            &&& spec_node_step(
+                production_node,
+                origin_node_at,
+                origin_response_event,
+            ).len() == 1
+            &&& origin_node_outcome.send.contains((
+                Pid::Store,
+                ProductionMessage::StoreReq {
+                    op: schedule_op,
+                    request: schedule_request,
+                },
+            ))
+            &&& !origin_store.seen.contains((
+                Pid::Node(0),
+                schedule_op,
+            ))
+        }),
+        0 <= abstract_service_slot
+            < abstract_before_world.process.len(),
+        abstract_before_world.process[abstract_service_slot]
+            == (
+                echod_abstract::model::Pid::Service,
+                abstract_before,
+            ),
+        abstract_before_world.now <= now,
+        crate::refinement::schedule_fire_split_intermediate(
+            abstract_config(production_config),
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            scheduled,
+            occurred,
+            abstract_after,
+        ),
+        ({
+            let schedule_results =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    abstract_before,
+                    now,
+                );
+            &&& 0 <= schedule_index
+                < schedule_results.len()
+            &&& schedule_results[schedule_index].state
+                == scheduled
+        }),
+        ({
+            let occurrence_results =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    scheduled,
+                    now,
+                );
+            &&& 0 <= occurrence_index
+                < occurrence_results.len()
+            &&& occurrence_results[occurrence_index].state
+                == occurred
+        }),
+        ({
+            let retry_results =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    occurred,
+                    now,
+                );
+            &&& 0 <= retry_index < retry_results.len()
+            &&& retry_results[retry_index].state
+                == abstract_after
+        }),
+    ensures
+        production_split_store_trace(
+            production_config,
+            production_before,
+            production_node_slot,
+            production_store_slot,
+            production_node,
+            production_store,
+            origin_op,
+            origin_request,
+            schedule_op,
+            schedule_request,
+            origin_store_at,
+            origin_node_at,
+            schedule_store_at,
+            schedule_node_at,
+        ),
+        ({
+            let event =
+                ProcessEvent::<
+                    echod_abstract::model::Pid,
+                    echod_abstract::Message,
+                >::Timeout;
+            let schedule_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    abstract_before,
+                    now,
+                )[schedule_index];
+            let after_schedule = land(
+                abstract_before_world,
+                abstract_service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                schedule_outcome,
+            );
+            let occurrence_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    scheduled,
+                    now,
+                )[occurrence_index];
+            let after_occurrence = land(
+                after_schedule,
+                abstract_service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                occurrence_outcome,
+            );
+            let retry_outcome =
+                echod_abstract::model::spec_run_timeout(
+                    abstract_config(production_config),
+                    occurred,
+                    now,
+                )[retry_index];
+            let after_retry = land(
+                after_occurrence,
+                abstract_service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                retry_outcome,
+            );
+            matches(
+                AbstractModel,
+                abstract_config(production_config),
+                abstract_before_world,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                after_retry,
+            )
+        }),
+{
+    lemma_production_split_store_trace(
+        production_config,
+        production_before,
+        production_node_slot,
+        production_store_slot,
+        production_node,
+        production_store,
+        origin_op,
+        origin_request,
+        schedule_op,
+        schedule_request,
+        origin_store_at,
+        origin_node_at,
+        schedule_store_at,
+        schedule_node_at,
+    );
+    lemma_abstract_schedule_fire_world_execution(
+        abstract_config(production_config),
+        abstract_before_world,
+        abstract_service_slot,
+        schedule_key,
+        schedule_doc,
+        origin_key,
+        origin_doc,
+        abstract_before,
+        now,
+        scheduled,
+        occurred,
+        abstract_after,
+        schedule_index,
+        occurrence_index,
+        retry_index,
+    );
 }
 
 /// The production document decisions already share the concrete handler,

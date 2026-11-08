@@ -3828,6 +3828,160 @@ pub open spec fn schedule_fire_split_intermediate(
     )
 }
 
+/// Relation retained after an origin CAS succeeds but the schedule CAS loses a
+/// race. Reloading the still-due schedule chooses the same deterministic
+/// occurrence, while the committed origin is a fixed point with no candidate
+/// effects. The abstract side therefore stays at the one already-taken atomic
+/// timeout endpoint instead of taking a duplicate timeout.
+pub open spec fn schedule_fire_retry_stutter_relation(
+    config: ServerConfig,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: AbstractStateV,
+    now: u64,
+    scheduled: AbstractStateV,
+    occurred: AbstractStateV,
+    abstract_after: AbstractStateV,
+) -> bool {
+    let schedule_step = echod_concrete::node::spec_run_due(
+        schedule_doc,
+        now,
+        config.retry_timeout,
+    );
+    let pending = schedule_step.2[0];
+    let first = echod_concrete::node::spec_occurrence_transition(
+        origin_doc,
+        pending,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+    let retry = echod_concrete::node::spec_occurrence_transition(
+        first.0,
+        pending,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+    &&& schedule_fire_split_intermediate(
+        config,
+        schedule_key,
+        schedule_doc,
+        origin_key,
+        origin_doc,
+        abstract_before,
+        now,
+        scheduled,
+        occurred,
+        abstract_after,
+    )
+    &&& retry == (
+        first.0,
+        Seq::<echod_concrete::node::NoteV>::empty(),
+        true,
+    )
+    &&& echod_concrete::node::spec_run_due(
+        schedule_doc,
+        now,
+        config.retry_timeout,
+    ) == schedule_step
+}
+
+pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
+    config: ServerConfig,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: AbstractStateV,
+    now: u64,
+    scheduled: AbstractStateV,
+    occurred: AbstractStateV,
+    abstract_after: AbstractStateV,
+)
+    requires
+        schedule_fire_split_intermediate(
+            config,
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            scheduled,
+            occurred,
+            abstract_after,
+        ),
+        ({
+            let schedule_step =
+                echod_concrete::node::spec_run_due(
+                    schedule_doc,
+                    now,
+                    config.retry_timeout,
+                );
+            let pending = schedule_step.2[0];
+            let first =
+                echod_concrete::node::spec_occurrence_transition(
+                    origin_doc,
+                    pending,
+                    now,
+                    config.retry_timeout,
+                    REQUEST_SWEEP_STEPS as nat,
+                );
+            &&& first.0 is Workflow
+            &&& first.0->Workflow_0.contains_key(
+                pending.promise,
+            )
+            &&& echod_concrete::node::spec_earliest_in(
+                first.0,
+                now,
+            ) is None
+            &&& echod_concrete::node::spec_run_due(
+                first.0,
+                now,
+                config.retry_timeout,
+            ).0 == first.0
+        }),
+    ensures
+        schedule_fire_retry_stutter_relation(
+            config,
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            scheduled,
+            occurred,
+            abstract_after,
+        ),
+{
+    let schedule_step =
+        echod_concrete::node::spec_run_due(
+            schedule_doc,
+            now,
+            config.retry_timeout,
+        );
+    let pending = schedule_step.2[0];
+    let first =
+        echod_concrete::node::spec_occurrence_transition(
+            origin_doc,
+            pending,
+            now,
+            config.retry_timeout,
+            REQUEST_SWEEP_STEPS as nat,
+        );
+    lemma_existing_occurrence_transition_is_idempotent(
+        first.0,
+        pending,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+}
+
 /// Bounded schedule-fire match for an already closed origin.  The production
 /// document path is exactly raw occurrence creation followed by one changing
 /// retry step and then idle.  The abstract witness is the indexed
@@ -4101,6 +4255,251 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
     ));
 }
 
+/// Generalized state match when the loaded origin contains arbitrary valid due
+/// work. Those origin timeouts linearize first through the existing indexed
+/// sweep trace; the schedule timeout then uses the closed sweep endpoint. The
+/// production occurrence transition reaches exactly that same final document.
+pub open spec fn schedule_fire_preswept_trace(
+    config: ServerConfig,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: AbstractStateV,
+    now: u64,
+    limit: nat,
+    preswept: AbstractStateV,
+    scheduled: AbstractStateV,
+    occurred: AbstractStateV,
+    abstract_after: AbstractStateV,
+) -> bool {
+    let swept = echod_concrete::node::spec_sweep(
+        origin_doc,
+        now,
+        config.retry_timeout,
+        limit,
+    ).0;
+    let schedule_step = echod_concrete::node::spec_run_due(
+        schedule_doc,
+        now,
+        config.retry_timeout,
+    );
+    let pending = schedule_step.2[0];
+    &&& origin_sweep_trace_to(
+        config,
+        origin_key,
+        origin_doc,
+        abstract_before,
+        now,
+        limit,
+        preswept,
+    )
+    &&& schedule_fire_split_intermediate(
+        config,
+        schedule_key,
+        schedule_doc,
+        origin_key,
+        swept,
+        preswept,
+        now,
+        scheduled,
+        occurred,
+        abstract_after,
+    )
+    &&& echod_concrete::node::spec_occurrence_transition(
+        origin_doc,
+        pending,
+        now,
+        config.retry_timeout,
+        limit,
+    ).0
+        == echod_concrete::node::spec_occurrence_transition(
+            swept,
+            pending,
+            now,
+            config.retry_timeout,
+            limit,
+        ).0
+}
+
+pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
+    config: ServerConfig,
+    schedule_key: Seq<char>,
+    schedule_doc: echod_concrete::node::DocumentBodyV,
+    origin_key: Seq<char>,
+    origin_doc: echod_concrete::node::DocumentBodyV,
+    abstract_before: AbstractStateV,
+    now: u64,
+    limit: nat,
+    preswept: AbstractStateV,
+)
+    requires
+        schedule_key != origin_key,
+        origin_doc is Workflow,
+        doc_rel(schedule_key, schedule_doc, abstract_before.store),
+        doc_rel(origin_key, origin_doc, abstract_before.store),
+        finite_store(abstract_before.store),
+        abstract_before.pending.len() == 0,
+        origin_sweep_trace_to(
+            config,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            limit,
+            preswept,
+        ),
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                origin_doc,
+                now,
+                config.retry_timeout,
+                limit,
+            ).0;
+            &&& echod_concrete::node::spec_earliest_in(
+                swept,
+                now,
+            ) is None
+            &&& echod_concrete::node::spec_run_due(
+                swept,
+                now,
+                config.retry_timeout,
+            ).0 == swept
+        }),
+        ({
+            let schedule_step =
+                echod_concrete::node::spec_run_due(
+                    schedule_doc,
+                    now,
+                    config.retry_timeout,
+                );
+            &&& schedule_step.0 != schedule_doc
+            &&& schedule_step.2.len() == 1
+            &&& origin_key
+                == echod_concrete::node::spec_origin_key(
+                    echod_types::origin(
+                        schedule_step.2[0].promise,
+                    ),
+                )
+        }),
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                origin_doc,
+                now,
+                config.retry_timeout,
+                limit,
+            ).0;
+            let pending =
+                echod_concrete::node::spec_run_due(
+                    schedule_doc,
+                    now,
+                    config.retry_timeout,
+                ).2[0];
+            let raw = echod_concrete::node::spec_occurrence(
+                swept,
+                pending,
+                now,
+            );
+            let retry = echod_concrete::node::spec_run_due(
+                raw,
+                now,
+                config.retry_timeout,
+            );
+            &&& raw != swept
+            &&& retry.0 != raw
+            &&& retry.2.len() == 0
+            &&& echod_concrete::node::spec_earliest_in(
+                retry.0,
+                now,
+            ) is None
+            &&& echod_concrete::node::spec_run_due(
+                retry.0,
+                now,
+                config.retry_timeout,
+            ).0 == retry.0
+        }),
+        limit == REQUEST_SWEEP_STEPS as nat,
+    ensures
+        exists|scheduled: AbstractStateV,
+            occurred: AbstractStateV,
+            abstract_after: AbstractStateV|
+            schedule_fire_preswept_trace(
+                config,
+                schedule_key,
+                schedule_doc,
+                origin_key,
+                origin_doc,
+                abstract_before,
+                now,
+                limit,
+                preswept,
+                scheduled,
+                occurred,
+                abstract_after,
+            ),
+{
+    let swept = echod_concrete::node::spec_sweep(
+        origin_doc,
+        now,
+        config.retry_timeout,
+        limit,
+    ).0;
+    lemma_origin_sweep_trace_endpoint_frames(
+        config,
+        origin_key,
+        origin_doc,
+        abstract_before,
+        now,
+        limit,
+        preswept,
+    );
+    assert(doc_rel(
+        schedule_key,
+        schedule_doc,
+        preswept.store,
+    ));
+    assert(preswept.pending.len() == 0);
+    lemma_closed_origin_schedule_fire_matches_atomic_timeout(
+        config,
+        schedule_key,
+        schedule_doc,
+        origin_key,
+        swept,
+        preswept,
+        now,
+    );
+    reveal(echod_concrete::node::spec_occurrence_transition);
+    assert forall|scheduled: AbstractStateV,
+        occurred: AbstractStateV,
+        abstract_after: AbstractStateV|
+        #[trigger] schedule_fire_split_intermediate(
+            config,
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            swept,
+            preswept,
+            now,
+            scheduled,
+            occurred,
+            abstract_after,
+        ) implies schedule_fire_preswept_trace(
+            config,
+            schedule_key,
+            schedule_doc,
+            origin_key,
+            origin_doc,
+            abstract_before,
+            now,
+            limit,
+            preswept,
+            scheduled,
+            occurred,
+            abstract_after,
+        ) by {
+    }
+}
+
 /// The production occurrence transition has only two outcomes.  Success
 /// exposes both fully closed endpoints and the canonical endpoint-derived
 /// effects.  Failure returns the loaded document byte-for-byte and exposes no
@@ -4165,6 +4564,171 @@ pub proof fn lemma_occurrence_transition_closes_or_discards(
         }),
 {
     reveal(echod_concrete::node::spec_occurrence_transition);
+}
+
+proof fn lemma_execute_notes_same_empty(
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    now: u64,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+    ensures
+        echod_concrete::node::spec_execute_notes(
+            map,
+            map,
+            now,
+            keys,
+            count,
+        ) == Seq::<echod_concrete::node::NoteV>::empty(),
+    decreases count,
+{
+    reveal(echod_concrete::node::spec_execute_notes);
+    if count > 0 {
+        lemma_execute_notes_same_empty(
+            map,
+            now,
+            keys,
+            (count - 1) as nat,
+        );
+        reveal(echod_concrete::document::offer_committed);
+    }
+}
+
+proof fn lemma_unblock_notes_for_same_empty(
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    promise: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= listeners.len(),
+    ensures
+        echod_concrete::node::spec_unblock_notes_for(
+            map,
+            map,
+            promise,
+            listeners,
+            count,
+        ) == Seq::<echod_concrete::node::NoteV>::empty(),
+    decreases count,
+{
+    reveal(echod_concrete::node::spec_unblock_notes_for);
+    if count > 0 {
+        lemma_unblock_notes_for_same_empty(
+            map,
+            promise,
+            listeners,
+            (count - 1) as nat,
+        );
+        reveal(echod_concrete::document::listener_committed);
+    }
+}
+
+proof fn lemma_unblock_notes_same_empty(
+    map: Map<Seq<char>, echod_concrete::node::ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+        forall|i: int|
+            0 <= i < count ==> map.contains_key(#[trigger] keys[i]),
+    ensures
+        echod_concrete::node::spec_unblock_notes(
+            map,
+            map,
+            keys,
+            count,
+        ) == Seq::<echod_concrete::node::NoteV>::empty(),
+    decreases count,
+{
+    reveal(echod_concrete::node::spec_unblock_notes);
+    if count > 0 {
+        lemma_unblock_notes_same_empty(
+            map,
+            keys,
+            (count - 1) as nat,
+        );
+        let promise = keys[count as int - 1];
+        lemma_unblock_notes_for_same_empty(
+            map,
+            promise,
+            map[promise].promise.listeners,
+            map[promise].promise.listeners.len(),
+        );
+    }
+}
+
+/// Retrying a schedule fire after its origin CAS has already committed cannot
+/// recreate or redispatch that occurrence.  A closed origin containing the
+/// deterministic occurrence id is an exact fixed point of occurrence
+/// insertion and both closure sweeps; endpoint-derived effects are empty.
+pub proof fn lemma_existing_occurrence_transition_is_idempotent(
+    document: echod_concrete::node::DocumentBodyV,
+    pending: echod_concrete::node::PendingV,
+    now: u64,
+    retry_timeout: u64,
+    limit: nat,
+)
+    requires
+        document is Workflow,
+        document->Workflow_0.contains_key(pending.promise),
+        echod_concrete::node::spec_earliest_in(document, now) is None,
+        echod_concrete::node::spec_run_due(
+            document,
+            now,
+            retry_timeout,
+        ).0 == document,
+    ensures
+        echod_concrete::node::spec_occurrence_transition(
+            document,
+            pending,
+            now,
+            retry_timeout,
+            limit,
+        ) == (
+            document,
+            Seq::<echod_concrete::node::NoteV>::empty(),
+            true,
+        ),
+{
+    reveal(echod_concrete::node::spec_occurrence_transition);
+    reveal(echod_concrete::node::spec_sweep);
+    reveal(echod_concrete::node::spec_occurrence);
+    reveal(echod_concrete::node::spec_opened);
+    assert(echod_concrete::node::spec_sweep(
+        document,
+        now,
+        retry_timeout,
+        limit,
+    ).0 == document);
+    assert(echod_concrete::node::spec_occurrence(
+        document,
+        pending,
+        now,
+    ) == document);
+    let map = document->Workflow_0;
+    let keys = echod_concrete::node::spec_sorted_present(map);
+    echod_concrete::timers::lemma_sorted(map.dom());
+    lemma_execute_notes_same_empty(
+        map,
+        now,
+        keys,
+        keys.len(),
+    );
+    lemma_unblock_notes_same_empty(
+        map,
+        keys,
+        keys.len(),
+    );
+    reveal(echod_concrete::node::spec_committed_notes);
+    assert(echod_concrete::node::spec_committed_notes(
+        document,
+        document,
+        now,
+    ) =~= Seq::<echod_concrete::node::NoteV>::empty());
 }
 
 /// A successful occurrence transition preserves the full stored-document
@@ -4647,6 +5211,69 @@ pub proof fn lemma_schedule_advance_cas_failure_retries_or_discards(
         ),
 {
     reveal(crate::handler_docs::spec_answered_fire_schedule);
+}
+
+/// A schedule CAS race restarts the same Fire flight by reloading the schedule.
+/// The origin outbox was already consumed at the first CAS and is absent from
+/// this phase, so the retry can only issue the hidden schedule Get; the
+/// existing-occurrence fixed-point theorem governs the later origin reload.
+pub proof fn lemma_schedule_advance_cas_race_reloads_fire(
+    s: S,
+    fid: u64,
+    flight: FlightSpec,
+    commit: crate::handler_docs::CommittingSpec,
+    outcome: StoreRes,
+    advanced: S,
+    next: crate::handler_docs::CommittingSpec,
+)
+    requires
+        flight.work is Fire,
+        flight.target is Schedule,
+        crate::handler_docs::spec_commit_advance(
+            s,
+            fid,
+            commit,
+            Some(outcome),
+        ) == (
+            advanced,
+            next,
+            crate::handler_docs::ProgressSpec::Failed(
+                echod_concrete::store::StoreErrorSpec::PreconditionFailed,
+            ),
+        ),
+    ensures
+        crate::handler_docs::spec_answered_fire_schedule(
+            s,
+            fid,
+            flight,
+            commit,
+            outcome,
+        ) == crate::handler_docs::spec_retry(
+            crate::state::spec_note(
+                crate::state::spec_note(
+                    crate::state::spec_note(
+                        advanced,
+                        crate::types::NoteSpec::AdvanceEnd {
+                            flight: fid,
+                            committed: false,
+                        },
+                    ),
+                    crate::types::NoteSpec::Commit(
+                        crate::types::CommitOutcome::Raced,
+                    ),
+                ),
+                crate::types::NoteSpec::Raced {
+                    target: crate::target::spec_name(
+                        flight.target,
+                    ),
+                    attempt: flight.attempt,
+                },
+            ),
+            flight,
+        ),
+{
+    reveal(crate::handler_docs::spec_answered_fire_schedule);
+    reveal(crate::handler_docs::spec_commit_failed);
 }
 
 /// Store-loading phases have not selected a durable document transition yet,
