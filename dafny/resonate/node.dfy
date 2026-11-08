@@ -11,7 +11,7 @@ module Node {
   datatype Plan = Plan(
     reply: Temp.Answer,
     created: bool,
-    cmds: seq<Cmd>,
+    effects: seq<Effect>,
     keep: Temp.Opt<Clock>,
     remember: bool,
     next: nat)
@@ -25,38 +25,39 @@ module Node {
             Result(s, [], Keep)
           else
             var rpc := s.mint;
-            Result(AtNode(s.open[id := Reading(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
+            Result(AtNode(s.open[id := Cont.Prepare(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
                    [ReqTo(Bucket, rpc, Body.Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
           if req.id in s.open then
             Result(s, [], Keep)
           else
             var rpc := s.mint;
-            Result(AtNode(s.open[req.id := Reading(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
+            Result(AtNode(s.open[req.id := Cont.Prepare(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
                    [ReqTo(Bucket, rpc, Body.Get(req.id))], Keep)
         case Request(_, Res(rpc, Got(id, doc, version))) =>
-          if id in s.open && s.open[id].Reading? && s.open[id].rpc == rpc then
-            Process(s, id, s.open[id].caller, s.open[id].cid, Prepare(s, s.open[id].job, id, doc, version, now))
+          if id in s.open && s.open[id].Prepare? && s.open[id].rpc == rpc then
+            var plan := Prepare(s, s.open[id].job, id, doc, version, now);
+            Process(s, id, s.open[id].caller, s.open[id].cid, plan)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutPut(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Cmd.Put(clock)) then
-            Advance(s, id)
+          if Live(s, id, rpc) && Head(s, id, Put(clock)) then
+            Reschedule(s, id)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, DocWrote(id, _))) =>
-          if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
-            Advance(s, id)
+          if Live(s, id, rpc) && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0].Write? then
+            Reschedule(s, id)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, DocRejected(id))) =>
-          if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
+          if Live(s, id, rpc) && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0].Write? then
             Result(AtNode(s.open - {id}, s.armed, s.next, s.owner, s.mint), [], Keep)
           else
             Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Cmd.Drop(clock)) then
-            Advance(s, id)
+          if Live(s, id, rpc) && Head(s, id, Effect.Drop(clock)) then
+            Reschedule(s, id)
           else
             Result(s, [], Keep)
         case _ =>
@@ -116,13 +117,13 @@ module Node {
         var prev := if key in s.armed then Temp.Some(s.armed[key]) else Temp.None;
         match Temp.Nearest(applied.doc)
         case None =>
-          var drop := match prev case None => [] case Some(t) => [Cmd.Drop(t)];
+          var drop := match prev case None => [] case Some(t) => [Effect.Drop(t)];
           Plan(applied.answer, true, [Write(key, applied.doc, version, Temp.None)] + drop, Temp.None, true, s.next)
         case Some(d) =>
           var put := Due(key, d, s.owner, s.next);
-          var drop := match prev case None => [] case Some(t) => if t == put then [] else [Cmd.Drop(t)];
+          var drop := match prev case None => [] case Some(t) => if t == put then [] else [Effect.Drop(t)];
           Plan(applied.answer, true,
-               [Cmd.Put(put), Write(key, applied.doc, version, Temp.Some(put))] + drop,
+               [Put(put), Write(key, applied.doc, version, Temp.Some(put))] + drop,
                Temp.Some(put), true, s.next + 1)
   }
 
@@ -130,47 +131,46 @@ module Node {
     if created then Created(answer) else PromiseReply(answer)
   }
 
-  function SendCmd(id: string, cmd: Cmd): Body {
-    match cmd
+  function SendEffect(id: string, effect: Effect): Body {
+    match effect
     case Put(clock) => PutTimeout(id, clock)
     case Write(key, doc, version, cover) => WriteDoc(id, key, doc, version, cover)
     case Drop(clock) => DropTimeout(id, clock)
   }
 
-  // The armed map after a write command lands.
-  function Remember(armed: map<string, Clock>, cmd: Cmd, keep: Temp.Opt<Clock>, remember: bool): map<string, Clock> {
-    if remember && cmd.Write? then
+  // The armed map after a write effect lands.
+  function Remember(armed: map<string, Clock>, effect: Effect, keep: Temp.Opt<Clock>, remember: bool): map<string, Clock> {
+    if remember && effect.Write? then
       match keep
-      case None => armed - {cmd.key}
+      case None => armed - {effect.key}
       case Some(clock) => armed[clock.key := clock]
     else armed
   }
 
-  // Process the commands. An empty list answers the caller.
+  // An empty effect list answers the caller. Otherwise the head goes to the
+  // store and Process stays scheduled on the whole list.
   function Process(s: State, id: string, caller: Pid, cid: nat, plan: Plan): Result<Pid, Msg, State>
     requires s.AtNode?
   {
-    if plan.cmds == [] then
-      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner, s.mint), [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
+    if plan.effects == [] then
+      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner, s.mint),
+             [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
     else
       var rpc := s.mint;
-      var run := Running(caller, plan.reply, plan.cmds, plan.keep, plan.remember, cid, rpc);
-      Result(AtNode(s.open[id := run], s.armed, plan.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, SendCmd(id, plan.cmds[0]))], Keep)
+      var phase := Cont.Process(caller, plan.reply, plan.effects, plan.keep, plan.remember, cid, rpc);
+      Result(AtNode(s.open[id := phase], s.armed, plan.next, s.owner, s.mint + 1),
+             [ReqTo(Bucket, rpc, SendEffect(id, plan.effects[0]))], Keep)
   }
 
-  // The head command was accepted. Remember a write, then send the next command or the reply.
-  function Advance(s: State, id: string): Result<Pid, Msg, State>
-    requires s.AtNode? && id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0
+  // The head effect landed. Remember a write, then schedule Process on what remains.
+  function Reschedule(s: State, id: string): Result<Pid, Msg, State>
+    requires s.AtNode? && id in s.open && s.open[id].Process? && |s.open[id].effects| > 0
   {
-    var run := s.open[id];
-    var armed := Remember(s.armed, run.cmds[0], run.keep, run.remember);
-    var rest := run.cmds[1..];
-    if rest == [] then
-      Result(AtNode(s.open - {id}, armed, s.next, s.owner, s.mint), [ResTo(run.caller, run.cid, Created(run.reply))], Keep)
-    else
-      var rpc := s.mint;
-      var run' := Running(run.caller, run.reply, rest, run.keep, run.remember && !run.cmds[0].Write?, run.cid, rpc);
-      Result(AtNode(s.open[id := run'], armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, SendCmd(id, rest[0]))], Keep)
+    var phase := s.open[id];
+    var head := phase.effects[0];
+    var armed := Remember(s.armed, head, phase.keep, phase.remember);
+    var plan := Plan(phase.reply, true, phase.effects[1..], phase.keep, phase.remember && !head.Write?, s.next);
+    Process(AtNode(s.open, armed, s.next, s.owner, s.mint), id, phase.caller, phase.cid, plan)
   }
 
   predicate Live(s: State, id: string, rpc: nat)
@@ -179,10 +179,10 @@ module Node {
     id in s.open && s.open[id].rpc == rpc
   }
 
-  predicate Head(s: State, id: string, cmd: Cmd)
+  predicate Head(s: State, id: string, effect: Effect)
     requires s.AtNode?
   {
-    && id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0] == cmd
+    && id in s.open && s.open[id].Process? && |s.open[id].effects| > 0 && s.open[id].effects[0] == effect
   }
 
 

@@ -13,19 +13,20 @@ module Protocol {
   datatype Clock = Due(key: string, at: nat, owner: nat, token: nat)
   // What the read was for. Every handler starts as one of these.
   datatype Job = AskGet | AskCreate(req: Temp.CreateReq)
-  // The store commands a prepared handler runs, in order.
-  datatype Cmd =
+  // What a prepared handler still has to do to the store, head first.
+  datatype Effect =
     | Put(clock: Clock)
     | Write(key: string, doc: Temp.Doc, version: nat, cover: Temp.Opt<Clock>)
     | Drop(clock: Clock)
-  // Reading: the document is in flight. Running: the commands still to send,
-  // head first. `remember` writes `keep` into the armed map when the write lands.
+  // The phase is named for what runs next. Prepare: the document is in flight.
+  // Process: the effects still to send. Process is rescheduled until that list
+  // is empty. `remember` writes `keep` into the armed map when the write lands.
   // `cid` is the caller's request. `rpc` is the store request in flight.
   datatype Cont =
-    | Reading(caller: Pid, job: Job, cid: nat, rpc: nat)
-    | Running(caller: Pid, reply: Temp.Answer, cmds: seq<Cmd>, keep: Temp.Opt<Clock>, remember: bool, cid: nat, rpc: nat)
+    | Prepare(caller: Pid, job: Job, cid: nat, rpc: nat)
+    | Process(caller: Pid, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: nat, rpc: nat)
 
-  predicate AwaitsGet(c: Cont) { c.Reading? && c.job.AskGet? }
+  predicate AwaitsGet(c: Cont) { c.Prepare? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
   datatype Body =
     | PromiseGet(id: string)

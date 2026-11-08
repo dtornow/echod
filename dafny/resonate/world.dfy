@@ -30,9 +30,9 @@ module Worlds {
   // What the world installs. The network holds these and calls process.step.
   function Processes(self: Pid): Process<Pid, Msg, State> {
     match self
-    case Client(_) => Process(Client.step)
-    case Node(_) => Process(Node.step)
-    case Bucket => Process(Bucket.step)
+    case Client(_) => Network.Process(Client.step)
+    case Node(_) => Network.Process(Node.step)
+    case Bucket => Network.Process(Bucket.step)
   }
 
   function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask): Sys<Pid, Msg, State>

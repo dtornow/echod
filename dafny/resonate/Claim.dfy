@@ -28,7 +28,7 @@ module Claim {
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Reading(from, AskGet, cid, rpc)
+      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid, rpc)
       && answer == Temp.Get(doc, id, b(k).now).answer
       && (id !in Temp.ObjectsOf(doc) ==> answer == Temp.Answer(404, Temp.None))
       && (id in Temp.ObjectsOf(doc) ==>
@@ -49,7 +49,7 @@ module Claim {
       && Bucket in b(k).procs && b(k).procs[Bucket].AtBucket?
       && node in b(k).procs && b(k).procs[node].AtNode?
       && id in b(k).procs[node].open
-      && b(k).procs[node].open[id] == Reading(from, AskGet, cid, rpc)
+      && b(k).procs[node].open[id] == Prepare(from, AskGet, cid, rpc)
       && answer == Temp.Get(doc, id, b(k).now).answer;
     Cases(doc, id, b(k).now);
   }
