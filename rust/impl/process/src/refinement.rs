@@ -42,7 +42,7 @@ use crate::document::spec_loaded_body;
 #[cfg(verus_keep_ghost)]
 use crate::handler::spec_on_event;
 #[cfg(verus_keep_ghost)]
-use crate::handler_docs::{FlightSpec, FlightsSpec, PhaseSpec};
+use crate::handler_docs::{FlightSpec, FlightsSpec, PhaseSpec, WorkSpec};
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
 #[cfg(verus_keep_ghost)]
@@ -1352,11 +1352,357 @@ pub proof fn lemma_empty_wheel_fire_due_is_idle(s: S, now: u64)
         crate::handler_timers::spec_fire_due(s, now) == s,
 {
     reveal(crate::handler_timers::spec_fire_due);
+    reveal(crate::handler_timers::spec_with_timers);
     reveal(crate::state_timers::spec_take_due);
     reveal(crate::state_timers::spec_due_count);
     reveal(crate::handler_timers::spec_dispatch_due);
     assert(s.timers.wheel.armed =~= Seq::<crate::state_timers::SlotSpec>::empty());
     assert(s.timers.backlog =~= Seq::<crate::state_timers::SlotSpec>::empty());
+}
+
+/// The exact, common singleton due-dispatch shape.  A successful fire consumes
+/// the backlog entry before `spec_timer_fire` increments `inflight`.
+pub open spec fn singleton_due_dispatch_base(
+    s: S,
+) -> S {
+    crate::handler_timers::spec_with_timers(
+        s,
+        TimersSpec {
+            wheel: crate::state_timers::TimerWheelSpec {
+                armed: Seq::empty(),
+            },
+            backlog: Seq::empty(),
+            ..s.timers
+        },
+    )
+}
+
+pub proof fn lemma_singleton_take_due(
+    at: u64,
+    key: Seq<char>,
+    now: u64,
+)
+    requires
+        at <= now,
+    ensures
+        crate::state_timers::spec_take_due(seq![(at, key)], now)
+            == (
+                seq![(at, key)],
+                Seq::<crate::state_timers::SlotSpec>::empty(),
+            ),
+{
+    reveal(crate::state_timers::spec_take_due);
+    reveal(crate::state_timers::spec_due_count);
+    assert(seq![(at, key)].drop_first()
+        =~= Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(crate::state_timers::spec_due_count(
+        Seq::<crate::state_timers::SlotSpec>::empty(),
+        now,
+    ) == 0);
+}
+
+pub proof fn lemma_dispatch_due_zero(s: S, now: u64)
+    ensures
+        crate::handler_timers::spec_dispatch_due(s, now, 0) == s,
+{
+    reveal(crate::handler_timers::spec_dispatch_due);
+}
+
+/// A real origin-key dispatch starts exactly one origin sweep.  The theorem
+/// deliberately states the resulting timer counters as well as the flight:
+/// those counters expose the activity-invariant frontier below.
+pub proof fn lemma_singleton_due_origin_starts_sweep(
+    s: S,
+    now: u64,
+    at: u64,
+    key: Seq<char>,
+    origin: Seq<char>,
+    deadline: u64,
+    token: u64,
+    by: Seq<char>,
+)
+    requires
+        s.timers.wheel.armed == seq![(at, key)],
+        s.timers.backlog == Seq::<crate::state_timers::SlotSpec>::empty(),
+        s.timers.inflight == 0,
+        at <= now,
+        crate::keys::spec_parse_timer_key(key)
+            == Some(crate::keys::TimerEntrySpec::Origin {
+                origin,
+                deadline,
+                token,
+                by,
+            }),
+        crate::handler_timers::spec_owns_entry(
+            s,
+            crate::keys::TimerEntrySpec::Origin {
+                origin,
+                deadline,
+                token,
+                by,
+            },
+        ),
+        crate::verified::node_spec::spec_acts(
+            s.node.core,
+            origin,
+            now as nat,
+        ),
+        crate::handler_docs::spec_slot_of(s, origin).busy is None,
+        !s.flights.inflight.contains_key(s.next_flight),
+        flight_lanes_consistent(s.flights),
+    ensures
+        ({
+            let after = crate::handler_timers::spec_fire_due(s, now);
+            let fid = s.next_flight;
+            let fired = crate::verified::flight_spec::AFired {
+                key: crate::verified::node::AKey {
+                    origin,
+                    at: deadline as nat,
+                    token: token as nat,
+                },
+                by,
+            };
+            &&& after.timers.wheel.armed.len() == 0
+            &&& after.timers.backlog.len() == 0
+            &&& after.timers.inflight == 1
+            &&& after.flights.inflight.contains_key(fid)
+            &&& after.flights.inflight[fid].target
+                == TargetSpec::Origin(origin)
+            &&& after.flights.inflight[fid].work
+                == WorkSpec::Sweep {
+                    fired: Some(fired),
+                    now,
+                }
+            &&& after.flights.inflight[fid].firing
+                == Some(crate::handler_docs::FiringSpec {
+                    key,
+                    at,
+                    kind: crate::types::TimerKind::Origin,
+                    lag: now.saturating_sub(at),
+                })
+            &&& after.flights.inflight[fid].phase is Loading
+            &&& forall|old_fid: crate::types::FlightId|
+                s.flights.inflight.contains_key(old_fid) ==>
+                    after.flights.inflight.contains_key(old_fid)
+                    && after.flights.inflight[old_fid]
+                        == s.flights.inflight[old_fid]
+            &&& flight_lanes_consistent(after.flights)
+            &&& !timers_consistent(after.timers)
+            &&& !timer_activity_consistent(after)
+        }),
+{
+    lemma_singleton_take_due(at, key, now);
+    assert(crate::state_timers::spec_take_due(
+        s.timers.wheel.armed,
+        now,
+    ) == (
+        seq![(at, key)],
+        Seq::<crate::state_timers::SlotSpec>::empty(),
+    ));
+    reveal(crate::handler_timers::spec_fire_due);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::state_timers::spec_take_due);
+    reveal(crate::state_timers::spec_due_count);
+    reveal(crate::handler_timers::spec_dispatch_due);
+    reveal(crate::handler_timers::spec_timer_fire);
+    reveal(crate::handler_docs::spec_submit);
+    reveal(crate::handler_docs::spec_start);
+    reveal(crate::handler_docs::spec_begin);
+    reveal(crate::handler_docs::spec_load_origin);
+    reveal(crate::handler_docs::spec_inflight);
+    reveal(crate::handler_docs::spec_slot_of);
+    reveal(crate::handler_docs::spec_with_slot);
+    reveal(crate::state::spec_store);
+    reveal(crate::state::spec_note);
+    let base = singleton_due_dispatch_base(s);
+    let queued = crate::handler_timers::spec_with_timers(
+        s,
+        TimersSpec {
+            wheel: crate::state_timers::TimerWheelSpec {
+                armed: Seq::empty(),
+            },
+            backlog: seq![(at, key)],
+            ..s.timers
+        },
+    );
+    assert(s.timers.backlog + seq![(at, key)] == seq![(at, key)]);
+    assert(crate::handler_timers::spec_fire_due(s, now)
+        == crate::handler_timers::spec_dispatch_due(queued, now, 1));
+    assert(queued.timers.backlog.drop_first()
+        =~= Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(crate::handler_timers::spec_with_timers(
+        queued,
+        TimersSpec {
+            backlog: queued.timers.backlog.drop_first(),
+            ..queued.timers
+        },
+    ) == base);
+    let fired = crate::handler_timers::spec_timer_fire(base, key, at, now);
+    lemma_dispatch_due_zero(fired, now);
+    assert(crate::handler_timers::spec_fire_due(s, now) == fired);
+    let after = crate::handler_timers::spec_fire_due(s, now);
+    let fid = s.next_flight;
+    assert(after.timers.wheel.armed.len() == 0);
+    assert(after.timers.backlog.len() == 0);
+    assert(after.timers.inflight == 1);
+    assert(after.flights.inflight.contains_key(fid));
+    assert(after.flights.inflight[fid].target == TargetSpec::Origin(origin));
+    assert(after.flights.inflight[fid].work is Sweep);
+    assert(after.flights.inflight[fid].firing is Some);
+    assert(after.flights.inflight[fid].phase is Loading);
+    assert(flight_lanes_consistent(after.flights));
+    assert(!timers_consistent(after.timers));
+    assert(!timer_activity_consistent(after));
+}
+
+/// The schedule counterpart starts the exact `Fire` flight and loads the
+/// named schedule.  As in the origin case, the singleton dispatch cannot
+/// preserve the current timer-activity invariant.
+pub proof fn lemma_singleton_due_schedule_starts_fire(
+    s: S,
+    now: u64,
+    at: u64,
+    key: Seq<char>,
+    id: Seq<char>,
+    deadline: u64,
+    token: u64,
+    by: Seq<char>,
+)
+    requires
+        s.timers.wheel.armed == seq![(at, key)],
+        s.timers.backlog == Seq::<crate::state_timers::SlotSpec>::empty(),
+        s.timers.inflight == 0,
+        at <= now,
+        crate::keys::spec_parse_timer_key(key)
+            == Some(crate::keys::TimerEntrySpec::Schedule {
+                id,
+                deadline,
+                token,
+                by,
+            }),
+        crate::handler_timers::spec_owns_entry(
+            s,
+            crate::keys::TimerEntrySpec::Schedule {
+                id,
+                deadline,
+                token,
+                by,
+            },
+        ),
+        crate::verified::node_spec::spec_acts(
+            s.node.core,
+            id,
+            now as nat,
+        ),
+        crate::handler_docs::spec_slot_of(
+            s,
+            crate::target::spec_name(TargetSpec::Schedule(id)),
+        ).busy is None,
+        !s.flights.inflight.contains_key(s.next_flight),
+        flight_lanes_consistent(s.flights),
+    ensures
+        ({
+            let after = crate::handler_timers::spec_fire_due(s, now);
+            let fid = s.next_flight;
+            let fired = crate::verified::flight_spec::AFired {
+                key: crate::verified::node::AKey {
+                    origin: "sched:"@ + id,
+                    at: deadline as nat,
+                    token: token as nat,
+                },
+                by,
+            };
+            &&& after.timers.wheel.armed.len() == 0
+            &&& after.timers.backlog.len() == 0
+            &&& after.timers.inflight == 1
+            &&& after.flights.inflight.contains_key(fid)
+            &&& after.flights.inflight[fid].target
+                == TargetSpec::Schedule(id)
+            &&& after.flights.inflight[fid].work
+                == WorkSpec::Fire {
+                    schedule: id,
+                    fired: Some(fired),
+                    now,
+                }
+            &&& after.flights.inflight[fid].firing
+                == Some(crate::handler_docs::FiringSpec {
+                    key,
+                    at,
+                    kind: crate::types::TimerKind::Schedule,
+                    lag: now.saturating_sub(at),
+                })
+            &&& after.flights.inflight[fid].phase is FireLoadingSchedule
+            &&& forall|old_fid: crate::types::FlightId|
+                s.flights.inflight.contains_key(old_fid) ==>
+                    after.flights.inflight.contains_key(old_fid)
+                    && after.flights.inflight[old_fid]
+                        == s.flights.inflight[old_fid]
+            &&& flight_lanes_consistent(after.flights)
+            &&& !timers_consistent(after.timers)
+            &&& !timer_activity_consistent(after)
+        }),
+{
+    lemma_singleton_take_due(at, key, now);
+    assert(crate::state_timers::spec_take_due(
+        s.timers.wheel.armed,
+        now,
+    ) == (
+        seq![(at, key)],
+        Seq::<crate::state_timers::SlotSpec>::empty(),
+    ));
+    reveal(crate::handler_timers::spec_fire_due);
+    reveal(crate::handler_timers::spec_with_timers);
+    reveal(crate::state_timers::spec_take_due);
+    reveal(crate::state_timers::spec_due_count);
+    reveal(crate::handler_timers::spec_dispatch_due);
+    reveal(crate::handler_timers::spec_timer_fire);
+    reveal(crate::handler_docs::spec_submit);
+    reveal(crate::handler_docs::spec_start);
+    reveal(crate::handler_docs::spec_begin);
+    reveal(crate::handler_docs::spec_inflight);
+    reveal(crate::handler_docs::spec_slot_of);
+    reveal(crate::handler_docs::spec_with_slot);
+    reveal(crate::state::spec_store);
+    reveal(crate::state::spec_note);
+    let base = singleton_due_dispatch_base(s);
+    let queued = crate::handler_timers::spec_with_timers(
+        s,
+        TimersSpec {
+            wheel: crate::state_timers::TimerWheelSpec {
+                armed: Seq::empty(),
+            },
+            backlog: seq![(at, key)],
+            ..s.timers
+        },
+    );
+    assert(s.timers.backlog + seq![(at, key)] == seq![(at, key)]);
+    assert(crate::handler_timers::spec_fire_due(s, now)
+        == crate::handler_timers::spec_dispatch_due(queued, now, 1));
+    assert(queued.timers.backlog.drop_first()
+        =~= Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(crate::handler_timers::spec_with_timers(
+        queued,
+        TimersSpec {
+            backlog: queued.timers.backlog.drop_first(),
+            ..queued.timers
+        },
+    ) == base);
+    let fired = crate::handler_timers::spec_timer_fire(base, key, at, now);
+    lemma_dispatch_due_zero(fired, now);
+    assert(crate::handler_timers::spec_fire_due(s, now) == fired);
+    let after = crate::handler_timers::spec_fire_due(s, now);
+    let fid = s.next_flight;
+    assert(after.timers.wheel.armed.len() == 0);
+    assert(after.timers.backlog.len() == 0);
+    assert(after.timers.inflight == 1);
+    assert(after.flights.inflight.contains_key(fid));
+    assert(after.flights.inflight[fid].target == TargetSpec::Schedule(id));
+    assert(after.flights.inflight[fid].work is Fire);
+    assert(after.flights.inflight[fid].firing is Some);
+    assert(after.flights.inflight[fid].phase is FireLoadingSchedule);
+    assert(flight_lanes_consistent(after.flights));
+    assert(!timers_consistent(after.timers));
+    assert(!timer_activity_consistent(after));
 }
 
 /// Runtime bookkeeping agrees with the operation table held by the core.
@@ -1393,6 +1739,21 @@ pub open spec fn related(
     // empty in the currently proved fragment. Fire/occurrence simulation must
     // relax it to a coverage relation.
     &&& abstract_state.pending.len() == 0
+}
+
+/// No abstract state can repair a production-side timer-activity violation:
+/// `related` requires that invariant independently of the abstract store or
+/// pending work.  The singleton due-dispatch theorems above establish this
+/// violation for both exact successful submission branches.
+pub proof fn lemma_failed_timer_activity_has_no_abstract_match(
+    production: ProcessV,
+    abstract_state: AbstractStateV,
+)
+    requires
+        !timer_activity_consistent(production.core),
+    ensures
+        !related(production, abstract_state),
+{
 }
 
 pub open spec fn initial_abstract() -> AbstractStateV {
