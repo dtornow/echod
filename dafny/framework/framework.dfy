@@ -23,6 +23,20 @@ module Network {
   datatype TimerOp = Keep | Set(delay: nat) | Cancel   // delay is relative to "now"
   datatype Result<P(!new), M(!new), S(!new)> = Result(state: S, sends: seq<Send<P, M>>, timer: TimerOp)
 
+  // A request carries an id. The response cites that same id, so a reply is
+  // the answer to one request and not to whatever else is in flight.
+  // `ask` and `ans` are separate names: a shared destructor has one type, and
+  // the request body and the response body need not be the same type.
+  datatype RR<Q(==, !new), A(==, !new)> = Req(id: nat, ask: Q) | Res(id: nat, ans: A)
+
+  function ReqTo<P(!new), Q(==, !new), A(==, !new)>(to: P, id: nat, body: Q): Send<P, RR<Q, A>> {
+    Send(to, Req(id, body))
+  }
+
+  function ResTo<P(!new), Q(==, !new), A(==, !new)>(to: P, id: nat, body: A): Send<P, RR<Q, A>> {
+    Send(to, Res(id, body))
+  }
+
   // The same shape for every process: who it is, the state it holds, what
   // arrived, and the time.
   datatype Process<!P(==, !new), !M(==, !new), !S(!new)> = Process(

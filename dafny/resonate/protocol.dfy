@@ -20,13 +20,14 @@ module Protocol {
     | Drop(clock: Clock)
   // Reading: the document is in flight. Running: the commands still to send,
   // head first. `remember` writes `keep` into the armed map when the write lands.
+  // `cid` is the caller's request. `rpc` is the store request in flight.
   datatype Cont =
-    | Reading(caller: Pid, job: Job)
-    | Running(caller: Pid, reply: Temp.Answer, cmds: seq<Cmd>, keep: Temp.Opt<Clock>, remember: bool)
+    | Reading(caller: Pid, job: Job, cid: nat, rpc: nat)
+    | Running(caller: Pid, reply: Temp.Answer, cmds: seq<Cmd>, keep: Temp.Opt<Clock>, remember: bool, cid: nat, rpc: nat)
 
   predicate AwaitsGet(c: Cont) { c.Reading? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
-  datatype Msg =
+  datatype Body =
     | PromiseGet(id: string)
     | PromiseCreate(req: Temp.CreateReq)
     | PromiseReply(answer: Temp.Answer)
@@ -40,9 +41,10 @@ module Protocol {
     | DocRejected(id: string)
     | DropTimeout(id: string, clock: Clock)
     | TimeoutDropped(id: string, clock: Clock)
+  type Msg = RR<Body, Body>
   datatype State =
     | AtClient(id: string, node: nat, kind: Kind, waiting: bool)
-    | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat)
+    | AtNode(open: map<string, Cont>, armed: map<string, Clock>, next: nat, owner: nat, mint: nat)
     | AtBucket(docs: map<string, Temp.Doc>, ver: map<string, nat>, timeouts: set<Clock>, anchor: map<string, Clock>)
 
   function Empty(): Temp.Doc { Temp.Origin(0, map[]) }
@@ -56,4 +58,9 @@ module Protocol {
   function VersionOf(ver: map<string, nat>, key: string): nat {
     if key in ver then ver[key] else 0
   }
+
+  predicate IsGet(m: Msg) { m.Req? && m.ask.Get? }
+  predicate IsGot(m: Msg) { m.Res? && m.ans.Got? }
+  predicate IsPromiseGet(m: Msg) { m.Req? && m.ask.PromiseGet? }
+  predicate IsPromiseReply(m: Msg) { m.Res? && m.ans.PromiseReply? }
 }

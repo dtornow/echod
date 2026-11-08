@@ -1,14 +1,7 @@
 include "protocol.dfy"
 
-// The Resonate server. One continuation per id in flight.
-//
-// A handler reads the document, prepares, then processes the store commands
-// in order. A promise get prepares a reply and no commands. A promise create
-// runs the handler, sweep then create. When the document changes, the
-// commands are the timeout for the nearest deadline, the write, and the
-// timeout that write replaces. The head command is the one in flight.
-
 module Node {
+
   import opened Network
   import opened Protocol
   import Temp
@@ -22,6 +15,43 @@ module Node {
     keep: Temp.Opt<Clock>,
     remember: bool,
     next: nat)
+
+  function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
+  {
+    if self.Node? && s.AtNode? then
+      match i {
+        case Request(from, Req(cid, PromiseGet(id))) =>
+          if id in s.open then Result(s, [], Keep)
+          else
+            var rpc := s.mint;
+            Result(AtNode(s.open[id := Reading(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
+                   [ReqTo(Bucket, rpc, Body.Get(id))], Keep)
+        case Request(from, Req(cid, PromiseCreate(req))) =>
+          if req.id in s.open then Result(s, [], Keep)
+          else
+            var rpc := s.mint;
+            Result(AtNode(s.open[req.id := Reading(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
+                   [ReqTo(Bucket, rpc, Body.Get(req.id))], Keep)
+        case Request(_, Res(rpc, Got(id, doc, version))) =>
+          if id in s.open && s.open[id].Reading? && s.open[id].rpc == rpc then
+            Process(s, id, s.open[id].caller, s.open[id].cid, Prepare(s, s.open[id].job, id, doc, version, now))
+          else Result(s, [], Keep)
+        case Request(_, Res(rpc, TimeoutPut(id, clock))) =>
+          if Live(s, id, rpc) && Head(s, id, Cmd.Put(clock)) then Advance(s, id) else Result(s, [], Keep)
+        case Request(_, Res(rpc, DocWrote(id, _))) =>
+          if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
+            Advance(s, id)
+          else Result(s, [], Keep)
+        case Request(_, Res(rpc, DocRejected(id))) =>
+          if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
+            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner, s.mint), [], Keep)
+          else Result(s, [], Keep)
+        case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
+          if Live(s, id, rpc) && Head(s, id, Cmd.Drop(clock)) then Advance(s, id) else Result(s, [], Keep)
+        case _ => Result(s, [], Keep)
+      }
+    else Result(s, [], Keep)
+  }
 
   // Promise get reads the projection and does not write it back.
   function Get(doc: Temp.Doc, id: string, now: nat): (r: Temp.Applied)
@@ -83,11 +113,11 @@ module Node {
                Temp.Some(put), true, s.next + 1)
   }
 
-  function Reply(created: bool, answer: Temp.Answer): Msg {
+  function Reply(created: bool, answer: Temp.Answer): Body {
     if created then Created(answer) else PromiseReply(answer)
   }
 
-  function SendCmd(id: string, cmd: Cmd): Msg {
+  function SendCmd(id: string, cmd: Cmd): Body {
     match cmd
     case Put(clock) => PutTimeout(id, clock)
     case Write(key, doc, version, cover) => WriteDoc(id, key, doc, version, cover)
@@ -104,14 +134,15 @@ module Node {
   }
 
   // Process the commands. An empty list answers the caller.
-  function Process(s: State, id: string, caller: Pid, plan: Plan): Result<Pid, Msg, State>
+  function Process(s: State, id: string, caller: Pid, cid: nat, plan: Plan): Result<Pid, Msg, State>
     requires s.AtNode?
   {
     if plan.cmds == [] then
-      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner), [Send(caller, Reply(plan.created, plan.reply))], Keep)
+      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner, s.mint), [ResTo(caller, cid, Reply(plan.created, plan.reply))], Keep)
     else
-      var run := Running(caller, plan.reply, plan.cmds, plan.keep, plan.remember);
-      Result(AtNode(s.open[id := run], s.armed, plan.next, s.owner), [Send(Bucket, SendCmd(id, plan.cmds[0]))], Keep)
+      var rpc := s.mint;
+      var run := Running(caller, plan.reply, plan.cmds, plan.keep, plan.remember, cid, rpc);
+      Result(AtNode(s.open[id := run], s.armed, plan.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, SendCmd(id, plan.cmds[0]))], Keep)
   }
 
   // The head command was accepted. Remember a write, then send the next command or the reply.
@@ -122,10 +153,17 @@ module Node {
     var armed := Remember(s.armed, run.cmds[0], run.keep, run.remember);
     var rest := run.cmds[1..];
     if rest == [] then
-      Result(AtNode(s.open - {id}, armed, s.next, s.owner), [Send(run.caller, Created(run.reply))], Keep)
+      Result(AtNode(s.open - {id}, armed, s.next, s.owner, s.mint), [ResTo(run.caller, run.cid, Created(run.reply))], Keep)
     else
-      var run' := Running(run.caller, run.reply, rest, run.keep, run.remember && !run.cmds[0].Write?);
-      Result(AtNode(s.open[id := run'], armed, s.next, s.owner), [Send(Bucket, SendCmd(id, rest[0]))], Keep)
+      var rpc := s.mint;
+      var run' := Running(run.caller, run.reply, rest, run.keep, run.remember && !run.cmds[0].Write?, run.cid, rpc);
+      Result(AtNode(s.open[id := run'], armed, s.next, s.owner, s.mint + 1), [ReqTo(Bucket, rpc, SendCmd(id, rest[0]))], Keep)
+  }
+
+  predicate Live(s: State, id: string, rpc: nat)
+    requires s.AtNode?
+  {
+    id in s.open && s.open[id].rpc == rpc
   }
 
   predicate Head(s: State, id: string, cmd: Cmd)
@@ -134,34 +172,5 @@ module Node {
     && id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0] == cmd
   }
 
-  function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
-  {
-    if self.Node? && s.AtNode? then
-      match i {
-        case Request(from, PromiseGet(id)) =>
-          if id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[id := Reading(from, AskGet)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(id))], Keep)
-        case Request(from, PromiseCreate(req)) =>
-          if req.id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[req.id := Reading(from, AskCreate(req))], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
-        case Request(_, Got(id, doc, version)) =>
-          if id in s.open && s.open[id].Reading? then
-            Process(s, id, s.open[id].caller, Prepare(s, s.open[id].job, id, doc, version, now))
-          else Result(s, [], Keep)
-        case Request(_, TimeoutPut(id, clock)) =>
-          if Head(s, id, Cmd.Put(clock)) then Advance(s, id) else Result(s, [], Keep)
-        case Request(_, DocWrote(id, _)) =>
-          if id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
-            Advance(s, id)
-          else Result(s, [], Keep)
-        case Request(_, DocRejected(id)) =>
-          if id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [], Keep)
-          else Result(s, [], Keep)
-        case Request(_, TimeoutDropped(id, clock)) =>
-          if Head(s, id, Cmd.Drop(clock)) then Advance(s, id) else Result(s, [], Keep)
-        case _ => Result(s, [], Keep)
-      }
-    else Result(s, [], Keep)
-  }
+
 }

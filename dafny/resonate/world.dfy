@@ -23,7 +23,7 @@ module Worlds {
   function Boot(docs: map<string, Temp.Doc>, ask: nat -> Ask, self: Pid): State {
     match self
     case Client(c) => AtClient(ask(c).id, ask(c).node, ask(c).kind, true)
-    case Node(i) => AtNode(map[], map[], 0, i + 1)
+    case Node(i) => AtNode(map[], map[], 0, i + 1, 0)
     case Bucket => AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs))
   }
 

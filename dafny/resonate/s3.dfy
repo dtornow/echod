@@ -53,7 +53,7 @@ module S3 {
     | List(prefix: Key, maxKeys: nat)
     | ListPrefixes(prefix: Key)
 
-  datatype Msg = Ask(op: Op) | Reply(out: Outcome)
+  type Msg = RR<Op, Outcome>
 
   const Pids: set<Pid> := {Bucket}
 
@@ -286,10 +286,10 @@ module S3 {
   {
     match i
     case Timeout => Result(s, [], Cancel)
-    case Request(from, Ask(op)) =>
+    case Request(from, Req(id, op)) =>
       var a := Apply(s, op);
-      Result(a.state, [Send(from, Reply(a.out))], Keep)
-    case Request(_, Reply(_)) => Result(s, [], Keep)
+      Result(a.state, [ResTo(from, id, a.out)], Keep)
+    case Request(_, Res(_, _)) => Result(s, [], Keep)
   }
 
   function Processes(self: Pid): Process<Pid, Msg, State> { Process(step) }
