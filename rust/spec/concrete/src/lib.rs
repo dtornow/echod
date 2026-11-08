@@ -3,7 +3,7 @@
 //! A world is the nodes and one store. Each node keeps its own documents
 //! and takes one flight at a time. The abstract model is a separate machine.
 //! This crate does not import its handlers. The document machine of `node.rs`
-//! (`handle`, `run_due`, `sweep`, `create_occurrence`) is the one the process
+//! (`handle`, `fire_schedule`, `sweep`, `create_occurrence`) is the one the process
 //! runs: each is proved equal to its specification here, and the process
 //! wraps it in flights and commits. Refinement of this model to the abstract
 //! one is `simulation`: the relation, the injected call, the observed output,
@@ -60,8 +60,8 @@ pub use model::Model;
 pub use node::{lemma_doc_view, lemma_obj_view, lemma_outbound_view, lemma_pending_view};
 pub use node::{
     advance_stored, body_deadline, body_len, clone_body, clone_stored, create_occurrence, empty_body,
-    empty_schedule, empty_stored_schedule, empty_stored_workflow, empty_workflow, handle,
-    keys_within, occurrence_transition, peek, request_transition, run_due, same_body, stored_body,
+    empty_schedule, empty_stored_schedule, empty_stored_workflow, empty_workflow, fire_schedule,
+    handle, keys_within, occurrence_transition, peek, request_transition, same_body, stored_body,
     stored_committed_at, stored_is_workflow, stored_next_wake_at, stored_version, sweep, Outbound,
     Pending,
 };

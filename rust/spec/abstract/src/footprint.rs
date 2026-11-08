@@ -4,6 +4,7 @@
 //! of steps a timeout may run; the handler decides which of them do anything.
 
 use vstd::prelude::*;
+use std::collections::BTreeMap;
 
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
 use echod_types::{Request, TaskFenceAction};
@@ -57,51 +58,75 @@ fn workflow_origin(request: &Request) -> Option<&str> {
     Some(origin(id))
 }
 
-fn belongs_to_workflow(want: &str, work: &Work) -> bool {
-    match work {
-        Work::PromiseTimeout(id)
-        | Work::TaskLeaseTimeout(id)
-        | Work::TaskRetryTimeout(id)
-        | Work::Listener { awaited: id, .. } => origin(id) == want,
-        Work::Callback { awaited, .. } => origin(awaited) == want,
-        Work::ScheduleTimeout { .. } | Work::Occurrence { .. } => false,
-    }
-}
-
 fn close_workflow(
     config: &ServerConfig,
     mut state: Store,
     workflow: &str,
     now: Time,
-    limit: usize,
-) -> Option<(Store, Vec<Work>, Vec<Dispatch>, Vec<&'static str>)> {
+) -> (Store, Vec<Work>, Vec<Dispatch>, Vec<&'static str>) {
     let mut deferred = Vec::new();
     let mut effects = Vec::new();
     let mut marks = Vec::new();
-    for _ in 0..limit {
-        let Some(step) = timeout_work_plain(config, &state, now)
-            .into_iter()
-            .find(|step| belongs_to_workflow(workflow, step.req()))
-        else {
-            return Some((state, deferred, effects, marks));
-        };
-        let outcome = config.process_work(step.req(), &state, now);
-        if outcome.not_due {
-            return None;
+
+    let mut apply = |work: Work, state: &mut Store| {
+        let outcome = config.process_work(&work, state, now);
+        if !outcome.not_due {
+            *state = outcome.next;
+            deferred.extend(outcome.work);
+            effects.extend(outcome.send);
+            marks.extend(outcome.marks);
         }
-        state = outcome.next;
-        deferred.extend(outcome.work);
-        effects.extend(outcome.send);
-        marks.extend(outcome.marks);
+    };
+
+    // Phase 1 uses stable key snapshots and projects every promise and task.
+    let promise_keys = state.promises.keys();
+    for id in promise_keys.iter().filter(|id| origin(id) == workflow) {
+        apply(Work::PromiseTimeout(id.clone()), &mut state);
     }
-    if timeout_work_plain(config, &state, now)
-        .iter()
-        .any(|step| belongs_to_workflow(workflow, step.req()))
-    {
-        None
-    } else {
-        Some((state, deferred, effects, marks))
+    let task_keys = state.tasks.keys();
+    for id in task_keys.iter().filter(|id| origin(id) == workflow) {
+        apply(Work::TaskLeaseTimeout(id.clone()), &mut state);
+        apply(Work::TaskRetryTimeout(id.clone()), &mut state);
     }
+
+    // Phase 2 drains every settled callback and listener queue.
+    let settled_keys = state.promises.keys();
+    for awaited in settled_keys.iter().filter(|id| origin(id) == workflow) {
+        let Some(promise) = state.promises.get(awaited) else {
+            continue;
+        };
+        if promise.state == echod_types::PromiseState::Pending {
+            continue;
+        }
+        let callbacks = promise.callbacks.to_vec();
+        let listeners = promise.listeners.to_vec();
+        for awaiter in callbacks {
+            apply(
+                Work::Callback {
+                    awaited: awaited.clone(),
+                    awaiter,
+                },
+                &mut state,
+            );
+        }
+        for address in listeners {
+            apply(
+                Work::Listener {
+                    awaited: awaited.clone(),
+                    address,
+                },
+                &mut state,
+            );
+        }
+    }
+
+    // Callback resumption can make suspended tasks immediately offerable.
+    let resumed_keys = state.tasks.keys();
+    for id in resumed_keys.iter().filter(|id| origin(id) == workflow) {
+        apply(Work::TaskRetryTimeout(id.clone()), &mut state);
+    }
+
+    (state, deferred, effects, marks)
 }
 
 fn effect_relevant(state: &Store, effect: &Dispatch) -> bool {
@@ -142,44 +167,23 @@ impl ServerConfig {
     ///
     /// Workflow requests close everything due at `now`, run the raw handler,
     /// and close newly due work before returning. Schedule requests retain
-    /// their independent internal timer processing. Either finite closure
-    /// failing leaves the original state and effects untouched and returns
-    /// the request-shaped 503.
+    /// their independent internal timer processing.
     pub fn request_transition(
         &self,
         request: &Request,
         state: &Store,
         now: Time,
-        limit: usize,
     ) -> Vec<Out> {
         let Some(workflow) = workflow_origin(request) else {
             return self.handler(request, state, now);
         };
-        let Some((before, before_work, before_effects, before_marks)) =
-            close_workflow(self, state.clone(), workflow, now, limit)
-        else {
-            return vec![Out {
-                resp: unavailable(request),
-                next: state.clone(),
-                work: Vec::new(),
-                send: Vec::new(),
-                marks: Vec::new(),
-            }];
-        };
+        let (before, before_work, before_effects, before_marks) =
+            close_workflow(self, state.clone(), workflow, now);
         self.handler(request, &before, now)
             .into_iter()
             .map(|handled| {
-                let Some((next, mut after_work, mut after_effects, after_marks)) =
-                    close_workflow(self, handled.next, workflow, now, limit)
-                else {
-                    return Out {
-                        resp: unavailable(request),
-                        next: state.clone(),
-                        work: Vec::new(),
-                        send: Vec::new(),
-                        marks: Vec::new(),
-                    };
-                };
+                let (next, mut after_work, mut after_effects, after_marks) =
+                    close_workflow(self, handled.next, workflow, now);
                 let mut work = before_work.clone();
                 work.append(&mut after_work);
                 let mut effects = before_effects.clone();
@@ -250,6 +254,9 @@ impl Footprint for ServerConfig {
     type Key = Key;
 
     fn external_touches(&self, op: &Request) -> Touches<Key> {
+        if let Some(workflow) = workflow_origin(op) {
+            return Touches::one(Key::Origin(workflow.to_string()));
+        }
         let ks = |v: &[&Id]| Touches::Only(v.iter().map(|k| Key::Object((*k).clone())).collect());
         match op {
             Request::PromiseCreate(c) => ks(&[&c.id]),
@@ -295,6 +302,9 @@ impl Footprint for ServerConfig {
 
     fn internal_touches(&self, step: &Work) -> Touches<Key> {
         match step {
+            Work::WorkflowTransition(id) => {
+                Touches::one(Key::Origin(origin(id).to_string()))
+            }
             Work::PromiseTimeout(id) | Work::TaskLeaseTimeout(id) | Work::TaskRetryTimeout(id) | Work::Listener { awaited: id, .. } => {
                 Touches::one(Key::Object(id.clone()))
             }
@@ -381,20 +391,62 @@ pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> (r: Vec<Sched<Wor
 
 fn timeout_work_plain(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
     let mut v = Vec::new();
+    let mut workflows: BTreeMap<String, (Time, String)> = BTreeMap::new();
+    let mut record = |id: &String, at: Time| {
+        let workflow = origin(id).to_string();
+        match workflows.get_mut(&workflow) {
+            Some((earliest, probe)) => {
+                if at < *earliest {
+                    *earliest = at;
+                    *probe = id.clone();
+                }
+            },
+            None => {
+                workflows.insert(workflow, (at, id.clone()));
+            },
+        }
+    };
     for (id, p) in s.promises.iter() {
-        runs(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        if !m.process_work(&Work::PromiseTimeout(id.clone()), s, now).not_due {
+            record(id, p.timeout_at);
+        }
         for awaiter in p.callbacks.to_vec() {
-            runs(m, s, now, &mut v, Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
+            if !m.process_work(
+                &Work::Callback { awaited: id.clone(), awaiter },
+                s,
+                now,
+            ).not_due {
+                record(id, now);
+            }
         }
         for address in p.listeners.to_vec() {
-            runs(m, s, now, &mut v, Sched::Later(Work::Listener { awaited: id.clone(), address }));
+            if !m.process_work(
+                &Work::Listener { awaited: id.clone(), address },
+                s,
+                now,
+            ).not_due {
+                record(id, now);
+            }
         }
     }
     for (id, t) in s.tasks.iter() {
-        runs(m, s, now, &mut v, Sched::Timer(t.lease_timeout_at(), Work::TaskLeaseTimeout(id.clone())));
-        if let Some(r) = t.retry_timeout_at {
-            runs(m, s, now, &mut v, Sched::Timer(r, Work::TaskRetryTimeout(id.clone())));
+        if !m.process_work(&Work::TaskLeaseTimeout(id.clone()), s, now).not_due {
+            record(id, t.lease_timeout_at());
         }
+        if let Some(r) = t.retry_timeout_at {
+            if !m.process_work(&Work::TaskRetryTimeout(id.clone()), s, now).not_due {
+                record(id, r);
+            }
+        }
+    }
+    for (_, (_, probe)) in workflows {
+        runs(
+            m,
+            s,
+            now,
+            &mut v,
+            Sched::Later(Work::WorkflowTransition(probe)),
+        );
     }
     for (id, c) in s.schedules.iter() {
         let promise = expand(&c.promise_id, id, c.next_run_at);

@@ -36,12 +36,13 @@ earlier proof.
 `echod_concrete::document` owns `WorkflowDocument`, `ScheduleDocument`, and
 the partials whose fold is either document. `echod_concrete::node` runs the
 business machine on their `DocumentBody`: workflow objects sorted by id, or a
-schedule. `handle` runs one request on it; `run_due` one due step — a promise's timeout, a lease or a
-retry timeout, one callback resumed, one listener told, or a schedule's
-occurrence; `sweep` runs `run_due` until a step changes nothing or a step
-limit is reached; `create_occurrence` births an occurrence in its origin.
-Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
-`spec_sweep`, `spec_occurrence` — and those are the steps of the concrete
+schedule. `handle` runs one request on it. `sweep` is one atomic two-phase
+workflow transition: it projects every due object from a stable key snapshot,
+then drains every settled callback and listener queue. `fire_schedule`
+advances one due schedule occurrence; `create_occurrence` births that
+occurrence in its origin and applies the same workflow transition.
+Each ensures it computes its specification — `spec_handle`, `spec_sweep`,
+`spec_fire_schedule`, `spec_occurrence` — and those are the steps of the concrete
 Rover model, which `simulation.rs` proves refines the abstract one.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
@@ -54,7 +55,7 @@ The process (`rust/impl/process`) runs that machine. `document.rs` states the
 shared partial codec for process verification; the executable codec and
 document values live in `echod_concrete::document`. `handler_docs`
 decides a request by `handle` and a fired key by `sweep`; `handler_sched`
-runs a schedule by `run_due` and `create_occurrence`. Once the write lands,
+runs a schedule by `fire_schedule` and `create_occurrence`. Once the write lands,
 an `Execute` note goes to the address of the task's `resonate:target` tag,
 an `Unblock` to its listener. Every module of the process is inside
 `verus!`: each exec function ensures it computes its `spec_*` twin over the

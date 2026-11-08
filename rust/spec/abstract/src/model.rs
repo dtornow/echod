@@ -13,19 +13,23 @@ use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
 use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
+#[cfg(verus_keep_ghost)]
+use echod_types::{PromiseState, TaskState};
 
 use super::machine::{unavailable, Dispatch, InOut, Out, ServerConfig, Store, Work};
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 pub use super::machine::spec_unavailable;
 #[cfg(verus_keep_ghost)]
-use super::machine::{spec_body, spec_handler, spec_process_work, spec_status_res};
+use super::machine::{spec_body, spec_handler, spec_lease_at, spec_process_work, spec_status_res};
 #[cfg(verus_keep_ghost)]
 use super::view::strs;
 #[cfg(verus_keep_ghost)]
 use super::trusted::{pset_seq, spec_expand};
 #[cfg(verus_keep_ghost)]
-use super::view::{group_views, lemma_lift_dispatch, lift_dispatch, spec_keys, DispatchV, InOutV, OutV};
+use super::view::{
+    group_views, lemma_lift_dispatch, lift_dispatch, spec_keys, DispatchV, InOutV, OutV,
+};
 use super::view::{InternalV, StoreV};
 
 verus! {
@@ -775,80 +779,6 @@ fn keep(config: &ServerConfig, state: &State, now: Time, work: Work) -> (results
     results
 }
 
-fn over_callbacks(
-    config: &ServerConfig,
-    state: &State,
-    now: Time,
-    awaited: &String,
-    awaiters: &Vec<String>,
-    i: usize,
-) -> (results: Vec<StepResult<Model>>)
-    requires
-        i <= awaiters.len(),
-    ensures
-        results_v(results@) == spec_over_callbacks(*config, state@, now, awaited@, strs(awaiters@).skip(i as int)),
-    decreases awaiters.len() - i,
-{
-    broadcast use super::view::group_views;
-    if i == awaiters.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
-        proof {
-            assert(strs(awaiters@).skip(i as int) =~= Seq::<Seq<char>>::empty());
-            assert(results_v(results@) =~= Seq::empty());
-        }
-        return results;
-    }
-    let awaiter = copy(&awaiters[i]);
-    let mut results = keep(config, state, now, Work::Callback { awaited: copy(awaited), awaiter });
-    let ghost head = results_v(results@);
-    let mut rest = over_callbacks(config, state, now, awaited, awaiters, i + 1);
-    let ghost tail = results_v(rest@);
-    results.append(&mut rest);
-    proof {
-        assert(strs(awaiters@).skip(i as int).drop_first() =~= strs(awaiters@).skip(i as int + 1));
-        assert(strs(awaiters@).skip(i as int)[0] == awaiters@[i as int]@);
-        assert(results_v(results@) =~= head + tail);
-    }
-    results
-}
-
-fn over_listeners(
-    config: &ServerConfig,
-    state: &State,
-    now: Time,
-    awaited: &String,
-    addresses: &Vec<String>,
-    i: usize,
-) -> (results: Vec<StepResult<Model>>)
-    requires
-        i <= addresses.len(),
-    ensures
-        results_v(results@) == spec_over_listeners(*config, state@, now, awaited@, strs(addresses@).skip(i as int)),
-    decreases addresses.len() - i,
-{
-    broadcast use super::view::group_views;
-    if i == addresses.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
-        proof {
-            assert(strs(addresses@).skip(i as int) =~= Seq::<Seq<char>>::empty());
-            assert(results_v(results@) =~= Seq::empty());
-        }
-        return results;
-    }
-    let address = copy(&addresses[i]);
-    let mut results = keep(config, state, now, Work::Listener { awaited: copy(awaited), address });
-    let ghost head = results_v(results@);
-    let mut rest = over_listeners(config, state, now, awaited, addresses, i + 1);
-    let ghost tail = results_v(rest@);
-    results.append(&mut rest);
-    proof {
-        assert(strs(addresses@).skip(i as int).drop_first() =~= strs(addresses@).skip(i as int + 1));
-        assert(strs(addresses@).skip(i as int)[0] == addresses@[i as int]@);
-        assert(results_v(results@) =~= head + tail);
-    }
-    results
-}
-
 fn over_promises(
     config: &ServerConfig,
     state: &State,
@@ -879,29 +809,26 @@ fn over_promises(
             proof {
                 assert(false);
             }
-            vstd::pervasive::unreached()
+            return vstd::pervasive::unreached()
         }
     };
-    let mut results = keep(config, state, now, Work::PromiseTimeout(copy(id)));
-    let ghost a = results_v(results@);
-    let callbacks = p.callbacks.to_vec();
-    let mut over_cb = over_callbacks(config, state, now, id, &callbacks, 0);
-    let ghost b = results_v(over_cb@);
-    let listeners = p.listeners.to_vec();
-    let mut over_ls = over_listeners(config, state, now, id, &listeners, 0);
-    let ghost c = results_v(over_ls@);
+    let promise_due =
+        p.state == echod_types::PromiseState::Pending && p.timeout_at <= now;
+    let queues_due = p.state != echod_types::PromiseState::Pending
+        && (p.callbacks.to_vec().len() > 0 || p.listeners.to_vec().len() > 0);
+    let mut results = if promise_due || queues_due {
+        keep(config, state, now, Work::WorkflowTransition(copy(id)))
+    } else {
+        Vec::new()
+    };
+    let ghost head = results_v(results@);
     let mut rest = over_promises(config, state, now, keys, i + 1);
-    let ghost d = results_v(rest@);
-    results.append(&mut over_cb);
-    results.append(&mut over_ls);
+    let ghost tail = results_v(rest@);
     results.append(&mut rest);
     proof {
         assert(strs(keys@).skip(i as int).drop_first() =~= strs(keys@).skip(i as int + 1));
         assert(strs(keys@).skip(i as int)[0] == id@);
-        assert(strs(callbacks@).skip(0) =~= pset_seq(p@.callbacks));
-        assert(strs(listeners@).skip(0) =~= pset_seq(p@.listeners));
-        assert(state@.store.promises[id@] == p@);
-        assert(results_v(results@) =~= a + b + c + d);
+        assert(results_v(results@) =~= head + tail);
     }
     results
 }
@@ -936,36 +863,36 @@ fn over_tasks(
             proof {
                 assert(false);
             }
-            vstd::pervasive::unreached()
+            return vstd::pervasive::unreached()
         }
     };
-    let mut results = keep(config, state, now, Work::TaskLeaseTimeout(copy(id)));
-    let ghost lease = results_v(results@);
-    let ghost retry: Seq<StepResultV<StateV, Pid, Message>>;
-    match t.retry_timeout_at {
-        Some(_) => {
-            let mut again = keep(config, state, now, Work::TaskRetryTimeout(copy(id)));
-            proof {
-                retry = results_v(again@);
-            }
-            results.append(&mut again);
-        }
-        None => {
-            proof {
-                retry = Seq::empty();
-            }
-        }
-    }
-    let ghost sofar = results_v(results@);
+    let live = match state.store.promises.get(id) {
+        Some(p) => p.state == echod_types::PromiseState::Pending,
+        None => false,
+    };
+    let lease_due = live
+        && t.state == echod_types::TaskState::Acquired
+        && t.lease_timeout_at() <= now;
+    let retry_due = live
+        && t.state == echod_types::TaskState::Pending
+        && match t.retry_timeout_at {
+            Some(at) => at <= now,
+            None => false,
+        };
+    let mut results = if lease_due || retry_due {
+        keep(config, state, now, Work::WorkflowTransition(copy(id)))
+    } else {
+        Vec::new()
+    };
+    let ghost head = results_v(results@);
     let mut rest = over_tasks(config, state, now, keys, i + 1);
-    let ghost d = results_v(rest@);
+    let ghost tail = results_v(rest@);
     results.append(&mut rest);
     proof {
         assert(strs(keys@).skip(i as int).drop_first() =~= strs(keys@).skip(i as int + 1));
         assert(strs(keys@).skip(i as int)[0] == id@);
         assert(state@.store.tasks[id@] == t@);
-        assert(sofar =~= lease + retry);
-        assert(results_v(results@) =~= lease + retry + d);
+        assert(results_v(results@) =~= head + tail);
     }
     results
 }
@@ -1306,50 +1233,6 @@ pub open spec fn spec_keep(config: ServerConfig, state: StateV, now: Time, work:
     }
 }
 
-pub open spec fn spec_over_callbacks(
-    config: ServerConfig,
-    state: StateV,
-    now: Time,
-    awaited: Seq<char>,
-    awaiters: Seq<Seq<char>>,
-) -> Seq<StepResultV<StateV, Pid, Message>>
-    decreases awaiters.len(),
-{
-    if awaiters.len() == 0 {
-        Seq::empty()
-    } else {
-        spec_keep(
-            config,
-            state,
-            now,
-            InternalV::Callback { awaited, awaiter: awaiters[0] },
-            Seq::empty(),
-        ) + spec_over_callbacks(config, state, now, awaited, awaiters.drop_first())
-    }
-}
-
-pub open spec fn spec_over_listeners(
-    config: ServerConfig,
-    state: StateV,
-    now: Time,
-    awaited: Seq<char>,
-    addresses: Seq<Seq<char>>,
-) -> Seq<StepResultV<StateV, Pid, Message>>
-    decreases addresses.len(),
-{
-    if addresses.len() == 0 {
-        Seq::empty()
-    } else {
-        spec_keep(
-            config,
-            state,
-            now,
-            InternalV::Listener { awaited, address: addresses[0] },
-            Seq::empty(),
-        ) + spec_over_listeners(config, state, now, awaited, addresses.drop_first())
-    }
-}
-
 pub open spec fn spec_over_promises(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
     decreases keys.len(),
 {
@@ -1358,9 +1241,14 @@ pub open spec fn spec_over_promises(config: ServerConfig, state: StateV, now: Ti
     } else {
         let id = keys[0];
         let p = state.store.promises[id];
-        spec_keep(config, state, now, InternalV::PromiseTimeout(id), Seq::empty())
-            + spec_over_callbacks(config, state, now, id, pset_seq(p.callbacks))
-            + spec_over_listeners(config, state, now, id, pset_seq(p.listeners))
+        let promise_due = p.state == PromiseState::Pending && p.timeout_at <= now;
+        let queues_due = p.state != PromiseState::Pending
+            && (p.callbacks.len() > 0 || p.listeners.len() > 0);
+        (if promise_due || queues_due {
+            spec_keep(config, state, now, InternalV::WorkflowTransition(id), Seq::empty())
+        } else {
+            Seq::empty()
+        })
             + spec_over_promises(config, state, now, keys.drop_first())
     }
 }
@@ -1373,12 +1261,22 @@ pub open spec fn spec_over_tasks(config: ServerConfig, state: StateV, now: Time,
     } else {
         let id = keys[0];
         let t = state.store.tasks[id];
-        let lease = spec_keep(config, state, now, InternalV::TaskLeaseTimeout(id), Seq::empty());
-        let retry = match t.retry_timeout_at {
-            Some(_) => spec_keep(config, state, now, InternalV::TaskRetryTimeout(id), Seq::empty()),
-            None => Seq::empty(),
-        };
-        lease + retry + spec_over_tasks(config, state, now, keys.drop_first())
+        let live = state.store.promises.contains_key(id)
+            && state.store.promises[id].state == PromiseState::Pending;
+        let lease_due = live
+            && t.state == TaskState::Acquired
+            && spec_lease_at(t) <= now;
+        let retry_due = live
+            && t.state == TaskState::Pending
+            && match t.retry_timeout_at {
+                Some(at) => at <= now,
+                None => false,
+            };
+        (if lease_due || retry_due {
+            spec_keep(config, state, now, InternalV::WorkflowTransition(id), Seq::empty())
+        } else {
+            Seq::empty()
+        }) + spec_over_tasks(config, state, now, keys.drop_first())
     }
 }
 

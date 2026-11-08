@@ -1,12 +1,8 @@
-//! The due step and the occurrence agree.
+//! Atomic workflow transitions and schedule occurrences agree.
 //!
-//! The concrete node walks one document and takes the first thing due in
-//! it; the abstract service offers every timeout of every object. This
-//! module finds the concrete choice among the abstract offers: the key
-//! order ([`lemma_sorted`]), membership in the offers
-//! ([`lemma_timeout_offered`]), and then each branch of
-//! `spec_step_object` against its abstract counterpart. The occurrence is
-//! Lean's `createPromiseAt` against `spec_create_if_absent`. The module ends
+//! A workflow timeout offer represents one whole-origin transition. Schedule
+//! occurrences remain independent and use `createPromiseAt` against
+//! `spec_create_if_absent`. The module ends
 //! in [`lemma_agreement`]: at the configuration the node implements, the
 //! handlers, the due step, and the occurrence all agree. Cargo erases these
 //! bodies; a Verus run is what checks them.
@@ -33,7 +29,7 @@ use crate::model::{spec_string as c_string};
 use crate::node::{
     DocumentBodyV, NoteV, ObjV, PendingV, PromV, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
     spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map,
-    spec_project_obj, spec_record, spec_resume, spec_run_due, spec_schedule_key,
+    spec_due_transition, spec_project_obj, spec_record, spec_resume, spec_schedule_key,
     spec_sorted as c_sorted, spec_step_object, spec_targeted, spec_timer, spec_unlease as c_unlease,
     TkV,
 };
@@ -53,8 +49,8 @@ use echod_abstract::machine::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::model::{
-    Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
-    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, StateV,
+    Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_promises,
+    spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, StateV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::{
@@ -406,8 +402,7 @@ pub proof fn lemma_over_listeners_offered(
     }
 }
 
-/// What the promises offer: every promise's timeout, every callback, every
-/// listener.
+/// A due promise or settled queue offers the origin's one bulk transition.
 pub open spec fn promise_offers(
     config: ServerConfig,
     state: StateV,
@@ -416,23 +411,14 @@ pub open spec fn promise_offers(
     results: Seq<AResult>,
 ) -> bool {
     let p = state.store.promises[id];
-    &&& offered(config, state, now, InternalV::PromiseTimeout(id), results)
-    &&& forall|awaiter: Seq<char>|
-        #[trigger] p.callbacks.contains(awaiter) ==> offered(
-            config,
-            state,
-            now,
-            InternalV::Callback { awaited: id, awaiter },
-            results,
-        )
-    &&& forall|address: Seq<char>|
-        #[trigger] p.listeners.contains(address) ==> offered(
-            config,
-            state,
-            now,
-            InternalV::Listener { awaited: id, address },
-            results,
-        )
+    let due = {
+        ||| p.state == PromiseState::Pending && p.timeout_at <= now
+        ||| p.state != PromiseState::Pending
+            && (p.callbacks.len() > 0 || p.listeners.len() > 0)
+    };
+    due ==> offered(
+        config, state, now, InternalV::WorkflowTransition(id), results,
+    )
 }
 
 pub proof fn lemma_promise_offers_left(
@@ -449,25 +435,14 @@ pub proof fn lemma_promise_offers_left(
         promise_offers(config, state, now, id, a + b),
 {
     let p = state.store.promises[id];
-    lemma_offered_left(config, state, now, InternalV::PromiseTimeout(id), a, b);
-    assert forall|awaiter: Seq<char>| #[trigger] p.callbacks.contains(awaiter) implies offered(
-        config,
-        state,
-        now,
-        InternalV::Callback { awaited: id, awaiter },
-        a + b,
-    ) by {
-        lemma_offered_left(config, state, now, InternalV::Callback { awaited: id, awaiter }, a, b);
-    };
-    assert forall|address: Seq<char>| #[trigger] p.listeners.contains(address) implies offered(
-        config,
-        state,
-        now,
-        InternalV::Listener { awaited: id, address },
-        a + b,
-    ) by {
-        lemma_offered_left(config, state, now, InternalV::Listener { awaited: id, address }, a, b);
-    };
+    if (p.state == PromiseState::Pending && p.timeout_at <= now)
+        || (p.state != PromiseState::Pending
+            && (p.callbacks.len() > 0 || p.listeners.len() > 0))
+    {
+        lemma_offered_left(
+            config, state, now, InternalV::WorkflowTransition(id), a, b,
+        );
+    }
 }
 
 pub proof fn lemma_promise_offers_right(
@@ -484,25 +459,14 @@ pub proof fn lemma_promise_offers_right(
         promise_offers(config, state, now, id, a + b),
 {
     let p = state.store.promises[id];
-    lemma_offered_right(config, state, now, InternalV::PromiseTimeout(id), a, b);
-    assert forall|awaiter: Seq<char>| #[trigger] p.callbacks.contains(awaiter) implies offered(
-        config,
-        state,
-        now,
-        InternalV::Callback { awaited: id, awaiter },
-        a + b,
-    ) by {
-        lemma_offered_right(config, state, now, InternalV::Callback { awaited: id, awaiter }, a, b);
-    };
-    assert forall|address: Seq<char>| #[trigger] p.listeners.contains(address) implies offered(
-        config,
-        state,
-        now,
-        InternalV::Listener { awaited: id, address },
-        a + b,
-    ) by {
-        lemma_offered_right(config, state, now, InternalV::Listener { awaited: id, address }, a, b);
-    };
+    if (p.state == PromiseState::Pending && p.timeout_at <= now)
+        || (p.state != PromiseState::Pending
+            && (p.callbacks.len() > 0 || p.listeners.len() > 0))
+    {
+        lemma_offered_right(
+            config, state, now, InternalV::WorkflowTransition(id), a, b,
+        );
+    }
 }
 
 pub proof fn lemma_over_promises_offered(
@@ -520,60 +484,38 @@ pub proof fn lemma_over_promises_offered(
 {
     let head = keys[0];
     let p = state.store.promises[head];
-    let a = spec_keep(config, state, now, InternalV::PromiseTimeout(head), Seq::empty());
-    let b = spec_over_callbacks(config, state, now, head, pset_seq(p.callbacks));
-    let c = spec_over_listeners(config, state, now, head, pset_seq(p.listeners));
-    let d = spec_over_promises(config, state, now, keys.drop_first());
-    assert(spec_over_promises(config, state, now, keys) == a + b + c + d);
+    let due = {
+        ||| p.state == PromiseState::Pending && p.timeout_at <= now
+        ||| p.state != PromiseState::Pending
+            && (p.callbacks.len() > 0 || p.listeners.len() > 0)
+    };
+    let first = if due {
+        spec_keep(
+            config, state, now, InternalV::WorkflowTransition(head), Seq::empty(),
+        )
+    } else {
+        Seq::empty()
+    };
+    let rest = spec_over_promises(config, state, now, keys.drop_first());
+    assert(spec_over_promises(config, state, now, keys) == first + rest);
     if head == id {
-        lemma_keep_offered(config, state, now, InternalV::PromiseTimeout(id));
-        lemma_offered_left(config, state, now, InternalV::PromiseTimeout(id), a, b);
-        assert forall|awaiter: Seq<char>| #[trigger] p.callbacks.contains(awaiter) implies offered(
-            config,
-            state,
-            now,
-            InternalV::Callback { awaited: id, awaiter },
-            a + b,
-        ) by {
-            assert(pset_seq(p.callbacks).to_set().contains(awaiter));
-            lemma_contains_to_set(pset_seq(p.callbacks), awaiter);
-            lemma_over_callbacks_offered(config, state, now, id, pset_seq(p.callbacks), awaiter);
-            lemma_offered_right(config, state, now, InternalV::Callback { awaited: id, awaiter }, a, b);
-        };
-        assert forall|address: Seq<char>| #[trigger] p.listeners.contains(address) implies offered(
-            config,
-            state,
-            now,
-            InternalV::Listener { awaited: id, address },
-            a + b + c,
-        ) by {
-            assert(pset_seq(p.listeners).to_set().contains(address));
-            lemma_contains_to_set(pset_seq(p.listeners), address);
-            lemma_over_listeners_offered(config, state, now, id, pset_seq(p.listeners), address);
-            lemma_offered_right(config, state, now, InternalV::Listener { awaited: id, address }, a + b, c);
-        };
-        lemma_offered_left(config, state, now, InternalV::PromiseTimeout(id), a + b, c);
-        assert forall|awaiter: Seq<char>| #[trigger] p.callbacks.contains(awaiter) implies offered(
-            config,
-            state,
-            now,
-            InternalV::Callback { awaited: id, awaiter },
-            a + b + c,
-        ) by {
-            lemma_offered_left(config, state, now, InternalV::Callback { awaited: id, awaiter }, a + b, c);
-        };
-        assert(promise_offers(config, state, now, id, a + b + c));
-        lemma_promise_offers_left(config, state, now, id, a + b + c, d);
+        if due {
+            lemma_keep_offered(
+                config, state, now, InternalV::WorkflowTransition(id),
+            );
+            lemma_offered_left(
+                config, state, now, InternalV::WorkflowTransition(id), first, rest,
+            );
+        }
     } else {
         let j = choose|j: int| 0 <= j < keys.len() && keys[j] == id;
         assert(keys.drop_first()[j - 1] == id);
         lemma_over_promises_offered(config, state, now, keys.drop_first(), id);
-        lemma_promise_offers_right(config, state, now, id, a + b + c, d);
+        lemma_promise_offers_right(config, state, now, id, first, rest);
     }
 }
 
-/// What the tasks offer: every lease, and the retry of every task that has
-/// one.
+/// A due task offers the origin's one bulk transition.
 pub open spec fn task_offers(
     config: ServerConfig,
     state: StateV,
@@ -581,13 +523,15 @@ pub open spec fn task_offers(
     id: Seq<char>,
     results: Seq<AResult>,
 ) -> bool {
-    &&& offered(config, state, now, InternalV::TaskLeaseTimeout(id), results)
-    &&& state.store.tasks[id].retry_timeout_at is Some ==> offered(
-        config,
-        state,
-        now,
-        InternalV::TaskRetryTimeout(id),
-        results,
+    let t = state.store.tasks[id];
+    let live = state.store.promises.contains_key(id)
+        && state.store.promises[id].state == PromiseState::Pending;
+    let lease_due = live && t.state == TaskState::Acquired
+        && spec_lease_at(t) <= now;
+    let retry_due = live && t.state == TaskState::Pending
+        && match t.retry_timeout_at { Some(at) => at <= now, None => false };
+    (lease_due || retry_due) ==> offered(
+        config, state, now, InternalV::WorkflowTransition(id), results,
     )
 }
 
@@ -606,29 +550,53 @@ pub proof fn lemma_over_tasks_offered(
 {
     let head = keys[0];
     let t = state.store.tasks[head];
-    let lease = spec_keep(config, state, now, InternalV::TaskLeaseTimeout(head), Seq::empty());
-    let retry = match t.retry_timeout_at {
-        Some(_) => spec_keep(config, state, now, InternalV::TaskRetryTimeout(head), Seq::empty()),
-        None => Seq::<AResult>::empty(),
+    let live = state.store.promises.contains_key(head)
+        && state.store.promises[head].state == PromiseState::Pending;
+    let due = {
+        ||| live && t.state == TaskState::Acquired
+            && spec_lease_at(t) <= now
+        ||| live && t.state == TaskState::Pending
+            && match t.retry_timeout_at {
+                Some(at) => at <= now,
+                None => false,
+            }
+    };
+    let first = if due {
+        spec_keep(
+            config, state, now, InternalV::WorkflowTransition(head), Seq::empty(),
+        )
+    } else {
+        Seq::empty()
     };
     let rest = spec_over_tasks(config, state, now, keys.drop_first());
-    assert(spec_over_tasks(config, state, now, keys) == lease + retry + rest);
+    assert(spec_over_tasks(config, state, now, keys) == first + rest);
     if head == id {
-        lemma_keep_offered(config, state, now, InternalV::TaskLeaseTimeout(id));
-        lemma_offered_left(config, state, now, InternalV::TaskLeaseTimeout(id), lease, retry);
-        lemma_offered_left(config, state, now, InternalV::TaskLeaseTimeout(id), lease + retry, rest);
-        if t.retry_timeout_at is Some {
-            lemma_keep_offered(config, state, now, InternalV::TaskRetryTimeout(id));
-            lemma_offered_right(config, state, now, InternalV::TaskRetryTimeout(id), lease, retry);
-            lemma_offered_left(config, state, now, InternalV::TaskRetryTimeout(id), lease + retry, rest);
+        if due {
+            lemma_keep_offered(
+                config, state, now, InternalV::WorkflowTransition(id),
+            );
+            lemma_offered_left(
+                config, state, now, InternalV::WorkflowTransition(id), first, rest,
+            );
         }
     } else {
         let j = choose|j: int| 0 <= j < keys.len() && keys[j] == id;
         assert(keys.drop_first()[j - 1] == id);
         lemma_over_tasks_offered(config, state, now, keys.drop_first(), id);
-        lemma_offered_right(config, state, now, InternalV::TaskLeaseTimeout(id), lease + retry, rest);
-        if state.store.tasks[id].retry_timeout_at is Some {
-            lemma_offered_right(config, state, now, InternalV::TaskRetryTimeout(id), lease + retry, rest);
+        let target = state.store.tasks[id];
+        let target_live = state.store.promises.contains_key(id)
+            && state.store.promises[id].state == PromiseState::Pending;
+        if (target_live && target.state == TaskState::Acquired
+                && spec_lease_at(target) <= now)
+            || (target_live && target.state == TaskState::Pending
+                && match target.retry_timeout_at {
+                    Some(at) => at <= now,
+                    None => false,
+                })
+        {
+            lemma_offered_right(
+                config, state, now, InternalV::WorkflowTransition(id), first, rest,
+            );
         }
     }
 }
@@ -736,13 +704,26 @@ pub proof fn lemma_timeout_offered(config: ServerConfig, state: StateV, now: Tim
     ) by {
         assert(s.tasks.dom().contains(id));
         lemma_over_tasks_offered(config, state, now, spec_keys(s.tasks), id);
-        lemma_offered_right(config, state, now, InternalV::TaskLeaseTimeout(id), op, ot);
-        lemma_offered_left(config, state, now, InternalV::TaskLeaseTimeout(id), op + ot, os);
-        lemma_offered_right(config, state, now, InternalV::TaskLeaseTimeout(id), queued, op + ot + os);
-        if s.tasks[id].retry_timeout_at is Some {
-            lemma_offered_right(config, state, now, InternalV::TaskRetryTimeout(id), op, ot);
-            lemma_offered_left(config, state, now, InternalV::TaskRetryTimeout(id), op + ot, os);
-            lemma_offered_right(config, state, now, InternalV::TaskRetryTimeout(id), queued, op + ot + os);
+        let task = s.tasks[id];
+        let live = s.promises.contains_key(id)
+            && s.promises[id].state == PromiseState::Pending;
+        if (live && task.state == TaskState::Acquired
+                && spec_lease_at(task) <= now)
+            || (live && task.state == TaskState::Pending
+                && match task.retry_timeout_at {
+                    Some(at) => at <= now,
+                    None => false,
+                })
+        {
+            lemma_offered_right(
+                config, state, now, InternalV::WorkflowTransition(id), op, ot,
+            );
+            lemma_offered_left(
+                config, state, now, InternalV::WorkflowTransition(id), op + ot, os,
+            );
+            lemma_offered_right(
+                config, state, now, InternalV::WorkflowTransition(id), queued, op + ot + os,
+            );
         }
     };
     assert forall|id: Seq<char>| #[trigger] s.schedules.contains_key(id) implies offered(
@@ -760,16 +741,31 @@ pub proof fn lemma_timeout_offered(config: ServerConfig, state: StateV, now: Tim
 }
 
 /// `work` names objects the store holds, so the timeout step offers it.
-pub open spec fn work_known(s: AStore, work: InternalV) -> bool {
+pub open spec fn work_known(s: AStore, work: InternalV, now: Time) -> bool {
     match work {
-        InternalV::PromiseTimeout(id) => s.promises.contains_key(id),
-        InternalV::Callback { awaited, awaiter } => s.promises.contains_key(awaited)
-            && s.promises[awaited].callbacks.contains(awaiter),
-        InternalV::Listener { awaited, address } => s.promises.contains_key(awaited)
-            && s.promises[awaited].listeners.contains(address),
-        InternalV::TaskLeaseTimeout(id) => s.tasks.contains_key(id),
-        InternalV::TaskRetryTimeout(id) => s.tasks.contains_key(id)
-            && s.tasks[id].retry_timeout_at is Some,
+        InternalV::WorkflowTransition(id) => {
+            ||| s.promises.contains_key(id) && {
+                let p = s.promises[id];
+                ||| p.state == PromiseState::Pending && p.timeout_at <= now
+                ||| p.state != PromiseState::Pending
+                    && (p.callbacks.len() > 0 || p.listeners.len() > 0)
+            }
+            ||| s.tasks.contains_key(id) && s.promises.contains_key(id)
+                && s.promises[id].state == PromiseState::Pending && {
+                    let t = s.tasks[id];
+                    ||| t.state == TaskState::Acquired && spec_lease_at(t) <= now
+                    ||| t.state == TaskState::Pending
+                        && match t.retry_timeout_at {
+                            Some(at) => at <= now,
+                            None => false,
+                        }
+                }
+        },
+        InternalV::PromiseTimeout(_)
+        | InternalV::Callback { .. }
+        | InternalV::Listener { .. }
+        | InternalV::TaskLeaseTimeout(_)
+        | InternalV::TaskRetryTimeout(_) => false,
         InternalV::ScheduleTimeout { id, promise } => s.schedules.contains_key(id)
             && work == schedule_work(s, id),
         InternalV::Occurrence { .. } => false,
@@ -781,28 +777,25 @@ pub open spec fn work_known(s: AStore, work: InternalV) -> bool {
 pub proof fn lemma_work_offered(config: ServerConfig, state: StateV, now: Time, work: InternalV)
     requires
         finite_store(state.store),
-        work_known(state.store, work),
+        work_known(state.store, work, now),
     ensures
         offered(config, state, now, work, spec_run_timeout(config, state, now)),
 {
     lemma_timeout_offered(config, state, now);
     let results = spec_run_timeout(config, state, now);
     match work {
-        InternalV::PromiseTimeout(id) => {
-            assert(promise_offers(config, state, now, id, results));
+        InternalV::WorkflowTransition(id) => {
+            if state.store.promises.contains_key(id) {
+                assert(promise_offers(config, state, now, id, results));
+            } else {
+                assert(task_offers(config, state, now, id, results));
+            }
         },
-        InternalV::Callback { awaited, awaiter } => {
-            assert(promise_offers(config, state, now, awaited, results));
-        },
-        InternalV::Listener { awaited, address } => {
-            assert(promise_offers(config, state, now, awaited, results));
-        },
-        InternalV::TaskLeaseTimeout(id) => {
-            assert(task_offers(config, state, now, id, results));
-        },
-        InternalV::TaskRetryTimeout(id) => {
-            assert(task_offers(config, state, now, id, results));
-        },
+        InternalV::PromiseTimeout(_)
+        | InternalV::Callback { .. }
+        | InternalV::Listener { .. }
+        | InternalV::TaskLeaseTimeout(_)
+        | InternalV::TaskRetryTimeout(_) => {},
         InternalV::ScheduleTimeout { id, promise } => {
             assert(offered(config, state, now, schedule_work(state.store, id), results));
         },
@@ -912,7 +905,7 @@ pub open spec fn due_matched(
     now: Time,
     r: AResult,
 ) -> bool {
-    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
+    let (next, _, born, notes) = spec_due_transition(doc, now, config.retry_timeout);
     &&& spec_run_timeout(config, state, now).contains(r)
     &&& r.send == note_sends(notes)
     &&& r.state.pending == state.pending + items(born)
@@ -967,7 +960,7 @@ pub proof fn lemma_origin_matched(
             &&& finite_store(outcome.next)
             &&& sends_of(outcome.send) == note_sends(notes)
         }),
-        spec_run_due(DocumentBodyV::Workflow(map), now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
+        spec_due_transition(DocumentBodyV::Workflow(map), now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
     ensures
         due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
@@ -1573,14 +1566,14 @@ pub proof fn lemma_origin_due(
     lemma_due_id(map, keys, now);
     match spec_due_id(map, keys, now) {
         None => {
-            assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+            assert(spec_due_transition(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
         },
         Some(id) => {
             assert(map.contains_key(id));
             assert(due_context(key, o, map, state.store, id));
             let obj = map[id];
             let (map2, notes) = spec_step_object(map, id, now, config.retry_timeout);
-            assert(spec_run_due(doc, now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
+            assert(spec_due_transition(doc, now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
             if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
                 lemma_promise_due(config, key, o, map, state, now, id);
             } else if obj.promise.state == PromiseState::Pending {
@@ -1665,7 +1658,7 @@ pub proof fn lemma_schedule_due(
     let n = AStore { schedules: s.schedules.insert(id, d), ..s };
     assert(outcome == spec_did(n, seq![occ], Seq::empty()));
     let r = spec_due_result(state, outcome);
-    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
+    let (next, _, born, notes) = spec_due_transition(doc, now, config.retry_timeout);
     let pending = PendingV {
         promise: spec_expand(sch.promise_id@, sch.id@, at),
         at,
@@ -1718,11 +1711,11 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: Documen
                 if sch.next_run_at <= now && sch.next_run_at <= MAX_TIME {
                     lemma_schedule_due(config, key, id, sch, state, now);
                 } else {
-                    assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                    assert(spec_due_transition(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
                 }
             },
             _ => {
-                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_due_transition(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
         }
     } else if spec_starts(key, origin_prefix()) {
@@ -1741,10 +1734,10 @@ pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: Documen
                 lemma_sorted(map.dom());
                 assert(c_sorted(map.dom()).len() == 0);
                 assert(spec_due_id(map, c_sorted(map.dom()), now) is None);
-                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_due_transition(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
             DocumentBodyV::Schedule(_) => {
-                assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
+                assert(spec_due_transition(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
         }
     }

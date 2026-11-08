@@ -12,8 +12,8 @@ use crate::document::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     spec_committed_notes, spec_execute_notes, spec_keyed_notes, spec_note_key,
-    spec_request_commits, spec_request_transition, spec_sorted_present, spec_stored_body,
-    spec_stored_committed_at, spec_unavailable, spec_unblock_notes, spec_unblock_notes_for,
+    spec_request_transition, spec_sorted_present, spec_stored_body,
+    spec_stored_committed_at, spec_unblock_notes, spec_unblock_notes_for,
     DocumentBodyV, NoteV,
 };
 #[cfg(verus_keep_ghost)]
@@ -1048,7 +1048,6 @@ pub proof fn lemma_request_transition_effects(
     request: Request,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     requires
         well_formed(document),
@@ -1064,13 +1063,12 @@ pub proof fn lemma_request_transition_effects(
     ensures
         ({
             let final_document =
-                on_request(document, request, now, retry_timeout, limit);
+                on_request(document, request, now, retry_timeout);
             let (_, _, _, notes) = spec_request_transition(
                 spec_stored_body(document),
                 request,
                 now,
                 retry_timeout,
-                limit,
             );
             effects_match(document, final_document, notes)
         }),
@@ -1081,7 +1079,6 @@ pub proof fn lemma_request_transition_effects(
         request,
         now,
         retry_timeout,
-        limit,
     );
     assert(match initial_body {
         DocumentBodyV::Workflow(old) => {
@@ -1136,13 +1133,7 @@ pub proof fn lemma_request_transition_effects(
             StoredDocumentV::Schedule(_) => {},
         }
     };
-    if spec_request_commits(
-        initial_body,
-        request,
-        now,
-        retry_timeout,
-        limit,
-    ) {
+    if final_body != initial_body {
         assert(notes == spec_committed_notes(initial_body, final_body, now));
         lemma_committed_notes_match(initial_body, final_body, now);
         match (document, final_body) {
@@ -1152,7 +1143,6 @@ pub proof fn lemma_request_transition_effects(
                     request,
                     now,
                     retry_timeout,
-                    limit,
                 ) == crate::node::spec_advance_stored(
                     StoredDocumentV::Workflow(old),
                     DocumentBodyV::Workflow(new),
@@ -1165,7 +1155,6 @@ pub proof fn lemma_request_transition_effects(
                         request,
                         now,
                         retry_timeout,
-                        limit,
                     ),
                 ) == workflow_effects(old.objects, new, now));
             },
@@ -1177,7 +1166,6 @@ pub proof fn lemma_request_transition_effects(
                         request,
                         now,
                         retry_timeout,
-                        limit,
                     ),
                 ) == ISet::<ProtocolEffectV>::empty());
             },
@@ -1185,24 +1173,18 @@ pub proof fn lemma_request_transition_effects(
         }
     } else {
         assert(final_body == initial_body);
-        if response == spec_unavailable(request) {
-            assert(notes =~= Seq::<NoteV>::empty());
-            assert(note_effects(notes) =~= ISet::<ProtocolEffectV>::empty());
-            assert(note_effect_keys(notes) =~= Seq::<ProtocolEffectKeyV>::empty());
-        } else {
-            match initial_body {
-                DocumentBodyV::Workflow(_) => {
-                    assert(notes == spec_committed_notes(initial_body, final_body, now));
-                },
-                DocumentBodyV::Schedule(_) => {
-                    assert(notes =~= Seq::<NoteV>::empty());
-                    assert(spec_committed_notes(initial_body, final_body, now)
-                        =~= Seq::<NoteV>::empty());
-                },
-            }
-            lemma_committed_notes_match(initial_body, final_body, now);
+        match initial_body {
+            DocumentBodyV::Workflow(_) => {
+                assert(notes == spec_committed_notes(initial_body, final_body, now));
+            },
+            DocumentBodyV::Schedule(_) => {
+                assert(notes =~= Seq::<NoteV>::empty());
+                assert(spec_committed_notes(initial_body, final_body, now)
+                    =~= Seq::<NoteV>::empty());
+            },
         }
-        assert(on_request(document, request, now, retry_timeout, limit) == document);
+        lemma_committed_notes_match(initial_body, final_body, now);
+        assert(on_request(document, request, now, retry_timeout) == document);
         assert(document_effects(document, document)
             =~= ISet::<ProtocolEffectV>::empty()) by {
             match document {
@@ -1226,7 +1208,7 @@ pub proof fn lemma_request_transition_effects(
     assert(note_effects(notes)
         == document_effects(
             document,
-            on_request(document, request, now, retry_timeout, limit),
+            on_request(document, request, now, retry_timeout),
         ));
     assert(note_effect_keys(notes).no_duplicates());
 }

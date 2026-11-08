@@ -3,9 +3,9 @@
 //! removes, and remembers. Each function ensures it computes its `spec_*`,
 //! as does every function of the crate around it, up to `State::on_event`.
 //!
-//! The document machine is `echod_concrete`: `handle`, `sweep`, `run_due`
+//! The document machine is `echod_concrete`: `handle`, `sweep`, `fire_schedule`
 //! and `create_occurrence` are proved there to compute `spec_handle`,
-//! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
+//! `spec_sweep`, `spec_fire_schedule` and `spec_occurrence`, the transitions of the
 //! concrete Rover model. `document.rs` states the shared partial codec; the
 //! handlers order the store calls around those steps.
 //!

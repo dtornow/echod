@@ -30,7 +30,7 @@ use crate::model::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_body, spec_encode_body,
-    spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
+    spec_due_transition, spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read,
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreReq, StoreRes};
@@ -132,7 +132,7 @@ pub open spec fn decision(flight: FlightV, doc: DocumentBodyV, retry_timeout: u6
             let (next, response) = spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        JobV::Due => spec_run_due(doc, flight.now, retry_timeout),
+        JobV::Due => spec_due_transition(doc, flight.now, retry_timeout),
         JobV::Occurrence(pending) => (
             spec_occurrence(doc, pending, flight.now),
             None,
@@ -645,7 +645,7 @@ pub open spec fn due_agrees(
     state: StateV,
     now: u64,
 ) -> bool {
-    let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
+    let (next, _, born, notes) = spec_due_transition(doc, now, config.retry_timeout);
     ||| next == doc && born.len() == 0 && notes.len() == 0
     ||| exists|j: int|
         #![trigger spec_run_timeout(config, state, now)[j]]

@@ -2,7 +2,7 @@
 //! the sequence of store calls that commits it.
 //!
 //! The step is the concrete model's (`spec_handle`, `spec_sweep`,
-//! `spec_run_due`, `spec_occurrence`); `lemma_step_is_decide` reads it off
+//! `spec_fire_schedule`, `spec_occurrence`); `lemma_step_is_decide` reads it off
 //! the model's `spec_decide`. The commit is this design's own: a deadline
 //! key is armed before the document is written, the key it replaced is
 //! removed after, and the key whose firing began the flight is collected
@@ -12,7 +12,7 @@
 use vstd::prelude::*;
 
 use echod_concrete::node::{
-    notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
+    notes_v, pend_v, spec_decide, spec_fire_schedule, spec_occurrence, spec_request_transition,
     spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
 use echod_concrete::store::{StoreError, StoreReq, StoreRes};
@@ -32,9 +32,9 @@ verus! {
 pub enum AJob {
     /// A request: `spec_handle`.
     Request(echod_types::Request),
-    /// A fired key: `spec_sweep`, every due step up to a limit.
+    /// A fired workflow key: one atomic two-phase closure.
     Sweep,
-    /// A schedule's key: `spec_run_due`, the occurrence due and the schedule advanced.
+    /// A schedule's key: the occurrence due and the schedule advanced.
     Fire,
     /// That occurrence, born in its origin: `spec_occurrence`.
     Occurrence(PendingV),
@@ -42,18 +42,21 @@ pub enum AJob {
 
 /// The document a step leaves, its answer, the occurrences it queued, and
 /// the notes it will send once the document is committed.
-pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
             let (next, response, born, notes) =
-                spec_request_transition(doc, request, now, retry_timeout, limit);
+                spec_request_transition(doc, request, now, retry_timeout);
             (next, Some(response), born, notes)
         },
         AJob::Sweep => {
-            let (next, born, notes) = spec_sweep(doc, now, retry_timeout, limit);
+            let (next, born, notes) = spec_sweep(doc, now, retry_timeout);
             (next, None, born, notes)
         },
-        AJob::Fire => spec_run_due(doc, now, retry_timeout),
+        AJob::Fire => {
+            let (next, born) = spec_fire_schedule(doc, now);
+            (next, None, born, Seq::empty())
+        },
         AJob::Occurrence(pending) => (spec_occurrence(doc, pending, now), None, Seq::empty(), Seq::empty()),
     }
 }
@@ -71,7 +74,7 @@ pub open spec fn job_of(job: JobV) -> AJob {
 /// document `spec_step` leaves. Request jobs use the stronger process-level
 /// pre/handler/post transition and are verified directly by
 /// [`super::flight::decide`], rather than by Rover's raw-handler step.
-pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
+pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV)
     requires
         !(flight.job is External),
         match flight.etag {
@@ -80,7 +83,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBod
         },
     ensures
         ({
-            let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
+            let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout);
             let (after, sent) = spec_decide(node, flight, doc);
             match after.flight {
                 Some(open) => {

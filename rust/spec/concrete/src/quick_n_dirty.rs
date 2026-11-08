@@ -22,10 +22,12 @@ use crate::document::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     spec_advance_stored, spec_awaitable, spec_body_deadline, spec_earliest_in,
-    spec_due_id, spec_handle, spec_key, spec_obj_due, spec_project_obj, spec_request_document, spec_request_transition,
-    spec_resume, spec_run_due, spec_sorted, spec_sorted_present, spec_stored_body, spec_sweep,
+    spec_drain_callbacks, spec_drain_keys, spec_drain_settled_object, spec_handle, spec_key, spec_obj_due,
+    spec_project_due_object, spec_project_keys, spec_project_obj, spec_request_document,
+    spec_request_transition, spec_resume, spec_resume_callbacks, spec_sorted, spec_sorted_present,
+    spec_stored_body, spec_sweep,
     spec_stored_committed_at, spec_stored_name, spec_targeted, spec_unavailable,
-    spec_unlease, DocumentBodyV, PendingV, REQUEST_SWEEP_STEPS,
+    spec_unlease, DocumentBodyV, PendingV,
 };
 #[cfg(verus_keep_ghost)]
 use crate::interpret::{lemma_origin_key, lemma_schedule_key};
@@ -798,120 +800,292 @@ pub proof fn lemma_pop_callback_and_resume(
     };
 }
 
-pub proof fn lemma_run_due_preserves_relaxed(
+pub proof fn lemma_project_keys_keeps_domain(
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires count <= keys.len(),
+    ensures
+        spec_project_keys(objects, keys, count, now, retry_timeout).dom()
+            == objects.dom(),
+    decreases count,
+{
+    if count > 0 {
+        lemma_project_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+    }
+}
+
+pub proof fn lemma_drain_callbacks_keeps_domain(
+    objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    count: nat,
+    now: u64,
+)
+    ensures
+        spec_drain_callbacks(objects, id, count, now).dom() == objects.dom(),
+    decreases count,
+{
+    reveal(spec_drain_callbacks);
+    if count > 0 {
+        lemma_drain_callbacks_keeps_domain(
+            objects, id, (count - 1) as nat, now,
+        );
+    }
+}
+
+pub proof fn lemma_drain_callbacks_length(
     name: Seq<char>,
     objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    count: nat,
+    now: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        objects.contains_key(id),
+        objects[id].promise.state != PromiseState::Pending,
+        count <= objects[id].promise.callbacks.len(),
+    ensures
+        ({
+            let drained = spec_drain_callbacks(objects, id, count, now);
+            &&& drained.contains_key(id)
+            &&& drained[id].promise.callbacks.len()
+                == objects[id].promise.callbacks.len() - count
+            &&& drained[id].promise.state
+                == objects[id].promise.state
+        }),
+    decreases count,
+{
+    reveal(spec_drain_callbacks);
+    if count > 0 {
+        lemma_drain_callbacks_preserves_relaxed(
+            name, objects, id, (count - 1) as nat, now,
+        );
+        lemma_drain_callbacks_length(
+            name, objects, id, (count - 1) as nat, now,
+        );
+        let prior =
+            spec_drain_callbacks(objects, id, (count - 1) as nat, now);
+        lemma_pop_callback_and_resume(name, prior, id, now);
+        reveal(spec_resume);
+    }
+}
+
+pub proof fn lemma_drain_callbacks_preserves_relaxed(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    count: nat,
+    now: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        objects.contains_key(id),
+        objects[id].promise.state != PromiseState::Pending,
+        count <= objects[id].promise.callbacks.len(),
+    ensures
+        workflow_relaxed(
+            name,
+            spec_drain_callbacks(objects, id, count, now),
+            now,
+        ),
+    decreases count,
+{
+    reveal(spec_drain_callbacks);
+    if count > 0 {
+        lemma_drain_callbacks_preserves_relaxed(
+            name, objects, id, (count - 1) as nat, now,
+        );
+        lemma_drain_callbacks_length(
+            name, objects, id, (count - 1) as nat, now,
+        );
+        let prior =
+            spec_drain_callbacks(objects, id, (count - 1) as nat, now);
+        assert(prior[id].promise.callbacks.len() > 0);
+        lemma_pop_callback_and_resume(name, prior, id, now);
+    }
+}
+
+pub proof fn lemma_drain_keys_keeps_domain(
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+)
+    requires count <= keys.len(),
+    ensures
+        spec_drain_keys(objects, keys, count, now).dom() == objects.dom(),
+    decreases count,
+{
+    if count > 0 {
+        lemma_drain_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now,
+        );
+        let prior = spec_drain_keys(objects, keys, (count - 1) as nat, now);
+        let id = keys[count as int - 1];
+        if prior.contains_key(id) && prior[id].promise.state != PromiseState::Pending {
+            lemma_drain_callbacks_keeps_domain(
+                prior, id, prior[id].promise.callbacks.len(), now,
+            );
+        }
+        reveal(spec_drain_settled_object);
+    }
+}
+
+pub proof fn lemma_project_keys_preserves_relaxed(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
     now: u64,
     retry_timeout: u64,
 )
     requires
         workflow_relaxed(name, objects, now),
         0 < retry_timeout <= MAX_TIME,
+        count <= keys.len(),
+        forall|i: int| 0 <= i < count ==>
+            objects.contains_key(#[trigger] keys[i]),
     ensures
-        ({
-            let next = spec_run_due(
-                DocumentBodyV::Workflow(objects),
-                now,
-                retry_timeout,
-            ).0;
-            next is Workflow
-                && workflow_relaxed(name, next->Workflow_0, now)
-        }),
+        workflow_relaxed(
+            name,
+            spec_project_keys(objects, keys, count, now, retry_timeout),
+            now,
+        ),
+    decreases count,
 {
-    reveal(workflow_relaxed);
-    crate::timers::lemma_sorted(objects.dom());
-    let keys = spec_sorted_present(objects);
-    assert forall|i: int| 0 <= i < keys.len() implies
-        objects.contains_key(#[trigger] keys[i]) by {
-        assert(objects.dom().contains(keys[i]));
-    };
-    crate::timers::lemma_due_id(objects, keys, now);
-    match spec_due_id(objects, keys, now) {
-        Some(id) => {
-            assert(objects.contains_key(id));
-            let object = objects[id];
-            let next = spec_run_due(
-                DocumentBodyV::Workflow(objects),
-                now,
-                retry_timeout,
-            ).0;
-            if object.promise.state == PromiseState::Pending
-                && object.promise.timeout_at <= now
-            {
-                let projected = spec_project_obj(object, now);
-                assert(promise_relaxed(id, projected, now));
-                assert(task_relaxed(projected));
-                lemma_replace_same_callbacks(name, objects, id, projected, now);
-                assert(next is Workflow
-                    && workflow_relaxed(name, next->Workflow_0, now));
-            } else if object.promise.state == PromiseState::Pending {
-                match object.task {
-                    Some(task) if task.state == TaskState::Acquired
-                        && match task.lease_timeout_at {
-                            Some(at) => at <= now,
-                            None => false,
-                        } => {
-                            let replaced = ObjV {
-                                task: Some(spec_unlease(task, TaskState::Pending, Some(now))),
-                                ..object
-                            };
-                            assert(promise_relaxed(id, replaced, now));
-                            assert(task_relaxed(replaced));
-                            lemma_replace_same_callbacks(name, objects, id, replaced, now);
-                            assert(next is Workflow
-                                && workflow_relaxed(name, next->Workflow_0, now));
-                        },
-                    Some(task) if task.state == TaskState::Pending
-                        && match task.retry_timeout_at {
-                            Some(at) => at <= now,
-                            None => false,
-                        } => {
-                            let replaced = ObjV {
-                                task: Some(TkV {
-                                    retry_timeout_at: Some(spec_sat_add(now, retry_timeout)),
-                                    ..task
-                                }),
-                                ..object
-                            };
-                            assert(spec_sat_add(now, retry_timeout) >= now);
-                            assert(promise_relaxed(id, replaced, now));
-                            assert(task_relaxed(replaced));
-                            lemma_replace_same_callbacks(name, objects, id, replaced, now);
-                            assert(next is Workflow
-                                && workflow_relaxed(name, next->Workflow_0, now));
-                        },
-                    _ => {},
+    if count > 0 {
+        lemma_project_keys_preserves_relaxed(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_project_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+        let prior = spec_project_keys(
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        let old = prior[id];
+        let next = spec_project_due_object(old, now, retry_timeout);
+        reveal(spec_project_due_object);
+        if old.promise.state == PromiseState::Pending
+            && old.promise.timeout_at <= now
+        {
+            assert(next == spec_project_obj(old, now));
+        }
+        assert(spec_sat_add(now, retry_timeout) > now);
+        assert(promise_relaxed(id, next, now));
+        assert(task_relaxed(next));
+        reveal(suspended_rung_relaxed);
+        match old.task {
+            Some(task) if task.state == TaskState::Suspended => {
+                if old.promise.state == PromiseState::Pending
+                    && old.promise.timeout_at <= now
+                {
+                    reveal(spec_project_obj);
+                    reveal(crate::node::spec_project_prom);
+                    reveal(crate::node::spec_fulfill_task);
+                    assert(next.task.unwrap().state == TaskState::Fulfilled);
+                } else {
+                    assert(next == old);
                 }
-            } else if object.promise.callbacks.len() > 0 {
-                lemma_pop_callback_and_resume(name, objects, id, now);
-                assert(next is Workflow
-                    && workflow_relaxed(name, next->Workflow_0, now));
-            } else if object.promise.listeners.len() > 0 {
-                let replaced = ObjV {
-                    promise: PromV {
-                        listeners: object.promise.listeners.skip(1),
-                        ..object.promise
-                    },
-                    ..object
-                };
-                crate::handlers::lemma_skip_no_duplicates(object.promise.listeners);
-                assert(promise_relaxed(id, replaced, now));
-                assert(task_relaxed(replaced));
-                lemma_replace_same_callbacks(name, objects, id, replaced, now);
-                assert(next is Workflow
-                    && workflow_relaxed(name, next->Workflow_0, now));
-            }
-        },
-        None => {},
+            },
+            _ => {},
+        }
+        assert(suspended_rung_relaxed(
+            prior.insert(id, next), id, next, now,
+        ));
+        lemma_replace_same_callbacks(name, prior, id, next, now);
     }
 }
 
+pub proof fn lemma_drain_keys_preserves_relaxed(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        count <= keys.len(),
+        forall|i: int| 0 <= i < count ==>
+            objects.contains_key(#[trigger] keys[i]),
+    ensures
+        workflow_relaxed(name, spec_drain_keys(objects, keys, count, now), now),
+    decreases count,
+{
+    if count > 0 {
+        lemma_drain_keys_preserves_relaxed(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+        );
+        lemma_drain_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now,
+        );
+        let prior = spec_drain_keys(objects, keys, (count - 1) as nat, now);
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        let next = spec_drain_settled_object(prior, id, now);
+        reveal(spec_drain_settled_object);
+        if prior[id].promise.state != PromiseState::Pending {
+            let callback_count = prior[id].promise.callbacks.len();
+            lemma_drain_callbacks_preserves_relaxed(
+                name, prior, id, callback_count, now,
+            );
+            let resumed =
+                spec_drain_callbacks(prior, id, callback_count, now);
+            lemma_drain_callbacks_keeps_domain(
+                prior, id, callback_count, now,
+            );
+            assert(resumed.contains_key(id));
+            let object = resumed[id];
+            let cleared = ObjV {
+                promise: PromV {
+                    listeners: Seq::empty(),
+                    ..object.promise
+                },
+                ..object
+            };
+            assert(promise_relaxed(id, cleared, now));
+            assert(task_relaxed(cleared));
+            assert(suspended_rung_relaxed(resumed, id, object, now));
+            reveal(suspended_rung_relaxed);
+            assert(suspended_rung_relaxed(
+                resumed.insert(id, cleared), id, cleared, now,
+            ));
+            lemma_replace_same_callbacks(
+                name, resumed, id, cleared, now,
+            );
+        }
+    }
+}
+
+/// The two whole-map phases preserve all relaxed clauses and directly close
+/// every due deadline and settled queue.
 pub proof fn lemma_sweep_preserves_relaxed(
     name: Seq<char>,
     objects: Map<Seq<char>, ObjV>,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     requires
         workflow_relaxed(name, objects, now),
@@ -922,29 +1096,41 @@ pub proof fn lemma_sweep_preserves_relaxed(
                 DocumentBodyV::Workflow(objects),
                 now,
                 retry_timeout,
-                limit,
             ).0;
-            next is Workflow && workflow_relaxed(name, next->Workflow_0, now)
+            &&& next is Workflow
+            &&& workflow_relaxed(name, next->Workflow_0, now)
+            &&& spec_earliest_in(next, now) is None
         }),
-    decreases limit,
 {
-    if limit > 0 {
-        lemma_run_due_preserves_relaxed(name, objects, now, retry_timeout);
-        let next = spec_run_due(
-            DocumentBodyV::Workflow(objects),
-            now,
-            retry_timeout,
-        ).0;
-        if next != DocumentBodyV::Workflow(objects) {
-            lemma_sweep_preserves_relaxed(
-                name,
-                next->Workflow_0,
-                now,
-                retry_timeout,
-                (limit - 1) as nat,
-            );
-        }
-    }
+    crate::timers::lemma_sorted(objects.dom());
+    let keys = spec_sorted_present(objects);
+    assert forall|i: int| 0 <= i < keys.len() implies
+        objects.contains_key(#[trigger] keys[i]) by {
+        assert(objects.dom().contains(keys[i]));
+    };
+    lemma_project_keys_preserves_relaxed(
+        name, objects, keys, keys.len(), now, retry_timeout,
+    );
+    let projected = spec_project_keys(
+        objects, keys, keys.len(), now, retry_timeout,
+    );
+    lemma_project_keys_keeps_domain(
+        objects, keys, keys.len(), now, retry_timeout,
+    );
+    lemma_drain_keys_preserves_relaxed(
+        name, projected, keys, keys.len(), now,
+    );
+    let drained = spec_drain_keys(projected, keys, keys.len(), now);
+    lemma_drain_keys_keeps_domain(
+        projected, keys, keys.len(), now,
+    );
+    lemma_project_keys_preserves_relaxed(
+        name, drained, keys, keys.len(), now, retry_timeout,
+    );
+    let closed = spec_project_keys(
+        drained, keys, keys.len(), now, retry_timeout,
+    );
+    assert(spec_earliest_in(DocumentBodyV::Workflow(closed), now) is None);
 }
 
 /// Inserting a schedule occurrence into a closed workflow preserves every
@@ -2208,18 +2394,14 @@ pub open spec fn on_request(
     request: Request,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 ) -> StoredDocumentV {
     let (body, response, _, _) = spec_request_transition(
         spec_stored_body(document),
         request,
         now,
         retry_timeout,
-        limit,
     );
-    if response == spec_unavailable(request) {
-        document
-    } else if body == spec_stored_body(document) {
+    if body == spec_stored_body(document) {
         document
     } else {
         spec_advance_stored(document, body, now)
@@ -2342,42 +2524,36 @@ pub proof fn request_preserves_well_formed(
         now <= MAX_TIME,
         0 < retry_timeout <= MAX_TIME,
     ensures
-        well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)),
+        well_formed(on_request(document, request, now, retry_timeout)),
 {
     let transition = spec_request_transition(
         spec_stored_body(document),
         request,
         now,
         retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
-    if transition.1 == spec_unavailable(request) {
-        assert(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat) == document);
-        return;
-    }
     if transition.0 == spec_stored_body(document) {
-        assert(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat) == document);
+        assert(on_request(document, request, now, retry_timeout) == document);
         return;
     }
     match document {
         StoredDocumentV::Schedule(_) => {
             match request {
                 Request::ScheduleGet(_) => {
-                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout)));
                 },
                 Request::ScheduleCreate(q) => {
                     reveal(echod_types::spec_deadline_bounded);
                     echod_abstract::trusted::axiom_next_cron_after(q.cron@, now);
-                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout)));
                 },
                 Request::ScheduleDelete(_) => {
-                    assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
+                    assert(well_formed(on_request(document, request, now, retry_timeout)));
                 },
                 _ => {},
             }
         },
         StoredDocumentV::Workflow(workflow) => {
-            let limit = REQUEST_SWEEP_STEPS as nat;
             let original = DocumentBodyV::Workflow(workflow.objects);
             lemma_full_implies_relaxed(workflow, now);
             lemma_sweep_preserves_relaxed(
@@ -2385,9 +2561,8 @@ pub proof fn request_preserves_well_formed(
                 workflow.objects,
                 now,
                 retry_timeout,
-                limit,
             );
-            let swept = spec_sweep(original, now, retry_timeout, limit).0;
+            let swept = spec_sweep(original, now, retry_timeout).0;
             assert(swept is Workflow);
             assert(spec_earliest_in(swept, now) is None);
             lemma_handle_preserves_relaxed(
@@ -2403,9 +2578,8 @@ pub proof fn request_preserves_well_formed(
                 handled->Workflow_0,
                 now,
                 retry_timeout,
-                limit,
             );
-            let closed = spec_sweep(handled, now, retry_timeout, limit).0;
+            let closed = spec_sweep(handled, now, retry_timeout).0;
             assert(closed is Workflow);
             assert(spec_earliest_in(closed, now) is None);
             lemma_relaxed_closed(
@@ -2413,7 +2587,7 @@ pub proof fn request_preserves_well_formed(
                 closed->Workflow_0,
                 now,
             );
-            assert(well_formed(on_request(document, request, now, retry_timeout, REQUEST_SWEEP_STEPS as nat)));
+            assert(well_formed(on_request(document, request, now, retry_timeout)));
         },
     }
 }

@@ -1595,14 +1595,12 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
                 settled.1.after,
             ) == echod_concrete::node::spec_occurrence_transition(
                 origin_doc,
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_fire_schedule(
                     schedule_doc,
                     now,
-                    abstract_config(production_config).retry_timeout,
-                ).2[0],
+                ).1[0],
                 now,
                 abstract_config(production_config).retry_timeout,
-                crate::handler_docs::SWEEP_STEPS as nat,
             ).0
         }),
         ({
@@ -1623,10 +1621,9 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             ) == schedule_doc
             &&& echod_concrete::node::spec_stored_body(
                 settled.1.after,
-            ) == echod_concrete::node::spec_run_due(
+            ) == echod_concrete::node::spec_fire_schedule(
                 schedule_doc,
                 now,
-                abstract_config(production_config).retry_timeout,
             ).0
         }),
         0 <= production_node_slot

@@ -1,6 +1,6 @@
 //! One schedule: create, read, delete, and a run coming due.
 //!
-//! A run is two commits. The concrete model's `run_due` on the schedule's
+//! A run is two commits. The concrete model's schedule transition on the
 //! document says which occurrence is due and advances the schedule; the
 //! occurrence is a promise in its origin, `create_occurrence`, committed
 //! there first; then the advanced schedule is committed and the key that
@@ -18,7 +18,6 @@ use crate::verified::text::{copy_string, text};
 use crate::document::{self, Loaded};
 use crate::handler_docs::{
     copy_fired, dispatches, FireCtx, Flight, Phase, Progress, Queued, Work, Working,
-    SWEEP_EXHAUSTED, SWEEP_STEPS,
 };
 use crate::keys::origin_of;
 use crate::state::State;
@@ -83,7 +82,7 @@ pub open spec fn spec_fire_decide(s: S, f: FlightSpec, ws: WorkingSpec) -> S {
         WorkSpec::Fire { fired, now, .. } => {
             let t1 = document::spec_clamp_now(document::spec_loaded_committed_at(ws.loaded), now);
             let body = document::spec_loaded_body(ws.loaded);
-            let (advanced, _response, born, _notes) = spec_step(AJob::Fire, body, t1, s.cfg.retry_timeout, 0);
+            let (advanced, _response, born, _notes) = spec_step(AJob::Fire, body, t1, s.cfg.retry_timeout);
             let due = match (spec_schedule_row(body), born.len() > 0) {
                 (Some(row), true) => Some((row, born.last())),
                 _ => None,
@@ -152,38 +151,33 @@ pub open spec fn spec_fire_load_origin(s: S, f: FlightSpec, ctx: FireCtxSpec) ->
 #[verifier::opaque]
 pub open spec fn spec_fire_run(s: S, f: FlightSpec, ctx: FireCtxSpec, wo: WorkingSpec) -> S {
     let t = document::spec_clamp_now(document::spec_loaded_committed_at(wo.loaded), ctx.t1);
-    let (after, notes, closed) =
+    let (after, notes) =
         echod_concrete::node::spec_occurrence_transition(
             document::spec_loaded_body(wo.loaded),
             ctx.pending,
             t,
             s.cfg.retry_timeout,
-            SWEEP_STEPS as nat,
         );
-    if !closed {
-        spec_fail(spec_release(s, ctx.origin), f, SWEEP_EXHAUSTED@)
-    } else {
-        let outbox = spec_dispatches(after, notes);
-        let deadline = spec_body_deadline(after);
-        let s = spec_note(s, NoteSpec::FireBegin { flight: f.id, origin: ctx.origin, now: t, row: ctx.row, at: ctx.pending.at, promise_id: ctx.pending.promise, next: ctx.next });
-        let (s, commit) = spec_commit_new(s, wo, after, deadline, t, None);
-        let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-        match p {
-            ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t, outbox }, ..f }),
-            ProgressSpec::Done(_) => {
-                let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: true });
-                let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
-                let s = spec_send_all(s, outbox);
-                let s = spec_release(s, ctx.origin);
-                spec_fire_advance(s, f, ctx, t)
-            },
-            ProgressSpec::Failed(e) => {
-                let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: false });
-                let s = spec_forget_origin(s, ctx.origin);
-                let s = spec_release(s, ctx.origin);
-                spec_commit_failed(s, f, e)
-            },
-        }
+    let outbox = spec_dispatches(after, notes);
+    let deadline = spec_body_deadline(after);
+    let s = spec_note(s, NoteSpec::FireBegin { flight: f.id, origin: ctx.origin, now: t, row: ctx.row, at: ctx.pending.at, promise_id: ctx.pending.promise, next: ctx.next });
+    let (s, commit) = spec_commit_new(s, wo, after, deadline, t, None);
+    let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
+    match p {
+        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t, outbox }, ..f }),
+        ProgressSpec::Done(_) => {
+            let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: true });
+            let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
+            let s = spec_send_all(s, outbox);
+            let s = spec_release(s, ctx.origin);
+            spec_fire_advance(s, f, ctx, t)
+        },
+        ProgressSpec::Failed(e) => {
+            let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: false });
+            let s = spec_forget_origin(s, ctx.origin);
+            let s = spec_release(s, ctx.origin);
+            spec_commit_failed(s, f, e)
+        },
     }
 }
 
@@ -292,7 +286,7 @@ impl State {
         let t1 = document::clamp_now(document::loaded_committed_at(&ws.loaded), now);
         // the decision is the model's: the occurrence due at the instant, or none
         let body = document::loaded_body(&ws.loaded);
-        let Decided { doc: advanced, response: _, born, notes: _ } = flight::decide(Job::Fire, body, t1, self.cfg.retry_timeout, 0);
+        let Decided { doc: advanced, response: _, born, notes: _ } = flight::decide(Job::Fire, body, t1, self.cfg.retry_timeout);
         let mut born = born;
         let ghost born0 = born@;
         let row = schedule_row(&document::loaded_body(&ws.loaded));
@@ -411,44 +405,38 @@ impl State {
             reveal(spec_fire_run);
         }
         let t = document::clamp_now(document::loaded_committed_at(&wo.loaded), ctx.t1);
-        let (after, notes, closed) = echod_concrete::occurrence_transition(
+        let (after, notes) = echod_concrete::occurrence_transition(
             document::loaded_body(&wo.loaded),
             &ctx.pending,
             t,
             self.cfg.retry_timeout,
-            SWEEP_STEPS,
         );
-        if !closed {
-            self.release(ctx.origin.as_str());
-            self.fail(f, text(SWEEP_EXHAUSTED));
-        } else {
-            let outbox = dispatches(&after, &notes);
-            let deadline = document::deadline(&after);
-            let flight = f.id;
-            proof {
-                echod_concrete::lemma_pending_view(&ctx.pending);
-            }
-            self.note(Note::FireBegin { flight, origin: copy_string(&ctx.origin), now: t, row: Box::new(copy(&ctx.row)), at: ctx.pending.at, promise_id: copy_string(&ctx.pending.promise), next: ctx.next });
-            let mut commit = self.commit_new(wo, after, deadline, t, None);
-            match self.commit_advance(f.id, &mut commit, None) {
-                Progress::Issued => {
-                    let f = Flight { phase: Phase::FireOrigin { commit, ctx, t, outbox }, ..f };
-                    self.inflight(f);
-                },
-                Progress::Done(_) => {
-                    self.note(Note::FireEnd { flight, committed: true });
-                    self.note(Note::Commit(CommitOutcome::Committed));
-                    self.send_all(outbox);
-                    self.release(ctx.origin.as_str());
-                    self.fire_advance(f, ctx, t);
-                },
-                Progress::Failed(e) => {
-                    self.note(Note::FireEnd { flight, committed: false });
-                    self.forget(ctx.origin.as_str());
-                    self.release(ctx.origin.as_str());
-                    self.commit_failed(f, e);
-                },
-            }
+        let outbox = dispatches(&after, &notes);
+        let deadline = document::deadline(&after);
+        let flight = f.id;
+        proof {
+            echod_concrete::lemma_pending_view(&ctx.pending);
+        }
+        self.note(Note::FireBegin { flight, origin: copy_string(&ctx.origin), now: t, row: Box::new(copy(&ctx.row)), at: ctx.pending.at, promise_id: copy_string(&ctx.pending.promise), next: ctx.next });
+        let mut commit = self.commit_new(wo, after, deadline, t, None);
+        match self.commit_advance(f.id, &mut commit, None) {
+            Progress::Issued => {
+                let f = Flight { phase: Phase::FireOrigin { commit, ctx, t, outbox }, ..f };
+                self.inflight(f);
+            },
+            Progress::Done(_) => {
+                self.note(Note::FireEnd { flight, committed: true });
+                self.note(Note::Commit(CommitOutcome::Committed));
+                self.send_all(outbox);
+                self.release(ctx.origin.as_str());
+                self.fire_advance(f, ctx, t);
+            },
+            Progress::Failed(e) => {
+                self.note(Note::FireEnd { flight, committed: false });
+                self.forget(ctx.origin.as_str());
+                self.release(ctx.origin.as_str());
+                self.commit_failed(f, e);
+            },
         }
     }
 

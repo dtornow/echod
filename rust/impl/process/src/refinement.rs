@@ -73,7 +73,7 @@ use echod_concrete::interpret::{
     doc_rel, finite_store, origin_prefix, request_agrees, schedule_prefix,
 };
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{spec_stored_body, REQUEST_SWEEP_STEPS};
+use echod_concrete::node::spec_stored_body;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, request_preserves_well_formed, routed};
 #[cfg(verus_keep_ghost)]
@@ -2269,289 +2269,27 @@ pub proof fn lemma_singleton_due_schedule_starts_fire(
     assert(timer_activity_consistent(after));
 }
 
-/// The exact abstract work selected by the first due object in a loaded
-/// origin document.  This is deterministic: no existential relation chooses
-/// a more convenient timeout.
-pub open spec fn origin_due_internal(
-    map: Map<Seq<char>, echod_concrete::node::ObjV>,
-    now: u64,
-) -> Option<echod_abstract::view::InternalV> {
-    let keys = echod_concrete::node::spec_sorted(map.dom());
-    match echod_concrete::node::spec_due_id(map, keys, now) {
-        None => None,
-        Some(id) => {
-            let object = map[id];
-            if object.promise.state == echod_types::PromiseState::Pending
-                && object.promise.timeout_at <= now
-            {
-                Some(echod_abstract::view::InternalV::PromiseTimeout(id))
-            } else if object.promise.state
-                == echod_types::PromiseState::Pending
-            {
-                match object.task {
-                    Some(task)
-                        if task.state == echod_types::TaskState::Acquired
-                            && match task.lease_timeout_at {
-                                Some(at) => at <= now,
-                                None => false,
-                            } =>
-                        Some(
-                            echod_abstract::view::InternalV::TaskLeaseTimeout(
-                                id,
-                            ),
-                        ),
-                    Some(task)
-                        if task.state == echod_types::TaskState::Pending
-                            && match task.retry_timeout_at {
-                                Some(at) => at <= now,
-                                None => false,
-                            } =>
-                        Some(
-                            echod_abstract::view::InternalV::TaskRetryTimeout(
-                                id,
-                            ),
-                        ),
-                    _ => None,
-                }
-            } else if object.promise.callbacks.len() > 0 {
-                Some(echod_abstract::view::InternalV::Callback {
-                    awaited: id,
-                    awaiter: object.promise.callbacks[0],
-                })
-            } else if object.promise.listeners.len() > 0 {
-                Some(echod_abstract::view::InternalV::Listener {
-                    awaited: id,
-                    address: object.promise.listeners[0],
-                })
-            } else {
-                None
-            }
-        },
-    }
-}
-
-/// At the origin decision boundary, the loaded document identifies one exact
-/// abstract timeout.  The concrete one-step due transition and that abstract
-/// work are both outcomes of the same timeout event.  Store loading before
-/// this boundary remains hidden.
-pub proof fn lemma_loaded_origin_identifies_timeout(
-    config: ServerConfig,
-    key: Seq<char>,
-    origin: Seq<char>,
-    map: Map<Seq<char>, echod_concrete::node::ObjV>,
-    abstract_state: AbstractStateV,
-    now: u64,
-)
-    requires
-        key == echod_concrete::node::spec_origin_key(origin),
-        map.dom().finite(),
-        echod_concrete::interpret::origin_rel(
-            map,
-            origin,
-            abstract_state.store,
-        ),
-        finite_store(abstract_state.store),
-        origin_due_internal(map, now) is Some,
-    ensures
-        ({
-            let work = origin_due_internal(map, now)->Some_0;
-            &&& echod_concrete::timers::work_known(
-                abstract_state.store,
-                work,
-            )
-            &&& echod_concrete::timers::offered(
-                config,
-                abstract_state,
-                now,
-                work,
-                echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                ),
-            )
-            &&& echod_concrete::relation::due_agrees(
-                config,
-                key,
-                echod_concrete::node::DocumentBodyV::Workflow(map),
-                abstract_state,
-                now,
-            )
-        }),
-{
-    reveal(origin_due_internal);
-    let keys = echod_concrete::node::spec_sorted(map.dom());
-    echod_concrete::timers::lemma_sorted(map.dom());
-    assert forall|i: int| 0 <= i < keys.len() implies
-        map.contains_key(#[trigger] keys[i]) by {
-        assert(map.dom().contains(keys[i]));
-    }
-    echod_concrete::timers::lemma_due_id(map, keys, now);
-    let id = echod_concrete::node::spec_due_id(map, keys, now)
-        ->Some_0;
-    assert(map.contains_key(id));
-    assert(echod_types::origin(id) == origin);
-    assert(abstract_state.store.promises.contains_key(id));
-    assert(echod_concrete::interpret::object_rel(
-        map[id],
-        abstract_state.store.promises[id],
-        echod_concrete::interpret::abstract_task(
-            abstract_state.store,
-            id,
-        ),
-    ));
-    let work = origin_due_internal(map, now)->Some_0;
-    match work {
-        echod_abstract::view::InternalV::Callback {
-            awaited,
-            awaiter,
-        } => {
-            assert(awaited == id);
-            assert(map[id].promise.callbacks.contains(awaiter));
-            echod_concrete::interpret::lemma_contains_to_set(
-                map[id].promise.callbacks,
-                awaiter,
-            );
-        },
-        echod_abstract::view::InternalV::Listener {
-            awaited,
-            address,
-        } => {
-            assert(awaited == id);
-            assert(map[id].promise.listeners.contains(address));
-            echod_concrete::interpret::lemma_contains_to_set(
-                map[id].promise.listeners,
-                address,
-            );
-        },
-        echod_abstract::view::InternalV::TaskLeaseTimeout(task_id)
-        | echod_abstract::view::InternalV::TaskRetryTimeout(task_id) => {
-            assert(task_id == id);
-            assert(echod_concrete::interpret::abstract_task(
-                abstract_state.store,
-                id,
-            ) is Some);
-            assert(abstract_state.store.tasks.contains_key(id));
-        },
-        echod_abstract::view::InternalV::PromiseTimeout(promise_id) => {
-            assert(promise_id == id);
-        },
-        _ => {
-            assert(false);
-        },
-    }
-    assert(echod_concrete::timers::work_known(
-        abstract_state.store,
-        work,
-    ));
-    echod_concrete::timers::lemma_work_offered(
-        config,
-        abstract_state,
-        now,
-        work,
-    );
-    echod_concrete::timers::lemma_origin_due(
-        config,
-        key,
-        origin,
-        map,
-        abstract_state,
-        now,
-    );
-}
-
-pub proof fn lemma_sweep_stops_after_one_due(
-    document: echod_concrete::node::DocumentBodyV,
-    now: u64,
-    retry_timeout: u64,
-    limit: nat,
-)
-    requires
-        limit > 0,
-        ({
-            let first = echod_concrete::node::spec_run_due(
-                document,
-                now,
-                retry_timeout,
-            );
-            &&& first.0 != document
-            &&& echod_concrete::node::spec_run_due(
-                first.0,
-                now,
-                retry_timeout,
-            ).0 == first.0
-        }),
-    ensures
-        ({
-            let first = echod_concrete::node::spec_run_due(
-                document,
-                now,
-                retry_timeout,
-            );
-            echod_concrete::node::spec_sweep(
-                document,
-                now,
-                retry_timeout,
-                limit,
-            ) == (first.0, first.2, first.3)
-        }),
-{
-    let first = echod_concrete::node::spec_run_due(
-        document,
-        now,
-        retry_timeout,
-    );
-    let remaining = (limit - 1) as nat;
-    assert(echod_concrete::node::spec_sweep(
-        first.0,
-        now,
-        retry_timeout,
-        remaining,
-    ) == (
-        first.0,
-        Seq::<echod_concrete::node::PendingV>::empty(),
-        Seq::<echod_concrete::node::NoteV>::empty(),
-    )) by {
-        reveal(echod_concrete::node::spec_sweep);
-    }
-    reveal(echod_concrete::node::spec_sweep);
-    assert(first.2 + Seq::<echod_concrete::node::PendingV>::empty()
-        =~= first.2);
-    assert(first.3 + Seq::<echod_concrete::node::NoteV>::empty()
-        =~= first.3);
-}
-
-/// A bounded production sweep may change several objects. Relaxed closure is
-/// inductive across every `spec_run_due` step; full document well-formedness is
-/// recovered exactly when the configured budget leaves no due object behind.
-pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
+/// The whole-map transition preserves the relaxed invariant and closes
+/// directly to full document well-formedness.
+pub proof fn lemma_bulk_sweep_preserves_well_formed(
     workflow: echod_concrete::document::WorkflowDocumentV,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     requires
         echod_concrete::document::workflow_well_formed(workflow),
         workflow.committed_at <= now,
         now <= MAX_TIME,
         0 < retry_timeout <= MAX_TIME,
-        ({
-            let swept = echod_concrete::node::spec_sweep(
-                echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
-                now,
-                retry_timeout,
-                limit,
-            ).0;
-            echod_concrete::node::spec_earliest_in(swept, now) is None
-        }),
     ensures
         ({
             let swept = echod_concrete::node::spec_sweep(
                 echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
                 now,
                 retry_timeout,
-                limit,
             ).0;
+            &&& echod_concrete::node::spec_earliest_in(swept, now) is None
+            &&&
             well_formed(echod_concrete::node::spec_advance_stored(
                 StoredDocumentV::Workflow(workflow),
                 swept,
@@ -2565,13 +2303,11 @@ pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
         workflow.objects,
         now,
         retry_timeout,
-        limit,
     );
     let swept = echod_concrete::node::spec_sweep(
         echod_concrete::node::DocumentBodyV::Workflow(workflow.objects),
         now,
         retry_timeout,
-        limit,
     ).0;
     assert(swept is Workflow);
     echod_concrete::quick_n_dirty::lemma_relaxed_closed(
@@ -2584,13 +2320,9 @@ pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
     reveal(echod_concrete::node::spec_advance_stored);
 }
 
-/// Standalone sweeps no longer commit a budget-exhausted intermediate body.
-/// A closed result enters the existing commit path and is well formed; an
-/// unclosed result takes the exact production failure path before
-/// `spec_commit_advance`, so none of its partial body, notes, or outbox can be
-/// written or emitted. `spec_fail` returns the firing reservation as failed,
-/// which rearms it at the retry slot.
-pub proof fn lemma_standalone_origin_sweep_closed_or_fails(
+/// A standalone workflow transition enters the normal CAS-gated commit path
+/// with a fully well-formed endpoint.
+pub proof fn lemma_standalone_origin_sweep_commits_well_formed(
     s: S,
     flight: FlightSpec,
     working: crate::handler_docs::WorkingSpec,
@@ -2613,7 +2345,6 @@ pub proof fn lemma_standalone_origin_sweep_closed_or_fails(
                 ),
                 now,
                 s.cfg.retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             let decided =
                 crate::handler_docs::spec_decide(
@@ -2621,28 +2352,14 @@ pub proof fn lemma_standalone_origin_sweep_closed_or_fails(
                     flight.work,
                     working,
                 );
-            if echod_concrete::node::spec_earliest_in(
-                swept,
-                now,
-            ) is Some {
-                crate::handler_docs::spec_run_origin(
-                    s,
-                    flight,
-                    working,
-                ) == crate::handler_docs::spec_fail(
-                    decided.0,
-                    flight,
-                    crate::handler_docs::SWEEP_EXHAUSTED@,
+            &&& echod_concrete::node::spec_earliest_in(swept, now) is None
+            &&& decided.1.after
+                == echod_concrete::node::spec_advance_stored(
+                    StoredDocumentV::Workflow(workflow),
+                    swept,
+                    now,
                 )
-            } else {
-                &&& decided.1.after
-                    == echod_concrete::node::spec_advance_stored(
-                        StoredDocumentV::Workflow(workflow),
-                        swept,
-                        now,
-                    )
-                &&& well_formed(decided.1.after)
-            }
+            &&& well_formed(decided.1.after)
         }),
 {
     let now = flight.work.now();
@@ -2652,26 +2369,18 @@ pub proof fn lemma_standalone_origin_sweep_closed_or_fails(
         ),
         now,
         s.cfg.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     ).0;
     reveal(crate::handler_docs::spec_decide);
     reveal(crate::verified::flight_spec::spec_step);
     reveal(crate::handler_docs::spec_commit_new);
-    if echod_concrete::node::spec_earliest_in(swept, now) is Some {
-        reveal(crate::handler_docs::spec_run_origin);
-    } else {
-        lemma_closed_origin_sweep_preserves_well_formed(
-            workflow,
-            now,
-            s.cfg.retry_timeout,
-            REQUEST_SWEEP_STEPS as nat,
-        );
-    }
+    lemma_bulk_sweep_preserves_well_formed(
+        workflow,
+        now,
+        s.cfg.retry_timeout,
+    );
 }
 
-/// The new exhaustion guard is confined to standalone `Sweep` work. Normal
-/// requests retain their existing atomic pre/handler/post exhaustion behavior
-/// and enter exactly the same commit state as before.
+/// Non-sweep work enters the same CAS-gated commit state.
 pub proof fn lemma_non_sweep_origin_commit_path_unchanged(
     s: S,
     flight: FlightSpec,
@@ -2729,7 +2438,7 @@ pub proof fn lemma_non_sweep_origin_commit_path_unchanged(
     reveal(crate::handler_docs::spec_run_origin);
 }
 
-/// Exact abstract trace for every changing step of a bounded origin sweep.
+/// Exact abstract alignment for the atomic origin transition.
 /// Each witness is an actual index in `spec_run_timeout` and must reproduce
 /// the concrete Store projection, dispatch notes, and queued occurrences.
 pub open spec fn origin_sweep_matches(
@@ -2738,69 +2447,49 @@ pub open spec fn origin_sweep_matches(
     document: echod_concrete::node::DocumentBodyV,
     abstract_state: AbstractStateV,
     now: u64,
-    limit: nat,
-) -> bool
-    decreases limit,
-{
-    if limit == 0 {
-        true
-    } else {
-        let (next, _, born, notes) = echod_concrete::node::spec_run_due(
-            document,
+) -> bool {
+    let (next, _, born, notes) = echod_concrete::node::spec_due_transition(
+        document,
+        now,
+        config.retry_timeout,
+    );
+    ||| next == document && born.len() == 0 && notes.len() == 0
+    ||| exists|j: int|
+        #![trigger echod_abstract::model::spec_run_timeout(
+            config,
+            abstract_state,
             now,
-            config.retry_timeout,
+        )[j]]
+    {
+        let results = echod_abstract::model::spec_run_timeout(
+            config,
+            abstract_state,
+            now,
         );
-        if next == document {
-            true
-        } else {
-            exists|j: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[j]]
-            {
-                let results =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= j < results.len()
-                &&& results[j].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& results[j].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, results[j].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    results[j].state.store,
-                )
-                &&& finite_store(results[j].state.store)
-                &&& origin_sweep_matches(
-                    config,
-                    key,
-                    next,
-                    results[j].state,
-                    now,
-                    (limit - 1) as nat,
-                )
-            }
-        }
+        &&& 0 <= j < results.len()
+        &&& results[j].send
+            == echod_concrete::relation::note_sends(notes)
+        &&& results[j].state.pending
+            == abstract_state.pending
+                + echod_concrete::relation::items(born)
+        &&& doc_rel(key, next, results[j].state.store)
+        &&& echod_concrete::interpret::others_kept(
+            key,
+            abstract_state.store,
+            results[j].state.store,
+        )
+        &&& finite_store(results[j].state.store)
     }
 }
 
-/// Compose all changing `spec_run_due` steps in the production sweep with the
+/// Relate the production workflow transition to the
 /// corresponding sequence of exact abstract internal transitions.
-pub proof fn lemma_origin_sweep_matches_abstract_trace(
+pub proof fn lemma_origin_sweep_matches_abstract_bulk_transition(
     config: ServerConfig,
     key: Seq<char>,
     document: echod_concrete::node::DocumentBodyV,
     abstract_state: AbstractStateV,
     now: u64,
-    limit: nat,
 )
     requires
         doc_rel(key, document, abstract_state.store),
@@ -2812,354 +2501,145 @@ pub proof fn lemma_origin_sweep_matches_abstract_trace(
             document,
             abstract_state,
             now,
-            limit,
         ),
-    decreases limit,
 {
-    if limit > 0 {
-        echod_concrete::timers::lemma_due_agrees(
+    echod_concrete::timers::lemma_due_agrees(
+        config,
+        key,
+        document,
+        abstract_state,
+        now,
+    );
+    reveal(origin_sweep_matches);
+    reveal(echod_concrete::relation::due_agrees);
+}
+
+/// The endpoint of the single abstract bulk transition corresponding to the
+/// concrete workflow transition.
+pub open spec fn origin_bulk_transition_to(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    final_state: AbstractStateV,
+) -> bool {
+    let (next, _, born, notes) = echod_concrete::node::spec_due_transition(
+        document,
+        now,
+        config.retry_timeout,
+    );
+    ||| next == document
+        && born.len() == 0
+        && notes.len() == 0
+        && final_state == abstract_state
+    ||| exists|j: int|
+        #![trigger echod_abstract::model::spec_run_timeout(
             config,
-            key,
-            document,
+            abstract_state,
+            now,
+        )[j]]
+    {
+        let results = echod_abstract::model::spec_run_timeout(
+            config,
             abstract_state,
             now,
         );
-        let (next, _, born, notes) =
-            echod_concrete::node::spec_run_due(
-                document,
-                now,
-                config.retry_timeout,
-            );
-        reveal(echod_concrete::relation::due_agrees);
-        if next != document {
-            let j = choose|j: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[j]]
-            {
-                let results =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= j < results.len()
-                &&& results[j].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& results[j].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, results[j].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    results[j].state.store,
-                )
-                &&& finite_store(results[j].state.store)
-            };
-            let results = echod_abstract::model::spec_run_timeout(
-                config,
-                abstract_state,
-                now,
-            );
-            lemma_origin_sweep_matches_abstract_trace(
-                config,
-                key,
-                next,
-                results[j].state,
-                now,
-                (limit - 1) as nat,
-            );
-            assert(origin_sweep_matches(
-                config,
-                key,
-                next,
-                results[j].state,
-                now,
-                (limit - 1) as nat,
-            ));
-            assert(exists|k: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[k]]
-            {
-                let outcomes =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= k < outcomes.len()
-                &&& outcomes[k].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& outcomes[k].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, outcomes[k].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    outcomes[k].state.store,
-                )
-                &&& finite_store(outcomes[k].state.store)
-                &&& origin_sweep_matches(
-                    config,
-                    key,
-                    next,
-                    outcomes[k].state,
-                    now,
-                    (limit - 1) as nat,
-                )
-            }) by {
-                assert({
-                    let outcomes =
-                        echod_abstract::model::spec_run_timeout(
-                            config,
-                            abstract_state,
-                            now,
-                        );
-                    &&& 0 <= j < outcomes.len()
-                    &&& outcomes[j].send
-                        == echod_concrete::relation::note_sends(notes)
-                    &&& outcomes[j].state.pending
-                        == abstract_state.pending
-                            + echod_concrete::relation::items(born)
-                    &&& doc_rel(key, next, outcomes[j].state.store)
-                    &&& echod_concrete::interpret::others_kept(
-                        key,
-                        abstract_state.store,
-                        outcomes[j].state.store,
-                    )
-                    &&& finite_store(outcomes[j].state.store)
-                    &&& origin_sweep_matches(
-                        config,
-                        key,
-                        next,
-                        outcomes[j].state,
-                        now,
-                        (limit - 1) as nat,
-                    )
-                });
-            }
-        }
+        &&& 0 <= j < results.len()
+        &&& final_state == results[j].state
+        &&& results[j].send
+            == echod_concrete::relation::note_sends(notes)
+        &&& results[j].state.pending
+            == abstract_state.pending
+                + echod_concrete::relation::items(born)
+        &&& doc_rel(key, next, results[j].state.store)
+        &&& echod_concrete::interpret::others_kept(
+            key,
+            abstract_state.store,
+            results[j].state.store,
+        )
+        &&& finite_store(results[j].state.store)
     }
-    reveal(origin_sweep_matches);
 }
 
-/// The endpoint form of `origin_sweep_matches`.  Unlike an unconstrained
-/// existential relation, every changing edge names an actual indexed result
-/// of `spec_run_timeout` and requires its exact sends, pending additions,
-/// document interpretation, other-key frame, and finite store.
-pub open spec fn origin_sweep_trace_to(
+pub proof fn lemma_origin_bulk_transition_endpoint_exists(
     config: ServerConfig,
     key: Seq<char>,
     document: echod_concrete::node::DocumentBodyV,
     abstract_state: AbstractStateV,
     now: u64,
-    limit: nat,
-    final_state: AbstractStateV,
-) -> bool
-    decreases limit,
-{
-    if limit == 0 {
-        final_state == abstract_state
-    } else {
-        let (next, _, born, notes) = echod_concrete::node::spec_run_due(
-            document,
-            now,
-            config.retry_timeout,
-        );
-        if next == document {
-            final_state == abstract_state
-        } else {
-            exists|j: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[j]]
-            {
-                let results =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= j < results.len()
-                &&& results[j].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& results[j].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, results[j].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    results[j].state.store,
-                )
-                &&& finite_store(results[j].state.store)
-                &&& origin_sweep_trace_to(
-                    config,
-                    key,
-                    next,
-                    results[j].state,
-                    now,
-                    (limit - 1) as nat,
-                    final_state,
-                )
-            }
-        }
-    }
-}
-
-pub proof fn lemma_origin_sweep_trace_endpoint_exists(
-    config: ServerConfig,
-    key: Seq<char>,
-    document: echod_concrete::node::DocumentBodyV,
-    abstract_state: AbstractStateV,
-    now: u64,
-    limit: nat,
 )
     requires
         doc_rel(key, document, abstract_state.store),
         finite_store(abstract_state.store),
     ensures
         exists|final_state: AbstractStateV|
-            origin_sweep_trace_to(
+            origin_bulk_transition_to(
                 config,
                 key,
                 document,
                 abstract_state,
                 now,
-                limit,
                 final_state,
             ),
-    decreases limit,
 {
-    if limit == 0 {
-        assert(origin_sweep_trace_to(
-            config,
-            key,
+    let (next, _, born, notes) =
+        echod_concrete::node::spec_due_transition(
             document,
-            abstract_state,
             now,
-            limit,
-            abstract_state,
+            config.retry_timeout,
+        );
+    echod_concrete::timers::lemma_due_agrees(
+        config,
+        key,
+        document,
+        abstract_state,
+        now,
+    );
+    reveal(echod_concrete::relation::due_agrees);
+    reveal(origin_bulk_transition_to);
+    if next == document && born.len() == 0 && notes.len() == 0 {
+        assert(origin_bulk_transition_to(
+            config, key, document, abstract_state, now, abstract_state,
         ));
     } else {
-        echod_concrete::timers::lemma_due_agrees(
-            config,
-            key,
-            document,
-            abstract_state,
-            now,
+        let results = echod_abstract::model::spec_run_timeout(
+            config, abstract_state, now,
         );
-        let (next, _, born, notes) =
-            echod_concrete::node::spec_run_due(
-                document,
-                now,
-                config.retry_timeout,
-            );
-        reveal(echod_concrete::relation::due_agrees);
-        if next == document {
-            assert(origin_sweep_trace_to(
-                config,
-                key,
-                document,
-                abstract_state,
-                now,
-                limit,
-                abstract_state,
-            ));
-        } else {
-            let j = choose|j: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[j]]
-            {
-                let results =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= j < results.len()
-                &&& results[j].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& results[j].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, results[j].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    results[j].state.store,
+        let j = choose|j: int|
+            0 <= j < results.len()
+                && results[j].send == echod_concrete::relation::note_sends(notes)
+                && results[j].state.pending
+                    == abstract_state.pending + echod_concrete::relation::items(born)
+                && doc_rel(key, next, results[j].state.store)
+                && echod_concrete::interpret::others_kept(
+                    key, abstract_state.store, results[j].state.store,
                 )
-                &&& finite_store(results[j].state.store)
-            };
-            let results = echod_abstract::model::spec_run_timeout(
-                config,
-                abstract_state,
-                now,
-            );
-            lemma_origin_sweep_trace_endpoint_exists(
-                config,
-                key,
-                next,
-                results[j].state,
-                now,
-                (limit - 1) as nat,
-            );
-            let final_state = choose|final_state: AbstractStateV|
-                #[trigger] origin_sweep_trace_to(
-                    config,
-                    key,
-                    next,
-                    results[j].state,
-                    now,
-                    (limit - 1) as nat,
-                    final_state,
-                );
-            assert(origin_sweep_trace_to(
-                config,
-                key,
-                document,
-                abstract_state,
-                now,
-                limit,
-                final_state,
-            ));
-        }
+                && finite_store(results[j].state.store);
+        assert(origin_bulk_transition_to(
+            config, key, document, abstract_state, now, results[j].state,
+        ));
     }
-    reveal(origin_sweep_trace_to);
 }
 
-pub proof fn lemma_origin_sweep_trace_endpoint_frames(
+pub proof fn lemma_origin_bulk_transition_endpoint_frames(
     config: ServerConfig,
     key: Seq<char>,
     document: echod_concrete::node::DocumentBodyV,
     abstract_state: AbstractStateV,
     now: u64,
-    limit: nat,
     final_state: AbstractStateV,
 )
     requires
         document is Workflow,
         doc_rel(key, document, abstract_state.store),
         finite_store(abstract_state.store),
-        origin_sweep_trace_to(
+        origin_bulk_transition_to(
             config,
             key,
             document,
             abstract_state,
             now,
-            limit,
             final_state,
         ),
     ensures
@@ -3168,7 +2648,6 @@ pub proof fn lemma_origin_sweep_trace_endpoint_frames(
                 document,
                 now,
                 config.retry_timeout,
-                limit,
             ).0;
             &&& doc_rel(key, swept, final_state.store)
             &&& echod_concrete::interpret::others_kept(
@@ -3179,11 +2658,16 @@ pub proof fn lemma_origin_sweep_trace_endpoint_frames(
             &&& finite_store(final_state.store)
             &&& final_state.pending == abstract_state.pending
         }),
-    decreases limit,
 {
-    reveal(origin_sweep_trace_to);
+    reveal(origin_bulk_transition_to);
     reveal(echod_concrete::node::spec_sweep);
-    if limit == 0 {
+    let (next, _, born, notes) =
+        echod_concrete::node::spec_due_transition(
+            document,
+            now,
+            config.retry_timeout,
+        );
+    if next == document {
         assert forall|other: Seq<char>,
             body: echod_concrete::node::DocumentBodyV|
             other != key
@@ -3191,97 +2675,36 @@ pub proof fn lemma_origin_sweep_trace_endpoint_frames(
             implies #[trigger] doc_rel(other, body, final_state.store) by {
         }
     } else {
-        let (next, _, born, notes) =
-            echod_concrete::node::spec_run_due(
-                document,
-                now,
-                config.retry_timeout,
-            );
-        if next == document {
-            assert forall|other: Seq<char>,
-                body: echod_concrete::node::DocumentBodyV|
-                other != key
-                    && doc_rel(other, body, abstract_state.store)
-                implies #[trigger] doc_rel(
-                    other,
-                    body,
-                    final_state.store,
-                ) by {
-            }
-        } else {
-            assert(next is Workflow);
-            assert(born =~=
-                Seq::<echod_concrete::node::PendingV>::empty());
-            let j = choose|j: int|
-                #![trigger echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_state,
-                    now,
-                )[j]]
-            {
-                let results =
-                    echod_abstract::model::spec_run_timeout(
-                        config,
-                        abstract_state,
-                        now,
-                    );
-                &&& 0 <= j < results.len()
-                &&& results[j].send
-                    == echod_concrete::relation::note_sends(notes)
-                &&& results[j].state.pending
-                    == abstract_state.pending
-                        + echod_concrete::relation::items(born)
-                &&& doc_rel(key, next, results[j].state.store)
-                &&& echod_concrete::interpret::others_kept(
-                    key,
-                    abstract_state.store,
-                    results[j].state.store,
+        let results = echod_abstract::model::spec_run_timeout(
+            config,
+            abstract_state,
+            now,
+        );
+        let j = choose|j: int|
+            0 <= j < results.len()
+                && final_state == results[j].state
+                && results[j].send == echod_concrete::relation::note_sends(notes)
+                && results[j].state.pending
+                    == abstract_state.pending + echod_concrete::relation::items(born)
+                && doc_rel(key, next, results[j].state.store)
+                && echod_concrete::interpret::others_kept(
+                    key, abstract_state.store, results[j].state.store,
                 )
-                &&& finite_store(results[j].state.store)
-                &&& origin_sweep_trace_to(
-                    config,
-                    key,
-                    next,
-                    results[j].state,
-                    now,
-                    (limit - 1) as nat,
-                    final_state,
-                )
-            };
-            let results = echod_abstract::model::spec_run_timeout(
-                config,
-                abstract_state,
-                now,
-            );
-            lemma_origin_sweep_trace_endpoint_frames(
-                config,
-                key,
-                next,
-                results[j].state,
-                now,
-                (limit - 1) as nat,
-                final_state,
-            );
-            assert forall|other: Seq<char>,
-                body: echod_concrete::node::DocumentBodyV|
-                other != key
-                    && doc_rel(other, body, abstract_state.store)
-                implies #[trigger] doc_rel(
-                    other,
-                    body,
-                    final_state.store,
-                ) by {
-                assert(doc_rel(other, body, results[j].state.store));
-            }
-            assert(echod_concrete::relation::items(born).len() == 0);
-            assert(results[j].state.pending
-                == abstract_state.pending);
+                && finite_store(results[j].state.store);
+        assert(next is Workflow);
+        assert(born =~= Seq::<echod_concrete::node::PendingV>::empty());
+        assert forall|other: Seq<char>,
+            body: echod_concrete::node::DocumentBodyV|
+            other != key
+                && doc_rel(other, body, abstract_state.store)
+            implies #[trigger] doc_rel(other, body, final_state.store) by {
         }
+        assert(echod_concrete::relation::items(born).len() == 0);
     }
 }
 
-/// `spec_commit_new` stores the fully closed multi-step sweep result, not an
-/// intermediate body.  The sequence may subsequently issue deadline-key
+/// `spec_commit_new` stores the fully closed bulk sweep result. The sequence
+/// may subsequently issue deadline-key
 /// actions before its conditional document write, but its committed payload is
 /// already fixed here.
 pub proof fn lemma_origin_commit_new_records_closed_sweep(
@@ -3304,7 +2727,6 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
                 ),
                 now,
                 retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             echod_concrete::node::spec_earliest_in(swept, now) is None
         }),
@@ -3316,7 +2738,6 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
                 ),
                 now,
                 retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             let (_, commit) = crate::handler_docs::spec_commit_new(
                 s,
@@ -3336,11 +2757,10 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
             &&& commit.issued is None
         }),
 {
-    lemma_closed_origin_sweep_preserves_well_formed(
+    lemma_bulk_sweep_preserves_well_formed(
         workflow,
         now,
         retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
     reveal(crate::handler_docs::spec_commit_new);
 }
@@ -3373,7 +2793,6 @@ pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
                 document,
                 now,
                 retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             &&& swept != document
             &&& echod_concrete::node::spec_earliest_in(
@@ -3391,7 +2810,6 @@ pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
                 document,
                 now,
                 retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             let (planned, commit) =
                 crate::handler_docs::spec_commit_new(
@@ -3448,7 +2866,6 @@ pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
         document,
         now,
         retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     ).0;
     lemma_origin_commit_new_records_closed_sweep(
         s,
@@ -3512,88 +2929,6 @@ pub proof fn lemma_successful_origin_write_answer_preserves_timer_lanes(
     reveal(crate::handler_docs::spec_answered);
     reveal(crate::state::spec_note);
     reveal(crate::state::spec_remember);
-}
-
-/// Bounded production decision slice: if the loaded origin has exactly one
-/// changing due step, the production Sweep body is that matched abstract
-/// timeout and then stops. Commit construction and its Store response remain
-/// the next linearization frontier.
-pub proof fn lemma_loaded_origin_single_timeout_decision_matches(
-    config: ServerConfig,
-    key: Seq<char>,
-    origin: Seq<char>,
-    map: Map<Seq<char>, echod_concrete::node::ObjV>,
-    abstract_state: AbstractStateV,
-    now: u64,
-)
-    requires
-        key == echod_concrete::node::spec_origin_key(origin),
-        map.dom().finite(),
-        echod_concrete::interpret::origin_rel(
-            map,
-            origin,
-            abstract_state.store,
-        ),
-        finite_store(abstract_state.store),
-        origin_due_internal(map, now) is Some,
-        ({
-            let document =
-                echod_concrete::node::DocumentBodyV::Workflow(map);
-            let first = echod_concrete::node::spec_run_due(
-                document,
-                now,
-                config.retry_timeout,
-            );
-            &&& first.0 != document
-            &&& echod_concrete::node::spec_run_due(
-                first.0,
-                now,
-                config.retry_timeout,
-            ).0 == first.0
-        }),
-    ensures
-        ({
-            let document =
-                echod_concrete::node::DocumentBodyV::Workflow(map);
-            let first = echod_concrete::node::spec_run_due(
-                document,
-                now,
-                config.retry_timeout,
-            );
-            &&& echod_concrete::relation::due_agrees(
-                config,
-                key,
-                document,
-                abstract_state,
-                now,
-            )
-            &&& crate::verified::flight_spec::spec_step(
-                crate::verified::flight_spec::AJob::Sweep,
-                document,
-                now,
-                config.retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
-            ) == (first.0, None, first.2, first.3)
-        }),
-{
-    lemma_loaded_origin_identifies_timeout(
-        config,
-        key,
-        origin,
-        map,
-        abstract_state,
-        now,
-    );
-    let document =
-        echod_concrete::node::DocumentBodyV::Workflow(map);
-    assert(REQUEST_SWEEP_STEPS as nat > 0);
-    lemma_sweep_stops_after_one_due(
-        document,
-        now,
-        config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
-    );
-    reveal(crate::verified::flight_spec::spec_step);
 }
 
 /// A successfully loaded due schedule determines the promise carried by the
@@ -3702,7 +3037,7 @@ pub open spec fn schedule_fire_atomic_trace(
     occurred: AbstractStateV,
     abstract_after: AbstractStateV,
 ) -> bool {
-    let schedule_step = echod_concrete::node::spec_run_due(
+    let schedule_step = echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
@@ -3733,7 +3068,7 @@ pub open spec fn schedule_fire_atomic_trace(
         pending,
         now,
     );
-    let retry_step = echod_concrete::node::spec_run_due(
+    let retry_step = echod_concrete::node::spec_due_transition(
         raw,
         now,
         config.retry_timeout,
@@ -3792,7 +3127,7 @@ pub open spec fn schedule_fire_split_intermediate(
     occurred: AbstractStateV,
     abstract_after: AbstractStateV,
 ) -> bool {
-    let schedule_step = echod_concrete::node::spec_run_due(
+    let schedule_step = echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
@@ -3804,19 +3139,17 @@ pub open spec fn schedule_fire_split_intermediate(
             pending,
             now,
             config.retry_timeout,
-            REQUEST_SWEEP_STEPS as nat,
         );
     let raw = echod_concrete::node::spec_occurrence(
         origin_doc,
         pending,
         now,
     );
-    let retry_step = echod_concrete::node::spec_run_due(
+    let retry_step = echod_concrete::node::spec_due_transition(
         raw,
         now,
         config.retry_timeout,
     );
-    &&& origin_transition.2
     &&& origin_transition.0 == retry_step.0
     &&& origin_transition.1
         == echod_concrete::node::spec_committed_notes(
@@ -3855,7 +3188,7 @@ pub open spec fn schedule_fire_retry_stutter_relation(
     occurred: AbstractStateV,
     abstract_after: AbstractStateV,
 ) -> bool {
-    let schedule_step = echod_concrete::node::spec_run_due(
+    let schedule_step = echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
@@ -3866,14 +3199,12 @@ pub open spec fn schedule_fire_retry_stutter_relation(
         pending,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
     let retry = echod_concrete::node::spec_occurrence_transition(
         first.0,
         pending,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
     &&& schedule_fire_split_intermediate(
         config,
@@ -3890,9 +3221,8 @@ pub open spec fn schedule_fire_retry_stutter_relation(
     &&& retry == (
         first.0,
         Seq::<echod_concrete::node::NoteV>::empty(),
-        true,
     )
-    &&& echod_concrete::node::spec_run_due(
+    &&& echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
@@ -3926,7 +3256,7 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
         ),
         ({
             let schedule_step =
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_due_transition(
                     schedule_doc,
                     now,
                     config.retry_timeout,
@@ -3938,7 +3268,6 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
                     pending,
                     now,
                     config.retry_timeout,
-                    REQUEST_SWEEP_STEPS as nat,
                 );
             &&& first.0 is Workflow
             &&& first.0->Workflow_0.contains_key(
@@ -3948,7 +3277,7 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
                 first.0,
                 now,
             ) is None
-            &&& echod_concrete::node::spec_run_due(
+            &&& echod_concrete::node::spec_due_transition(
                 first.0,
                 now,
                 config.retry_timeout,
@@ -3969,7 +3298,7 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
         ),
 {
     let schedule_step =
-        echod_concrete::node::spec_run_due(
+        echod_concrete::node::spec_due_transition(
             schedule_doc,
             now,
             config.retry_timeout,
@@ -3981,14 +3310,12 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
             pending,
             now,
             config.retry_timeout,
-            REQUEST_SWEEP_STEPS as nat,
         );
     lemma_existing_occurrence_transition_is_idempotent(
         first.0,
         pending,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
 }
 
@@ -4014,7 +3341,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
         abstract_before.pending.len() == 0,
         ({
             let schedule_step =
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_due_transition(
                     schedule_doc,
                     now,
                     config.retry_timeout,
@@ -4030,7 +3357,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
         }),
         ({
             let pending =
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_due_transition(
                     schedule_doc,
                     now,
                     config.retry_timeout,
@@ -4040,7 +3367,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
                 pending,
                 now,
             );
-            let retry = echod_concrete::node::spec_run_due(
+            let retry = echod_concrete::node::spec_due_transition(
                 raw,
                 now,
                 config.retry_timeout,
@@ -4049,7 +3376,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
                 origin_doc,
                 now,
             ) is None
-            &&& echod_concrete::node::spec_run_due(
+            &&& echod_concrete::node::spec_due_transition(
                 origin_doc,
                 now,
                 config.retry_timeout,
@@ -4061,7 +3388,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
                 retry.0,
                 now,
             ) is None
-            &&& echod_concrete::node::spec_run_due(
+            &&& echod_concrete::node::spec_due_transition(
                 retry.0,
                 now,
                 config.retry_timeout,
@@ -4084,7 +3411,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
                 abstract_after,
             ),
 {
-    let schedule_step = echod_concrete::node::spec_run_due(
+    let schedule_step = echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
@@ -4158,7 +3485,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
             occurrence_out,
         );
     let occurred = occurrence_result.state;
-    reveal(echod_concrete::node::spec_run_due);
+    reveal(echod_concrete::node::spec_due_transition);
     assert(pending.at <= now);
     reveal(echod_concrete::relation::as_item);
     reveal(echod_abstract::machine::spec_body);
@@ -4184,17 +3511,10 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
     assert(finite_store(occurred.store));
     assert(doc_rel(schedule_key, schedule_step.0, occurred.store));
 
-    let retry_step = echod_concrete::node::spec_run_due(
+    let retry_step = echod_concrete::node::spec_due_transition(
         raw,
         now,
         config.retry_timeout,
-    );
-    assert(REQUEST_SWEEP_STEPS as nat > 0);
-    lemma_sweep_stops_after_one_due(
-        raw,
-        now,
-        config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
     echod_concrete::timers::lemma_due_agrees(
         config,
@@ -4253,7 +3573,7 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
     ));
     reveal(echod_concrete::node::spec_occurrence_transition);
     reveal(echod_concrete::node::spec_sweep);
-    assert(echod_concrete::node::spec_run_due(
+    assert(echod_concrete::node::spec_due_transition(
         origin_doc,
         now,
         config.retry_timeout,
@@ -4262,13 +3582,11 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
         origin_doc,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     ).0 == origin_doc);
     assert(echod_concrete::node::spec_sweep(
         raw,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     ).0 == retry_step.0);
     assert(schedule_fire_split_intermediate(
         config,
@@ -4284,10 +3602,10 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
     ));
 }
 
-/// Generalized state match when the loaded origin contains arbitrary valid due
-/// work. Those origin timeouts linearize first through the existing indexed
-/// sweep trace; the schedule timeout then uses the closed sweep endpoint. The
-/// production occurrence transition reaches exactly that same final document.
+/// State match when the loaded origin contains arbitrary valid due work. The
+/// origin bulk transition linearizes first; the schedule timeout then uses
+/// that closed endpoint. The production occurrence transition reaches the
+/// same final document.
 pub open spec fn schedule_fire_preswept_trace(
     config: ServerConfig,
     schedule_key: Seq<char>,
@@ -4296,7 +3614,6 @@ pub open spec fn schedule_fire_preswept_trace(
     origin_doc: echod_concrete::node::DocumentBodyV,
     abstract_before: AbstractStateV,
     now: u64,
-    limit: nat,
     preswept: AbstractStateV,
     scheduled: AbstractStateV,
     occurred: AbstractStateV,
@@ -4306,21 +3623,19 @@ pub open spec fn schedule_fire_preswept_trace(
         origin_doc,
         now,
         config.retry_timeout,
-        limit,
     ).0;
-    let schedule_step = echod_concrete::node::spec_run_due(
+    let schedule_step = echod_concrete::node::spec_due_transition(
         schedule_doc,
         now,
         config.retry_timeout,
     );
     let pending = schedule_step.2[0];
-    &&& origin_sweep_trace_to(
+    &&& origin_bulk_transition_to(
         config,
         origin_key,
         origin_doc,
         abstract_before,
         now,
-        limit,
         preswept,
     )
     &&& schedule_fire_split_intermediate(
@@ -4340,14 +3655,12 @@ pub open spec fn schedule_fire_preswept_trace(
         pending,
         now,
         config.retry_timeout,
-        limit,
     ).0
         == echod_concrete::node::spec_occurrence_transition(
             swept,
             pending,
             now,
             config.retry_timeout,
-            limit,
         ).0
 }
 
@@ -4359,7 +3672,6 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
     origin_doc: echod_concrete::node::DocumentBodyV,
     abstract_before: AbstractStateV,
     now: u64,
-    limit: nat,
     preswept: AbstractStateV,
 )
     requires
@@ -4369,13 +3681,12 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
         doc_rel(origin_key, origin_doc, abstract_before.store),
         finite_store(abstract_before.store),
         abstract_before.pending.len() == 0,
-        origin_sweep_trace_to(
+        origin_bulk_transition_to(
             config,
             origin_key,
             origin_doc,
             abstract_before,
             now,
-            limit,
             preswept,
         ),
         ({
@@ -4383,13 +3694,12 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
                 origin_doc,
                 now,
                 config.retry_timeout,
-                limit,
             ).0;
             &&& echod_concrete::node::spec_earliest_in(
                 swept,
                 now,
             ) is None
-            &&& echod_concrete::node::spec_run_due(
+            &&& echod_concrete::node::spec_due_transition(
                 swept,
                 now,
                 config.retry_timeout,
@@ -4397,7 +3707,7 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
         }),
         ({
             let schedule_step =
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_due_transition(
                     schedule_doc,
                     now,
                     config.retry_timeout,
@@ -4416,10 +3726,9 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
                 origin_doc,
                 now,
                 config.retry_timeout,
-                limit,
             ).0;
             let pending =
-                echod_concrete::node::spec_run_due(
+                echod_concrete::node::spec_due_transition(
                     schedule_doc,
                     now,
                     config.retry_timeout,
@@ -4429,7 +3738,7 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
                 pending,
                 now,
             );
-            let retry = echod_concrete::node::spec_run_due(
+            let retry = echod_concrete::node::spec_due_transition(
                 raw,
                 now,
                 config.retry_timeout,
@@ -4441,13 +3750,12 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
                 retry.0,
                 now,
             ) is None
-            &&& echod_concrete::node::spec_run_due(
+            &&& echod_concrete::node::spec_due_transition(
                 retry.0,
                 now,
                 config.retry_timeout,
             ).0 == retry.0
         }),
-        limit == REQUEST_SWEEP_STEPS as nat,
     ensures
         exists|scheduled: AbstractStateV,
             occurred: AbstractStateV,
@@ -4460,7 +3768,6 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
                 origin_doc,
                 abstract_before,
                 now,
-                limit,
                 preswept,
                 scheduled,
                 occurred,
@@ -4471,15 +3778,13 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
         origin_doc,
         now,
         config.retry_timeout,
-        limit,
     ).0;
-    lemma_origin_sweep_trace_endpoint_frames(
+    lemma_origin_bulk_transition_endpoint_frames(
         config,
         origin_key,
         origin_doc,
         abstract_before,
         now,
-        limit,
         preswept,
     );
     assert(doc_rel(
@@ -4520,7 +3825,6 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
             origin_doc,
             abstract_before,
             now,
-            limit,
             preswept,
             scheduled,
             occurred,
@@ -4529,16 +3833,13 @@ pub proof fn lemma_preswept_origin_schedule_fire_matches_atomic_timeout(
     }
 }
 
-/// The production occurrence transition has only two outcomes.  Success
-/// exposes both fully closed endpoints and the canonical endpoint-derived
-/// effects.  Failure returns the loaded document byte-for-byte and exposes no
-/// effect, so neither bounded partial sweep can reach a Store write.
-pub proof fn lemma_occurrence_transition_closes_or_discards(
+/// The production occurrence transition closes both endpoints and derives
+/// exactly the canonical endpoint effects.
+pub proof fn lemma_occurrence_transition_is_bulk(
     document: echod_concrete::node::DocumentBodyV,
     pending: echod_concrete::node::PendingV,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     ensures
         ({
@@ -4546,7 +3847,6 @@ pub proof fn lemma_occurrence_transition_closes_or_discards(
                 document,
                 now,
                 retry_timeout,
-                limit,
             ).0;
             let created = echod_concrete::node::spec_occurrence(
                 before,
@@ -4557,7 +3857,6 @@ pub proof fn lemma_occurrence_transition_closes_or_discards(
                 created,
                 now,
                 retry_timeout,
-                limit,
             ).0;
             let result =
                 echod_concrete::node::spec_occurrence_transition(
@@ -4565,31 +3864,15 @@ pub proof fn lemma_occurrence_transition_closes_or_discards(
                     pending,
                     now,
                     retry_timeout,
-                    limit,
                 );
-            if result.2 {
-                &&& echod_concrete::node::spec_earliest_in(
-                    before,
-                    now,
-                ) is None
-                &&& echod_concrete::node::spec_earliest_in(
+            result == (
                     after,
-                    now,
-                ) is None
-                &&& result.0 == after
-                &&& result.1
-                    == echod_concrete::node::spec_committed_notes(
-                        document,
+                    echod_concrete::node::spec_committed_notes(
+                    document,
                         after,
                         now,
-                    )
-            } else {
-                result == (
-                    document,
-                    Seq::<echod_concrete::node::NoteV>::empty(),
-                    false,
+                    ),
                 )
-            }
         }),
 {
     reveal(echod_concrete::node::spec_occurrence_transition);
@@ -4693,19 +3976,18 @@ proof fn lemma_unblock_notes_same_empty(
 /// Retrying a schedule fire after its origin CAS has already committed cannot
 /// recreate or redispatch that occurrence.  A closed origin containing the
 /// deterministic occurrence id is an exact fixed point of occurrence
-/// insertion and both closure sweeps; endpoint-derived effects are empty.
+/// insertion and both whole-map phases; endpoint-derived effects are empty.
 pub proof fn lemma_existing_occurrence_transition_is_idempotent(
     document: echod_concrete::node::DocumentBodyV,
     pending: echod_concrete::node::PendingV,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     requires
         document is Workflow,
         document->Workflow_0.contains_key(pending.promise),
         echod_concrete::node::spec_earliest_in(document, now) is None,
-        echod_concrete::node::spec_run_due(
+        echod_concrete::node::spec_due_transition(
             document,
             now,
             retry_timeout,
@@ -4716,11 +3998,9 @@ pub proof fn lemma_existing_occurrence_transition_is_idempotent(
             pending,
             now,
             retry_timeout,
-            limit,
         ) == (
             document,
             Seq::<echod_concrete::node::NoteV>::empty(),
-            true,
         ),
 {
     reveal(echod_concrete::node::spec_occurrence_transition);
@@ -4731,7 +4011,6 @@ pub proof fn lemma_existing_occurrence_transition_is_idempotent(
         document,
         now,
         retry_timeout,
-        limit,
     ).0 == document);
     assert(echod_concrete::node::spec_occurrence(
         document,
@@ -4760,17 +4039,15 @@ pub proof fn lemma_existing_occurrence_transition_is_idempotent(
     ) =~= Seq::<echod_concrete::node::NoteV>::empty());
 }
 
-/// A successful occurrence transition preserves the full stored-document
-/// invariant.  Both sweeps may be bounded, but success itself proves closure;
-/// the raw insertion preserves the relaxed invariant under the schedule's
-/// key/tag validity facts, and closed relaxed state upgrades back to full
+/// The bulk occurrence transition preserves the full stored-document
+/// invariant. The raw insertion preserves the relaxed invariant under the
+/// schedule's key/tag validity facts, and phase 2 upgrades directly to full
 /// `well_formed`.
-pub proof fn lemma_successful_occurrence_transition_well_formed(
+pub proof fn lemma_occurrence_transition_preserves_well_formed(
     workflow: echod_concrete::document::WorkflowDocumentV,
     pending: echod_concrete::node::PendingV,
     now: u64,
     retry_timeout: u64,
-    limit: nat,
 )
     requires
         echod_concrete::document::workflow_well_formed(workflow),
@@ -4786,15 +4063,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
         echod_types::origin(pending.promise) == workflow.document,
         !(echod_concrete::node::spec_timer(pending.tags)
             && echod_concrete::node::spec_targeted(pending.tags)),
-        echod_concrete::node::spec_occurrence_transition(
-            echod_concrete::node::DocumentBodyV::Workflow(
-                workflow.objects,
-            ),
-            pending,
-            now,
-            retry_timeout,
-            limit,
-        ).2,
     ensures
         ({
             let after =
@@ -4805,7 +4073,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
                     pending,
                     now,
                     retry_timeout,
-                    limit,
                 ).0;
             well_formed(
                 echod_concrete::node::spec_advance_stored(
@@ -4824,7 +4091,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
         document,
         now,
         retry_timeout,
-        limit,
     ).0;
     let created = echod_concrete::node::spec_occurrence(
         before,
@@ -4835,7 +4101,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
         created,
         now,
         retry_timeout,
-        limit,
     ).0;
     echod_concrete::quick_n_dirty::lemma_full_implies_relaxed(
         workflow,
@@ -4846,7 +4111,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
         workflow.objects,
         now,
         retry_timeout,
-        limit,
     );
     assert(before is Workflow);
     reveal(echod_concrete::node::spec_occurrence_transition);
@@ -4864,7 +4128,6 @@ pub proof fn lemma_successful_occurrence_transition_well_formed(
         created->Workflow_0,
         now,
         retry_timeout,
-        limit,
     );
     assert(echod_concrete::node::spec_earliest_in(after, now)
         is None);
@@ -5196,54 +4459,6 @@ pub proof fn lemma_schedule_fire_schedule_phase_issues_exact_write(
         cond,
         idle,
     );
-}
-
-/// Exhausting either origin closure ends the schedule flight before
-/// `spec_commit_new`: the origin lane is released, no origin CAS is issued,
-/// and the timer flight fails/rearms through the existing finish path.
-pub proof fn lemma_schedule_fire_origin_exhaustion_discards(
-    s: S,
-    flight: FlightSpec,
-    ctx: crate::handler_docs::FireCtxSpec,
-    working: crate::handler_docs::WorkingSpec,
-)
-    requires
-        ({
-            let t = crate::document::spec_clamp_now(
-                crate::document::spec_loaded_committed_at(
-                    working.loaded,
-                ),
-                ctx.t1,
-            );
-            !echod_concrete::node::spec_occurrence_transition(
-                spec_loaded_body(working.loaded),
-                ctx.pending,
-                t,
-                s.cfg.retry_timeout,
-                crate::handler_docs::SWEEP_STEPS as nat,
-            ).2
-        }),
-    ensures
-        ({
-            let t = crate::document::spec_clamp_now(
-                crate::document::spec_loaded_committed_at(
-                    working.loaded,
-                ),
-                ctx.t1,
-            );
-            crate::handler_sched::spec_fire_run(
-                s,
-                flight,
-                ctx,
-                working,
-            ) == crate::handler_docs::spec_fail(
-                crate::handler_docs::spec_release(s, ctx.origin),
-                flight,
-                crate::handler_docs::SWEEP_EXHAUSTED@,
-            )
-        }),
-{
-    reveal(crate::handler_sched::spec_fire_run);
 }
 
 /// Exact origin-CAS success branch.  The canonical occurrence effects are
@@ -5871,7 +5086,7 @@ pub proof fn lemma_send_all_preserves_timer_control(
     }
 }
 
-/// Completing the bounded origin sweep releases only its own empty lane and
+/// Completing the atomic origin transition releases only its own empty lane and
 /// then returns the firing reservation to the timer dispatcher.  Concurrent
 /// lanes and an arbitrary backlog remain covered by the full timer activity
 /// invariant.
@@ -6060,7 +5275,7 @@ pub open spec fn closed_origin_commit_endpoint_frame(
 
 /// Full process relation at the successful document-write linearization
 /// endpoint.  The abstract endpoint is constrained by every actual timeout
-/// result in the bounded sweep; the production endpoint retains all runtime,
+/// result in the bulk transition; the production endpoint retains all runtime,
 /// ownership, membership, lane, cache, and timer invariants.
 pub proof fn lemma_closed_origin_commit_endpoint_related(
     production: ProcessV,
@@ -6094,13 +5309,12 @@ pub proof fn lemma_closed_origin_commit_endpoint_related(
                 ),
                 now,
                 config.retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             &&& echod_concrete::node::spec_earliest_in(
                 swept,
                 now,
             ) is None
-            &&& origin_sweep_trace_to(
+            &&& origin_bulk_transition_to(
                 config,
                 key,
                 echod_concrete::node::DocumentBodyV::Workflow(
@@ -6108,7 +5322,6 @@ pub proof fn lemma_closed_origin_commit_endpoint_related(
                 ),
                 abstract_before,
                 now,
-                REQUEST_SWEEP_STEPS as nat,
                 abstract_after,
             )
             &&& closed_origin_commit_endpoint_frame(
@@ -6126,7 +5339,6 @@ pub proof fn lemma_closed_origin_commit_endpoint_related(
                 ),
                 now,
                 config.retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             ).0;
             &&& related(production, abstract_after)
             &&& well_formed(
@@ -6144,21 +5356,18 @@ pub proof fn lemma_closed_origin_commit_endpoint_related(
         document,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     ).0;
-    lemma_closed_origin_sweep_preserves_well_formed(
+    lemma_bulk_sweep_preserves_well_formed(
         workflow,
         now,
         config.retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
-    lemma_origin_sweep_trace_endpoint_frames(
+    lemma_origin_bulk_transition_endpoint_frames(
         config,
         key,
         document,
         abstract_before,
         now,
-        REQUEST_SWEEP_STEPS as nat,
         abstract_after,
     );
     assert(cache_related(
@@ -6695,7 +5904,6 @@ pub proof fn lemma_normal_request_happy_path(
                 request,
                 now,
                 retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             );
             let (_, _, _, notes) =
                 echod_concrete::node::spec_request_transition(
@@ -6703,7 +5911,6 @@ pub proof fn lemma_normal_request_happy_path(
                     request,
                     now,
                     retry_timeout,
-                    REQUEST_SWEEP_STEPS as nat,
                 );
             &&& well_formed(after)
             &&& effects_match(document, after, notes)
@@ -6720,7 +5927,6 @@ pub proof fn lemma_normal_request_happy_path(
         request,
         now,
         retry_timeout,
-        REQUEST_SWEEP_STEPS as nat,
     );
 }
 
@@ -6759,7 +5965,6 @@ pub proof fn lemma_normal_request_matches_abstract_handler(
                 request,
                 now,
                 config.retry_timeout,
-                REQUEST_SWEEP_STEPS as nat,
             );
             let (_, _, _, notes) =
                 echod_concrete::node::spec_request_transition(
@@ -6767,7 +5972,6 @@ pub proof fn lemma_normal_request_matches_abstract_handler(
                     request,
                     now,
                     config.retry_timeout,
-                    REQUEST_SWEEP_STEPS as nat,
                 );
             &&& request_agrees(
                 config,

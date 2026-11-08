@@ -556,7 +556,7 @@ fn partitions_keep_independent_origins_apart() {
         let r = c.allowed(&Request::PromiseGet(PromiseGetReq { id: id.clone() })).into_iter().find(promise(want, None)).unwrap();
         c.call(5_000 + o, Request::PromiseGet(PromiseGetReq { id: id }), r).unwrap();
     }
-    assert!(c.factors().iter().all(|f| f.nodes.len() == 1));
+    assert_eq!(c.factors().len(), 20);
 
     let t0 = std::time::Instant::now();
     let v = unanswered_settles(Checker::with_footprints(ServerConfig::default(), Store::default(), settles_cfg()), 20)

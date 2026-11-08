@@ -35,7 +35,7 @@ use crate::node::{
     spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
     spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep,
     spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
-    spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
+    spec_due_transition, spec_store_reply, spec_timeout, spec_unavailable,
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{
@@ -3370,7 +3370,7 @@ pub proof fn lemma_due_begin(
     let probe_flight = probe(key, at, caller, job);
     let (next, reply, born, notes) = decision(probe_flight, doc, node0.retry_timeout);
     assert(node0.retry_timeout == config.retry_timeout);
-    assert((next, reply, born, notes) == spec_run_due(doc, at, config.retry_timeout));
+    assert((next, reply, born, notes) == spec_due_transition(doc, at, config.retry_timeout));
     assert(flight_reply(probe_flight, reply) is None);
     assert(due_agrees(config, key, doc, state, at));
     assert(born_of(node0) =~= Seq::<PendingV>::empty());

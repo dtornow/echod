@@ -39,7 +39,7 @@
 //! What is assumed is listed in `verified/mod.rs`.
 //!
 //! The concrete Rover model decides: a request is `echod_concrete::handle`,
-//! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
+//! a sweep `echod_concrete::sweep`, a schedule's run `fire_schedule` and
 //! `create_occurrence`, each proved there to compute its specification.
 //! The handlers turn a document's rows into the model's `DocumentBody`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::

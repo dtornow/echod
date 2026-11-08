@@ -31,4 +31,3 @@ pub use machine::*;
 pub use explore::{plain, IDS, MARKS, SCHEDULES};
 pub use footprint::{next_cron, Key};
 pub use protocol::{BoundaryEvent, Call, Message, Output};
-pub use view::REQUEST_STEPS;
