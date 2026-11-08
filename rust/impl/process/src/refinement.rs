@@ -38,7 +38,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::cache::CacheSpec;
+use crate::cache::{CacheSpec, CachedSpec};
 #[cfg(verus_keep_ghost)]
 use crate::config::ConfigSpec;
 #[cfg(verus_keep_ghost)]
@@ -47,11 +47,12 @@ use crate::document::spec_loaded_body;
 use crate::handler::{spec_on_event, spec_schedule_wake};
 #[cfg(verus_keep_ghost)]
 use crate::handler_docs::{
-    spec_answered_origin, spec_commit_advance, spec_commit_failed,
-    spec_committed, spec_decide, spec_dispatch, spec_dispatches,
-    spec_flight_completed, spec_inflight, spec_run_origin, spec_send_all,
-    spec_take_flight, CommittingSpec, DoneSpec, FlightSpec, FlightsSpec,
-    PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec,
+    spec_answered_loading, spec_answered_origin, spec_begin,
+    spec_commit_advance, spec_commit_failed, spec_committed, spec_decide,
+    spec_dispatch, spec_dispatches, spec_flight_completed, spec_inflight,
+    spec_load_origin, spec_loaded_origin, spec_retry, spec_run_origin,
+    spec_send_all, spec_take_flight, CommittingSpec, DoneSpec, FlightSpec,
+    FlightsSpec, PhaseSpec, ProgressSpec, WorkSpec, WorkingSpec,
 };
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
@@ -6681,6 +6682,34 @@ pub open spec fn normal_request_inflight(
         )
 }
 
+/// A normal request whose raced candidate has been discarded and whose next
+/// load is now the only Store operation carried by the flight.
+pub open spec fn normal_request_reloading(s: S, fid: u64) -> bool {
+    s.flights.inflight.contains_key(fid)
+        && match s.flights.inflight[fid] {
+            FlightSpec {
+                work: WorkSpec::Request { .. },
+                target: TargetSpec::Origin(_),
+                phase: PhaseSpec::Loading { op, .. },
+                firing: None,
+                debug: false,
+                ..
+            } => {
+                s.ops.contains_key(op)
+                    && s.ops[op] == Owner::Flight(fid)
+            },
+            _ => false,
+        }
+}
+
+/// The pre-dispatch membership bootstrap branch of `spec_on_event` is not
+/// taken. Store-response theorems state this separately from their flight
+/// invariants because that branch is an independent state transition.
+pub open spec fn startup_membership_tick_skipped(s: S) -> bool {
+    !(s.node.members.next_heartbeat is None
+        && !s.node.members.refreshing())
+}
+
 /// A changed decision always issues the first commit call and enters the
 /// actual Origin phase carrying the decision witness.
 #[verifier::spinoff_prover]
@@ -7218,6 +7247,255 @@ pub proof fn lemma_normal_request_precondition_failed_discards(
     reveal(spec_answered_origin);
 }
 
+/// With retry budget remaining, a precondition race immediately starts a
+/// fresh origin load.  The only payload retained by the flight is its original
+/// request metadata; the failed `commit` and `done` values are absent from the
+/// resulting Loading phase.
+#[verifier::spinoff_prover]
+pub proof fn lemma_normal_request_precondition_failed_starts_reload(
+    s: S,
+    fid: u64,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    response: StoreRes,
+    witness: NormalRequestCommitV,
+)
+    requires
+        f0.id == fid,
+        f0.phase is Idle,
+        f0.target is Origin,
+        f0.firing is None,
+        !f0.debug,
+        f0.attempt.wrapping_add(1)
+            <= s.flights.max_retries,
+        normal_request_origin_phase(
+            FlightSpec {
+                phase: PhaseSpec::Origin { commit, done },
+                ..f0
+            },
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is PuttingKey
+            || commit.seq.step is Writing,
+        answer_v(commit.seq.step, Some(response))
+            == AAnswer::Failed(StoreError::PreconditionFailed),
+    ensures
+        normal_request_reloading(
+            spec_answered_origin(
+                s,
+                fid,
+                f0,
+                commit,
+                done,
+                response,
+            ),
+            fid,
+        ),
+{
+    lemma_normal_request_precondition_failed_discards(
+        s,
+        fid,
+        f0,
+        commit,
+        done,
+        response,
+        witness,
+    );
+    reveal(spec_commit_advance);
+    reveal(crate::handler_docs::spec_answered);
+    reveal(spec_commit_failed);
+    reveal(spec_retry);
+    reveal(spec_begin);
+    reveal(spec_load_origin);
+    reveal(crate::cache::spec_get);
+    reveal(spec_inflight);
+    let result = spec_answered_origin(
+        s,
+        fid,
+        f0,
+        commit,
+        done,
+        response,
+    );
+    let advanced =
+        spec_commit_advance(s, fid, commit, Some(response));
+    assert(result == spec_commit_failed(
+        advanced.0,
+        f0,
+        StoreErrorSpec::PreconditionFailed,
+    ));
+    assert(advanced.0.flights.max_retries
+        == s.flights.max_retries);
+    match f0.target {
+        TargetSpec::Origin(origin) => {
+            assert(result.flights.inflight.contains_key(fid));
+            let reload = result.flights.inflight[fid];
+            assert(reload.work == f0.work);
+            assert(reload.target == f0.target);
+            assert(reload.firing is None);
+            assert(!reload.debug);
+            assert(reload.phase is Loading);
+            let load_op = match reload.phase {
+                PhaseSpec::Loading { op, .. } => op,
+                _ => fid,
+            };
+            assert(result.ops.contains_key(load_op));
+            assert(result.ops[load_op] == Owner::Flight(fid));
+            assert(normal_request_reloading(result, fid));
+        },
+        _ => {},
+    }
+}
+
+/// A successful matching reload re-runs the normal request against the newly
+/// loaded document and establishes a fresh candidate/outbox witness.
+///
+/// `spec_decode_workflow` is currently uninterpreted, so `well_formed` and the
+/// loaded document's origin are explicit preconditions rather than codec
+/// conclusions.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(20)]
+pub proof fn lemma_matching_well_formed_reload_reestablishes_origin_phase(
+    s: S,
+    fid: u64,
+    op: u64,
+    outcome: StoreRes,
+    flight: FlightSpec,
+    revalidating: Option<CachedSpec>,
+    w: WorkingSpec,
+    origin: Seq<char>,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    request: Request,
+    action_kind: Option<Seq<char>>,
+    offered_now: u64,
+)
+    requires
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid] == flight,
+        flight.id == fid,
+        fid == id,
+        flight.work == (WorkSpec::Request {
+            id,
+            kind,
+            corr,
+            req: request,
+            action_kind,
+            now: offered_now,
+        }),
+        flight.target == TargetSpec::Origin(origin),
+        flight.phase
+            == (PhaseSpec::Loading { op, revalidating }),
+        flight.firing is None,
+        !flight.debug,
+        ({
+            let taken = spec_take_flight(s, fid);
+            spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).1 == Ok(w)
+        }),
+        w.target == origin,
+        w.loaded.document is Workflow,
+        w.target
+            == echod_concrete::node::spec_stored_name(w.loaded.document),
+        // Explicit until the codec has a well-formedness law.
+        well_formed(w.loaded.document),
+        routed(w.loaded.document, request),
+        ({
+            let taken = spec_take_flight(s, fid);
+            let loaded = spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).0;
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            &&& now <= MAX_TIME
+            &&& 0 < loaded.cfg.retry_timeout <= MAX_TIME
+            &&& safe_effect_config(
+                now,
+                loaded.cfg.retry_timeout,
+            )
+            &&& document_ids_bounded(w.loaded.document)
+            &&& spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            ).0 != spec_stored_body(w.loaded.document)
+        }),
+    ensures
+        ({
+            let taken = spec_take_flight(s, fid);
+            let loaded = spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).0;
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            let notes = spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            ).3;
+            let candidate = on_request(
+                w.loaded.document,
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            );
+            normal_request_inflight(
+                spec_flight_completed(s, fid, op, outcome),
+                fid,
+                NormalRequestCommitV {
+                    before: w.loaded.document,
+                    candidate,
+                    notes,
+                },
+            )
+        }),
+{
+    let taken = spec_take_flight(s, fid);
+    let (loaded, result) = spec_loaded_origin(
+        taken,
+        origin,
+        revalidating,
+        outcome,
+    );
+    let f0 = FlightSpec {
+        phase: PhaseSpec::Idle,
+        ..flight
+    };
+    lemma_changed_normal_request_enters_origin_phase(
+        loaded,
+        f0,
+        w,
+        id,
+        kind,
+        corr,
+        request,
+        action_kind,
+        offered_now,
+    );
+    reveal(spec_flight_completed);
+    reveal(crate::handler_docs::spec_answered_phase);
+    reveal(spec_answered_loading);
+}
+
 /// A matching flight-owned operation whose flight is in Origin reaches
 /// `spec_answered_origin` with an Idle copy of the flight.  This is the point
 /// at which failed commits cannot accidentally retain the candidate/outbox.
@@ -7251,6 +7529,260 @@ pub proof fn lemma_matching_origin_store_response_routes_answer(
     reveal(crate::handler_docs::spec_answered_phase);
 }
 
+proof fn lemma_schedule_wake_preserves_flights_and_ops(s: S)
+    ensures
+        spec_schedule_wake(s).flights == s.flights,
+        spec_schedule_wake(s).ops == s.ops,
+        spec_schedule_wake(s).cfg == s.cfg,
+{
+    reveal(spec_schedule_wake);
+}
+
+/// The actual production Store event for a matching raced Origin call returns
+/// the flight to Loading, provided retry budget remains.  The independent
+/// startup membership tick is explicitly excluded.
+#[verifier::spinoff_prover]
+pub proof fn lemma_matching_precondition_failed_store_event_starts_reload(
+    s: S,
+    fid: u64,
+    op: u64,
+    response: StoreRes,
+    clock: u64,
+    flight: FlightSpec,
+    commit: CommittingSpec,
+    done: DoneSpec,
+    witness: NormalRequestCommitV,
+)
+    requires
+        startup_membership_tick_skipped(s),
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid] == flight,
+        flight.id == fid,
+        flight.phase == (PhaseSpec::Origin { commit, done }),
+        flight.phase.expects() == Some(op),
+        flight.target is Origin,
+        flight.firing is None,
+        !flight.debug,
+        flight.attempt.wrapping_add(1)
+            <= s.flights.max_retries,
+        normal_request_origin_phase(
+            flight,
+            s.cfg.retry_timeout,
+            witness,
+        ),
+        commit.seq.step is PuttingKey
+            || commit.seq.step is Writing,
+        answer_v(commit.seq.step, Some(response))
+            == AAnswer::Failed(StoreError::PreconditionFailed),
+    ensures
+        normal_request_reloading(
+            spec_on_event(
+                s,
+                EventSpec::Store { op, response, clock },
+            ).0,
+            fid,
+        ),
+{
+    let timed = S { clock, ..s };
+    let without_op = S {
+        ops: timed.ops.remove(op),
+        ..timed
+    };
+    let f0 = FlightSpec { phase: PhaseSpec::Idle, ..flight };
+    let taken = spec_take_flight(without_op, fid);
+    lemma_matching_origin_store_response_routes_answer(
+        without_op,
+        fid,
+        op,
+        response,
+        flight,
+        commit,
+        done,
+    );
+    lemma_normal_request_precondition_failed_starts_reload(
+        taken,
+        fid,
+        f0,
+        commit,
+        done,
+        response,
+        witness,
+    );
+    let handled =
+        spec_flight_completed(without_op, fid, op, response);
+    lemma_schedule_wake_preserves_flights_and_ops(handled);
+    reveal(spec_on_event);
+}
+
+/// The matching production Store event for a successful, well-formed reload
+/// recomputes the request decision from the reloaded document.  As above, the
+/// startup membership tick is an explicit exclusion, not folded into the
+/// reload assumptions.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(20)]
+pub proof fn lemma_matching_well_formed_reload_store_event_reestablishes_origin(
+    s: S,
+    fid: u64,
+    op: u64,
+    outcome: StoreRes,
+    clock: u64,
+    flight: FlightSpec,
+    revalidating: Option<CachedSpec>,
+    w: WorkingSpec,
+    origin: Seq<char>,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    request: Request,
+    action_kind: Option<Seq<char>>,
+    offered_now: u64,
+)
+    requires
+        startup_membership_tick_skipped(s),
+        s.ops.contains_key(op),
+        s.ops[op] == Owner::Flight(fid),
+        s.flights.inflight.contains_key(fid),
+        s.flights.inflight[fid] == flight,
+        flight.id == fid,
+        fid == id,
+        flight.work == (WorkSpec::Request {
+            id,
+            kind,
+            corr,
+            req: request,
+            action_kind,
+            now: offered_now,
+        }),
+        flight.target == TargetSpec::Origin(origin),
+        flight.phase
+            == (PhaseSpec::Loading { op, revalidating }),
+        flight.firing is None,
+        !flight.debug,
+        ({
+            let timed = S { clock, ..s };
+            let without_op = S {
+                ops: timed.ops.remove(op),
+                ..timed
+            };
+            let taken = spec_take_flight(without_op, fid);
+            spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).1 == Ok(w)
+        }),
+        w.target == origin,
+        w.loaded.document is Workflow,
+        w.target
+            == echod_concrete::node::spec_stored_name(w.loaded.document),
+        // Explicit until the codec has a well-formedness law.
+        well_formed(w.loaded.document),
+        routed(w.loaded.document, request),
+        ({
+            let timed = S { clock, ..s };
+            let without_op = S {
+                ops: timed.ops.remove(op),
+                ..timed
+            };
+            let taken = spec_take_flight(without_op, fid);
+            let loaded = spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).0;
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            &&& now <= MAX_TIME
+            &&& 0 < loaded.cfg.retry_timeout <= MAX_TIME
+            &&& safe_effect_config(
+                now,
+                loaded.cfg.retry_timeout,
+            )
+            &&& document_ids_bounded(w.loaded.document)
+            &&& spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            ).0 != spec_stored_body(w.loaded.document)
+        }),
+    ensures
+        ({
+            let timed = S { clock, ..s };
+            let without_op = S {
+                ops: timed.ops.remove(op),
+                ..timed
+            };
+            let taken = spec_take_flight(without_op, fid);
+            let loaded = spec_loaded_origin(
+                taken,
+                origin,
+                revalidating,
+                outcome,
+            ).0;
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            let notes = spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            ).3;
+            let candidate = on_request(
+                w.loaded.document,
+                request,
+                now,
+                loaded.cfg.retry_timeout,
+            );
+            normal_request_inflight(
+                spec_on_event(
+                    s,
+                    EventSpec::Store { op, response: outcome, clock },
+                ).0,
+                fid,
+                NormalRequestCommitV {
+                    before: w.loaded.document,
+                    candidate,
+                    notes,
+                },
+            )
+        }),
+{
+    let timed = S { clock, ..s };
+    let without_op = S {
+        ops: timed.ops.remove(op),
+        ..timed
+    };
+    lemma_matching_well_formed_reload_reestablishes_origin_phase(
+        without_op,
+        fid,
+        op,
+        outcome,
+        flight,
+        revalidating,
+        w,
+        origin,
+        id,
+        kind,
+        corr,
+        request,
+        action_kind,
+        offered_now,
+    );
+    let handled =
+        spec_flight_completed(without_op, fid, op, outcome);
+    lemma_schedule_wake_preserves_flights_and_ops(handled);
+    reveal(spec_on_event);
+}
+
 /// The matching production `EventSpec::Store` arm removes the operation,
 /// routes the response to the owning flight, schedules the next wake, and
 /// returns (then clears) the accumulated outbox.  This is the direct bridge
@@ -7265,8 +7797,7 @@ pub proof fn lemma_owned_store_event_runs_flight_completion(
     clock: u64,
 )
     requires
-        s.node.members.next_heartbeat is Some
-            || s.node.members.refreshing(),
+        startup_membership_tick_skipped(s),
         s.ops.contains_key(op),
         s.ops[op] == Owner::Flight(fid),
         s.flights.inflight.contains_key(fid),
