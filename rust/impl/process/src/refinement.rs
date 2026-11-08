@@ -48,7 +48,7 @@ use crate::state::{spec_state_new, Owner, S};
 #[cfg(verus_keep_ghost)]
 use crate::state_node::RefreshSpec;
 #[cfg(verus_keep_ghost)]
-use crate::state_timers::{spec_slot_before, TimersSpec};
+use crate::state_timers::{spec_slot_before, ListingSpec, TimersSpec};
 #[cfg(verus_keep_ghost)]
 use crate::target::TargetSpec;
 #[cfg(verus_keep_ghost)]
@@ -77,7 +77,7 @@ use echod_concrete::node::{spec_stored_body, REQUEST_SWEEP_STEPS};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, request_preserves_well_formed, routed};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreReqSpec, StoreRes};
+use echod_concrete::store::{spec_before, StoreReqSpec, StoreRes};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Request, MAX_TIME};
 
@@ -522,15 +522,340 @@ pub open spec fn membership_consistent(s: S) -> bool {
     &&& s.node.core.members.no_duplicates()
 }
 
-pub open spec fn timer_wheel_ordered(timers: TimersSpec) -> bool {
+pub open spec fn timer_slots_pairwise_ordered(
+    slots: Seq<crate::state_timers::SlotSpec>,
+) -> bool {
     forall|i: int, j: int|
-        0 <= i < j < timers.wheel.armed.len() ==> {
-            &&& timers.wheel.armed[i] != timers.wheel.armed[j]
+        #![trigger slots[i], slots[j]]
+        0 <= i < j < slots.len() ==> {
+            &&& slots[i] != slots[j]
             &&& spec_slot_before(
-                timers.wheel.armed[i],
-                timers.wheel.armed[j],
+                slots[i],
+                slots[j],
             )
         }
+}
+
+pub open spec fn timer_wheel_ordered(timers: TimersSpec) -> bool {
+    timer_slots_pairwise_ordered(timers.wheel.armed)
+}
+
+pub open spec fn timer_slots_adjacent_ordered(
+    slots: Seq<crate::state_timers::SlotSpec>,
+) -> bool
+    decreases slots.len(),
+{
+    slots.len() <= 1 || (
+        spec_slot_before(slots[0], slots[1])
+        && timer_slots_adjacent_ordered(slots.drop_first())
+    )
+}
+
+proof fn lemma_timer_key_before_irreflexive(key: Seq<char>)
+    ensures
+        !spec_before(key, key),
+    decreases key.len(),
+{
+    if key.len() > 0 {
+        lemma_timer_key_before_irreflexive(key.drop_first());
+    }
+}
+
+proof fn lemma_timer_key_before_transitive(
+    a: Seq<char>,
+    b: Seq<char>,
+    c: Seq<char>,
+)
+    requires
+        spec_before(a, b),
+        spec_before(b, c),
+    ensures
+        spec_before(a, c),
+    decreases a.len() + b.len() + c.len(),
+{
+    if a.len() == 0 {
+    } else if b.len() == 0 {
+    } else if c.len() == 0 {
+    } else if a[0] != b[0] {
+    } else if b[0] != c[0] {
+    } else {
+        lemma_timer_key_before_transitive(
+            a.drop_first(),
+            b.drop_first(),
+            c.drop_first(),
+        );
+    }
+}
+
+proof fn lemma_timer_key_before_total(a: Seq<char>, b: Seq<char>)
+    requires
+        a != b,
+    ensures
+        spec_before(a, b) || spec_before(b, a),
+    decreases a.len() + b.len(),
+{
+    if a.len() == 0 {
+        if b.len() == 0 {
+            assert(a =~= b);
+        }
+    } else if b.len() == 0 {
+    } else if a[0] != b[0] {
+        assert(a[0] < b[0] || b[0] < a[0]);
+    } else {
+        assert(a =~= seq![a[0]] + a.drop_first());
+        assert(b =~= seq![b[0]] + b.drop_first());
+        if a.drop_first() == b.drop_first() {
+            assert(a == b);
+        }
+        lemma_timer_key_before_total(a.drop_first(), b.drop_first());
+    }
+}
+
+proof fn lemma_timer_slot_before_transitive(
+    a: crate::state_timers::SlotSpec,
+    b: crate::state_timers::SlotSpec,
+    c: crate::state_timers::SlotSpec,
+)
+    requires
+        spec_slot_before(a, b),
+        spec_slot_before(b, c),
+    ensures
+        spec_slot_before(a, c),
+{
+    if a.0 == b.0 && b.0 == c.0 {
+        lemma_timer_key_before_transitive(a.1, b.1, c.1);
+    }
+}
+
+proof fn lemma_timer_slot_before_irreflexive(
+    slot: crate::state_timers::SlotSpec,
+)
+    ensures
+        !spec_slot_before(slot, slot),
+{
+    lemma_timer_key_before_irreflexive(slot.1);
+}
+
+proof fn lemma_timer_slot_before_total(
+    a: crate::state_timers::SlotSpec,
+    b: crate::state_timers::SlotSpec,
+)
+    requires
+        a != b,
+    ensures
+        spec_slot_before(a, b) || spec_slot_before(b, a),
+{
+    if a.0 == b.0 {
+        assert(a.1 != b.1);
+        lemma_timer_key_before_total(a.1, b.1);
+    }
+}
+
+proof fn lemma_adjacent_ordered_head_before(
+    slots: Seq<crate::state_timers::SlotSpec>,
+    j: int,
+)
+    requires
+        timer_slots_adjacent_ordered(slots),
+        0 < j < slots.len(),
+    ensures
+        spec_slot_before(slots[0], slots[j]),
+    decreases j,
+{
+    reveal(timer_slots_adjacent_ordered);
+    if j > 1 {
+        lemma_adjacent_ordered_head_before(
+            slots.drop_first(),
+            j - 1,
+        );
+        assert(slots.drop_first()[0] == slots[1]);
+        assert(slots.drop_first()[j - 1] == slots[j]);
+        lemma_timer_slot_before_transitive(
+            slots[0],
+            slots[1],
+            slots[j],
+        );
+    }
+}
+
+proof fn lemma_adjacent_ordered_skip(
+    slots: Seq<crate::state_timers::SlotSpec>,
+    i: int,
+)
+    requires
+        timer_slots_adjacent_ordered(slots),
+        0 <= i <= slots.len(),
+    ensures
+        timer_slots_adjacent_ordered(slots.skip(i)),
+    decreases i,
+{
+    reveal(timer_slots_adjacent_ordered);
+    if i == 0 {
+        assert(slots.skip(0) =~= slots);
+    } else {
+        lemma_adjacent_ordered_skip(slots.drop_first(), i - 1);
+        assert(slots.drop_first().skip(i - 1) =~= slots.skip(i));
+    }
+}
+
+proof fn lemma_adjacent_ordered_implies_pairwise(
+    slots: Seq<crate::state_timers::SlotSpec>,
+)
+    requires
+        timer_slots_adjacent_ordered(slots),
+    ensures
+        timer_slots_pairwise_ordered(slots),
+{
+    assert(timer_slots_pairwise_ordered(slots)) by {
+        reveal(timer_slots_pairwise_ordered);
+        assert forall|i: int, j: int|
+            #![trigger slots[i], slots[j]]
+            0 <= i < j < slots.len() implies {
+                &&& slots[i] != slots[j]
+                &&& spec_slot_before(slots[i], slots[j])
+            } by {
+            let suffix = slots.skip(i);
+            assert(suffix[0] == slots[i]);
+            assert(suffix[j - i] == slots[j]);
+            lemma_adjacent_ordered_skip(slots, i);
+            lemma_adjacent_ordered_head_before(suffix, j - i);
+            assert(spec_slot_before(slots[i], slots[j]));
+            if slots[i] == slots[j] {
+                lemma_timer_slot_before_irreflexive(slots[i]);
+                assert(false);
+            }
+        }
+    }
+}
+
+proof fn lemma_pairwise_implies_adjacent_ordered(
+    slots: Seq<crate::state_timers::SlotSpec>,
+)
+    requires
+        timer_slots_pairwise_ordered(slots),
+    ensures
+        timer_slots_adjacent_ordered(slots),
+    decreases slots.len(),
+{
+    reveal(timer_slots_adjacent_ordered);
+    reveal(timer_slots_pairwise_ordered);
+    if slots.len() > 1 {
+        assert forall|i: int, j: int|
+            0 <= i < j < slots.drop_first().len() implies {
+                &&& slots.drop_first()[i]
+                    != slots.drop_first()[j]
+                &&& spec_slot_before(
+                    slots.drop_first()[i],
+                    slots.drop_first()[j],
+                )
+            } by {
+            assert(slots.drop_first()[i] == slots[i + 1]);
+            assert(slots.drop_first()[j] == slots[j + 1]);
+            assert(slots[i + 1] != slots[j + 1]);
+            assert(spec_slot_before(
+                slots[i + 1],
+                slots[j + 1],
+            ));
+        }
+        lemma_pairwise_implies_adjacent_ordered(
+            slots.drop_first(),
+        );
+    }
+}
+
+proof fn lemma_arm_preserves_adjacent_order(
+    slots: Seq<crate::state_timers::SlotSpec>,
+    at: u64,
+    key: Seq<char>,
+)
+    requires
+        timer_slots_adjacent_ordered(slots),
+    ensures
+        timer_slots_adjacent_ordered(
+            crate::state_timers::spec_arm(slots, at, key),
+        ),
+    decreases slots.len(),
+{
+    reveal(timer_slots_adjacent_ordered);
+    let added = (at, key);
+    if slots.len() == 0 {
+        assert(crate::state_timers::spec_arm(slots, at, key)
+            =~= seq![added]);
+    } else if slots[0] == added {
+        assert(crate::state_timers::spec_arm(slots, at, key)
+            == slots);
+    } else if spec_slot_before(added, slots[0]) {
+        let prepended = seq![added] + slots;
+        assert(crate::state_timers::spec_arm(slots, at, key)
+            =~= prepended);
+        assert(prepended[0] == added);
+        assert(prepended[1] == slots[0]);
+        assert(prepended.drop_first() =~= slots);
+        assert(timer_slots_adjacent_ordered(
+            prepended.drop_first(),
+        ));
+        assert(timer_slots_adjacent_ordered(prepended));
+    } else {
+        lemma_timer_slot_before_total(slots[0], added);
+        assert(spec_slot_before(slots[0], added));
+        lemma_arm_preserves_adjacent_order(
+            slots.drop_first(),
+            at,
+            key,
+        );
+        let tail = crate::state_timers::spec_arm(
+            slots.drop_first(),
+            at,
+            key,
+        );
+        assert(timer_slots_adjacent_ordered(tail));
+        assert(tail.len() > 0);
+        if slots.drop_first().len() == 0
+            || slots.drop_first()[0] == added
+            || spec_slot_before(added, slots.drop_first()[0])
+        {
+            assert(tail[0] == added);
+            assert(spec_slot_before(slots[0], tail[0]));
+        } else {
+            assert(tail[0] == slots.drop_first()[0]);
+            assert(slots.len() > 1);
+            assert(spec_slot_before(slots[0], slots[1]));
+            assert(slots.drop_first()[0] == slots[1]);
+            assert(spec_slot_before(slots[0], tail[0]));
+        }
+        let prepended = seq![slots[0]] + tail;
+        assert(crate::state_timers::spec_arm(slots, at, key)
+            =~= prepended);
+        assert(prepended[0] == slots[0]);
+        assert(prepended[1] == tail[0]);
+        assert(prepended.drop_first() =~= tail);
+        assert(timer_slots_adjacent_ordered(
+            prepended.drop_first(),
+        ));
+        assert(timer_slots_adjacent_ordered(prepended));
+    }
+    assert(timer_slots_adjacent_ordered(
+        crate::state_timers::spec_arm(slots, at, key),
+    ));
+}
+
+pub proof fn lemma_arm_preserves_timer_wheel_order(
+    slots: Seq<crate::state_timers::SlotSpec>,
+    at: u64,
+    key: Seq<char>,
+)
+    requires
+        timer_slots_pairwise_ordered(slots),
+    ensures
+        timer_slots_pairwise_ordered(
+            crate::state_timers::spec_arm(slots, at, key),
+        ),
+{
+    lemma_pairwise_implies_adjacent_ordered(slots);
+    lemma_arm_preserves_adjacent_order(slots, at, key);
+    lemma_adjacent_ordered_implies_pairwise(
+        crate::state_timers::spec_arm(slots, at, key),
+    );
 }
 
 pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
@@ -541,10 +866,12 @@ pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
 /// Every wheel slot is a real timer key and carries the deadline encoded by
 /// that key. This is the representation invariant needed before a listed key
 /// can safely join the ordered wheel.
-pub open spec fn timer_wheel_keys_valid(s: S) -> bool {
+pub open spec fn timer_slots_keys_valid(
+    slots: Seq<crate::state_timers::SlotSpec>,
+) -> bool {
     forall|i: int|
-        0 <= i < s.timers.wheel.armed.len() ==> {
-            let slot = #[trigger] s.timers.wheel.armed[i];
+        0 <= i < slots.len() ==> {
+            let slot = #[trigger] slots[i];
             match crate::keys::spec_parse_timer_key(slot.1) {
                 Some(entry) => slot.0 == entry.deadline(),
                 None => false,
@@ -552,24 +879,443 @@ pub open spec fn timer_wheel_keys_valid(s: S) -> bool {
         }
 }
 
+pub open spec fn timer_wheel_keys_valid(s: S) -> bool {
+    timer_slots_keys_valid(s.timers.wheel.armed)
+}
+
 /// A current wheel contains only this node's share. While a membership change
 /// has marked the wheel for reload, stale ownership is allowed only until
 /// `spec_reload` filters it; key validity and ordering still hold.
-pub open spec fn timer_wheel_ownership_consistent(s: S) -> bool {
-    s.timers.reload_pending || forall|i: int|
-        0 <= i < s.timers.wheel.armed.len() ==> {
-            let slot = #[trigger] s.timers.wheel.armed[i];
+pub open spec fn timer_slots_owned(
+    s: S,
+    slots: Seq<crate::state_timers::SlotSpec>,
+) -> bool {
+    forall|i: int|
+        0 <= i < slots.len() ==> {
+            let slot = #[trigger] slots[i];
             match crate::keys::spec_parse_timer_key(slot.1) {
-                Some(entry) => crate::handler_timers::spec_owns_entry(s, entry),
+                Some(entry) =>
+                    crate::handler_timers::spec_owns_entry(s, entry),
                 None => false,
             }
         }
+}
+
+pub open spec fn timer_wheel_ownership_consistent(s: S) -> bool {
+    s.timers.reload_pending
+        || timer_slots_owned(s, s.timers.wheel.armed)
 }
 
 pub open spec fn timer_activity_consistent(s: S) -> bool {
     &&& timers_consistent(s.timers)
     &&& timer_wheel_keys_valid(s)
     &&& timer_wheel_ownership_consistent(s)
+}
+
+pub proof fn lemma_timer_activity_preserved_by_control_state(
+    before: S,
+    after: S,
+)
+    requires
+        timer_activity_consistent(before),
+        after.timers.wheel == before.timers.wheel,
+        after.timers.inflight == before.timers.inflight,
+        after.timers.backlog == before.timers.backlog,
+        after.timers.reload_pending
+            == before.timers.reload_pending,
+        after.node.core.members == before.node.core.members,
+        after.cfg.node_id == before.cfg.node_id,
+    ensures
+        timer_activity_consistent(after),
+{
+    if !after.timers.reload_pending {
+        assert(timer_slots_owned(
+            after,
+            after.timers.wheel.armed,
+        )) by {
+            assert forall|i: int|
+                0 <= i < after.timers.wheel.armed.len() implies {
+                    let slot =
+                        #[trigger] after.timers.wheel.armed[i];
+                    match crate::keys::spec_parse_timer_key(slot.1) {
+                        Some(entry) =>
+                            crate::handler_timers::spec_owns_entry(
+                                after,
+                                entry,
+                            ),
+                        None => false,
+                    }
+                } by {
+                assert(after.timers.wheel.armed[i]
+                    == before.timers.wheel.armed[i]);
+                assert(crate::handler_timers::spec_owns_entry(
+                    after,
+                    crate::keys::spec_parse_timer_key(
+                        after.timers.wheel.armed[i].1,
+                    )->Some_0,
+                ) == crate::handler_timers::spec_owns_entry(
+                    before,
+                    crate::keys::spec_parse_timer_key(
+                        before.timers.wheel.armed[i].1,
+                    )->Some_0,
+                ));
+            }
+        }
+    }
+}
+
+pub proof fn lemma_arm_preserves_timer_key_deadlines(
+    slots: Seq<crate::state_timers::SlotSpec>,
+    key: Seq<char>,
+    entry: crate::keys::TimerEntrySpec,
+)
+    requires
+        timer_slots_keys_valid(slots),
+        crate::keys::spec_parse_timer_key(key) == Some(entry),
+    ensures
+        timer_slots_keys_valid(crate::state_timers::spec_arm(
+            slots,
+            entry.deadline(),
+            key,
+        )),
+    decreases slots.len(),
+{
+    let added = (entry.deadline(), key);
+    if slots.len() > 0
+        && slots[0] != added
+        && !spec_slot_before(added, slots[0])
+    {
+        lemma_arm_preserves_timer_key_deadlines(
+            slots.drop_first(),
+            key,
+            entry,
+        );
+        let result = crate::state_timers::spec_arm(
+            slots,
+            entry.deadline(),
+            key,
+        );
+        assert forall|i: int|
+            0 <= i
+                < result.len() implies {
+                let slot = #[trigger] result[i];
+                match crate::keys::spec_parse_timer_key(slot.1) {
+                    Some(parsed) => slot.0 == parsed.deadline(),
+                    None => false,
+                }
+            } by {
+            if i > 0 {
+                let tail = crate::state_timers::spec_arm(
+                    slots.drop_first(),
+                    entry.deadline(),
+                    key,
+                );
+                assert(result[i] == tail[i - 1]);
+            }
+        }
+    }
+}
+
+pub proof fn lemma_arm_preserves_timer_ownership(
+    s: S,
+    slots: Seq<crate::state_timers::SlotSpec>,
+    key: Seq<char>,
+    entry: crate::keys::TimerEntrySpec,
+)
+    requires
+        timer_slots_owned(s, slots),
+        crate::keys::spec_parse_timer_key(key) == Some(entry),
+        crate::handler_timers::spec_owns_entry(s, entry),
+    ensures
+        timer_slots_owned(
+            s,
+            crate::state_timers::spec_arm(
+                slots,
+                entry.deadline(),
+                key,
+            ),
+        ),
+    decreases slots.len(),
+{
+    let added = (entry.deadline(), key);
+    if slots.len() > 0
+        && slots[0] != added
+        && !spec_slot_before(added, slots[0])
+    {
+        lemma_arm_preserves_timer_ownership(
+            s,
+            slots.drop_first(),
+            key,
+            entry,
+        );
+        let result = crate::state_timers::spec_arm(
+            slots,
+            entry.deadline(),
+            key,
+        );
+        assert forall|i: int|
+            0 <= i
+                < result.len() implies {
+                let slot = #[trigger] result[i];
+                match crate::keys::spec_parse_timer_key(slot.1) {
+                    Some(parsed) =>
+                        crate::handler_timers::spec_owns_entry(
+                            s,
+                            parsed,
+                        ),
+                    None => false,
+                }
+            } by {
+            if i > 0 {
+                let tail = crate::state_timers::spec_arm(
+                    slots.drop_first(),
+                    entry.deadline(),
+                    key,
+                );
+                assert(result[i] == tail[i - 1]);
+            }
+        }
+    }
+}
+
+/// Every parseable key owned by this node can be folded into the wheel while
+/// preserving strict order, key/deadline agreement, and current ownership.
+/// Unparseable and foreign keys are ignored by the production fold.
+pub proof fn lemma_take_bucket_preserves_timer_activity(
+    s: S,
+    keys: Seq<Seq<char>>,
+    n: nat,
+)
+    requires
+        timer_activity_consistent(s),
+    ensures
+        ({
+            let after =
+                crate::handler_timers::spec_take_bucket(s, keys, n).0;
+            &&& timer_activity_consistent(after)
+            &&& after.node == s.node
+            &&& after.cache == s.cache
+            &&& after.flights == s.flights
+            &&& after.loops == s.loops
+            &&& after.keys == s.keys
+            &&& after.cfg == s.cfg
+            &&& after.out == s.out
+            &&& after.ops == s.ops
+            &&& after.next_op == s.next_op
+            &&& after.timers == TimersSpec {
+                wheel: after.timers.wheel,
+                ..s.timers
+            }
+        }),
+    decreases keys.len(),
+{
+    reveal(crate::handler_timers::spec_take_bucket);
+    if keys.len() > 0 {
+        let key = keys[0];
+        match crate::keys::spec_parse_timer_key(key) {
+            Some(entry) => {
+                if crate::handler_timers::spec_owns_entry(s, entry) {
+                    let armed = crate::state_timers::spec_arm(
+                        s.timers.wheel.armed,
+                        entry.deadline(),
+                        key,
+                    );
+                    lemma_arm_preserves_timer_wheel_order(
+                        s.timers.wheel.armed,
+                        entry.deadline(),
+                        key,
+                    );
+                    lemma_arm_preserves_timer_key_deadlines(
+                        s.timers.wheel.armed,
+                        key,
+                        entry,
+                    );
+                    if !s.timers.reload_pending {
+                        lemma_arm_preserves_timer_ownership(
+                            s,
+                            s.timers.wheel.armed,
+                            key,
+                            entry,
+                        );
+                    }
+                    let next = crate::handler_timers::spec_with_timers(
+                        s,
+                        crate::state_timers::TimersSpec {
+                            wheel: crate::state_timers::TimerWheelSpec {
+                                armed,
+                            },
+                            ..s.timers
+                        },
+                    );
+                    assert(crate::handler_timers::spec_owns_entry(
+                        next,
+                        entry,
+                    ) == crate::handler_timers::spec_owns_entry(
+                        s,
+                        entry,
+                    ));
+                    assert(timer_activity_consistent(next));
+                    lemma_take_bucket_preserves_timer_activity(
+                        next,
+                        keys.drop_first(),
+                        n + 1,
+                    );
+                } else {
+                    lemma_take_bucket_preserves_timer_activity(
+                        s,
+                        keys.drop_first(),
+                        n,
+                    );
+                }
+            },
+            None => {
+                lemma_take_bucket_preserves_timer_activity(
+                    s,
+                    keys.drop_first(),
+                    n,
+                );
+            },
+        }
+    }
+}
+
+pub proof fn lemma_nonempty_relisted_requeues_preserves_timer_activity(
+    s: S,
+    bucket: u64,
+    now: u64,
+    keys: Vec<String>,
+)
+    requires
+        timer_activity_consistent(s),
+        keys.deep_view().len() > 0,
+        s.timers.started,
+        s.timers.listing is None,
+        s.timers.backoff_until is None,
+        !s.timers.reload_pending,
+        s.timers.loaded_through is Some,
+        s.timers.loaded_through->Some_0
+            < crate::handler_timers::spec_horizon(s, now),
+    ensures
+        ({
+            let after = crate::handler_timers::spec_relisted(
+                s,
+                bucket,
+                now,
+                StoreRes::List { result: Ok(keys) },
+            );
+            &&& timer_activity_consistent(after)
+            &&& after.node == s.node
+            &&& after.cache == s.cache
+            &&& after.flights == s.flights
+            &&& after.loops == s.loops
+            &&& after.out.len() == s.out.len() + 3
+            &&& after.out[s.out.len() as int] is Note
+            &&& after.out[s.out.len() as int + 1] is Note
+            &&& after.out[s.out.len() as int + 2] is Store
+            &&& match after.timers.listing {
+                Some(ListingSpec::Extend { op, .. }) => {
+                    &&& after.ops.contains_key(op)
+                    &&& after.ops[op] == Owner::Timers
+                },
+                _ => false,
+            }
+        }),
+{
+    reveal(crate::handler_timers::spec_relisted);
+    reveal(crate::handler_timers::spec_take_bucket);
+    reveal(crate::handler_timers::spec_timers_run);
+    lemma_take_bucket_preserves_timer_activity(
+        s,
+        keys.deep_view(),
+        0,
+    );
+    let taken_result = crate::handler_timers::spec_take_bucket(
+        s,
+        keys.deep_view(),
+        0,
+    );
+    let taken = taken_result.0;
+    let n = taken_result.1;
+    assert(taken.node == s.node);
+    assert(taken.cache == s.cache);
+    assert(taken.flights == s.flights);
+    assert(taken.loops == s.loops);
+    assert(taken.out == s.out);
+    assert(taken.timers.loaded_through
+        == s.timers.loaded_through);
+    assert(timer_activity_consistent(taken));
+    let noted_bucket = crate::state::spec_note(
+        taken,
+        crate::types::NoteSpec::BucketLoaded {
+            bucket,
+            deadlines: n as usize,
+        },
+    );
+    lemma_timer_activity_preserved_by_control_state(
+        taken,
+        noted_bucket,
+    );
+    let noted_listing = crate::state::spec_note(
+        noted_bucket,
+        crate::types::NoteSpec::TimerListing { ok: true },
+    );
+    lemma_timer_activity_preserved_by_control_state(
+        noted_bucket,
+        noted_listing,
+    );
+    assert(noted_bucket.timers == taken.timers);
+    assert(noted_listing.timers == noted_bucket.timers);
+    let advanced = crate::handler_timers::spec_with_timers(
+        noted_listing,
+        TimersSpec {
+            closed_through: Some(bucket),
+            ..noted_listing.timers
+        },
+    );
+    lemma_timer_activity_preserved_by_control_state(
+        noted_listing,
+        advanced,
+    );
+    assert(advanced.timers.loaded_through
+        == s.timers.loaded_through);
+    assert(advanced.timers.loaded_through->Some_0
+        < crate::handler_timers::spec_horizon(advanced, now));
+    let after =
+        crate::handler_timers::spec_timers_run(advanced, now);
+    assert(crate::handler_timers::spec_relisted(
+        s,
+        bucket,
+        now,
+        StoreRes::List { result: Ok(keys) },
+    ) == after);
+    assert(after.timers.wheel == advanced.timers.wheel);
+    assert(after.timers.inflight == advanced.timers.inflight);
+    assert(after.timers.backlog == advanced.timers.backlog);
+    assert(after.timers.reload_pending
+        == advanced.timers.reload_pending);
+    assert(after.node.core.members
+        == advanced.node.core.members);
+    assert(after.cfg.node_id == advanced.cfg.node_id);
+    lemma_timer_activity_preserved_by_control_state(
+        advanced,
+        after,
+    );
+    assert(timer_activity_consistent(after));
+    assert(after.node == s.node);
+    assert(after.cache == s.cache);
+    assert(after.flights == s.flights);
+    assert(after.loops == s.loops);
+    assert(after.out.len() == s.out.len() + 3);
+    assert(after.out[s.out.len() as int] is Note);
+    assert(after.out[s.out.len() as int + 1] is Note);
+    assert(after.out[s.out.len() as int + 2] is Store);
+    assert(match after.timers.listing {
+        Some(ListingSpec::Extend { op, .. }) => {
+            &&& after.ops.contains_key(op)
+            &&& after.ops[op] == Owner::Timers
+        },
+        _ => false,
+    });
 }
 
 /// The exact empty successful bucket payload is the bounded completion case
