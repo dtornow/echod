@@ -14,13 +14,17 @@
 //! * the initial production/abstract states are related;
 //! * effect interpretation records Store/Reply/Send/Wake effects exactly;
 //! * a matching successful Store completion consumes exactly its pending call;
-//! * a normal atomic request preserves the stored-document invariant and its
-//!   Reply/Send effects are exactly the endpoint delta.
+//! * the decision kernel for a normal loaded workflow request preserves the
+//!   stored-document invariant and computes the exact endpoint-note delta;
+//! * dispatchable endpoint notes become exactly one Send effect each, with
+//!   the same unique effect keys.
 //!
-//! The last theorem intentionally reuses the two document theorems on which a
-//! full process simulation must rest:
+//! These local theorems intentionally reuse the two document theorems on which
+//! a full process simulation must rest:
 //! `quick_n_dirty::request_preserves_well_formed` and
 //! `effects::lemma_request_transition_effects`.
+//! They do not establish persistence, a Store-step invariant, or a global
+//! refinement theorem.
 //!
 //! Failure, racing-CAS, detached two-document requests, concurrent flights,
 //! membership refresh, and timer/fire steps are represented by the state and
@@ -40,7 +44,10 @@ use crate::document::spec_loaded_body;
 #[cfg(verus_keep_ghost)]
 use crate::handler::spec_on_event;
 #[cfg(verus_keep_ghost)]
-use crate::handler_docs::{FlightSpec, FlightsSpec, PhaseSpec};
+use crate::handler_docs::{
+    spec_decide, spec_dispatch, spec_dispatches, spec_send_all, FlightSpec,
+    FlightsSpec, PhaseSpec, WorkSpec, WorkingSpec, SWEEP_STEPS,
+};
 #[cfg(verus_keep_ghost)]
 use crate::state::{spec_state_new, Owner, S};
 #[cfg(verus_keep_ghost)]
@@ -57,10 +64,13 @@ use echod_abstract::view::StoreV as AbstractStoreV;
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::document::{well_formed, StoredDocumentV};
+use echod_concrete::document::{
+    well_formed, ProtocolEffectKeyV, StoredDocumentV,
+};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::effects::{
-    effects_match, lemma_request_transition_effects, safe_effect_config,
+    effects_match, lemma_request_transition_effects, note_effect,
+    note_effect_keys, note_effects, safe_effect_config,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete::handlers::lemma_request_agrees;
@@ -69,13 +79,17 @@ use echod_concrete::interpret::{
     doc_rel, finite_store, origin_prefix, request_agrees, schedule_prefix,
 };
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{spec_stored_body, REQUEST_SWEEP_STEPS};
+use echod_concrete::node::{
+    spec_request_transition, spec_stored_body, NoteV, REQUEST_SWEEP_STEPS,
+};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::quick_n_dirty::{on_request, request_preserves_well_formed, routed};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{StoreReqSpec, StoreRes};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Request, MAX_TIME};
+#[cfg(verus_keep_ghost)]
+use crate::verified::flight_spec::{spec_advance, AAct, AAnswer, AOutcome};
 
 #[cfg(verus_keep_ghost)]
 verus! {
@@ -347,6 +361,311 @@ pub proof fn lemma_process_step_observes(
         ProcessV { core: next, ..accepted },
         effects,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint notes become Send effects without filtering
+// ---------------------------------------------------------------------------
+
+/// Whether every endpoint note has an addressed production dispatch.
+pub open spec fn notes_dispatchable(
+    doc: echod_concrete::node::DocumentBodyV,
+    notes: Seq<NoteV>,
+) -> bool {
+    forall|i: int| 0 <= i < notes.len() ==>
+        spec_dispatch(doc, #[trigger] notes[i]) is Some
+}
+
+/// The logical idempotency key carried by an addressed production message.
+pub open spec fn dispatch_effect_key(
+    dispatch: (Seq<char>, MessageSpec),
+) -> ProtocolEffectKeyV {
+    match dispatch.1 {
+        MessageSpec::Execute { task_id, .. } =>
+            ProtocolEffectKeyV::Execute { id: task_id },
+        MessageSpec::Unblock(promise) =>
+            ProtocolEffectKeyV::Unblock {
+                promise: promise.id@,
+                address: dispatch.0,
+            },
+    }
+}
+
+pub open spec fn dispatch_effect_keys(
+    dispatches: Seq<(Seq<char>, MessageSpec)>,
+) -> Seq<ProtocolEffectKeyV>
+    decreases dispatches.len(),
+{
+    if dispatches.len() == 0 {
+        Seq::empty()
+    } else {
+        dispatch_effect_keys(dispatches.drop_last()).push(
+            dispatch_effect_key(dispatches.last()),
+        )
+    }
+}
+
+/// Turn an addressed outbox into the exact process effects it emits.
+pub open spec fn send_effects(
+    dispatches: Seq<(Seq<char>, MessageSpec)>,
+) -> Seq<EffectSpec>
+    decreases dispatches.len(),
+{
+    if dispatches.len() == 0 {
+        Seq::empty()
+    } else {
+        seq![EffectSpec::Send {
+            address: dispatches[0].0,
+            message: dispatches[0].1,
+        }] + send_effects(dispatches.drop_first())
+    }
+}
+
+proof fn lemma_targeted_has_dispatch_address(
+    tags: echod_types::Tags,
+    i: int,
+)
+    requires
+        0 <= i,
+        echod_concrete::node::spec_tag_key(
+            tags,
+            "resonate:target"@,
+            i,
+        ),
+    ensures
+        crate::reason::spec_target_of(tags@.skip(i)) is Some,
+    decreases tags@.len() - i,
+{
+    reveal(echod_concrete::node::spec_tag_key);
+    reveal(crate::reason::spec_target_of);
+    reveal_strlit("resonate:target");
+    if i < tags@.len() {
+        assert(tags@.skip(i)[0] == tags@[i]);
+        if tags@[i].0@ != "resonate:target"@ {
+            lemma_targeted_has_dispatch_address(tags, i + 1);
+            assert(tags@.skip(i).drop_first() =~= tags@.skip(i + 1));
+        }
+    }
+}
+
+proof fn lemma_targeted_has_dispatch_address_at_zero(
+    tags: echod_types::Tags,
+)
+    requires
+        echod_concrete::node::spec_targeted(tags),
+    ensures
+        crate::reason::spec_target_of(tags@) is Some,
+{
+    reveal(echod_concrete::node::spec_targeted);
+    reveal_strlit("resonate:target");
+    assert(seq![
+        'r','e','s','o','n','a','t','e',':','t','a','r','g','e','t'
+    ] =~= "resonate:target"@);
+    lemma_targeted_has_dispatch_address(tags, 0);
+    assert(tags@.skip(0) =~= tags@);
+}
+
+/// Well-formed workflow endpoint notes are all addressable.  This is the
+/// semantic fact that prevents `spec_dispatches` from filtering an Execute.
+pub proof fn lemma_workflow_effect_notes_dispatchable(
+    before: StoredDocumentV,
+    after: StoredDocumentV,
+    notes: Seq<NoteV>,
+)
+    requires
+        before is Workflow,
+        after is Workflow,
+        well_formed(after),
+        effects_match(before, after, notes),
+    ensures
+        notes_dispatchable(spec_stored_body(after), notes),
+{
+    assert forall|i: int| 0 <= i < notes.len() implies
+        spec_dispatch(
+            spec_stored_body(after),
+            #[trigger] notes[i],
+        ) is Some by {
+        let note = notes[i];
+        assert(note_effects(notes).contains(note_effect(note))) by {
+            reveal(note_effects);
+            assert(exists|j: int|
+                0 <= j < notes.len()
+                    && note_effect(notes[j]) == note_effect(note)) by {
+                assert(0 <= i < notes.len());
+            };
+        };
+        assert(echod_concrete::document::document_effects(before, after)
+            .contains(note_effect(note)));
+        match note {
+            NoteV::Execute { id, version } => {
+                reveal(echod_concrete::document::document_effects);
+                reveal(echod_concrete::document::workflow_effects);
+                reveal(echod_concrete::document::offer_committed);
+                let workflow = after->Workflow_0;
+                assert(workflow.objects.contains_key(id));
+                assert(workflow.objects[id].task is Some);
+                reveal(echod_concrete::document::well_formed);
+                reveal(echod_concrete::document::workflow_well_formed);
+                assert(echod_concrete::document::task_well_formed(
+                    workflow.objects[id],
+                    workflow.committed_at,
+                ));
+                reveal(echod_concrete::document::task_well_formed);
+                assert(echod_concrete::node::spec_targeted(
+                    workflow.objects[id].promise.tags,
+                ));
+                lemma_targeted_has_dispatch_address_at_zero(
+                    workflow.objects[id].promise.tags,
+                );
+                reveal(spec_dispatch);
+            },
+            NoteV::Unblock { .. } => {
+                reveal(spec_dispatch);
+            },
+        }
+    };
+}
+
+proof fn lemma_dispatch_key_of_note(
+    doc: echod_concrete::node::DocumentBodyV,
+    note: NoteV,
+)
+    requires
+        spec_dispatch(doc, note) is Some,
+    ensures
+        dispatch_effect_key(spec_dispatch(doc, note)->Some_0)
+            == echod_concrete::document::protocol_effect_key(note_effect(note)),
+{
+    reveal(spec_dispatch);
+    match note {
+        NoteV::Execute { .. } => {},
+        NoteV::Unblock { .. } => {},
+    }
+}
+
+/// `spec_dispatches` preserves every dispatchable note, in order, and
+/// preserves its endpoint idempotency key.
+pub proof fn lemma_dispatches_preserve_endpoint_notes(
+    doc: echod_concrete::node::DocumentBodyV,
+    notes: Seq<NoteV>,
+)
+    requires
+        notes_dispatchable(doc, notes),
+    ensures
+        ({
+            let outbox = spec_dispatches(doc, notes);
+            &&& outbox.len() == notes.len()
+            &&& dispatch_effect_keys(outbox) == note_effect_keys(notes)
+        }),
+    decreases notes.len(),
+{
+    if notes.len() == 0 {
+        assert(spec_dispatches(doc, notes)
+            =~= Seq::<(Seq<char>, MessageSpec)>::empty());
+        assert(note_effect_keys(notes)
+            =~= Seq::<ProtocolEffectKeyV>::empty());
+    } else {
+        let prefix = notes.drop_last();
+        let note = notes.last();
+        assert(notes_dispatchable(doc, prefix)) by {
+            assert forall|i: int| 0 <= i < prefix.len() implies
+                spec_dispatch(doc, #[trigger] prefix[i]) is Some by {
+                assert(prefix[i] == notes[i]);
+            };
+        };
+        lemma_dispatches_preserve_endpoint_notes(doc, prefix);
+        let dispatch = spec_dispatch(doc, note)->Some_0;
+        lemma_dispatch_key_of_note(doc, note);
+        reveal(spec_dispatches);
+        assert(prefix.push(note) =~= notes);
+        assert(spec_dispatches(doc, notes)
+            == spec_dispatches(doc, prefix).push(dispatch));
+        let prefix_outbox = spec_dispatches(doc, prefix);
+        let outbox = prefix_outbox.push(dispatch);
+        assert(outbox.drop_last() =~= prefix_outbox);
+        assert(outbox.last() == dispatch);
+        reveal(dispatch_effect_keys);
+        assert(dispatch_effect_keys(outbox)
+            == dispatch_effect_keys(prefix_outbox).push(
+                dispatch_effect_key(dispatch),
+            ));
+        assert(dispatch_effect_keys(spec_dispatches(doc, notes))
+            == dispatch_effect_keys(spec_dispatches(doc, prefix)).push(
+                dispatch_effect_key(dispatch),
+            ));
+        assert(note_effect_keys(notes)
+            == note_effect_keys(prefix).push(
+                echod_concrete::document::protocol_effect_key(note_effect(note)),
+            ));
+    }
+}
+
+/// The production `send_all` fold appends exactly one `EffectSpec::Send` for
+/// each addressed outbox entry and no other effect.
+pub proof fn lemma_send_all_exact(
+    s: S,
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+)
+    ensures
+        spec_send_all(s, outbox).out == s.out + send_effects(outbox),
+    decreases outbox.len(),
+{
+    if outbox.len() == 0 {
+        assert(s.out + Seq::<EffectSpec>::empty() =~= s.out);
+    } else {
+        let first = outbox[0];
+        let tail = outbox.drop_first();
+        lemma_send_all_exact(
+            crate::state::spec_emit(
+                s,
+                EffectSpec::Send {
+                    address: first.0,
+                    message: first.1,
+                },
+            ),
+            tail,
+        );
+        assert(send_effects(outbox)
+            == seq![EffectSpec::Send {
+                address: first.0,
+                message: first.1,
+            }] + send_effects(tail));
+        assert(crate::state::spec_emit(
+            s,
+            EffectSpec::Send {
+                address: first.0,
+                message: first.1,
+            },
+        ).out == s.out.push(EffectSpec::Send {
+            address: first.0,
+            message: first.1,
+        }));
+    }
+}
+
+/// Combined endpoint bridge: no note is filtered, each note becomes one Send,
+/// and the resulting sends retain the notes' unique effect keys.
+pub proof fn lemma_endpoint_notes_send_exact(
+    s: S,
+    doc: echod_concrete::node::DocumentBodyV,
+    notes: Seq<NoteV>,
+)
+    requires
+        notes_dispatchable(doc, notes),
+        note_effect_keys(notes).no_duplicates(),
+    ensures
+        ({
+            let outbox = spec_dispatches(doc, notes);
+            &&& spec_send_all(s, outbox).out
+                == s.out + send_effects(outbox)
+            &&& outbox.len() == notes.len()
+            &&& dispatch_effect_keys(outbox)
+                == note_effect_keys(notes)
+            &&& dispatch_effect_keys(outbox).no_duplicates()
+        }),
+{
+    lemma_dispatches_preserve_endpoint_notes(doc, notes);
+    lemma_send_all_exact(s, spec_dispatches(doc, notes));
 }
 
 pub proof fn lemma_successful_store_completion_bookkeeping(
@@ -653,6 +972,347 @@ pub proof fn lemma_normal_request_happy_path(
         now,
         retry_timeout,
         REQUEST_SWEEP_STEPS as nat,
+    );
+}
+
+/// Mechanical shape of `handler_docs::spec_decide` for request work.
+#[verifier::spinoff_prover]
+proof fn lemma_spec_decide_request_shape(
+    s: S,
+    w: WorkingSpec,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    request: Request,
+    action_kind: Option<Seq<char>>,
+    offered_now: u64,
+)
+    ensures
+        ({
+            let work = WorkSpec::Request {
+                id,
+                kind,
+                corr,
+                req: request,
+                action_kind,
+                now: offered_now,
+            };
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            let (next, commit, done) = spec_decide(s, work, w);
+            let (body, _, _, notes) = spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            &&& done.outbox == spec_dispatches(body, notes)
+            &&& commit.after
+                == echod_concrete::node::spec_advance_stored(
+                    w.loaded.document,
+                    body,
+                    now,
+                )
+            &&& commit.seq.changed
+                == (body != spec_stored_body(w.loaded.document))
+            &&& commit.seq.fired is None
+            &&& commit.seq.step is Start
+            &&& !commit.seq.changed ==> spec_advance(
+                commit.seq,
+                next.node.core,
+                AAnswer::Fresh,
+            ).2 == AOutcome::Act(AAct::Done { deleted: false })
+        }),
+{
+    let work = WorkSpec::Request {
+        id,
+        kind,
+        corr,
+        req: request,
+        action_kind,
+        now: offered_now,
+    };
+    reveal(spec_decide);
+    reveal(crate::handler_docs::spec_commit_new);
+    let (next, commit, done) = spec_decide(s, work, w);
+    if !commit.seq.changed {
+        assert(spec_advance(
+            commit.seq,
+            next.node.core,
+            AAnswer::Fresh,
+        ).2 == AOutcome::Act(AAct::Done { deleted: false }));
+    }
+}
+
+#[verifier::spinoff_prover]
+#[verifier::rlimit(20)]
+proof fn lemma_request_logical_after_shape(
+    before: StoredDocumentV,
+    request: Request,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        before is Workflow,
+        routed(before, request),
+        well_formed(before),
+        echod_concrete::node::spec_stored_committed_at(before) <= now,
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+    ensures
+        ({
+            let (body, _, _, _) = spec_request_transition(
+                spec_stored_body(before),
+                request,
+                now,
+                retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            let logical_after = on_request(
+                before,
+                request,
+                now,
+                retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            &&& spec_stored_body(logical_after) == body
+            &&& logical_after is Workflow
+            &&& if body != spec_stored_body(before) {
+                logical_after == echod_concrete::node::spec_advance_stored(
+                    before,
+                    body,
+                    now,
+                )
+            } else {
+                logical_after == before
+            }
+        }),
+{
+    reveal(routed);
+    reveal(echod_concrete::quick_n_dirty::request_matches);
+    let workflow = before->Workflow_0;
+    let original = spec_stored_body(before);
+    echod_concrete::quick_n_dirty::lemma_full_implies_relaxed(
+        workflow,
+        now,
+    );
+    echod_concrete::quick_n_dirty::lemma_sweep_preserves_relaxed(
+        workflow.document,
+        workflow.objects,
+        now,
+        retry_timeout,
+        SWEEP_STEPS as nat,
+    );
+    let swept = echod_concrete::node::spec_sweep(
+        original,
+        now,
+        retry_timeout,
+        SWEEP_STEPS as nat,
+    ).0;
+    assert(swept is Workflow);
+    if echod_concrete::node::spec_earliest_in(swept, now) is None {
+        echod_concrete::quick_n_dirty::lemma_handle_preserves_relaxed(
+            workflow.document,
+            swept->Workflow_0,
+            request,
+            now,
+        );
+        let handled =
+            echod_concrete::node::spec_handle(swept, request, now).0;
+        assert(handled is Workflow);
+        echod_concrete::quick_n_dirty::lemma_sweep_preserves_relaxed(
+            workflow.document,
+            handled->Workflow_0,
+            now,
+            retry_timeout,
+            SWEEP_STEPS as nat,
+        );
+        let closed = echod_concrete::node::spec_sweep(
+            handled,
+            now,
+            retry_timeout,
+            SWEEP_STEPS as nat,
+        ).0;
+        assert(closed is Workflow);
+    }
+    let (body, response, _, _) = spec_request_transition(
+        spec_stored_body(before),
+        request,
+        now,
+        retry_timeout,
+        SWEEP_STEPS as nat,
+    );
+    reveal(on_request);
+    if response == echod_concrete::node::spec_unavailable(request) {
+        reveal(spec_request_transition);
+        assert(body == spec_stored_body(before));
+    }
+    reveal(spec_request_transition);
+    assert(body is Workflow);
+}
+
+#[verifier::spinoff_prover]
+/// The exact decision made by a normal loaded workflow request.
+///
+/// `logical_after` is the document that may become persistent.  The
+/// `CommittingSpec::after` field is an advanced candidate even when the body
+/// did not change, so it is identified with `logical_after` only in the
+/// changed branch.  In the unchanged/rejected branch the sequence's first act
+/// is `Done`, proving that the advanced candidate is not written.
+pub proof fn lemma_normal_request_decision_kernel(
+    s: S,
+    w: WorkingSpec,
+    id: u64,
+    kind: Seq<char>,
+    corr: Seq<char>,
+    request: Request,
+    action_kind: Option<Seq<char>>,
+    offered_now: u64,
+)
+    requires
+        w.loaded.document is Workflow,
+        w.target
+            == echod_concrete::node::spec_stored_name(w.loaded.document),
+        well_formed(w.loaded.document),
+        routed(w.loaded.document, request),
+        crate::document::spec_clamp_now(
+            crate::document::spec_loaded_committed_at(w.loaded),
+            offered_now,
+        ) <= MAX_TIME,
+        0 < s.cfg.retry_timeout <= MAX_TIME,
+        safe_effect_config(
+            crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            ),
+            s.cfg.retry_timeout,
+        ),
+        document_ids_bounded(w.loaded.document),
+    ensures
+        ({
+            let work = WorkSpec::Request {
+                id,
+                kind,
+                corr,
+                req: request,
+                action_kind,
+                now: offered_now,
+            };
+            let now = crate::document::spec_clamp_now(
+                crate::document::spec_loaded_committed_at(w.loaded),
+                offered_now,
+            );
+            let (next, commit, done) = spec_decide(s, work, w);
+            let (body, _, _, notes) = spec_request_transition(
+                spec_stored_body(w.loaded.document),
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            let logical_after = on_request(
+                w.loaded.document,
+                request,
+                now,
+                s.cfg.retry_timeout,
+                SWEEP_STEPS as nat,
+            );
+            &&& well_formed(logical_after)
+            &&& effects_match(w.loaded.document, logical_after, notes)
+            &&& spec_stored_body(logical_after) == body
+            &&& note_effect_keys(notes).no_duplicates()
+            &&& notes_dispatchable(
+                spec_stored_body(logical_after),
+                notes,
+            )
+            &&& done.outbox == spec_dispatches(body, notes)
+            &&& commit.seq.changed
+                == (body != spec_stored_body(w.loaded.document))
+            &&& commit.seq.fired is None
+            &&& commit.seq.step is Start
+            &&& if commit.seq.changed {
+                commit.after == logical_after
+            } else {
+                &&& logical_after == w.loaded.document
+                &&& spec_advance(
+                    commit.seq,
+                    next.node.core,
+                    AAnswer::Fresh,
+                ).2 == AOutcome::Act(AAct::Done { deleted: false })
+            }
+        }),
+{
+    let work = WorkSpec::Request {
+        id,
+        kind,
+        corr,
+        req: request,
+        action_kind,
+        now: offered_now,
+    };
+    let now = crate::document::spec_clamp_now(
+        crate::document::spec_loaded_committed_at(w.loaded),
+        offered_now,
+    );
+    let before = w.loaded.document;
+    let (body, response, born, notes) = spec_request_transition(
+        spec_stored_body(before),
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    );
+    let logical_after = on_request(
+        before,
+        request,
+        now,
+        s.cfg.retry_timeout,
+        SWEEP_STEPS as nat,
+    );
+
+    assert(echod_concrete::node::spec_stored_committed_at(before) <= now);
+    lemma_normal_request_happy_path(
+        before,
+        request,
+        now,
+        s.cfg.retry_timeout,
+    );
+    lemma_request_logical_after_shape(
+        before,
+        request,
+        now,
+        s.cfg.retry_timeout,
+    );
+    lemma_spec_decide_request_shape(
+        s,
+        w,
+        id,
+        kind,
+        corr,
+        request,
+        action_kind,
+        offered_now,
+    );
+    let (next, commit, done) = spec_decide(s, work, w);
+
+    if body != spec_stored_body(before) {
+        assert(commit.after == logical_after);
+    } else {
+        assert(logical_after == before);
+        assert(spec_advance(
+            commit.seq,
+            next.node.core,
+            AAnswer::Fresh,
+        ).2 == AOutcome::Act(AAct::Done { deleted: false }));
+    }
+    assert(logical_after is Workflow);
+    lemma_workflow_effect_notes_dispatchable(
+        before,
+        logical_after,
+        notes,
     );
 }
 
