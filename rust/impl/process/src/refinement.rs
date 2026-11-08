@@ -22,10 +22,11 @@
 //! `quick_n_dirty::request_preserves_well_formed` and
 //! `effects::lemma_request_transition_effects`.
 //!
-//! Failure, racing-CAS, detached two-document requests, concurrent flights,
-//! membership refresh, and timer/fire steps are represented by the state and
-//! classified by [`open_case`], but no refinement theorem is claimed for them.
-//! There are no admits or axioms in this module.
+//! Failure, racing-CAS, concurrent flights, later membership completions, and
+//! timer fire/commit steps remain classified by [`open_case`]. The bounded
+//! startup wake is proved below: it starts membership refresh, leaves timers
+//! inactive, and preserves the full relation as an abstract stutter. There are
+//! no admits or axioms in this module.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports, dead_code))]
 
@@ -596,6 +597,106 @@ pub proof fn lemma_initial_related(cfg: ConfigSpec)
     assert(p.core.node.core.members =~= Seq::<Seq<char>>::empty());
     assert(p.core.timers.wheel.armed =~= Seq::<(u64, Seq<char>)>::empty());
     assert(p.core.timers.backlog =~= Seq::<(u64, Seq<char>)>::empty());
+}
+
+/// The first production wake is a control-plane step. It starts the
+/// membership announcement, observes that timers have not started yet, and
+/// leaves the abstract service state unchanged. Unlike a boundary-only
+/// observation fact, this proves preservation of the full relation used by
+/// this module, including operation ownership and pending-store bookkeeping.
+pub proof fn lemma_initial_wake_membership_stutters(cfg: ConfigSpec)
+    ensures
+        ({
+            let before = initial_process(cfg);
+            let event = EventSpec::Wake {
+                clock: 0,
+                armed: Armed::Heartbeat,
+            };
+            let after = process_step(before, event);
+            &&& related(after, initial_abstract())
+            &&& after.boundary == before.boundary
+            &&& after.core.node.members.refresh is Some
+            &&& !after.core.timers.started
+            &&& after.pending_store.dom().len() == 1
+        }),
+{
+    let before = initial_process(cfg);
+    let event = EventSpec::Wake {
+        clock: 0,
+        armed: Armed::Heartbeat,
+    };
+    reveal(spec_on_event);
+    reveal(crate::handler_node::spec_members_tick);
+    reveal(crate::handler_node::spec_members_refresh);
+    reveal(crate::handler::spec_schedule_wake);
+    reveal_with_fuel(apply_effects, 2);
+
+    let accepted = accept_event(before, event);
+    let (core, effects) = spec_on_event(accepted.core, event);
+    assert(accepted.core == before.core);
+    assert(before.core == spec_state_new(cfg));
+    assert(effects.len() == 1);
+    assert(effects[0] is Store);
+    assert(core.out =~= Seq::<EffectSpec>::empty());
+    assert(core.ops.dom().len() == 1);
+    assert(core.node.members.refresh is Some);
+    assert(!core.timers.started);
+
+    let after = process_step(before, event);
+    let base = ProcessV { core, ..accepted };
+    assert(after == apply_effects(
+        base,
+        effects,
+    ));
+    assert(effects =~= seq![effects[0]]);
+    assert(effects.drop_first() =~= Seq::<EffectSpec>::empty());
+    match effects[0] {
+        EffectSpec::Store { op, request } => {
+            assert(op == 1);
+            assert(after == apply_effect(
+                base,
+                EffectSpec::Store { op, request },
+            ));
+            lemma_store_effect_is_pending(base, op, request);
+            assert(after.pending_store
+                == base.pending_store.insert(
+                    op,
+                    PendingStoreV {
+                        request,
+                        owner: Some(Owner::Members),
+                    },
+                ));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+    assert(after.pending_store.dom() =~= Set::<OpId>::empty().insert(1));
+    assert(after.pending_store.dom().len() == 1);
+    assert(after.boundary == before.boundary);
+    assert(after.completed_store =~= Set::<OpId>::empty());
+    assert(after.core == core);
+    assert(after.core.out =~= Seq::<EffectSpec>::empty());
+    assert(after.core.cache == before.core.cache);
+    assert(after.core.flights == before.core.flights);
+    assert(after.core.timers == before.core.timers);
+    assert(after.core.node.core == before.core.node.core);
+
+    assert(pending_store_consistent(after));
+    assert(owners_consistent(after.core));
+    assert(membership_consistent(after.core));
+    assert(timers_consistent(after.core.timers));
+    assert(flight_lanes_consistent(after.core.flights));
+    assert(cache_related(
+        after.core.cache,
+        after.core.flights,
+        initial_abstract().store,
+    ));
+    assert(flights_related(
+        after.core.flights,
+        initial_abstract().store,
+    ));
+    assert(related(after, initial_abstract()));
 }
 
 // ---------------------------------------------------------------------------

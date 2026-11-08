@@ -1255,9 +1255,21 @@ mod tests {
         let outcomes = model.on_event(&config, pid, local, 0, &ProcessEvent::Timeout);
 
         assert_eq!(outcomes.len(), 1);
-        assert!(outcomes[0].send.iter().any(|(recipient, message)| {
-            *recipient == Pid::Store && matches!(message, Message::StoreReq { .. })
-        }));
+        assert_eq!(outcomes[0].send.len(), 1);
+        assert!(matches!(
+            &outcomes[0].send[0],
+            (Pid::Store, Message::StoreReq { op: 1, .. })
+        ));
+        assert!(!outcomes[0]
+            .send
+            .iter()
+            .any(|(recipient, _)| *recipient == Pid::Outside));
+        let Local::Node(node) = &outcomes[0].state else {
+            panic!("the node timeout keeps the node in its local state");
+        };
+        assert!(node.core.node.members.refresh.is_some());
+        assert!(!node.core.timers.started);
+        assert!(node.wake.is_none());
     }
 
     #[test]
