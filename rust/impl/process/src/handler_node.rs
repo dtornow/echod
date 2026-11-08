@@ -272,9 +272,7 @@ pub open spec fn spec_refresh_ended(s: S, r: Result<(), StoreErrorSpec>) -> S {
         Err(e) => spec_note(s, NoteSpec::RefreshFailed { error: spec_error_text(e) }),
     };
     let s = spec_with_members(s, MembersSpec { next_heartbeat: Some(now.saturating_add(s.node.members.heartbeat_ms)), ..s.node.members });
-    if s.node.members.leave_pending {
-        crate::handler::spec_leave(spec_with_members(s, MembersSpec { leave_pending: false, ..s.node.members }))
-    } else if s.loops {
+    if s.loops {
         spec_timers_run(s, now)
     } else {
         s
@@ -614,10 +612,7 @@ impl State {
             Err(e) => self.note(Note::RefreshFailed { error: error_text(&e) }),
         }
         self.node.members.next_heartbeat = Some(now.saturating_add(self.node.members.heartbeat_ms));
-        if self.node.members.leave_pending {
-            self.node.members.leave_pending = false;
-            self.leave();
-        } else if self.loops {
+        if self.loops {
             self.timers_run(now);
         }
     }

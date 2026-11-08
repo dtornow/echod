@@ -1,7 +1,8 @@
 //! echod-logic: the decision core of a node, with no I/O in it.
 //!
-//! The core is a state machine: `State`, `Event` in, `Effect`s out,
-//! `on_event` the only step. Every call on the store leaves as an
+//! The core is a state machine: `State`, operational `Event`s in, `Effect`s
+//! out. Startup is inferred from the first delivered event; shutdown belongs
+//! to the impure shell. Every request on the store leaves as an
 //! `Effect::Store` under an op id and comes back as `Event::Store`
 //! under the same id; every answer to a client leaves as `Effect::Reply`;
 //! the clock is read by whoever drives the core and handed in on every

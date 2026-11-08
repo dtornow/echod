@@ -1,6 +1,5 @@
 //! The one step. A request that came in from the network is above the line.
-//! Below it, the runtime: a store answer, the heartbeat, the wheel, the
-//! process starting or stopping.
+//! Below it, the runtime: a store answer, the heartbeat, or the wheel.
 //!
 //! Theorem 1: `State::on_event` computes `spec_on_event`. Verus checks it
 //! here, over every method the step reaches.
@@ -24,11 +23,7 @@ use crate::keys::*;
 #[cfg(verus_keep_ghost)]
 use crate::state::*;
 #[cfg(verus_keep_ghost)]
-use crate::state_node::MembersSpec;
-#[cfg(verus_keep_ghost)]
 use crate::state_timers::spec_next_wake;
-#[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -39,17 +34,25 @@ verus! {
 /// An event in, the effects it calls for out: the step of the process.
 #[verifier::opaque]
 pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
+    let clock = match event {
+        EventSpec::Request { clock, .. }
+        | EventSpec::Store { clock, .. }
+        | EventSpec::Wake { clock, .. } => clock,
+    };
+    let s = S { clock, ..s };
+    let s = if s.node.members.next_heartbeat is None
+        && !s.node.members.refreshing()
+    {
+        spec_members_tick(s, spec_now(s))
+    } else {
+        s
+    };
     let s = match event {
         EventSpec::Request { clock, request } => match request {
-            RequestEventSpec::Protocol(call) => spec_request(S { clock, ..s }, call),
-            RequestEventSpec::Debug(call) => spec_debug_begin(S { clock, ..s }, call),
+            RequestEventSpec::Protocol(call) => spec_request(s, call),
+            RequestEventSpec::Debug(call) => spec_debug_begin(s, call),
         },
-        EventSpec::Start { clock, loops } => {
-            let s = S { clock, loops, ..s };
-            spec_members_refresh(s, spec_now(s))
-        },
-        EventSpec::Store { op, response, clock } => {
-            let s = S { clock, ..s };
+        EventSpec::Store { op, response, .. } => {
             let owner = if s.ops.contains_key(op) { Some(s.ops[op]) } else { None };
             let s = S { ops: s.ops.remove(op), ..s };
             match owner {
@@ -57,13 +60,12 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
                 Some(Owner::Members) => spec_members_completed(s, op, response),
                 Some(Owner::Timers) => spec_timers_completed(s, op, response),
                 Some(Owner::Debug) => spec_debug_completed(s, op, response),
-                Some(Owner::Leaving) => S { stopped: true, ..s },
                 _ => s,
             }
         },
-        EventSpec::Wake { clock, armed } => {
-            let s = S { clock, last_wake: None, ..s };
-            if s.loops && !s.stopping {
+        EventSpec::Wake { armed, .. } => {
+            let s = S { last_wake: None, ..s };
+            if s.loops {
                 let now = spec_now(s);
                 match armed {
                     Armed::Heartbeat => spec_timers_run(spec_members_tick(s, now), now),
@@ -73,7 +75,6 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
                 s
             }
         },
-        EventSpec::Stop { clock } => spec_stop(S { clock, ..s }),
     };
     let s = spec_schedule_wake(s);
     (S { out: Seq::empty(), ..s }, s.out)
@@ -90,27 +91,11 @@ pub open spec fn spec_request(s: S, call: CallSpec) -> S {
     spec_submit(s, call.target, work, None, false)
 }
 
-#[verifier::opaque]
-pub open spec fn spec_stop(s: S) -> S {
-    let s = S { stopping: true, loops: false, ..s };
-    if s.node.members.refreshing() {
-        spec_with_members(s, MembersSpec { leave_pending: true, ..s.node.members })
-    } else {
-        spec_leave(s)
-    }
-}
-
-#[verifier::opaque]
-pub open spec fn spec_leave(s: S) -> S {
-    let key = spec_node_key(s.keys.prefix, s.cfg.node_id);
-    spec_store(s, StoreReqSpec::Del { key }, Owner::Leaving).0
-}
-
 /// Ask the runtime to sleep until the next heartbeat or the next time the
 /// wheel wants to look, whichever comes first, and to say which.
 #[verifier::opaque]
 pub open spec fn spec_schedule_wake(s: S) -> S {
-    if !s.loops || s.stopping {
+    if !s.loops {
         s
     } else {
         let now = spec_now(s);
@@ -153,12 +138,23 @@ impl State {
         proof {
             reveal(spec_on_event);
         }
+        let clock = match &event {
+            Event::Request { clock, .. }
+            | Event::Store { clock, .. }
+            | Event::Wake { clock, .. } => *clock,
+        };
+        self.set_clock(clock);
+        if self.node.members.next_heartbeat.is_none()
+            && !self.node.members.refreshing()
+        {
+            let now = self.now();
+            self.members_tick(now);
+        }
         match event {
             // -----------------------------------------------------------------
             // From the network, already admitted by the runtime.
             // -----------------------------------------------------------------
-            Event::Request { clock, request } => {
-                self.set_clock(clock);
+            Event::Request { request, .. } => {
                 match request {
                     RequestEvent::Protocol(call) => self.request(call),
                     RequestEvent::Debug(call) => self.debug_begin(call),
@@ -167,28 +163,19 @@ impl State {
             // -----------------------------------------------------------------
             // From the runtime, not the network.
             // -----------------------------------------------------------------
-            Event::Start { clock, loops } => {
-                self.set_clock(clock);
-                self.loops = loops;
-                let now = self.now();
-                self.members_refresh(now);
-            },
-            Event::Store { op, response, clock } => {
-                self.set_clock(clock);
+            Event::Store { op, response, .. } => {
                 match self.ops.remove(&op) {
                     Some(Owner::Flight(f)) => self.flight_completed(f, op, response),
                     Some(Owner::Members) => self.members_completed(op, response),
                     Some(Owner::Timers) => self.timers_completed(op, response),
                     Some(Owner::Debug) => self.debug_completed(op, response),
-                    Some(Owner::Leaving) => self.mark_stopped(),
                     Some(Owner::Ignored) | None => {},
                 }
             },
-            Event::Wake { clock, armed } => {
-                self.set_clock(clock);
+            Event::Wake { armed, .. } => {
                 // A wake that came early asks again below.
                 self.clear_wake();
-                if self.loops && !self.stopping {
+                if self.loops {
                     let now = self.now();
                     // The loop the sleep was for, then the other one: a late
                     // wake may have overrun it. Each loop checks its own clock.
@@ -201,10 +188,6 @@ impl State {
                         Armed::Wheel => self.members_tick(now),
                     }
                 }
-            },
-            Event::Stop { clock } => {
-                self.set_clock(clock);
-                self.stop();
             },
         }
         self.schedule_wake();
@@ -229,35 +212,6 @@ impl State {
         self.submit(target, work, None, false);
     }
 
-    fn stop(&mut self)
-        ensures
-            final(self).deep_view() == spec_stop(old(self).deep_view()),
-    {
-        proof {
-            reveal(spec_stop);
-        }
-        self.stopping = true;
-        self.loops = false;
-        // A refresh in flight finishes first, so the announcement it
-        // writes does not outlive the withdrawal.
-        if self.node.members.refreshing() {
-            self.node.members.leave_pending = true;
-        } else {
-            self.leave();
-        }
-    }
-
-    pub fn leave(&mut self)
-        ensures
-            final(self).deep_view() == spec_leave(old(self).deep_view()),
-    {
-        proof {
-            reveal(spec_leave);
-        }
-        let key = self.keys.node_key(self.cfg.node_id.as_str());
-        self.store(StoreReq::Del { key }, Owner::Leaving);
-    }
-
     /// Ask the runtime to sleep until the next heartbeat or the next time
     /// the wheel wants to look, whichever comes first, and to say which.
     fn schedule_wake(&mut self)
@@ -267,7 +221,7 @@ impl State {
         proof {
             reveal(spec_schedule_wake);
         }
-        if !self.loops || self.stopping {
+        if !self.loops {
             return;
         }
         let now = self.now();

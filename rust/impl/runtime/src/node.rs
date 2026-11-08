@@ -46,7 +46,6 @@ pub struct Node {
     next_request: AtomicU64,
     /// When the core next wants a wake, and what that wake is for.
     wake: watch::Sender<Option<(tokio::time::Instant, Armed)>>,
-    stopped: watch::Sender<bool>,
     crashed: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -74,7 +73,6 @@ impl Node {
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", echod_logic::keys::fnv1a(&format!("{}/{}", cfg.node_url(), clock.now()))));
         let state = State::new(cfg.logic(id.clone(), appendable));
         let (wake, _) = watch::channel(None);
-        let (stopped, _) = watch::channel(false);
         let (crashed, _) = watch::channel(false);
         let node = Arc::new_cyclic(|me| Node {
             me: me.clone(),
@@ -89,7 +87,6 @@ impl Node {
             replies: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
             wake,
-            stopped,
             crashed,
             tasks: Mutex::new(Vec::new()),
         });
@@ -169,16 +166,16 @@ impl Node {
         if *self.crashed.borrow() {
             return;
         }
-        let (effects, stopped) = {
+        let effects = {
             let mut s = self.lock();
-            let effects = s.on_event(event);
-            (effects, s.stopped())
+            s.on_event(event)
         };
+        self.perform_all(effects);
+    }
+
+    fn perform_all(&self, effects: Vec<Effect>) {
         for e in effects {
             self.perform(e);
-        }
-        if stopped {
-            let _ = self.stopped.send(true);
         }
     }
 
@@ -307,19 +304,14 @@ impl ResonateServer for Node {
             let handle = self.me().spawn_wake();
             self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         }
-        self.apply(Event::Start { clock, loops: !debug });
+        self.lock().set_loops(!debug);
+        self.apply(Event::Wake { clock, armed: Armed::Heartbeat });
         Ok(())
     }
 
-    /// Stop: the announcement is withdrawn, the timer stops. Requests in
-    /// flight are answered.
+    /// Stop the impure shell. Durable leases and announcements expire without
+    /// a lifecycle transition in the pure core.
     async fn stop(&self) -> Result<(), Unavailable> {
-        let mut stopped = self.stopped.subscribe();
-        let clock = self.clock.now();
-        self.apply(Event::Stop { clock });
-        if !*stopped.borrow_and_update() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), stopped.changed()).await;
-        }
         let tasks: Vec<_> = self.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
         for t in tasks {
             t.abort();

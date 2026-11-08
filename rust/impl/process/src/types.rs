@@ -1,8 +1,10 @@
 //! The vocabulary the core is written in: what it is told, what it answers
 //! with, and the shapes those two carry.
 //!
-//! Everything here is data. `Event` is the only way in, `Effect` the only
-//! way out. A `StoreReq` goes out as an `Effect::Store` under an `OpId`
+//! Everything here is data. Operational work enters as `Event`; startup is
+//! inferred from the first delivered event, and shutdown belongs to the
+//! shell. `Effect` is the only way out. A `StoreReq` goes out as an
+//! `Effect::Store` under an `OpId`
 //! and its answer comes back as `Event::Store` under the same id; the
 //! core keeps, per id, which machine is waiting for it. No decision is made
 //! in this file: that is `State` in the crate root and the machines beside
@@ -170,12 +172,6 @@ pub enum Event {
     /// has come. `armed` is the loop the sleep was for. A late wake still
     /// runs the other loop when its time has come.
     Wake { clock: u64, armed: Armed },
-    /// The node starts. `loops` says whether it keeps itself going: the
-    /// heartbeat and the timers. Without them it answers requests and does
-    /// nothing on its own.
-    Start { clock: u64, loops: bool },
-    /// The node stops: it withdraws its announcement and runs no loop.
-    Stop { clock: u64 },
 }
 
 #[allow(inconsistent_fields)]
@@ -184,8 +180,6 @@ pub ghost enum EventSpec {
     Request { clock: u64, request: RequestEventSpec },
     Store { op: OpId, response: StoreRes, clock: u64 },
     Wake { clock: u64, armed: Armed },
-    Start { clock: u64, loops: bool },
-    Stop { clock: u64 },
 }
 
 #[cfg(verus_keep_ghost)]
@@ -193,11 +187,9 @@ impl DeepView for Event {
     type V = EventSpec;
     open spec fn deep_view(&self) -> EventSpec {
         match self {
-            Event::Start { clock, loops } => EventSpec::Start { clock: *clock, loops: *loops },
             Event::Request { clock, request } => EventSpec::Request { clock: *clock, request: request.deep_view() },
             Event::Store { op, response, clock } => EventSpec::Store { op: *op, response: *response, clock: *clock },
             Event::Wake { clock, armed } => EventSpec::Wake { clock: *clock, armed: *armed },
-            Event::Stop { clock } => EventSpec::Stop { clock: *clock },
         }
     }
 }

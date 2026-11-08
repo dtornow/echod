@@ -101,7 +101,11 @@ impl Harness {
     /// One event in, and every store call it leads to answered, until the
     /// core asks for nothing more of the store.
     fn apply(&mut self, event: Event) {
-        let mut pending = self.state.on_event(event);
+        let pending = self.state.on_event(event);
+        self.perform_all(pending);
+    }
+
+    fn perform_all(&mut self, mut pending: Vec<Effect>) {
         while !pending.is_empty() {
             let mut next = Vec::new();
             for e in pending {
@@ -127,6 +131,11 @@ impl Harness {
             }
             pending = next;
         }
+    }
+
+    fn start(&mut self, loops: bool) {
+        self.state.set_loops(loops);
+        self.apply(Event::Wake { clock: self.clock, armed: Armed::Heartbeat });
     }
 
     fn request(&mut self, kind: &str, data: Value) -> (u16, Value) {
@@ -185,7 +194,7 @@ impl Harness {
 #[test]
 fn a_promise_is_created_timed_out_and_the_key_collected() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     // announced; the configuration naming this node is written by the
     // first refresh and read by the next heartbeat
     assert_eq!(h.keys("nodes/"), vec!["nodes/n1".to_string()]);
@@ -218,17 +227,12 @@ fn a_promise_is_created_timed_out_and_the_key_collected() {
     assert_eq!(h.sent.len(), 1, "one unblock: {:?}", h.sent);
     assert!(h.sent[0].starts_with("http://worker/ "));
     assert!(h.keys("t/").is_empty(), "the fired key was collected");
-
-    // stop: the announcement goes
-    h.apply(Event::Stop { clock: h.clock });
-    assert!(h.state.stopped());
-    assert!(h.keys("nodes/").is_empty());
 }
 
 #[test]
 fn a_schedule_fires_into_its_origin() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let (status, data) = h.request("schedule.create", json!({ "id": "tick", "cron": "* * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200, "{data}");
@@ -254,7 +258,7 @@ fn a_schedule_fires_into_its_origin() {
 #[test]
 fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let bucket_ms = 1_000; // the harness's `timer_bucket_ms`
     let current = h.clock - h.clock % bucket_ms;
@@ -276,7 +280,7 @@ fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
 #[test]
 fn a_schedule_recreated_after_its_delete_fires_again() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let (status, _) = h.request("schedule.create", json!({ "id": "tick", "cron": "*/2 * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200);
@@ -300,7 +304,7 @@ fn a_schedule_recreated_after_its_delete_fires_again() {
 fn the_same_events_give_the_same_effects() {
     let run = || {
         let mut h = Harness::new("n1");
-        h.apply(Event::Start { clock: h.clock, loops: true });
+        h.start(true);
         h.advance(100);
         h.request("promise.create", json!({ "id": "a:1", "timeoutAt": h.clock + 500, "tags": { "resonate:scope": "global" } }));
         h.advance(600);
@@ -317,7 +321,7 @@ fn the_debug_operations_own_the_clock() {
         cfg.debug = true;
         cfg
     });
-    h.apply(Event::Start { clock: h.clock, loops: false });
+    h.start(false);
     let far = h.clock + 10_000;
     let (status, _) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } }));
     assert_eq!(status, 200);
@@ -357,7 +361,7 @@ fn the_debug_operations_own_the_clock() {
 #[test]
 fn a_detached_create_lands_before_the_fence_is_checked() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let far = h.clock + 100_000;
     let (status, _) = h.request("promise.create", json!({ "id": "a:t", "timeoutAt": far, "tags": { "resonate:target": "poll://w" } }));
