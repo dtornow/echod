@@ -29,7 +29,7 @@ use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequen
 use crate::verified::node::Key;
 use crate::verified::table::Table;
 use crate::verified::text::{concat, copy_string, text};
-use crate::verified::{Request, Response, TaskFenceInnerRes, TaskFenceRes};
+use crate::verified::{Request, Response};
 
 use crate::cache::Cached;
 use crate::document::{self, Loaded};
@@ -62,6 +62,8 @@ use echod_concrete::node::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec::AResponse;
 
 verus! {
 
@@ -73,7 +75,7 @@ verus! {
 #[derive(Clone)]
 #[verifier::allow(autoderive_clone_without_spec)]
 pub enum Work {
-    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64, stage: Stage },
+    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64 },
     /// `fired` is the key whose firing this is; none for a sweep or a fire
     /// a test asked for.
     Sweep { fired: Option<FiredKey>, now: u64 },
@@ -82,7 +84,7 @@ pub enum Work {
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum WorkSpec {
-    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64, stage: StageSpec },
+    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64 },
     Sweep { fired: Option<AFired>, now: u64 },
     Fire { schedule: Seq<char>, fired: Option<AFired>, now: u64 },
 }
@@ -92,8 +94,8 @@ impl DeepView for Work {
     type V = WorkSpec;
     open spec fn deep_view(&self) -> WorkSpec {
         match self {
-            Work::Request { id, kind, corr, req, action_kind, now, stage } => WorkSpec::Request {
-                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now, stage: stage.deep_view(),
+            Work::Request { id, kind, corr, req, action_kind, now } => WorkSpec::Request {
+                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now,
             },
             Work::Sweep { fired, now } => WorkSpec::Sweep { fired: fired.deep_view(), now: *now },
             Work::Fire { schedule, fired, now } => WorkSpec::Fire { schedule: schedule@, fired: fired.deep_view(), now: *now },
@@ -121,43 +123,6 @@ impl Work {
     {
         match self {
             Work::Request { now, .. } | Work::Sweep { now, .. } | Work::Fire { now, .. } => *now,
-        }
-    }
-}
-
-/// Where a request stands when it spans two documents: a fence whose create
-/// targets another origin (a detached workflow) commits the create on that
-/// origin first, then the fence's check on the task's, and answers as one
-/// fence. A request on one document is `Whole`.
-#[derive(Clone)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum Stage {
-    Whole,
-    /// The create, with the check to run on the task's document once it has
-    /// committed.
-    Detached { then: Target, check: Option<Request> },
-    /// The check, with the create's answer to fold into the fence's.
-    Check { inner: Option<crate::verified::PromiseRes> },
-}
-
-#[cfg(verus_keep_ghost)]
-pub ghost enum StageSpec {
-    Whole,
-    Detached { then: TargetSpec, check: Option<Request> },
-    Check { inner: Option<crate::verified::PromiseRes> },
-}
-
-#[cfg(verus_keep_ghost)]
-impl DeepView for Stage {
-    type V = StageSpec;
-    open spec fn deep_view(&self) -> StageSpec {
-        match self {
-            Stage::Whole => StageSpec::Whole,
-            Stage::Detached { then, check } => StageSpec::Detached { then: then.deep_view(), check: *check },
-            Stage::Check { inner } => StageSpec::Check { inner: match inner {
-                Some(inner) => Some(*inner),
-                None => None,
-            } },
         }
     }
 }
@@ -1006,26 +971,7 @@ pub open spec fn spec_committed(s: S, f: FlightSpec, done: DoneSpec, fired: Fire
     let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
     let s = spec_send_all(s, done.outbox);
     let s = match f.work {
-        WorkSpec::Request { id, kind, corr, action_kind, now, stage: StageSpec::Detached { then, check }, .. } => {
-            match (done.response, check) {
-                (Some(Response::Promise(inner)), Some(check)) => {
-                    let work = WorkSpec::Request { id, kind, corr, req: check, action_kind, now, stage: StageSpec::Check { inner: Some(inner) } };
-                    spec_submit(s, then, work, None, f.debug)
-                },
-                _ => spec_emit(s, EffectSpec::Reply { id, response: Err("no answer"@) }),
-            }
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Check { inner }, .. } => {
-            let response = match (done.response, inner) {
-                (Some(Response::Status(st)), Some(inner)) => {
-                    let action = if st.status == 200 { Some(TaskFenceInnerRes::Create(inner)) } else { None };
-                    Ok(AnswerSpec::Step { kind, corr, action_kind, response: Response::TaskFence(TaskFenceRes { status: st.status, action }), why: done.why })
-                },
-                _ => Err("no answer"@),
-            };
-            spec_emit(s, EffectSpec::Reply { id, response })
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Whole, .. } => {
+        WorkSpec::Request { id, kind, corr, action_kind, .. } => {
             let response = match done.response {
                 Some(response) => Ok(AnswerSpec::Step { kind, corr, action_kind, response, why: done.why }),
                 None => Err("no answer"@),
@@ -1870,33 +1816,7 @@ impl State {
         self.send_all(outbox);
         let mut f = f;
         match &f.work {
-            Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
-                match (response, check) {
-                    (Some(Response::Promise(inner)), Some(check)) => {
-                        let work = Work::Request { id: *id, kind: copy_string(kind), corr: copy_string(corr), req: copy(check), action_kind: copy(action_kind), now: *now, stage: Stage::Check { inner: Some(inner) } };
-                        let then = then.copy();
-                        let debug = f.debug;
-                        self.submit(then, work, None, debug);
-                    },
-                    _ => {
-                        let id = *id;
-                        self.emit(Effect::Reply { id, response: Err(text("no answer")) });
-                    },
-                }
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
-                let response = match (response, inner) {
-                    (Some(Response::Status(st)), Some(inner)) => {
-                        let action = if st.status == 200 { Some(TaskFenceInnerRes::Create(copy(inner))) } else { None };
-                        let response = Response::TaskFence(TaskFenceRes { status: st.status, action });
-                        Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why })
-                    },
-                    _ => Err(text("no answer")),
-                };
-                let id = *id;
-                self.emit(Effect::Reply { id, response });
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Whole, .. } => {
+            Work::Request { id, kind, corr, action_kind, .. } => {
                 let response = match response {
                     Some(response) => Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why }),
                     None => Err(text("no answer")),

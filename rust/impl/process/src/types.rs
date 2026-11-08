@@ -89,8 +89,6 @@ pub struct Call {
     /// whichever is later.
     pub now: u64,
     pub pinned: bool,
-    /// A second request, on another document, once the first has committed.
-    pub then: Option<(Target, Request)>,
 }
 
 /// A debug operation the runtime has already accepted.

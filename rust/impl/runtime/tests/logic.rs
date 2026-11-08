@@ -147,7 +147,7 @@ impl Harness {
             Admission::Request(d) => {
                 self.apply(Event::Request {
                     clock: self.clock,
-                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
+                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
                 });
                 self.take(id)
             }
@@ -354,12 +354,10 @@ fn the_debug_operations_own_the_clock() {
     assert!(snap["promises"].as_array().is_some_and(Vec::is_empty));
 }
 
-/// A fence whose create targets another origin: the create commits first, on
-/// its own document, then the fence's check on the task's. A stale fence
-/// still leaves the promise created, and answers its 409; a settle in
-/// another origin is refused outright.
+/// Every fence action stays in the task's origin; the shell does not
+/// decompose a cross-origin action into a detached workflow.
 #[test]
-fn a_detached_create_lands_before_the_fence_is_checked() {
+fn a_fence_action_cannot_leave_its_origin() {
     let mut h = Harness::new("n1");
     h.start(true);
     h.advance(100);
@@ -371,23 +369,20 @@ fn a_detached_create_lands_before_the_fence_is_checked() {
     let create = |id: &str| json!({ "kind": "promise.create", "head": {}, "data": { "id": id, "timeoutAt": far, "tags": {} } });
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("d:x") }));
-    assert_eq!(status, 409, "{data}");
-    assert_eq!(data, json!("Version mismatch"));
-    let (status, data) = h.request("promise.get", json!({ "id": "d:x" }));
-    assert_eq!(status, 200, "a stale detached create still lands: {data}");
-    assert_eq!(data["promise"]["state"], "pending");
+    assert_eq!(status, 400, "{data}");
+    assert_eq!(data, json!("Action must belong to the task's origin"));
+    let (status, _) = h.request("promise.get", json!({ "id": "d:x" }));
+    assert_eq!(status, 404);
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:ghost", "version": 0, "action": create("d:y") }));
-    assert_eq!(status, 404, "{data}");
+    assert_eq!(status, 400, "{data}");
     let (status, _) = h.request("promise.get", json!({ "id": "d:y" }));
-    assert_eq!(status, 200, "a detached create from a missing task lands too");
+    assert_eq!(status, 404);
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": create("d:z") }));
-    assert_eq!(status, 200, "{data}");
-    assert_eq!(data["action"]["head"]["status"], 200);
-    assert_eq!(data["action"]["data"]["promise"]["id"], "d:z");
-    assert_eq!(data["preload"], json!([]));
-    assert_eq!(h.keys("wf/").len(), 2, "two origins' documents: {:?}", h.keys("wf/"));
+    assert_eq!(status, 400, "{data}");
+    let (status, _) = h.request("promise.get", json!({ "id": "d:z" }));
+    assert_eq!(status, 404);
 
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 9, "action": create("a:n") }));
     assert_eq!(status, 409, "{data}");

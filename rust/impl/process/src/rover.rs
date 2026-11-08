@@ -188,7 +188,6 @@ pub open spec fn spec_call(call: BoundaryCall, target: TargetSpec, now: Time) ->
         action_kind: None,
         now,
         pinned: false,
-        then: None,
     }
 }
 
@@ -205,7 +204,6 @@ fn process_call(call: &BoundaryCall, target: Target, now: Time) -> (result: Call
         action_kind: None,
         now,
         pinned: false,
-        then: None,
     }
 }
 

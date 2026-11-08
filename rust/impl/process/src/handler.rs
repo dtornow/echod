@@ -6,7 +6,7 @@
 
 use vstd::prelude::*;
 
-use crate::handler_docs::{Stage, Work};
+use crate::handler_docs::Work;
 use crate::state::{Owner, State};
 use crate::types::*;
 
@@ -83,11 +83,7 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
 #[verifier::opaque]
 pub open spec fn spec_request(s: S, call: CallSpec) -> S {
     let now = if call.pinned || call.now > s.node.fleet_at { call.now } else { s.node.fleet_at };
-    let stage = match call.then {
-        Some((then, check)) => StageSpec::Detached { then, check: Some(check) },
-        None => StageSpec::Whole,
-    };
-    let work = WorkSpec::Request { id: call.id, kind: call.kind, corr: call.corr, req: call.request, action_kind: call.action_kind, now, stage };
+    let work = WorkSpec::Request { id: call.id, kind: call.kind, corr: call.corr, req: call.request, action_kind: call.action_kind, now };
     spec_submit(s, call.target, work, None, false)
 }
 
@@ -201,14 +197,10 @@ impl State {
         proof {
             reveal(spec_request);
         }
-        let Call { id, kind, corr, target, request, action_kind, now, pinned, then } = call;
+        let Call { id, kind, corr, target, request, action_kind, now, pinned } = call;
         // The fleet's time, unless the request named its own instant.
         let now = if pinned || now > self.node.fleet_at { now } else { self.node.fleet_at };
-        let stage = match then {
-            Some((then, check)) => Stage::Detached { then, check: Some(check) },
-            None => Stage::Whole,
-        };
-        let work = Work::Request { id, kind, corr, req: request, action_kind, now, stage };
+        let work = Work::Request { id, kind, corr, req: request, action_kind, now };
         self.submit(target, work, None, false);
     }
 
