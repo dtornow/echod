@@ -2521,11 +2521,9 @@ pub proof fn lemma_sweep_stops_after_one_due(
         =~= first.3);
 }
 
-/// A bounded production sweep may change several objects.  Relaxed closure is
+/// A bounded production sweep may change several objects. Relaxed closure is
 /// inductive across every `spec_run_due` step; full document well-formedness is
 /// recovered exactly when the configured budget leaves no due object behind.
-/// The latter premise is intentionally explicit: production otherwise commits
-/// the partially swept body when `SWEEP_STEPS` is exhausted.
 pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
     workflow: echod_concrete::document::WorkflowDocumentV,
     now: u64,
@@ -2584,6 +2582,151 @@ pub proof fn lemma_closed_origin_sweep_preserves_well_formed(
     reveal(echod_concrete::document::well_formed);
     reveal(echod_concrete::document::workflow_well_formed);
     reveal(echod_concrete::node::spec_advance_stored);
+}
+
+/// Standalone sweeps no longer commit a budget-exhausted intermediate body.
+/// A closed result enters the existing commit path and is well formed; an
+/// unclosed result takes the exact production failure path before
+/// `spec_commit_advance`, so none of its partial body, notes, or outbox can be
+/// written or emitted. `spec_fail` returns the firing reservation as failed,
+/// which rearms it at the retry slot.
+pub proof fn lemma_standalone_origin_sweep_closed_or_fails(
+    s: S,
+    flight: FlightSpec,
+    working: crate::handler_docs::WorkingSpec,
+    workflow: echod_concrete::document::WorkflowDocumentV,
+)
+    requires
+        flight.work is Sweep,
+        working.loaded.document
+            == StoredDocumentV::Workflow(workflow),
+        echod_concrete::document::workflow_well_formed(workflow),
+        workflow.committed_at <= flight.work.now(),
+        flight.work.now() <= MAX_TIME,
+        0 < s.cfg.retry_timeout <= MAX_TIME,
+    ensures
+        ({
+            let now = flight.work.now();
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                now,
+                s.cfg.retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            let decided =
+                crate::handler_docs::spec_decide(
+                    s,
+                    flight.work,
+                    working,
+                );
+            if echod_concrete::node::spec_earliest_in(
+                swept,
+                now,
+            ) is Some {
+                crate::handler_docs::spec_run_origin(
+                    s,
+                    flight,
+                    working,
+                ) == crate::handler_docs::spec_fail(
+                    decided.0,
+                    flight,
+                    crate::handler_docs::SWEEP_EXHAUSTED@,
+                )
+            } else {
+                &&& decided.1.after
+                    == echod_concrete::node::spec_advance_stored(
+                        StoredDocumentV::Workflow(workflow),
+                        swept,
+                        now,
+                    )
+                &&& well_formed(decided.1.after)
+            }
+        }),
+{
+    let now = flight.work.now();
+    let swept = echod_concrete::node::spec_sweep(
+        echod_concrete::node::DocumentBodyV::Workflow(
+            workflow.objects,
+        ),
+        now,
+        s.cfg.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    ).0;
+    reveal(crate::handler_docs::spec_decide);
+    reveal(crate::verified::flight_spec::spec_step);
+    reveal(crate::handler_docs::spec_commit_new);
+    if echod_concrete::node::spec_earliest_in(swept, now) is Some {
+        reveal(crate::handler_docs::spec_run_origin);
+    } else {
+        lemma_closed_origin_sweep_preserves_well_formed(
+            workflow,
+            now,
+            s.cfg.retry_timeout,
+            REQUEST_SWEEP_STEPS as nat,
+        );
+    }
+}
+
+/// The new exhaustion guard is confined to standalone `Sweep` work. Normal
+/// requests retain their existing atomic pre/handler/post exhaustion behavior
+/// and enter exactly the same commit state as before.
+pub proof fn lemma_non_sweep_origin_commit_path_unchanged(
+    s: S,
+    flight: FlightSpec,
+    working: crate::handler_docs::WorkingSpec,
+)
+    requires
+        !(flight.work is Sweep),
+    ensures
+        ({
+            let (decided, commit, done) =
+                crate::handler_docs::spec_decide(
+                    s,
+                    flight.work,
+                    working,
+                );
+            let (advanced, next, progress) =
+                crate::handler_docs::spec_commit_advance(
+                    decided,
+                    flight.id,
+                    commit,
+                    None,
+                );
+            crate::handler_docs::spec_run_origin(
+                s,
+                flight,
+                working,
+            ) == match progress {
+                crate::handler_docs::ProgressSpec::Issued =>
+                    crate::handler_docs::spec_inflight(
+                        advanced,
+                        FlightSpec {
+                            phase: PhaseSpec::Origin {
+                                commit: next,
+                                done,
+                            },
+                            ..flight
+                        },
+                    ),
+                crate::handler_docs::ProgressSpec::Done(fired) =>
+                    crate::handler_docs::spec_committed(
+                        advanced,
+                        flight,
+                        done,
+                        fired,
+                    ),
+                crate::handler_docs::ProgressSpec::Failed(error) =>
+                    crate::handler_docs::spec_commit_failed(
+                        advanced,
+                        flight,
+                        error,
+                    ),
+            }
+        }),
+{
+    reveal(crate::handler_docs::spec_run_origin);
 }
 
 /// Exact abstract trace for every changing step of a bounded origin sweep.

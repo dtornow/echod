@@ -254,6 +254,8 @@ impl DeepView for Progress {
 /// that fires at once.
 pub const SWEEP_STEPS: u64 = echod_concrete::node::REQUEST_SWEEP_STEPS;
 
+pub const SWEEP_EXHAUSTED: &'static str = "sweep budget exhausted";
+
 /// What a committed step answers with.
 #[derive(Clone)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -915,11 +917,20 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
 #[verifier::opaque]
 pub open spec fn spec_run_origin(s: S, f: FlightSpec, w: WorkingSpec) -> S {
     let (s, commit, done) = spec_decide(s, f.work, w);
-    let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-    match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Origin { commit, done }, ..f }),
-        ProgressSpec::Done(fired) => spec_committed(s, f, done, fired),
-        ProgressSpec::Failed(e) => spec_commit_failed(s, f, e),
+    if f.work is Sweep
+        && echod_concrete::node::spec_earliest_in(
+            echod_concrete::node::spec_stored_body(commit.after),
+            commit.now,
+        ) is Some
+    {
+        spec_fail(s, f, SWEEP_EXHAUSTED@)
+    } else {
+        let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
+        match p {
+            ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Origin { commit, done }, ..f }),
+            ProgressSpec::Done(fired) => spec_committed(s, f, done, fired),
+            ProgressSpec::Failed(e) => spec_commit_failed(s, f, e),
+        }
     }
 }
 
@@ -1719,13 +1730,22 @@ impl State {
             reveal(spec_run_origin);
         }
         let (mut commit, done) = self.decide(&f.work, w);
-        match self.commit_advance(f.id, &mut commit, None) {
-            Progress::Issued => {
-                let f = Flight { phase: Phase::Origin { commit, done }, ..f };
-                self.inflight(f);
-            },
-            Progress::Done(fired) => self.committed(f, done, fired),
-            Progress::Failed(e) => self.commit_failed(f, e),
+        if matches!(&f.work, Work::Sweep { .. })
+            && echod_concrete::node::due(
+                &stored_body(&commit.after),
+                commit.now,
+            )
+        {
+            self.fail(f, SWEEP_EXHAUSTED.to_string());
+        } else {
+            match self.commit_advance(f.id, &mut commit, None) {
+                Progress::Issued => {
+                    let f = Flight { phase: Phase::Origin { commit, done }, ..f };
+                    self.inflight(f);
+                },
+                Progress::Done(fired) => self.committed(f, done, fired),
+                Progress::Failed(e) => self.commit_failed(f, e),
+            }
         }
     }
 
