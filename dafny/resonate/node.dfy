@@ -21,13 +21,15 @@ module Node {
     if self.Node? && s.AtNode? then
       match i {
         case Request(from, Req(cid, PromiseGet(id))) =>
-          if id in s.open then Result(s, [], Keep)
+          if id in s.open then
+            Result(s, [], Keep)
           else
             var rpc := s.mint;
             Result(AtNode(s.open[id := Reading(from, AskGet, cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
                    [ReqTo(Bucket, rpc, Body.Get(id))], Keep)
         case Request(from, Req(cid, PromiseCreate(req))) =>
-          if req.id in s.open then Result(s, [], Keep)
+          if req.id in s.open then
+            Result(s, [], Keep)
           else
             var rpc := s.mint;
             Result(AtNode(s.open[req.id := Reading(from, AskCreate(req), cid, rpc)], s.armed, s.next, s.owner, s.mint + 1),
@@ -35,22 +37,33 @@ module Node {
         case Request(_, Res(rpc, Got(id, doc, version))) =>
           if id in s.open && s.open[id].Reading? && s.open[id].rpc == rpc then
             Process(s, id, s.open[id].caller, s.open[id].cid, Prepare(s, s.open[id].job, id, doc, version, now))
-          else Result(s, [], Keep)
+          else
+            Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutPut(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Cmd.Put(clock)) then Advance(s, id) else Result(s, [], Keep)
+          if Live(s, id, rpc) && Head(s, id, Cmd.Put(clock)) then
+            Advance(s, id)
+          else
+            Result(s, [], Keep)
         case Request(_, Res(rpc, DocWrote(id, _))) =>
           if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
             Advance(s, id)
-          else Result(s, [], Keep)
+          else
+            Result(s, [], Keep)
         case Request(_, Res(rpc, DocRejected(id))) =>
           if Live(s, id, rpc) && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
             Result(AtNode(s.open - {id}, s.armed, s.next, s.owner, s.mint), [], Keep)
-          else Result(s, [], Keep)
+          else
+            Result(s, [], Keep)
         case Request(_, Res(rpc, TimeoutDropped(id, clock))) =>
-          if Live(s, id, rpc) && Head(s, id, Cmd.Drop(clock)) then Advance(s, id) else Result(s, [], Keep)
-        case _ => Result(s, [], Keep)
+          if Live(s, id, rpc) && Head(s, id, Cmd.Drop(clock)) then
+            Advance(s, id)
+          else
+            Result(s, [], Keep)
+        case _ =>
+          Result(s, [], Keep)
       }
-    else Result(s, [], Keep)
+    else
+      Result(s, [], Keep)
   }
 
   // Promise get reads the projection and does not write it back.
