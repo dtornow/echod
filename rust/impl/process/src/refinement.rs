@@ -522,8 +522,8 @@ pub open spec fn membership_consistent(s: S) -> bool {
     &&& s.node.core.members.no_duplicates()
 }
 
-pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
-    &&& forall|i: int, j: int|
+pub open spec fn timer_wheel_ordered(timers: TimersSpec) -> bool {
+    forall|i: int, j: int|
         0 <= i < j < timers.wheel.armed.len() ==> {
             &&& timers.wheel.armed[i] != timers.wheel.armed[j]
             &&& spec_slot_before(
@@ -531,7 +531,86 @@ pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
                 timers.wheel.armed[j],
             )
         }
+}
+
+pub open spec fn timers_consistent(timers: TimersSpec) -> bool {
+    &&& timer_wheel_ordered(timers)
     &&& timers.inflight <= timers.backlog.len()
+}
+
+/// Every wheel slot is a real timer key and carries the deadline encoded by
+/// that key. This is the representation invariant needed before a listed key
+/// can safely join the ordered wheel.
+pub open spec fn timer_wheel_keys_valid(s: S) -> bool {
+    forall|i: int|
+        0 <= i < s.timers.wheel.armed.len() ==> {
+            let slot = #[trigger] s.timers.wheel.armed[i];
+            match crate::keys::spec_parse_timer_key(slot.1) {
+                Some(entry) => slot.0 == entry.deadline(),
+                None => false,
+            }
+        }
+}
+
+/// A current wheel contains only this node's share. While a membership change
+/// has marked the wheel for reload, stale ownership is allowed only until
+/// `spec_reload` filters it; key validity and ordering still hold.
+pub open spec fn timer_wheel_ownership_consistent(s: S) -> bool {
+    s.timers.reload_pending || forall|i: int|
+        0 <= i < s.timers.wheel.armed.len() ==> {
+            let slot = #[trigger] s.timers.wheel.armed[i];
+            match crate::keys::spec_parse_timer_key(slot.1) {
+                Some(entry) => crate::handler_timers::spec_owns_entry(s, entry),
+                None => false,
+            }
+        }
+}
+
+pub open spec fn timer_activity_consistent(s: S) -> bool {
+    &&& timers_consistent(s.timers)
+    &&& timer_wheel_keys_valid(s)
+    &&& timer_wheel_ownership_consistent(s)
+}
+
+/// The exact empty successful bucket payload is the bounded completion case
+/// proved below. It cannot perturb wheel order, key/deadline agreement, or
+/// ownership because `spec_take_bucket` performs no arm operation.
+pub proof fn lemma_empty_bucket_preserves_timer_activity(s: S, n: nat)
+    requires
+        timer_activity_consistent(s),
+    ensures
+        crate::handler_timers::spec_take_bucket(
+            s,
+            Seq::<Seq<char>>::empty(),
+            n,
+        ) == (s, n),
+        timer_activity_consistent(
+            crate::handler_timers::spec_take_bucket(
+                s,
+                Seq::<Seq<char>>::empty(),
+                n,
+            ).0,
+        ),
+{
+    reveal(crate::handler_timers::spec_take_bucket);
+}
+
+/// With neither an armed key nor queued work, entering the production
+/// due-dispatch path is an actual identity step. Nonempty due work is kept out
+/// of the hidden slice.
+pub proof fn lemma_empty_wheel_fire_due_is_idle(s: S, now: u64)
+    requires
+        s.timers.wheel.armed.len() == 0,
+        s.timers.backlog.len() == 0,
+    ensures
+        crate::handler_timers::spec_fire_due(s, now) == s,
+{
+    reveal(crate::handler_timers::spec_fire_due);
+    reveal(crate::state_timers::spec_take_due);
+    reveal(crate::state_timers::spec_due_count);
+    reveal(crate::handler_timers::spec_dispatch_due);
+    assert(s.timers.wheel.armed =~= Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(s.timers.backlog =~= Seq::<crate::state_timers::SlotSpec>::empty());
 }
 
 /// Runtime bookkeeping agrees with the operation table held by the core.
@@ -556,7 +635,7 @@ pub open spec fn related(
     &&& pending_store_consistent(production)
     &&& owners_consistent(production.core)
     &&& membership_consistent(production.core)
-    &&& timers_consistent(production.core.timers)
+    &&& timer_activity_consistent(production.core)
     &&& flight_lanes_consistent(production.core.flights)
     &&& cache_related(
         production.core.cache,
@@ -720,6 +799,9 @@ pub proof fn lemma_initial_wake_membership_stutters(cfg: ConfigSpec)
     assert(owners_consistent(after.core));
     assert(membership_consistent(after.core));
     assert(timers_consistent(after.core.timers));
+    assert(timer_wheel_keys_valid(after.core));
+    assert(timer_wheel_ownership_consistent(after.core));
+    assert(timer_activity_consistent(after.core));
     assert(flight_lanes_consistent(after.core.flights));
     assert(cache_related(
         after.core.cache,
@@ -956,6 +1038,9 @@ pub proof fn lemma_initial_membership_announcement_completion_stutters(
     assert(owners_consistent(after.core));
     assert(membership_consistent(after.core));
     assert(timers_consistent(after.core.timers));
+    assert(timer_wheel_keys_valid(after.core));
+    assert(timer_wheel_ownership_consistent(after.core));
+    assert(timer_activity_consistent(after.core));
     assert(flight_lanes_consistent(after.core.flights));
     assert(cache_related(
         after.core.cache,

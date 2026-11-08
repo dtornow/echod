@@ -26,6 +26,8 @@ use crate::state::Owner;
 #[cfg(verus_keep_ghost)]
 use crate::state_node::RefreshSpec;
 #[cfg(verus_keep_ghost)]
+use crate::state_timers::ListingSpec;
+#[cfg(verus_keep_ghost)]
 use crate::types::{Armed, EffectSpec, EventSpec};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{Model as AbstractModel, ServerConfig};
@@ -621,6 +623,597 @@ pub proof fn lemma_startup_membership_store_completion_is_abstract_stutter(
         startup_membership_node(config),
         outcome,
     ));
+
+    reveal(step);
+    assert(ProductionModel.spec_on_event(
+        config,
+        Pid::Node(0),
+        concrete_before.process[0].1,
+        at,
+        event,
+    ) == outcomes);
+    assert(step(
+        ProductionModel,
+        config,
+        concrete_before,
+        label,
+        concrete_after,
+    ));
+    assert(ProductionModel.spec_observe(label)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+
+    let execution = Execution::<AbstractModel>::empty();
+    assert(legal(
+        AbstractModel,
+        abstract_config(config),
+        abstract_before,
+        execution,
+    ));
+    assert(project::<AbstractModel>(AbstractModel, execution)
+        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+    assert(end::<AbstractModel>(abstract_before, execution)
+        == abstract_before);
+    assert(matches(
+        AbstractModel,
+        abstract_config(config),
+        abstract_before,
+        Seq::<echod_abstract::BoundaryEvent>::empty(),
+        abstract_before,
+    ));
+}
+
+/// Exact successful payload and control state for the bounded timer listing
+/// completion slice. `ListPrefixes` is accepted only for the prefix phase;
+/// `List` is accepted only for extension or relisting. The returned vector is
+/// exactly empty, so this slice does not smuggle an unconstrained key set into
+/// the wheel proof.
+pub open spec fn empty_timer_listing_completion_pre(
+    node: ProductionNodeV,
+    op: u64,
+    response: StoreRes,
+) -> bool {
+    &&& node.core.out.len() == 0
+    &&& node.core.ops.contains_key(op)
+    &&& node.core.ops[op] == Owner::Timers
+    &&& node.core.timers.started
+    &&& node.core.timers.wheel.armed.len() == 0
+    &&& node.core.timers.backlog.len() == 0
+    &&& node.core.timers.inflight == 0
+    &&& crate::refinement::timer_activity_consistent(node.core)
+    &&& crate::refinement::owners_consistent(node.core)
+    &&& node.core.node.members.next_heartbeat is Some
+    &&& match (node.core.timers.listing, response) {
+        (
+            Some(ListingSpec::Prefixes { op: expected, .. }),
+            StoreRes::ListPrefixes { result: Ok(prefixes) },
+        ) => expected == op && prefixes.deep_view().len() == 0,
+        (
+            Some(ListingSpec::Extend { op: expected, .. }),
+            StoreRes::List { result: Ok(keys) },
+        ) | (
+            Some(ListingSpec::Relist { op: expected, .. }),
+            StoreRes::List { result: Ok(keys) },
+        ) => expected == op && keys.deep_view().len() == 0,
+        _ => false,
+    }
+}
+
+/// A timer completion in this slice may leave the timer machine idle or may
+/// install another hidden listing phase. It cannot dispatch document work:
+/// both the ordered wheel and the due backlog remain empty.
+pub open spec fn empty_timer_listing_completion_post(
+    before: ProductionNodeV,
+    outcome: StepResultV<ProductionLocalV, Pid, ProductionMessage>,
+) -> bool {
+    &&& (outcome.send.len() == 0
+        || (outcome.send.len() == 1
+            && match outcome.send[0] {
+                (Pid::Store, ProductionMessage::StoreReq { .. }) => true,
+                _ => false,
+            }))
+    &&& match outcome.state {
+        ProductionLocalV::Node(after) => {
+            &&& after.core.node == before.core.node
+            &&& after.core.cache == before.core.cache
+            &&& after.core.flights == before.core.flights
+            &&& after.core.timers.wheel.armed.len() == 0
+            &&& after.core.timers.backlog.len() == 0
+            &&& after.core.timers.inflight == 0
+            &&& crate::refinement::timer_activity_consistent(after.core)
+            &&& match after.core.timers.listing {
+                None => outcome.send.len() == 0,
+                Some(ListingSpec::Prefixes { op, .. })
+                | Some(ListingSpec::Extend { op, .. })
+                | Some(ListingSpec::Relist { op, .. }) => {
+                    &&& after.core.ops.contains_key(op)
+                    &&& after.core.ops[op] == Owner::Timers
+                    &&& outcome.send.len() <= 1
+                },
+                Some(ListingSpec::Buckets { .. }) => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+pub open spec fn empty_timer_extension_scheduled(
+    outcome: StepResultV<ProductionLocalV, Pid, ProductionMessage>,
+) -> bool {
+    &&& outcome.send.len() == 1
+    &&& match outcome.send[0] {
+        (Pid::Store, ProductionMessage::StoreReq { .. }) => true,
+        _ => false,
+    }
+    &&& match outcome.state {
+        ProductionLocalV::Node(after) => match after.core.timers.listing {
+            Some(ListingSpec::Extend { op, .. }) => {
+                &&& after.core.ops.contains_key(op)
+                &&& after.core.ops[op] == Owner::Timers
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub open spec fn empty_timer_listing_idle(
+    outcome: StepResultV<ProductionLocalV, Pid, ProductionMessage>,
+) -> bool {
+    &&& outcome.send.len() == 0
+    &&& match outcome.state {
+        ProductionLocalV::Node(after) =>
+            after.core.timers.listing is None,
+        _ => false,
+    }
+}
+
+pub open spec fn empty_timer_prefixes_requeues_pre(
+    node: ProductionNodeV,
+    at: u64,
+    op: u64,
+    prefixes: Vec<String>,
+) -> bool {
+    &&& empty_timer_listing_completion_pre(
+        node,
+        op,
+        StoreRes::ListPrefixes { result: Ok(prefixes) },
+    )
+    &&& !node.core.loops
+    &&& node.core.timers.backoff_until is None
+    &&& match node.core.timers.listing {
+        Some(ListingSpec::Prefixes { horizon, .. }) =>
+            horizon < crate::handler_timers::spec_horizon(
+            crate::state::S { clock: at, ..node.core },
+            crate::state::spec_now(
+                crate::state::S { clock: at, ..node.core },
+            ),
+        ),
+        _ => false,
+    }
+}
+
+pub open spec fn empty_timer_relist_idles_pre(
+    node: ProductionNodeV,
+    at: u64,
+    op: u64,
+    response: StoreRes,
+) -> bool {
+    &&& empty_timer_listing_completion_pre(node, op, response)
+    &&& !node.core.timers.reload_pending
+    &&& node.core.timers.backoff_until is None
+    &&& match (node.core.timers.listing, response) {
+        (
+            Some(ListingSpec::Relist { bucket, .. }),
+            StoreRes::List { result: Ok(_) },
+        ) => {
+            &&& node.core.timers.loaded_through is Some
+            &&& node.core.timers.loaded_through->Some_0
+                >= crate::handler_timers::spec_horizon(
+                    crate::state::S { clock: at, ..node.core },
+                    crate::state::spec_now(
+                        crate::state::S { clock: at, ..node.core },
+                    ),
+                )
+            &&& bucket.saturating_add(node.core.keys.bucket_ms)
+                >= crate::keys::spec_bucket_of(
+                    crate::state::spec_now(
+                        crate::state::S { clock: at, ..node.core },
+                    ),
+                    node.core.keys.bucket_ms,
+                )
+        },
+        _ => false,
+    }
+}
+
+/// An empty successful `ListPrefixes` completion whose captured horizon is
+/// behind the completion clock schedules the next hidden extension `List`.
+#[verifier::rlimit(30)]
+pub proof fn lemma_empty_timer_prefixes_completion_schedules_extend(
+    node: ProductionNodeV,
+    at: u64,
+    op: u64,
+    prefixes: Vec<String>,
+)
+    requires
+        empty_timer_prefixes_requeues_pre(node, at, op, prefixes),
+    ensures
+        ({
+            let response =
+                StoreRes::ListPrefixes { result: Ok(prefixes) };
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: ProductionMessage::StoreRes { op, response },
+            };
+            let outcomes = spec_node_step(node, at, event);
+            &&& outcomes.len() == 1
+            &&& empty_timer_listing_completion_post(node, outcomes[0])
+            &&& empty_timer_extension_scheduled(outcomes[0])
+        }),
+{
+    let response = StoreRes::ListPrefixes { result: Ok(prefixes) };
+    assert(prefixes.deep_view() =~= Seq::<Seq<char>>::empty());
+    match node.core.timers.listing {
+        Some(ListingSpec::Prefixes {
+            op: expected,
+            horizon,
+        }) => {
+            assert(expected == op);
+            assert(horizon < crate::handler_timers::spec_horizon(
+                crate::state::S { clock: at, ..node.core },
+                crate::state::spec_now(
+                    crate::state::S { clock: at, ..node.core },
+                ),
+            ));
+        },
+        _ => {
+            assert(false);
+        },
+    }
+    reveal(crate::handler::spec_on_event);
+    reveal(crate::handler_timers::spec_timers_completed);
+    reveal(crate::handler_timers::spec_prefixes_listed);
+    reveal(crate::handler_timers::spec_list_buckets);
+    reveal(crate::handler_timers::spec_reloaded);
+    reveal(crate::handler_timers::spec_timers_run);
+    reveal(crate::handler::spec_schedule_wake);
+    reveal_with_fuel(crate::rover::spec_effects, 6);
+    reveal(crate::rover::spec_effect);
+
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: ProductionMessage::StoreRes { op, response },
+    };
+    let outcomes = spec_node_step(node, at, event);
+    let core_event = EventSpec::Store {
+        op,
+        response,
+        clock: at,
+    };
+    let clocked = crate::state::S { clock: at, ..node.core };
+    let now = crate::state::spec_now(clocked);
+    let removed = crate::state::S {
+        ops: clocked.ops.remove(op),
+        ..clocked
+    };
+    assert(removed.timers == node.core.timers);
+    assert(match removed.timers.listing {
+        Some(listing) => listing.expects(op),
+        None => false,
+    });
+    let horizon = match removed.timers.listing {
+        Some(ListingSpec::Prefixes { horizon, .. }) => horizon,
+        _ => 0,
+    };
+    let cleared = crate::state::S {
+        timers: crate::state_timers::TimersSpec {
+            listing: None,
+            ..removed.timers
+        },
+        ..removed
+    };
+    let completed = crate::handler_timers::spec_timers_completed(
+        removed,
+        op,
+        response,
+    );
+    assert(completed == crate::handler_timers::spec_prefixes_listed(
+        cleared,
+        horizon,
+        now,
+        response,
+    ));
+    assert(crate::handler_timers::spec_list_buckets(
+        cleared,
+        prefixes.deep_view(),
+        horizon,
+        Map::empty(),
+    ) == (cleared, Map::empty()));
+    assert(completed == crate::handler_timers::spec_reloaded(
+        cleared,
+        horizon,
+        0,
+        now,
+    ));
+    assert(completed.node == node.core.node);
+    assert(completed.cache == node.core.cache);
+    assert(completed.flights == node.core.flights);
+    assert(completed.timers.wheel.armed.len() == 0);
+    assert(completed.timers.backlog.len() == 0);
+    assert(completed.timers.inflight == 0);
+    assert(match completed.timers.listing {
+        Some(ListingSpec::Extend { op, .. }) => {
+            &&& completed.ops.contains_key(op)
+            &&& completed.ops[op] == Owner::Timers
+        },
+        _ => false,
+    });
+    assert(completed.out.len() == 3);
+    assert(crate::handler::spec_schedule_wake(completed) == completed);
+    let (core, effects) =
+        crate::handler::spec_on_event(node.core, core_event);
+    assert(core == crate::state::S {
+        out: Seq::empty(),
+        ..completed
+    });
+    assert(effects == completed.out);
+    let (after, send) = crate::rover::spec_effects(
+        ProductionNodeV { core, ..node },
+        at,
+        effects,
+    );
+
+    assert(node.core.timers.wheel.armed
+        =~= Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(node.core.timers.backlog =~=
+        Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(core.node == node.core.node);
+    assert(core.cache == node.core.cache);
+    assert(core.flights == node.core.flights);
+    assert(core.timers.wheel.armed.len() == 0);
+    assert(core.timers.backlog.len() == 0);
+    assert(core.timers.inflight == 0);
+    assert(match core.timers.listing {
+        Some(ListingSpec::Extend { op, .. }) => {
+            &&& core.ops.contains_key(op)
+            &&& core.ops[op] == Owner::Timers
+        },
+        _ => false,
+    });
+    assert(effects.len() == 3);
+    assert(effects[0] is Note);
+    assert(effects[1] is Note);
+    assert(effects[2] is Store);
+
+    assert(outcomes =~= seq![StepResultV {
+        state: ProductionLocalV::Node(after),
+        send,
+    }]);
+    assert(send.len() == 1);
+    assert(match send[0] {
+        (Pid::Store, ProductionMessage::StoreReq { .. }) => true,
+        _ => false,
+    });
+    assert(after.core.node == node.core.node);
+    assert(after.core.cache == node.core.cache);
+    assert(after.core.flights == node.core.flights);
+    assert(after.core.timers.wheel.armed.len() == 0);
+    assert(after.core.timers.backlog.len() == 0);
+    assert(after.core.timers.inflight == 0);
+    assert(crate::refinement::timers_consistent(after.core.timers));
+    assert(crate::refinement::timer_wheel_keys_valid(after.core));
+    assert(crate::refinement::timer_wheel_ownership_consistent(after.core));
+    assert(crate::refinement::timer_activity_consistent(after.core));
+    assert(match after.core.timers.listing {
+        Some(ListingSpec::Extend { op, .. }) => {
+            &&& after.core.ops.contains_key(op)
+            &&& after.core.ops[op] == Owner::Timers
+        },
+        _ => false,
+    });
+    assert(empty_timer_listing_completion_post(
+        node,
+        outcomes[0],
+    ));
+    assert(empty_timer_extension_scheduled(outcomes[0]));
+}
+
+/// An empty successful relist `List` completion with a fully loaded horizon
+/// and no further bucket to close enters `spec_fire_due`; the explicit empty
+/// wheel/backlog makes that branch an idle identity rather than due dispatch.
+#[verifier::rlimit(30)]
+pub proof fn lemma_empty_timer_relist_completion_reaches_idle(
+    node: ProductionNodeV,
+    at: u64,
+    op: u64,
+    response: StoreRes,
+)
+    requires
+        empty_timer_relist_idles_pre(node, at, op, response),
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: ProductionMessage::StoreRes { op, response },
+            };
+            let outcomes = spec_node_step(node, at, event);
+            &&& outcomes.len() == 1
+            &&& empty_timer_listing_completion_post(node, outcomes[0])
+            &&& empty_timer_listing_idle(outcomes[0])
+        }),
+{
+    reveal(crate::handler::spec_on_event);
+    reveal(crate::handler_timers::spec_timers_completed);
+    reveal(crate::handler_timers::spec_relisted);
+    reveal(crate::handler_timers::spec_take_bucket);
+    reveal(crate::handler_timers::spec_timers_run);
+    reveal(crate::handler_timers::spec_fire_due);
+    reveal(crate::handler_timers::spec_dispatch_due);
+    reveal(crate::state_timers::spec_take_due);
+    reveal(crate::state_timers::spec_due_count);
+    reveal(crate::handler::spec_schedule_wake);
+    reveal_with_fuel(crate::rover::spec_effects, 6);
+    reveal(crate::rover::spec_effect);
+
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: ProductionMessage::StoreRes { op, response },
+    };
+    let outcomes = spec_node_step(node, at, event);
+    let core_event = EventSpec::Store { op, response, clock: at };
+    let (core, effects) =
+        crate::handler::spec_on_event(node.core, core_event);
+    let (after, send) = crate::rover::spec_effects(
+        ProductionNodeV { core, ..node },
+        at,
+        effects,
+    );
+
+    assert(node.core.timers.wheel.armed =~=
+        Seq::<crate::state_timers::SlotSpec>::empty());
+    assert(node.core.timers.backlog =~=
+        Seq::<crate::state_timers::SlotSpec>::empty());
+    crate::refinement::lemma_empty_bucket_preserves_timer_activity(
+        node.core,
+        0,
+    );
+    crate::refinement::lemma_empty_wheel_fire_due_is_idle(
+        crate::state::S {
+            timers: crate::state_timers::TimersSpec {
+                listing: None,
+                closed_through: match node.core.timers.listing {
+                    Some(ListingSpec::Relist { bucket, .. }) => Some(bucket),
+                    _ => node.core.timers.closed_through,
+                },
+                ..node.core.timers
+            },
+            clock: at,
+            ops: node.core.ops.remove(op),
+            ..node.core
+        },
+        crate::state::spec_now(
+            crate::state::S { clock: at, ..node.core },
+        ),
+    );
+
+    assert(outcomes =~= seq![StepResultV {
+        state: ProductionLocalV::Node(after),
+        send,
+    }]);
+    assert(empty_timer_listing_completion_post(node, outcomes[0]));
+    assert(empty_timer_listing_idle(outcomes[0]));
+}
+
+/// These two exact completion modes are real Rover world steps whose Store
+/// traffic is hidden and therefore match the empty abstract execution.
+pub proof fn lemma_empty_timer_completion_is_abstract_stutter(
+    config: crate::Config,
+    concrete_before: World<ProductionModel>,
+    abstract_before: World<AbstractModel>,
+    node: ProductionNodeV,
+    at: u64,
+    op: u64,
+    response: StoreRes,
+)
+    requires
+        concrete_before.process.len() > 0,
+        concrete_before.process[0]
+            == (Pid::Node(0), ProductionLocalV::Node(node)),
+        concrete_before.now <= at,
+        match response {
+            StoreRes::ListPrefixes { result: Ok(prefixes) } =>
+                empty_timer_prefixes_requeues_pre(
+                    node, at, op, prefixes,
+                ),
+            _ => false,
+        }
+            || empty_timer_relist_idles_pre(node, at, op, response),
+        event_valid(
+            concrete_before,
+            Pid::Node(0),
+            ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: ProductionMessage::StoreRes { op, response },
+            },
+        ),
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Store,
+                message: ProductionMessage::StoreRes { op, response },
+            };
+            let outcome = spec_node_step(node, at, event)[0];
+            let label = Label::Process {
+                process: Pid::Node(0),
+                at,
+                event,
+                send: outcome.send,
+            };
+            let concrete_after = land(
+                concrete_before,
+                0,
+                Pid::Node(0),
+                at,
+                outcome,
+            );
+            &&& empty_timer_listing_completion_post(node, outcome)
+            &&& step(
+                ProductionModel,
+                config,
+                concrete_before,
+                label,
+                concrete_after,
+            )
+            &&& ProductionModel.spec_observe(label)
+                == Seq::<echod_abstract::BoundaryEvent>::empty()
+            &&& matches(
+                AbstractModel,
+                abstract_config(config),
+                abstract_before,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                abstract_before,
+            )
+        }),
+{
+    match response {
+        StoreRes::ListPrefixes { result: Ok(prefixes) } => {
+            if empty_timer_prefixes_requeues_pre(
+                node, at, op, prefixes,
+            ) {
+                lemma_empty_timer_prefixes_completion_schedules_extend(
+                    node, at, op, prefixes,
+                );
+            } else {
+                lemma_empty_timer_relist_completion_reaches_idle(
+                    node, at, op, response,
+                );
+            }
+        },
+        _ => {
+            lemma_empty_timer_relist_completion_reaches_idle(
+                node, at, op, response,
+            );
+        },
+    }
+    let event = ProcessEvent::Receive {
+        sender: Pid::Store,
+        message: ProductionMessage::StoreRes { op, response },
+    };
+    let outcomes = spec_node_step(node, at, event);
+    let outcome = outcomes[0];
+    let label = Label::Process {
+        process: Pid::Node(0),
+        at,
+        event,
+        send: outcome.send,
+    };
+    let concrete_after = land(
+        concrete_before,
+        0,
+        Pid::Node(0),
+        at,
+        outcome,
+    );
 
     reveal(step);
     assert(ProductionModel.spec_on_event(
