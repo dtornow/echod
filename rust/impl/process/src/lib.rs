@@ -68,6 +68,7 @@ pub mod keys;
 pub mod reason;
 pub mod rover;
 pub mod rover_refinement;
+pub mod refinement;
 pub mod state;
 pub mod state_node;
 pub mod state_timers;
