@@ -280,7 +280,7 @@ module S3 {
       Applied(s, Listed(Prefixes(s.entries, prefix, 0, [])))
   }
 
-  function Step(self: Pid, s: State, i: Input<Pid, Msg>): (r: Result<Pid, Msg, State>)
+  function Step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): (r: Result<Pid, Msg, State>)
     ensures r.state.appendable == s.appendable
     ensures Ordered(s.entries) ==> Ordered(r.state.entries)
   {
@@ -310,11 +310,11 @@ module S3 {
     assert w.step == Step;
     match a
     case Deliver(p) =>
-      var r := Step(p.dst, n.procs[p.dst], Request(p.src, p.msg));
+      var r := Step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now);
       assert r.state.appendable == n.procs[p.dst].appendable;
       assert Ordered(r.state.entries);
     case Fire(pid) =>
-      var r := Step(pid, n.procs[pid], Timeout);
+      var r := Step(pid, n.procs[pid], Timeout, n.now);
       assert r.state.appendable == n.procs[pid].appendable;
       assert Ordered(r.state.entries);
     case _ =>

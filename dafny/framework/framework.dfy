@@ -2,9 +2,9 @@ include "order.dfy"
 
 // A network of processes, generic in the process.
 //
-// A process is a value: an id, a state, and a step function. A system is the
-// set of ids, how each one boots, the step, and whether the network may drop
-// or duplicate packets. One network runs any system. Deliver, fire, tick,
+// A process is a value: an id, a state, and a step function. The step is told
+// the time. A system is the set of ids, how each one boots, the step, and
+// whether the network may drop or duplicate packets. One network runs any system. Deliver, fire, tick,
 // drop and duplicate are the same transitions; a trace invariant is an
 // argument of the safety theorem, not a module each system has to refine.
 //
@@ -28,7 +28,7 @@ module Network {
     pids: set<P>,
     faults: bool,
     init: P -> S,
-    step: (P, S, Input<P, M>) -> Result<P, M, S>)
+    step: (P, S, Input<P, M>, nat) -> Result<P, M, S>)   // the nat is the time
 
   datatype Packet<P(==, !new), M(==, !new)> = Packet(src: P, dst: P, msg: M)
 
@@ -93,11 +93,11 @@ module Network {
     case Deliver(p) =>
       && p in n.inflight && p.dst in n.procs
       && n' == Advance(n.(inflight := n.inflight - multiset{p}), p.dst,
-                       w.step(p.dst, n.procs[p.dst], Request(p.src, p.msg)))
+                       w.step(p.dst, n.procs[p.dst], Request(p.src, p.msg), n.now))
     case Fire(pid) =>
       && pid in n.timers && pid in n.procs && n.timers[pid] <= n.now
       && n' == Advance(n.(timers := n.timers - {pid}), pid,
-                       w.step(pid, n.procs[pid], Timeout))
+                       w.step(pid, n.procs[pid], Timeout, n.now))
     case Tick =>
       n' == n.(now := n.now + 1)
     case Drop(p) =>
