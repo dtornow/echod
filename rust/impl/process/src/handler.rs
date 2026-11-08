@@ -40,13 +40,15 @@ verus! {
 #[verifier::opaque]
 pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
     let s = match event {
-        EventSpec::Request { clock, call } => spec_request(S { clock, ..s }, call),
-        EventSpec::Debug { clock, call } => spec_debug_begin(S { clock, ..s }, call),
+        EventSpec::Request { clock, request } => match request {
+            RequestEventSpec::Protocol(call) => spec_request(S { clock, ..s }, call),
+            RequestEventSpec::Debug(call) => spec_debug_begin(S { clock, ..s }, call),
+        },
         EventSpec::Start { clock, loops } => {
             let s = S { clock, loops, ..s };
             spec_members_refresh(s, spec_now(s))
         },
-        EventSpec::Completed { op, outcome, clock } => {
+        EventSpec::Store { op, outcome, clock } => {
             let s = S { clock, ..s };
             let owner = if s.ops.contains_key(op) { Some(s.ops[op]) } else { None };
             let s = S { ops: s.ops.remove(op), ..s };
@@ -59,7 +61,7 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
                 _ => s,
             }
         },
-        EventSpec::Due { clock, armed } => {
+        EventSpec::Wake { clock, armed } => {
             let s = S { clock, last_wake: None, ..s };
             if s.loops && !s.stopping {
                 let now = spec_now(s);
@@ -155,13 +157,12 @@ impl State {
             // -----------------------------------------------------------------
             // From the network, already admitted by the runtime.
             // -----------------------------------------------------------------
-            Event::Request { clock, call } => {
+            Event::Request { clock, request } => {
                 self.set_clock(clock);
-                self.request(call);
-            },
-            Event::Debug { clock, call } => {
-                self.set_clock(clock);
-                self.debug_begin(call);
+                match request {
+                    RequestEvent::Protocol(call) => self.request(call),
+                    RequestEvent::Debug(call) => self.debug_begin(call),
+                }
             },
             // -----------------------------------------------------------------
             // From the runtime, not the network.
@@ -172,7 +173,7 @@ impl State {
                 let now = self.now();
                 self.members_refresh(now);
             },
-            Event::Completed { op, outcome, clock } => {
+            Event::Store { op, outcome, clock } => {
                 self.set_clock(clock);
                 match self.ops.remove(&op) {
                     Some(Owner::Flight(f)) => self.flight_completed(f, op, outcome),
@@ -183,7 +184,7 @@ impl State {
                     Some(Owner::Ignored) | None => {},
                 }
             },
-            Event::Due { clock, armed } => {
+            Event::Wake { clock, armed } => {
                 self.set_clock(clock);
                 // A wake that came early asks again below.
                 self.clear_wake();

@@ -2,7 +2,7 @@
 //!
 //! The core is a state machine: `State`, `Event` in, `Effect`s out,
 //! `on_event` the only step. Every call on the store leaves as an
-//! `Effect::Store` under an op id and comes back as `Event::Completed`
+//! `Effect::Store` under an op id and comes back as `Event::Store`
 //! under the same id; every answer to a client leaves as `Effect::Reply`;
 //! the clock is read by whoever drives the core and handed in on every
 //! event. Nothing here waits, sleeps, locks or spawns, so the same events

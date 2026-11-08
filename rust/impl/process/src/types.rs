@@ -3,7 +3,7 @@
 //!
 //! Everything here is data. `Event` is the only way in, `Effect` the only
 //! way out. A store call goes out as an `Effect::Store` under an `OpId`
-//! and its answer comes back as `Event::Completed` under the same id; the
+//! and its answer comes back as `Event::Store` under the same id; the
 //! core keeps, per id, which machine is waiting for it. No decision is made
 //! in this file: that is `State` in the crate root and the machines beside
 //! it.
@@ -115,8 +115,31 @@ impl DeepView for DebugCall {
     }
 }
 
+/// A request already admitted by the impure shell.
+pub enum RequestEvent {
+    Protocol(Call),
+    Debug(DebugCall),
+}
+
+#[cfg(verus_keep_ghost)]
+pub ghost enum RequestEventSpec {
+    Protocol(CallSpec),
+    Debug(DebugCallSpec),
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for RequestEvent {
+    type V = RequestEventSpec;
+    open spec fn deep_view(&self) -> RequestEventSpec {
+        match self {
+            RequestEvent::Protocol(call) => RequestEventSpec::Protocol(call.deep_view()),
+            RequestEvent::Debug(call) => RequestEventSpec::Debug(call.deep_view()),
+        }
+    }
+}
+
 /// Which loop a physical wake was armed for. The runtime sleeps, then hands
-/// this back as `Event::Due`. The keys themselves stay in the wheel: one
+/// this back as `Event::Wake`. The keys themselves stay in the wheel: one
 /// wake can owe several of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Structural)]
 pub enum Armed {
@@ -138,23 +161,19 @@ impl DeepView for Armed {
 /// executor read it when the event happened; the core never reads a clock.
 #[allow(inconsistent_fields)]
 pub enum Event {
+    /// A protocol or debug request came in; the answer goes out as
+    /// `Effect::Reply`. The runtime has already admitted and decoded it.
+    Request { clock: u64, request: RequestEvent },
+    /// A store call the core issued has an answer.
+    Store { op: OpId, outcome: StoreOutcome, clock: u64 },
+    /// The runtime slept until a loop this process armed, and that instant
+    /// has come. `armed` is the loop the sleep was for. A late wake still
+    /// runs the other loop when its time has come.
+    Wake { clock: u64, armed: Armed },
     /// The node starts. `loops` says whether it keeps itself going: the
     /// heartbeat and the timers. Without them it answers requests and does
     /// nothing on its own.
     Start { clock: u64, loops: bool },
-    /// A request came in; the answer goes out as `Effect::Reply` under `id`.
-    /// `clock` is the node's clock. `call.now` is the instant the step is
-    /// decided at, which a debug request may set ahead of that clock.
-    Request { clock: u64, call: Call },
-    /// A debug operation, already checked. Answered only in debug mode,
-    /// which the runtime decides before it asks.
-    Debug { clock: u64, call: DebugCall },
-    /// A store call the core issued has an answer.
-    Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
-    /// The runtime slept until a loop this process armed, and that instant
-    /// has come. `armed` is the loop the sleep was for. A late wake still
-    /// runs the other loop when its time has come.
-    Due { clock: u64, armed: Armed },
     /// The node stops: it withdraws its announcement and runs no loop.
     Stop { clock: u64 },
 }
@@ -162,11 +181,10 @@ pub enum Event {
 #[allow(inconsistent_fields)]
 #[cfg(verus_keep_ghost)]
 pub ghost enum EventSpec {
+    Request { clock: u64, request: RequestEventSpec },
+    Store { op: OpId, outcome: StoreOutcome, clock: u64 },
+    Wake { clock: u64, armed: Armed },
     Start { clock: u64, loops: bool },
-    Request { clock: u64, call: CallSpec },
-    Debug { clock: u64, call: DebugCallSpec },
-    Completed { op: OpId, outcome: StoreOutcome, clock: u64 },
-    Due { clock: u64, armed: Armed },
     Stop { clock: u64 },
 }
 
@@ -176,10 +194,9 @@ impl DeepView for Event {
     open spec fn deep_view(&self) -> EventSpec {
         match self {
             Event::Start { clock, loops } => EventSpec::Start { clock: *clock, loops: *loops },
-            Event::Request { clock, call } => EventSpec::Request { clock: *clock, call: call.deep_view() },
-            Event::Debug { clock, call } => EventSpec::Debug { clock: *clock, call: call.deep_view() },
-            Event::Completed { op, outcome, clock } => EventSpec::Completed { op: *op, outcome: *outcome, clock: *clock },
-            Event::Due { clock, armed } => EventSpec::Due { clock: *clock, armed: *armed },
+            Event::Request { clock, request } => EventSpec::Request { clock: *clock, request: request.deep_view() },
+            Event::Store { op, outcome, clock } => EventSpec::Store { op: *op, outcome: *outcome, clock: *clock },
+            Event::Wake { clock, armed } => EventSpec::Wake { clock: *clock, armed: *armed },
             Event::Stop { clock } => EventSpec::Stop { clock: *clock },
         }
     }
@@ -251,16 +268,16 @@ impl DeepView for DebugBody {
 
 /// What the core asks the executor to do.
 pub enum Effect {
-    /// Make this call on the store and answer with `Event::Completed { op }`.
-    Store { op: OpId, call: StoreCall },
     /// Answer the request handed in under `id`. `Err` is a 503: the node
     /// could not serve it.
     Reply { id: RequestId, response: Result<Answer, String> },
-    /// Push a message to a worker. At most once; nothing is reported back.
-    Send { address: String, message: Message },
-    /// Send `Event::Due` for `armed` once `after_ms` have passed, replacing
+    /// Make this call on the store and answer with `Event::Store { op }`.
+    Store { op: OpId, call: StoreCall },
+    /// Send `Event::Wake` for `armed` once `after_ms` have passed, replacing
     /// any wake asked for before.
     Wake { after_ms: u64, armed: Armed },
+    /// Push a message to a worker. At most once; nothing is reported back.
+    Send { address: String, message: Message },
     /// Something happened that an operator, a log or a simulation may want
     /// to know. Nothing depends on it.
     Note(Note),
@@ -268,10 +285,10 @@ pub enum Effect {
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum EffectSpec {
-    Store { op: OpId, call: StoreCallSpec },
     Reply { id: RequestId, response: Result<AnswerSpec, Seq<char>> },
-    Send { address: Seq<char>, message: MessageSpec },
+    Store { op: OpId, call: StoreCallSpec },
     Wake { after_ms: u64, armed: Armed },
+    Send { address: Seq<char>, message: MessageSpec },
     Note(NoteSpec),
 }
 

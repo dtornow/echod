@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, RequestEvent, StoreCall, StoreOutcome, SweepOutcome};
 use echod_logic::Message;
 use echod_logic::{Call, Config, DebugCall, State};
 use echod::admit::{self, Admission, DebugOp};
@@ -108,7 +108,7 @@ impl Harness {
                 match e {
                     Effect::Store { op, call } => {
                         let outcome = self.bucket.call(call);
-                        next.extend(self.state.on_event(Event::Completed { op, outcome, clock: self.clock }));
+                        next.extend(self.state.on_event(Event::Store { op, outcome, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => {
@@ -138,7 +138,7 @@ impl Harness {
             Admission::Request(d) => {
                 self.apply(Event::Request {
                     clock: self.clock,
-                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
+                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
                 });
                 self.take(id)
             }
@@ -148,7 +148,10 @@ impl Harness {
                     DebugOp::Snap => DebugCall::Snap { id, kind, corr },
                     DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
                 };
-                self.apply(Event::Debug { clock: self.clock, call });
+                self.apply(Event::Request {
+                    clock: self.clock,
+                    request: RequestEvent::Debug(call),
+                });
                 self.take(id)
             }
         }
@@ -170,7 +173,7 @@ impl Harness {
             let step = self.wake_after.unwrap_or(until - self.clock).min(until - self.clock).max(1);
             self.clock += step;
             self.wake_after = None;
-            self.apply(Event::Due { clock: self.clock, armed: self.wake_armed.clone() });
+            self.apply(Event::Wake { clock: self.clock, armed: self.wake_armed.clone() });
         }
     }
 

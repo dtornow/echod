@@ -3,7 +3,7 @@
 //! One `State` behind one lock. Every event goes through `apply`, which
 //! takes the lock, runs the core's one step, drops the lock, and performs
 //! what came out: a store call is spawned and its answer comes back as
-//! `Completed`; a reply wakes the request waiting for it; a message is
+//! `Event::Store`; a reply wakes the request waiting for it; a message is
 //! pushed; a wake resets the one timer; a note goes to the metrics, the
 //! log, and whoever listens. The core never waits, so the lock is held
 //! for a step and no longer, and nothing here decides anything.
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use echod_logic::Membership;
-use echod_logic::types::{Armed, Effect, Event, Note, RequestId};
+use echod_logic::types::{Armed, Effect, Event, Note, RequestEvent, RequestId};
 use echod_logic::{Call, DebugCall, State};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
@@ -194,7 +194,7 @@ impl Node {
                         _ = crashed.changed() => {}
                         outcome = store::call(&*store, call) => {
                             let clock = node.clock.now();
-                            node.apply(Event::Completed { op, outcome, clock });
+                            node.apply(Event::Store { op, outcome, clock });
                         }
                     }
                 });
@@ -269,7 +269,7 @@ impl Node {
                             _ = tokio::time::sleep_until(at) => {
                                 let _ = node.wake.send_replace(None);
                                 let clock = node.clock.now();
-                                node.apply(Event::Due { clock, armed });
+                                node.apply(Event::Wake { clock, armed });
                             }
                         }
                     }
@@ -347,7 +347,7 @@ impl ResonateServer for Node {
                 let (id, rx) = self.begin();
                 self.apply(Event::Request {
                     clock,
-                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
+                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
                 });
                 self.finish(&req.kind, started, rx).await
             }
@@ -358,7 +358,10 @@ impl ResonateServer for Node {
                     crate::admit::DebugOp::Snap => DebugCall::Snap { id, kind, corr },
                     crate::admit::DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
                 };
-                self.apply(Event::Debug { clock, call });
+                self.apply(Event::Request {
+                    clock,
+                    request: RequestEvent::Debug(call),
+                });
                 self.finish(&req.kind, started, rx).await
             }
         }
