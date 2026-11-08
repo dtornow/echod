@@ -23,7 +23,9 @@ use super::commit_spec::*;
 
 verus! {
 
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct Commit {
     pub origin: String,
     /// The nearest deadline of the document as it will be written.
@@ -64,7 +66,7 @@ impl NodeCore {
     pub fn prepare(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Commit)
         ensures t@ == spec_prepare(self@, origin@, opt_str(etag), opt_nat(deadline), changed, opt_key(fired)),
     {
-        let previous: Option<Key> = match self.armed.get(origin) {
+        let previous: Option<Key> = match self.armed.get(&origin.to_string()) {
             Some(a) => {
                 let same_version = match etag {
                     Some(e) => str_eq(a.etag.as_str(), e.as_str()),

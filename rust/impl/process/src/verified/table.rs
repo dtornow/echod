@@ -44,6 +44,8 @@ impl KeyEq for String {
     }
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Table<K, V> {
     pub entries: Vec<(K, V)>,
 }

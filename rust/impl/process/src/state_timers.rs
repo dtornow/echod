@@ -47,6 +47,8 @@ pub type SlotSpec = (u64, Seq<char>);
 
 /// Armed keys by deadline.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct TimerWheel {
     pub armed: Vec<Slot>,
 }
@@ -350,6 +352,8 @@ pub const RELIST_AFTER_MS: u64 = 1_000;
 pub const CONCURRENCY: usize = 16;
 
 /// A listing in progress.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Listing {
     /// The full load: the buckets there are.
     Prefixes { op: OpId, horizon: u64 },
@@ -406,6 +410,8 @@ impl Listing {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Timers {
     pub wheel: TimerWheel,
     pub started: bool,

@@ -24,6 +24,8 @@ verus! {
 
 /// A document this node has seen, and the version it saw.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Cached {
     pub loaded: Loaded,
     pub etag: Etag,
@@ -69,6 +71,8 @@ pub struct CacheStats {
 
 /// One remembered document, under its origin.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Entry {
     pub origin: String,
     pub cached: Cached,
@@ -76,6 +80,8 @@ pub struct Entry {
 
 /// The cache: entries least recently used first.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Cache {
     pub entries: Vec<Entry>,
     pub bytes: u64,

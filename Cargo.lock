@@ -1158,6 +1158,7 @@ version = "0.1.0"
 dependencies = [
  "echod-abstract",
  "echod-concrete",
+ "echod-rover",
  "echod-types",
  "serde",
  "serde_json",

@@ -24,7 +24,7 @@ pub use echod_concrete::{Etag, Read, StoreError, StoreReq, StoreRes};
 pub use crate::verified::flight::FiredKey;
 
 #[cfg(verus_keep_ghost)]
-use echod_types::{PromiseRecordSpec, ScheduleSpec, AResponse};
+use echod_types::ScheduleSpec;
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 #[cfg(verus_keep_ghost)]
@@ -53,7 +53,7 @@ pub enum Message {
 #[cfg(verus_keep_ghost)]
 pub ghost enum MessageSpec {
     Execute { task_id: Seq<char>, version: u64 },
-    Unblock(PromiseRecordSpec),
+    Unblock(PromiseRecord),
 }
 
 #[cfg(verus_keep_ghost)]
@@ -62,7 +62,7 @@ impl DeepView for Message {
     open spec fn deep_view(&self) -> MessageSpec {
         match self {
             Message::Execute { task_id, version } => MessageSpec::Execute { task_id: task_id@, version: *version },
-            Message::Unblock(r) => MessageSpec::Unblock(r.deep_view()),
+            Message::Unblock(r) => MessageSpec::Unblock(*r),
         }
     }
 }
@@ -74,6 +74,8 @@ impl DeepView for Message {
 /// A request the runtime has already accepted. The core never sees an
 /// envelope, a header, or a parse error.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Call {
     pub id: RequestId,
     pub kind: String,
@@ -92,6 +94,8 @@ pub struct Call {
 }
 
 /// A debug operation the runtime has already accepted.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum DebugCall {
     Reset { id: RequestId, kind: String, corr: String },
     Snap { id: RequestId, kind: String, corr: String },
@@ -118,6 +122,8 @@ impl DeepView for DebugCall {
 }
 
 /// A request already admitted by the impure shell.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum RequestEvent {
     Protocol(Call),
     Debug(DebugCall),
@@ -162,6 +168,8 @@ impl DeepView for Armed {
 /// What the core is told. Every event carries the node's clock as the
 /// executor read it when the event happened; the core never reads a clock.
 #[allow(inconsistent_fields)]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Event {
     /// A protocol or debug request came in; the answer goes out as
     /// `Effect::Reply`. The runtime has already admitted and decoded it.
@@ -199,6 +207,8 @@ impl DeepView for Event {
 // ---------------------------------------------------------------------------
 
 /// What a client is told. The runtime turns it into the protocol's envelope.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Answer {
     /// A document step.
     Step { kind: String, corr: String, action_kind: Option<String>, response: Response, why: Option<String> },
@@ -208,7 +218,7 @@ pub enum Answer {
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum AnswerSpec {
-    Step { kind: Seq<char>, corr: Seq<char>, action_kind: Option<Seq<char>>, response: AResponse, why: Option<Seq<char>> },
+    Step { kind: Seq<char>, corr: Seq<char>, action_kind: Option<Seq<char>>, response: Response, why: Option<Seq<char>> },
     Debug { kind: Seq<char>, corr: Seq<char>, status: u16, body: DebugBodySpec },
 }
 
@@ -218,7 +228,7 @@ impl DeepView for Answer {
     open spec fn deep_view(&self) -> AnswerSpec {
         match self {
             Answer::Step { kind, corr, action_kind, response, why } => AnswerSpec::Step {
-                kind: kind@, corr: corr@, action_kind: action_kind.deep_view(), response: response.deep_view(), why: why.deep_view(),
+                kind: kind@, corr: corr@, action_kind: action_kind.deep_view(), response: *response, why: why.deep_view(),
             },
             Answer::Debug { kind, corr, status, body } => AnswerSpec::Debug { kind: kind@, corr: corr@, status: *status, body: body.deep_view() },
         }
@@ -226,6 +236,8 @@ impl DeepView for Answer {
 }
 
 /// The body of a debug answer, before it is an envelope.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum DebugBody {
     /// `{}`.
     Object,
@@ -259,6 +271,8 @@ impl DeepView for DebugBody {
 }
 
 /// What the core asks the executor to do.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Effect {
     /// Answer the request handed in under `id`. `Err` is a 503: the node
     /// could not serve it.
@@ -407,6 +421,8 @@ impl DeepView for SweepOutcome {
 /// closed set, never a name a client or the bucket supplied; the observed
 /// ones carry what a simulation needs to account for a step no client
 /// sees; the logged ones carry what a log line wants.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Note {
     // counted
     DocumentWrite { mode: WriteMode, bytes: usize },

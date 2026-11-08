@@ -272,7 +272,8 @@ pub enum DocumentBody {
 }
 
 /// The complete logical value of a workflow document.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct WorkflowDocument {
     pub document: String,
     pub version: u64,
@@ -294,14 +295,16 @@ pub struct ScheduleDocument {
 
 /// A loaded document. The variants are deliberately the two physical
 /// document families; there is no unversioned document representation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum StoredDocument {
     Workflow(WorkflowDocument),
     Schedule(ScheduleDocument),
 }
 
 /// A decoded document and the byte accounting needed to append or compact it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct LoadedDocument {
     pub document: StoredDocument,
     pub change_count: usize,

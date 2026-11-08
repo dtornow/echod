@@ -56,6 +56,8 @@ use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 verus! {
 
 #[allow(inconsistent_fields)]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Op {
     Reset { id: RequestId, kind: String, corr: String, phase: Reset },
     Snap { id: RequestId, kind: String, corr: String, phase: Snap },
@@ -82,6 +84,8 @@ impl DeepView for Op {
     }
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Reset {
     Listing { op: OpId },
     Deleting { pending: Table<OpId, bool> },
@@ -104,6 +108,8 @@ impl DeepView for Reset {
     }
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Snap {
     /// The listings out (origins and schedules), the document reads out
     /// (`true` marks a schedule's), and the documents read so far.
@@ -125,6 +131,8 @@ impl DeepView for Snap {
     }
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Tick {
     /// The documents there are: origins and schedules, two listings.
     Listing { ops: Table<OpId, bool>, origins: Vec<String>, schedules: Vec<String> },
@@ -154,6 +162,8 @@ impl DeepView for Tick {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Debug {
     pub current: Option<Op>,
     pub queue: Vec<DebugCall>,

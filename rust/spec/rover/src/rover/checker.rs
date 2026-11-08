@@ -97,7 +97,10 @@ fn search_from<M: RoverModel>(
     visible: usize,
     remaining: usize,
     certificate: &mut Certificate<M>,
-) -> bool {
+) -> bool
+where
+    M::State: PartialEq,
+{
     if visible == events.len() {
         return true;
     }
@@ -147,7 +150,10 @@ pub fn search<M: RoverModel>(
     config: &M::Config,
     events: &[EventOf<M>],
     limits: CheckConfig,
-) -> Option<Certificate<M>> {
+) -> Option<Certificate<M>>
+where
+    M::State: PartialEq,
+{
     let world = World::initial(model, config);
     let mut certificate = Vec::new();
     search_from(world, events, 0, limits.max_steps, &mut certificate).then_some(certificate)
@@ -160,7 +166,10 @@ pub fn check<M: RoverModel>(
     config: &M::Config,
     events: &[EventOf<M>],
     limits: CheckConfig,
-) -> Option<Certificate<M>> {
+) -> Option<Certificate<M>>
+where
+    M::State: PartialEq,
+{
     let certificate = search(model, config, events, limits)?;
     super::replay(model, config, events, &certificate).ok()?;
     Some(certificate)

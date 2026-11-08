@@ -97,7 +97,9 @@ pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: 
 // ---------------------------------------------------------------------------
 
 /// The key that fired the flight, and the node that armed it.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct FiredKey {
     pub key: Key,
     pub by: String,
@@ -161,6 +163,8 @@ pub open spec fn answer_v(step: AStep, o: Option<&StoreRes>) -> AAnswer {
 }
 
 /// Where the commit stands: which call it waits on.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Step {
     Start,
     PuttingKey(Key),
@@ -260,6 +264,8 @@ fn copy_step(s: &Step) -> (r: Step)
 }
 
 /// The commit of one step on one document.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Sequence {
     pub origin: String,
     /// The version loaded; after the write, the version written.

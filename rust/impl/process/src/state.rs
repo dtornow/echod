@@ -58,6 +58,8 @@ impl DeepView for Owner {
 
 /// The process. Every core transition uses `on_event`.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct State {
     pub cfg: Config,
     pub keys: KeySpace,

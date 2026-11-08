@@ -74,7 +74,10 @@ pub trait RoverModel {
     type Config;
     type Pid: Data;
     type StateV;
-    type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
+    /// Executable process state. Replay only needs to clone it when selecting
+    /// an outcome. Search adds equality and debug bounds separately, so a
+    /// verified adapter need not expose those operational conveniences.
+    type State: Clone + View<V = Self::StateV>;
     type Message: Data;
     /// The only values refinement and clients observe. Internal process ids
     /// and messages do not appear here.

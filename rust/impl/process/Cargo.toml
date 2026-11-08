@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 echod-abstract = { path = "../../spec/abstract" }
 echod-concrete = { path = "../../spec/concrete" }
+echod-rover = { path = "../../spec/rover" }
 echod-types = { path = "../../comm/types" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"

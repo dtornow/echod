@@ -462,7 +462,7 @@ fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> (r: Response)
 
 /// The reply when a request is shed or the store does not answer. The shape
 /// follows the request, and the status is 503.
-pub(crate) fn unavailable(request: &Request) -> (response: Response)
+pub fn unavailable(request: &Request) -> (response: Response)
     ensures
         response == spec_unavailable(*request),
 {
