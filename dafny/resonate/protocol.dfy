@@ -11,12 +11,20 @@ module Protocol {
   datatype Pid = Client(c: nat) | Node(i: nat) | Bucket
   datatype Kind = Read | Create(timeout: nat)
   datatype Clock = Due(key: string, at: nat, owner: nat, token: nat)
+  // What the read was for. Every handler starts as one of these.
+  datatype Job = AskGet | AskCreate(req: Temp.CreateReq)
+  // The store commands a prepared handler runs, in order.
+  datatype Cmd =
+    | Put(clock: Clock)
+    | Write(key: string, doc: Temp.Doc, version: nat, cover: Temp.Opt<Clock>)
+    | Drop(clock: Clock)
+  // Reading: the document is in flight. Running: the commands still to send,
+  // head first. `remember` writes `keep` into the armed map when the write lands.
   datatype Cont =
-    | WaitGet(caller: Pid)
-    | Load(caller: Pid, req: Temp.CreateReq)
-    | Arm(caller: Pid, key: string, after: Temp.Doc, version: nat, answer: Temp.Answer, clock: Clock, forget: Temp.Opt<Clock>)
-    | Writing(caller: Pid, key: string, answer: Temp.Answer, kept: Temp.Opt<Clock>, forget: Temp.Opt<Clock>)
-    | Disarm(caller: Pid, answer: Temp.Answer, kept: Temp.Opt<Clock>, gone: Clock)
+    | Reading(caller: Pid, job: Job)
+    | Running(caller: Pid, reply: Temp.Answer, cmds: seq<Cmd>, keep: Temp.Opt<Clock>, remember: bool)
+
+  predicate AwaitsGet(c: Cont) { c.Reading? && c.job.AskGet? }
   datatype Ask = Ask(id: string, node: nat, kind: Kind)
   datatype Msg =
     | PromiseGet(id: string)

@@ -2,12 +2,11 @@ include "protocol.dfy"
 
 // The Resonate server. One continuation per id in flight.
 //
-// A promise get reads the origin document from the bucket and answers with
-// that document's Get. A promise create runs the handler, sweep then create.
-// When the document changes and still owes a deadline — the nearest of a
-// pending promise, a lease, a retry, or a schedule's next run — the server
-// puts a timeout for that instant before it writes the document, then deletes
-// the timeout it had remembered for the origin.
+// A handler reads the document, prepares, then runs the store commands in
+// order. A promise get prepares a reply and no commands. A promise create
+// runs the handler, sweep then create. When the document changes, the
+// commands are the timeout for the nearest deadline, the write, and the
+// timeout that write replaces. The head command is the one in flight.
 
 module Node {
   import opened Network
@@ -16,98 +15,116 @@ module Node {
 
   const Retry: nat := 1
 
+  datatype Plan = Plan(
+    reply: Temp.Answer,
+    created: bool,
+    cmds: seq<Cmd>,
+    keep: Temp.Opt<Clock>,
+    remember: bool,
+    next: nat)
+
+  function Prepare(s: State, job: Job, id: string, doc: Temp.Doc, version: nat, now: nat): Plan
+    requires s.AtNode?
+  {
+    match job
+    case AskGet => Plan(Temp.Get(doc, id, now).answer, false, [], Temp.None, false, s.next)
+    case AskCreate(req) =>
+      var applied := Temp.Handle(doc, Temp.PromiseCreate(req), now, Retry);
+      if applied.doc == doc then Plan(applied.answer, true, [], Temp.None, false, s.next)
+      else
+        var key := DocKey(req.id);
+        var prev := if key in s.armed then Temp.Some(s.armed[key]) else Temp.None;
+        match Temp.Nearest(applied.doc)
+        case None =>
+          var drop := match prev case None => [] case Some(t) => [Cmd.Drop(t)];
+          Plan(applied.answer, true, [Write(key, applied.doc, version, Temp.None)] + drop, Temp.None, true, s.next)
+        case Some(d) =>
+          var put := Due(key, d, s.owner, s.next);
+          var drop := match prev case None => [] case Some(t) => if t == put then [] else [Cmd.Drop(t)];
+          Plan(applied.answer, true,
+               [Cmd.Put(put), Write(key, applied.doc, version, Temp.Some(put))] + drop,
+               Temp.Some(put), true, s.next + 1)
+  }
+
+  function Reply(created: bool, answer: Temp.Answer): Msg {
+    if created then Created(answer) else PromiseReply(answer)
+  }
+
+  function SendCmd(id: string, cmd: Cmd): Msg {
+    match cmd
+    case Put(clock) => PutTimeout(id, clock)
+    case Write(key, doc, version, cover) => WriteDoc(id, key, doc, version, cover)
+    case Drop(clock) => DropTimeout(id, clock)
+  }
+
+  // The armed map after a write command lands.
+  function Remember(armed: map<string, Clock>, cmd: Cmd, keep: Temp.Opt<Clock>, remember: bool): map<string, Clock> {
+    if remember && cmd.Write? then
+      match keep
+      case None => armed - {cmd.key}
+      case Some(clock) => armed[clock.key := clock]
+    else armed
+  }
+
+  // Run the commands. An empty list answers the caller.
+  function Drive(s: State, id: string, caller: Pid, plan: Plan): Result<Pid, Msg, State>
+    requires s.AtNode?
+  {
+    if plan.cmds == [] then
+      Result(AtNode(s.open - {id}, s.armed, plan.next, s.owner), [Send(caller, Reply(plan.created, plan.reply))], Keep)
+    else
+      var run := Running(caller, plan.reply, plan.cmds, plan.keep, plan.remember);
+      Result(AtNode(s.open[id := run], s.armed, plan.next, s.owner), [Send(Bucket, SendCmd(id, plan.cmds[0]))], Keep)
+  }
+
+  // The head command was accepted. Remember a write, then send the next command or the reply.
+  function Advance(s: State, id: string): Result<Pid, Msg, State>
+    requires s.AtNode? && id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0
+  {
+    var run := s.open[id];
+    var armed := Remember(s.armed, run.cmds[0], run.keep, run.remember);
+    var rest := run.cmds[1..];
+    if rest == [] then
+      Result(AtNode(s.open - {id}, armed, s.next, s.owner), [Send(run.caller, Created(run.reply))], Keep)
+    else
+      var run' := Running(run.caller, run.reply, rest, run.keep, run.remember && !run.cmds[0].Write?);
+      Result(AtNode(s.open[id := run'], armed, s.next, s.owner), [Send(Bucket, SendCmd(id, rest[0]))], Keep)
+  }
+
+  predicate Head(s: State, id: string, cmd: Cmd)
+    requires s.AtNode?
+  {
+    && id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0] == cmd
+  }
+
   function step(self: Pid, s: State, i: Input<Pid, Msg>, now: nat): Result<Pid, Msg, State>
   {
     if self.Node? && s.AtNode? then
       match i {
         case Request(from, PromiseGet(id)) =>
           if id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[id := WaitGet(from)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(id))], Keep)
+          else Result(AtNode(s.open[id := Reading(from, AskGet)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(id))], Keep)
         case Request(from, PromiseCreate(req)) =>
           if req.id in s.open then Result(s, [], Keep)
-          else Result(AtNode(s.open[req.id := Load(from, req)], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
-        case Request(_, Got(id, doc, version)) => GotOn(s, id, doc, version, now)
-        case Request(_, TimeoutPut(id, clock)) => ArmOn(s, id, clock)
-        case Request(_, DocWrote(id, _)) => WroteOn(s, id)
+          else Result(AtNode(s.open[req.id := Reading(from, AskCreate(req))], s.armed, s.next, s.owner), [Send(Bucket, Msg.Get(req.id))], Keep)
+        case Request(_, Got(id, doc, version)) =>
+          if id in s.open && s.open[id].Reading? then
+            Drive(s, id, s.open[id].caller, Prepare(s, s.open[id].job, id, doc, version, now))
+          else Result(s, [], Keep)
+        case Request(_, TimeoutPut(id, clock)) =>
+          if Head(s, id, Cmd.Put(clock)) then Advance(s, id) else Result(s, [], Keep)
+        case Request(_, DocWrote(id, _)) =>
+          if id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
+            Advance(s, id)
+          else Result(s, [], Keep)
         case Request(_, DocRejected(id)) =>
-          if id in s.open && s.open[id].Writing? then
+          if id in s.open && s.open[id].Running? && |s.open[id].cmds| > 0 && s.open[id].cmds[0].Write? then
             Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [], Keep)
           else Result(s, [], Keep)
-        case Request(_, TimeoutDropped(id, _)) =>
-          if id in s.open && s.open[id].Disarm? then
-            Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [Send(s.open[id].caller, Created(s.open[id].answer))], Keep)
-          else Result(s, [], Keep)
+        case Request(_, TimeoutDropped(id, clock)) =>
+          if Head(s, id, Cmd.Drop(clock)) then Advance(s, id) else Result(s, [], Keep)
         case _ => Result(s, [], Keep)
       }
     else Result(s, [], Keep)
-  }
-
-  function Decide(s: State, id: string, doc: Temp.Doc, version: nat, now: nat): Result<Pid, Msg, State>
-    requires s.AtNode? && id in s.open && s.open[id].Load?
-  {
-    var caller := s.open[id].caller;
-    var req := s.open[id].req;
-    var applied := Temp.Handle(doc, Temp.PromiseCreate(req), now, Retry);
-    if applied.doc == doc then
-      Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [Send(caller, Created(applied.answer))], Keep)
-    else
-      var key := DocKey(req.id);
-      var drop := if key in s.armed then Temp.Some(s.armed[key]) else Temp.None;
-      match Temp.Nearest(applied.doc)
-      case None =>
-        var open' := s.open[id := Writing(caller, key, applied.answer, Temp.None, drop)];
-        Result(AtNode(open', s.armed, s.next, s.owner),
-               [Send(Bucket, WriteDoc(id, key, applied.doc, version, Temp.None))], Keep)
-      case Some(d) =>
-        var put := Due(key, d, s.owner, s.next);
-        var open' := s.open[id := Arm(caller, key, applied.doc, version, applied.answer, put, drop)];
-        Result(AtNode(open', s.armed, s.next + 1, s.owner),
-               [Send(Bucket, PutTimeout(id, put))], Keep)
-  }
-
-  function GotOn(s: State, id: string, doc: Temp.Doc, version: nat, now: nat): Result<Pid, Msg, State>
-    requires s.AtNode?
-  {
-    if id !in s.open then Result(s, [], Keep)
-    else if s.open[id].WaitGet? then
-      var answer := Temp.Get(doc, id, now).answer;
-      Result(AtNode(s.open - {id}, s.armed, s.next, s.owner), [Send(s.open[id].caller, PromiseReply(answer))], Keep)
-    else if s.open[id].Load? then Decide(s, id, doc, version, now)
-    else Result(s, [], Keep)
-  }
-
-  function ArmOn(s: State, id: string, clock: Clock): Result<Pid, Msg, State>
-    requires s.AtNode?
-  {
-    if id in s.open && s.open[id].Arm? && s.open[id].clock == clock then
-      var c := s.open[id];
-      var open' := s.open[id := Writing(c.caller, c.key, c.answer, Temp.Some(c.clock), c.forget)];
-      Result(AtNode(open', s.armed, s.next, s.owner),
-             [Send(Bucket, WriteDoc(id, c.key, c.after, c.version, Temp.Some(c.clock)))], Keep)
-    else Result(s, [], Keep)
-  }
-
-  function WroteOn(s: State, id: string): Result<Pid, Msg, State>
-    requires s.AtNode?
-  {
-    if id !in s.open then Result(s, [], Keep)
-    else match s.open[id] {
-      case Writing(caller, key, answer, put, drop) =>
-        var armed' :=
-          match put
-          case None => s.armed - {key}
-          case Some(clock) => s.armed[key := clock];
-        match drop {
-          case None =>
-            Result(AtNode(s.open - {id}, armed', s.next, s.owner), [Send(caller, Created(answer))], Keep)
-          case Some(t) =>
-            if put == Temp.Some(t) then
-              Result(AtNode(s.open - {id}, armed', s.next, s.owner), [Send(caller, Created(answer))], Keep)
-            else
-              var open' := s.open[id := Disarm(caller, answer, put, t)];
-              Result(AtNode(open', armed', s.next, s.owner), [Send(Bucket, DropTimeout(id, t))], Keep)
-        }
-      case _ => Result(s, [], Keep)
-    }
   }
 }
