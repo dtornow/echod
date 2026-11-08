@@ -652,7 +652,7 @@ impl Node {
             node@ == spec_initial_node(config.deep_view()),
     {
         let mut core = State::new(copy(config));
-        core.set_loops(true);
+        core.set_loops(!config.debug);
         Node {
             core,
             pending: Vec::new(),
@@ -1002,7 +1002,7 @@ impl RoverModel for Model {
 pub open spec fn spec_initial_node(config: ConfigSpec) -> NodeV {
     NodeV {
         core: StateSpec {
-            loops: true,
+            loops: !config.debug,
             ..crate::state::spec_state_new(config)
         },
         pending: Seq::empty(),
