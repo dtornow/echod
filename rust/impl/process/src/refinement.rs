@@ -2807,6 +2807,336 @@ pub proof fn lemma_origin_sweep_matches_abstract_trace(
     reveal(origin_sweep_matches);
 }
 
+/// The endpoint form of `origin_sweep_matches`.  Unlike an unconstrained
+/// existential relation, every changing edge names an actual indexed result
+/// of `spec_run_timeout` and requires its exact sends, pending additions,
+/// document interpretation, other-key frame, and finite store.
+pub open spec fn origin_sweep_trace_to(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    limit: nat,
+    final_state: AbstractStateV,
+) -> bool
+    decreases limit,
+{
+    if limit == 0 {
+        final_state == abstract_state
+    } else {
+        let (next, _, born, notes) = echod_concrete::node::spec_run_due(
+            document,
+            now,
+            config.retry_timeout,
+        );
+        if next == document {
+            final_state == abstract_state
+        } else {
+            exists|j: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[j]]
+            {
+                let results =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= j < results.len()
+                &&& results[j].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& results[j].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, results[j].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    results[j].state.store,
+                )
+                &&& finite_store(results[j].state.store)
+                &&& origin_sweep_trace_to(
+                    config,
+                    key,
+                    next,
+                    results[j].state,
+                    now,
+                    (limit - 1) as nat,
+                    final_state,
+                )
+            }
+        }
+    }
+}
+
+pub proof fn lemma_origin_sweep_trace_endpoint_exists(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    limit: nat,
+)
+    requires
+        doc_rel(key, document, abstract_state.store),
+        finite_store(abstract_state.store),
+    ensures
+        exists|final_state: AbstractStateV|
+            origin_sweep_trace_to(
+                config,
+                key,
+                document,
+                abstract_state,
+                now,
+                limit,
+                final_state,
+            ),
+    decreases limit,
+{
+    if limit == 0 {
+        assert(origin_sweep_trace_to(
+            config,
+            key,
+            document,
+            abstract_state,
+            now,
+            limit,
+            abstract_state,
+        ));
+    } else {
+        echod_concrete::timers::lemma_due_agrees(
+            config,
+            key,
+            document,
+            abstract_state,
+            now,
+        );
+        let (next, _, born, notes) =
+            echod_concrete::node::spec_run_due(
+                document,
+                now,
+                config.retry_timeout,
+            );
+        reveal(echod_concrete::relation::due_agrees);
+        if next == document {
+            assert(origin_sweep_trace_to(
+                config,
+                key,
+                document,
+                abstract_state,
+                now,
+                limit,
+                abstract_state,
+            ));
+        } else {
+            let j = choose|j: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[j]]
+            {
+                let results =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= j < results.len()
+                &&& results[j].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& results[j].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, results[j].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    results[j].state.store,
+                )
+                &&& finite_store(results[j].state.store)
+            };
+            let results = echod_abstract::model::spec_run_timeout(
+                config,
+                abstract_state,
+                now,
+            );
+            lemma_origin_sweep_trace_endpoint_exists(
+                config,
+                key,
+                next,
+                results[j].state,
+                now,
+                (limit - 1) as nat,
+            );
+            let final_state = choose|final_state: AbstractStateV|
+                #[trigger] origin_sweep_trace_to(
+                    config,
+                    key,
+                    next,
+                    results[j].state,
+                    now,
+                    (limit - 1) as nat,
+                    final_state,
+                );
+            assert(origin_sweep_trace_to(
+                config,
+                key,
+                document,
+                abstract_state,
+                now,
+                limit,
+                final_state,
+            ));
+        }
+    }
+    reveal(origin_sweep_trace_to);
+}
+
+pub proof fn lemma_origin_sweep_trace_endpoint_frames(
+    config: ServerConfig,
+    key: Seq<char>,
+    document: echod_concrete::node::DocumentBodyV,
+    abstract_state: AbstractStateV,
+    now: u64,
+    limit: nat,
+    final_state: AbstractStateV,
+)
+    requires
+        document is Workflow,
+        doc_rel(key, document, abstract_state.store),
+        finite_store(abstract_state.store),
+        origin_sweep_trace_to(
+            config,
+            key,
+            document,
+            abstract_state,
+            now,
+            limit,
+            final_state,
+        ),
+    ensures
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                document,
+                now,
+                config.retry_timeout,
+                limit,
+            ).0;
+            &&& doc_rel(key, swept, final_state.store)
+            &&& echod_concrete::interpret::others_kept(
+                key,
+                abstract_state.store,
+                final_state.store,
+            )
+            &&& finite_store(final_state.store)
+            &&& final_state.pending == abstract_state.pending
+        }),
+    decreases limit,
+{
+    reveal(origin_sweep_trace_to);
+    reveal(echod_concrete::node::spec_sweep);
+    if limit == 0 {
+        assert forall|other: Seq<char>,
+            body: echod_concrete::node::DocumentBodyV|
+            other != key
+                && doc_rel(other, body, abstract_state.store)
+            implies #[trigger] doc_rel(other, body, final_state.store) by {
+        }
+    } else {
+        let (next, _, born, notes) =
+            echod_concrete::node::spec_run_due(
+                document,
+                now,
+                config.retry_timeout,
+            );
+        if next == document {
+            assert forall|other: Seq<char>,
+                body: echod_concrete::node::DocumentBodyV|
+                other != key
+                    && doc_rel(other, body, abstract_state.store)
+                implies #[trigger] doc_rel(
+                    other,
+                    body,
+                    final_state.store,
+                ) by {
+            }
+        } else {
+            assert(next is Workflow);
+            assert(born =~=
+                Seq::<echod_concrete::node::PendingV>::empty());
+            let j = choose|j: int|
+                #![trigger echod_abstract::model::spec_run_timeout(
+                    config,
+                    abstract_state,
+                    now,
+                )[j]]
+            {
+                let results =
+                    echod_abstract::model::spec_run_timeout(
+                        config,
+                        abstract_state,
+                        now,
+                    );
+                &&& 0 <= j < results.len()
+                &&& results[j].send
+                    == echod_concrete::relation::note_sends(notes)
+                &&& results[j].state.pending
+                    == abstract_state.pending
+                        + echod_concrete::relation::items(born)
+                &&& doc_rel(key, next, results[j].state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_state.store,
+                    results[j].state.store,
+                )
+                &&& finite_store(results[j].state.store)
+                &&& origin_sweep_trace_to(
+                    config,
+                    key,
+                    next,
+                    results[j].state,
+                    now,
+                    (limit - 1) as nat,
+                    final_state,
+                )
+            };
+            let results = echod_abstract::model::spec_run_timeout(
+                config,
+                abstract_state,
+                now,
+            );
+            lemma_origin_sweep_trace_endpoint_frames(
+                config,
+                key,
+                next,
+                results[j].state,
+                now,
+                (limit - 1) as nat,
+                final_state,
+            );
+            assert forall|other: Seq<char>,
+                body: echod_concrete::node::DocumentBodyV|
+                other != key
+                    && doc_rel(other, body, abstract_state.store)
+                implies #[trigger] doc_rel(
+                    other,
+                    body,
+                    final_state.store,
+                ) by {
+                assert(doc_rel(other, body, results[j].state.store));
+            }
+            assert(echod_concrete::relation::items(born).len() == 0);
+            assert(results[j].state.pending
+                == abstract_state.pending);
+        }
+    }
+}
+
 /// `spec_commit_new` stores the fully closed multi-step sweep result, not an
 /// intermediate body.  The sequence may subsequently issue deadline-key
 /// actions before its conditional document write, but its committed payload is
@@ -2870,6 +3200,138 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
         REQUEST_SWEEP_STEPS as nat,
     );
     reveal(crate::handler_docs::spec_commit_new);
+}
+
+/// The production commit begins with the optional new deadline key and then
+/// the conditional document write.  Its verified sequence subsequently
+/// includes the optional previous-key deletion and fired-key collection before
+/// `Done`; all five shapes are the actions consumed by `spec_commit_advance`.
+pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
+    s: S,
+    fid: u64,
+    w: crate::handler_docs::WorkingSpec,
+    workflow: echod_concrete::document::WorkflowDocumentV,
+    now: u64,
+    retry_timeout: u64,
+    tag: Seq<char>,
+)
+    requires
+        w.loaded.document == StoredDocumentV::Workflow(workflow),
+        echod_concrete::document::workflow_well_formed(workflow),
+        workflow.committed_at <= now,
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+        ({
+            let document =
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                );
+            let swept = echod_concrete::node::spec_sweep(
+                document,
+                now,
+                retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            &&& swept != document
+            &&& echod_concrete::node::spec_earliest_in(
+                swept,
+                now,
+            ) is None
+        }),
+    ensures
+        ({
+            let document =
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                );
+            let swept = echod_concrete::node::spec_sweep(
+                document,
+                now,
+                retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            let (planned, commit) =
+                crate::handler_docs::spec_commit_new(
+                    s,
+                    w,
+                    swept,
+                    echod_concrete::node::spec_body_deadline(swept),
+                    now,
+                    None,
+                );
+            let (started, first, progress) =
+                crate::handler_docs::spec_commit_advance(
+                    planned,
+                    fid,
+                    commit,
+                    None,
+                );
+            let calls =
+                crate::verified::flight_spec::spec_calls(
+                    commit.seq,
+                    planned.node.core,
+                );
+            let run = crate::verified::flight_spec::spec_run(
+                commit.seq,
+                planned.node.core,
+                tag,
+                6,
+            );
+            &&& commit.seq.step is Start
+            &&& commit.seq.changed
+            &&& progress is Issued
+            &&& first.issued is Some
+            &&& calls.len() >= 2
+            &&& match calls[0] {
+                crate::verified::flight_spec::AAct::PutKey(_) =>
+                    first.issued->Some_0 is Key,
+                crate::verified::flight_spec::AAct::Write { .. } =>
+                    first.issued->Some_0 is Write,
+                _ => false,
+            }
+            &&& run.0 == calls
+            &&& run.1.step is Over
+            &&& run.2
+                == crate::verified::flight_spec::spec_node_after(
+                    commit.seq,
+                    planned.node.core,
+                    tag,
+                )
+        }),
+{
+    let document =
+        echod_concrete::node::DocumentBodyV::Workflow(workflow.objects);
+    let swept = echod_concrete::node::spec_sweep(
+        document,
+        now,
+        retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    ).0;
+    lemma_origin_commit_new_records_closed_sweep(
+        s,
+        w,
+        workflow,
+        now,
+        retry_timeout,
+    );
+    let (planned, commit) = crate::handler_docs::spec_commit_new(
+        s,
+        w,
+        swept,
+        echod_concrete::node::spec_body_deadline(swept),
+        now,
+        None,
+    );
+    reveal(crate::handler_docs::spec_commit_new);
+    crate::verified::flight_spec::lemma_sequence(
+        commit.seq,
+        planned.node.core,
+        tag,
+    );
+    reveal(crate::handler_docs::spec_commit_advance);
+    reveal(crate::handler_docs::spec_issue_write);
+    reveal(crate::verified::flight_spec::spec_calls);
+    reveal(crate::state::spec_store);
 }
 
 /// A successful conditional document response records the exact committed
@@ -3295,6 +3757,129 @@ pub proof fn lemma_timer_fired_preserves_activity(
     ));
 }
 
+pub proof fn lemma_send_all_preserves_timer_control(
+    s: S,
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+)
+    ensures
+        ({
+            let after =
+                crate::handler_docs::spec_send_all(s, outbox);
+            &&& after.timers == s.timers
+            &&& after.node.core.members == s.node.core.members
+            &&& after.cfg.node_id == s.cfg.node_id
+            &&& after.flights == s.flights
+        }),
+    decreases outbox.len(),
+{
+    reveal(crate::handler_docs::spec_send_all);
+    if outbox.len() > 0 {
+        let emitted = crate::state::spec_emit(
+            s,
+            EffectSpec::Send {
+                address: outbox[0].0,
+                message: outbox[0].1,
+            },
+        );
+        reveal(crate::state::spec_emit);
+        lemma_send_all_preserves_timer_control(
+            emitted,
+            outbox.drop_first(),
+        );
+    }
+}
+
+/// Completing the bounded origin sweep releases only its own empty lane and
+/// then returns the firing reservation to the timer dispatcher.  Concurrent
+/// lanes and an arbitrary backlog remain covered by the full timer activity
+/// invariant.
+pub proof fn lemma_closed_origin_flight_finish_preserves_timer_activity(
+    s: S,
+    flight: FlightSpec,
+    done: crate::handler_docs::DoneSpec,
+    firing: crate::handler_docs::FiringSpec,
+    entry: crate::keys::TimerEntrySpec,
+    fired: crate::types::Fired,
+)
+    requires
+        timer_activity_consistent(s),
+        flight.work is Sweep,
+        flight.firing == Some(firing),
+        !flight.debug,
+        s.flights.slots.contains_key(
+            crate::target::spec_name(flight.target),
+        ),
+        s.flights.slots[
+            crate::target::spec_name(flight.target)
+        ].queue.len() == 0,
+        crate::keys::spec_parse_timer_key(firing.key)
+            == Some(entry),
+        firing.at >= entry.deadline(),
+        s.timers.reload_pending
+            || crate::handler_timers::spec_owns_entry(s, entry),
+    ensures
+        timer_activity_consistent(
+            crate::handler_docs::spec_committed(
+                s,
+                flight,
+                done,
+                fired,
+            ),
+        ),
+{
+    let noted = crate::state::spec_note(
+        s,
+        crate::types::NoteSpec::Commit(
+            crate::types::CommitOutcome::Committed,
+        ),
+    );
+    lemma_send_all_preserves_timer_control(noted, done.outbox);
+    let sent = crate::handler_docs::spec_send_all(
+        noted,
+        done.outbox,
+    );
+    let swept = crate::state::spec_note(
+        crate::state::spec_note(
+            sent,
+            crate::types::NoteSpec::Sweep(
+                if done.did {
+                    crate::types::SweepOutcome::Fired
+                } else {
+                    crate::types::SweepOutcome::Idle
+                },
+            ),
+        ),
+        crate::types::NoteSpec::SweepEnd {
+            flight: flight.id,
+            committed: true,
+        },
+    );
+    reveal(crate::state::spec_note);
+    reveal(crate::state::spec_emit);
+    lemma_timer_activity_preserved_by_control_state(s, swept);
+    let name = crate::target::spec_name(flight.target);
+    let released = crate::handler_docs::spec_release(swept, name);
+    reveal(crate::handler_docs::spec_release);
+    reveal(crate::handler_docs::spec_without_slot);
+    assert(released.timers == swept.timers);
+    assert(released.node.core.members == swept.node.core.members);
+    assert(released.cfg.node_id == swept.cfg.node_id);
+    lemma_timer_activity_preserved_by_control_state(swept, released);
+    assert(crate::handler_timers::spec_owns_entry(
+        released,
+        entry,
+    ) == crate::handler_timers::spec_owns_entry(s, entry));
+    lemma_timer_fired_preserves_activity(
+        released,
+        firing,
+        entry,
+        crate::state::spec_now(released),
+        Ok(fired),
+    );
+    reveal(crate::handler_docs::spec_committed);
+    reveal(crate::handler_docs::spec_finish);
+}
+
 /// Runtime bookkeeping agrees with the operation table held by the core.
 pub open spec fn pending_store_consistent(p: ProcessV) -> bool {
     &&& forall|op: OpId|
@@ -3340,6 +3925,233 @@ pub open spec fn related(
 ) -> bool {
     &&& due_submission_frame_related(production, abstract_state)
     &&& timer_activity_consistent(production.core)
+}
+
+/// Everything a completed origin flight must retain around the one document
+/// it linearizes.  The target cache entry is tied to the exact swept body;
+/// every other decided document is interpreted in the pre-trace store and is
+/// transferred to the post-trace store by `others_kept`.
+pub open spec fn closed_origin_commit_endpoint_frame(
+    production: ProcessV,
+    before: AbstractStateV,
+    key: Seq<char>,
+    swept: echod_concrete::node::DocumentBodyV,
+) -> bool {
+    &&& production.core.out.len() == 0
+    &&& pending_store_consistent(production)
+    &&& owners_consistent(production.core)
+    &&& membership_consistent(production.core)
+    &&& flight_lanes_consistent(production.core.flights)
+    &&& timer_activity_consistent(production.core)
+    &&& before.pending.len() == 0
+    &&& forall|i: int|
+        0 <= i < production.core.cache.entries.len() ==> {
+            let entry = #[trigger] production.core.cache.entries[i];
+            let entry_key =
+                logical_key(TargetSpec::Origin(entry.origin));
+            if entry_key == key {
+                spec_loaded_body(entry.cached.loaded) == swept
+            } else {
+                doc_rel(
+                    entry_key,
+                    spec_loaded_body(entry.cached.loaded),
+                    before.store,
+                )
+            }
+        }
+    &&& forall|fid: u64|
+        production.core.flights.inflight.contains_key(fid) ==> {
+            let flight = production.core.flights.inflight[fid];
+            match phase_after(flight.phase) {
+                Some(after) => {
+                    &&& logical_key(flight.target) != key
+                    &&& doc_rel(
+                        logical_key(flight.target),
+                        spec_stored_body(after),
+                        before.store,
+                    )
+                },
+                None => true,
+            }
+        }
+}
+
+/// Full process relation at the successful document-write linearization
+/// endpoint.  The abstract endpoint is constrained by every actual timeout
+/// result in the bounded sweep; the production endpoint retains all runtime,
+/// ownership, membership, lane, cache, and timer invariants.
+pub proof fn lemma_closed_origin_commit_endpoint_related(
+    production: ProcessV,
+    config: ServerConfig,
+    key: Seq<char>,
+    workflow: echod_concrete::document::WorkflowDocumentV,
+    abstract_before: AbstractStateV,
+    abstract_after: AbstractStateV,
+    now: u64,
+)
+    requires
+        key == echod_concrete::node::spec_origin_key(
+            workflow.document,
+        ),
+        doc_rel(
+            key,
+            echod_concrete::node::DocumentBodyV::Workflow(
+                workflow.objects,
+            ),
+            abstract_before.store,
+        ),
+        finite_store(abstract_before.store),
+        echod_concrete::document::workflow_well_formed(workflow),
+        workflow.committed_at <= now,
+        now <= MAX_TIME,
+        0 < config.retry_timeout <= MAX_TIME,
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                now,
+                config.retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            &&& echod_concrete::node::spec_earliest_in(
+                swept,
+                now,
+            ) is None
+            &&& origin_sweep_trace_to(
+                config,
+                key,
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                abstract_before,
+                now,
+                REQUEST_SWEEP_STEPS as nat,
+                abstract_after,
+            )
+            &&& closed_origin_commit_endpoint_frame(
+                production,
+                abstract_before,
+                key,
+                swept,
+            )
+        }),
+    ensures
+        ({
+            let swept = echod_concrete::node::spec_sweep(
+                echod_concrete::node::DocumentBodyV::Workflow(
+                    workflow.objects,
+                ),
+                now,
+                config.retry_timeout,
+                REQUEST_SWEEP_STEPS as nat,
+            ).0;
+            &&& related(production, abstract_after)
+            &&& well_formed(
+                echod_concrete::node::spec_advance_stored(
+                    StoredDocumentV::Workflow(workflow),
+                    swept,
+                    now,
+                ),
+            )
+        }),
+{
+    let document =
+        echod_concrete::node::DocumentBodyV::Workflow(workflow.objects);
+    let swept = echod_concrete::node::spec_sweep(
+        document,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    ).0;
+    lemma_closed_origin_sweep_preserves_well_formed(
+        workflow,
+        now,
+        config.retry_timeout,
+        REQUEST_SWEEP_STEPS as nat,
+    );
+    lemma_origin_sweep_trace_endpoint_frames(
+        config,
+        key,
+        document,
+        abstract_before,
+        now,
+        REQUEST_SWEEP_STEPS as nat,
+        abstract_after,
+    );
+    assert(cache_related(
+        production.core.cache,
+        production.core.flights,
+        abstract_after.store,
+    )) by {
+        assert forall|i: int|
+            0 <= i < production.core.cache.entries.len()
+            implies {
+                let entry =
+                    #[trigger] production.core.cache.entries[i];
+                let target = TargetSpec::Origin(entry.origin);
+                !(
+                    exists|fid: u64|
+                        production.core.flights.inflight
+                            .contains_key(fid)
+                            && production.core.flights.inflight[fid]
+                                .target == target
+                            && phase_after(
+                                production.core.flights.inflight[fid]
+                                    .phase,
+                            ) is Some
+                ) ==> doc_rel(
+                    logical_key(target),
+                    spec_loaded_body(entry.cached.loaded),
+                    abstract_after.store,
+                )
+            } by {
+            let entry = production.core.cache.entries[i];
+            let entry_key =
+                logical_key(TargetSpec::Origin(entry.origin));
+            if entry_key == key {
+                assert(spec_loaded_body(entry.cached.loaded) == swept);
+            } else {
+                assert(echod_concrete::interpret::others_kept(
+                    key,
+                    abstract_before.store,
+                    abstract_after.store,
+                ));
+            }
+        }
+    }
+    assert(flights_related(
+        production.core.flights,
+        abstract_after.store,
+    )) by {
+        assert forall|fid: u64|
+            production.core.flights.inflight.contains_key(fid)
+            implies {
+                let flight =
+                    production.core.flights.inflight[fid];
+                match phase_after(flight.phase) {
+                    Some(after) => doc_rel(
+                        logical_key(flight.target),
+                        spec_stored_body(after),
+                        abstract_after.store,
+                    ),
+                    None => true,
+                }
+            } by {
+            let flight = production.core.flights.inflight[fid];
+            match phase_after(flight.phase) {
+                Some(after) => {
+                    assert(echod_concrete::interpret::others_kept(
+                        key,
+                        abstract_before.store,
+                        abstract_after.store,
+                    ));
+                },
+                None => {},
+            }
+        }
+    }
+    assert(abstract_after.pending.len() == 0);
 }
 
 pub proof fn lemma_due_submission_frame_closes_related(
