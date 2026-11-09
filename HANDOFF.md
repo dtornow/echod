@@ -153,6 +153,15 @@ Domain-independent formal machinery:
 - bounded trace search
 - generic forward-simulation-to-trace-refinement theorem
 
+Its message-passing layer is split by dependency direction:
+
+```text
+rover/comm  <-  rover/spec  <-  rover/test
+```
+
+`comm` is shared data, `spec` is mathematical semantics and refinement, and
+`test` is executable search and verified replay.
+
 ### `spec/abstract`
 
 The independent, executable Resonate reference model and its mathematical

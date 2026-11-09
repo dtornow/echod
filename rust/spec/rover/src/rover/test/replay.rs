@@ -1,7 +1,7 @@
 //! Verified replay for Rover certificates.
 //!
 //! Search is untrusted. This module re-executes every named action and proves
-//! that successful replay witnesses [`super::semantics::valid_trace`].
+//! that successful replay witnesses [`crate::rover::spec::semantics::valid_trace`].
 
 use vstd::prelude::*;
 
@@ -9,12 +9,14 @@ use crate::certificate::trusted::{copy, same};
 use crate::Time;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::semantics::{self, Execution, Label, StepResultV, WorldV};
+use super::super::spec::semantics::{self, Execution, Label, StepResultV, WorldV};
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::{
-    BoundaryEvent, ConfigOf, Envelope, ExecEventOf, MessageOf, PidOf, ProcOf, ProcessEvent,
-    RoverExec, RoverProc, RoverProcExec, RoverSpec, SpecOf,
+    ConfigOf, ExecEventOf, MessageOf, PidOf, ProcOf, RoverExec, RoverProcExec, SpecOf,
 };
+use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
+#[allow(unused_imports)]
+use super::super::spec::{RoverProc, RoverSpec};
 
 verus! {
 

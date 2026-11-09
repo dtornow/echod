@@ -8,7 +8,8 @@ use vstd::prelude::*;
 use crate::Time;
 
 #[allow(unused_imports)] // RoverProc is used only by specification bodies
-use super::{BoundaryEvent, Envelope, ProcessEvent, RoverProc, RoverSpec};
+use super::{RoverProc, RoverSpec};
+use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
 
 verus! {
 

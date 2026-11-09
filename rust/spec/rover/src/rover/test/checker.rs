@@ -6,7 +6,8 @@
 use crate::Time;
 
 use super::replay::{Action, ActionOf, Certificate, World};
-use super::{BoundaryEvent, ConfigOf, ExecEventOf, ProcessEvent, RoverExec, RoverProcExec};
+use super::{ConfigOf, ExecEventOf, RoverExec, RoverProcExec};
+use super::super::comm::{BoundaryEvent, ProcessEvent};
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
