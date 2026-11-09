@@ -91,6 +91,9 @@ use crate::verified::node::AKey;
 use crate::verified::node_spec::spec_forget;
 
 #[cfg(verus_keep_ghost)]
+pub use crate::production_relation::*;
+
+#[cfg(verus_keep_ghost)]
 use echod_abstract::model::{empty_store, StateV as AbstractStateV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::StoreV as AbstractStoreV;
