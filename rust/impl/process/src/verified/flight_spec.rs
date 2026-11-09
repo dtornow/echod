@@ -61,11 +61,15 @@ pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeou
     }
 }
 
-/// The model's job as this flight's: one due step is `Fire`.
-pub open spec fn job_of(job: JobV) -> AJob {
+/// The model job represented by a flight. A due workflow closes in one bulk
+/// sweep; schedule due processing remains a separate fire operation.
+pub open spec fn job_of(job: JobV, doc: DocumentBodyV) -> AJob {
     match job {
         JobV::External(request) => AJob::Request(request),
-        JobV::Due => AJob::Fire,
+        JobV::Due => match doc {
+            DocumentBodyV::Workflow(_) => AJob::Sweep,
+            DocumentBodyV::Schedule(_) => AJob::Fire,
+        },
         JobV::Occurrence(pending) => AJob::Occurrence(pending),
     }
 }
@@ -83,7 +87,12 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBod
         },
     ensures
         ({
-            let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout);
+            let (next, reply, born, notify) = spec_step(
+                job_of(flight.job, doc),
+                doc,
+                flight.now,
+                node.retry_timeout,
+            );
             let (after, sent) = spec_decide(node, flight, doc);
             match after.flight {
                 Some(open) => {

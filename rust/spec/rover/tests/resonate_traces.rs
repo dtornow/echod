@@ -373,7 +373,7 @@ fn callback_layer() {
 }
 
 #[test]
-fn settle_resumes_before_return() {
+fn settle_resume_may_run_before_or_after_return() {
     let now = 3_000_000;
     let mut t = Trace::new(now);
     t.step("create a", create("ex:a", FAR, "x").external().op(), st(200));
@@ -382,7 +382,14 @@ fn settle_resumes_before_return() {
     t.step("suspend r on a", suspend("ex:r", 1, &["ex:a"]), st(200));
     t.step("settle a", Request::PromiseSettle(settle("ex:a", "resolved", "v")), st(200));
     let seen = t.c.allowed(&get_task("ex:r"));
-    assert!(!seen.is_empty() && seen.iter().all(task(TaskState::Pending, 1)), "{seen:?}");
+    assert!(
+        !seen.is_empty()
+            && seen.iter().all(|response| {
+                task(TaskState::Pending, 1)(response)
+                    || task(TaskState::Suspended, 1)(response)
+            }),
+        "{seen:?}",
+    );
 }
 
 #[test]
@@ -395,13 +402,7 @@ fn execute_consumed_inside_request_does_not_escape() {
         10,
     );
     assert_eq!(created.len(), 1);
-    assert_eq!(
-        created[0].send,
-        vec![Dispatch::Execute {
-            id: "ex:atomic".into(),
-            version: 0,
-        }],
-    );
+    assert!(created[0].send.is_empty());
 
     let acquired = <ServerConfig as echod_rover::Model>::external(
         &model,
@@ -413,7 +414,7 @@ fn execute_consumed_inside_request_does_not_escape() {
     assert!(st(200)(&acquired[0].resp));
     assert!(
         acquired[0].send.is_empty(),
-        "the pre-sweep Execute was consumed by acquire"
+        "the abstract handler can acquire before the retry timeout runs"
     );
 }
 

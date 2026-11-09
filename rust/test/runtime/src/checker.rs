@@ -23,7 +23,7 @@ use echod_abstract::types::{Request, Response};
 use echod_abstract::{Dispatch, Key, ServerConfig, Store, Work};
 use echod_rover::{
     Checker, Config, Event, ExternalOutcome, Footprint, Grouped, InternalOutcome, Model,
-    Partitioned, Touches, Violation,
+    Partitioned, Sched, Touches, Violation,
 };
 
 use crate::bus::Sent;
@@ -52,12 +52,12 @@ impl Model for TimedServer {
 
     fn external(&self, op: &TimedRequest, state: &Store, _now: u64) -> Vec<ExternalOutcome<Self>> {
         self.0
-            .external(&op.req, state, op.at)
+            .request_transition(&op.req, state, op.at)
             .into_iter()
             .map(|o| ExternalOutcome {
                 next: o.next,
                 resp: o.resp,
-                work: o.work,
+                work: o.work.into_iter().map(Sched::Later).collect(),
                 send: o.send,
                 marks: o.marks,
             })

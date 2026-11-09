@@ -193,6 +193,72 @@ fn settlement_drains_callbacks_and_listeners_before_returning_effects() {
 }
 
 #[test]
+fn multiple_callbacks_to_one_suspended_task_emit_one_direct_execute() {
+    let (doc, _, _) =
+        step(empty_workflow(), create("wf:awaiter", target()), NOW);
+    let acquire = Request::TaskAcquire(TaskAcquireReq {
+        id: "wf:awaiter".into(),
+        version: 0,
+        pid: "worker".into(),
+        ttl: 500,
+    });
+    let (doc, _, _) = step(doc, acquire, NOW + 1);
+    let (doc, _, _) =
+        step(doc, create("wf:first", external()), NOW + 2);
+    let (doc, _, _) =
+        step(doc, create("wf:second", external()), NOW + 3);
+    let suspend = Request::TaskSuspend(TaskSuspendReq {
+        id: "wf:awaiter".into(),
+        version: 1,
+        actions: vec![
+            PromiseRegisterCallbackReq {
+                awaited: "wf:first".into(),
+                awaiter: "wf:awaiter".into(),
+            },
+            PromiseRegisterCallbackReq {
+                awaited: "wf:second".into(),
+                awaiter: "wf:awaiter".into(),
+            },
+        ],
+    });
+    let (doc, response, notes) = step(doc, suspend, NOW + 4);
+    assert_eq!(status(&response), 200);
+    assert!(notes.is_empty());
+
+    let (doc, _, first_notes) =
+        step(doc, settle("wf:first"), NOW + 5);
+    assert_eq!(
+        first_notes,
+        vec![Outbound::Execute {
+            id: "wf:awaiter".into(),
+            version: 1,
+        }],
+    );
+    let first = peek(&doc, &"wf:awaiter".into())
+        .unwrap()
+        .task
+        .unwrap();
+    assert_eq!(first.retry_timeout_at, Some(NOW + 5 + RETRY));
+    assert_eq!(first.resumes, vec!["wf:first".to_string()]);
+
+    let (doc, _, second_notes) =
+        step(doc, settle("wf:second"), NOW + 5);
+    assert!(
+        second_notes.is_empty(),
+        "the already offered task must not emit a duplicate Execute",
+    );
+    let final_task = peek(&doc, &"wf:awaiter".into())
+        .unwrap()
+        .task
+        .unwrap();
+    assert_eq!(
+        final_task.resumes,
+        vec!["wf:first".to_string(), "wf:second".to_string()],
+    );
+    assert_eq!(final_task.retry_timeout_at, Some(NOW + 5 + RETRY));
+}
+
+#[test]
 fn settlement_closes_more_than_256_obligations() {
     let (mut doc, _, _) = step(empty_workflow(), create("wf:awaited", external()), NOW);
     for i in 0..300 {

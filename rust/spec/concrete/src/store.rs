@@ -328,6 +328,28 @@ pub open spec fn spec_etag_chars(body: Seq<u8>) -> Seq<char> {
     spec_hex_from(spec_fnv_acc(spec_lossy(body), 0xcbf29ce484222325), 15)
 }
 
+proof fn lemma_hex_from_len(n: u64, shift: int)
+    requires
+        0 <= shift,
+    ensures
+        spec_hex_from(n, shift).len() == shift + 1,
+    decreases shift,
+{
+    if shift > 0 {
+        lemma_hex_from_len(n, shift - 1);
+    }
+}
+
+pub proof fn lemma_etag_chars_len(body: Seq<u8>)
+    ensures
+        spec_etag_chars(body).len() == 16,
+{
+    lemma_hex_from_len(
+        spec_fnv_acc(spec_lossy(body), 0xcbf29ce484222325),
+        15,
+    );
+}
+
 pub open spec fn spec_cont(b: u8) -> bool {
     b >= 0x80 && b < 0xc0
 }

@@ -413,7 +413,6 @@ pub open spec fn offer_committed(
                 &&& new.state == TaskState::Pending
                 &&& new.retry_timeout_at is Some
                 &&& new.retry_timeout_at.unwrap() > committed_at
-                &&& (!before.contains_key(id) || before[id] != after[id])
                 &&& if before.contains_key(id) {
                     match before[id].task {
                         Some(old) if old.state == TaskState::Pending =>

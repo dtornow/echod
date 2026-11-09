@@ -1025,9 +1025,140 @@ proof fn lemma_abstract_timeout_lands_index(
     ));
 }
 
-/// The three exact abstract timeout edges represented by the split schedule
-/// fire: schedule advancement, queued occurrence insertion, and retry
-/// dispatch.
+/// Lift one finite abstract timeout trace into a silent Rover execution.
+proof fn lemma_abstract_timeout_trace_world(
+    config: ServerConfig,
+    before: World<AbstractModel>,
+    service_slot: int,
+    state: echod_abstract::model::StateV,
+    now: u64,
+    work: Seq<echod_abstract::view::InternalV>,
+) -> (after: World<AbstractModel>)
+    requires
+        0 <= service_slot < before.process.len(),
+        before.process[service_slot]
+            == (echod_abstract::model::Pid::Service, state),
+        before.now <= now,
+        echod_concrete::relation::timeout_trace_legal(
+            config, state, now, work,
+        ),
+    ensures
+        ({
+            let trace =
+                echod_concrete::relation::spec_timeout_trace(
+                    config, state, now, work,
+                );
+            &&& after.process[service_slot]
+                == (
+                    echod_abstract::model::Pid::Service,
+                    trace.state,
+                )
+            &&& matches(
+                AbstractModel,
+                config,
+                before,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                after,
+            )
+        }),
+    decreases work.len(),
+{
+    reveal(echod_concrete::relation::timeout_trace_legal);
+    reveal(echod_concrete::relation::spec_timeout_trace);
+    if work.len() == 0 {
+        echod_concrete::simulation::lemma_empty_matches(
+            config, before,
+        );
+        before
+    } else {
+        let outcome =
+            echod_abstract::machine::spec_process_work(
+                config, work[0], state.store, now,
+            );
+        if outcome.not_due {
+            lemma_abstract_timeout_trace_world(
+                config,
+                before,
+                service_slot,
+                state,
+                now,
+                work.drop_first(),
+            )
+        } else {
+            let result =
+                echod_abstract::model::spec_due_result(
+                    state, outcome,
+                );
+            let results =
+                echod_abstract::model::spec_run_timeout(
+                    config, state, now,
+                );
+            let index = choose|i: int|
+                0 <= i < results.len()
+                    && results[i] == result;
+            lemma_abstract_timeout_lands_index(
+                config,
+                before,
+                service_slot,
+                state,
+                now,
+                index,
+            );
+            let event =
+                ProcessEvent::<
+                    echod_abstract::model::Pid,
+                    echod_abstract::Message,
+                >::Timeout;
+            let label = Label::Process {
+                process: echod_abstract::model::Pid::Service,
+                at: now,
+                event,
+                send: result.send,
+            };
+            let middle = land(
+                before,
+                service_slot,
+                echod_abstract::model::Pid::Service,
+                now,
+                result,
+            );
+            let execution = seq![(label, middle)];
+            reveal(legal);
+            reveal(echod_rover::rover::semantics::before);
+            assert(legal(
+                AbstractModel, config, before, execution,
+            ));
+            assert(AbstractModel.spec_observe(label)
+                =~= Seq::<echod_abstract::BoundaryEvent>::empty());
+            reveal_with_fuel(project, 2);
+            reveal(end);
+            assert(matches(
+                AbstractModel,
+                config,
+                before,
+                Seq::<echod_abstract::BoundaryEvent>::empty(),
+                middle,
+            ));
+            let after =
+                lemma_abstract_timeout_trace_world(
+                    config,
+                    middle,
+                    service_slot,
+                    result.state,
+                    now,
+                    work.drop_first(),
+                );
+            echod_concrete::simulation::lemma_silent_matches_add(
+                config, before, middle, after,
+            );
+            after
+        }
+    }
+}
+
+/// The exact abstract execution represented by a split schedule fire:
+/// schedule advance, occurrence insertion, then the finite timeout trace
+/// corresponding to the origin's atomic bulk sweep.
 pub open spec fn abstract_timeout_endpoint_index(
     config: ServerConfig,
     state: echod_abstract::model::StateV,
@@ -1086,9 +1217,8 @@ pub proof fn lemma_abstract_timeout_endpoint_index(
 {
 }
 
-/// Schedule and retry indices are canonical functions of their established
-/// endpoint states. The singleton runnable occurrence is exactly result zero,
-/// so no timeout index is supplied by the caller.
+/// The schedule and occurrence are concrete abstract timeout edges; the
+/// origin closure is the finite trace corresponding to one bulk sweep.
 pub proof fn lemma_abstract_schedule_fire_world_execution(
     config: ServerConfig,
     before: World<AbstractModel>,
@@ -1124,108 +1254,21 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
             abstract_after,
         ),
     ensures
-        ({
-            let schedule_index =
-                abstract_timeout_endpoint_index(
-                    config,
-                    abstract_before,
-                    now,
-                    scheduled,
-                );
-            let occurrence_index = 0int;
-            let retry_index =
-                abstract_timeout_endpoint_index(
-                    config,
-                    occurred,
-                    now,
+        exists|after: World<AbstractModel>|
+            after.process[service_slot]
+                == (
+                    echod_abstract::model::Pid::Service,
                     abstract_after,
-                );
-            let event =
-                ProcessEvent::<
-                    echod_abstract::model::Pid,
-                    echod_abstract::Message,
-                >::Timeout;
-            let schedule_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    config,
-                    abstract_before,
-                    now,
-                )[schedule_index];
-            let schedule_label = Label::Process {
-                process: echod_abstract::model::Pid::Service,
-                at: now,
-                event,
-                send: schedule_outcome.send,
-            };
-            let after_schedule = land(
-                before,
-                service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                schedule_outcome,
-            );
-            let occurrence_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    config,
-                    scheduled,
-                    now,
-                )[occurrence_index];
-            let occurrence_label = Label::Process {
-                process: echod_abstract::model::Pid::Service,
-                at: now,
-                event,
-                send: occurrence_outcome.send,
-            };
-            let after_occurrence = land(
-                after_schedule,
-                service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                occurrence_outcome,
-            );
-            let retry_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    config,
-                    occurred,
-                    now,
-                )[retry_index];
-            let retry_label = Label::Process {
-                process: echod_abstract::model::Pid::Service,
-                at: now,
-                event,
-                send: retry_outcome.send,
-            };
-            let after_retry = land(
-                after_occurrence,
-                service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                retry_outcome,
-            );
-            let execution = seq![
-                (schedule_label, after_schedule),
-                (occurrence_label, after_occurrence),
-                (retry_label, after_retry),
-            ];
-            &&& legal(
-                AbstractModel,
-                config,
-                before,
-                execution,
-            )
-            &&& end::<AbstractModel>(before, execution)
-                == after_retry
-            &&& after_retry.process[service_slot].1
-                == abstract_after
-            &&& matches(
+                )
+            && #[trigger] matches(
                 AbstractModel,
                 config,
                 before,
                 Seq::<echod_abstract::BoundaryEvent>::empty(),
-                after_retry,
+                after,
             )
-        }),
 {
+    reveal(crate::refinement::schedule_fire_atomic_trace);
     let schedule_index =
         abstract_timeout_endpoint_index(
             config,
@@ -1234,13 +1277,6 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
             scheduled,
         );
     let occurrence_index = 0int;
-    let retry_index =
-        abstract_timeout_endpoint_index(
-            config,
-            occurred,
-            now,
-            abstract_after,
-        );
     assert(exists|index: int|
         #![trigger echod_abstract::model::spec_run_timeout(
             config,
@@ -1269,29 +1305,6 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
         scheduled,
         now,
     )[0].state == occurred);
-    assert(exists|index: int|
-        #![trigger echod_abstract::model::spec_run_timeout(
-            config,
-            occurred,
-            now,
-        )[index]]
-        0 <= index
-            < echod_abstract::model::spec_run_timeout(
-                config,
-                occurred,
-                now,
-            ).len()
-            && echod_abstract::model::spec_run_timeout(
-                config,
-                occurred,
-                now,
-            )[index].state == abstract_after);
-    lemma_abstract_timeout_endpoint_index(
-        config,
-        occurred,
-        now,
-        abstract_after,
-    );
     let event =
         ProcessEvent::<
             echod_abstract::model::Pid,
@@ -1353,37 +1366,9 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
         occurrence_outcome,
     );
     assert(after_occurrence.process[service_slot].1 == occurred);
-    let retry_outcome =
-        echod_abstract::model::spec_run_timeout(
-            config,
-            occurred,
-            now,
-        )[retry_index];
-    lemma_abstract_timeout_lands_index(
-        config,
-        after_occurrence,
-        service_slot,
-        occurred,
-        now,
-        retry_index,
-    );
-    let retry_label = Label::Process {
-        process: echod_abstract::model::Pid::Service,
-        at: now,
-        event,
-        send: retry_outcome.send,
-    };
-    let after_retry = land(
-        after_occurrence,
-        service_slot,
-        echod_abstract::model::Pid::Service,
-        now,
-        retry_outcome,
-    );
     let execution = seq![
         (schedule_label, after_schedule),
         (occurrence_label, after_occurrence),
-        (retry_label, after_retry),
     ];
     reveal(legal);
     reveal(echod_rover::rover::semantics::before);
@@ -1397,21 +1382,44 @@ pub proof fn lemma_abstract_schedule_fire_world_execution(
         =~= Seq::<echod_abstract::BoundaryEvent>::empty());
     assert(AbstractModel.spec_observe(occurrence_label)
         =~= Seq::<echod_abstract::BoundaryEvent>::empty());
-    assert(AbstractModel.spec_observe(retry_label)
-        =~= Seq::<echod_abstract::BoundaryEvent>::empty());
-    reveal_with_fuel(project, 4);
+    reveal_with_fuel(project, 3);
     reveal(end);
     assert(project::<AbstractModel>(AbstractModel, execution)
         =~= Seq::<echod_abstract::BoundaryEvent>::empty());
     assert(end::<AbstractModel>(before, execution)
-        == after_retry);
+        == after_occurrence);
     assert(matches(
         AbstractModel,
         config,
         before,
         Seq::<echod_abstract::BoundaryEvent>::empty(),
-        after_retry,
+        after_occurrence,
     ));
+    let retry_work =
+        choose|work: Seq<echod_abstract::view::InternalV>|
+            #[trigger]
+            echod_concrete::relation::timeout_trace_legal(
+                config, occurred, now, work,
+            ) && echod_concrete::relation::spec_timeout_trace(
+                config, occurred, now, work,
+            ).state == abstract_after;
+    let after =
+        lemma_abstract_timeout_trace_world(
+            config,
+            after_occurrence,
+            service_slot,
+            occurred,
+            now,
+            retry_work,
+        );
+    echod_concrete::simulation::lemma_silent_matches_add(
+        config, before, after_occurrence, after,
+    );
+    assert(after.process[service_slot]
+        == (
+            echod_abstract::model::Pid::Service,
+            abstract_after,
+        ));
 }
 
 /// Irreducible full-document serialization law needed only when a future
@@ -1876,74 +1884,19 @@ pub proof fn lemma_split_schedule_fire_store_events_match_abstract_world(
             schedule_store_at,
             schedule_node_at,
         ),
-        ({
-            let schedule_index =
-                abstract_timeout_endpoint_index(
-                    abstract_config(production_config),
-                    abstract_before,
-                    now,
-                    scheduled,
-                );
-            let occurrence_index = 0int;
-            let retry_index =
-                abstract_timeout_endpoint_index(
-                    abstract_config(production_config),
-                    occurred,
-                    now,
+        exists|after: World<AbstractModel>|
+            after.process[abstract_service_slot]
+                == (
+                    echod_abstract::model::Pid::Service,
                     abstract_after,
-                );
-            let event =
-                ProcessEvent::<
-                    echod_abstract::model::Pid,
-                    echod_abstract::Message,
-                >::Timeout;
-            let schedule_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    abstract_before,
-                    now,
-                )[schedule_index];
-            let after_schedule = land(
-                abstract_before_world,
-                abstract_service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                schedule_outcome,
-            );
-            let occurrence_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    scheduled,
-                    now,
-                )[occurrence_index];
-            let after_occurrence = land(
-                after_schedule,
-                abstract_service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                occurrence_outcome,
-            );
-            let retry_outcome =
-                echod_abstract::model::spec_run_timeout(
-                    abstract_config(production_config),
-                    occurred,
-                    now,
-                )[retry_index];
-            let after_retry = land(
-                after_occurrence,
-                abstract_service_slot,
-                echod_abstract::model::Pid::Service,
-                now,
-                retry_outcome,
-            );
-            matches(
+                )
+            && #[trigger] matches(
                 AbstractModel,
                 abstract_config(production_config),
                 abstract_before_world,
                 Seq::<echod_abstract::BoundaryEvent>::empty(),
-                after_retry,
+                after,
             )
-        }),
 {
     crate::refinement::lemma_schedule_fire_origin_phase_issues_exact_write(
         origin_write_state,

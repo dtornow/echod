@@ -267,62 +267,16 @@ impl ServerConfig {
         r
     }
 
-    /// One internal item. WorkflowTransition is one atomic whole-origin
-    /// transition; schedules and queued occurrences remain independent.
+    /// One internal item. Schedules and queued occurrences remain
+    /// independent from workflow timeout work.
     pub fn process_work(&self, step: &Work, s: &Store, now: Time) -> (r: InOut)
         ensures
             r@ == spec_process_work(*self, step@, s@, now),
     {
         match step {
-            Work::WorkflowTransition(id) => {
-                let request = Request::PromiseGet(PromiseGetReq { id: copy(id) });
-                proof {
-                    lemma_string_of(*id);
-                    assert(request == Request::PromiseGet(PromiseGetReq {
-                        id: spec_string(id@),
-                    }));
-                }
-                let mut outcomes = self.request_transition(&request, s, now);
-                if outcomes.len() == 0 {
-                    let r = InOut {
-                        next: copy_store(s),
-                        work: Vec::new(),
-                        send: Vec::new(),
-                        marks: Vec::new(),
-                        not_due: true,
-                    };
-                    proof {
-                        broadcast use group_views;
-                        assert(r@ == spec_noop(s@));
-                    }
-                    r
-                } else {
-                    let ghost before = outcomes@;
-                    let outcome = outcomes.remove(0);
-                    proof {
-                        broadcast use group_views;
-                        assert(outcome@ == crate::view::outs_v(before)[0]);
-                    }
-                    let r = InOut {
-                        next: outcome.next,
-                        work: outcome.work,
-                        send: outcome.send,
-                        marks: outcome.marks,
-                        not_due: false,
-                    };
-                    proof {
-                        assert(r@ == InOutV {
-                            next: crate::view::outs_v(before)[0].next,
-                            work: crate::view::outs_v(before)[0].work,
-                            send: crate::view::outs_v(before)[0].send,
-                            not_due: false,
-                        });
-                    }
-                    r
-                }
-            },
             Work::PromiseTimeout(id) => self.process_promise_timeout(id, s, now),
-            Work::Callback { awaited, awaiter } => self.process_callback(awaited, awaiter, s, now),
+            Work::Callback { awaited, awaiter } =>
+                self.process_callback(awaited, awaiter, s, now),
             Work::Listener { awaited, address } => self.process_listener(awaited, address, s, now),
             Work::TaskLeaseTimeout(id) => self.process_lease_timeout(id, s, now),
             Work::TaskRetryTimeout(id) => self.process_retry_timeout(id, s, now),
@@ -380,22 +334,9 @@ pub open spec fn spec_body(item: Sched<InternalV>) -> InternalV {
 
 pub open spec fn spec_process_work(config: ServerConfig, step: InternalV, s: StoreV, now: Time) -> InOutV {
     match step {
-        InternalV::WorkflowTransition(id) => {
-            let request = Request::PromiseGet(PromiseGetReq { id: spec_string(id) });
-            let outcomes = crate::view::spec_request_transition(config, request, s, now);
-            if outcomes.len() == 0 {
-                spec_noop(s)
-            } else {
-                InOutV {
-                    next: outcomes[0].next,
-                    work: outcomes[0].work,
-                    send: outcomes[0].send,
-                    not_due: false,
-                }
-            }
-        },
         InternalV::PromiseTimeout(id) => spec_promise_timeout(s, id, now),
-        InternalV::Callback { awaited, awaiter } => spec_callback(s, awaited, awaiter, now),
+        InternalV::Callback { awaited, awaiter } =>
+            spec_callback(s, awaited, awaiter, now),
         InternalV::Listener { awaited, address } => spec_listener(s, awaited, address, now),
         InternalV::TaskLeaseTimeout(id) => spec_lease(s, id, now),
         InternalV::TaskRetryTimeout(id) => spec_retry(config, s, id, now),

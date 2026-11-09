@@ -506,8 +506,6 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
 /// `Occurrence` to the queue; that is the only work a step starts.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Work {
-    /// One atomic two-phase transition over the workflow containing this id.
-    WorkflowTransition(Id),
     PromiseTimeout(Id),
     Callback { awaited: Id, awaiter: Id },
     Listener { awaited: Id, address: String },

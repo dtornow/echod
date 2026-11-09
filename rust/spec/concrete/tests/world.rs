@@ -492,7 +492,7 @@ fn a_due_retry_offers_the_task() {
             tags: vec![("resonate:target".into(), "worker".into())],
         }),
     );
-    let (node_state, store_state, _) = deliver(
+    let (node_state, _, send) = deliver(
         pid,
         node_state,
         store_state,
@@ -502,19 +502,20 @@ fn a_due_retry_offers_the_task() {
             message: Message::Request(create),
         },
     );
-    assert_eq!(node(&node_state).wake, Some(5));
-    let (node_state, _, send) = deliver(pid, node_state, store_state, 5, &ProcessEvent::Timeout);
-    assert_eq!(
-        send,
-        vec![(
-            Pid::Outside,
-            Message::Output(Output::Dispatch(Dispatch::Execute {
-                id: "a:1".into(),
-                version: 0,
-            })),
-        )]
-    );
     assert_eq!(node(&node_state).wake, Some(5_005));
+    match send.as_slice() {
+        [
+            (Pid::Outside, Message::Output(Output::Response { .. })),
+            (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(Dispatch::Execute {
+                    id,
+                    version: 0,
+                })),
+            ),
+        ] => assert_eq!(id, "a:1"),
+        other => panic!("task create {other:?}"),
+    }
 }
 
 #[test]
@@ -556,7 +557,7 @@ fn a_settled_listener_is_told() {
             )),
         },
     );
-    let (node_state, store_state, _) = deliver(
+    let (node_state, _, send) = deliver(
         pid,
         node_state,
         store_state,
@@ -573,13 +574,15 @@ fn a_settled_listener_is_told() {
             )),
         },
     );
-    assert_eq!(node(&node_state).wake, Some(7));
-    let (_, _, send) = deliver(pid, node_state, store_state, 7, &ProcessEvent::Timeout);
+    assert_eq!(node(&node_state).wake, None);
     match &send[..] {
-        [(
-            Pid::Outside,
-            Message::Output(Output::Dispatch(Dispatch::Unblock { address, promise })),
-        )] => {
+        [
+            (Pid::Outside, Message::Output(Output::Response { .. })),
+            (
+                Pid::Outside,
+                Message::Output(Output::Dispatch(Dispatch::Unblock { address, promise })),
+            ),
+        ] => {
             assert_eq!(address, "http://x");
             assert_eq!(promise.id, "a:1");
             assert_eq!(promise.state, PromiseState::Resolved);

@@ -35,9 +35,14 @@ use crate::node::{
 #[cfg(verus_keep_ghost)]
 use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreReq, StoreRes};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{spec_create_if_absent, spec_handler};
+use echod_abstract::machine::{
+    spec_create_if_absent, spec_handler, spec_process_work,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{Model as AModel, Pid as APid, spec_run_timeout, StateV};
+use echod_abstract::model::{
+    Model as AModel, Pid as APid, spec_due_result,
+    spec_run_timeout, StateV,
+};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
@@ -129,8 +134,14 @@ pub open spec fn decision(flight: FlightV, doc: DocumentBodyV, retry_timeout: u6
 ) {
     match flight.job {
         JobV::External(request) => {
-            let (next, response) = spec_handle(doc, request, flight.now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notes) =
+                crate::node::spec_request_transition(
+                    doc,
+                    request,
+                    flight.now,
+                    retry_timeout,
+                );
+            (next, Some(response), born, notes)
         },
         JobV::Due => spec_due_transition(doc, flight.now, retry_timeout),
         JobV::Occurrence(pending) => (
@@ -319,15 +330,23 @@ pub open spec fn flight_ok(node: NodeV) -> bool {
         None => true,
         Some(flight) => {
             let (next, reply, born, notes) = decision(flight, loaded(node, flight.key), node.retry_timeout);
+            &&& flight.key.len() <= usize::MAX as int
             &&& spec_owns(node, flight.key)
             &&& flight.op < node.next_op
             &&& job_keyed(flight)
+            &&& match flight.etag {
+                Some(chars) =>
+                    chars.len() <= usize::MAX as int,
+                None => true,
+            }
             &&& if !flight.writing {
                 &&& flight.etag is None
                 &&& spec_cached(node, flight.key) is None
             } else {
                 &&& flight.etag == cached_etag(node, flight.key)
                 &&& flight.decided == Some(spec_encode_body(next))
+                &&& flight.decided.unwrap().len()
+                    <= usize::MAX as int
                 &&& flight.born == born
                 &&& flight.notify == notes
                 &&& flight.reply == flight_reply(flight, reply)
@@ -635,9 +654,78 @@ pub open spec fn note_sends(notes: Seq<NoteV>) -> Seq<(APid, AMessage)> {
     notes.map_values(|note: NoteV| (APid::Outside, AMessage::Output(note_output(note))))
 }
 
-/// The due step of one document: nothing is due, or one abstract timeout
-/// result does the same, sends the same dispatches, queues the same
-/// occurrences, and keeps the store finite.
+#[cfg(verus_keep_ghost)]
+pub struct TimeoutTraceV {
+    pub state: StateV,
+    pub send: Seq<(APid, AMessage)>,
+}
+
+/// Execute a fixed finite list of abstract timeout work. Items whose guards
+/// are false are stutters and do not consume an abstract event.
+pub open spec fn spec_timeout_trace(
+    config: ServerConfig,
+    state: StateV,
+    now: u64,
+    work: Seq<InternalV>,
+) -> TimeoutTraceV
+    decreases work.len(),
+{
+    if work.len() == 0 {
+        TimeoutTraceV { state, send: Seq::empty() }
+    } else {
+        let outcome =
+            spec_process_work(config, work[0], state.store, now);
+        if outcome.not_due {
+            spec_timeout_trace(
+                config, state, now, work.drop_first(),
+            )
+        } else {
+            let result = spec_due_result(state, outcome);
+            let tail = spec_timeout_trace(
+                config, result.state, now, work.drop_first(),
+            );
+            TimeoutTraceV {
+                state: tail.state,
+                send: result.send + tail.send,
+            }
+        }
+    }
+}
+
+/// Every non-stuttering item in the fixed list is an offered timeout at the
+/// state where it executes.
+pub open spec fn timeout_trace_legal(
+    config: ServerConfig,
+    state: StateV,
+    now: u64,
+    work: Seq<InternalV>,
+) -> bool
+    decreases work.len(),
+{
+    if work.len() == 0 {
+        true
+    } else {
+        let outcome =
+            spec_process_work(config, work[0], state.store, now);
+        if outcome.not_due {
+            timeout_trace_legal(
+                config, state, now, work.drop_first(),
+            )
+        } else {
+            let result = spec_due_result(state, outcome);
+            &&& spec_run_timeout(config, state, now).contains(result)
+            &&& timeout_trace_legal(
+                config,
+                result.state,
+                now,
+                work.drop_first(),
+            )
+        }
+    }
+}
+
+/// One atomic concrete document transition is either a stutter or matches a
+/// finite, silent abstract timeout trace with the same endpoint and effects.
 pub open spec fn due_agrees(
     config: ServerConfig,
     key: Seq<char>,
@@ -647,17 +735,18 @@ pub open spec fn due_agrees(
 ) -> bool {
     let (next, _, born, notes) = spec_due_transition(doc, now, config.retry_timeout);
     ||| next == doc && born.len() == 0 && notes.len() == 0
-    ||| exists|j: int|
-        #![trigger spec_run_timeout(config, state, now)[j]]
-        {
-            let results = spec_run_timeout(config, state, now);
-            &&& 0 <= j < results.len()
-            &&& results[j].send == note_sends(notes)
-            &&& results[j].state.pending == state.pending + items(born)
-            &&& doc_rel(key, next, results[j].state.store)
-            &&& others_kept(key, state.store, results[j].state.store)
-            &&& finite_store(results[j].state.store)
-        }
+    ||| exists|work: Seq<InternalV>|
+        #[trigger] timeout_trace_legal(config, state, now, work)
+        && {
+        let trace =
+            spec_timeout_trace(config, state, now, work);
+        &&& note_sends(notes).to_set()
+            .subset_of(trace.send.to_set())
+        &&& trace.state.pending == state.pending + items(born)
+        &&& doc_rel(key, next, trace.state.store)
+        &&& others_kept(key, state.store, trace.state.store)
+        &&& finite_store(trace.state.store)
+    }
 }
 
 pub open spec fn dues_agree(config: ServerConfig) -> bool {

@@ -268,6 +268,8 @@ pub axiom fn axiom_string_ext(a: String, b: String)
         a@ == b@,
     ensures
         a == b,
+        a@.len() <= usize::MAX as int,
+        b@.len() <= usize::MAX as int,
 ;
 
 /// A promise record is its fields.

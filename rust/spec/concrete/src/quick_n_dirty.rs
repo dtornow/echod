@@ -22,9 +22,10 @@ use crate::document::{
 #[cfg(verus_keep_ghost)]
 use crate::node::{
     spec_advance_stored, spec_awaitable, spec_body_deadline, spec_earliest_in,
-    spec_drain_callbacks, spec_drain_keys, spec_drain_settled_object, spec_handle, spec_key, spec_obj_due,
+    spec_clear_listener_keys, spec_clear_settled_listeners, spec_drain_callback_keys,
+    spec_drain_callbacks, spec_drain_settled_callbacks, spec_handle, spec_key, spec_obj_due,
     spec_project_due_object, spec_project_keys, spec_project_obj, spec_request_document,
-    spec_request_transition, spec_resume, spec_resume_callbacks, spec_sorted, spec_sorted_present,
+    spec_record, spec_request_transition, spec_resume, spec_resume_callbacks, spec_sorted, spec_sorted_present,
     spec_stored_body, spec_sweep,
     spec_stored_committed_at, spec_stored_name, spec_targeted, spec_unavailable,
     spec_unlease, DocumentBodyV, PendingV,
@@ -121,6 +122,37 @@ pub open spec fn workflow_relaxed(
     }
 }
 
+/// Phase 1 has advanced every due promise, lease, and retry beyond `now`.
+pub open spec fn deadlines_closed(object: ObjV, now: u64) -> bool {
+    &&& object.promise.state == PromiseState::Pending ==>
+        object.promise.timeout_at > now
+    &&& match object.task {
+        Some(task) if object.promise.state == PromiseState::Pending
+            && task.state == TaskState::Acquired =>
+                task.lease_timeout_at is Some
+                    && task.lease_timeout_at.unwrap() > now,
+        Some(task) if object.promise.state == PromiseState::Pending
+            && task.state == TaskState::Pending =>
+                task.retry_timeout_at is Some
+                    && task.retry_timeout_at.unwrap() > now,
+        _ => true,
+    }
+}
+
+pub open spec fn map_deadlines_closed(
+    objects: Map<Seq<char>, ObjV>,
+    now: u64,
+) -> bool {
+    forall|id: Seq<char>| #[trigger] objects.contains_key(id) ==>
+        deadlines_closed(objects[id], now)
+}
+
+pub open spec fn settlement_queue_closed(object: ObjV) -> bool {
+    object.promise.state == PromiseState::Pending
+        || (object.promise.callbacks.len() == 0
+            && object.promise.listeners.len() == 0)
+}
+
 pub proof fn lemma_full_implies_relaxed(workflow: WorkflowDocumentV, now: u64)
     requires
         crate::document::workflow_well_formed(workflow),
@@ -183,6 +215,36 @@ proof fn lemma_map_due_none(
                 assert(keys.drop_first().contains(id));
             }
         };
+    }
+}
+
+proof fn lemma_objects_closed_implies_map_due_none(
+    map: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    now: u64,
+)
+    requires
+        forall|i: int| 0 <= i < keys.len() ==>
+            map.contains_key(#[trigger] keys[i])
+                && spec_obj_due(map[keys[i]], now) is None,
+    ensures
+        crate::node::spec_map_due(map, keys, now) is None,
+    decreases keys.len(),
+{
+    reveal(crate::node::spec_map_due);
+    if keys.len() > 0 {
+        assert forall|i: int| 0 <= i < keys.drop_first().len()
+            implies
+                map.contains_key(#[trigger] keys.drop_first()[i])
+                    && spec_obj_due(
+                        map[keys.drop_first()[i]], now,
+                    ) is None by {
+            assert(keys.drop_first()[i] == keys[i + 1]);
+        };
+        lemma_objects_closed_implies_map_due_none(
+            map, keys.drop_first(), now,
+        );
+        reveal(crate::node::spec_earlier);
     }
 }
 
@@ -667,12 +729,15 @@ pub proof fn lemma_pop_callback_and_resume(
     objects: Map<Seq<char>, ObjV>,
     id: Seq<char>,
     now: u64,
+    retry_timeout: u64,
 )
     requires
         workflow_relaxed(name, objects, now),
         objects.contains_key(id),
         objects[id].promise.state != PromiseState::Pending,
         objects[id].promise.callbacks.len() > 0,
+        0 < retry_timeout <= MAX_TIME,
+        map_deadlines_closed(objects, now),
     ensures
         ({
             let object = objects[id];
@@ -687,7 +752,15 @@ pub proof fn lemma_pop_callback_and_resume(
             });
             workflow_relaxed(
                 name,
-                spec_resume(popped, awaiter, id, since, now),
+                spec_resume(
+                    popped, awaiter, id, since, now, retry_timeout,
+                ),
+                now,
+            )
+            && map_deadlines_closed(
+                spec_resume(
+                    popped, awaiter, id, since, now, retry_timeout,
+                ),
                 now,
             )
         }),
@@ -704,7 +777,19 @@ pub proof fn lemma_pop_callback_and_resume(
         ..object
     };
     let popped = objects.insert(id, popped_object);
-    let resumed = spec_resume(popped, awaiter, id, since, now);
+    let resumed =
+        spec_resume(popped, awaiter, id, since, now, retry_timeout);
+    reveal(map_deadlines_closed);
+    assert(map_deadlines_closed(popped, now)) by {
+        assert forall|x: Seq<char>| popped.contains_key(x) implies
+            deadlines_closed(popped[x], now) by {
+            if x != id {
+                assert(popped[x] == objects[x]);
+            } else {
+                reveal(deadlines_closed);
+            }
+        };
+    };
     crate::handlers::lemma_skip_no_duplicates(object.promise.callbacks);
     assert(promise_relaxed(id, popped_object, now));
     assert(task_relaxed(popped_object));
@@ -798,6 +883,23 @@ pub proof fn lemma_pop_callback_and_resume(
             }
         };
     };
+    assert forall|x: Seq<char>| #[trigger] resumed.contains_key(x) implies
+        deadlines_closed(resumed[x], now) by {
+        assert(popped.contains_key(x));
+        if x == awaiter {
+            reveal(spec_resume);
+            reveal(deadlines_closed);
+            if projected.task is Some
+                && projected.task.unwrap().state == TaskState::Suspended
+            {
+                assert(spec_sat_add(now, retry_timeout) > now);
+            } else {
+                assert(deadlines_closed(popped[x], now));
+            }
+        } else {
+            assert(resumed[x] == popped[x]);
+        }
+    };
 }
 
 pub proof fn lemma_project_keys_keeps_domain(
@@ -820,21 +922,333 @@ pub proof fn lemma_project_keys_keeps_domain(
     }
 }
 
+proof fn lemma_project_due_object_closes_deadlines(
+    id: Seq<char>,
+    object: ObjV,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        promise_relaxed(id, object, now),
+        task_relaxed(object),
+        now <= MAX_TIME,
+        0 < retry_timeout <= MAX_TIME,
+    ensures
+        deadlines_closed(
+            spec_project_due_object(object, now, retry_timeout),
+            now,
+        ),
+{
+    reveal(spec_project_due_object);
+    reveal(deadlines_closed);
+    reveal(task_relaxed);
+    assert(spec_sat_add(now, retry_timeout) > now);
+    if object.promise.state == PromiseState::Pending
+        && object.promise.timeout_at <= now
+    {
+        reveal(spec_project_obj);
+        reveal(crate::node::spec_project_prom);
+        reveal(crate::node::spec_fulfill_task);
+    } else if object.promise.state == PromiseState::Pending {
+        match object.task {
+            Some(task) if task.state == TaskState::Acquired => {
+                if match task.lease_timeout_at {
+                    Some(at) => at <= now,
+                    None => false,
+                } {
+                    reveal(spec_unlease);
+                }
+            },
+            Some(task) if task.state == TaskState::Pending => {},
+            _ => {},
+        }
+    }
+}
+
+pub proof fn lemma_project_keys_closes_deadlines(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        0 < retry_timeout <= MAX_TIME,
+        count <= keys.len(),
+        forall|i: int| 0 <= i < count ==>
+            objects.contains_key(#[trigger] keys[i]),
+    ensures
+        ({
+            let projected = spec_project_keys(
+                objects, keys, count, now, retry_timeout,
+            );
+            forall|i: int| 0 <= i < count ==>
+                deadlines_closed(projected[#[trigger] keys[i]], now)
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_project_keys_preserves_relaxed(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_project_keys_closes_deadlines(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_project_keys_keeps_domain(
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        let prior = spec_project_keys(
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        reveal(workflow_relaxed);
+        lemma_project_due_object_closes_deadlines(
+            id, prior[id], now, retry_timeout,
+        );
+        let projected =
+            prior.insert(
+                id,
+                spec_project_due_object(
+                    prior[id], now, retry_timeout,
+                ),
+            );
+        assert forall|i: int| 0 <= i < count implies
+            deadlines_closed(projected[#[trigger] keys[i]], now) by {
+            if keys[i] != id {
+                assert(i < count - 1);
+                assert(projected[keys[i]] == prior[keys[i]]);
+            }
+        };
+    }
+}
+
 pub proof fn lemma_drain_callbacks_keeps_domain(
     objects: Map<Seq<char>, ObjV>,
     id: Seq<char>,
     count: nat,
     now: u64,
+    retry_timeout: u64,
 )
     ensures
-        spec_drain_callbacks(objects, id, count, now).dom() == objects.dom(),
+        spec_drain_callbacks(
+            objects, id, count, now, retry_timeout,
+        ).dom() == objects.dom(),
     decreases count,
 {
     reveal(spec_drain_callbacks);
     if count > 0 {
         lemma_drain_callbacks_keeps_domain(
-            objects, id, (count - 1) as nat, now,
+            objects, id, (count - 1) as nat, now, retry_timeout,
         );
+    }
+}
+
+proof fn lemma_resume_preserves_promises(
+    objects: Map<Seq<char>, ObjV>,
+    awaiter: Seq<char>,
+    awaited: Seq<char>,
+    since: u64,
+    now: u64,
+    retry_timeout: u64,
+)
+    ensures
+        ({
+            let resumed = spec_resume(
+                objects,
+                awaiter,
+                awaited,
+                since,
+                now,
+                retry_timeout,
+            );
+            forall|id: Seq<char>| #[trigger] resumed.contains_key(id) ==>
+                resumed[id].promise == objects[id].promise
+        }),
+{
+    reveal(spec_resume);
+}
+
+pub proof fn lemma_drain_callbacks_preserves_other_promises(
+    objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    ensures
+        ({
+            let drained = spec_drain_callbacks(
+                objects, id, count, now, retry_timeout,
+            );
+            forall|other: Seq<char>|
+                other != id && #[trigger] drained.contains_key(other) ==>
+                    drained[other].promise == objects[other].promise
+        }),
+    decreases count,
+{
+    reveal(spec_drain_callbacks);
+    if count > 0 {
+        lemma_drain_callbacks_preserves_other_promises(
+            objects,
+            id,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        let prior = spec_drain_callbacks(
+            objects, id, (count - 1) as nat, now, retry_timeout,
+        );
+        if prior.contains_key(id)
+            && prior[id].promise.callbacks.len() > 0
+        {
+            let awaiter = prior[id].promise.callbacks[0];
+            let since = match prior[id].promise.settled_at {
+                Some(at) => at,
+                None => 0,
+            };
+            let popped = prior.insert(id, ObjV {
+                promise: PromV {
+                    callbacks: prior[id].promise.callbacks.skip(1),
+                    ..prior[id].promise
+                },
+                ..prior[id]
+            });
+            lemma_resume_preserves_promises(
+                popped,
+                awaiter,
+                id,
+                since,
+                now,
+                retry_timeout,
+            );
+            assert forall|other: Seq<char>|
+                other != id
+                    && spec_resume(
+                        popped,
+                        awaiter,
+                        id,
+                        since,
+                        now,
+                        retry_timeout,
+                    ).contains_key(other)
+                implies
+                    spec_resume(
+                        popped,
+                        awaiter,
+                        id,
+                        since,
+                        now,
+                        retry_timeout,
+                    )[other].promise
+                        == objects[other].promise by {
+                assert(popped[other].promise
+                    == prior[other].promise);
+            };
+        }
+    }
+}
+
+pub proof fn lemma_drain_callbacks_preserves_record(
+    objects: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        objects.contains_key(id),
+    ensures
+        ({
+            let drained = spec_drain_callbacks(
+                objects, id, count, now, retry_timeout,
+            );
+            &&& drained.contains_key(id)
+            &&& drained[id].promise.listeners
+                == objects[id].promise.listeners
+            &&& spec_record(
+                crate::model::spec_string(id),
+                drained[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            )
+        }),
+    decreases count,
+{
+    reveal(spec_drain_callbacks);
+    if count > 0 {
+        lemma_drain_callbacks_preserves_record(
+            objects,
+            id,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        let prior = spec_drain_callbacks(
+            objects, id, (count - 1) as nat, now, retry_timeout,
+        );
+        if prior[id].promise.callbacks.len() > 0 {
+            let awaiter = prior[id].promise.callbacks[0];
+            let since = match prior[id].promise.settled_at {
+                Some(at) => at,
+                None => 0,
+            };
+            let popped = prior.insert(id, ObjV {
+                promise: PromV {
+                    callbacks: prior[id].promise.callbacks.skip(1),
+                    ..prior[id].promise
+                },
+                ..prior[id]
+            });
+            lemma_resume_preserves_promises(
+                popped,
+                awaiter,
+                id,
+                since,
+                now,
+                retry_timeout,
+            );
+            let resumed = spec_resume(
+                popped,
+                awaiter,
+                id,
+                since,
+                now,
+                retry_timeout,
+            );
+            assert(resumed.contains_key(id));
+            assert(resumed[id].promise == popped[id].promise);
+            assert(popped[id].promise.listeners
+                == objects[id].promise.listeners);
+            assert(spec_record(
+                crate::model::spec_string(id),
+                popped[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            ));
+        }
     }
 }
 
@@ -844,15 +1258,20 @@ pub proof fn lemma_drain_callbacks_length(
     id: Seq<char>,
     count: nat,
     now: u64,
+    retry_timeout: u64,
 )
     requires
         workflow_relaxed(name, objects, now),
         objects.contains_key(id),
         objects[id].promise.state != PromiseState::Pending,
         count <= objects[id].promise.callbacks.len(),
+        0 < retry_timeout <= MAX_TIME,
+        map_deadlines_closed(objects, now),
     ensures
         ({
-            let drained = spec_drain_callbacks(objects, id, count, now);
+            let drained = spec_drain_callbacks(
+                objects, id, count, now, retry_timeout,
+            );
             &&& drained.contains_key(id)
             &&& drained[id].promise.callbacks.len()
                 == objects[id].promise.callbacks.len() - count
@@ -865,13 +1284,19 @@ pub proof fn lemma_drain_callbacks_length(
     if count > 0 {
         lemma_drain_callbacks_preserves_relaxed(
             name, objects, id, (count - 1) as nat, now,
+            retry_timeout,
         );
         lemma_drain_callbacks_length(
             name, objects, id, (count - 1) as nat, now,
+            retry_timeout,
         );
         let prior =
-            spec_drain_callbacks(objects, id, (count - 1) as nat, now);
-        lemma_pop_callback_and_resume(name, prior, id, now);
+            spec_drain_callbacks(
+                objects, id, (count - 1) as nat, now, retry_timeout,
+            );
+        lemma_pop_callback_and_resume(
+            name, prior, id, now, retry_timeout,
+        );
         reveal(spec_resume);
     }
 }
@@ -882,16 +1307,27 @@ pub proof fn lemma_drain_callbacks_preserves_relaxed(
     id: Seq<char>,
     count: nat,
     now: u64,
+    retry_timeout: u64,
 )
     requires
         workflow_relaxed(name, objects, now),
         objects.contains_key(id),
         objects[id].promise.state != PromiseState::Pending,
         count <= objects[id].promise.callbacks.len(),
+        0 < retry_timeout <= MAX_TIME,
+        map_deadlines_closed(objects, now),
     ensures
         workflow_relaxed(
             name,
-            spec_drain_callbacks(objects, id, count, now),
+            spec_drain_callbacks(
+                objects, id, count, now, retry_timeout,
+            ),
+            now,
+        )
+        && map_deadlines_closed(
+            spec_drain_callbacks(
+                objects, id, count, now, retry_timeout,
+            ),
             now,
         ),
     decreases count,
@@ -900,40 +1336,130 @@ pub proof fn lemma_drain_callbacks_preserves_relaxed(
     if count > 0 {
         lemma_drain_callbacks_preserves_relaxed(
             name, objects, id, (count - 1) as nat, now,
+            retry_timeout,
         );
         lemma_drain_callbacks_length(
             name, objects, id, (count - 1) as nat, now,
+            retry_timeout,
         );
         let prior =
-            spec_drain_callbacks(objects, id, (count - 1) as nat, now);
+            spec_drain_callbacks(
+                objects, id, (count - 1) as nat, now, retry_timeout,
+            );
         assert(prior[id].promise.callbacks.len() > 0);
-        lemma_pop_callback_and_resume(name, prior, id, now);
+        lemma_pop_callback_and_resume(
+            name, prior, id, now, retry_timeout,
+        );
     }
 }
 
-pub proof fn lemma_drain_keys_keeps_domain(
+pub proof fn lemma_drain_callback_keys_keeps_domain(
     objects: Map<Seq<char>, ObjV>,
     keys: Seq<Seq<char>>,
     count: nat,
     now: u64,
+    retry_timeout: u64,
 )
-    requires count <= keys.len(),
+    requires
+        count <= keys.len(),
     ensures
-        spec_drain_keys(objects, keys, count, now).dom() == objects.dom(),
+        spec_drain_callback_keys(
+            objects, keys, count, now, retry_timeout,
+        ).dom() == objects.dom(),
     decreases count,
 {
     if count > 0 {
-        lemma_drain_keys_keeps_domain(
-            objects, keys, (count - 1) as nat, now,
+        lemma_drain_callback_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
         );
-        let prior = spec_drain_keys(objects, keys, (count - 1) as nat, now);
+        let prior = spec_drain_callback_keys(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
         let id = keys[count as int - 1];
-        if prior.contains_key(id) && prior[id].promise.state != PromiseState::Pending {
+        if prior.contains_key(id)
+            && prior[id].promise.state != PromiseState::Pending
+        {
             lemma_drain_callbacks_keeps_domain(
-                prior, id, prior[id].promise.callbacks.len(), now,
+                prior,
+                id,
+                prior[id].promise.callbacks.len(),
+                now,
+                retry_timeout,
             );
         }
-        reveal(spec_drain_settled_object);
+        reveal(spec_drain_settled_callbacks);
+    }
+}
+
+pub proof fn lemma_clear_listener_keys_keeps_domain(
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+    ensures
+        spec_clear_listener_keys(objects, keys, count).dom()
+            == objects.dom(),
+    decreases count,
+{
+    if count > 0 {
+        lemma_clear_listener_keys_keeps_domain(
+            objects, keys, (count - 1) as nat,
+        );
+        reveal(spec_clear_settled_listeners);
+    }
+}
+
+pub proof fn lemma_clear_listener_keys_preserves_queue_source(
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+    ensures
+        ({
+            let next =
+                spec_clear_listener_keys(objects, keys, count);
+            forall|id: Seq<char>| #[trigger] next.contains_key(id)
+                ==> {
+                    &&& next[id].promise.state
+                        == objects[id].promise.state
+                    &&& next[id].promise.callbacks
+                        == objects[id].promise.callbacks
+                }
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_clear_listener_keys_preserves_queue_source(
+            objects, keys, (count - 1) as nat,
+        );
+        let prior = spec_clear_listener_keys(
+            objects, keys, (count - 1) as nat,
+        );
+        let id = keys[count as int - 1];
+        reveal(spec_clear_settled_listeners);
+        assert forall|other: Seq<char>|
+            #[trigger] spec_clear_settled_listeners(
+                prior, id,
+            ).contains_key(other) implies {
+                &&& spec_clear_settled_listeners(
+                    prior, id,
+                )[other].promise.state
+                    == objects[other].promise.state
+                &&& spec_clear_settled_listeners(
+                    prior, id,
+                )[other].promise.callbacks
+                    == objects[other].promise.callbacks
+            } by {
+            if other != id {
+                assert(spec_clear_settled_listeners(
+                    prior, id,
+                )[other] == prior[other]);
+            }
+        };
     }
 }
 
@@ -1003,6 +1529,7 @@ pub proof fn lemma_project_keys_preserves_relaxed(
                     assert(next.task.unwrap().state == TaskState::Fulfilled);
                 } else {
                     assert(next == old);
+                    assert(prior.insert(id, next) =~= prior);
                 }
             },
             _ => {},
@@ -1014,7 +1541,63 @@ pub proof fn lemma_project_keys_preserves_relaxed(
     }
 }
 
-pub proof fn lemma_drain_keys_preserves_relaxed(
+pub proof fn lemma_drain_callback_keys_preserves_relaxed(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        0 < retry_timeout <= MAX_TIME,
+        map_deadlines_closed(objects, now),
+        count <= keys.len(),
+        forall|i: int| 0 <= i < count ==>
+            objects.contains_key(#[trigger] keys[i]),
+    ensures
+        ({
+            let next = spec_drain_callback_keys(
+                objects, keys, count, now, retry_timeout,
+            );
+            &&& workflow_relaxed(name, next, now)
+            &&& map_deadlines_closed(next, now)
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_drain_callback_keys_preserves_relaxed(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_drain_callback_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+        let prior = spec_drain_callback_keys(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        if prior[id].promise.state != PromiseState::Pending {
+            lemma_drain_callbacks_preserves_relaxed(
+                name,
+                prior,
+                id,
+                prior[id].promise.callbacks.len(),
+                now,
+                retry_timeout,
+            );
+        }
+        reveal(spec_drain_settled_callbacks);
+    }
+}
+
+pub proof fn lemma_clear_listener_keys_preserves_relaxed(
     name: Seq<char>,
     objects: Map<Seq<char>, ObjV>,
     keys: Seq<Seq<char>>,
@@ -1023,41 +1606,37 @@ pub proof fn lemma_drain_keys_preserves_relaxed(
 )
     requires
         workflow_relaxed(name, objects, now),
+        map_deadlines_closed(objects, now),
         count <= keys.len(),
         forall|i: int| 0 <= i < count ==>
             objects.contains_key(#[trigger] keys[i]),
     ensures
-        workflow_relaxed(name, spec_drain_keys(objects, keys, count, now), now),
+        ({
+            let next =
+                spec_clear_listener_keys(objects, keys, count);
+            &&& workflow_relaxed(name, next, now)
+            &&& map_deadlines_closed(next, now)
+        }),
     decreases count,
 {
     if count > 0 {
-        lemma_drain_keys_preserves_relaxed(
-            name,
-            objects,
-            keys,
-            (count - 1) as nat,
-            now,
+        lemma_clear_listener_keys_preserves_relaxed(
+            name, objects, keys, (count - 1) as nat, now,
         );
-        lemma_drain_keys_keeps_domain(
-            objects, keys, (count - 1) as nat, now,
+        lemma_clear_listener_keys_keeps_domain(
+            objects, keys, (count - 1) as nat,
         );
-        let prior = spec_drain_keys(objects, keys, (count - 1) as nat, now);
+        lemma_clear_listener_keys_preserves_queue_source(
+            objects, keys, (count - 1) as nat,
+        );
+        let prior = spec_clear_listener_keys(
+            objects, keys, (count - 1) as nat,
+        );
         let id = keys[count as int - 1];
         assert(prior.contains_key(id));
-        let next = spec_drain_settled_object(prior, id, now);
-        reveal(spec_drain_settled_object);
+        reveal(spec_clear_settled_listeners);
         if prior[id].promise.state != PromiseState::Pending {
-            let callback_count = prior[id].promise.callbacks.len();
-            lemma_drain_callbacks_preserves_relaxed(
-                name, prior, id, callback_count, now,
-            );
-            let resumed =
-                spec_drain_callbacks(prior, id, callback_count, now);
-            lemma_drain_callbacks_keeps_domain(
-                prior, id, callback_count, now,
-            );
-            assert(resumed.contains_key(id));
-            let object = resumed[id];
+            let object = prior[id];
             let cleared = ObjV {
                 promise: PromV {
                     listeners: Seq::empty(),
@@ -1067,15 +1646,215 @@ pub proof fn lemma_drain_keys_preserves_relaxed(
             };
             assert(promise_relaxed(id, cleared, now));
             assert(task_relaxed(cleared));
-            assert(suspended_rung_relaxed(resumed, id, object, now));
+            assert(suspended_rung_relaxed(prior, id, object, now));
             reveal(suspended_rung_relaxed);
             assert(suspended_rung_relaxed(
-                resumed.insert(id, cleared), id, cleared, now,
+                prior.insert(id, cleared), id, cleared, now,
             ));
+            assert(map_deadlines_closed(
+                prior.insert(id, cleared), now,
+            )) by {
+                reveal(map_deadlines_closed);
+                assert forall|x: Seq<char>|
+                    prior.insert(id, cleared).contains_key(x) implies
+                    deadlines_closed(
+                        prior.insert(id, cleared)[x], now,
+                    ) by {
+                    if x == id {
+                        reveal(deadlines_closed);
+                    } else {
+                        assert(prior.insert(id, cleared)[x]
+                            == prior[x]);
+                    }
+                };
+            };
             lemma_replace_same_callbacks(
-                name, resumed, id, cleared, now,
+                name, prior, id, cleared, now,
             );
         }
+    }
+}
+
+pub proof fn lemma_drain_callback_keys_closes_callbacks(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+    retry_timeout: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        map_deadlines_closed(objects, now),
+        0 < retry_timeout <= MAX_TIME,
+        count <= keys.len(),
+        keys.take(count as int).no_duplicates(),
+        forall|i: int| 0 <= i < count ==>
+            objects.contains_key(#[trigger] keys[i]),
+    ensures
+        ({
+            let drained = spec_drain_callback_keys(
+                objects, keys, count, now, retry_timeout,
+            );
+            forall|i: int| 0 <= i < count
+                && drained[keys[i]].promise.state
+                    != PromiseState::Pending ==>
+                drained[#[trigger] keys[i]].promise.callbacks.len() == 0
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_drain_callback_keys_preserves_relaxed(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_drain_callback_keys_closes_callbacks(
+            name,
+            objects,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        lemma_drain_callback_keys_keeps_domain(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+        let prior = spec_drain_callback_keys(
+            objects, keys, (count - 1) as nat, now, retry_timeout,
+        );
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        reveal(spec_drain_settled_callbacks);
+        if prior[id].promise.state != PromiseState::Pending {
+            let callback_count = prior[id].promise.callbacks.len();
+            lemma_drain_callbacks_preserves_relaxed(
+                name, prior, id, callback_count, now, retry_timeout,
+            );
+            lemma_drain_callbacks_length(
+                name, prior, id, callback_count, now, retry_timeout,
+            );
+            lemma_drain_callbacks_preserves_other_promises(
+                prior, id, callback_count, now, retry_timeout,
+            );
+            lemma_drain_callbacks_keeps_domain(
+                prior, id, callback_count, now, retry_timeout,
+            );
+        }
+        let next = spec_drain_settled_callbacks(
+            prior, id, now, retry_timeout,
+        );
+        assert forall|i: int| 0 <= i < count
+            && next[keys[i]].promise.state
+                != PromiseState::Pending implies
+            next[#[trigger] keys[i]].promise.callbacks.len() == 0 by {
+            if keys[i] == id {
+                if prior[id].promise.state == PromiseState::Pending {
+                    assert(next == prior);
+                }
+            } else {
+                assert(i < count - 1) by {
+                    if i == count - 1 {
+                        assert(keys[i] == id);
+                    }
+                };
+                if prior[id].promise.state != PromiseState::Pending {
+                    assert(next[keys[i]].promise
+                        == prior[keys[i]].promise);
+                } else {
+                    assert(next == prior);
+                }
+            }
+        };
+    }
+}
+
+pub proof fn lemma_clear_listener_keys_closes_queues(
+    name: Seq<char>,
+    objects: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: u64,
+)
+    requires
+        workflow_relaxed(name, objects, now),
+        map_deadlines_closed(objects, now),
+        count <= keys.len(),
+        keys.take(count as int).no_duplicates(),
+        forall|i: int| 0 <= i < count ==> {
+            &&& objects.contains_key(#[trigger] keys[i])
+            &&& (objects[keys[i]].promise.state
+                    != PromiseState::Pending ==>
+                objects[keys[i]].promise.callbacks.len() == 0)
+        },
+    ensures
+        ({
+            let drained =
+                spec_clear_listener_keys(objects, keys, count);
+            forall|i: int| 0 <= i < count ==>
+                settlement_queue_closed(
+                    drained[#[trigger] keys[i]],
+                )
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_clear_listener_keys_preserves_relaxed(
+            name, objects, keys, (count - 1) as nat, now,
+        );
+        lemma_clear_listener_keys_closes_queues(
+            name, objects, keys, (count - 1) as nat, now,
+        );
+        lemma_clear_listener_keys_keeps_domain(
+            objects, keys, (count - 1) as nat,
+        );
+        lemma_clear_listener_keys_preserves_queue_source(
+            objects, keys, (count - 1) as nat,
+        );
+        let prior = spec_clear_listener_keys(
+            objects, keys, (count - 1) as nat,
+        );
+        let id = keys[count as int - 1];
+        assert(prior.contains_key(id));
+        assert(prior[id].promise.state
+            == objects[id].promise.state);
+        assert(prior[id].promise.callbacks
+            == objects[id].promise.callbacks);
+        let next = spec_clear_settled_listeners(prior, id);
+        reveal(spec_clear_settled_listeners);
+        if prior[id].promise.state != PromiseState::Pending {
+            assert(objects[id].promise.state
+                != PromiseState::Pending);
+            assert(objects[id].promise.callbacks.len() == 0);
+            assert(prior[id].promise.callbacks.len() == 0);
+        }
+        assert(settlement_queue_closed(next[id])) by {
+            reveal(settlement_queue_closed);
+            if prior[id].promise.state == PromiseState::Pending {
+                assert(next == prior);
+            }
+        };
+        assert forall|i: int| 0 <= i < count implies
+            settlement_queue_closed(next[#[trigger] keys[i]]) by {
+            if keys[i] == id {
+            } else {
+                assert(i < count - 1) by {
+                    if i == count - 1 {
+                        assert(keys[i] == id);
+                    }
+                };
+                if prior[id].promise.state
+                    != PromiseState::Pending
+                {
+                    assert(next[keys[i]] == prior[keys[i]]);
+                } else {
+                    assert(next == prior);
+                }
+            }
+        };
     }
 }
 
@@ -1117,20 +1896,102 @@ pub proof fn lemma_sweep_preserves_relaxed(
     lemma_project_keys_keeps_domain(
         objects, keys, keys.len(), now, retry_timeout,
     );
-    lemma_drain_keys_preserves_relaxed(
-        name, projected, keys, keys.len(), now,
+    lemma_project_keys_closes_deadlines(
+        name, objects, keys, keys.len(), now, retry_timeout,
     );
-    let drained = spec_drain_keys(projected, keys, keys.len(), now);
-    lemma_drain_keys_keeps_domain(
-        projected, keys, keys.len(), now,
+    assert(map_deadlines_closed(projected, now)) by {
+        reveal(map_deadlines_closed);
+        assert forall|id: Seq<char>| projected.contains_key(id) implies
+            deadlines_closed(projected[id], now) by {
+            assert(objects.contains_key(id));
+            assert(keys.contains(id));
+            let i = choose|i: int|
+                0 <= i < keys.len() && keys[i] == id;
+            assert(deadlines_closed(projected[keys[i]], now));
+        };
+    };
+    crate::effects::lemma_sorted_no_duplicates(objects.dom());
+    lemma_drain_callback_keys_preserves_relaxed(
+        name, projected, keys, keys.len(), now, retry_timeout,
     );
-    lemma_project_keys_preserves_relaxed(
-        name, drained, keys, keys.len(), now, retry_timeout,
+    lemma_drain_callback_keys_closes_callbacks(
+        name, projected, keys, keys.len(), now, retry_timeout,
     );
-    let closed = spec_project_keys(
-        drained, keys, keys.len(), now, retry_timeout,
+    let resumed = spec_drain_callback_keys(
+        projected, keys, keys.len(), now, retry_timeout,
     );
-    assert(spec_earliest_in(DocumentBodyV::Workflow(closed), now) is None);
+    lemma_drain_callback_keys_keeps_domain(
+        projected, keys, keys.len(), now, retry_timeout,
+    );
+    assert forall|i: int| 0 <= i < keys.len() implies
+        resumed.contains_key(#[trigger] keys[i]) by {
+    };
+    lemma_clear_listener_keys_preserves_relaxed(
+        name, resumed, keys, keys.len(), now,
+    );
+    lemma_clear_listener_keys_closes_queues(
+        name, resumed, keys, keys.len(), now,
+    );
+    let drained =
+        spec_clear_listener_keys(resumed, keys, keys.len());
+    lemma_clear_listener_keys_keeps_domain(
+        resumed, keys, keys.len(),
+    );
+    assert forall|i: int| 0 <= i < keys.len() implies {
+        &&& drained.contains_key(#[trigger] keys[i])
+        &&& spec_obj_due(drained[keys[i]], now) is None
+    } by {
+        assert(deadlines_closed(drained[keys[i]], now));
+        assert(settlement_queue_closed(drained[keys[i]]));
+        reveal(deadlines_closed);
+        reveal(settlement_queue_closed);
+        reveal(spec_obj_due);
+        reveal(crate::node::spec_promise_due);
+        reveal(crate::node::spec_lease_due);
+        reveal(crate::node::spec_retry_due);
+        reveal(crate::node::spec_earlier);
+    };
+    lemma_objects_closed_implies_map_due_none(
+        drained, keys, now,
+    );
+    assert(spec_earliest_in(
+        DocumentBodyV::Workflow(drained), now,
+    ) is None);
+    reveal(crate::node::spec_project_workflow);
+    reveal(crate::node::spec_drain_workflow);
+    assert(spec_sweep(
+        DocumentBodyV::Workflow(objects), now, retry_timeout,
+    ).0 == DocumentBodyV::Workflow(drained));
+}
+
+pub proof fn lemma_sweep_keeps_domain(
+    objects: Map<Seq<char>, ObjV>,
+    now: u64,
+    retry_timeout: u64,
+)
+    ensures
+        spec_sweep(
+            DocumentBodyV::Workflow(objects),
+            now,
+            retry_timeout,
+        ).0->Workflow_0.dom() == objects.dom(),
+{
+    let keys = spec_sorted_present(objects);
+    let projected = spec_project_keys(
+        objects, keys, keys.len(), now, retry_timeout,
+    );
+    let resumed = spec_drain_callback_keys(
+        projected, keys, keys.len(), now, retry_timeout,
+    );
+    lemma_project_keys_keeps_domain(
+        objects, keys, keys.len(), now, retry_timeout,
+    );
+    lemma_drain_callback_keys_keeps_domain(
+        projected, keys, keys.len(), now, retry_timeout,
+    );
+    lemma_clear_listener_keys_keeps_domain(
+        resumed, keys, keys.len(),
+    );
 }
 
 /// Inserting a schedule occurrence into a closed workflow preserves every
@@ -2388,6 +3249,816 @@ pub proof fn lemma_handle_preserves_relaxed(
     }
 }
 
+pub open spec fn future_offer_preserved(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    now: u64,
+) -> bool {
+    after.contains_key(id)
+        && after[id].promise.state == PromiseState::Pending
+        && after[id].task is Some
+        && after[id].task.unwrap().state == TaskState::Pending
+        && after[id].task.unwrap().retry_timeout_at is Some
+        && after[id].task.unwrap().retry_timeout_at.unwrap() > now
+        ==> {
+            &&& before.contains_key(id)
+            &&& before[id].promise.state == PromiseState::Pending
+            &&& before[id].task is Some
+            &&& before[id].task.unwrap().state == TaskState::Pending
+            &&& before[id].task.unwrap().retry_timeout_at is Some
+            &&& before[id].task.unwrap().retry_timeout_at.unwrap() > now
+            &&& before[id].task.unwrap().version
+                == after[id].task.unwrap().version
+        }
+}
+
+proof fn lemma_future_offer_transitive(
+    first: Map<Seq<char>, ObjV>,
+    second: Map<Seq<char>, ObjV>,
+    third: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+    now: u64,
+)
+    requires
+        future_offer_preserved(first, second, id, now),
+        future_offer_preserved(second, third, id, now),
+    ensures
+        future_offer_preserved(first, third, id, now),
+{
+}
+
+proof fn lemma_extend_preserves_future_offer(
+    objects: Map<Seq<char>, ObjV>,
+    pid: Seq<char>,
+    tasks: Seq<TaskRef>,
+    index: int,
+    id: Seq<char>,
+    now: u64,
+)
+    requires
+        0 <= index <= tasks.len(),
+    ensures
+        future_offer_preserved(
+            objects,
+            crate::node::spec_extend(objects, pid, tasks, now, index),
+            id,
+            now,
+        ),
+    decreases tasks.len() - index,
+{
+    reveal(crate::node::spec_extend);
+    if index < tasks.len() {
+        let current = tasks[index].id@;
+        if !objects.contains_key(current) {
+            lemma_extend_preserves_future_offer(
+                objects,
+                pid,
+                tasks,
+                index + 1,
+                id,
+                now,
+            );
+        } else {
+            let object = spec_project_obj(objects[current], now);
+            match object.task {
+                Some(task) if task.state == TaskState::Acquired
+                    && task.version == tasks[index].version
+                    && task.pid == Some(pid) => {
+                        let ttl = match task.ttl { Some(n) => n, None => 0 };
+                        let next = ObjV {
+                            task: Some(TkV {
+                                lease_timeout_at: Some(spec_sat_add(now, ttl)),
+                                ..task
+                            }),
+                            ..object
+                        };
+                        let updated = objects.insert(current, next);
+                        assert(future_offer_preserved(
+                            objects,
+                            updated,
+                            id,
+                            now,
+                        )) by {
+                            if id == current {
+                                assert(updated[id].task.unwrap().state
+                                    == TaskState::Acquired);
+                            } else {
+                                assert(updated[id] == objects[id]);
+                            }
+                        };
+                        lemma_extend_preserves_future_offer(
+                            updated,
+                            pid,
+                            tasks,
+                            index + 1,
+                            id,
+                            now,
+                        );
+                        lemma_future_offer_transitive(
+                            objects,
+                            updated,
+                            crate::node::spec_extend(
+                                updated,
+                                pid,
+                                tasks,
+                                now,
+                                index + 1,
+                            ),
+                            id,
+                            now,
+                        );
+                    },
+                _ => {
+                    lemma_extend_preserves_future_offer(
+                        objects,
+                        pid,
+                        tasks,
+                        index + 1,
+                        id,
+                        now,
+                    );
+                },
+            }
+        }
+    }
+}
+
+proof fn lemma_add_callbacks_preserves_future_offer(
+    objects: Map<Seq<char>, ObjV>,
+    awaiter: Seq<char>,
+    actions: Seq<PromiseRegisterCallbackReq>,
+    index: int,
+    id: Seq<char>,
+    now: u64,
+)
+    requires
+        0 <= index <= actions.len(),
+    ensures
+        future_offer_preserved(
+            objects,
+            crate::node::spec_add_callbacks(
+                objects,
+                awaiter,
+                actions,
+                index,
+            ),
+            id,
+            now,
+        ),
+    decreases actions.len() - index,
+{
+    reveal(crate::node::spec_add_callbacks);
+    if index < actions.len() {
+        let awaited = actions[index].awaited@;
+        if !objects.contains_key(awaited) {
+            lemma_add_callbacks_preserves_future_offer(
+                objects,
+                awaiter,
+                actions,
+                index + 1,
+                id,
+                now,
+            );
+        } else {
+            let object = objects[awaited];
+            let callbacks = if object.promise.callbacks.contains(awaiter) {
+                object.promise.callbacks
+            } else {
+                object.promise.callbacks.push(awaiter)
+            };
+            let next = ObjV {
+                promise: PromV { callbacks, ..object.promise },
+                ..object
+            };
+            let updated = objects.insert(awaited, next);
+            assert(future_offer_preserved(
+                objects,
+                updated,
+                id,
+                now,
+            )) by {
+                if id == awaited {
+                    assert(updated[id].task == objects[id].task);
+                } else {
+                    assert(updated[id] == objects[id]);
+                }
+            };
+            lemma_add_callbacks_preserves_future_offer(
+                updated,
+                awaiter,
+                actions,
+                index + 1,
+                id,
+                now,
+            );
+            lemma_future_offer_transitive(
+                objects,
+                updated,
+                crate::node::spec_add_callbacks(
+                    updated,
+                    awaiter,
+                    actions,
+                    index + 1,
+                ),
+                id,
+                now,
+            );
+        }
+    }
+}
+
+pub proof fn lemma_handle_preserves_future_offer(
+    objects: Map<Seq<char>, ObjV>,
+    request: Request,
+    now: u64,
+    id: Seq<char>,
+)
+    requires
+        !matches!(request, Request::ScheduleGet(_)
+            | Request::ScheduleCreate(_)
+            | Request::ScheduleDelete(_)),
+    ensures
+        ({
+            let next = spec_handle(
+                DocumentBodyV::Workflow(objects),
+                request,
+                now,
+            ).0->Workflow_0;
+            future_offer_preserved(objects, next, id, now)
+        }),
+{
+    reveal(spec_handle);
+    reveal(spec_project_obj);
+    let next = spec_handle(
+        DocumentBodyV::Workflow(objects),
+        request,
+        now,
+    ).0->Workflow_0;
+    match request {
+        Request::PromiseGet(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::PromiseCreate(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::PromiseSettle(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::PromiseRegisterCallback(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::PromiseRegisterListener(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskGet(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskCreate(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskAcquire(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskFulfill(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskRelease(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskHalt(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskContinue(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskHeartbeat(_) => {
+            if let Request::TaskHeartbeat(q) = request {
+                if q.tasks@.len() > 0
+                    && crate::node::spec_one_origin(
+                        q.tasks@,
+                        origin(q.tasks@[0].id@),
+                        0,
+                    )
+                {
+                    lemma_extend_preserves_future_offer(
+                        objects,
+                        q.pid@,
+                        q.tasks@,
+                        0,
+                        id,
+                        now,
+                    );
+                }
+            }
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskSuspend(_) => {
+            if let Request::TaskSuspend(q) = request {
+                lemma_add_callbacks_preserves_future_offer(
+                    objects,
+                    q.id@,
+                    q.actions@,
+                    0,
+                    id,
+                    now,
+                );
+            }
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskFence(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        Request::TaskFenceCheck(_) => {
+            assert(future_offer_preserved(objects, next, id, now));
+        },
+        _ => {},
+    }
+}
+
+proof fn lemma_extend_preserves_listener(
+    objects: Map<Seq<char>, ObjV>,
+    pid: Seq<char>,
+    tasks: Seq<TaskRef>,
+    index: int,
+    now: u64,
+    promise: Seq<char>,
+    address: Seq<char>,
+)
+    requires
+        0 <= index <= tasks.len(),
+        objects.contains_key(promise),
+        objects[promise].promise.listeners.contains(address),
+    ensures
+        ({
+            let next = crate::node::spec_extend(
+                objects, pid, tasks, now, index,
+            );
+            &&& next.contains_key(promise)
+            &&& next[promise].promise.listeners.contains(address)
+        }),
+    decreases tasks.len() - index,
+{
+    reveal(crate::node::spec_extend);
+    reveal(spec_project_obj);
+    if index < tasks.len() {
+        let current = tasks[index].id@;
+        if !objects.contains_key(current) {
+            lemma_extend_preserves_listener(
+                objects, pid, tasks, index + 1, now, promise, address,
+            );
+        } else {
+            let object = spec_project_obj(objects[current], now);
+            match object.task {
+                Some(task) if task.state == TaskState::Acquired
+                    && task.version == tasks[index].version
+                    && task.pid == Some(pid) => {
+                        let ttl = match task.ttl { Some(n) => n, None => 0 };
+                        let next = ObjV {
+                            task: Some(TkV {
+                                lease_timeout_at: Some(spec_sat_add(now, ttl)),
+                                ..task
+                            }),
+                            ..object
+                        };
+                        let updated = objects.insert(current, next);
+                        assert(updated.contains_key(promise));
+                        assert(updated[promise].promise.listeners
+                            .contains(address));
+                        lemma_extend_preserves_listener(
+                            updated,
+                            pid,
+                            tasks,
+                            index + 1,
+                            now,
+                            promise,
+                            address,
+                        );
+                    },
+                _ => {
+                    lemma_extend_preserves_listener(
+                        objects,
+                        pid,
+                        tasks,
+                        index + 1,
+                        now,
+                        promise,
+                        address,
+                    );
+                },
+            }
+        }
+    }
+}
+
+proof fn lemma_add_callbacks_preserves_listener(
+    objects: Map<Seq<char>, ObjV>,
+    awaiter: Seq<char>,
+    actions: Seq<PromiseRegisterCallbackReq>,
+    index: int,
+    promise: Seq<char>,
+    address: Seq<char>,
+)
+    requires
+        0 <= index <= actions.len(),
+        objects.contains_key(promise),
+        objects[promise].promise.listeners.contains(address),
+    ensures
+        ({
+            let next = crate::node::spec_add_callbacks(
+                objects, awaiter, actions, index,
+            );
+            &&& next.contains_key(promise)
+            &&& next[promise].promise.listeners.contains(address)
+        }),
+    decreases actions.len() - index,
+{
+    reveal(crate::node::spec_add_callbacks);
+    if index < actions.len() {
+        let awaited = actions[index].awaited@;
+        if !objects.contains_key(awaited) {
+            lemma_add_callbacks_preserves_listener(
+                objects,
+                awaiter,
+                actions,
+                index + 1,
+                promise,
+                address,
+            );
+        } else {
+            let object = objects[awaited];
+            let callbacks = if object.promise.callbacks.contains(awaiter) {
+                object.promise.callbacks
+            } else {
+                object.promise.callbacks.push(awaiter)
+            };
+            let next = ObjV {
+                promise: PromV { callbacks, ..object.promise },
+                ..object
+            };
+            let updated = objects.insert(awaited, next);
+            assert(updated.contains_key(promise));
+            assert(updated[promise].promise.listeners.contains(address));
+            lemma_add_callbacks_preserves_listener(
+                updated,
+                awaiter,
+                actions,
+                index + 1,
+                promise,
+                address,
+            );
+        }
+    }
+}
+
+proof fn lemma_extend_preserves_settled_record(
+    objects: Map<Seq<char>, ObjV>,
+    pid: Seq<char>,
+    tasks: Seq<TaskRef>,
+    index: int,
+    now: u64,
+    id: Seq<char>,
+)
+    requires
+        0 <= index <= tasks.len(),
+        objects.contains_key(id),
+        objects[id].promise.state != PromiseState::Pending,
+    ensures
+        ({
+            let next = crate::node::spec_extend(
+                objects, pid, tasks, now, index,
+            );
+            &&& next.contains_key(id)
+            &&& spec_record(
+                crate::model::spec_string(id),
+                next[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            )
+            &&& next[id].promise.state != PromiseState::Pending
+        }),
+    decreases tasks.len() - index,
+{
+    reveal(crate::node::spec_extend);
+    reveal(spec_project_obj);
+    if index < tasks.len() {
+        let current = tasks[index].id@;
+        if !objects.contains_key(current) {
+            lemma_extend_preserves_settled_record(
+                objects, pid, tasks, index + 1, now, id,
+            );
+        } else {
+            let object = spec_project_obj(objects[current], now);
+            match object.task {
+                Some(task) if task.state == TaskState::Acquired
+                    && task.version == tasks[index].version
+                    && task.pid == Some(pid) => {
+                        let ttl = match task.ttl { Some(n) => n, None => 0 };
+                        let next = ObjV {
+                            task: Some(TkV {
+                                lease_timeout_at: Some(spec_sat_add(now, ttl)),
+                                ..task
+                            }),
+                            ..object
+                        };
+                        let updated = objects.insert(current, next);
+                        assert(updated.contains_key(id));
+                        assert(updated[id].promise.state
+                            != PromiseState::Pending);
+                        assert(spec_record(
+                            crate::model::spec_string(id),
+                            updated[id].promise,
+                        ) == spec_record(
+                            crate::model::spec_string(id),
+                            objects[id].promise,
+                        ));
+                        lemma_extend_preserves_settled_record(
+                            updated,
+                            pid,
+                            tasks,
+                            index + 1,
+                            now,
+                            id,
+                        );
+                    },
+                _ => {
+                    lemma_extend_preserves_settled_record(
+                        objects,
+                        pid,
+                        tasks,
+                        index + 1,
+                        now,
+                        id,
+                    );
+                },
+            }
+        }
+    }
+}
+
+proof fn lemma_add_callbacks_preserves_settled_record(
+    objects: Map<Seq<char>, ObjV>,
+    awaiter: Seq<char>,
+    actions: Seq<PromiseRegisterCallbackReq>,
+    index: int,
+    id: Seq<char>,
+)
+    requires
+        0 <= index <= actions.len(),
+        objects.contains_key(id),
+        objects[id].promise.state != PromiseState::Pending,
+    ensures
+        ({
+            let next = crate::node::spec_add_callbacks(
+                objects, awaiter, actions, index,
+            );
+            &&& next.contains_key(id)
+            &&& next[id].promise.state != PromiseState::Pending
+            &&& spec_record(
+                crate::model::spec_string(id),
+                next[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            )
+        }),
+    decreases actions.len() - index,
+{
+    reveal(crate::node::spec_add_callbacks);
+    if index < actions.len() {
+        let awaited = actions[index].awaited@;
+        if !objects.contains_key(awaited) {
+            lemma_add_callbacks_preserves_settled_record(
+                objects, awaiter, actions, index + 1, id,
+            );
+        } else {
+            let object = objects[awaited];
+            let callbacks = if object.promise.callbacks.contains(awaiter) {
+                object.promise.callbacks
+            } else {
+                object.promise.callbacks.push(awaiter)
+            };
+            let next = ObjV {
+                promise: PromV { callbacks, ..object.promise },
+                ..object
+            };
+            let updated = objects.insert(awaited, next);
+            assert(updated.contains_key(id));
+            assert(updated[id].promise.state != PromiseState::Pending);
+            assert(spec_record(
+                crate::model::spec_string(id),
+                updated[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            ));
+            lemma_add_callbacks_preserves_settled_record(
+                updated,
+                awaiter,
+                actions,
+                index + 1,
+                id,
+            );
+        }
+    }
+}
+
+pub proof fn lemma_handle_preserves_listener(
+    objects: Map<Seq<char>, ObjV>,
+    request: Request,
+    now: u64,
+    promise: Seq<char>,
+    address: Seq<char>,
+)
+    requires
+        objects.contains_key(promise),
+        objects[promise].promise.listeners.contains(address),
+        !matches!(request, Request::ScheduleGet(_)
+            | Request::ScheduleCreate(_)
+            | Request::ScheduleDelete(_)),
+    ensures
+        ({
+            let next = spec_handle(
+                DocumentBodyV::Workflow(objects),
+                request,
+                now,
+            ).0->Workflow_0;
+            &&& next.contains_key(promise)
+            &&& next[promise].promise.listeners.contains(address)
+        }),
+{
+    reveal(spec_handle);
+    reveal(spec_project_obj);
+    let next = spec_handle(
+        DocumentBodyV::Workflow(objects),
+        request,
+        now,
+    ).0->Workflow_0;
+    match request {
+        Request::PromiseGet(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::PromiseCreate(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::PromiseSettle(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::PromiseRegisterCallback(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::PromiseRegisterListener(q) => {
+            reveal(crate::node::spec_register_listener);
+            if objects.contains_key(q.awaited@) {
+                let object = spec_project_obj(objects[q.awaited@], now);
+                if spec_awaitable(object.promise.tags)
+                    && object.promise.state == PromiseState::Pending
+                {
+                    if q.awaited@ == promise {
+                        assert(object.promise.listeners
+                            == objects[promise].promise.listeners);
+                        if !object.promise.listeners.contains(q.address@) {
+                            let listeners =
+                                object.promise.listeners.push(q.address@);
+                            let i = choose|i: int|
+                                0 <= i < object.promise.listeners.len()
+                                    && object.promise.listeners[i] == address;
+                            assert(listeners[i] == address);
+                            assert(listeners.contains(address));
+                        }
+                    } else {
+                        assert(objects.insert(q.awaited@, object)[promise]
+                            == objects[promise]);
+                    }
+                }
+            }
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskGet(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskCreate(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskAcquire(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskFulfill(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskRelease(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskHalt(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskContinue(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskHeartbeat(q) => {
+            lemma_extend_preserves_listener(
+                objects,
+                q.pid@,
+                q.tasks@,
+                0,
+                now,
+                promise,
+                address,
+            );
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskSuspend(q) => {
+            lemma_add_callbacks_preserves_listener(
+                objects,
+                q.id@,
+                q.actions@,
+                0,
+                promise,
+                address,
+            );
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskFence(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        Request::TaskFenceCheck(_) => {
+            assert(next[promise].promise.listeners.contains(address));
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_handle_preserves_settled_record(
+    objects: Map<Seq<char>, ObjV>,
+    request: Request,
+    now: u64,
+    id: Seq<char>,
+)
+    requires
+        objects.contains_key(id),
+        objects[id].promise.state
+            != PromiseState::Pending,
+        !matches!(request, Request::ScheduleGet(_)
+            | Request::ScheduleCreate(_)
+            | Request::ScheduleDelete(_)),
+    ensures
+        ({
+            let next = spec_handle(
+                DocumentBodyV::Workflow(objects),
+                request,
+                now,
+            ).0->Workflow_0;
+            &&& next.contains_key(id)
+            &&& spec_record(
+                crate::model::spec_string(id),
+                next[id].promise,
+            ) == spec_record(
+                crate::model::spec_string(id),
+                objects[id].promise,
+            )
+        }),
+{
+    reveal(spec_handle);
+    reveal(spec_project_obj);
+    match request {
+        Request::PromiseGet(_) => {},
+        Request::PromiseCreate(_) => {},
+        Request::PromiseSettle(_) => {},
+        Request::PromiseRegisterCallback(_) => {},
+        Request::PromiseRegisterListener(_) => {},
+        Request::TaskGet(_) => {},
+        Request::TaskCreate(_) => {},
+        Request::TaskAcquire(_) => {},
+        Request::TaskFulfill(_) => {},
+        Request::TaskRelease(_) => {},
+        Request::TaskHalt(_) => {},
+        Request::TaskContinue(_) => {},
+        Request::TaskHeartbeat(q) => {
+            lemma_extend_preserves_settled_record(
+                objects,
+                q.pid@,
+                q.tasks@,
+                0,
+                now,
+                id,
+            );
+        },
+        Request::TaskSuspend(q) => {
+            lemma_add_callbacks_preserves_settled_record(
+                objects,
+                q.id@,
+                q.actions@,
+                0,
+                id,
+            );
+        },
+        Request::TaskFence(_) => {},
+        Request::TaskFenceCheck(_) => {},
+        _ => {},
+    }
+}
+
 /// Apply an existing request handler's update to the stored document.
 pub open spec fn on_request(
     document: StoredDocumentV,
@@ -2451,7 +4122,7 @@ pub open spec fn routed(document: StoredDocumentV, request: Request) -> bool {
     request_matches(document, request)
 }
 
-proof fn lemma_key_names_document(request: Request)
+pub proof fn lemma_key_names_document(request: Request)
     ensures
         match (spec_key(request), spec_request_document(request)) {
             (Some(key), Some(document)) => key.skip(2) == document,

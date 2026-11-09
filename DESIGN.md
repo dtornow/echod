@@ -42,8 +42,8 @@ then drains every settled callback and listener queue. `fire_schedule`
 advances one due schedule occurrence; `create_occurrence` births that
 occurrence in its origin and applies the same workflow transition.
 Each ensures it computes its specification — `spec_handle`, `spec_sweep`,
-`spec_fire_schedule`, `spec_occurrence` — and those are the steps of the concrete
-Rover model, which `simulation.rs` proves refines the abstract one.
+`spec_fire_schedule`, `spec_occurrence_transition` — and those are the steps of
+the concrete Rover model, which `simulation.rs` proves refines the abstract one.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
 models under `lean/` state it: 18 request handlers, the fence's check with
@@ -170,10 +170,13 @@ replays its object.
 
 ### Writing
 
-A request loads the document, sweeps it at the request's instant and runs
-the kernel handler on the swept document, drains what the step left owed
-(callbacks and listeners of settled promises, retries now due), and writes
-the rows that changed. The Lean specification projects a promise past its
+A request loads the document, applies the same whole-document two-phase sweep
+at the request's instant, runs the kernel handler, and applies the bulk closure
+again before writing the rows that changed. Phase one projects every due
+promise and task. Phase two drains all callbacks and listeners of promises
+settled by that projection; a suspended callback task is rearmed directly at
+the saturated `now + retryTimeout` and its `Execute` is emitted by that same
+transition. The Lean specification projects a promise past its
 deadline and a lease past its end on every read (`Object.project`): a
 client never sees either as still ahead. The kernel keeps the promise's
 projection in the document and leaves the lease to the sweep, and `decide`
@@ -182,8 +185,9 @@ projecting read would. A task's offers run on a grid anchored where it came
 to be pending, `due + n·retryTimeout` (the kernel's `next_offer`, Lean's
 `nextOffer`): a retry the sweep gets to late is rearmed where an exact
 timer would have put it, a lease reclaimed is retried from its end, a task
-resumed from the awaited promise's settlement. What a step writes does not
-depend on when the node ran it. The step is decided at the later of the
+resumed from the awaited promise's settlement uses the direct callback rule
+above. What a step writes does not depend on when the node ran it. The step is
+decided at the later of the
 node's clock and the document's stamp — the instant of the last write,
 carried in the object's header — so every step on a document is decided no
 earlier than the one before, which is what the kernel is proved for. Every
@@ -525,9 +529,10 @@ with it). `Commit` (`commit.rs`) is one commit's decisions: the previous
 key, whether to arm, what to delete, what to keep. Each function `ensures`
 it equals the specification function of the same name on the state's
 view. `steps.rs` verifies the loops the node runs around the kernel:
-`sweep` leaves nothing due at its instant and leaves the document as it
-was if nothing fired; `drain` is kernel steps; `next_deadline` is the
-least deadline; `clamp_now` the later of clock and stamp. One primitive
+`sweep` is the atomic whole-map projection and queue-draining transition,
+leaves nothing due at its instant, and leaves the document as it was if
+nothing fired; `next_deadline` is the least deadline; `clamp_now` the later
+of clock and stamp. One primitive
 is trusted with its meaning stated: FNV-1a is a function of the string,
 as `str == str` and `String::clone` are.
 
@@ -546,10 +551,9 @@ and is read for one purpose: the instant a step is decided at.
 The actions: a clock advances; a node joins or crashes; a node drops a
 cache entry; and the commit, five actions, one store round trip each.
 `Prepare` loads the bucket's document and decides a step on it, and
-touches nothing: for a request, the document after is the kernel's
-`spec_handle` of the one loaded followed by any sequence of internal
-steps at the same instant, what `drain` ensures; for a sweep, what `sweep`
-then `drain` ensure. `AddTimer`
+touches nothing: for a request, the document after is the atomic pre-sweep,
+kernel `spec_handle`, and atomic post-handler closure; for a fired origin it
+is the same single bulk sweep. `AddTimer`
 puts the key for the document's nearest deadline. `Process` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
@@ -602,12 +606,12 @@ a schedule created on one node and owned by another, never fired. The
 Occurrences theorem is why a fire commits the origin before the schedule.
 
 What the model asks of a node's step is exactly what the node's verified
-functions ensure, and nothing else. A request's document is the handler's
-function then `drain`; a sweep's is `sweep` then `drain`; a fire's two are
-`spec_fire` then `drain`, and a schedule's key with nothing due is what
-`schedule_due` answers. `drain` and `sweep` are proved to keep every
-object's key and the schedules; every handler is proved to drop no object
-and to keep the other kind's rows (`lemma_spec_handle_keeps`). From these
+functions ensure, and nothing else. A request's document is the bulk
+pre-sweep, handler, and bulk post-handler closure; a fired origin is one bulk
+sweep; a schedule fire advances the schedule and inserts its occurrence using
+that same bulk origin transition. The sweep is proved to keep every object's
+key and the schedules; every handler is proved to drop no object and to keep
+the other kind's rows (`lemma_spec_handle_keeps`). From these
 the proof derives what it needs of a step — that a document keeps its
 kind, that no object is lost, that a schedule's rows are the handler's —
 rather than assuming it. The catalogue alone would not give the first two:

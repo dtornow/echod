@@ -2439,8 +2439,7 @@ pub proof fn lemma_non_sweep_origin_commit_path_unchanged(
 }
 
 /// Exact abstract alignment for the atomic origin transition.
-/// Each witness is an actual index in `spec_run_timeout` and must reproduce
-/// the concrete Store projection, dispatch notes, and queued occurrences.
+/// A finite timeout trace represents the two whole-map passes.
 pub open spec fn origin_sweep_matches(
     config: ServerConfig,
     key: Seq<char>,
@@ -2454,31 +2453,28 @@ pub open spec fn origin_sweep_matches(
         config.retry_timeout,
     );
     ||| next == document && born.len() == 0 && notes.len() == 0
-    ||| exists|j: int|
-        #![trigger echod_abstract::model::spec_run_timeout(
+    ||| exists|work: Seq<echod_abstract::view::InternalV>|
+        #[trigger] echod_concrete::relation::timeout_trace_legal(
             config,
             abstract_state,
             now,
-        )[j]]
-    {
-        let results = echod_abstract::model::spec_run_timeout(
-            config,
-            abstract_state,
-            now,
+            work,
+        ) && {
+        let trace = echod_concrete::relation::spec_timeout_trace(
+            config, abstract_state, now, work,
         );
-        &&& 0 <= j < results.len()
-        &&& results[j].send
-            == echod_concrete::relation::note_sends(notes)
-        &&& results[j].state.pending
+        &&& echod_concrete::relation::note_sends(notes).to_set()
+            .subset_of(trace.send.to_set())
+        &&& trace.state.pending
             == abstract_state.pending
                 + echod_concrete::relation::items(born)
-        &&& doc_rel(key, next, results[j].state.store)
+        &&& doc_rel(key, next, trace.state.store)
         &&& echod_concrete::interpret::others_kept(
             key,
             abstract_state.store,
-            results[j].state.store,
+            trace.state.store,
         )
-        &&& finite_store(results[j].state.store)
+        &&& finite_store(trace.state.store)
     }
 }
 
@@ -2514,8 +2510,8 @@ pub proof fn lemma_origin_sweep_matches_abstract_bulk_transition(
     reveal(echod_concrete::relation::due_agrees);
 }
 
-/// The endpoint of the single abstract bulk transition corresponding to the
-/// concrete workflow transition.
+/// The endpoint of the finite abstract timeout trace corresponding to the
+/// atomic concrete workflow transition.
 pub open spec fn origin_bulk_transition_to(
     config: ServerConfig,
     key: Seq<char>,
@@ -2533,32 +2529,29 @@ pub open spec fn origin_bulk_transition_to(
         && born.len() == 0
         && notes.len() == 0
         && final_state == abstract_state
-    ||| exists|j: int|
-        #![trigger echod_abstract::model::spec_run_timeout(
+    ||| exists|work: Seq<echod_abstract::view::InternalV>|
+        #[trigger] echod_concrete::relation::timeout_trace_legal(
             config,
             abstract_state,
             now,
-        )[j]]
-    {
-        let results = echod_abstract::model::spec_run_timeout(
-            config,
-            abstract_state,
-            now,
+            work,
+        ) && {
+        let trace = echod_concrete::relation::spec_timeout_trace(
+            config, abstract_state, now, work,
         );
-        &&& 0 <= j < results.len()
-        &&& final_state == results[j].state
-        &&& results[j].send
-            == echod_concrete::relation::note_sends(notes)
-        &&& results[j].state.pending
+        &&& final_state == trace.state
+        &&& echod_concrete::relation::note_sends(notes).to_set()
+            .subset_of(trace.send.to_set())
+        &&& trace.state.pending
             == abstract_state.pending
                 + echod_concrete::relation::items(born)
-        &&& doc_rel(key, next, results[j].state.store)
+        &&& doc_rel(key, next, trace.state.store)
         &&& echod_concrete::interpret::others_kept(
             key,
             abstract_state.store,
-            results[j].state.store,
+            trace.state.store,
         )
-        &&& finite_store(results[j].state.store)
+        &&& finite_store(trace.state.store)
     }
 }
 
@@ -2603,21 +2596,28 @@ pub proof fn lemma_origin_bulk_transition_endpoint_exists(
             config, key, document, abstract_state, now, abstract_state,
         ));
     } else {
-        let results = echod_abstract::model::spec_run_timeout(
-            config, abstract_state, now,
-        );
-        let j = choose|j: int|
-            0 <= j < results.len()
-                && results[j].send == echod_concrete::relation::note_sends(notes)
-                && results[j].state.pending
+        let work = choose|work: Seq<echod_abstract::view::InternalV>|
+            echod_concrete::relation::timeout_trace_legal(
+                config, abstract_state, now, work,
+            ) && {
+                let trace = echod_concrete::relation::spec_timeout_trace(
+                    config, abstract_state, now, work,
+                );
+                &&& echod_concrete::relation::note_sends(notes).to_set()
+                    .subset_of(trace.send.to_set())
+                &&& trace.state.pending
                     == abstract_state.pending + echod_concrete::relation::items(born)
-                && doc_rel(key, next, results[j].state.store)
-                && echod_concrete::interpret::others_kept(
-                    key, abstract_state.store, results[j].state.store,
+                &&& doc_rel(key, next, trace.state.store)
+                &&& echod_concrete::interpret::others_kept(
+                    key, abstract_state.store, trace.state.store,
                 )
-                && finite_store(results[j].state.store);
+                &&& finite_store(trace.state.store)
+            };
+        let trace = echod_concrete::relation::spec_timeout_trace(
+            config, abstract_state, now, work,
+        );
         assert(origin_bulk_transition_to(
-            config, key, document, abstract_state, now, results[j].state,
+            config, key, document, abstract_state, now, trace.state,
         ));
     }
 }
@@ -2675,22 +2675,6 @@ pub proof fn lemma_origin_bulk_transition_endpoint_frames(
             implies #[trigger] doc_rel(other, body, final_state.store) by {
         }
     } else {
-        let results = echod_abstract::model::spec_run_timeout(
-            config,
-            abstract_state,
-            now,
-        );
-        let j = choose|j: int|
-            0 <= j < results.len()
-                && final_state == results[j].state
-                && results[j].send == echod_concrete::relation::note_sends(notes)
-                && results[j].state.pending
-                    == abstract_state.pending + echod_concrete::relation::items(born)
-                && doc_rel(key, next, results[j].state.store)
-                && echod_concrete::interpret::others_kept(
-                    key, abstract_state.store, results[j].state.store,
-                )
-                && finite_store(results[j].state.store);
         assert(next is Workflow);
         assert(born =~= Seq::<echod_concrete::node::PendingV>::empty());
         assert forall|other: Seq<char>,
@@ -2707,7 +2691,7 @@ pub proof fn lemma_origin_bulk_transition_endpoint_frames(
 /// may subsequently issue deadline-key
 /// actions before its conditional document write, but its committed payload is
 /// already fixed here.
-pub proof fn lemma_origin_commit_new_records_closed_sweep(
+pub proof fn lemma_origin_commit_new_records_bulk_sweep(
     s: S,
     w: crate::handler_docs::WorkingSpec,
     workflow: echod_concrete::document::WorkflowDocumentV,
@@ -2720,16 +2704,6 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
         workflow.committed_at <= now,
         now <= MAX_TIME,
         0 < retry_timeout <= MAX_TIME,
-        ({
-            let swept = echod_concrete::node::spec_sweep(
-                echod_concrete::node::DocumentBodyV::Workflow(
-                    workflow.objects,
-                ),
-                now,
-                retry_timeout,
-            ).0;
-            echod_concrete::node::spec_earliest_in(swept, now) is None
-        }),
     ensures
         ({
             let swept = echod_concrete::node::spec_sweep(
@@ -2769,7 +2743,7 @@ pub proof fn lemma_origin_commit_new_records_closed_sweep(
 /// the conditional document write.  Its verified sequence subsequently
 /// includes the optional previous-key deletion and fired-key collection before
 /// `Done`; all five shapes are the actions consumed by `spec_commit_advance`.
-pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
+pub proof fn lemma_bulk_origin_commit_sequence_covers_write_cleanup(
     s: S,
     fid: u64,
     w: crate::handler_docs::WorkingSpec,
@@ -2794,11 +2768,7 @@ pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
                 now,
                 retry_timeout,
             ).0;
-            &&& swept != document
-            &&& echod_concrete::node::spec_earliest_in(
-                swept,
-                now,
-            ) is None
+            swept != document
         }),
     ensures
         ({
@@ -2867,7 +2837,7 @@ pub proof fn lemma_closed_origin_commit_sequence_covers_write_cleanup(
         now,
         retry_timeout,
     ).0;
-    lemma_origin_commit_new_records_closed_sweep(
+    lemma_origin_commit_new_records_bulk_sweep(
         s,
         w,
         workflow,
@@ -2972,6 +2942,7 @@ pub proof fn lemma_loaded_schedule_identifies_timeout(
             &&& echod_concrete::timers::work_known(
                 abstract_state.store,
                 work,
+                now,
             )
             &&& echod_concrete::timers::offered(
                 config,
@@ -3003,6 +2974,7 @@ pub proof fn lemma_loaded_schedule_identifies_timeout(
     assert(echod_concrete::timers::work_known(
         abstract_state.store,
         work,
+        now,
     ));
     echod_concrete::timers::lemma_work_offered(
         config,
@@ -3021,10 +2993,9 @@ pub proof fn lemma_loaded_schedule_identifies_timeout(
 }
 
 /// The exact abstract trace represented by a successful split schedule fire.
-/// Every edge is an indexed result of the real abstract timeout relation:
-/// schedule advance, queued occurrence creation, then the newly runnable
-/// task's retry dispatch.  `scheduled` and `occurred` are explicit
-/// intermediate states rather than unconstrained relation witnesses.
+/// The schedule advance and occurrence insertion are exact indexed timeout
+/// results. The origin's atomic post-insertion bulk sweep is represented by
+/// its corresponding finite abstract timeout trace.
 pub open spec fn schedule_fire_atomic_trace(
     config: ServerConfig,
     schedule_key: Seq<char>,
@@ -3073,11 +3044,6 @@ pub open spec fn schedule_fire_atomic_trace(
         now,
         config.retry_timeout,
     );
-    let retry_results = echod_abstract::model::spec_run_timeout(
-        config,
-        occurred,
-        now,
-    );
     &&& schedule_step.2.len() == 1
     &&& exists|schedule_index: int|
         #![trigger schedule_results[schedule_index]]
@@ -3096,14 +3062,19 @@ pub open spec fn schedule_fire_atomic_trace(
         now,
     )[0] == occurrence_result
     &&& occurred.pending.len() == 0
-    &&& exists|retry_index: int|
-        #![trigger retry_results[retry_index]]
-        0 <= retry_index < retry_results.len()
-            && retry_results[retry_index].state == abstract_after
-            && retry_results[retry_index].send
-                == echod_concrete::relation::note_sends(
+    &&& exists|work: Seq<echod_abstract::view::InternalV>|
+        #[trigger] echod_concrete::relation::timeout_trace_legal(
+            config, occurred, now, work,
+        ) && {
+            let trace =
+                echod_concrete::relation::spec_timeout_trace(
+                    config, occurred, now, work,
+                );
+            &&& trace.state == abstract_after
+            &&& echod_concrete::relation::note_sends(
                     retry_step.3,
-                )
+                ).to_set().subset_of(trace.send.to_set())
+        }
     &&& doc_rel(schedule_key, schedule_step.0, abstract_after.store)
     &&& doc_rel(origin_key, retry_step.0, abstract_after.store)
     &&& finite_store(abstract_after.store)
@@ -3324,6 +3295,8 @@ pub proof fn lemma_schedule_cas_race_retry_is_idempotent(
 /// retry step and then idle.  The abstract witness is the indexed
 /// `ScheduleTimeout`, its queued `Occurrence`, and the exact retry result
 /// carrying the production Execute effect.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(100)]
 pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
     config: ServerConfig,
     schedule_key: Seq<char>,
@@ -3424,7 +3397,15 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
         abstract_before,
         now,
     );
+    echod_concrete::timers::lemma_changing_schedule_due_exact(
+        config,
+        schedule_key,
+        schedule_doc,
+        abstract_before,
+        now,
+    );
     reveal(echod_concrete::relation::due_agrees);
+    reveal(echod_concrete::timers::schedule_due_exact);
     let schedule_results =
         echod_abstract::model::spec_run_timeout(
             config,
@@ -3524,36 +3505,42 @@ pub proof fn lemma_closed_origin_schedule_fire_matches_atomic_timeout(
         now,
     );
     reveal(echod_concrete::relation::due_agrees);
-    let retry_results =
-        echod_abstract::model::spec_run_timeout(
-            config,
-            occurred,
-            now,
-        );
-    let retry_index = choose|j: int|
-        #![trigger retry_results[j]]
-        0 <= j < retry_results.len()
-            && retry_results[j].send
-                == echod_concrete::relation::note_sends(
-                    retry_step.3,
+    let retry_work =
+        choose|work: Seq<echod_abstract::view::InternalV>|
+            #[trigger]
+            echod_concrete::relation::timeout_trace_legal(
+                config, occurred, now, work,
+            ) && {
+                let trace =
+                    echod_concrete::relation::spec_timeout_trace(
+                        config, occurred, now, work,
+                    );
+                &&& echod_concrete::relation::note_sends(
+                        retry_step.3,
+                    ).to_set().subset_of(trace.send.to_set())
+                &&& trace.state.pending
+                    == occurred.pending
+                        + echod_concrete::relation::items(
+                            retry_step.2,
+                        )
+                &&& doc_rel(
+                    origin_key,
+                    retry_step.0,
+                    trace.state.store,
                 )
-            && retry_results[j].state.pending
-                == occurred.pending
-                    + echod_concrete::relation::items(
-                        retry_step.2,
-                    )
-            && doc_rel(
-                origin_key,
-                retry_step.0,
-                retry_results[j].state.store,
-            )
-            && echod_concrete::interpret::others_kept(
-                origin_key,
-                occurred.store,
-                retry_results[j].state.store,
-            )
-            && finite_store(retry_results[j].state.store);
-    let abstract_after = retry_results[retry_index].state;
+                &&& echod_concrete::interpret::others_kept(
+                    origin_key,
+                    occurred.store,
+                    trace.state.store,
+                )
+                &&& finite_store(trace.state.store)
+            };
+    let retry_trace =
+        echod_concrete::relation::spec_timeout_trace(
+            config, occurred, now, retry_work,
+        );
+    let abstract_after = retry_trace.state;
+    reveal(echod_concrete::interpret::others_kept);
     assert(doc_rel(
         schedule_key,
         schedule_step.0,

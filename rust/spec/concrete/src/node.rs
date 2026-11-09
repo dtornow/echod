@@ -3406,11 +3406,20 @@ proof fn lemma_pend_one(pending: Pending)
     assert(pend_v(seq![pending]) =~= seq![pending@]);
 }
 
-/// `spec_resume`: a suspended awaiter is offered immediately.  A callback
-/// on a pending, acquired, or halted task only records the resume.
-fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u64) -> (r: Objects)
+/// Resume one callback target. A suspended task is offered directly at its
+/// next retry slot; no later projection pass is needed.
+fn resume(
+    objs: Objects,
+    awaiter: &String,
+    awaited: &String,
+    since: u64,
+    now: u64,
+    retry_timeout: u64,
+) -> (r: Objects)
     ensures
-        r@ == spec_resume(objs@, awaiter@, awaited@, since, now),
+        r@ == spec_resume(
+            objs@, awaiter@, awaited@, since, now, retry_timeout,
+        ),
         r@.dom() == objs@.dom(),
 {
     match objs.get(awaiter) {
@@ -3432,7 +3441,7 @@ fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u6
                             pid: None,
                             ttl: None,
                             lease_timeout_at: None,
-                            retry_timeout_at: Some(now),
+                            retry_timeout_at: Some(sat_add(now, retry_timeout)),
                             resumes,
                         };
                         let Obj { promise, task: _ } = found;
@@ -3534,11 +3543,17 @@ fn project_workflow(objs: Objects, now: u64, retry_timeout: u64) -> (r: Objects)
     out
 }
 
-/// Drain all queues on one settled promise. Callback order is retained, but
-/// the whole queue is consumed inside this phase.
-fn drain_settled_object(mut objs: Objects, id: &String, now: u64) -> (r: Objects)
+/// Drain every callback on one settled promise in queue order.
+fn drain_settled_callbacks(
+    mut objs: Objects,
+    id: &String,
+    now: u64,
+    retry_timeout: u64,
+) -> (r: Objects)
     ensures
-        r@ == spec_drain_settled_object(objs@, id@, now),
+        r@ == spec_drain_settled_callbacks(
+            objs@, id@, now, retry_timeout,
+        ),
         r@.dom() == objs@.dom(),
 {
     let ghost original = objs@;
@@ -3556,7 +3571,9 @@ fn drain_settled_object(mut objs: Objects, id: &String, now: u64) -> (r: Objects
             objs@.dom() == original.dom(),
             objs@.contains_key(id@),
             objs@[id@].promise.callbacks.len() == callback_count - i,
-            objs@ == spec_drain_callbacks(original, id@, i as nat, now),
+            objs@ == spec_drain_callbacks(
+                original, id@, i as nat, now, retry_timeout,
+            ),
         decreases callback_count - i,
     {
         let ghost before = objs@;
@@ -3568,36 +3585,35 @@ fn drain_settled_object(mut objs: Objects, id: &String, now: u64) -> (r: Objects
         let awaiter = promise.callbacks.remove(0);
         let since = match promise.settled_at { Some(t) => t, None => 0 };
         objs = objs.put(id, Obj { promise, task });
-        objs = resume(objs, &awaiter, id, since, now);
+        objs = resume(
+            objs, &awaiter, id, since, now, retry_timeout,
+        );
         proof {
             reveal(spec_drain_callbacks);
             assert(spec_drain_callbacks(
-                original, id@, i as nat, now,
+                original, id@, i as nat, now, retry_timeout,
             ) == before);
             assert(spec_drain_callbacks(
-                original, id@, (i + 1) as nat, now,
+                original, id@, (i + 1) as nat, now, retry_timeout,
             ) == objs@);
         }
         i += 1;
     }
-    let current = objs.get(id).unwrap();
-    let Obj { mut promise, task } = current;
-    promise.listeners = Vec::new();
     proof {
-        lemma_strs_empty();
-    }
-    objs = objs.put(id, Obj { promise, task });
-    proof {
-        reveal(spec_drain_settled_object);
+        reveal(spec_drain_settled_callbacks);
         assert(original.contains_key(id@));
     }
     objs
 }
 
 /// Phase 2 drains every settled queue from the same stable key snapshot.
-fn drain_workflow(objs: Objects, now: u64) -> (r: Objects)
+fn drain_workflow(
+    objs: Objects,
+    now: u64,
+    retry_timeout: u64,
+) -> (r: Objects)
     ensures
-        r@ == spec_drain_workflow(objs@, now),
+        r@ == spec_drain_workflow(objs@, now, retry_timeout),
 {
     let ghost start = objs@;
     let snapshot = objs.clone().into_entries();
@@ -3612,15 +3628,55 @@ fn drain_workflow(objs: Objects, now: u64) -> (r: Objects)
                 start.contains_key(#[trigger] snapshot@[j].0@),
             out@.dom() == start.dom(),
             spec_keys_of(snapshot@) == spec_sorted_present(start),
-            out@ == spec_drain_keys(start, spec_keys_of(snapshot@), i as nat, now),
+            out@ == spec_drain_callback_keys(
+                start,
+                spec_keys_of(snapshot@),
+                i as nat,
+                now,
+                retry_timeout,
+            ),
         decreases snapshot@.len() - i,
     {
         proof {
             assert(start.contains_key(snapshot@[i as int].0@));
             assert(out@.contains_key(snapshot@[i as int].0@));
         }
-        out = drain_settled_object(out, &snapshot[i].0, now);
+        out = drain_settled_callbacks(
+            out, &snapshot[i].0, now, retry_timeout,
+        );
         i += 1;
+    }
+    let ghost resumed = out@;
+    let mut j: usize = 0;
+    while j < snapshot.len()
+        invariant
+            j <= snapshot@.len(),
+            spec_from_entries(snapshot@) == start,
+            spec_sorted_entries(snapshot@),
+            forall|k: int| 0 <= k < snapshot@.len() ==>
+                resumed.contains_key(
+                    #[trigger] snapshot@[k].0@,
+                ),
+            out@.dom() == resumed.dom(),
+            spec_keys_of(snapshot@) == spec_sorted_present(start),
+            out@ == spec_clear_listener_keys(
+                resumed,
+                spec_keys_of(snapshot@),
+                j as nat,
+            ),
+        decreases snapshot@.len() - j,
+    {
+        let id = &snapshot[j].0;
+        let current = out.get(id).unwrap();
+        if current.promise.state != PromiseState::Pending {
+            let Obj { mut promise, task } = current;
+            promise.listeners = Vec::new();
+            proof {
+                lemma_strs_empty();
+            }
+            out = out.put(id, Obj { promise, task });
+        }
+        j += 1;
     }
     proof {
         assert(spec_keys_of(snapshot@).len() == snapshot@.len());
@@ -3725,7 +3781,7 @@ pub fn occurrence_transition(
 }
 
 /// One atomic workflow closure. Phase 1 projects every due promise and task;
-/// phase 2 drains settled queues and offers tasks resumed by callbacks.
+/// phase 2 drains settled queues and directly offers resumed tasks.
 pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64) -> (r: (DocumentBody, Vec<Pending>, Vec<Outbound>))
     ensures
         (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout),
@@ -3739,11 +3795,8 @@ pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64) -> (r: (DocumentB
         return (from, Vec::new(), Vec::new());
     };
     let projected = project_workflow(objs, now, retry_timeout);
-    let drained = drain_workflow(projected, now);
-    // Callback resumption can make a suspended task immediately due. Reusing
-    // the phase-1 map projection here is the final fold inside phase 2.
-    let offered = project_workflow(drained, now, retry_timeout);
-    let after = DocumentBody::Workflow(offered);
+    let drained = drain_workflow(projected, now, retry_timeout);
+    let after = DocumentBody::Workflow(drained);
     let notes = committed_notes(&original, &after, now);
     (after, Vec::new(), notes)
 }
@@ -4613,8 +4666,14 @@ impl Node {
         let Flight { key, job, etag, now, caller, .. } = flight;
         let (next, answer, born, notify): (DocumentBody, Option<Response>, Vec<Pending>, Vec<Outbound>) = match &job {
             Job::External { request } => {
-                let (next, response) = handle(doc, request, now);
-                (next, Some(response), Vec::new(), Vec::new())
+                let (next, response, born, notify) =
+                    request_transition(
+                        doc,
+                        request,
+                        now,
+                        self.retry_timeout,
+                    );
+                (next, Some(response), born, notify)
             },
             Job::Due => {
                 match doc {
@@ -4795,6 +4854,10 @@ impl Node {
                 (self, one(message))
             },
             Some(key) => {
+                proof {
+                    axiom_string_ext(key, key);
+                    assert(key@.len() <= usize::MAX as int);
+                }
                 if !self.owns(&key) {
                     let message = reply(&call.client, call.id, unavailable(&call.request));
                     (self, one(message))
@@ -4824,13 +4887,23 @@ impl Node {
                 lemma_pend_skip(queued);
             }
             let key = origin_key(&pending.promise);
+            proof {
+                axiom_string_ext(key, key);
+                assert(key@.len() <= usize::MAX as int);
+            }
             if !node.owns(&key) {
                 return (node, Vec::new());
             }
             return node.begin(key, Job::Occurrence(pending), now, None);
         }
         match self.earliest_due(now) {
-            Some(key) => self.begin(key, Job::Due, now, None),
+            Some(key) => {
+                proof {
+                    axiom_string_ext(key, key);
+                    assert(key@.len() <= usize::MAX as int);
+                }
+                self.begin(key, Job::Due, now, None)
+            },
             None => (self, Vec::new()),
         }
     }
@@ -5407,6 +5480,7 @@ pub uninterp spec fn spec_encode_body(doc: DocumentBodyV) -> Seq<u8>;
 pub axiom fn axiom_decode_encode_body(doc: DocumentBodyV)
     ensures
         spec_decode_body_raw(spec_encode_body(doc)) == Some(doc),
+        spec_encode_body(doc).len() <= usize::MAX as int,
 ;
 
 pub open spec fn spec_read(key: Seq<char>, body: Seq<u8>) -> DocumentBodyV {
@@ -5477,7 +5551,7 @@ pub open spec fn spec_request(node: NodeV, now: Time, call: Call) -> (NodeV, Seq
     match spec_key(call.request) {
         None => (node, seq![spec_reply(call.client@, call.id, spec_pure(call.request))]),
         Some(key) => {
-            if !spec_owns(node, key) {
+            if key.len() > usize::MAX as int || !spec_owns(node, key) {
                 (node, seq![spec_reply(call.client@, call.id, spec_unavailable(call.request))])
             } else {
                 spec_begin(node, key, JobV::External(call.request), now, Some((call.client@, call.id)))
@@ -5493,14 +5567,18 @@ pub open spec fn spec_timeout(node: NodeV, now: Time) -> (NodeV, Seq<(Pid, Messa
         let pending = node.pending[0];
         let node = NodeV { pending: node.pending.skip(1), ..node };
         let key = spec_origin_key(origin(pending.promise));
-        if !spec_owns(node, key) {
+        if key.len() > usize::MAX as int || !spec_owns(node, key) {
             (node, Seq::empty())
         } else {
             spec_begin(node, key, JobV::Occurrence(pending), now, None)
         }
     } else {
         match spec_earliest_key(node, now) {
-            Some(key) => spec_begin(node, key, JobV::Due, now, None),
+            Some(key) => if key.len() <= usize::MAX as int {
+                spec_begin(node, key, JobV::Due, now, None)
+            } else {
+                (node, Seq::empty())
+            },
             None => (node, Seq::empty()),
         }
     }
@@ -5570,8 +5648,14 @@ pub open spec fn spec_begin(node: NodeV, key: Seq<char>, job: JobV, now: Time, c
 pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV) -> (NodeV, Seq<(Pid, Message)>) {
     let (next, reply, born, notify) = match flight.job {
         JobV::External(request) => {
-            let (next, response) = spec_handle(doc, request, flight.now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notify) =
+                spec_request_transition(
+                    doc,
+                    request,
+                    flight.now,
+                    node.retry_timeout,
+                );
+            (next, Some(response), born, notify)
         },
         JobV::Due => spec_due_transition(doc, flight.now, node.retry_timeout),
         JobV::Occurrence(pending) => (spec_occurrence(doc, pending, flight.now), None, Seq::empty(), Seq::empty()),
@@ -6553,6 +6637,7 @@ pub open spec fn spec_resume_callbacks(
     awaited: Seq<char>,
     since: Time,
     now: Time,
+    retry_timeout: u64,
 ) -> Map<Seq<char>, ObjV>
     decreases count,
 {
@@ -6566,29 +6651,104 @@ pub open spec fn spec_resume_callbacks(
             awaited,
             since,
             now,
+            retry_timeout,
         );
-        spec_resume(prior, callbacks[count as int - 1], awaited, since, now)
+        spec_resume(
+            prior,
+            callbacks[count as int - 1],
+            awaited,
+            since,
+            now,
+            retry_timeout,
+        )
     }
 }
 
-pub open spec fn spec_drain_settled_object(
+pub open spec fn spec_drain_settled_callbacks(
     map: Map<Seq<char>, ObjV>,
     id: Seq<char>,
     now: Time,
+    retry_timeout: u64,
 ) -> Map<Seq<char>, ObjV> {
-    if !map.contains_key(id) || map[id].promise.state == PromiseState::Pending {
+    if !map.contains_key(id)
+        || map[id].promise.state == PromiseState::Pending
+    {
         map
     } else {
-        let callbacks = map[id].promise.callbacks.len();
-        let resumed = spec_drain_callbacks(map, id, callbacks, now);
-        let obj = resumed[id];
-        resumed.insert(id, ObjV {
+        spec_drain_callbacks(
+            map,
+            id,
+            map[id].promise.callbacks.len(),
+            now,
+            retry_timeout,
+        )
+    }
+}
+
+pub open spec fn spec_drain_callback_keys(
+    map: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: Time,
+    retry_timeout: u64,
+) -> Map<Seq<char>, ObjV>
+    decreases count,
+{
+    if count == 0 {
+        map
+    } else {
+        let prior = spec_drain_callback_keys(
+            map,
+            keys,
+            (count - 1) as nat,
+            now,
+            retry_timeout,
+        );
+        spec_drain_settled_callbacks(
+            prior,
+            keys[count as int - 1],
+            now,
+            retry_timeout,
+        )
+    }
+}
+
+pub open spec fn spec_clear_settled_listeners(
+    map: Map<Seq<char>, ObjV>,
+    id: Seq<char>,
+) -> Map<Seq<char>, ObjV> {
+    if !map.contains_key(id)
+        || map[id].promise.state == PromiseState::Pending
+    {
+        map
+    } else {
+        let object = map[id];
+        map.insert(id, ObjV {
             promise: PromV {
                 listeners: Seq::empty(),
-                ..obj.promise
+                ..object.promise
             },
-            ..obj
+            ..object
         })
+    }
+}
+
+pub open spec fn spec_clear_listener_keys(
+    map: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+) -> Map<Seq<char>, ObjV>
+    decreases count,
+{
+    if count == 0 {
+        map
+    } else {
+        spec_clear_settled_listeners(
+            spec_clear_listener_keys(
+                map, keys, (count - 1) as nat,
+            ),
+            keys[count as int - 1],
+        )
     }
 }
 
@@ -6597,6 +6757,7 @@ pub open spec fn spec_drain_callbacks(
     id: Seq<char>,
     count: nat,
     now: Time,
+    retry_timeout: u64,
 ) -> Map<Seq<char>, ObjV>
     decreases count,
 {
@@ -6604,7 +6765,9 @@ pub open spec fn spec_drain_callbacks(
         map
     } else {
         let prior =
-            spec_drain_callbacks(map, id, (count - 1) as nat, now);
+            spec_drain_callbacks(
+                map, id, (count - 1) as nat, now, retry_timeout,
+            );
         if !prior.contains_key(id)
             || prior[id].promise.callbacks.len() == 0
         {
@@ -6621,33 +6784,23 @@ pub open spec fn spec_drain_callbacks(
                 },
                 ..obj
             });
-            spec_resume(popped, awaiter, id, since, now)
+            spec_resume(
+                popped, awaiter, id, since, now, retry_timeout,
+            )
         }
-    }
-}
-
-pub open spec fn spec_drain_keys(
-    map: Map<Seq<char>, ObjV>,
-    keys: Seq<Seq<char>>,
-    count: nat,
-    now: Time,
-) -> Map<Seq<char>, ObjV>
-    decreases count,
-{
-    if count == 0 {
-        map
-    } else {
-        let prior = spec_drain_keys(map, keys, (count - 1) as nat, now);
-        spec_drain_settled_object(prior, keys[count as int - 1], now)
     }
 }
 
 pub open spec fn spec_drain_workflow(
     map: Map<Seq<char>, ObjV>,
     now: Time,
+    retry_timeout: u64,
 ) -> Map<Seq<char>, ObjV> {
     let keys = spec_sorted_present(map);
-    spec_drain_keys(map, keys, keys.len(), now)
+    let resumed = spec_drain_callback_keys(
+        map, keys, keys.len(), now, retry_timeout,
+    );
+    spec_clear_listener_keys(resumed, keys, keys.len())
 }
 
 /// The atomic two-phase workflow transition.
@@ -6659,9 +6812,9 @@ pub open spec fn spec_sweep(
     match doc {
         DocumentBodyV::Workflow(map) => {
             let projected = spec_project_workflow(map, now, retry_timeout);
-            let drained = spec_drain_workflow(projected, now);
-            let offered = spec_project_workflow(drained, now, retry_timeout);
-            let after = DocumentBodyV::Workflow(offered);
+            let drained =
+                spec_drain_workflow(projected, now, retry_timeout);
+            let after = DocumentBodyV::Workflow(drained);
             (after, Seq::empty(), spec_committed_notes(doc, after, now))
         },
         _ => (doc, Seq::empty(), Seq::empty()),
@@ -6751,14 +6904,6 @@ pub open spec fn spec_occurrence_transition(
     (after, spec_committed_notes(doc, after, now))
 }
 
-pub open spec fn spec_due_id(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: Time) -> Option<Seq<char>>
-    decreases keys.len(),
-{
-    if keys.len() == 0 { None }
-    else if spec_obj_due(map[keys[0]], now) is Some { Some(keys[0]) }
-    else { spec_due_id(map, keys.drop_first(), now) }
-}
-
 pub open spec fn spec_sorted_present(map: Map<Seq<char>, ObjV>) -> Seq<Seq<char>> {
     spec_sorted(map.dom())
 }
@@ -6832,46 +6977,17 @@ pub open spec fn spec_obj_due(obj: ObjV, now: Time) -> Option<u64> {
     spec_earlier(spec_earlier(spec_promise_due(obj, now), spec_lease_due(obj, now)), spec_retry_due(obj, now))
 }
 
-pub open spec fn spec_step_object(map: Map<Seq<char>, ObjV>, id: Seq<char>, now: Time, retry_timeout: u64) -> (Map<Seq<char>, ObjV>, Seq<NoteV>) {
-    if !map.contains_key(id) {
-        (map, Seq::empty())
-    } else {
-        let obj = map[id];
-        if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
-            (map.insert(id, spec_project_obj(obj, now)), Seq::empty())
-        } else if obj.promise.state == PromiseState::Pending {
-            match obj.task {
-                Some(t) if t.state == TaskState::Acquired && match t.lease_timeout_at { Some(at) => at <= now, None => false } => {
-                    let obj = ObjV { task: Some(spec_unlease(t, TaskState::Pending, Some(now))), ..obj };
-                    (map.insert(id, obj), Seq::empty())
-                },
-                Some(t) if t.state == TaskState::Pending && match t.retry_timeout_at { Some(at) => at <= now, None => false } => {
-                    let obj = ObjV { task: Some(TkV { retry_timeout_at: Some(spec_sat_add(now, retry_timeout)), ..t }), ..obj };
-                    (map.insert(id, obj), seq![NoteV::Execute { id, version: t.version }])
-                },
-                _ => (map, Seq::empty()),
-            }
-        } else if obj.promise.callbacks.len() > 0 {
-            let awaiter = obj.promise.callbacks[0];
-            let since = match obj.promise.settled_at { Some(t) => t, None => 0 };
-            let obj = ObjV { promise: PromV { callbacks: obj.promise.callbacks.skip(1), ..obj.promise }, ..obj };
-            let map = map.insert(id, obj);
-            (spec_resume(map, awaiter, id, since, now), Seq::empty())
-        } else if obj.promise.listeners.len() > 0 {
-            let address = obj.promise.listeners[0];
-            let promise = spec_record(spec_string(id), obj.promise);
-            let obj = ObjV { promise: PromV { listeners: obj.promise.listeners.skip(1), ..obj.promise }, ..obj };
-            (map.insert(id, obj), seq![NoteV::Unblock { address, promise }])
-        } else {
-            (map, Seq::empty())
-        }
-    }
-}
-
 /// `resume`: a suspended awaiter is offered again from `since`, the instant
 /// the awaited promise settled. The awaiter is read through its projection
 /// at `now`: a task whose own promise is settled reads as fulfilled.
-pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awaited: Seq<char>, since: Time, now: Time) -> Map<Seq<char>, ObjV> {
+pub open spec fn spec_resume(
+    map: Map<Seq<char>, ObjV>,
+    awaiter: Seq<char>,
+    awaited: Seq<char>,
+    since: Time,
+    now: Time,
+    retry_timeout: u64,
+) -> Map<Seq<char>, ObjV> {
     if !map.contains_key(awaiter) {
         map
     } else {
@@ -6884,7 +7000,9 @@ pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awai
                         pid: None,
                         ttl: None,
                         lease_timeout_at: None,
-                        retry_timeout_at: Some(now),
+                    retry_timeout_at: Some(
+                        spec_sat_add(now, retry_timeout),
+                    ),
                         resumes: seq![awaited],
                         ..t
                     }),

@@ -174,7 +174,7 @@ proof fn lemma_note_effects_push(notes: Seq<NoteV>, note: NoteV)
     };
 }
 
-proof fn lemma_nodup_last_not_in_prefix<A>(values: Seq<A>, count: nat)
+pub proof fn lemma_nodup_last_not_in_prefix<A>(values: Seq<A>, count: nat)
     requires
         0 < count <= values.len(),
         values.take(count as int).no_duplicates(),
@@ -860,7 +860,7 @@ proof fn lemma_unblock_notes(
     }
 }
 
-proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
+pub proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
     ensures
         crate::node::spec_sorted(keys).no_duplicates(),
     decreases keys.len(),
@@ -884,7 +884,7 @@ proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
     }
 }
 
-proof fn lemma_committed_notes_match(
+pub proof fn lemma_committed_notes_match(
     before: DocumentBodyV,
     after: DocumentBodyV,
     committed_at: u64,

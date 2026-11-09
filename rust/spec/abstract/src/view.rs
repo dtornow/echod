@@ -81,7 +81,6 @@ pub enum DispatchV {
 }
 
 pub enum InternalV {
-    WorkflowTransition(Chars),
     PromiseTimeout(Chars),
     Callback { awaited: Chars, awaiter: Chars },
     Listener { awaited: Chars, address: Chars },
@@ -179,7 +178,6 @@ impl View for Work {
 
     open spec fn view(&self) -> InternalV {
         match self {
-            Work::WorkflowTransition(id) => InternalV::WorkflowTransition(id@),
             Work::PromiseTimeout(id) => InternalV::PromiseTimeout(id@),
             Work::Callback { awaited, awaiter } => InternalV::Callback { awaited: awaited@, awaiter: awaiter@ },
             Work::Listener { awaited, address } => InternalV::Listener { awaited: awaited@, address: address@ },
@@ -205,7 +203,6 @@ pub open spec fn as_sched(w: Work) -> Sched<InternalV> {
             at,
             InternalV::Occurrence { promise: promise@, at, timeout, param, tags },
         ),
-        Work::WorkflowTransition(id) => Sched::Later(InternalV::WorkflowTransition(id@)),
         Work::PromiseTimeout(id) => Sched::Later(InternalV::PromiseTimeout(id@)),
         Work::Callback { awaited, awaiter } => Sched::Later(InternalV::Callback { awaited: awaited@, awaiter: awaiter@ }),
         Work::Listener { awaited, address } => Sched::Later(InternalV::Listener { awaited: awaited@, address: address@ }),
@@ -246,324 +243,6 @@ pub struct InOutV {
     pub send: Seq<DispatchV>,
     pub not_due: bool,
 }
-
-pub struct CloseV {
-    pub next: StoreV,
-    pub work: Seq<Sched<InternalV>>,
-    pub send: Seq<DispatchV>,
-}
-
-pub open spec fn spec_close_empty(state: StoreV) -> CloseV {
-    CloseV { next: state, work: Seq::empty(), send: Seq::empty() }
-}
-
-pub open spec fn spec_close_apply(close: CloseV, outcome: InOutV) -> CloseV {
-    if outcome.not_due {
-        close
-    } else {
-        CloseV {
-            next: outcome.next,
-            work: close.work + outcome.work,
-            send: close.send + outcome.send,
-        }
-    }
-}
-
-pub open spec fn spec_close_promises(
-    config: ServerConfig,
-    close: CloseV,
-    keys: Seq<Chars>,
-    probe: Chars,
-    now: Time,
-) -> CloseV
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        close
-    } else {
-        let id = keys[0];
-        let next = if origin(id) == origin(probe) {
-            spec_close_apply(close, spec_promise_timeout(close.next, id, now))
-        } else {
-            close
-        };
-        spec_close_promises(config, next, keys.drop_first(), probe, now)
-    }
-}
-
-pub open spec fn spec_close_tasks(
-    config: ServerConfig,
-    close: CloseV,
-    keys: Seq<Chars>,
-    probe: Chars,
-    now: Time,
-) -> CloseV
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        close
-    } else {
-        let id = keys[0];
-        let next = if origin(id) == origin(probe) {
-            let leased = spec_close_apply(close, spec_lease(close.next, id, now));
-            spec_close_apply(leased, spec_retry(config, leased.next, id, now))
-        } else {
-            close
-        };
-        spec_close_tasks(config, next, keys.drop_first(), probe, now)
-    }
-}
-
-pub open spec fn spec_close_callbacks(
-    close: CloseV,
-    awaited: Chars,
-    callbacks: Seq<Chars>,
-    now: Time,
-) -> CloseV
-    decreases callbacks.len(),
-{
-    if callbacks.len() == 0 {
-        close
-    } else {
-        let next = spec_close_apply(
-            close,
-            spec_callback(close.next, awaited, callbacks[0], now),
-        );
-        spec_close_callbacks(next, awaited, callbacks.drop_first(), now)
-    }
-}
-
-pub open spec fn spec_close_listeners(
-    close: CloseV,
-    awaited: Chars,
-    listeners: Seq<Chars>,
-    now: Time,
-) -> CloseV
-    decreases listeners.len(),
-{
-    if listeners.len() == 0 {
-        close
-    } else {
-        let next = spec_close_apply(
-            close,
-            spec_listener(close.next, awaited, listeners[0], now),
-        );
-        spec_close_listeners(next, awaited, listeners.drop_first(), now)
-    }
-}
-
-pub open spec fn spec_close_queues(
-    close: CloseV,
-    keys: Seq<Chars>,
-    probe: Chars,
-    now: Time,
-) -> CloseV
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        close
-    } else {
-        let id = keys[0];
-        let next = if origin(id) == origin(probe) && close.next.promises.contains_key(id) {
-            let promise = close.next.promises[id];
-            if promise.state == PromiseState::Pending {
-                close
-            } else {
-                let callbacks = spec_close_callbacks(
-                    close, id, pset_seq(promise.callbacks), now,
-                );
-                spec_close_listeners(
-                    callbacks, id, pset_seq(promise.listeners), now,
-                )
-            }
-        } else {
-            close
-        };
-        spec_close_queues(next, keys.drop_first(), probe, now)
-    }
-}
-
-pub open spec fn spec_close_offers(
-    config: ServerConfig,
-    close: CloseV,
-    keys: Seq<Chars>,
-    probe: Chars,
-    now: Time,
-) -> CloseV
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        close
-    } else {
-        let id = keys[0];
-        let next = if origin(id) == origin(probe) {
-            spec_close_apply(close, spec_retry(config, close.next, id, now))
-        } else {
-            close
-        };
-        spec_close_offers(config, next, keys.drop_first(), probe, now)
-    }
-}
-
-pub open spec fn spec_close_workflow(
-    config: ServerConfig,
-    state: StoreV,
-    probe: Chars,
-    now: Time,
-) -> CloseV {
-    let promises = spec_keys(state.promises);
-    let tasks = spec_keys(state.tasks);
-    let projected = spec_close_promises(
-        config, spec_close_empty(state), promises, probe, now,
-    );
-    let projected = spec_close_tasks(config, projected, tasks, probe, now);
-    let drained = spec_close_queues(projected, promises, probe, now);
-    spec_close_offers(config, drained, tasks, probe, now)
-}
-
-pub open spec fn spec_effect_relevant(state: StoreV, effect: DispatchV) -> bool {
-    match effect {
-        DispatchV::Execute { id, version } => {
-            state.tasks.contains_key(id)
-                && state.tasks[id].state == TaskState::Pending
-                && state.tasks[id].version == version
-        },
-        DispatchV::Unblock { .. } => true,
-    }
-}
-
-pub open spec fn spec_same_effect_key(a: DispatchV, b: DispatchV) -> bool {
-    match (a, b) {
-        (
-            DispatchV::Execute { id: x, .. },
-            DispatchV::Execute { id: y, .. },
-        ) => x == y,
-        (
-            DispatchV::Unblock { address: xa, promise: xp },
-            DispatchV::Unblock { address: ya, promise: yp },
-        ) => xa == ya && xp.id@ == yp.id@,
-        _ => false,
-    }
-}
-
-pub open spec fn spec_effect_key_present(
-    kept: Seq<DispatchV>,
-    effect: DispatchV,
-) -> bool {
-    exists|i: int| 0 <= i < kept.len() && spec_same_effect_key(kept[i], effect)
-}
-
-pub open spec fn spec_keyed_effects_from(
-    state: StoreV,
-    effects: Seq<DispatchV>,
-    index: int,
-    kept: Seq<DispatchV>,
-) -> Seq<DispatchV>
-    decreases effects.len() - index,
-{
-    if index < 0 || index >= effects.len() {
-        kept
-    } else {
-        let effect = effects[index];
-        let next = if spec_effect_relevant(state, effect)
-            && !spec_effect_key_present(kept, effect)
-        {
-            kept.push(effect)
-        } else {
-            kept
-        };
-        spec_keyed_effects_from(state, effects, index + 1, next)
-    }
-}
-
-pub open spec fn spec_keyed_effects(
-    state: StoreV,
-    effects: Seq<DispatchV>,
-) -> Seq<DispatchV> {
-    spec_keyed_effects_from(state, effects, 0, Seq::empty())
-}
-
-pub open spec fn spec_workflow_probe(request: Request) -> Option<Chars> {
-    match request {
-        Request::PromiseCreate(q) => Some(q.id@),
-        Request::PromiseGet(q) => Some(q.id@),
-        Request::PromiseSettle(q) => Some(q.id@),
-        Request::PromiseRegisterCallback(q) => Some(q.awaited@),
-        Request::PromiseRegisterListener(q) => Some(q.awaited@),
-        Request::TaskGet(q) => Some(q.id@),
-        Request::TaskCreate(q) => Some(q.action.id@),
-        Request::TaskAcquire(q) => Some(q.id@),
-        Request::TaskRelease(q) => Some(q.id@),
-        Request::TaskFulfill(q) => Some(q.id@),
-        Request::TaskSuspend(q) => Some(q.id@),
-        Request::TaskFence(q) => Some(q.id@),
-        Request::TaskFenceCheck(q) => Some(q.id@),
-        Request::TaskHalt(q) => Some(q.id@),
-        Request::TaskContinue(q) => Some(q.id@),
-        Request::TaskHeartbeat(q) => {
-            if q.tasks@.len() == 0 { None } else { Some(q.tasks@[0].id@) }
-        },
-        Request::ScheduleCreate(_) | Request::ScheduleGet(_) | Request::ScheduleDelete(_) => None,
-    }
-}
-
-pub open spec fn spec_close_outcomes(
-    config: ServerConfig,
-    original: StoreV,
-    probe: Chars,
-    outcomes: Seq<OutV>,
-    before: CloseV,
-    now: Time,
-) -> Seq<OutV>
-    decreases outcomes.len(),
-{
-    if outcomes.len() == 0 {
-        Seq::empty()
-    } else {
-        let handled = outcomes[0];
-        let after = spec_close_workflow(config, handled.next, probe, now);
-        let effects = before.send + handled.send + after.send;
-        seq![OutV {
-            resp: handled.resp,
-            next: after.next,
-            work: before.work + handled.work + after.work,
-            send: spec_keyed_effects(after.next, effects),
-        }] + spec_close_outcomes(
-            config, original, probe, outcomes.drop_first(), before, now,
-        )
-    }
-}
-
-pub open spec fn spec_request_transition(
-    config: ServerConfig,
-    request: Request,
-    state: StoreV,
-    now: Time,
-) -> Seq<OutV> {
-    match spec_workflow_probe(request) {
-        None => spec_handler(config, request, state, now),
-        Some(probe) => {
-            let before = spec_close_workflow(config, state, probe, now);
-            spec_close_outcomes(
-                config,
-                state,
-                probe,
-                spec_handler(config, request, before.next, now),
-                before,
-                now,
-            )
-        },
-    }
-}
-
-pub assume_specification [ServerConfig::request_transition](
-    config: &ServerConfig,
-    request: &Request,
-    state: &Store,
-    now: Time,
-) -> (r: Vec<Out>)
-    ensures
-        outs_v(r@) == spec_request_transition(*config, *request, state@, now);
 
 impl View for Out {
     type V = OutV;
@@ -933,8 +612,7 @@ pub proof fn lemma_work_ext(a: Work, b: Work)
         a == b,
 {
     match (a, b) {
-        (Work::WorkflowTransition(x), Work::WorkflowTransition(y))
-        | (Work::PromiseTimeout(x), Work::PromiseTimeout(y))
+        (Work::PromiseTimeout(x), Work::PromiseTimeout(y))
         | (Work::TaskLeaseTimeout(x), Work::TaskLeaseTimeout(y))
         | (Work::TaskRetryTimeout(x), Work::TaskRetryTimeout(y)) => {
             axiom_string_ext(x, y);
@@ -1133,7 +811,7 @@ impl Model for ServerConfig {
         state: Store,
         now: Time,
     ) -> Seq<ExternalOutcomeV<Store, Response, Work, Dispatch>> {
-        spec_request_transition(*self, req, state@, now)
+        spec_handler(*self, req, state@, now)
             .map_values(|o: OutV| lift_out(o))
     }
 
@@ -1148,9 +826,9 @@ impl Model for ServerConfig {
     }
 
     fn external(&self, op: &Request, s: &Store, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        let mut outs = self.request_transition(op, s, now);
+        let mut outs = self.handler(op, s, now);
         let ghost all = outs@;
-        let ghost twin = spec_request_transition(*self, *op, s@, now);
+        let ghost twin = spec_handler(*self, *op, s@, now);
         assert(twin == outs_v(all));
         let mut r: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
         while outs.len() > 0
