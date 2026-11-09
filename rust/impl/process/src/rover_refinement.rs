@@ -3995,6 +3995,8 @@ pub proof fn lemma_empty_timer_completion_is_abstract_stutter(
         Seq::<echod_abstract::BoundaryEvent>::empty(),
         abstract_before,
     ));
+}
+
 // ---------------------------------------------------------------------------
 // Production-backed Rover request slices
 // ---------------------------------------------------------------------------
