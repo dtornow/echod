@@ -120,10 +120,6 @@ use echod_concrete::store::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_types::{Request, Response, StatusRes, MAX_TIME};
-#[cfg(verus_keep_ghost)]
-use crate::verified::flight_spec::{
-    answer_v, spec_advance, AAct, AAnswer, AOutcome, AStep,
-};
 
 #[cfg(verus_keep_ghost)]
 verus! {
