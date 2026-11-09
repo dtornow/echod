@@ -53,15 +53,17 @@ module Claim {
     Cases(doc, id, b(k).now);
   }
 
-  // The network invariant at every time. When the documents are well-formed at time 0,
-  // every document is well-formed: stored in the bucket, in flight, or waiting on a continuation.
-  lemma DocumentsStayWellFormed(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
-                                b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Behavior(docs, clients, nodes, ask, b, a)
-    requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
-    ensures Formed(b(n))
+  // The bucket starts empty. Whatever the clients ask, every document is well-formed at every time:
+  // stored in the bucket, in flight, or waiting on a continuation.
+  lemma DocumentsStayWellFormed(clients: set<nat>, nodes: set<nat>,
+                                b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>)
+    requires exists ask :: Behavior(map[], clients, nodes, ask, b, a)
+    ensures forall t: nat :: Formed(b(t))
   {
-    DocumentsStay(docs, clients, nodes, ask, b, a, n);
+    var ask :| Behavior(map[], clients, nodes, ask, b, a);
+    forall t: nat ensures Formed(b(t)) {
+      DocumentsStay(map[], clients, nodes, ask, b, a, t);
+    }
   }
 
   // Every stored document that owes a deadline has a timeout at or before it.
