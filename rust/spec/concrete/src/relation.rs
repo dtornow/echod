@@ -47,7 +47,7 @@ use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::{is_process, World};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, RoverModel};
+use echod_rover::rover::{Envelope, RoverSpec};
 #[cfg(verus_keep_ghost)]
 use echod_rover::Sched;
 #[cfg(verus_keep_ghost)]

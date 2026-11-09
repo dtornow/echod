@@ -10,7 +10,7 @@ use crate::Time;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::semantics::{self, Execution, Label, StepResultV, WorldV};
-use super::{BoundaryEvent, Envelope, EventOf, ProcessEvent, RoverModel};
+use super::{BoundaryEvent, Envelope, EventOf, ProcessEvent, RoverExec, RoverSpec};
 
 verus! {
 
@@ -38,11 +38,11 @@ pub enum Action<P, M> {
     },
 }
 
-pub type ActionOf<M> = Action<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
+pub type ActionOf<M> = Action<<M as RoverSpec>::Pid, <M as RoverSpec>::Message>;
 pub type Certificate<M> = Vec<ActionOf<M>>;
 
 /// The label a successful action must make.
-pub(crate) open spec fn action_label<M: RoverModel>(
+pub(crate) open spec fn action_label<M: RoverExec>(
     m: M,
     config: M::Config,
     world: semantics::World<M>,
@@ -79,7 +79,7 @@ pub(crate) open spec fn shown<P, M>(
 }
 
 /// Executable replay state. Its view is exactly the mathematical Rover world.
-pub(crate) struct World<'a, M: RoverModel> {
+pub(crate) struct World<'a, M: RoverExec> {
     pub(crate) model: &'a M,
     pub(crate) config: &'a M::Config,
     pub(crate) process: Vec<(M::Pid, M::State)>,
@@ -87,19 +87,26 @@ pub(crate) struct World<'a, M: RoverModel> {
     pub(crate) now: Time,
 }
 
-impl<M: RoverModel> View for World<'_, M> {
+impl<M: RoverExec> View for World<'_, M> {
     type V = semantics::World<M>;
 
     open(crate) spec fn view(&self) -> semantics::World<M> {
         WorldV {
-            process: semantics::process_view::<M>(self.process@),
+            process: process_view::<M>(self.process@),
             network: self.network@,
             now: self.now,
         }
     }
 }
 
-impl<'a, M: RoverModel> World<'a, M> {
+/// Executable process slots as the mathematical world sees their state views.
+pub(crate) open spec fn process_view<M: RoverExec>(
+    process: Seq<(M::Pid, M::State)>,
+) -> Seq<(M::Pid, M::StateV)> {
+    process.map_values(|entry: (M::Pid, M::State)| (entry.0, entry.1@))
+}
+
+impl<'a, M: RoverExec> World<'a, M> {
     pub(crate) fn initial(model: &'a M, config: &'a M::Config) -> (world: Self)
         ensures
             world@ == semantics::initial(*model, *config),
@@ -487,7 +494,7 @@ impl<'a, M: RoverModel> World<'a, M> {
 }
 
 /// A legal execution remains legal after one valid step.
-proof fn extend<M: RoverModel>(
+proof fn extend<M: RoverExec>(
     m: M,
     config: M::Config,
     first: semantics::World<M>,
@@ -536,7 +543,7 @@ proof fn extend<M: RoverModel>(
     }
 }
 
-proof fn action_observe<M: RoverModel>(
+proof fn action_observe<M: RoverExec>(
     m: M,
     config: M::Config,
     world: semantics::World<M>,
@@ -560,7 +567,7 @@ proof fn action_observe<M: RoverModel>(
 ///
 /// The search is irrelevant to this contract: any successfully replayed
 /// certificate proves that the supplied trace is a valid Rover trace.
-pub fn replay<M: RoverModel>(
+pub fn replay<M: RoverExec>(
     model: &M,
     config: &M::Config,
     events: &[EventOf<M>],
@@ -658,7 +665,7 @@ pub fn replay<M: RoverModel>(
 
 // Search needs cheap snapshots. This code is ordinary Rust; replay remains the
 // verified acceptance boundary.
-impl<M: RoverModel> Clone for World<'_, M> {
+impl<M: RoverExec> Clone for World<'_, M> {
     fn clone(&self) -> Self {
         World {
             model: self.model,
@@ -670,7 +677,7 @@ impl<M: RoverModel> Clone for World<'_, M> {
     }
 }
 
-impl<M: RoverModel> World<'_, M> {
+impl<M: RoverExec> World<'_, M> {
     pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
         self.process == other.process && self.network == other.network && self.now == other.now
     }

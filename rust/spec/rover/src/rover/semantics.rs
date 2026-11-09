@@ -7,7 +7,7 @@ use vstd::prelude::*;
 
 use crate::Time;
 
-use super::{BoundaryEvent, Envelope, ProcessEvent, RoverModel};
+use super::{BoundaryEvent, Envelope, ProcessEvent, RoverSpec};
 
 verus! {
 
@@ -25,9 +25,9 @@ pub struct WorldV<P, S, M> {
 }
 
 pub type World<M> = WorldV<
-    <M as RoverModel>::Pid,
-    <M as RoverModel>::StateV,
-    <M as RoverModel>::Message,
+    <M as RoverSpec>::Pid,
+    <M as RoverSpec>::StateV,
+    <M as RoverSpec>::Message,
 >;
 
 /// Labels retain exactly what happened in one world step.
@@ -50,18 +50,11 @@ pub enum Label<P, M> {
     },
 }
 
-pub type Lab<M> = Label<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
-pub type Ev<M> = BoundaryEvent<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
-
-/// Executable process slots as the mathematical world sees their state views.
-pub open spec fn process_view<M: RoverModel>(
-    process: Seq<(M::Pid, M::State)>,
-) -> Seq<(M::Pid, M::StateV)> {
-    process.map_values(|entry: (M::Pid, M::State)| (entry.0, entry.1@))
-}
+pub type Lab<M> = Label<<M as RoverSpec>::Pid, <M as RoverSpec>::Message>;
+pub type Ev<M> = BoundaryEvent<<M as RoverSpec>::Pid, <M as RoverSpec>::Message>;
 
 /// Process `pid` exists and is not the distinguished outside endpoint.
-pub open spec fn is_process<M: RoverModel>(m: M, world: World<M>, pid: M::Pid) -> bool {
+pub open spec fn is_process<M: RoverSpec>(m: M, world: World<M>, pid: M::Pid) -> bool {
     pid != m.spec_outside() && exists|i: int|
         0 <= i < world.process.len() && #[trigger] world.process[i].0 == pid
 }
@@ -125,7 +118,7 @@ pub open spec fn observe_outside<P, S, M>(
 }
 
 /// One atomic Rover transition.
-pub open spec fn step<M: RoverModel>(
+pub open spec fn step<M: RoverSpec>(
     m: M,
     config: M::Config,
     world: World<M>,
@@ -190,7 +183,7 @@ pub open spec fn observe<P, M>(label: Label<P, M>) -> Seq<BoundaryEvent<P, M>> {
 
 pub type Execution<M> = Seq<(Lab<M>, World<M>)>;
 
-pub open spec fn before<M: RoverModel>(
+pub open spec fn before<M: RoverSpec>(
     first: World<M>,
     execution: Execution<M>,
     i: int,
@@ -199,7 +192,7 @@ pub open spec fn before<M: RoverModel>(
 }
 
 /// Every execution entry is a valid step from the preceding world.
-pub open spec fn legal<M: RoverModel>(
+pub open spec fn legal<M: RoverSpec>(
     m: M,
     config: M::Config,
     first: World<M>,
@@ -210,7 +203,7 @@ pub open spec fn legal<M: RoverModel>(
 }
 
 /// Boundary trace shown by an execution.
-pub open spec fn trace<M: RoverModel>(execution: Execution<M>) -> Seq<Ev<M>>
+pub open spec fn trace<M: RoverSpec>(execution: Execution<M>) -> Seq<Ev<M>>
     decreases execution.len(),
 {
     if execution.len() == 0 {
@@ -220,7 +213,7 @@ pub open spec fn trace<M: RoverModel>(execution: Execution<M>) -> Seq<Ev<M>>
     }
 }
 
-pub open spec fn initial<M: RoverModel>(m: M, config: M::Config) -> World<M> {
+pub open spec fn initial<M: RoverSpec>(m: M, config: M::Config) -> World<M> {
     WorldV {
         process: m.spec_initial(config),
         network: Seq::empty(),
@@ -229,7 +222,7 @@ pub open spec fn initial<M: RoverModel>(m: M, config: M::Config) -> World<M> {
 }
 
 /// A boundary trace is valid when some legal execution shows exactly it.
-pub open spec fn valid_trace<M: RoverModel>(
+pub open spec fn valid_trace<M: RoverSpec>(
     m: M,
     config: M::Config,
     events: Seq<Ev<M>>,
@@ -242,7 +235,7 @@ pub open spec fn valid_trace<M: RoverModel>(
 
 /// Rover's translation of the catalogue's monotone-outbox property: once a
 /// message is emitted into the world network, no later step removes it.
-pub open spec fn network_extends<M: RoverModel>(
+pub open spec fn network_extends<M: RoverSpec>(
     before: World<M>,
     after: World<M>,
 ) -> bool {
@@ -250,7 +243,7 @@ pub open spec fn network_extends<M: RoverModel>(
         after.network == before.network + suffix
 }
 
-pub proof fn step_preserves_network<M: RoverModel>(
+pub proof fn step_preserves_network<M: RoverSpec>(
     model: M,
     config: M::Config,
     before: World<M>,
@@ -356,7 +349,7 @@ pub proof fn step_preserves_network<M: RoverModel>(
 }
 
 /// Every model admits the empty trace.
-pub proof fn empty_trace_valid<M: RoverModel>(m: M, config: M::Config)
+pub proof fn empty_trace_valid<M: RoverSpec>(m: M, config: M::Config)
     ensures
         valid_trace(m, config, Seq::<Ev<M>>::empty()),
 {

@@ -13,12 +13,12 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use super::semantics::{before, initial, legal, step, Execution, Lab, World};
 #[cfg(verus_keep_ghost)]
-use super::RoverModel;
+use super::RoverSpec;
 
 verus! {
 
 /// Where an execution ends.
-pub open spec fn end<M: RoverModel>(
+pub open spec fn end<M: RoverSpec>(
     first: World<M>,
     execution: Execution<M>,
 ) -> World<M> {
@@ -30,7 +30,7 @@ pub open spec fn end<M: RoverModel>(
 }
 
 /// Project an execution through a model-specific boundary observer.
-pub open spec fn project<M: RoverModel>(
+pub open spec fn project<M: RoverSpec>(
     model: M,
     execution: Execution<M>,
 ) -> Seq<M::Boundary>
@@ -45,7 +45,7 @@ pub open spec fn project<M: RoverModel>(
 }
 
 /// A boundary trace admitted by one Rover model.
-pub open spec fn valid_boundary_trace<M: RoverModel>(
+pub open spec fn valid_boundary_trace<M: RoverSpec>(
     model: M,
     config: M::Config,
     events: Seq<M::Boundary>,
@@ -57,7 +57,7 @@ pub open spec fn valid_boundary_trace<M: RoverModel>(
 }
 
 /// Abstract steps matching one concrete label's visible boundary contribution.
-pub open spec fn matches<A: RoverModel>(
+pub open spec fn matches<A: RoverSpec>(
     abstract_model: A,
     abstract_config: A::Config,
     start: World<A>,
@@ -74,8 +74,8 @@ pub open spec fn matches<A: RoverModel>(
 /// Every concrete step from related worlds has a matching finite abstract run
 /// and leaves the worlds related again.
 pub open spec fn simulation<
-    C: RoverModel,
-    A: RoverModel<Boundary = C::Boundary>,
+    C: RoverSpec,
+    A: RoverSpec<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -120,8 +120,8 @@ pub open spec fn simulation<
 
 /// Trace inclusion at the shared boundary.
 pub open spec fn refines<
-    C: RoverModel,
-    A: RoverModel<Boundary = C::Boundary>,
+    C: RoverSpec,
+    A: RoverSpec<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -150,7 +150,7 @@ pub open spec fn refines<
 // Execution algebra
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_project_add<M: RoverModel>(
+pub proof fn lemma_project_add<M: RoverSpec>(
     model: M,
     first: Execution<M>,
     second: Execution<M>,
@@ -173,7 +173,7 @@ pub proof fn lemma_project_add<M: RoverModel>(
     }
 }
 
-pub proof fn lemma_end_add<M: RoverModel>(
+pub proof fn lemma_end_add<M: RoverSpec>(
     first: World<M>,
     prefix: Execution<M>,
     suffix: Execution<M>,
@@ -189,7 +189,7 @@ pub proof fn lemma_end_add<M: RoverModel>(
     }
 }
 
-pub proof fn lemma_legal_add<M: RoverModel>(
+pub proof fn lemma_legal_add<M: RoverSpec>(
     model: M,
     config: M::Config,
     first: World<M>,
@@ -229,8 +229,8 @@ pub proof fn lemma_legal_add<M: RoverModel>(
 // ---------------------------------------------------------------------------
 
 proof fn lemma_simulate_prefix<
-    C: RoverModel,
-    A: RoverModel<Boundary = C::Boundary>,
+    C: RoverSpec,
+    A: RoverSpec<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -497,8 +497,8 @@ proof fn lemma_simulate_prefix<
 /// The generic theorem: a related initial world and a proved forward
 /// simulation imply concrete boundary traces are included in abstract traces.
 pub proof fn concrete_refines_abstract<
-    C: RoverModel,
-    A: RoverModel<Boundary = C::Boundary>,
+    C: RoverSpec,
+    A: RoverSpec<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,

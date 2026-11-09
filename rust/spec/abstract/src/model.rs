@@ -9,7 +9,7 @@ use vstd::prelude::*;
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use echod_rover::rover::semantics::{Label, StepResultV};
-use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
+use echod_rover::rover::{Process, ProcessEvent, RoverExec, RoverSpec, StepResult};
 use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
@@ -1133,13 +1133,8 @@ impl Process<ServerConfig, Pid, Message> for State {
     }
 }
 
-impl RoverModel for Model {
-    type Config = ServerConfig;
-    type Pid = Pid;
-    type StateV = StateV;
+impl RoverExec for Model {
     type State = State;
-    type Message = Message;
-    type Boundary = BoundaryEvent;
 
     fn outside(&self) -> (outside: Pid) {
         Pid::Outside
@@ -1199,6 +1194,14 @@ impl RoverModel for Model {
         }
         results
     }
+}
+
+impl RoverSpec for Model {
+    type Config = ServerConfig;
+    type Pid = Pid;
+    type StateV = StateV;
+    type Message = Message;
+    type Boundary = BoundaryEvent;
 
     open spec fn spec_outside(&self) -> Pid {
         Pid::Outside
@@ -1221,9 +1224,8 @@ impl RoverModel for Model {
         }
     }
 
-    /// One local step. `spec_step` is that transition. The `ensures` on
-    /// `on_event` is the equality of the executable results with this function;
-    /// that proof is not written yet.
+    /// One local step. `spec_step` is that transition. `RoverExec::on_event`
+    /// proves that the executable results equal this function.
     open spec fn spec_on_event(
         &self,
         config: ServerConfig,
@@ -1257,11 +1259,11 @@ impl RoverModel for Model {
 
 // ---------------------------------------------------------------------------
 // The step, as a specification. `spec_step` is what
-// `RoverModel::spec_on_event` returns. A request is served, lost, or shed, the
+// `RoverSpec::spec_on_event` returns. A request is served, lost, or shed, the
 // three outcomes of the Lean step. A timeout is one ready queued occurrence, or
 // one step derived from the three maps. Anything else leaves the state as it
-// was. The executable `on_event` is obliged, by the trait, to return results
-// whose views are exactly this sequence. That equality is not proved here.
+// was. `RoverExec::on_event` proves that its executable results have exactly
+// the views in this sequence.
 // ---------------------------------------------------------------------------
 
 pub open spec fn spec_run(config: ServerConfig, state: StateV, call: Call, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {

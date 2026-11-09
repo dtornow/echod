@@ -6,7 +6,7 @@
 use crate::Time;
 
 use super::replay::{Action, ActionOf, Certificate, World};
-use super::{BoundaryEvent, EventOf, ProcessEvent, RoverModel};
+use super::{BoundaryEvent, EventOf, ProcessEvent, RoverExec};
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ impl CheckConfig {
     }
 }
 
-fn visible_action<M: RoverModel>(event: &EventOf<M>) -> ActionOf<M> {
+fn visible_action<M: RoverExec>(event: &EventOf<M>) -> ActionOf<M> {
     match event {
         BoundaryEvent::Input {
             recipient,
@@ -48,7 +48,7 @@ fn visible_action<M: RoverModel>(event: &EventOf<M>) -> ActionOf<M> {
 }
 
 /// Candidate hidden process actions at `at`.
-fn hidden_actions<M: RoverModel>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<M>> {
+fn hidden_actions<M: RoverExec>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<M>> {
     if at < world.now {
         return Vec::new();
     }
@@ -91,7 +91,7 @@ fn hidden_actions<M: RoverModel>(world: &World<'_, M>, at: Time) -> Vec<ActionOf
     actions
 }
 
-fn search_from<M: RoverModel>(
+fn search_from<M: RoverExec>(
     world: World<'_, M>,
     events: &[EventOf<M>],
     visible: usize,
@@ -142,7 +142,7 @@ fn search_from<M: RoverModel>(
 
 /// Search for a candidate certificate. Failure means only that this bounded
 /// search did not find one; no completeness claim is made.
-pub fn search<M: RoverModel>(
+pub fn search<M: RoverExec>(
     model: &M,
     config: &M::Config,
     events: &[EventOf<M>],
@@ -155,7 +155,7 @@ pub fn search<M: RoverModel>(
 
 /// Search and independently replay. `Some(certificate)` is the acceptance
 /// result covered by [`super::replay`]'s Verus soundness theorem.
-pub fn check<M: RoverModel>(
+pub fn check<M: RoverExec>(
     model: &M,
     config: &M::Config,
     events: &[EventOf<M>],

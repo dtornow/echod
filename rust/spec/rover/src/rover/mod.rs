@@ -5,10 +5,12 @@
 //! sent, so delay, loss, reordering, and duplicate delivery require no extra
 //! rules. One distinguished endpoint is outside the modeled processes.
 //!
-//! [`RoverModel`] is executable and has specification twins for proofs.
-//! [`check`] performs bounded certificate search. Acceptance is decided only
-//! after [`replay`] independently replays that certificate; Verus proves that
-//! successful replay implies [`semantics::valid_trace`].
+//! [`RoverSpec`] is the mathematical model used by semantics and refinement.
+//! [`RoverExec`] is its optional executable realization, used by bounded
+//! search and verified replay. [`check`] performs bounded certificate search.
+//! Acceptance is decided only after [`replay`] independently replays that
+//! certificate; Verus proves that successful replay implies
+//! [`semantics::valid_trace`].
 
 use vstd::prelude::*;
 
@@ -42,7 +44,7 @@ pub enum ProcessEvent<P, M> {
 }
 
 /// One possible local transition result.
-pub struct StepResult<M: RoverModel + ?Sized> {
+pub struct StepResult<M: RoverExec + ?Sized> {
     pub state: M::State,
     pub send: Vec<(M::Pid, M::Message)>,
 }
@@ -65,22 +67,64 @@ impl<P, M> BoundaryEvent<P, M> {
     }
 }
 
-/// A protocol interpreted by the Rover world.
+/// The mathematical protocol interpreted by the Rover world.
 ///
-/// The executable methods have specification twins. A model authored inside
-/// `verus!` overrides the twins and verifies each method's `ensures`; ordinary
-/// Rust models may use the defaults for trace checking only.
-pub trait RoverModel {
+/// Semantics and refinement depend only on this trait. Its methods are ghost
+/// code and impose no executable state representation on a model.
+pub trait RoverSpec {
     type Config;
     type Pid: Data;
     type StateV;
-    type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
     type Message: Data;
     /// The only values refinement and clients observe. Internal process ids
     /// and messages do not appear here.
     type Boundary;
 
     /// The stateless endpoint representing everything outside the model.
+    open spec fn spec_outside(&self) -> Self::Pid {
+        arbitrary()
+    }
+
+    /// All process-local initial states.
+    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)> {
+        arbitrary()
+    }
+
+    /// Which messages the environment may inject.
+    open spec fn spec_injectable(&self, config: Self::Config, message: Self::Message) -> bool {
+        arbitrary()
+    }
+
+    /// Every possible result of one local process event.
+    open spec fn spec_on_event(
+        &self,
+        config: Self::Config,
+        pid: Self::Pid,
+        state: Self::StateV,
+        now: Time,
+        event: ProcessEvent<Self::Pid, Self::Message>,
+    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
+        arbitrary()
+    }
+
+    /// Project one world label to zero or more clean boundary observations.
+    open spec fn spec_observe(
+        &self,
+        label: semantics::Lab<Self>,
+    ) -> Seq<Self::Boundary> {
+        arbitrary()
+    }
+}
+
+/// An executable realization of a [`RoverSpec`].
+///
+/// Search and replay require this trait. Each method's contract connects the
+/// executable representation to the mathematical model inherited from
+/// [`RoverSpec`]. A proof-only model implements `RoverSpec` and stops there.
+pub trait RoverExec: RoverSpec {
+    type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
+
+    /// The executable outside endpoint.
     fn outside(&self) -> (r: Self::Pid)
         ensures
             r == self.spec_outside();
@@ -121,39 +165,9 @@ pub trait RoverModel {
                 } == self.spec_on_event(*config, *pid, state@, now, *event)[i]
             };
 
-    open spec fn spec_outside(&self) -> Self::Pid {
-        arbitrary()
-    }
-
-    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)> {
-        arbitrary()
-    }
-
-    open spec fn spec_injectable(&self, config: Self::Config, message: Self::Message) -> bool {
-        arbitrary()
-    }
-
-    open spec fn spec_on_event(
-        &self,
-        config: Self::Config,
-        pid: Self::Pid,
-        state: Self::StateV,
-        now: Time,
-        event: ProcessEvent<Self::Pid, Self::Message>,
-    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
-        arbitrary()
-    }
-
-    /// Project one world label to zero or more clean boundary observations.
-    open spec fn spec_observe(
-        &self,
-        label: semantics::Lab<Self>,
-    ) -> Seq<Self::Boundary> {
-        arbitrary()
-    }
 }
 
-/// One process in a [`RoverModel`].
+/// One process in a [`RoverExec`].
 ///
 /// Every process in a model shares that model's `Pid` and `Message`. `on_event`
 /// returns the next instance and the messages it sends. `Config` is the model's
@@ -169,5 +183,5 @@ pub trait Process<Config, Pid, Message> {
 
 } // verus!
 
-/// A boundary event for `M`.
-pub type EventOf<M> = BoundaryEvent<<M as RoverModel>::Pid, <M as RoverModel>::Message>;
+/// A boundary event for specification `M`.
+pub type EventOf<M> = BoundaryEvent<<M as RoverSpec>::Pid, <M as RoverSpec>::Message>;

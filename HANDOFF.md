@@ -37,8 +37,8 @@ Produce an inventory containing exact paths for the following.
 
 ### Rover
 
-- Rust `RoverModel`, world semantics, checker, certificate replay, and generic
-  refinement theorem.
+- Rust `RoverSpec` mathematical model, optional `RoverExec` realization,
+  world semantics, checker, certificate replay, and generic refinement theorem.
 - Standalone Resonate protocol, abstract model, property catalogue, tests,
   benchmark, and fuzz driver.
 - Lean `Rover.World`, Resonate abstract/concrete models, trace checker, and
@@ -220,7 +220,7 @@ certificates. A process's identity belongs in its state or configuration.
 
 ### Boundary hides all internal topology
 
-Every `RoverModel` owns:
+Every `RoverSpec` owns:
 
 ```rust
 type Boundary;

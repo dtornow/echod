@@ -17,7 +17,7 @@ use echod_abstract::{BoundaryEvent, Call, Output};
 use echod_rover::rover::semantics::Label;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::StepResultV;
-use echod_rover::rover::{Process, ProcessEvent, RoverModel, StepResult};
+use echod_rover::rover::{Process, ProcessEvent, RoverExec, RoverSpec, StepResult};
 use echod_rover::Time;
 
 use echod_types::Response;
@@ -184,7 +184,7 @@ impl View for Local {
 
 // ---------------------------------------------------------------------------
 // The step, as a specification. `spec_step` is what
-// `RoverModel::spec_on_event` returns: a node runs one flight, the store
+// `RoverSpec::spec_on_event` returns: a node runs one flight, the store
 // applies one call. The executable `on_event` is obliged, by the trait, to
 // return results whose views are this sequence: `Node::step` computes
 // `spec_node` and `Store::step` computes `spec_store`.
@@ -434,13 +434,8 @@ impl Process<(), Pid, Message> for Store {
     }
 }
 
-impl RoverModel for Model {
-    type Config = Fleet;
-    type Pid = Pid;
-    type StateV = LocalV;
+impl RoverExec for Model {
     type State = Local;
-    type Message = Message;
-    type Boundary = BoundaryEvent;
 
     fn outside(&self) -> Pid {
         Pid::Outside
@@ -555,6 +550,14 @@ impl RoverModel for Model {
         }
         results
     }
+}
+
+impl RoverSpec for Model {
+    type Config = Fleet;
+    type Pid = Pid;
+    type StateV = LocalV;
+    type Message = Message;
+    type Boundary = BoundaryEvent;
 
     open spec fn spec_outside(&self) -> Pid {
         Pid::Outside

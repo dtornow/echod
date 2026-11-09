@@ -26,7 +26,7 @@
 use vstd::prelude::*;
 
 use echod_rover::rover::semantics::StepResultV;
-use echod_rover::rover::{ProcessEvent, RoverModel};
+use echod_rover::rover::{ProcessEvent, RoverSpec};
 use echod_rover::Time;
 
 use super::model::{Pid, StateV};

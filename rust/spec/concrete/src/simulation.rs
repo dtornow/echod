@@ -71,7 +71,7 @@ use echod_rover::rover::semantics::{
     observe_outside, step, StepResultV, World, WorldV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, ProcessEvent, RoverModel};
+use echod_rover::rover::{Envelope, ProcessEvent, RoverSpec};
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]
@@ -530,7 +530,7 @@ pub proof fn lemma_matches_same_visible(
 
 /// A process step with the outcome at `j`, stated over the model's trait: the
 /// witness `step` asks for is in the form `step` names it.
-pub proof fn lemma_process_step<M: RoverModel>(
+pub proof fn lemma_process_step<M: RoverSpec>(
     m: M,
     config: M::Config,
     world: World<M>,

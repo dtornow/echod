@@ -1,7 +1,7 @@
 //! Executable examples for the Rust + Verus Rover world.
 
 use echod_rover::rover::{
-    check, replay, Action, BoundaryEvent, CheckConfig, ProcessEvent, RoverModel, StepResult,
+    check, replay, Action, BoundaryEvent, CheckConfig, ProcessEvent, RoverExec, RoverSpec, StepResult,
 };
 use echod_rover::Time;
 
@@ -19,13 +19,27 @@ enum Message {
 
 struct Counter;
 
-impl RoverModel for Counter {
+/// A mathematical model need not provide executable state or transitions.
+struct SpecOnly;
+
+impl RoverSpec for SpecOnly {
+    type Config = ();
+    type Pid = ();
+    type StateV = u64;
+    type Message = ();
+    type Boundary = ();
+}
+
+impl RoverSpec for Counter {
     type Config = ();
     type Pid = Pid;
     type StateV = u64;
-    type State = u64;
     type Message = Message;
     type Boundary = Event;
+}
+
+impl RoverExec for Counter {
+    type State = u64;
 
     fn outside(&self) -> Pid {
         Pid::Outside
@@ -67,6 +81,12 @@ impl RoverModel for Counter {
 }
 
 type Event = BoundaryEvent<Pid, Message>;
+
+#[test]
+fn a_specification_does_not_need_an_executable_realization() {
+    fn accepts_spec<S: RoverSpec>(_: S) {}
+    accepts_spec(SpecOnly);
+}
 
 fn input(at: Time, amount: u64) -> Event {
     Event::Input {
