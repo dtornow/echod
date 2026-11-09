@@ -53,13 +53,13 @@ module Claim {
     Cases(doc, id, tr(k).state.now);
   }
 
-  // The bucket starts empty. Every document is well-formed at every time:
-  // stored in the bucket, in flight, or waiting on a continuation.
-  lemma DocumentsStayWellFormed(clients: set<nat>, nodes: set<nat>,
-                                tr: nat -> Moment<Pid, Msg, State>)
-    requires Behavior(map[], clients, nodes, tr)
+  // Every trace of a world whose bucket starts empty. Every document is well-formed
+  // at every time: stored in the bucket, in flight, or waiting on a continuation.
+  lemma DocumentsStayWellFormed(tr: nat -> Moment<Pid, Msg, State>)
+    requires exists clients: set<nat>, nodes: set<nat> :: Behavior(map[], clients, nodes, tr)
     ensures forall t: nat :: Formed(tr(t).state)
   {
+    var clients, nodes :| Behavior(map[], clients, nodes, tr);
     forall t: nat ensures Formed(tr(t).state) {
       DocumentsStay(map[], clients, nodes, tr, t);
     }
