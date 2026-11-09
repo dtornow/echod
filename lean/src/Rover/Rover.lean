@@ -194,6 +194,28 @@ def Behavior (model : Model) (config : model.Config)
     model.init config process ∧
     Legal model config (System.initial process) execution
 
+/-- Every system a legal execution passes through is reachable. -/
+theorem Legal.reachable {system : System model} {execution : Execution model}
+    (hreachable : Reachable model config system)
+    (hlegal : Legal model config system execution) :
+    ∀ entry ∈ execution, Reachable model config entry.2 := by
+  induction execution generalizing system with
+  | nil => intro _ h; nomatch h
+  | cons head rest ih =>
+      obtain ⟨label, next⟩ := head
+      have hnext := Reachable.step hreachable hlegal.1
+      intro entry hentry
+      rcases List.mem_cons.mp hentry with rfl | hentry
+      · exact hnext
+      · exact ih hnext hlegal.2 entry hentry
+
+/-- Every system a behavior passes through is reachable. -/
+theorem Behavior.reachable {execution : Execution model}
+    (hbehavior : Behavior model config execution) :
+    ∀ entry ∈ execution, Reachable model config entry.2 :=
+  let ⟨_, hinit, hlegal⟩ := hbehavior
+  Legal.reachable (.init hinit) hlegal
+
 /-- Trace checking asks whether some legal execution from an allowed initial
 state shows exactly the supplied boundary trace. -/
 def ValidTrace (model : Model) (config : model.Config)

@@ -1,4 +1,4 @@
-import «concrete».ProcessStore
+import «concrete».Model
 
 /-!
 # Well-formed documents
@@ -61,5 +61,10 @@ def DocumentOk : (key : DocumentKey) → Document key → Prop
 def Store.WellFormed (store : Store) : Prop :=
   ∀ key document version, store.read key = some (document, version) →
     DocumentOk key document
+
+/-- A system is well-formed when its store is. -/
+def Formed {nodes : List Addr} {appConfig : Resonate.Config}
+    (system : Rover.System (model nodes appConfig)) : Prop :=
+  ∀ store, system.process .store = .store store → store.WellFormed
 
 end Resonate.Concrete
