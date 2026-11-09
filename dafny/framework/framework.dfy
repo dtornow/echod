@@ -5,9 +5,10 @@ include "order.dfy"
 // A process is a value: its step, told the time. A system is the set of ids,
 // how each one boots, the process installed at each id, and whether the
 // network may drop or duplicate packets. One network runs any system.
-// Deliver, fire, tick, drop and duplicate are the same transitions; a trace
-// invariant is an argument of the safety theorem, not a module each system
-// has to refine.
+// Deliver, fire, tick, drop and duplicate are the same transitions. A behavior
+// is a moment at every time: the state, and the event that takes it to the
+// next state. A trace invariant is an argument of the safety theorem, not a
+// module each system has to refine.
 //
 // Liveness ("eventually") holds only under fairness, otherwise the network
 // may drop every message or never let time pass:
@@ -79,6 +80,9 @@ module Network {
     | Tick
     | Drop(p: Packet<P, M>)
     | Duplicate(p: Packet<P, M>)
+
+  // One moment of a trace: the state, and the event that takes it to the next state.
+  datatype Moment<P(==, !new), M(==, !new), S(!new)> = Moment(state: Net<P, M, S>, event: Action<P, M>)
 
   function ToPackets<P(==, !new), M(==, !new)>(src: P, sends: seq<Send<P, M>>): multiset<Packet<P, M>>
   {
@@ -170,9 +174,9 @@ module Network {
   }
 
   ghost predicate IsBehavior<P(!new), M(!new), S(!new)>(
-    w: Sys<P, M, S>, b: nat -> Net<P, M, S>, a: nat -> Action<P, M>)
+    w: Sys<P, M, S>, tr: nat -> Moment<P, M, S>)
   {
-    IsInit(w, b(0)) && forall i: nat :: NextStep(w, b(i), b(i+1), a(i))
+    IsInit(w, tr(0).state) && forall i: nat :: NextStep(w, tr(i).state, tr(i+1).state, tr(i).event)
   }
 
   ghost predicate FireEnabled<P(!new), M(!new), S(!new)>(n: Net<P, M, S>, p: P)
@@ -180,126 +184,126 @@ module Network {
     p in n.timers && p in n.procs && n.timers[p] <= n.now
   }
 
-  ghost predicate SentAt<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, j: nat, pk: Packet<P, M>)
+  ghost predicate SentAt<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, j: nat, pk: Packet<P, M>)
   {
-    b(j+1).inflight[pk] > b(j).inflight[pk]
+    tr(j+1).state.inflight[pk] > tr(j).state.inflight[pk]
   }
 
   // Named temporal patterns. Each one is a quantifier trigger.
-  ghost predicate SentAfter<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, i: nat, pk: Packet<P, M>)
-  { exists j: nat {:trigger SentAt(b, j, pk)} :: j >= i && SentAt(b, j, pk) }
+  ghost predicate SentAfter<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, pk: Packet<P, M>)
+  { exists j: nat {:trigger SentAt(tr, j, pk)} :: j >= i && SentAt(tr, j, pk) }
 
-  ghost predicate DeliveredAfter<P(!new), M(!new)>(a: nat -> Action<P, M>, i: nat, pk: Packet<P, M>)
-  { exists j: nat {:trigger a(j)} :: j >= i && a(j) == Deliver(pk) }
+  ghost predicate DeliveredAfter<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, pk: Packet<P, M>)
+  { exists j: nat {:trigger tr(j).event} :: j >= i && tr(j).event == Deliver(pk) }
 
-  ghost predicate FiredAfter<P(!new), M(!new)>(a: nat -> Action<P, M>, i: nat, p: P)
-  { exists j: nat {:trigger a(j)} :: j >= i && a(j) == Fire(p) }
+  ghost predicate FiredAfter<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, p: P)
+  { exists j: nat {:trigger tr(j).event} :: j >= i && tr(j).event == Fire(p) }
 
-  ghost predicate EnabledFrom<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, i: nat, p: P)
-  { forall j: nat {:trigger b(j)} :: j >= i ==> FireEnabled(b(j), p) }
+  ghost predicate EnabledFrom<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, p: P)
+  { forall j: nat {:trigger tr(j).state} :: j >= i ==> FireEnabled(tr(j).state, p) }
 
-  ghost predicate Reaches<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, t: nat)
-  { exists i: nat {:trigger b(i)} :: b(i).now >= t }
+  ghost predicate Reaches<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, t: nat)
+  { exists i: nat {:trigger tr(i).state} :: tr(i).state.now >= t }
 
-  ghost predicate InfinitelyOftenSent<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, pk: Packet<P, M>)
-  { forall i: nat :: SentAfter(b, i, pk) }
+  ghost predicate InfinitelyOftenSent<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, pk: Packet<P, M>)
+  { forall i: nat :: SentAfter(tr, i, pk) }
 
-  ghost predicate TimeDiverges<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>)
-  { forall t: nat :: Reaches(b, t) }
+  ghost predicate TimeDiverges<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>)
+  { forall t: nat :: Reaches(tr, t) }
 
-  ghost predicate WeakFairFire<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, a: nat -> Action<P, M>)
-  { forall p: P, i: nat :: EnabledFrom(b, i, p) ==> FiredAfter(a, i, p) }
+  ghost predicate WeakFairFire<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>)
+  { forall p: P, i: nat :: EnabledFrom(tr, i, p) ==> FiredAfter(tr, i, p) }
 
-  ghost predicate FairLoss<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, a: nat -> Action<P, M>)
-  { forall pk: Packet<P, M>, i: nat :: InfinitelyOftenSent(b, pk) ==> DeliveredAfter(a, i, pk) }
+  ghost predicate FairLoss<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>)
+  { forall pk: Packet<P, M>, i: nat :: InfinitelyOftenSent(tr, pk) ==> DeliveredAfter(tr, i, pk) }
 
-  ghost predicate Fair<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, a: nat -> Action<P, M>)
+  ghost predicate Fair<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>)
   {
-    TimeDiverges(b) && WeakFairFire(b, a) && FairLoss(b, a)
+    TimeDiverges(tr) && WeakFairFire(tr) && FairLoss(tr)
   }
 
   lemma BehaviorInv<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>, i: nat)
-    requires IsBehavior(w, b, a) && Preserves(w, inv)
-    ensures inv(b(i))
+    tr: nat -> Moment<P, M, S>, i: nat)
+    requires IsBehavior(w, tr) && Preserves(w, inv)
+    ensures inv(tr(i).state)
   {
     if i == 0 {
-      assert IsInit(w, b(0));
+      assert IsInit(w, tr(0).state);
     } else {
-      BehaviorInv(w, inv, b, a, i - 1);
-      assert NextStep(w, b(i-1), b(i), a(i-1));
+      BehaviorInv(w, inv, tr, i - 1);
+      assert NextStep(w, tr(i-1).state, tr(i).state, tr(i-1).event);
     }
   }
 
-  ghost predicate Always<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, i: nat, holds: Net<P, M, S> -> bool)
-  { forall j: nat {:trigger b(j)} :: j >= i ==> holds(b(j)) }
+  ghost predicate Always<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, holds: Net<P, M, S> -> bool)
+  { forall j: nat {:trigger tr(j).state} :: j >= i ==> holds(tr(j).state) }
 
-  ghost predicate Eventually<P(!new), M(!new), S(!new)>(b: nat -> Net<P, M, S>, i: nat, holds: Net<P, M, S> -> bool)
-  { exists j: nat {:trigger b(j)} :: j >= i && holds(b(j)) }
+  ghost predicate Eventually<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, holds: Net<P, M, S> -> bool)
+  { exists j: nat {:trigger tr(j).state} :: j >= i && holds(tr(j).state) }
 
-  ghost predicate ActsAfter<P(!new), M(!new)>(a: nat -> Action<P, M>, i: nat, act: Action<P, M>)
-  { exists j: nat {:trigger a(j)} :: j >= i && a(j) == act }
+  ghost predicate ActsAfter<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, act: Action<P, M>)
+  { exists j: nat {:trigger tr(j).event} :: j >= i && tr(j).event == act }
 
-  ghost predicate ActsInfinitelyOften<P(!new), M(!new)>(a: nat -> Action<P, M>, i: nat, act: Action<P, M>)
-  { forall k: nat :: k >= i ==> ActsAfter(a, k, act) }
+  ghost predicate ActsInfinitelyOften<P(!new), M(!new), S(!new)>(tr: nat -> Moment<P, M, S>, i: nat, act: Action<P, M>)
+  { forall k: nat :: k >= i ==> ActsAfter(tr, k, act) }
 
   // Rule 1 (timers). While `holds` is true forever, it keeps p's timer pending,
   // and no step other than Fire(p) moves p's deadline: then p fires forever.
   lemma TimerRule<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     i: nat, p: P, holds: Net<P, M, S> -> bool)
-    requires IsBehavior(w, b, a) && Fair(b, a) && Preserves(w, inv) && Always(b, i, holds)
+    requires IsBehavior(w, tr) && Fair(tr) && Preserves(w, inv) && Always(tr, i, holds)
     requires forall n: Net<P, M, S> :: inv(n) && holds(n) ==> p in n.timers && p in n.procs
     requires forall n: Net<P, M, S>, n': Net<P, M, S>, act: Action<P, M>
         {:trigger NextStep(w, n, n', act)} ::
       inv(n) && holds(n) && holds(n') && NextStep(w, n, n', act) && act != Fire(p) ==>
       p in n.timers && p in n'.timers && n'.timers[p] == n.timers[p]
-    ensures ActsInfinitelyOften(a, i, Fire(p))
+    ensures ActsInfinitelyOften(tr, i, Fire(p))
   {
-    forall k: nat | k >= i ensures ActsAfter(a, k, Fire(p)) {
-      if !FiredAfter(a, k, p) {
-        BehaviorInv(w, inv, b, a, k);
-        assert holds(b(k));
-        var d := b(k).timers[p];
-        assert Reaches(b, d);
-        var t: nat :| b(t).now >= d;
+    forall k: nat | k >= i ensures ActsAfter(tr, k, Fire(p)) {
+      if !FiredAfter(tr, k, p) {
+        BehaviorInv(w, inv, tr, k);
+        assert holds(tr(k).state);
+        var d := tr(k).state.timers[p];
+        assert Reaches(tr, d);
+        var t: nat :| tr(t).state.now >= d;
         var m: nat := if t > k then t else k;
-        forall x: nat | x >= m ensures FireEnabled(b(x), p) {
-          DeadlineFrozen(w, inv, b, a, i, k, x, p, holds);
-          TimeMonotone(w, b, a, t, x);
-          BehaviorInv(w, inv, b, a, x);
+        forall x: nat | x >= m ensures FireEnabled(tr(x).state, p) {
+          DeadlineFrozen(w, inv, tr, i, k, x, p, holds);
+          TimeMonotone(w, tr, t, x);
+          BehaviorInv(w, inv, tr, x);
         }
-        assert EnabledFrom(b, m, p);
-        assert FiredAfter(a, m, p);
-        var y: nat :| y >= m && a(y) == Fire(p);
+        assert EnabledFrom(tr, m, p);
+        assert FiredAfter(tr, m, p);
+        var y: nat :| y >= m && tr(y).event == Fire(p);
         assert false;
       }
-      var y: nat :| y >= k && a(y) == Fire(p);
+      var y: nat :| y >= k && tr(y).event == Fire(p);
     }
   }
 
   lemma DeadlineFrozen<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     i: nat, k: nat, x: nat, p: P, holds: Net<P, M, S> -> bool)
-    requires IsBehavior(w, b, a) && Preserves(w, inv) && Always(b, i, holds)
-    requires k >= i && x >= k && !FiredAfter(a, k, p)
+    requires IsBehavior(w, tr) && Preserves(w, inv) && Always(tr, i, holds)
+    requires k >= i && x >= k && !FiredAfter(tr, k, p)
     requires forall n: Net<P, M, S> :: inv(n) && holds(n) ==> p in n.timers && p in n.procs
     requires forall n: Net<P, M, S>, n': Net<P, M, S>, act: Action<P, M>
         {:trigger NextStep(w, n, n', act)} ::
       inv(n) && holds(n) && holds(n') && NextStep(w, n, n', act) && act != Fire(p) ==>
       p in n.timers && p in n'.timers && n'.timers[p] == n.timers[p]
-    ensures p in b(x).timers && p in b(k).timers && b(x).timers[p] == b(k).timers[p]
+    ensures p in tr(x).state.timers && p in tr(k).state.timers && tr(x).state.timers[p] == tr(k).state.timers[p]
     decreases x - k
   {
-    BehaviorInv(w, inv, b, a, k); BehaviorInv(w, inv, b, a, x);
-    assert holds(b(k)) && holds(b(x));
+    BehaviorInv(w, inv, tr, k); BehaviorInv(w, inv, tr, x);
+    assert holds(tr(k).state) && holds(tr(x).state);
     if x > k {
-      DeadlineFrozen(w, inv, b, a, i, k, x - 1, p, holds);
-      BehaviorInv(w, inv, b, a, x - 1);
-      assert NextStep(w, b(x-1), b(x), a(x-1));
+      DeadlineFrozen(w, inv, tr, i, k, x - 1, p, holds);
+      BehaviorInv(w, inv, tr, x - 1);
+      assert NextStep(w, tr(x-1).state, tr(x).state, tr(x-1).event);
     }
   }
 
@@ -307,21 +311,21 @@ module Network {
   // and each such step puts pk in flight: pk is sent forever.
   lemma SendRule<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     i: nat, pk: Packet<P, M>, act: Action<P, M>, holds: Net<P, M, S> -> bool)
-    requires IsBehavior(w, b, a) && Preserves(w, inv)
-    requires Always(b, i, holds) && ActsInfinitelyOften(a, i, act)
+    requires IsBehavior(w, tr) && Preserves(w, inv)
+    requires Always(tr, i, holds) && ActsInfinitelyOften(tr, i, act)
     requires forall n: Net<P, M, S>, n': Net<P, M, S> {:trigger NextStep(w, n, n', act)} ::
       inv(n) && holds(n) && NextStep(w, n, n', act) ==> n'.inflight[pk] > n.inflight[pk]
-    ensures InfinitelyOftenSent(b, pk)
+    ensures InfinitelyOftenSent(tr, pk)
   {
-    forall k: nat ensures SentAfter(b, k, pk) {
+    forall k: nat ensures SentAfter(tr, k, pk) {
       var k' := if k > i then k else i;
-      assert ActsAfter(a, k', act);
-      var j: nat :| j >= k' && a(j) == act;
-      BehaviorInv(w, inv, b, a, j);
-      assert NextStep(w, b(j), b(j+1), a(j));
-      assert SentAt(b, j, pk);
+      assert ActsAfter(tr, k', act);
+      var j: nat :| j >= k' && tr(j).event == act;
+      BehaviorInv(w, inv, tr, j);
+      assert NextStep(w, tr(j).state, tr(j+1).state, tr(j).event);
+      assert SentAt(tr, j, pk);
     }
   }
 
@@ -329,74 +333,74 @@ module Network {
   // delivery establishes whatever `after` its step gives.
   lemma DeliveryRule<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     i: nat, pk: Packet<P, M>, after: Net<P, M, S> -> bool)
-    requires IsBehavior(w, b, a) && Fair(b, a) && Preserves(w, inv) && InfinitelyOftenSent(b, pk)
+    requires IsBehavior(w, tr) && Fair(tr) && Preserves(w, inv) && InfinitelyOftenSent(tr, pk)
     requires forall n: Net<P, M, S>, n': Net<P, M, S> {:trigger NextStep(w, n, n', Deliver(pk))} ::
       inv(n) && NextStep(w, n, n', Deliver(pk)) ==> after(n')
-    ensures ActsInfinitelyOften(a, i, Deliver(pk))
-    ensures Eventually(b, i, after)
+    ensures ActsInfinitelyOften(tr, i, Deliver(pk))
+    ensures Eventually(tr, i, after)
   {
-    forall k: nat | k >= i ensures ActsAfter(a, k, Deliver(pk)) {
-      assert DeliveredAfter(a, k, pk);
-      var j: nat :| j >= k && a(j) == Deliver(pk);
+    forall k: nat | k >= i ensures ActsAfter(tr, k, Deliver(pk)) {
+      assert DeliveredAfter(tr, k, pk);
+      var j: nat :| j >= k && tr(j).event == Deliver(pk);
     }
-    assert DeliveredAfter(a, i, pk);
-    var j: nat :| j >= i && a(j) == Deliver(pk);
-    BehaviorInv(w, inv, b, a, j);
-    assert NextStep(w, b(j), b(j+1), a(j));
-    assert after(b(j+1));
+    assert DeliveredAfter(tr, i, pk);
+    var j: nat :| j >= i && tr(j).event == Deliver(pk);
+    BehaviorInv(w, inv, tr, j);
+    assert NextStep(w, tr(j).state, tr(j+1).state, tr(j).event);
+    assert after(tr(j+1).state);
   }
 
   // Rule 4 (stabilization). A bounded measure that never decreases is
   // eventually constant forever.
   lemma StabilizeRule<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     f: Net<P, M, S> -> nat, bound: nat, i: nat) returns (s: nat)
-    requires IsBehavior(w, b, a) && Preserves(w, inv)
+    requires IsBehavior(w, tr) && Preserves(w, inv)
     requires forall n: Net<P, M, S> :: inv(n) ==> f(n) <= bound
     requires forall n: Net<P, M, S>, n': Net<P, M, S>, act: Action<P, M>
         {:trigger NextStep(w, n, n', act)} ::
       inv(n) && NextStep(w, n, n', act) ==> f(n) <= f(n')
-    ensures s >= i && Always(b, s, n => f(n) == f(b(s)))
-    decreases bound - f(b(i))
+    ensures s >= i && Always(tr, s, n => f(n) == f(tr(s).state))
+    decreases bound - f(tr(i).state)
   {
-    BehaviorInv(w, inv, b, a, i);
-    if Always(b, i, n => f(n) == f(b(i))) { return i; }
-    var j: nat :| j >= i && f(b(j)) != f(b(i));
-    MeasureMonotone(w, inv, b, a, f, i, j);
-    BehaviorInv(w, inv, b, a, j);
-    s := StabilizeRule(w, inv, b, a, f, bound, j);
+    BehaviorInv(w, inv, tr, i);
+    if Always(tr, i, n => f(n) == f(tr(i).state)) { return i; }
+    var j: nat :| j >= i && f(tr(j).state) != f(tr(i).state);
+    MeasureMonotone(w, inv, tr, f, i, j);
+    BehaviorInv(w, inv, tr, j);
+    s := StabilizeRule(w, inv, tr, f, bound, j);
   }
 
   lemma MeasureMonotone<P(!new), M(!new), S(!new)>(
     w: Sys<P, M, S>, inv: Net<P, M, S> -> bool,
-    b: nat -> Net<P, M, S>, a: nat -> Action<P, M>,
+    tr: nat -> Moment<P, M, S>,
     f: Net<P, M, S> -> nat, i: nat, j: nat)
-    requires IsBehavior(w, b, a) && Preserves(w, inv) && i <= j
+    requires IsBehavior(w, tr) && Preserves(w, inv) && i <= j
     requires forall n: Net<P, M, S>, n': Net<P, M, S>, act: Action<P, M>
         {:trigger NextStep(w, n, n', act)} ::
       inv(n) && NextStep(w, n, n', act) ==> f(n) <= f(n')
-    ensures f(b(i)) <= f(b(j))
+    ensures f(tr(i).state) <= f(tr(j).state)
     decreases j - i
   {
     if i < j {
-      MeasureMonotone(w, inv, b, a, f, i, j - 1);
-      BehaviorInv(w, inv, b, a, j - 1);
-      assert NextStep(w, b(j-1), b(j), a(j-1));
+      MeasureMonotone(w, inv, tr, f, i, j - 1);
+      BehaviorInv(w, inv, tr, j - 1);
+      assert NextStep(w, tr(j-1).state, tr(j).state, tr(j-1).event);
     }
   }
 
   lemma TimeMonotone<P(!new), M(!new), S(!new)>(
-    w: Sys<P, M, S>, b: nat -> Net<P, M, S>, a: nat -> Action<P, M>, i: nat, j: nat)
-    requires IsBehavior(w, b, a) && i <= j
-    ensures b(i).now <= b(j).now
+    w: Sys<P, M, S>, tr: nat -> Moment<P, M, S>, i: nat, j: nat)
+    requires IsBehavior(w, tr) && i <= j
+    ensures tr(i).state.now <= tr(j).state.now
     decreases j - i
   {
     if i < j {
-      TimeMonotone(w, b, a, i, j - 1);
-      assert NextStep(w, b(j-1), b(j), a(j-1));
+      TimeMonotone(w, tr, i, j - 1);
+      assert NextStep(w, tr(j-1).state, tr(j).state, tr(j-1).event);
     }
   }
 

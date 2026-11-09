@@ -41,12 +41,12 @@ module Worlds {
     Sys(Pids(clients, nodes), true, self => Boot(docs, ask, self), Processes)
   }
 
-  // A trace of this world. It boots, and every later state is one network step.
+  // A trace of this world: at every time, the state and the event that takes it to the next state.
   // The world is defined when every client asks a node that is in it.
   ghost predicate Behavior(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
-                           b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>)
+                           tr: nat -> Moment<Pid, Msg, State>)
   {
     && Routed(clients, nodes, ask)
-    && IsBehavior(World(docs, clients, nodes, ask), b, a)
+    && IsBehavior(World(docs, clients, nodes, ask), tr)
   }
 }
