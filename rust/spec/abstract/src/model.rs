@@ -8,10 +8,10 @@ use vstd::prelude::*;
 
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
-use echod_rover::rover::spec::{Label, StepResultV};
 use echod_rover::rover::comm::ProcessEvent;
-use echod_rover::rover::spec::{RoverModel, RoverProc};
-use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
+use echod_rover::rover::{RoverExec, RoverSpec};
+use RoverExec::ProcResult;
+use RoverSpec::{Label, Proc as _, StepResultV};
 use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
@@ -50,7 +50,7 @@ pub struct StateV {
     pub pending: Seq<Sched<InternalV>>,
 }
 
-impl RoverProc for StateV {
+impl RoverSpec::Proc for StateV {
     type Config = ServerConfig;
     type Pid = Pid;
     type Message = Message;
@@ -1130,7 +1130,7 @@ impl State {
     }
 }
 
-impl RoverProcExec for State {
+impl RoverExec::Proc for State {
     type Spec = StateV;
 
     fn on_event(
@@ -1147,11 +1147,11 @@ impl RoverProcExec for State {
     }
 }
 
-impl RoverExec for Model {
-    type Model = Spec;
+impl RoverExec::Spec for Model {
+    type Spec = Spec;
     type Proc = State;
 
-    open spec fn model(&self) -> Spec {
+    open spec fn spec(&self) -> Spec {
         Spec
     }
 
@@ -1198,7 +1198,7 @@ impl RoverExec for Model {
 
 }
 
-impl RoverModel for Spec {
+impl RoverSpec::Spec for Spec {
     type Config = ServerConfig;
     type Pid = Pid;
     type Proc = StateV;
@@ -1251,7 +1251,7 @@ impl RoverModel for Spec {
 // `spec_service`. A request is served, lost, or shed, the
 // three outcomes of the Lean step. A timeout is one ready queued occurrence, or
 // one step derived from the three maps. Anything else leaves the state as it
-// was. `RoverProcExec::on_event` proves that its executable results have exactly
+// was. `RoverExec::Proc::on_event` proves that its executable results have exactly
 // the views in this sequence.
 // ---------------------------------------------------------------------------
 

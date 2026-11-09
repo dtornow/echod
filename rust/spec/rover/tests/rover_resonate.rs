@@ -1,7 +1,8 @@
 //! The complete standalone Resonate protocol through Rover's world.
 
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover::rover::test::{check, CheckConfig, RoverExec, RoverProcExec};
+use echod_rover::rover::RoverExec::{check, CheckConfig, Proc as _};
+use echod_rover::rover::RoverExec::Spec as _;
 use echod_abstract::model::Pid;
 use echod_abstract::types::*;
 use echod_abstract::*;

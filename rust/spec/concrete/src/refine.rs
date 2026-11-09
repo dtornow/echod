@@ -22,9 +22,9 @@
 //! that begins a flight is one abstract step, taken on the owners' caches;
 //! the store steps and the reply that closes the flight are stutters.
 //! The theorem is about the distinct abstract and concrete `Spec` types.
-//! Each executable `Model` names its `Spec` through `RoverExec`; the trait's
+//! Each executable `Model` implements `RoverExec::Spec`; the trait's
 //! contracts prove that `initial` realizes `processes`, while each
-//! `RoverProcExec::on_event` realizes its stateful `RoverProc::on_event`.
+//! `RoverExec::Proc::on_event` realizes `RoverSpec::Proc::on_event`.
 //! Verus checks those bridges, node (`Node::step`) and store
 //! (`Store::step`) alike. The concrete node trusts its JSON codec, its
 //! key hash, its string characters, and the abstract crate's cron engine and

@@ -37,7 +37,7 @@ Produce an inventory containing exact paths for the following.
 
 ### Rover
 
-- Rust `RoverModel` hooks, generic `RoverSpec` worlds, optional `RoverExec` realization,
+- Rust `RoverSpec::{Spec, Proc, State}` and `RoverExec::{Spec, Proc}`,
   world semantics, checker, certificate replay, and generic refinement theorem.
 - Standalone Resonate protocol, abstract model, property catalogue, tests,
   benchmark, and fuzz driver.
@@ -146,7 +146,7 @@ It contains no protocol decisions.
 Domain-independent formal machinery:
 
 - append-only network world
-- an ordered finite map from pid to a stateful `RoverProc`
+- ordered pid/process entries over a stateful `RoverSpec::Proc`
 - generic process selection, message/timeout delivery, and routing
 - clean boundary observation
 - certificates and verified replay
@@ -156,11 +156,11 @@ Domain-independent formal machinery:
 Its message-passing layer is split by dependency direction:
 
 ```text
-rover/comm  <-  rover/spec  <-  rover/test
+rover/comm  <-  rover/spec  <-  rover/exec
 ```
 
 `comm` is shared data, `spec` is mathematical semantics and refinement, and
-`test` is executable search and verified replay.
+`exec` is executable search and verified replay.
 
 ### `spec/abstract`
 
@@ -178,7 +178,7 @@ and not a dependent of the process:
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
 - the Rover model in `model.rs`: one `LocalV` process enum (`Node` or `Store`),
-  nodes and one store in `spec_world`, and `RoverProc::on_event` dispatching
+  nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
 - the abstract model, which that step refines
 
@@ -232,7 +232,7 @@ certificates. A process's identity belongs in its state or configuration.
 
 ### Boundary hides all internal topology
 
-Every `RoverModel` owns:
+Every `RoverSpec::Spec` owns:
 
 ```rust
 type Boundary;

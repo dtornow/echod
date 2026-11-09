@@ -8,7 +8,7 @@ use echod_concrete::{
     PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
 };
 use echod_rover::rover::comm::ProcessEvent;
-use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
+use echod_rover::rover::RoverExec::{Proc as _, ProcResult, Spec as _};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {

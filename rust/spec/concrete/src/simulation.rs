@@ -62,13 +62,13 @@ use echod_abstract::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{BoundaryEvent, Call, Spec as AModel, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::spec::refinement::{
+use echod_rover::rover::RoverSpec::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::spec::{
+use echod_rover::rover::RoverSpec::{
     before, envelopes, event_valid, Execution, inject, is_process, Label, land, legal,
-    observe_outside, RoverModel, RoverProc, RoverSpec, StepResultV,
+    observe_outside, Proc, Spec, State, StepResultV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::{Envelope, ProcessEvent};
@@ -97,11 +97,11 @@ pub open spec fn abstract_model() -> AModel {
 }
 
 /// `related`, packaged as the function the generic theorem takes.
-pub open spec fn link(fleet: Fleet) -> spec_fn(RoverSpec<CModel>, RoverSpec<AModel>) -> bool {
-    |concrete: RoverSpec<CModel>, abstract_world: RoverSpec<AModel>| related(fleet, concrete, abstract_world)
+pub open spec fn link(fleet: Fleet) -> spec_fn(State<CModel>, State<AModel>) -> bool {
+    |concrete: State<CModel>, abstract_world: State<AModel>| related(fleet, concrete, abstract_world)
 }
 
-pub proof fn lemma_link(fleet: Fleet, concrete: RoverSpec<CModel>, abstract_world: RoverSpec<AModel>)
+pub proof fn lemma_link(fleet: Fleet, concrete: State<CModel>, abstract_world: State<AModel>)
     ensures
         link(fleet)(concrete, abstract_world) == related(fleet, concrete, abstract_world),
 {
@@ -204,8 +204,8 @@ pub open spec fn empty_heartbeat(call: Call) -> bool {
 // Network arithmetic
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_inject_keeps_process<M: RoverModel>(
-    world: RoverSpec<M>,
+pub proof fn lemma_inject_keeps_process<M: Spec>(
+    world: State<M>,
     outside: M::Pid,
     recipient: M::Pid,
     at: Time,
@@ -218,7 +218,7 @@ pub proof fn lemma_inject_keeps_process<M: RoverModel>(
     assert(after.process == world.process);
 }
 
-pub proof fn lemma_observe_keeps_world<M: RoverModel>(world: RoverSpec<M>, at: Time)
+pub proof fn lemma_observe_keeps_world<M: Spec>(world: State<M>, at: Time)
     ensures
         observe_outside(world, at).process == world.process,
         observe_outside(world, at).network == world.network,
@@ -452,11 +452,11 @@ pub proof fn lemma_sent_outputs(
 // One abstract step, and the empty execution
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_empty_matches(config: ServerConfig, before: RoverSpec<AModel>)
+pub proof fn lemma_empty_matches(config: ServerConfig, before: State<AModel>)
     ensures
         matches(abstract_model(), config, before, Seq::<BoundaryEvent>::empty(), before),
 {
-    let execution = Seq::<(Label<APid, AMessage>, RoverSpec<AModel>)>::empty();
+    let execution = Seq::<(Label<APid, AMessage>, State<AModel>)>::empty();
     assert forall|i: int| 0 <= i < execution.len() implies #[trigger]
         echod_rover::rover::spec::before::<AModel>(before, execution, i).step(
         abstract_model(),
@@ -473,9 +473,9 @@ pub proof fn lemma_empty_matches(config: ServerConfig, before: RoverSpec<AModel>
 
 pub proof fn lemma_matched_step(
     config: ServerConfig,
-    before: RoverSpec<AModel>,
+    before: State<AModel>,
     label: Label<APid, AMessage>,
-    after: RoverSpec<AModel>,
+    after: State<AModel>,
     visible: Seq<BoundaryEvent>,
 )
     requires
@@ -485,11 +485,11 @@ pub proof fn lemma_matched_step(
         matches(abstract_model(), config, before, visible, after),
 {
     let pair = (label, after);
-    let execution = Seq::<(Label<APid, AMessage>, RoverSpec<AModel>)>::empty().push(pair);
+    let execution = Seq::<(Label<APid, AMessage>, State<AModel>)>::empty().push(pair);
     assert(execution.len() == 1);
     assert(execution[0] == pair);
     assert(execution.last() == pair);
-    assert(execution.drop_last() =~= Seq::<(Label<APid, AMessage>, RoverSpec<AModel>)>::empty());
+    assert(execution.drop_last() =~= Seq::<(Label<APid, AMessage>, State<AModel>)>::empty());
     assert(project::<AModel>(abstract_model(), execution.drop_last()) =~= Seq::<BoundaryEvent>::empty());
     let empty = Seq::<BoundaryEvent>::empty();
     assert(empty.add(visible) =~= visible);
@@ -510,10 +510,10 @@ pub proof fn lemma_matched_step(
 
 pub proof fn lemma_matches_same_visible(
     config: ServerConfig,
-    before: RoverSpec<AModel>,
+    before: State<AModel>,
     visible: Seq<BoundaryEvent>,
     same: Seq<BoundaryEvent>,
-    after: RoverSpec<AModel>,
+    after: State<AModel>,
 )
     requires
         matches(abstract_model(), config, before, visible, after),
@@ -530,10 +530,10 @@ pub proof fn lemma_matches_same_visible(
 
 /// A process step with the outcome at `j`, stated over the model's trait: the
 /// witness `step` asks for is in the form `step` names it.
-pub proof fn lemma_process_step<M: RoverModel>(
+pub proof fn lemma_process_step<M: Spec>(
     m: M,
     config: M::Config,
-    world: RoverSpec<M>,
+    world: State<M>,
     i: int,
     at: Time,
     event: ProcessEvent<M::Pid, M::Message>,
@@ -565,11 +565,11 @@ pub proof fn lemma_process_step<M: RoverModel>(
 /// network grew by the outcome's sends, the clock is `at`.
 pub proof fn lemma_service_step(
     config: ServerConfig,
-    before_a: RoverSpec<AModel>,
+    before_a: State<AModel>,
     at: Time,
     event: ProcessEvent<APid, AMessage>,
     index: int,
-) -> (after_a: RoverSpec<AModel>)
+) -> (after_a: State<AModel>)
     requires
         single(before_a),
         before_a.now <= at,
@@ -587,7 +587,7 @@ pub proof fn lemma_service_step(
             &&& matches(abstract_model(), config, before_a, Seq::<BoundaryEvent>::empty(), after_a)
         }),
 {
-    reveal(RoverSpec::step);
+    reveal(State::step);
     let outcomes = astate(before_a).on_event(config, at, event);
     let outcome = outcomes[index];
     lemma_single_present(before_a);
@@ -1160,8 +1160,8 @@ pub open spec fn owed_by(node: NodeV, item: Sched<InternalV>) -> nat {
 /// state moves the sum by that node's difference.
 pub proof fn lemma_owed_update(
     fleet: Fleet,
-    before_w: RoverSpec<CModel>,
-    after_w: RoverSpec<CModel>,
+    before_w: State<CModel>,
+    after_w: State<CModel>,
     i: int,
     item: Sched<InternalV>,
     k: int,
@@ -1190,8 +1190,8 @@ pub proof fn lemma_owed_update(
 
 pub proof fn lemma_owed_same(
     fleet: Fleet,
-    before_w: RoverSpec<CModel>,
-    after_w: RoverSpec<CModel>,
+    before_w: State<CModel>,
+    after_w: State<CModel>,
     item: Sched<InternalV>,
     k: int,
 )
@@ -1207,7 +1207,7 @@ pub proof fn lemma_owed_same(
     }
 }
 
-pub proof fn lemma_owed_nonneg(fleet: Fleet, world: RoverSpec<CModel>, item: Sched<InternalV>, i: int, k: int)
+pub proof fn lemma_owed_nonneg(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, i: int, k: int)
     requires
         0 <= i < fleet.nodes,
         0 <= k <= i,
@@ -1293,7 +1293,7 @@ pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::v
 }
 
 /// The owner of a key is the node that owns it.
-pub proof fn lemma_owner(fleet: Fleet, world: RoverSpec<CModel>, i: int, key: Seq<char>)
+pub proof fn lemma_owner(fleet: Fleet, world: State<CModel>, i: int, key: Seq<char>)
     requires
         shaped(fleet, world),
         0 <= i < fleet.nodes,
@@ -1644,7 +1644,7 @@ pub proof fn lemma_earliest_cached(node: NodeV, now: Time, key: Seq<char>)
 }
 
 /// An item a node owes is queued at the service.
-pub proof fn lemma_owed_present(fleet: Fleet, world: RoverSpec<AModel>, concrete: RoverSpec<CModel>, i: int, p: PendingV)
+pub proof fn lemma_owed_present(fleet: Fleet, world: State<AModel>, concrete: State<CModel>, i: int, p: PendingV)
     requires
         0 <= i < fleet.nodes,
         pending_covered(fleet, concrete, astate(world)),
@@ -1691,7 +1691,7 @@ pub proof fn lemma_pending_head(pending: Seq<PendingV>, item: Sched<InternalV>)
 // ---------------------------------------------------------------------------
 
 /// What `land` does for a node step.
-pub proof fn lemma_land_node(fleet: Fleet, cb: RoverSpec<CModel>, i: int, at: Time, node2: NodeV, send: Seq<(CPid, CMessage)>)
+pub proof fn lemma_land_node(fleet: Fleet, cb: State<CModel>, i: int, at: Time, node2: NodeV, send: Seq<(CPid, CMessage)>)
     requires
         shaped(fleet, cb),
         0 <= i < fleet.nodes,
@@ -1722,7 +1722,7 @@ pub proof fn lemma_land_node(fleet: Fleet, cb: RoverSpec<CModel>, i: int, at: Ti
 }
 
 /// What `land` does for a store step.
-pub proof fn lemma_land_store(fleet: Fleet, cb: RoverSpec<CModel>, at: Time, store2: CStore, send: Seq<(CPid, CMessage)>)
+pub proof fn lemma_land_store(fleet: Fleet, cb: State<CModel>, at: Time, store2: CStore, send: Seq<(CPid, CMessage)>)
     requires
         shaped(fleet, cb),
     ensures
@@ -1747,8 +1747,8 @@ pub proof fn lemma_land_store(fleet: Fleet, cb: RoverSpec<CModel>, at: Time, sto
 }
 
 pub proof fn lemma_requested_grows(
-    earlier: RoverSpec<CModel>,
-    later: RoverSpec<CModel>,
+    earlier: State<CModel>,
+    later: State<CModel>,
     sender: CPid,
     op: u64,
 )
@@ -1768,7 +1768,7 @@ pub proof fn lemma_requested_grows(
 
 /// The invariant survives a step that touched no process and added only
 /// envelopes that are not store traffic.
-pub proof fn lemma_invariant_grow(fleet: Fleet, cb: RoverSpec<CModel>, ca: RoverSpec<CModel>)
+pub proof fn lemma_invariant_grow(fleet: Fleet, cb: State<CModel>, ca: State<CModel>)
     requires
         inv(fleet, cb),
         ca.process == cb.process,
@@ -1868,7 +1868,7 @@ pub proof fn lemma_flight_outputs_monotone(
 }
 
 /// The relation carries to worlds whose processes did not change.
-pub proof fn lemma_carry(fleet: Fleet, cb: RoverSpec<CModel>, ab: RoverSpec<AModel>, ca: RoverSpec<CModel>, aa: RoverSpec<AModel>)
+pub proof fn lemma_carry(fleet: Fleet, cb: State<CModel>, ab: State<AModel>, ca: State<CModel>, aa: State<AModel>)
     requires
         related(fleet, cb, ab),
         ca.process == cb.process,
@@ -1898,7 +1898,7 @@ pub proof fn lemma_carry(fleet: Fleet, cb: RoverSpec<CModel>, ab: RoverSpec<AMod
 }
 
 /// What `related` says of node `i`, instantiated.
-pub proof fn lemma_node_facts(fleet: Fleet, cb: RoverSpec<CModel>, ab: RoverSpec<AModel>, i: int)
+pub proof fn lemma_node_facts(fleet: Fleet, cb: State<CModel>, ab: State<AModel>, i: int)
     requires
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -2018,12 +2018,12 @@ pub proof fn lemma_cache_ok_keep(
 pub proof fn lemma_silent(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -2153,12 +2153,12 @@ pub proof fn lemma_silent(
 pub proof fn lemma_same_work(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -2183,11 +2183,11 @@ pub proof fn lemma_same_work(
 pub proof fn lemma_shell(
     fleet: Fleet,
     config: ServerConfig,
-    ca: RoverSpec<CModel>,
-    aa: RoverSpec<AModel>,
+    ca: State<CModel>,
+    aa: State<AModel>,
     i: int,
     node2: NodeV,
-    cs: RoverSpec<CModel>,
+    cs: State<CModel>,
 )
     requires
         related(fleet, ca, aa),
@@ -2211,14 +2211,14 @@ pub proof fn lemma_shell(
 pub proof fn lemma_reshell(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    aa: RoverSpec<AModel>,
+    cb: State<CModel>,
+    aa: State<AModel>,
     i: int,
     at: Time,
     next: NodeV,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, land(cb, i, node_pid(i), at, node_result(next, send)), aa),
@@ -2240,12 +2240,12 @@ pub proof fn lemma_reshell(
 pub proof fn lemma_pop_silent(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -2288,7 +2288,7 @@ pub open spec fn begin_keyed(key: Seq<char>, job: JobV, caller: Option<(Seq<char
 }
 
 /// No op the node has not issued is one the store has seen.
-pub proof fn lemma_fresh_op(fleet: Fleet, world: RoverSpec<CModel>, i: int, op: u64)
+pub proof fn lemma_fresh_op(fleet: Fleet, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -2313,7 +2313,7 @@ pub proof fn lemma_fresh_op(fleet: Fleet, world: RoverSpec<CModel>, i: int, op: 
 }
 
 /// Every op a node without a flight has issued, the store has seen.
-pub proof fn lemma_idle_answered(fleet: Fleet, world: RoverSpec<CModel>, i: int, op: u64)
+pub proof fn lemma_idle_answered(fleet: Fleet, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -2332,7 +2332,7 @@ pub proof fn lemma_idle_answered(fleet: Fleet, world: RoverSpec<CModel>, i: int,
 
 /// Every op a node with a flight has issued, other than the flight's, the
 /// store has seen.
-pub proof fn lemma_busy_answered(fleet: Fleet, world: RoverSpec<CModel>, i: int, op: u64)
+pub proof fn lemma_busy_answered(fleet: Fleet, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -2350,7 +2350,7 @@ pub proof fn lemma_busy_answered(fleet: Fleet, world: RoverSpec<CModel>, i: int,
 }
 
 /// A seen op of a node is below its next op.
-pub proof fn lemma_seen_issued(fleet: Fleet, world: RoverSpec<CModel>, i: int, op: u64)
+pub proof fn lemma_seen_issued(fleet: Fleet, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -2372,8 +2372,8 @@ pub proof fn lemma_seen_issued(fleet: Fleet, world: RoverSpec<CModel>, i: int, o
 /// envelopes added are that flight's request or no store traffic.
 pub proof fn lemma_traffic_ok(
     fleet: Fleet,
-    cb: RoverSpec<CModel>,
-    ca: RoverSpec<CModel>,
+    cb: State<CModel>,
+    ca: State<CModel>,
     i: int,
     node2: NodeV,
 )
@@ -2500,8 +2500,8 @@ pub proof fn lemma_traffic_ok(
 /// for under `key` and nothing else.
 pub proof fn lemma_interpreted_update(
     fleet: Fleet,
-    cb: RoverSpec<CModel>,
-    ca: RoverSpec<CModel>,
+    cb: State<CModel>,
+    ca: State<CModel>,
     i: int,
     key: Seq<char>,
     s: AStore,
@@ -2543,10 +2543,10 @@ pub proof fn lemma_interpreted_update(
 /// abstract world took the step the begin stands for.
 pub proof fn lemma_begin_related(
     fleet: Fleet,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
-    ca: RoverSpec<CModel>,
-    aa: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
+    ca: State<CModel>,
+    aa: State<AModel>,
     i: int,
     at: Time,
     node1: NodeV,
@@ -2899,10 +2899,10 @@ pub proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, call: C
 pub proof fn lemma_answered_idle(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
-    ca: RoverSpec<CModel>,
-    aa: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
+    ca: State<CModel>,
+    aa: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
@@ -2952,16 +2952,16 @@ pub proof fn lemma_answered_idle(
 pub proof fn lemma_request_served(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     call: Call,
     key: Seq<char>,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         agreement(config),
         related(fleet, cb, ab),
@@ -3041,15 +3041,15 @@ pub proof fn lemma_request_served(
 pub proof fn lemma_request(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     call: Call,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         agreement(config),
         related(fleet, cb, ab),
@@ -3155,14 +3155,14 @@ pub proof fn lemma_removed_count(pending: Seq<Sched<InternalV>>, k: int, item: S
 pub proof fn lemma_occurrence_begin(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         agreement(config),
         related(fleet, cb, ab),
@@ -3293,15 +3293,15 @@ pub proof fn lemma_note_sends(network: Seq<Envelope<APid, AMessage>>, notes: Seq
 pub proof fn lemma_due_begin(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     key: Seq<char>,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -3388,7 +3388,7 @@ pub proof fn lemma_due_begin(
 // ---------------------------------------------------------------------------
 
 /// Every op a busy node issued, the store has seen, once its flight's op is.
-pub proof fn lemma_all_answered(fleet: Fleet, world: RoverSpec<CModel>, i: int)
+pub proof fn lemma_all_answered(fleet: Fleet, world: State<CModel>, i: int)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -3457,13 +3457,13 @@ pub proof fn lemma_closing_sends(
 pub proof fn lemma_flight_closed(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -3590,13 +3590,13 @@ pub proof fn lemma_flight_closed(
 pub proof fn lemma_write_after_read(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -3739,15 +3739,15 @@ pub proof fn lemma_write_after_read(
 pub proof fn lemma_store_reply(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     op: u64,
     outcome: StoreOutcome,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -3879,7 +3879,7 @@ pub proof fn lemma_push_contains<A>(s: Seq<A>, x: A, y: A)
 
 /// The store's answer to the live flight's call: a read of an absent key,
 /// or a write that lands.
-pub proof fn lemma_store_answers(fleet: Fleet, world: RoverSpec<CModel>, n: int)
+pub proof fn lemma_store_answers(fleet: Fleet, world: State<CModel>, n: int)
     requires
         inv(fleet, world),
         0 <= n < fleet.nodes,
@@ -3967,12 +3967,12 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: RoverSpec<CModel>, n: int)
 pub proof fn lemma_store(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     at: Time,
     event: ProcessEvent<CPid, CMessage>,
     j: int,
-    ca: RoverSpec<CModel>,
+    ca: State<CModel>,
 )
     requires
         related(fleet, cb, ab),
@@ -4183,14 +4183,14 @@ pub proof fn lemma_store(
 pub proof fn lemma_node(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     event: ProcessEvent<CPid, CMessage>,
     j: int,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -4316,13 +4316,13 @@ pub proof fn lemma_node(
 pub proof fn lemma_input(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     recipient: CPid,
     at: Time,
     message: CMessage,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         related(fleet, cb, ab),
         cb.step(concrete_model(), fleet, Label::Input { recipient, at, message }, ca),
@@ -4330,7 +4330,7 @@ pub proof fn lemma_input(
         matches(abstract_model(), config, ab, concrete_model().observe(Label::Input { recipient, at, message }), aa),
         related(fleet, ca, aa),
 {
-    reveal(RoverSpec::step);
+    reveal(State::step);
     let label = Label::<CPid, CMessage>::Input { recipient, at, message };
     assert(cb.now <= at);
     assert(concrete_model().injectable(fleet, message));
@@ -4385,13 +4385,13 @@ pub proof fn lemma_input(
 pub proof fn lemma_outside(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     sender: CPid,
     at: Time,
     message: CMessage,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         related(fleet, cb, ab),
         cb.step(concrete_model(), fleet, Label::Outside { sender, at, message }, ca),
@@ -4399,7 +4399,7 @@ pub proof fn lemma_outside(
         matches(abstract_model(), config, ab, concrete_model().observe(Label::Outside { sender, at, message }), aa),
         related(fleet, ca, aa),
 {
-    reveal(RoverSpec::step);
+    reveal(State::step);
     let label = Label::<CPid, CMessage>::Outside { sender, at, message };
     assert(cb.now <= at);
     assert(ca == observe_outside(cb, at));
@@ -4449,14 +4449,14 @@ pub proof fn lemma_outside(
 pub proof fn lemma_process(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     process: CPid,
     at: Time,
     event: ProcessEvent<CPid, CMessage>,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -4466,7 +4466,7 @@ pub proof fn lemma_process(
         matches(abstract_model(), config, ab, concrete_model().observe(Label::Process { process, at, event, send }), aa),
         related(fleet, ca, aa),
 {
-    reveal(RoverSpec::step);
+    reveal(State::step);
     let label = Label::<CPid, CMessage>::Process { process, at, event, send };
     assert(cb.now <= at);
     assert(event_valid(cb, process, event));
@@ -4523,11 +4523,11 @@ pub proof fn lemma_process(
 pub proof fn lemma_step(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
+    cb: State<CModel>,
     label: Label<CPid, CMessage>,
-    ca: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+    ab: State<AModel>,
+) -> (aa: State<AModel>)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -4558,7 +4558,7 @@ pub proof fn lemma_step(
 // The initial worlds
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_owed_zero(fleet: Fleet, world: RoverSpec<CModel>, item: Sched<InternalV>, k: int)
+pub proof fn lemma_owed_zero(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, k: int)
     requires
         forall|i: int| 0 <= i < fleet.nodes ==> #[trigger] occurrences(node_at(world, i)).len() == 0,
     ensures
@@ -4610,12 +4610,12 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
     ensures
         related(
             fleet,
-            RoverSpec::<CModel>::init(concrete_model(), fleet),
-            RoverSpec::<AModel>::init(abstract_model(), config),
+            State::<CModel>::init(concrete_model(), fleet),
+            State::<AModel>::init(abstract_model(), config),
         ),
 {
-    let cw = RoverSpec::<CModel>::init(concrete_model(), fleet);
-    let aw = RoverSpec::<AModel>::init(abstract_model(), config);
+    let cw = State::<CModel>::init(concrete_model(), fleet);
+    let aw = State::<AModel>::init(abstract_model(), config);
     assert(cw.process == spec_world(fleet));
     assert(cw.network =~= Seq::<Envelope<CPid, CMessage>>::empty());
     assert(cw.now == 0);
@@ -4703,14 +4703,14 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
 pub proof fn lemma_timeout(
     fleet: Fleet,
     config: ServerConfig,
-    cb: RoverSpec<CModel>,
-    ab: RoverSpec<AModel>,
+    cb: State<CModel>,
+    ab: State<AModel>,
     i: int,
     at: Time,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
-    ca: RoverSpec<CModel>,
-) -> (aa: RoverSpec<AModel>)
+    ca: State<CModel>,
+) -> (aa: State<AModel>)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -4764,9 +4764,9 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
         simulation(concrete_model(), fleet, abstract_model(), config, link(fleet)),
 {
     let relation = link(fleet);
-    assert forall|cb: RoverSpec<CModel>, label: Label<CPid, CMessage>, ca: RoverSpec<CModel>, ab: RoverSpec<AModel>|
+    assert forall|cb: State<CModel>, label: Label<CPid, CMessage>, ca: State<CModel>, ab: State<AModel>|
         #![trigger relation(cb, ab), cb.step(concrete_model(), fleet, label, ca)]
-        relation(cb, ab) && cb.step(concrete_model(), fleet, label, ca) implies exists|aa: RoverSpec<AModel>|
+        relation(cb, ab) && cb.step(concrete_model(), fleet, label, ca) implies exists|aa: State<AModel>|
             #[trigger] matches(abstract_model(), config, ab, concrete_model().observe(label), aa) && relation(ca, aa) by {
         lemma_link(fleet, cb, ab);
         let aa = lemma_step(fleet, config, cb, label, ca, ab);
@@ -4789,8 +4789,8 @@ pub proof fn lemma_refines(concrete_config: Fleet)
     lemma_initial(fleet, config);
     lemma_link(
         fleet,
-        RoverSpec::<CModel>::init(concrete_model(), fleet),
-        RoverSpec::<AModel>::init(abstract_model(), config),
+        State::<CModel>::init(concrete_model(), fleet),
+        State::<AModel>::init(abstract_model(), config),
     );
     lemma_simulation(fleet, config);
     concrete_refines_abstract(concrete_model(), fleet, abstract_model(), config, link(fleet));

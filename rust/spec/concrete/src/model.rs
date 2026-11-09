@@ -8,18 +8,18 @@
 //! different machine. See `simulation`.
 //!
 //! The initial world has executable and specification forms (`initial` and
-//! `spec_world`). Each `Local` executes as a `RoverProcExec`; its `LocalV`
+//! `spec_world`). Each `Local` implements `RoverExec::Proc`; its `LocalV`
 //! specification dispatches to `spec_node` or `spec_store`.
 
 use vstd::prelude::*;
 
 use echod_abstract::{BoundaryEvent, Call, Output};
-use echod_rover::rover::spec::Label;
-#[cfg(verus_keep_ghost)]
-use echod_rover::rover::spec::StepResultV;
 use echod_rover::rover::comm::ProcessEvent;
-use echod_rover::rover::spec::{RoverModel, RoverProc};
-use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
+use echod_rover::rover::{RoverExec, RoverSpec};
+use RoverExec::ProcResult;
+use RoverSpec::Label;
+#[cfg(verus_keep_ghost)]
+use RoverSpec::StepResultV;
 use echod_rover::Time;
 
 use echod_types::Response;
@@ -100,7 +100,7 @@ pub enum LocalV {
     Store(StoreV),
 }
 
-impl RoverProc for LocalV {
+impl RoverSpec::Proc for LocalV {
     type Config = Fleet;
     type Pid = Pid;
     type Message = Message;
@@ -208,7 +208,7 @@ impl View for Local {
 // ---------------------------------------------------------------------------
 // The process steps as specifications. `LocalV::on_event` dispatches on the
 // model-specific process enum: a node runs one flight, the store applies one
-// call. `RoverProcExec::on_event` proves the executable process returns these
+// call. `RoverExec::Proc::on_event` proves the executable process returns these
 // results: `Node::step` computes `spec_node` and `Store::step` computes
 // `spec_store`.
 // ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ impl Store {
     }
 }
 
-impl RoverProcExec for Local {
+impl RoverExec::Proc for Local {
     type Spec = LocalV;
 
     fn on_event(
@@ -489,11 +489,11 @@ impl RoverProcExec for Local {
     }
 }
 
-impl RoverExec for Model {
-    type Model = Spec;
+impl RoverExec::Spec for Model {
+    type Spec = Spec;
     type Proc = Local;
 
-    open spec fn model(&self) -> Spec {
+    open spec fn spec(&self) -> Spec {
         Spec
     }
 
@@ -556,7 +556,7 @@ impl RoverExec for Model {
 
 }
 
-impl RoverModel for Spec {
+impl RoverSpec::Spec for Spec {
     type Config = Fleet;
     type Pid = Pid;
     type Proc = LocalV;

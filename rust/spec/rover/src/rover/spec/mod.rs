@@ -13,7 +13,7 @@ pub mod refinement;
 verus! {
 
 /// One stateful process in a Rover world.
-pub trait RoverProc: Sized {
+pub trait Proc: Sized {
     type Config;
     type Pid: Data;
     type Message: Data;
@@ -27,10 +27,10 @@ pub trait RoverProc: Sized {
 }
 
 /// Model-specific policy supplied to the generic Rover specification.
-pub trait RoverModel: Sized {
+pub trait Spec: Sized {
     type Config;
     type Pid: Data;
-    type Proc: RoverProc<Config = Self::Config, Pid = Self::Pid, Message = Self::Message>;
+    type Proc: Proc<Config = Self::Config, Pid = Self::Pid, Message = Self::Message>;
     type Message: Data;
     type Boundary;
 
@@ -61,7 +61,7 @@ pub struct StepResultV<S, P, M> {
 }
 
 /// The complete Rover world.
-pub struct RoverSpec<M: RoverModel> {
+pub struct State<M: Spec> {
     /// Ordered entries; executable initialization proves pids are unique.
     pub process: Seq<(M::Pid, M::Proc)>,
     pub network: Seq<Envelope<M::Pid, M::Message>>,
@@ -89,9 +89,9 @@ pub enum Label<P, M> {
 }
 
 /// Process `pid` exists and is not the distinguished outside endpoint.
-pub open spec fn is_process<M: RoverModel>(
+pub open spec fn is_process<M: Spec>(
     m: M,
-    world: RoverSpec<M>,
+    world: State<M>,
     pid: M::Pid,
 ) -> bool {
     pid != m.outside() && exists|i: int|
@@ -99,8 +99,8 @@ pub open spec fn is_process<M: RoverModel>(
 }
 
 /// A receive is valid whenever its message occurs in the append-only network.
-pub open spec fn event_valid<M: RoverModel>(
-    world: RoverSpec<M>,
+pub open spec fn event_valid<M: Spec>(
+    world: State<M>,
     recipient: M::Pid,
     event: ProcessEvent<M::Pid, M::Message>,
 ) -> bool {
@@ -121,51 +121,51 @@ pub open spec fn envelopes<P, M>(sender: P, send: Seq<(P, M)>) -> Seq<Envelope<P
     })
 }
 
-pub open spec fn inject<M: RoverModel>(
-    world: RoverSpec<M>,
+pub open spec fn inject<M: Spec>(
+    world: State<M>,
     outside: M::Pid,
     recipient: M::Pid,
     at: Time,
     message: M::Message,
-) -> RoverSpec<M> {
-    RoverSpec {
+) -> State<M> {
+    State {
         network: world.network.push(Envelope { sender: outside, recipient, message }),
         now: at,
         ..world
     }
 }
 
-pub open spec fn land<M: RoverModel>(
-    world: RoverSpec<M>,
+pub open spec fn land<M: Spec>(
+    world: State<M>,
     slot: int,
     process: M::Pid,
     at: Time,
     result: StepResultV<M::Proc, M::Pid, M::Message>,
-) -> RoverSpec<M> {
-    RoverSpec {
+) -> State<M> {
+    State {
         process: world.process.update(slot, (process, result.state)),
         network: world.network + envelopes(process, result.send),
         now: at,
     }
 }
 
-pub open spec fn observe_outside<M: RoverModel>(
-    world: RoverSpec<M>,
+pub open spec fn observe_outside<M: Spec>(
+    world: State<M>,
     at: Time,
-) -> RoverSpec<M> {
-    RoverSpec { now: at, ..world }
+) -> State<M> {
+    State { now: at, ..world }
 }
 
 /// The process-delivery arm of [`step`].
-pub open spec fn process_transition<M: RoverModel>(
+pub open spec fn process_transition<M: Spec>(
     model: M,
     config: M::Config,
-    world: RoverSpec<M>,
+    world: State<M>,
     process: M::Pid,
     at: Time,
     event: ProcessEvent<M::Pid, M::Message>,
     send: Seq<(M::Pid, M::Message)>,
-    next: RoverSpec<M>,
+    next: State<M>,
 ) -> bool {
     &&& world.now <= at
     &&& is_process(model, world, process)
@@ -184,9 +184,9 @@ pub open spec fn process_transition<M: RoverModel>(
     }
 }
 
-impl<M: RoverModel> RoverSpec<M> {
+impl<M: Spec> State<M> {
     pub open spec fn init(model: M, config: M::Config) -> Self {
-        RoverSpec {
+        State {
             process: model.processes(config),
             network: Seq::empty(),
             now: 0,
@@ -229,10 +229,10 @@ impl<M: RoverModel> RoverSpec<M> {
 }
 
 /// One process outcome witnesses one complete Rover process step.
-pub proof fn process_step<M: RoverModel>(
+pub proof fn process_step<M: Spec>(
     model: M,
     config: M::Config,
-    world: RoverSpec<M>,
+    world: State<M>,
     i: int,
     at: Time,
     event: ProcessEvent<M::Pid, M::Message>,
@@ -301,7 +301,7 @@ pub proof fn process_step<M: RoverModel>(
             }
         });
     }
-    reveal(RoverSpec::step);
+    reveal(State::step);
 }
 
 /// The observable boundary contribution of a label.
@@ -316,23 +316,23 @@ pub open spec fn observe<P, M>(label: Label<P, M>) -> Seq<BoundaryEvent<P, M>> {
 }
 
 pub type Execution<M> = Seq<(
-    Label<<M as RoverModel>::Pid, <M as RoverModel>::Message>,
-    RoverSpec<M>,
+    Label<<M as Spec>::Pid, <M as Spec>::Message>,
+    State<M>,
 )>;
 
-pub open spec fn before<M: RoverModel>(
-    first: RoverSpec<M>,
+pub open spec fn before<M: Spec>(
+    first: State<M>,
     execution: Execution<M>,
     i: int,
-) -> RoverSpec<M> {
+) -> State<M> {
     if i == 0 { first } else { execution[i - 1].1 }
 }
 
 /// Every execution entry is a valid step from the preceding world.
-pub open spec fn legal<M: RoverModel>(
+pub open spec fn legal<M: Spec>(
     m: M,
     config: M::Config,
-    first: RoverSpec<M>,
+    first: State<M>,
     execution: Execution<M>,
 ) -> bool {
     forall|i: int| 0 <= i < execution.len() ==> #[trigger]
@@ -340,7 +340,7 @@ pub open spec fn legal<M: RoverModel>(
 }
 
 /// Boundary trace shown by an execution.
-pub open spec fn trace<M: RoverModel>(
+pub open spec fn trace<M: Spec>(
     execution: Execution<M>,
 ) -> Seq<BoundaryEvent<M::Pid, M::Message>>
     decreases execution.len(),
@@ -353,40 +353,40 @@ pub open spec fn trace<M: RoverModel>(
 }
 
 /// A boundary trace is valid when some legal execution shows exactly it.
-pub open spec fn valid_trace<M: RoverModel>(
+pub open spec fn valid_trace<M: Spec>(
     m: M,
     config: M::Config,
     events: Seq<BoundaryEvent<M::Pid, M::Message>>,
 ) -> bool {
     exists|execution: Execution<M>|
-        #![trigger legal(m, config, RoverSpec::<M>::init(m, config), execution), trace::<M>(execution)]
-        legal(m, config, RoverSpec::<M>::init(m, config), execution)
+        #![trigger legal(m, config, State::<M>::init(m, config), execution), trace::<M>(execution)]
+        legal(m, config, State::<M>::init(m, config), execution)
             && trace::<M>(execution) == events
 }
 
 /// Rover's translation of the catalogue's monotone-outbox property: once a
 /// message is emitted into the world network, no later step removes it.
-pub open spec fn network_extends<M: RoverModel>(
-    before: RoverSpec<M>,
-    after: RoverSpec<M>,
+pub open spec fn network_extends<M: Spec>(
+    before: State<M>,
+    after: State<M>,
 ) -> bool {
     exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
         after.network == before.network + suffix
 }
 
-pub proof fn step_preserves_network<M: RoverModel>(
+pub proof fn step_preserves_network<M: Spec>(
     model: M,
     config: M::Config,
-    before: RoverSpec<M>,
+    before: State<M>,
     label: Label<M::Pid, M::Message>,
-    after: RoverSpec<M>,
+    after: State<M>,
 )
     requires
         before.step(model, config, label, after),
     ensures
         network_extends::<M>(before, after),
 {
-    reveal(RoverSpec::step);
+    reveal(State::step);
     reveal(network_extends);
     match label {
         Label::Input {
@@ -470,7 +470,7 @@ pub proof fn step_preserves_network<M: RoverModel>(
 }
 
 /// Every model admits the empty trace.
-pub proof fn empty_trace_valid<M: RoverModel>(m: M, config: M::Config)
+pub proof fn empty_trace_valid<M: Spec>(m: M, config: M::Config)
     ensures
         valid_trace(
             m,
@@ -479,7 +479,7 @@ pub proof fn empty_trace_valid<M: RoverModel>(m: M, config: M::Config)
         ),
 {
     let execution = Execution::<M>::empty();
-    assert(legal(m, config, RoverSpec::<M>::init(m, config), execution));
+    assert(legal(m, config, State::<M>::init(m, config), execution));
     assert(trace::<M>(execution)
         =~= Seq::<BoundaryEvent<M::Pid, M::Message>>::empty());
 }

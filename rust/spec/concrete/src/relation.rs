@@ -47,7 +47,7 @@ use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::Envelope;
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::spec::{is_process, RoverModel, RoverSpec};
+use echod_rover::rover::RoverSpec::{is_process, Spec, State};
 #[cfg(verus_keep_ghost)]
 use echod_rover::Sched;
 #[cfg(verus_keep_ghost)]
@@ -60,18 +60,18 @@ verus! {
 // ---------------------------------------------------------------------------
 
 /// The node in slot `i`.
-pub open spec fn node_at(world: RoverSpec<CModel>, i: int) -> NodeV {
+pub open spec fn node_at(world: State<CModel>, i: int) -> NodeV {
     world.process[i].1->Node_0
 }
 
 /// The store, in the slot after the nodes.
-pub open spec fn store_at(fleet: Fleet, world: RoverSpec<CModel>) -> CStore {
+pub open spec fn store_at(fleet: Fleet, world: State<CModel>) -> CStore {
     world.process[fleet.nodes as int].1->Store_0
 }
 
 /// Slots `0 .. nodes` are the nodes, each at its own address; the last slot
 /// is the store. The world `initial` builds has this shape and a step keeps it.
-pub open spec fn shaped(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
+pub open spec fn shaped(fleet: Fleet, world: State<CModel>) -> bool {
     &&& world.process.len() == fleet.nodes + 1
     &&& forall|i: int|
         0 <= i < fleet.nodes ==> {
@@ -86,15 +86,15 @@ pub open spec fn shaped(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
 }
 
 /// The abstract world has the one service slot.
-pub open spec fn single(world: RoverSpec<AModel>) -> bool {
+pub open spec fn single(world: State<AModel>) -> bool {
     world.process.len() == 1 && world.process[0].0 == APid::Service
 }
 
-pub open spec fn astate(world: RoverSpec<AModel>) -> StateV {
+pub open spec fn astate(world: State<AModel>) -> StateV {
     world.process[0].1
 }
 
-pub proof fn lemma_single_present(world: RoverSpec<AModel>)
+pub proof fn lemma_single_present(world: State<AModel>)
     requires
         single(world),
     ensures
@@ -157,7 +157,7 @@ pub open spec fn owner(fleet: Fleet, key: Seq<char>) -> int {
 }
 
 /// The document the concrete world stands for under `key`.
-pub open spec fn effective(fleet: Fleet, world: RoverSpec<CModel>, key: Seq<char>) -> DocV {
+pub open spec fn effective(fleet: Fleet, world: State<CModel>, key: Seq<char>) -> DocV {
     if fleet.nodes == 0 {
         spec_empty_doc(key)
     } else {
@@ -167,7 +167,7 @@ pub open spec fn effective(fleet: Fleet, world: RoverSpec<CModel>, key: Seq<char
 
 /// Lean's `StoreRep`: under every key, the concrete world reads as the
 /// abstract store.
-pub open spec fn store_interpreted(fleet: Fleet, world: RoverSpec<CModel>, s: AStore) -> bool {
+pub open spec fn store_interpreted(fleet: Fleet, world: State<CModel>, s: AStore) -> bool {
     forall|key: Seq<char>| #[trigger] doc_rel(key, effective(fleet, world, key), s)
 }
 
@@ -207,7 +207,7 @@ pub open spec fn items(occurrences: Seq<PendingV>) -> Seq<Sched<InternalV>> {
 }
 
 /// How many times `item` is owed by the nodes from slot `i` on.
-pub open spec fn owed(fleet: Fleet, world: RoverSpec<CModel>, item: Sched<InternalV>, i: int) -> nat
+pub open spec fn owed(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, i: int) -> nat
     decreases fleet.nodes - i,
 {
     if i < 0 || i >= fleet.nodes {
@@ -224,7 +224,7 @@ pub open spec fn owed(fleet: Fleet, world: RoverSpec<CModel>, item: Sched<Intern
 
 /// Every occurrence a node owes is queued at the service. The service may
 /// hold more: an occurrence a node dropped stays queued there.
-pub open spec fn pending_covered(fleet: Fleet, world: RoverSpec<CModel>, state: StateV) -> bool {
+pub open spec fn pending_covered(fleet: Fleet, world: State<CModel>, state: StateV) -> bool {
     forall|item: Sched<InternalV>|
         #[trigger] owed(fleet, world, item, 0) <= state.pending.to_multiset().count(item)
 }
@@ -456,7 +456,7 @@ pub open spec fn outcome_of(flight: FlightV) -> StoreOutcome {
 /// Every store request on the network is from a node, under an op that
 /// node has issued. One the store has not answered is the node's open
 /// flight's call. One under the open flight's op is that flight's call.
-pub open spec fn requests_ok(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
+pub open spec fn requests_ok(fleet: Fleet, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
             CMessage::StoreReq { op, call } => {
@@ -480,7 +480,7 @@ pub open spec fn requests_ok(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
 /// Every store reply on the network answers a node under an op the store
 /// has executed. One under the node's open flight's op is the reply
 /// [`outcome_of`] says.
-pub open spec fn replies_ok(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
+pub open spec fn replies_ok(fleet: Fleet, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
             CMessage::StoreReply { op, outcome } => {
@@ -502,7 +502,7 @@ pub open spec fn replies_ok(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
 }
 
 /// A request envelope under `(sender, op)` is on the network.
-pub open spec fn requested(world: RoverSpec<CModel>, sender: CPid, op: u64) -> bool {
+pub open spec fn requested(world: State<CModel>, sender: CPid, op: u64) -> bool {
     exists|k: int|
         #![trigger world.network[k]]
         0 <= k < world.network.len() && world.network[k].sender == sender
@@ -511,13 +511,13 @@ pub open spec fn requested(world: RoverSpec<CModel>, sender: CPid, op: u64) -> b
 }
 
 /// Every op the store has executed was requested.
-pub open spec fn seen_ok(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
+pub open spec fn seen_ok(fleet: Fleet, world: State<CModel>) -> bool {
     forall|pair: (CPid, u64)|
         #[trigger] store_at(fleet, world).seen.contains(pair) ==> requested(world, pair.0, pair.1)
 }
 
 /// The facts of the concrete world alone.
-pub open spec fn inv(fleet: Fleet, world: RoverSpec<CModel>) -> bool {
+pub open spec fn inv(fleet: Fleet, world: State<CModel>) -> bool {
     &&& shaped(fleet, world)
     &&& entries_distinct(store_at(fleet, world))
     &&& forall|i: int|
@@ -586,14 +586,14 @@ pub open spec fn outputs_covered(
 
 /// Clock, requests, and outputs: what an injected call and an observed
 /// output need.
-pub open spec fn coupled(concrete: RoverSpec<CModel>, abstract_world: RoverSpec<AModel>) -> bool {
+pub open spec fn coupled(concrete: State<CModel>, abstract_world: State<AModel>) -> bool {
     &&& abstract_world.now <= concrete.now
     &&& requests_covered(concrete.network, abstract_world.network)
     &&& outputs_covered(concrete.network, abstract_world.network)
 }
 
 /// The relation.
-pub open spec fn related(fleet: Fleet, concrete: RoverSpec<CModel>, abstract_world: RoverSpec<AModel>) -> bool {
+pub open spec fn related(fleet: Fleet, concrete: State<CModel>, abstract_world: State<AModel>) -> bool {
     &&& coupled(concrete, abstract_world)
     &&& single(abstract_world)
     &&& inv(fleet, concrete)

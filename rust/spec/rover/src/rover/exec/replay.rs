@@ -9,12 +9,14 @@ use crate::certificate::trusted::{copy, same};
 use crate::Time;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::super::spec::{self as specification, Execution, Label, RoverSpec, StepResultV};
+use super::super::spec::{
+    self as specification, Execution, Label, State as SpecState, StepResultV,
+};
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::{RoverExec, RoverProcExec};
+use super::{Proc as ExecProc, Spec as ExecSpec};
 use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
 #[allow(unused_imports)]
-use super::super::spec::{RoverModel, RoverProc};
+use super::super::spec::{Proc as SpecProc, Spec as SpecModel};
 
 verus! {
 
@@ -45,17 +47,17 @@ pub enum Action<P, M> {
 pub type Certificate<P, M> = Vec<Action<P, M>>;
 
 /// The label a successful action must make.
-pub(crate) open spec fn action_label<M: RoverExec>(
-    model: M::Model,
-    config: <M::Model as RoverModel>::Config,
-    world: RoverSpec<M::Model>,
+pub(crate) open spec fn action_label<M: ExecSpec>(
+    model: M::Spec,
+    config: <M::Spec as SpecModel>::Config,
+    world: SpecState<M::Spec>,
     action: Action<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >,
 ) -> Label<
-    <M::Model as RoverModel>::Pid,
-    <M::Model as RoverModel>::Message,
+    <M::Spec as SpecModel>::Pid,
+    <M::Spec as SpecModel>::Message,
 > {
     match action {
         Action::Inject { recipient, at, message } =>
@@ -86,22 +88,22 @@ pub(crate) open spec fn shown<P, M>(
 }
 
 /// Executable replay state. Its view is exactly the mathematical Rover world.
-pub(crate) struct ReplayState<'a, M: RoverExec> {
+pub(crate) struct ReplayState<'a, M: ExecSpec> {
     pub(crate) model: &'a M,
-    pub(crate) config: &'a <M::Model as RoverModel>::Config,
-    pub(crate) process: Vec<(<M::Model as RoverModel>::Pid, M::Proc)>,
+    pub(crate) config: &'a <M::Spec as SpecModel>::Config,
+    pub(crate) process: Vec<(<M::Spec as SpecModel>::Pid, M::Proc)>,
     pub(crate) network: Vec<Envelope<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >>,
     pub(crate) now: Time,
 }
 
-impl<M: RoverExec> View for ReplayState<'_, M> {
-    type V = RoverSpec<M::Model>;
+impl<M: ExecSpec> View for ReplayState<'_, M> {
+    type V = SpecState<M::Spec>;
 
-    open(crate) spec fn view(&self) -> RoverSpec<M::Model> {
-        RoverSpec {
+    open(crate) spec fn view(&self) -> SpecState<M::Spec> {
+        SpecState {
             process: process_view::<M>(self.process@),
             network: self.network@,
             now: self.now,
@@ -110,24 +112,24 @@ impl<M: RoverExec> View for ReplayState<'_, M> {
 }
 
 /// Executable process slots as the mathematical world sees their state views.
-pub(crate) open spec fn process_view<M: RoverExec>(
-    process: Seq<(<M::Model as RoverModel>::Pid, M::Proc)>,
+pub(crate) open spec fn process_view<M: ExecSpec>(
+    process: Seq<(<M::Spec as SpecModel>::Pid, M::Proc)>,
 ) -> Seq<(
-    <M::Model as RoverModel>::Pid,
-    <M::Model as RoverModel>::Proc,
+    <M::Spec as SpecModel>::Pid,
+    <M::Spec as SpecModel>::Proc,
 )> {
     process.map_values(
-        |entry: (<M::Model as RoverModel>::Pid, M::Proc)| (entry.0, entry.1@)
+        |entry: (<M::Spec as SpecModel>::Pid, M::Proc)| (entry.0, entry.1@)
     )
 }
 
-impl<'a, M: RoverExec> ReplayState<'a, M> {
+impl<'a, M: ExecSpec> ReplayState<'a, M> {
     pub(crate) fn initial(
         model: &'a M,
-        config: &'a <M::Model as RoverModel>::Config,
+        config: &'a <M::Spec as SpecModel>::Config,
     ) -> (world: Self)
         ensures
-            world@ == RoverSpec::<M::Model>::init(model.model(), *config),
+            world@ == SpecState::<M::Spec>::init(model.spec(), *config),
             world.model == model,
             world.config == config,
     {
@@ -141,7 +143,7 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
     }
 
     /// Whether some initial process slot has this id.
-    fn process_present(&self, pid: &<M::Model as RoverModel>::Pid) -> (present: bool)
+    fn process_present(&self, pid: &<M::Spec as SpecModel>::Pid) -> (present: bool)
         ensures
             present ==> exists|i: int| 0 <= i < self@.process.len()
                 && #[trigger] self@.process[i].0 == *pid,
@@ -159,9 +161,9 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
     /// append-only network.
     fn receive_valid(
         &self,
-        recipient: &<M::Model as RoverModel>::Pid,
-        sender: &<M::Model as RoverModel>::Pid,
-        message: &<M::Model as RoverModel>::Message,
+        recipient: &<M::Spec as SpecModel>::Pid,
+        sender: &<M::Spec as SpecModel>::Pid,
+        message: &<M::Spec as SpecModel>::Message,
     ) -> (valid: bool)
         ensures
             valid ==> exists|i: int| 0 <= i < self@.network.len()
@@ -191,9 +193,9 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
     /// If this returns true, the exact output envelope was previously sent.
     fn output_sent(
         &self,
-        sender: &<M::Model as RoverModel>::Pid,
-        outside: &<M::Model as RoverModel>::Pid,
-        message: &<M::Model as RoverModel>::Message,
+        sender: &<M::Spec as SpecModel>::Pid,
+        outside: &<M::Spec as SpecModel>::Pid,
+        message: &<M::Spec as SpecModel>::Message,
     ) -> (sent: bool)
         ensures
             sent ==> exists|i: int| 0 <= i < self@.network.len()
@@ -223,14 +225,14 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
     /// Append every message sent by one process.
     fn append_sends(
         &mut self,
-        sender: <M::Model as RoverModel>::Pid,
+        sender: <M::Spec as SpecModel>::Pid,
         send: Vec<(
-            <M::Model as RoverModel>::Pid,
-            <M::Model as RoverModel>::Message,
+            <M::Spec as SpecModel>::Pid,
+            <M::Spec as SpecModel>::Message,
         )>,
     )
         ensures
-            final(self)@ == (RoverSpec {
+            final(self)@ == (SpecState {
                 network: old(self)@.network + specification::envelopes(sender, send@),
                 ..old(self)@
             }),
@@ -283,23 +285,23 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
     pub(crate) fn apply(
         &mut self,
         action: &Action<
-            <M::Model as RoverModel>::Pid,
-            <M::Model as RoverModel>::Message,
+            <M::Spec as SpecModel>::Pid,
+            <M::Spec as SpecModel>::Message,
         >,
     ) -> (result: Result<Option<BoundaryEvent<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >>, ()>)
         ensures
             result is Ok ==> {
                 let label = action_label::<M>(
-                    old(self).model.model(),
+                    old(self).model.spec(),
                     *old(self).config,
                     old(self)@,
                     *action,
                 );
                 &&& old(self)@.step(
-                    old(self).model.model(),
+                    old(self).model.spec(),
                     *old(self).config,
                     label,
                     final(self)@,
@@ -336,18 +338,18 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*recipient == outside));
-                    assert(outside == self.model.model().outside());
+                    assert(outside == self.model.spec().outside());
                     assert(specification::is_process(
-                        self.model.model(),
+                        self.model.spec(),
                         before,
                         *recipient,
                     ));
                     assert(before == original);
                     assert(original.step(
-                        self.model.model(),
+                        self.model.spec(),
                         *self.config,
                         action_label::<M>(
-                            self.model.model(),
+                            self.model.spec(),
                             *self.config,
                             original,
                             *action,
@@ -439,9 +441,9 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*process == outside));
-                    assert(outside == self.model.model().outside());
+                    assert(outside == self.model.spec().outside());
                     assert(specification::is_process(
-                        self.model.model(),
+                        self.model.spec(),
                         before,
                         *process,
                     ));
@@ -455,7 +457,7 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                     assert(before == original);
                     assert(original.now <= *at);
                     assert(specification::is_process(
-                        self.model.model(),
+                        self.model.spec(),
                         original,
                         *process,
                     ));
@@ -478,7 +480,7 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                         *event,
                     )[*outcome as int] == selected_v);
                     let label = action_label::<M>(
-                        self.model.model(),
+                        self.model.spec(),
                         *self.config,
                         original,
                         *action,
@@ -524,7 +526,7 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                         ));
                     }
                     specification::process_step(
-                        self.model.model(),
+                        self.model.spec(),
                         *self.config,
                         original,
                         *slot as int,
@@ -532,9 +534,9 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                         *event,
                         *outcome as int,
                     );
-                    reveal(RoverSpec::step);
+                    reveal(SpecState::step);
                     assert(original.step(
-                        self.model.model(),
+                        self.model.spec(),
                         *self.config,
                         label,
                         self@,
@@ -554,13 +556,13 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
                 let ghost before = self@;
                 self.now = *at;
                 proof {
-                    assert(outside == self.model.model().outside());
+                    assert(outside == self.model.spec().outside());
                     assert(before == original);
                     assert(original.step(
-                        self.model.model(),
+                        self.model.spec(),
                         *self.config,
                         action_label::<M>(
-                            self.model.model(),
+                            self.model.spec(),
                             *self.config,
                             original,
                             *action,
@@ -584,13 +586,13 @@ impl<'a, M: RoverExec> ReplayState<'a, M> {
 }
 
 /// A legal execution remains legal after one valid step.
-proof fn extend<S: RoverModel>(
+proof fn extend<S: SpecModel>(
     spec: S,
     config: S::Config,
-    first: RoverSpec<S>,
+    first: SpecState<S>,
     execution: Execution<S>,
     label: Label<S::Pid, S::Message>,
-    next: RoverSpec<S>,
+    next: SpecState<S>,
 )
     requires
         specification::legal(spec, config, first, execution),
@@ -630,13 +632,13 @@ proof fn extend<S: RoverModel>(
     }
 }
 
-proof fn action_observe<M: RoverExec>(
-    model: M::Model,
-    config: <M::Model as RoverModel>::Config,
-    world: RoverSpec<M::Model>,
+proof fn action_observe<M: ExecSpec>(
+    model: M::Spec,
+    config: <M::Spec as SpecModel>::Config,
+    world: SpecState<M::Spec>,
     action: Action<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >,
 )
     ensures
@@ -657,40 +659,40 @@ proof fn action_observe<M: RoverExec>(
 ///
 /// The search is irrelevant to this contract: any successfully replayed
 /// certificate proves that the supplied trace is a valid Rover trace.
-pub fn replay<M: RoverExec>(
+pub fn replay<M: ExecSpec>(
     model: &M,
-    config: &<M::Model as RoverModel>::Config,
+    config: &<M::Spec as SpecModel>::Config,
     events: &[BoundaryEvent<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >],
     certificate: &[Action<
-        <M::Model as RoverModel>::Pid,
-        <M::Model as RoverModel>::Message,
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
     >],
 ) -> (result: Result<(), usize>)
     ensures
-        result is Ok ==> specification::valid_trace(model.model(), *config, events@),
+        result is Ok ==> specification::valid_trace(model.spec(), *config, events@),
 {
     let mut world = ReplayState::initial(model, config);
     let mut visible = 0usize;
-    let ghost first = RoverSpec::<M::Model>::init(model.model(), *config);
-    let ghost mut execution: Execution<M::Model> = Seq::empty();
+    let ghost first = SpecState::<M::Spec>::init(model.spec(), *config);
+    let ghost mut execution: Execution<M::Spec> = Seq::empty();
 
     for k in 0..certificate.len()
         invariant
             world.model == model,
             world.config == config,
             visible <= events.len(),
-            specification::legal(model.model(), *config, first, execution),
-            specification::before::<M::Model>(first, execution, execution.len() as int)
+            specification::legal(model.spec(), *config, first, execution),
+            specification::before::<M::Spec>(first, execution, execution.len() as int)
                 == world@,
-            specification::trace::<M::Model>(execution)
+            specification::trace::<M::Spec>(execution)
                 == events@.subrange(0, visible as int),
     {
         let ghost before_world = world@;
         let ghost label = action_label::<M>(
-            model.model(),
+            model.spec(),
             *config,
             before_world,
             certificate@[k as int],
@@ -707,13 +709,13 @@ pub fn replay<M: RoverExec>(
                 visible += 1;
                 proof {
                     action_observe::<M>(
-                        model.model(),
+                        model.spec(),
                         *config,
                         before_world,
                         certificate@[k as int],
                     );
                     extend(
-                        model.model(),
+                        model.spec(),
                         *config,
                         first,
                         execution,
@@ -721,20 +723,20 @@ pub fn replay<M: RoverExec>(
                         world@,
                     );
                     execution = execution.push((label, world@));
-                    assert(specification::trace::<M::Model>(execution)
+                    assert(specification::trace::<M::Spec>(execution)
                         =~= events@.subrange(0, visible as int));
                 }
             }
             None => {
                 proof {
                     action_observe::<M>(
-                        model.model(),
+                        model.spec(),
                         *config,
                         before_world,
                         certificate@[k as int],
                     );
                     extend(
-                        model.model(),
+                        model.spec(),
                         *config,
                         first,
                         execution,
@@ -751,8 +753,8 @@ pub fn replay<M: RoverExec>(
     }
     proof {
         assert(events@.subrange(0, events@.len() as int) =~= events@);
-        assert(specification::trace::<M::Model>(execution) == events@);
-        assert(specification::valid_trace(model.model(), *config, events@));
+        assert(specification::trace::<M::Spec>(execution) == events@);
+        assert(specification::valid_trace(model.spec(), *config, events@));
     }
     Ok(())
 }
@@ -761,7 +763,7 @@ pub fn replay<M: RoverExec>(
 
 // Search needs cheap snapshots. This code is ordinary Rust; replay remains the
 // verified acceptance boundary.
-impl<M: RoverExec> Clone for ReplayState<'_, M> {
+impl<M: ExecSpec> Clone for ReplayState<'_, M> {
     fn clone(&self) -> Self {
         ReplayState {
             model: self.model,
@@ -773,7 +775,7 @@ impl<M: RoverExec> Clone for ReplayState<'_, M> {
     }
 }
 
-impl<M: RoverExec> ReplayState<'_, M> {
+impl<M: ExecSpec> ReplayState<'_, M> {
     pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
         self.process == other.process && self.network == other.network && self.now == other.now
     }

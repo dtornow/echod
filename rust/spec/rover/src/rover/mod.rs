@@ -1,11 +1,14 @@
 //! A Rust + Verus Rover world.
 //!
-//! - [`comm`] contains values shared by specifications and executable tests.
+//! - [`comm`] contains values shared by specifications and executions.
 //! - [`spec`] contains stateful mathematical processes, world semantics, and
 //!   refinement.
-//! - [`test`] contains executable realizations, bounded search, and verified
+//! - [`exec`] contains executable realizations, bounded search, and verified
 //!   replay.
 
 pub mod comm;
+pub mod exec;
 pub mod spec;
-pub mod test;
+
+pub use exec as RoverExec;
+pub use spec as RoverSpec;

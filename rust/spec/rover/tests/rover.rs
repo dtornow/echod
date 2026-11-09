@@ -1,10 +1,8 @@
 //! Executable examples for the Rust + Verus Rover world.
 
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover::rover::spec::{RoverModel, RoverProc};
-use echod_rover::rover::test::{
-    check, replay, Action, CheckConfig, ProcResult, RoverExec, RoverProcExec,
-};
+use echod_rover::rover::{RoverExec, RoverSpec};
+use RoverExec::{check, replay, Action, CheckConfig, ProcResult};
 use echod_rover::Time;
 use vstd::prelude::View;
 
@@ -33,19 +31,19 @@ impl View for CounterState {
     type V = CounterProc;
 }
 
-impl RoverProc for SpecOnlyProc {
+impl RoverSpec::Proc for SpecOnlyProc {
     type Config = ();
     type Pid = ();
     type Message = ();
 }
 
-impl RoverProc for CounterProc {
+impl RoverSpec::Proc for CounterProc {
     type Config = ();
     type Pid = Pid;
     type Message = Message;
 }
 
-impl RoverProcExec for CounterState {
+impl RoverExec::Proc for CounterState {
     type Spec = CounterProc;
 
     fn on_event(
@@ -73,7 +71,7 @@ impl RoverProcExec for CounterState {
 /// A mathematical model need not provide executable state or transitions.
 struct SpecOnly;
 
-impl RoverModel for SpecOnly {
+impl RoverSpec::Spec for SpecOnly {
     type Config = ();
     type Pid = ();
     type Proc = SpecOnlyProc;
@@ -81,7 +79,7 @@ impl RoverModel for SpecOnly {
     type Boundary = ();
 }
 
-impl RoverModel for CounterSpec {
+impl RoverSpec::Spec for CounterSpec {
     type Config = ();
     type Pid = Pid;
     type Proc = CounterProc;
@@ -89,8 +87,8 @@ impl RoverModel for CounterSpec {
     type Boundary = Event;
 }
 
-impl RoverExec for Counter {
-    type Model = CounterSpec;
+impl RoverExec::Spec for Counter {
+    type Spec = CounterSpec;
     type Proc = CounterState;
 
     fn outside(&self) -> Pid {
@@ -111,13 +109,13 @@ type Event = BoundaryEvent<Pid, Message>;
 
 #[test]
 fn a_specification_does_not_need_an_executable_realization() {
-    fn accepts_spec<S: RoverModel>(_: S) {}
+    fn accepts_spec<S: RoverSpec::Spec>(_: S) {}
     accepts_spec(SpecOnly);
 }
 
 #[test]
 fn an_executable_realization_names_its_distinct_specification() {
-    fn accepts_exec<E: RoverExec<Model = CounterSpec>>(_: E) {}
+    fn accepts_exec<E: RoverExec::Spec<Spec = CounterSpec>>(_: E) {}
     accepts_exec(Counter);
 }
 
