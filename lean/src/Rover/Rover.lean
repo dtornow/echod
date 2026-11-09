@@ -1,5 +1,5 @@
 /-!
-# Rover: a minimal message-passing world
+# Rover: a minimal message-passing system
 
 Rover follows Kleppmann's model: the network is an append-only history of
 messages that were sent. A process may receive any message addressed to it
@@ -34,7 +34,7 @@ structure Result (Pid State Msg : Type) where
   state : State
   send  : List (Pid × Msg)
 
-/-- A protocol interpreted by the Rover world. -/
+/-- A protocol interpreted by the Rover system. -/
 structure Model where
   Config : Type
   Pid    : Type
@@ -60,45 +60,45 @@ structure Model where
   step : Config → Pid → State → Time → Event Pid Msg →
     Outcomes (Result Pid State Msg)
 
-/-- The whole modeled world. `process outside` is present only because the
+/-- The whole modeled system. `process outside` is present only because the
 state function is total; no transition may select `outside` as a process. -/
-structure World (model : Model) where
+structure System (model : Model) where
   process : model.Pid → model.State
   network : List (model.Pid × model.Pid × model.Msg)
   now     : Time
 
-def World.initial (process : model.Pid → model.State) : World model :=
+def System.initial (process : model.Pid → model.State) : System model :=
   ⟨process, [], 0⟩
 
 /-- A receive is possible whenever its message was sent. Messages from the
-outside endpoint are injected by a separate world step, so they follow the
+outside endpoint are injected by a separate system step, so they follow the
 same rule after injection. -/
-def Event.Valid (world : World model) (recipient : model.Pid) :
+def Event.Valid (system : System model) (recipient : model.Pid) :
     Event model.Pid model.Msg → Prop
-  | .receive sender message => (sender, recipient, message) ∈ world.network
+  | .receive sender message => (sender, recipient, message) ∈ system.network
   | .timeout => True
 
 /-- Add one externally supplied request to the append-only network. -/
-def World.inject (world : World model) (to : model.Pid) (message : model.Msg)
-    (now : Time) : World model :=
-  { world with
-    network := world.network ++ [(model.outside, to, message)]
+def System.inject (system : System model) (to : model.Pid) (message : model.Msg)
+    (now : Time) : System model :=
+  { system with
+    network := system.network ++ [(model.outside, to, message)]
     now }
 
 /-- Apply one local outcome and append every message it sends. -/
-def World.land (world : World model) (process : model.Pid) (now : Time)
-    (result : Result model.Pid model.State model.Msg) : World model :=
+def System.land (system : System model) (process : model.Pid) (now : Time)
+    (result : Result model.Pid model.State model.Msg) : System model :=
   letI := model.decEqPid
-  { process := fun p => if p = process then result.state else world.process p
-    network := world.network ++
+  { process := fun p => if p = process then result.state else system.process p
+    network := system.network ++
       result.send.map fun (recipient, message) => (process, recipient, message)
     now }
 
 /-- Observe one outside-addressed message without consuming it. -/
-def World.observeOutside (world : World model) (now : Time) : World model :=
-  { world with now }
+def System.observeOutside (system : System model) (now : Time) : System model :=
+  { system with now }
 
-/-- Labels retain exactly what happened in one world step. -/
+/-- Labels retain exactly what happened in one system step. -/
 inductive Label (model : Model) where
   | input (recipient : model.Pid) (now : Time) (message : model.Msg)
   | process (process : model.Pid) (now : Time)
@@ -119,64 +119,64 @@ def Label.observe (label : Label model) : List (BoundaryEvent model) :=
   | .process _ _ _ _ => []
   | .outside sender now message => [.output sender now message]
 
-/-- One atomic world transition. The network itself does not step:
+/-- One atomic system transition. The network itself does not step:
 injection appends one outside message; a process step validates one event,
 updates that process, and appends its sends. Receive never removes a message,
 which gives Kleppmann-style duplication. -/
 inductive Step (model : Model) (config : model.Config) :
-    World model → Label model → World model → Prop where
-  | inject {world to now message} :
-      world.now ≤ now →
+    System model → Label model → System model → Prop where
+  | inject {system to now message} :
+      system.now ≤ now →
       model.isProcess to →
       model.injectable config message →
-      Step model config world (.input to now message)
-        (world.inject to message now)
+      Step model config system (.input to now message)
+        (system.inject to message now)
 
-  | process {world process now event result} :
-      world.now ≤ now →
+  | process {system process now event result} :
+      system.now ≤ now →
       model.isProcess process →
-      event.Valid world process →
-      result ∈ (model.step config process (world.process process) now event).val →
-      Step model config world
+      event.Valid system process →
+      result ∈ (model.step config process (system.process process) now event).val →
+      Step model config system
         (.process process now event result.send)
-        (world.land process now result)
+        (system.land process now result)
 
-  | outside {world sender now message} :
-      world.now ≤ now →
-      (sender, model.outside, message) ∈ world.network →
-      Step model config world
+  | outside {system sender now message} :
+      system.now ≤ now →
+      (sender, model.outside, message) ∈ system.network →
+      Step model config system
         (.outside sender now message)
-        (world.observeOutside now)
+        (system.observeOutside now)
 
-abbrev Execution (model : Model) := List (Label model × World model)
+abbrev Execution (model : Model) := List (Label model × System model)
 
-/-- Every execution entry is a valid step from the world before it. -/
+/-- Every execution entry is a valid step from the system before it. -/
 def Legal (model : Model) (config : model.Config) :
-    World model → Execution model → Prop
+    System model → Execution model → Prop
   | _, [] => True
-  | world, (label, next) :: rest =>
-      Step model config world label next ∧ Legal model config next rest
+  | system, (label, next) :: rest =>
+      Step model config system label next ∧ Legal model config next rest
 
-def endOf (world : World model) : Execution model → World model
-  | [] => world
+def endOf (system : System model) : Execution model → System model
+  | [] => system
   | (_, next) :: rest => endOf next rest
 
 /-- Configurations reachable from some allowed initial process state. -/
-inductive Reachable (model : Model) (config : model.Config) : World model → Prop where
+inductive Reachable (model : Model) (config : model.Config) : System model → Prop where
   | init {process} :
       model.init config process →
-      Reachable model config (World.initial process)
-  | step {world label next} :
-      Reachable model config world →
-      Step model config world label next →
+      Reachable model config (System.initial process)
+  | step {system label next} :
+      Reachable model config system →
+      Step model config system label next →
       Reachable model config next
 
-/-- Standard induction principle for invariants over reachable worlds. -/
-theorem Reachable.invariant {P : World model → Prop}
-    (hinit : ∀ process, model.init config process → P (World.initial process))
-    (hstep : ∀ {world label next},
-      P world → Step model config world label next → P next)
-    {world : World model} (h : Reachable model config world) : P world := by
+/-- Standard induction principle for invariants over reachable systems. -/
+theorem Reachable.invariant {P : System model → Prop}
+    (hinit : ∀ process, model.init config process → P (System.initial process))
+    (hstep : ∀ {system label next},
+      P system → Step model config system label next → P next)
+    {system : System model} (h : Reachable model config system) : P system := by
   induction h with
   | init hi => exact hinit _ hi
   | step _ hs ih => exact hstep ih hs
@@ -187,12 +187,12 @@ def trace : Execution model → List (BoundaryEvent model)
   | (label, _) :: rest => label.observe ++ trace rest
 
 /-- A complete finite behavior starts in an allowed process state and follows
-only legal world transitions. -/
+only legal system transitions. -/
 def Behavior (model : Model) (config : model.Config)
     (execution : Execution model) : Prop :=
   ∃ process,
     model.init config process ∧
-    Legal model config (World.initial process) execution
+    Legal model config (System.initial process) execution
 
 /-- Trace checking asks whether some legal execution from an allowed initial
 state shows exactly the supplied boundary trace. -/

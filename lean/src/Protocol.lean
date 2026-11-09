@@ -124,7 +124,7 @@ structure Object where
   task : Option TaskObject := none
   deriving Repr
 
-/-- The abstract world: a list of promise/task objects and a list of
+/-- The abstract system: a list of promise/task objects and a list of
 schedules. -/
 structure Store where
   objects : List Object := []

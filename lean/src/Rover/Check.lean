@@ -3,7 +3,7 @@ import Rover
 /-!
 # Generic executable checking for Rover models
 
-An action names only a Rover world move and, for a process move, an index in
+An action names only a Rover system move and, for a process move, an index in
 the model's finite nonempty outcome list. Replay recomputes every side
 condition and outcome. Search is deliberately separate from replay: adapters
 may prune or omit candidates, but no candidate is accepted without replay.
@@ -19,7 +19,7 @@ inductive ProcessEvent where
   | receive (networkIndex : Nat)
   | timeout
 
-/-- An executable name for each of Rover's three world transitions. -/
+/-- An executable name for each of Rover's three system transitions. -/
 inductive Action (model : Model) where
   | inject (recipient : model.Pid) (now : Time) (message : model.Msg)
   | process (process : model.Pid) (now : Time)
@@ -30,8 +30,8 @@ abbrev Certificate (model : Model) := List (Action model)
 
 /-- Recompute one named move. No legality evidence is accepted from search. -/
 def actionStep (model : Model) (config : model.Config)
-    (world : World model) (action : Action model) :
-    Option (Label model × World model) :=
+    (system : System model) (action : Action model) :
+    Option (Label model × System model) :=
   letI : DecidableEq model.Pid := model.decEqPid
   match action with
   | .inject recipient now message =>
@@ -39,60 +39,60 @@ def actionStep (model : Model) (config : model.Config)
         model.decIsProcess recipient
       letI : Decidable (model.injectable config message) :=
         model.decInjectable config message
-      if _htime : world.now ≤ now then
+      if _htime : system.now ≤ now then
         if _hprocess : model.isProcess recipient then
           if _hinjectable : model.injectable config message then
             some (.input recipient now message,
-              world.inject recipient message now)
+              system.inject recipient message now)
           else none
         else none
       else none
   | .process process now .timeout outcome =>
       letI : Decidable (model.isProcess process) :=
         model.decIsProcess process
-      if _htime : world.now ≤ now then
+      if _htime : system.now ≤ now then
         if _hprocess : model.isProcess process then
-          match (model.step config process (world.process process)
+          match (model.step config process (system.process process)
               now .timeout).val[outcome]? with
           | some result =>
               some (.process process now .timeout result.send,
-                world.land process now result)
+                system.land process now result)
           | none => none
         else none
       else none
   | .process process now (.receive networkIndex) outcome =>
       letI : Decidable (model.isProcess process) :=
         model.decIsProcess process
-      match _hnetwork : world.network[networkIndex]? with
+      match _hnetwork : system.network[networkIndex]? with
       | none => none
       | some (sender, recipient, message) =>
           if _hrecipient : recipient = process then
-            if _htime : world.now ≤ now then
+            if _htime : system.now ≤ now then
               if _hprocess : model.isProcess process then
-                match (model.step config process (world.process process)
+                match (model.step config process (system.process process)
                     now (.receive sender message)).val[outcome]? with
                 | some result =>
                     some (.process process now (.receive sender message)
-                        result.send, world.land process now result)
+                        result.send, system.land process now result)
                 | none => none
               else none
             else none
           else none
   | .outside networkIndex now =>
-      match _hnetwork : world.network[networkIndex]? with
+      match _hnetwork : system.network[networkIndex]? with
       | none => none
       | some (sender, recipient, message) =>
         if _hrecipient : recipient = model.outside then
-          if _htime : world.now ≤ now then
-            some (.outside sender now message, world.observeOutside now)
+          if _htime : system.now ≤ now then
+            some (.outside sender now message, system.observeOutside now)
           else none
         else none
 
 theorem actionStep_sound {model : Model} {config : model.Config}
-    {world : World model} {action : Action model}
-    {label : Label model} {next : World model}
-    (h : actionStep model config world action = some (label, next)) :
-    Step model config world label next := by
+    {system : System model} {action : Action model}
+    {label : Label model} {next : System model}
+    (h : actionStep model config system action = some (label, next)) :
+    Step model config system label next := by
   letI : DecidableEq model.Pid := model.decEqPid
   cases action with
   | inject recipient now message =>
@@ -164,9 +164,9 @@ theorem actionStep_sound {model : Model} {config : model.Config}
 /-- Every semantic Rover step has a canonical executable action. Network
 messages and nondeterministic outcomes are named by their list indices. -/
 theorem actionStep_complete {model : Model} {config : model.Config}
-    {world : World model} {label : Label model} {next : World model}
-    (h : Step model config world label next) :
-    ∃ action, actionStep model config world action = some (label, next) := by
+    {system : System model} {label : Label model} {next : System model}
+    (h : Step model config system label next) :
+    ∃ action, actionStep model config system action = some (label, next) := by
   letI : DecidableEq model.Pid := model.decEqPid
   cases h with
   | inject htime hprocess hinjectable =>
@@ -198,27 +198,27 @@ theorem actionStep_complete {model : Model} {config : model.Config}
 
 /-- Replay every action, stopping at the first illegal move. -/
 def replayFrom (model : Model) (config : model.Config) :
-    World model → Certificate model → Option (Execution model)
+    System model → Certificate model → Option (Execution model)
   | _, [] => some []
-  | world, action :: rest =>
-      match actionStep model config world action with
+  | system, action :: rest =>
+      match actionStep model config system action with
       | none => none
       | some (label, next) =>
           (replayFrom model config next rest).map ((label, next) :: ·)
 
 theorem replayFrom_sound (model : Model) (config : model.Config)
-    (world : World model) (certificate : Certificate model)
+    (system : System model) (certificate : Certificate model)
     (execution : Execution model)
-    (h : replayFrom model config world certificate = some execution) :
-    Legal model config world execution := by
-  induction certificate generalizing world execution with
+    (h : replayFrom model config system certificate = some execution) :
+    Legal model config system execution := by
+  induction certificate generalizing system execution with
   | nil =>
       simp only [replayFrom, Option.some.injEq] at h
       subst execution
       trivial
   | cons action rest ih =>
       simp only [replayFrom] at h
-      cases hs : actionStep model config world action with
+      cases hs : actionStep model config system action with
       | none => simp [hs] at h
       | some entry =>
           obtain ⟨label, next⟩ := entry
@@ -260,7 +260,7 @@ def replay (observation : Observation model) (config : model.Config)
     (initial : model.Pid → model.State) (events : List observation.Event)
     (certificate : Certificate model) : Option (Execution model) :=
   letI := observation.decEqEvent
-  match replayFrom model config (World.initial initial) certificate with
+  match replayFrom model config (System.initial initial) certificate with
   | none => none
   | some execution =>
       if observation.executionTrace execution = events then
@@ -278,7 +278,7 @@ theorem replay_sound {observation : Observation model}
       observation.executionTrace execution = events := by
   letI := observation.decEqEvent
   simp only [replay] at h
-  cases hr : replayFrom model config (World.initial initial) certificate with
+  cases hr : replayFrom model config (System.initial initial) certificate with
   | none => simp [hr] at h
   | some replayed =>
       simp only [hr] at h
@@ -310,7 +310,7 @@ structure Adapter (model : Model) extends Observation model where
   own normalization and expose that normalized state here. -/
   initial_complete : ∀ {config process},
     model.init config process → process = initial config
-  actions : model.Config → World model → Event → List (Action model)
+  actions : model.Config → System model → Event → List (Action model)
   /-- Incomplete adapters remain useful for sound search. Completeness
   theorems require this flag to be true. -/
   complete : Bool
@@ -320,23 +320,23 @@ structure Adapter (model : Model) extends Observation model where
   /-- Every first step of a legal suffix producing the expected next event is
   no later than that event's finite horizon. -/
   horizon_sound : complete = true →
-    ∀ {config world expected remaining label next rest},
-      Reachable model config world →
-      Step model config world label next →
+    ∀ {config system expected remaining label next rest},
+      Reachable model config system →
+      Step model config system label next →
       Legal model config next rest →
       toObservation.executionTrace ((label, next) :: rest) =
         expected :: remaining →
       labelTime label ≤ horizon expected
   /-- Every relevant legal hidden or next-observation step is represented by
   a finite executable candidate. -/
-  actions_complete : complete = true → ∀ {config world expected label next},
-    Reachable model config world →
-    Step model config world label next →
+  actions_complete : complete = true → ∀ {config system expected label next},
+    Reachable model config system →
+    Step model config system label next →
     (toObservation.labelTrace label = [] ∨
       toObservation.labelTrace label = [expected]) →
     labelTime label ≤ horizon expected →
-    ∃ action ∈ actions config world expected,
-      actionStep model config world action = some (label, next)
+    ∃ action ∈ actions config system expected,
+      actionStep model config system action = some (label, next)
   definitiveInvalid : model.Config → List Event → Bool
   definitiveInvalid_sound : ∀ {config events},
     definitiveInvalid config events = true →
@@ -347,7 +347,7 @@ structure Adapter (model : Model) extends Observation model where
   exhaustive : Bool
 
 structure Context (model : Model) where
-  world : World model
+  system : System model
   certificate : Certificate model
 
 inductive RawResult (model : Model) where
@@ -474,7 +474,7 @@ theorem observed_nil_or_singleton (adapter : Adapter model)
 
 @[simp] theorem Observation.executionTrace_cons
     (observation : Observation model) (label : Label model)
-    (next : World model) (rest : Execution model) :
+    (next : System model) (rest : Execution model) :
     observation.executionTrace ((label, next) :: rest) =
       observation.labelTrace label ++ observation.executionTrace rest := by
   simp [Observation.executionTrace, Observation.labelTrace,
@@ -492,16 +492,16 @@ theorem Observation.executionTrace_append
       obtain ⟨label, next⟩ := entry
       simp [ih, List.append_assoc]
 
-/-- Replay extends by one checked action at the world where the prefix ends. -/
+/-- Replay extends by one checked action at the system where the prefix ends. -/
 theorem replayFrom_snoc {model : Model} {config : model.Config}
-    {initial world : World model} {certificate : Certificate model}
+    {initial system : System model} {certificate : Certificate model}
     {execution : Execution model} {action : Action model}
-    {label : Label model} {next : World model}
+    {label : Label model} {next : System model}
     (hreplay :
       replayFrom model config initial certificate = some execution)
-    (hend : Rover.endOf initial execution = world)
+    (hend : Rover.endOf initial execution = system)
     (hstep :
-      actionStep model config world action = some (label, next)) :
+      actionStep model config system action = some (label, next)) :
     replayFrom model config initial (certificate ++ [action]) =
       some (execution ++ [(label, next)]) := by
   induction certificate generalizing initial execution with
@@ -509,7 +509,7 @@ theorem replayFrom_snoc {model : Model} {config : model.Config}
       simp only [replayFrom, Option.some.injEq] at hreplay
       subst execution
       simp only [Rover.endOf] at hend
-      subst world
+      subst system
       simp [replayFrom, hstep]
   | cons first rest ih =>
       simp only [replayFrom] at hreplay
@@ -517,7 +517,7 @@ theorem replayFrom_snoc {model : Model} {config : model.Config}
           actionStep model config initial first with
       | none => simp [hfirst] at hreplay
       | some entry =>
-          obtain ⟨firstLabel, firstWorld⟩ := entry
+          obtain ⟨firstLabel, firstSystem⟩ := entry
           simp only [hfirst] at hreplay
           obtain ⟨tail, htail, rfl⟩ :=
             Option.map_eq_some_iff.mp hreplay
@@ -525,8 +525,8 @@ theorem replayFrom_snoc {model : Model} {config : model.Config}
           rw [ih htail hend]
           rfl
 
-@[simp] theorem endOf_snoc (initial : World model)
-    (execution : Execution model) (entry : Label model × World model) :
+@[simp] theorem endOf_snoc (initial : System model)
+    (execution : Execution model) (entry : Label model × System model) :
     Rover.endOf initial (execution ++ [entry]) = entry.2 := by
   induction execution generalizing initial with
   | nil => rfl
@@ -540,12 +540,12 @@ def searchFrom (adapter : Adapter model) (config : model.Config) :
   | _, context, [] => .found context.certificate
   | 0, _, _ => .cutoff
   | fuel + 1, context, events@(expected :: rest) =>
-      explore (adapter.actions config context.world expected) fun action =>
-        match actionStep model config context.world action with
+      explore (adapter.actions config context.system expected) fun action =>
+        match actionStep model config context.system action with
         | none => .exhausted
         | some (label, next) =>
             let nextContext := {
-              world := next
+              system := next
               certificate := context.certificate ++ [action]
             }
             match observed adapter label with
@@ -560,19 +560,19 @@ def searchFrom (adapter : Adapter model) (config : model.Config) :
 def rawSearch (adapter : Adapter model) (bound : Nat)
     (config : model.Config) (events : List adapter.Event) : RawResult model :=
   searchFrom adapter config bound {
-    world := World.initial (adapter.initial config)
+    system := System.initial (adapter.initial config)
     certificate := []
   } events
 
-/-- Every reported search witness replays from the context's original world
+/-- Every reported search witness replays from the context's original system
 and extends the already-replayed prefix by exactly the remaining trace. -/
 theorem searchFrom_found_replays (adapter : Adapter model)
-    (config : model.Config) {initial : World model}
+    (config : model.Config) {initial : System model}
     {fuel : Nat} {context : Context model} {events : List adapter.Event}
     {found : Certificate model} {preExecution : Execution model}
     (hprefix : replayFrom model config initial context.certificate =
       some preExecution)
-    (hend : Rover.endOf initial preExecution = context.world)
+    (hend : Rover.endOf initial preExecution = context.system)
     (hsearch :
       searchFrom adapter config fuel context events = .found found) :
     ∃ execution,
@@ -598,7 +598,7 @@ theorem searchFrom_found_replays (adapter : Adapter model)
           obtain ⟨action, haction, hbranch⟩ :=
             explore_found hsearch
           cases hstep :
-              actionStep model config context.world action with
+              actionStep model config context.system action with
           | none => simp [hstep] at hbranch
           | some entry =>
               obtain ⟨label, next⟩ := entry
@@ -635,7 +635,7 @@ theorem searchFrom_found_replays (adapter : Adapter model)
                   simpa [hlabel, List.append_assoc] using htrace
                 · simp [hobserved, heq] at hbranch
 
-/-- A raw search witness from the adapter's initial world independently
+/-- A raw search witness from the adapter's initial system independently
 replays to exactly the requested observation trace. -/
 theorem rawSearch_found_replays {adapter : Adapter model}
     {bound : Nat} {config : model.Config} {events : List adapter.Event}
@@ -643,15 +643,15 @@ theorem rawSearch_found_replays {adapter : Adapter model}
     (h : rawSearch adapter bound config events = .found certificate) :
     ∃ execution,
       replayFrom model config
-        (World.initial (adapter.initial config)) certificate =
+        (System.initial (adapter.initial config)) certificate =
           some execution ∧
       adapter.executionTrace execution = events := by
   have hprefix :
-      replayFrom model config (World.initial (adapter.initial config))
+      replayFrom model config (System.initial (adapter.initial config))
         ([] : Certificate model) = some [] := rfl
   have hend :
-      Rover.endOf (World.initial (adapter.initial config)) [] =
-        World.initial (adapter.initial config) := rfl
+      Rover.endOf (System.initial (adapter.initial config)) [] =
+        System.initial (adapter.initial config) := rfl
   obtain ⟨execution, hexecution, htrace⟩ :=
     searchFrom_found_replays adapter config hprefix hend h
   exact ⟨execution, hexecution, by
@@ -664,8 +664,8 @@ theorem searchFrom_complete {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
     {config : model.Config} {context : Context model}
     {events : List adapter.Event} {execution : Execution model}
-    (hreachable : Reachable model config context.world)
-    (hlegal : Legal model config context.world execution)
+    (hreachable : Reachable model config context.system)
+    (hlegal : Legal model config context.system execution)
     (htrace : adapter.executionTrace execution = events) :
     ∃ certificate,
       searchFrom adapter config execution.length context events =
@@ -698,17 +698,17 @@ theorem searchFrom_complete {adapter : Adapter model}
               adapter.actions_complete hcomplete hreachable hstep
                 (Or.inl hhidden) hupper
             let nextContext : Context model := {
-              world := next
+              system := next
               certificate := context.certificate ++ [action]
             }
             obtain ⟨certificate, hcertificate⟩ :=
               ih (context := nextContext) hnext hrest htail
             let branch : Action model → RawResult model := fun candidate =>
-              match actionStep model config context.world candidate with
+              match actionStep model config context.system candidate with
                 | none => RawResult.exhausted
                 | some (branchLabel, branchNext) =>
                     let branchContext : Context model := {
-                      world := branchNext
+                      system := branchNext
                       certificate := context.certificate ++ [candidate]
                     }
                     match observed adapter branchLabel with
@@ -747,17 +747,17 @@ theorem searchFrom_complete {adapter : Adapter model}
               adapter.actions_complete hcomplete hreachable hstep
                 (Or.inr hobserved) hupper
             let nextContext : Context model := {
-              world := next
+              system := next
               certificate := context.certificate ++ [action]
             }
             obtain ⟨certificate, hcertificate⟩ :=
               ih (context := nextContext) hnext hrest htail
             let branch : Action model → RawResult model := fun candidate =>
-              match actionStep model config context.world candidate with
+              match actionStep model config context.system candidate with
                 | none => RawResult.exhausted
                 | some (branchLabel, branchNext) =>
                     let branchContext : Context model := {
-                      world := branchNext
+                      system := branchNext
                       certificate := context.certificate ++ [candidate]
                     }
                     match observed adapter branchLabel with
@@ -788,8 +788,8 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
     {config : model.Config} {context : Context model}
     {events : List adapter.Event} {execution : Execution model}
-    (hreachable : Reachable model config context.world)
-    (hlegal : Legal model config context.world execution)
+    (hreachable : Reachable model config context.system)
+    (hlegal : Legal model config context.system execution)
     (htrace : adapter.executionTrace execution = events)
     (fuel : Nat) :
     searchFrom adapter config fuel context events ≠ .exhausted := by
@@ -822,7 +822,7 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                   adapter.actions_complete hcomplete hreachable hstep
                     (Or.inl hhidden) hupper
                 let nextContext : Context model := {
-                  world := next
+                  system := next
                   certificate := context.certificate ++ [action]
                 }
                 have htailSearch :=
@@ -830,11 +830,11 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                     hnext hrest htail
                 let branch : Action model → RawResult model :=
                   fun candidate =>
-                    match actionStep model config context.world candidate with
+                    match actionStep model config context.system candidate with
                     | none => .exhausted
                     | some (branchLabel, branchNext) =>
                         let branchContext : Context model := {
-                          world := branchNext
+                          system := branchNext
                           certificate := context.certificate ++ [candidate]
                         }
                         match observed adapter branchLabel with
@@ -867,7 +867,7 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                   adapter.actions_complete hcomplete hreachable hstep
                     (Or.inr hobserved) hupper
                 let nextContext : Context model := {
-                  world := next
+                  system := next
                   certificate := context.certificate ++ [action]
                 }
                 have htailSearch :=
@@ -875,11 +875,11 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                     hnext hrest hparts.2
                 let branch : Action model → RawResult model :=
                   fun candidate =>
-                    match actionStep model config context.world candidate with
+                    match actionStep model config context.system candidate with
                     | none => .exhausted
                     | some (branchLabel, branchNext) =>
                         let branchContext : Context model := {
-                          world := branchNext
+                          system := branchNext
                           certificate := context.certificate ++ [candidate]
                         }
                         match observed adapter branchLabel with
@@ -955,7 +955,7 @@ theorem boundedSearch_exhausted_sound {adapter : Adapter model}
   subst process
   have hreachable :
       Reachable model config
-        (World.initial (adapter.initial config)) :=
+        (System.initial (adapter.initial config)) :=
     .init (adapter.initial_valid config)
   have hne :
       rawSearch adapter bound config events ≠ .exhausted := by
@@ -993,12 +993,12 @@ theorem boundedSearch_complete {adapter : Adapter model}
     adapter.initial_complete hinit
   subst process
   let initialContext : Context model := {
-    world := World.initial (adapter.initial config)
+    system := System.initial (adapter.initial config)
     certificate := []
   }
   have hinitialReachable :
       Reachable model config
-        (World.initial (adapter.initial config)) :=
+        (System.initial (adapter.initial config)) :=
     .init (adapter.initial_valid config)
   obtain ⟨certificate, hsearch⟩ :=
     searchFrom_complete hcomplete

@@ -7,7 +7,7 @@ import «concrete».WellFormed
 Every concrete decision leaves a well-formed document well-formed
 (`Keeps`). A PUT that lands was decided on exactly the document it
 replaces, so the store holds only well-formed documents in every reachable
-world.
+system.
 -/
 
 namespace Resonate.Concrete
@@ -888,11 +888,11 @@ theorem store_step_ok {config : Config} {store : Store} {event : Event Pid Msg}
 
 
 
-/-- Every document the store holds is well-formed, in every reachable world. -/
+/-- Every document the store holds is well-formed, in every reachable system. -/
 theorem reachable_store_well_formed {nodes : List Addr} {appConfig : Resonate.Config}
-    {config : Config} {world : World (model nodes appConfig)}
-    (hreachable : Reachable (model nodes appConfig) config world) :
-    ∀ {store}, world.process .store = .store store → store.WellFormed := by
+    {config : Config} {system : System (model nodes appConfig)}
+    (hreachable : Reachable (model nodes appConfig) config system) :
+    ∀ {store}, system.process .store = .store store → store.WellFormed := by
   induction hreachable with
   | init hinit =>
       intro store hstore
@@ -904,8 +904,8 @@ theorem reachable_store_well_formed {nodes : List Addr} {appConfig : Resonate.Co
       obtain ⟨store, hstore⟩ := Refinement.reachable_store_exists hprevious
       have hwf := ih hstore
       cases hstep with
-      | inject => exact ih (by simpa [World.inject] using hnext)
-      | outside => exact ih (by simpa [World.observeOutside] using hnext)
+      | inject => exact ih (by simpa [System.inject] using hnext)
+      | outside => exact ih (by simpa [System.observeOutside] using hnext)
       | @process pid now event result htime hprocess hvalid hresult =>
           by_cases hp : pid = .store
           · subst hp
@@ -932,9 +932,9 @@ theorem reachable_store_well_formed {nodes : List Addr} {appConfig : Resonate.Co
             obtain ⟨store', hstate, hwf'⟩ := store_step_ok hwf hput hresult'
             have heq : Local.store nextStore = Local.store store' := by
               rw [← hnext, ← hstate]
-              simp [World.land]
+              simp [System.land]
             cases heq
             exact hwf'
-          · exact ih (by simpa [World.land, Ne.symm hp] using hnext)
+          · exact ih (by simpa [System.land, Ne.symm hp] using hnext)
 
 end Resonate.Concrete

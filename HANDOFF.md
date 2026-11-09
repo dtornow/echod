@@ -41,7 +41,7 @@ Produce an inventory containing exact paths for the following.
   refinement theorem.
 - Standalone Resonate protocol, abstract model, property catalogue, tests,
   benchmark, and fuzz driver.
-- Lean `Rover.World`, Resonate abstract/concrete models, trace checker, and
+- Lean `Rover.System`, Resonate abstract/concrete models, trace checker, and
   refinement proofs.
 - Current unproved property obligations.
 - Every trusted helper and axiom.
