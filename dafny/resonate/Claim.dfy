@@ -17,8 +17,7 @@ module Claim {
   lemma PromiseGetReceived(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                            b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                            r: nat, node: Pid, from: Pid, cid: Uuid, answer: Temp.Answer)
-    requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
+    requires Behavior(docs, clients, nodes, ask, b, a)
     requires node.Node?
     requires a(r) == Deliver(Packet(node, from, Res(cid, PromiseReply(answer))))
     ensures exists i: nat, k: nat, id, doc, version {:trigger a(i), a(k), GotPacket(node, Hash(cid), id, doc, version)} ::
@@ -58,9 +57,8 @@ module Claim {
   // every document is well-formed: stored in the bucket, in flight, or waiting on a continuation.
   lemma DocumentsStayWellFormed(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                                 b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Routed(clients, nodes, ask)
+    requires Behavior(docs, clients, nodes, ask, b, a)
     requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     ensures Formed(b(n))
   {
     DocumentsStay(docs, clients, nodes, ask, b, a, n);
@@ -70,8 +68,7 @@ module Claim {
   // A document that owes nothing does not need one.
   lemma WorkflowsHaveTimeouts(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                               b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
+    requires Behavior(docs, clients, nodes, ask, b, a)
     ensures Bucket in b(n).procs && b(n).procs[Bucket].AtBucket?
     ensures forall key | key in b(n).procs[Bucket].docs ::
       match Temp.Nearest(b(n).procs[Bucket].docs[key])

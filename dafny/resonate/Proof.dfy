@@ -563,8 +563,7 @@ module Proof {
 
   lemma StepOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a) && Inv(docs, b, a, n)
+    requires Behavior(docs, clients, nodes, ask, b, a) && Inv(docs, b, a, n)
     ensures Inv(docs, b, a, n+1)
   {
     var w := World(docs, clients, nodes, ask);
@@ -625,8 +624,7 @@ module Proof {
 
   lemma DeliverOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                   b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat, p: Packet<Pid, Msg>)
-    requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a) && Trace(docs, b, a, n)
+    requires Behavior(docs, clients, nodes, ask, b, a) && Trace(docs, b, a, n)
     requires a(n) == Deliver(p)
     ensures Trace(docs, b, a, n+1)
   {
@@ -1118,8 +1116,7 @@ module Proof {
 
   lemma Safe(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
              b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
+    requires Behavior(docs, clients, nodes, ask, b, a)
     ensures Inv(docs, b, a, n)
     decreases n
   {
@@ -1568,9 +1565,8 @@ module Proof {
 
   lemma DocumentsStay(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                       b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Routed(clients, nodes, ask)
+    requires Behavior(docs, clients, nodes, ask, b, a)
     requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     ensures Formed(b(n))
   {
     Safe(docs, clients, nodes, ask, b, a, n);
