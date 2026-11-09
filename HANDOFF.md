@@ -149,26 +149,27 @@ Domain-independent formal machinery:
 - ordered pid/process entries over a stateful `RoverSpec::Proc`
 - generic process selection, message/timeout delivery, and routing
 - clean boundary observation
-- certificates and verified replay
-- bounded trace search
 - generic forward-simulation-to-trace-refinement theorem
 
-Its message-passing layer is split by dependency direction:
+### `spec/rover-exec`
 
-```text
-rover/comm  <-  rover/spec  <-  rover/exec
-```
+The executable realization of Rover specifications:
 
-`comm` is shared data, `spec` is mathematical semantics and refinement, and
-`exec` is executable search and verified replay.
+- bounded trace and history search
+- certificates and verified replay
+- coverage labels from selected executable outcomes
 
 ### `spec/abstract`
 
-The independent, executable Resonate reference model and its mathematical
-twin. It owns the protocol conformance properties that remain meaningful under
-Rover's world semantics.
+The independent mathematical Resonate model. It owns the protocol transition
+functions and conformance properties meaningful under Rover semantics.
 
 It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
+
+### `spec/abstract-exec`
+
+The executable realization of the abstract model: Rover adapters, client
+history translation, model-driven request generation, and coverage marks.
 
 ### `spec/concrete`
 
@@ -182,12 +183,8 @@ and not a dependent of the process:
   each enum variant to its local step
 - the abstract model, which that step refines
 
-Still open, and the reason concrete depends on the abstract model:
-
-- the handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`, `spec_completed`, `spec_tick`, `spec_stop`)
-- concrete/abstract world relation
-- per-step forward simulation
-- final `concrete_refines_abstract` theorem
+`simulation.rs` proves the concrete world refines the abstract world through
+the generic Rover forward-simulation theorem.
 
 ### `test/runtime`
 
@@ -208,6 +205,9 @@ The production and test runtimes must drive the exact same
 
 ```text
 spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process ---> impl/runtime ---> impl/cli
+      |               |
+      v               v
+spec/rover-exec --> spec/abstract-exec
 
 impl + spec -----------------> test/*
 ```

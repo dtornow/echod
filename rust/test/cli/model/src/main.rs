@@ -43,11 +43,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use echod_rover::rover::RoverExec::{check_guided, marks, CheckConfig};
+use echod_rover_exec::{check_guided, marks, CheckConfig};
 use echod_abstract::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
-use echod_abstract::{
-    history_rank, history_responses, rover_trace, Action, Dispatch, HistoryEvent,
-    Model as RoverModel, ServerConfig, Store as Model, MARKS,
+use echod_abstract::{Dispatch, ServerConfig, Store as Model};
+use echod_abstract_exec::{
+    arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
+    Action, HistoryEvent, Model as RoverModel, MARKS,
 };
 use serde_json::{json, Value};
 
@@ -219,21 +220,21 @@ impl Driver {
         for _ in 0..requests {
             let state = self.snap(now).await;
             let a = if guided {
-                let suggested = self.model.suggest(&state, now);
+                let suggested = suggest(&state, now);
                 // one time in four, anything; otherwise a suggestion taken least
                 if suggested.is_empty() || choices.pick(4) == 0 {
-                    self.model.arbitrary(&state, now, &mut |n| choices.pick(n))
+                    arbitrary(&state, now, &mut |n| choices.pick(n))
                 } else {
                     let labels: Vec<&'static str> = suggested.iter().map(|(_, why)| *why).collect();
                     suggested[choices.pick_labeled(&labels)].0.clone()
                 }
             } else {
-                self.model.arbitrary(&state, now, &mut |n| choices.pick(n))
+                arbitrary(&state, now, &mut |n| choices.pick(n))
             };
             self.act(a, &mut now, &mut call, &mut trace).await;
         }
         let state = self.snap(now).await;
-        for a in self.model.finish(&state, now) {
+        for a in finish(&state, now) {
             self.act(a, &mut now, &mut call, &mut trace).await;
         }
         trace

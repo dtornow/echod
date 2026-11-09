@@ -3,9 +3,8 @@
 //! `machine` is the store and handlers; `model` adapts one service process to
 //! Rover; `view` holds mathematical views and their lemmas; `catalogue` states
 //! conformance properties; `trusted` contains the explicit trust boundary.
-//! `history` translates client histories to Rover events and drives requests.
 //! `model::Spec` implements `RoverSpec::Spec`; `RoverSpec::State<model::Spec>`
-//! is the complete state, and `model::Model` implements `RoverExec::Spec`.
+//! is the complete mathematical state.
 
 #![allow(
     clippy::ptr_arg,
@@ -21,17 +20,12 @@ pub mod model;
 pub mod trusted;
 pub mod machine;
 mod hashed_map;
-mod history;
 pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
-pub use model::{Model, Spec};
+pub use model::Spec;
 pub use trusted::{PMap, PSet};
 pub use echod_types as types;
 pub use machine::*;
-pub use history::{
-    history_rank, history_responses, next_cron, plain, rover_trace, Action,
-    HistoryEvent, IDS, MARKS, SCHEDULES,
-};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

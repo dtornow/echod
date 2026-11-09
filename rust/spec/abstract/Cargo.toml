@@ -1,6 +1,6 @@
 [package]
-name = "echod-abstract"
-description = "The Resonate protocol as a Rover model: executable handlers, their specification twins, and the one-process reference."
+name = "echod-abstract-spec"
+description = "The mathematical Resonate protocol specification and verified transition kernel."
 version.workspace = true
 edition.workspace = true
 license = "MIT"
@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 echod-types = { path = "../../comm/types" }
 echod-cron = { path = "../../comm/cron" }
-echod-rover = { path = "../rover" }
+echod-rover = { package = "echod-rover-spec", path = "../rover" }
 imbl = "7.0.2"
 vstd = "=0.0.0-2026-10-11-0230"
 

@@ -1092,11 +1092,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-abstract"
+name = "echod-abstract-exec"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract-spec",
+ "echod-cron",
+ "echod-rover-exec",
+ "echod-rover-spec",
+ "echod-types",
+ "vstd",
+]
+
+[[package]]
+name = "echod-abstract-spec"
 version = "0.1.0"
 dependencies = [
  "echod-cron",
- "echod-rover",
+ "echod-rover-spec",
  "echod-types",
  "imbl",
  "vstd",
@@ -1106,9 +1118,10 @@ dependencies = [
 name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
- "echod-abstract",
+ "echod-abstract-spec",
  "echod-cron",
- "echod-rover",
+ "echod-rover-exec",
+ "echod-rover-spec",
  "echod-types",
  "serde",
  "serde_json",
@@ -1145,8 +1158,10 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "echod-abstract",
- "echod-rover",
+ "echod-abstract-exec",
+ "echod-abstract-spec",
+ "echod-rover-exec",
+ "echod-rover-spec",
  "reqwest 0.12.28",
  "resonate-core",
  "serde_json",
@@ -1157,7 +1172,7 @@ dependencies = [
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
- "echod-abstract",
+ "echod-abstract-spec",
  "echod-concrete",
  "echod-types",
  "serde",
@@ -1168,10 +1183,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-rover"
+name = "echod-rover-exec"
 version = "0.1.0"
 dependencies = [
- "echod-abstract",
+ "echod-abstract-exec",
+ "echod-abstract-spec",
+ "echod-rover-spec",
+ "vstd",
+]
+
+[[package]]
+name = "echod-rover-spec"
+version = "0.1.0"
+dependencies = [
  "vstd",
 ]
 
@@ -1228,10 +1252,12 @@ name = "echod-test-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "echod-abstract",
+ "echod-abstract-exec",
+ "echod-abstract-spec",
  "echod-cron",
  "echod-process",
- "echod-rover",
+ "echod-rover-exec",
+ "echod-rover-spec",
  "echod-runtime",
  "resonate-core",
  "serde",

@@ -1,7 +1,8 @@
 //! Executable examples for the Rust + Verus Rover world.
 
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover::rover::{RoverExec, RoverSpec};
+use echod_rover::rover::RoverSpec;
+use echod_rover_exec as RoverExec;
 use RoverExec::{check, replay, Action, CheckConfig, ProcResult};
 use echod_rover::rover::comm::Time;
 use vstd::prelude::View;

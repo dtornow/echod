@@ -1,21 +1,21 @@
 //! Verified replay for Rover certificates.
 //!
 //! Search is untrusted. This module re-executes every named action and proves
-//! that successful replay witnesses [`crate::rover::spec::valid_trace`].
+//! that successful replay witnesses [`echod_rover::rover::spec::valid_trace`].
 
 use vstd::prelude::*;
 
 use std::collections::BTreeSet;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::super::spec::{
+use echod_rover::rover::spec::{
     self as specification, Execution, Label, State as SpecState, StepResultV,
 };
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::{Proc as ExecProc, Spec as ExecSpec};
-use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent, Time};
+use echod_rover::rover::comm::{BoundaryEvent, Envelope, ProcessEvent, Time};
 #[allow(unused_imports)]
-use super::super::spec::{Proc as SpecProc, Spec as SpecModel};
+use echod_rover::rover::spec::{Proc as SpecProc, Spec as SpecModel};
 
 verus! {
 

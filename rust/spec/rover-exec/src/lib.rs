@@ -2,8 +2,8 @@
 
 use vstd::prelude::*;
 
-use super::comm::{ProcessEvent, Time};
-use super::spec::{Proc as SpecProc, Spec as SpecModel};
+use echod_rover::rover::comm::{ProcessEvent, Time};
+use echod_rover::rover::spec::{Proc as SpecProc, Spec as SpecModel};
 
 mod checker;
 mod replay;
@@ -43,7 +43,7 @@ pub trait Proc:
             r@.len() == self@.on_event(*config, now, *event).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let result = #[trigger] r@[i];
-                super::spec::StepResultV {
+                echod_rover::rover::spec::StepResultV {
                     state: result.state@,
                     send: result.send@,
                 } == self@.on_event(*config, now, *event)[i]

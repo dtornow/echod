@@ -19,5 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
 tracing = "0.1"
-echod-rover = { path = "../../spec/rover" }
-echod-abstract = { path = "../../spec/abstract" }
+echod-rover = { package = "echod-rover-spec", path = "../../spec/rover" }
+echod-rover-exec = { path = "../../spec/rover-exec" }
+echod-abstract = { package = "echod-abstract-spec", path = "../../spec/abstract" }
+echod-abstract-exec = { path = "../../spec/abstract-exec" }

@@ -1,15 +1,16 @@
 [package]
-name = "echod-rover"
-description = "Rover: an append-only message-passing world, its checker, and its refinement theorem."
+name = "echod-rover-spec"
+description = "Rover: append-only message-passing specifications and refinement."
 version.workspace = true
 edition.workspace = true
 license = "MIT"
 
+[lib]
+name = "echod_rover"
+path = "src/lib.rs"
+
 [dependencies]
 vstd = "=0.0.0-2026-10-11-0230"
-
-[dev-dependencies]
-echod-abstract = { path = "../abstract" }
 
 [package.metadata.verus]
 verify = true

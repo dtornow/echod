@@ -625,6 +625,12 @@ pub struct ServerConfig {
     pub retry_timeout: Time,
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig { retry_timeout: 5_000 }
+    }
+}
+
 fn one(o: Out) -> (r: Vec<Out>)
     ensures
         r.len() == 1,

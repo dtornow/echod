@@ -25,8 +25,10 @@ whole to the Resonate model under crashes, outages and lost acks.
 rust/impl/process     the pure State::on_event around the concrete document machine, proved to compute spec_on_event
 rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
-rust/spec/rover       the Rover world, replay, and refinement theorem
-rust/spec/abstract    the Resonate protocol as a Rover model
+rust/spec/rover       Rover mathematical state, steps, and refinement
+rust/spec/rover-exec  Rover executable search and verified replay
+rust/spec/abstract    the mathematical Resonate protocol model
+rust/spec/abstract-exec  its executable Rover realization and history tooling
 rust/spec/concrete    the document machine the process runs, proved; the Rover model and its refinement
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
@@ -52,6 +54,8 @@ what is next. Each crate's `lib.rs` opens with a map of its files.
 ```
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
+cargo verus verify -p echod-rover-spec -p echod-rover-exec
+cargo verus verify -p echod-abstract-spec -p echod-abstract-exec
 cargo verus verify -p echod-concrete    # the document machine and the refinement, under Verus
 cargo verus verify -p echod-process     # State::on_event == spec_on_event, under Verus
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator

@@ -15,7 +15,8 @@ use vstd::prelude::*;
 
 use echod_abstract::{BoundaryEvent, Call, Output};
 use echod_rover::rover::comm::ProcessEvent;
-use echod_rover::rover::{RoverExec, RoverSpec};
+use echod_rover::rover::RoverSpec;
+use echod_rover_exec as RoverExec;
 use RoverExec::ProcResult;
 use RoverSpec::Label;
 #[cfg(verus_keep_ghost)]

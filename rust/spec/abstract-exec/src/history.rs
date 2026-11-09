@@ -6,7 +6,7 @@ use echod_rover::rover::comm::Time;
 use echod_rover::rover::comm::{
     BoundaryEvent as RoverBoundaryEvent, ProcessEvent,
 };
-use echod_rover::rover::RoverExec::Action as ExecAction;
+use echod_rover_exec::Action as ExecAction;
 use std::collections::BTreeMap;
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
@@ -16,9 +16,9 @@ use echod_types::{
     TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
 
-use super::machine::*;
-use super::model::Pid;
-use super::protocol::{Call, Message, Output};
+use echod_abstract::machine::*;
+use echod_abstract::model::Pid;
+use echod_abstract::protocol::{Call, Message, Output};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action<X> {
@@ -39,12 +39,6 @@ pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
 
 fn origin(id: &str) -> &str {
     echod_types::origin_of(id)
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        ServerConfig { retry_timeout: 5_000 }
-    }
 }
 
 pub fn rover_trace(history: &[HistoryEvent]) -> Vec<RoverBoundaryEvent<Pid, Message>> {
@@ -302,13 +296,8 @@ fn suspend(id: &Id, version: u64, awaited: &Id) -> Request {
     Request::TaskSuspend(TaskSuspendReq { id: id.clone(), version, actions: vec![PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter: id.clone() }] })
 }
 
-impl ServerConfig {
-    /// Actions that reach the edges of what the state allows: fences and
-    /// heartbeats at the current version and a stale one, the clock moved to
-    /// just before and exactly at each deadline, promises settled while a task
-    /// awaits them, settles and creates repeated, halts and continues in every
-    /// task state, schedules fired and deleted.
-    pub fn suggest(&self, s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
+/// Actions that reach the edges of what the state allows.
+pub fn suggest(s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
         let mut out = Vec::new();
         let mut push = |a, why| out.push((a, why));
         let siblings = |id: &Id| -> Vec<&Id> { s.promises.iter().map(|(k, _)| k).filter(|k| *k != id && origin(k) == origin(id)).collect() };
@@ -429,14 +418,14 @@ impl ServerConfig {
         out
     }
 
-    pub fn arbitrary(&self, _s: &Store, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
-        random_action(pick, now)
-    }
+pub fn arbitrary(_s: &Store, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
+    random_action(pick, now)
+}
 
     /// Read everything, delete every schedule (or it fires forever), move the
     /// clock past every deadline, so every timer must have fired and every
     /// task is done, and read again.
-    pub fn finish(&self, s: &Store, now: Time) -> Vec<Action<Request>> {
+pub fn finish(s: &Store, now: Time) -> Vec<Action<Request>> {
         let reads = || {
             IDS.iter()
                 .flat_map(|id| [Request::TaskGet(TaskGetReq { id: id.to_string() }), Request::PromiseGet(PromiseGetReq { id: id.to_string() })])
@@ -452,7 +441,6 @@ impl ServerConfig {
             last = last.max(t.lease_timeout_at()).max(t.retry_timeout_at.unwrap_or(0));
         }
         reads().chain(deletes).chain([Action::Clock(last + 1)]).chain(reads()).collect()
-    }
 }
 
 /// The ids random requests use.

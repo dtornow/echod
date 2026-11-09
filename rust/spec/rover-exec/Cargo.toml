@@ -1,0 +1,24 @@
+[package]
+name = "echod-rover-exec"
+description = "Executable search and verified replay for Rover specifications."
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[lib]
+name = "echod_rover_exec"
+path = "src/lib.rs"
+
+[dependencies]
+echod-rover = { package = "echod-rover-spec", path = "../rover" }
+vstd = "=0.0.0-2026-10-11-0230"
+
+[dev-dependencies]
+echod-abstract = { package = "echod-abstract-spec", path = "../abstract" }
+echod-abstract-exec = { path = "../abstract-exec" }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

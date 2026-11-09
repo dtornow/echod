@@ -5,8 +5,8 @@
 
 use super::replay::{Action, Certificate, ReplayState};
 use super::{Proc as ExecProc, Spec as ExecSpec};
-use super::super::comm::{BoundaryEvent, ProcessEvent, Time};
-use super::super::spec::Spec as SpecModel;
+use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent, Time};
+use echod_rover::rover::spec::Spec as SpecModel;
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,7 +251,7 @@ pub fn check_guided<M: ExecSpec>(
             <M::Spec as SpecModel>::Pid,
             <M::Spec as SpecModel>::Message,
         >,
-        &[super::super::comm::Envelope<
+        &[echod_rover::rover::comm::Envelope<
             <M::Spec as SpecModel>::Pid,
             <M::Spec as SpecModel>::Message,
         >],

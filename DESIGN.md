@@ -10,8 +10,10 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
-| `rust/spec/rover` | `echod-rover` (library `echod_rover`): the stateful-process Rover world, executable history checking, verified replay, and refinement theorem |
-| `rust/spec/abstract` | `echod-abstract` (library `echod_abstract`): the Resonate protocol as a Rover model |
+| `rust/spec/rover` | `echod-rover-spec`: mathematical Rover processes, state, steps, and refinement |
+| `rust/spec/rover-exec` | `echod-rover-exec`: executable search and verified certificate replay |
+| `rust/spec/abstract` | `echod-abstract-spec`: the mathematical Resonate protocol model |
+| `rust/spec/abstract-exec` | `echod-abstract-exec`: executable realization, history translation, and model driving |
 | `rust/spec/concrete` | `echod-concrete`: the catalogue, handler specifications, Rover model (nodes and one store), and its proved refinement to the abstract model |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
