@@ -17,9 +17,7 @@ module Proof {
     && Bucket in n.procs
     && n.procs[Bucket].AtBucket?
     && (forall p {:trigger n.procs[p]} ::
-         p in n.procs && p.Client? ==>
-           && n.procs[p].AtClient?
-           && Node(n.procs[p].node) in n.procs)
+         p in n.procs && p.Client? ==> n.procs[p].AtClient?)
     && (forall p {:trigger n.procs[p]} ::
          p in n.procs && p.Node? ==> n.procs[p].AtNode?)
   }
@@ -192,7 +190,7 @@ module Proof {
 
   lemma ShapeAt(docs: map<string, Temp.Doc>, n: Net<Pid, Msg, State>, self: Pid, s: State)
     requires Shaped(docs, n) && self in n.procs
-    requires self.Client? ==> s.AtClient? && Node(s.node) in n.procs
+    requires self.Client? ==> s.AtClient?
     requires self.Node? ==> s.AtNode?
     requires self.Bucket? ==> s.AtBucket?
     ensures Shaped(docs, n.(procs := n.procs[self := s]))
@@ -205,15 +203,12 @@ module Proof {
       assert n'.procs[Bucket] == n.procs[Bucket];
     }
     forall p | p in n'.procs && p.Client?
-      ensures n'.procs[p].AtClient? && Node(n'.procs[p].node) in n'.procs
+      ensures n'.procs[p].AtClient?
     {
       if p == self {
         assert n'.procs[p] == s;
-        assert Node(s.node) in n'.procs.Keys;
       } else {
         assert n'.procs[p] == n.procs[p];
-        assert Node(n.procs[p].node) in n.procs;
-        assert Node(n.procs[p].node) in n'.procs.Keys;
       }
     }
     forall p | p in n'.procs && p.Node?
@@ -453,34 +448,30 @@ module Proof {
     }
   }
 
-  lemma Booted(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask, n: Net<Pid, Msg, State>)
-    requires Routed(clients, nodes, ask)
-    requires IsInit(World(docs, clients, nodes, ask), n)
+  lemma Booted(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, n: Net<Pid, Msg, State>)
+    requires IsInit(World(docs, clients, nodes), n)
     ensures Shaped(docs, n)
     ensures n.inflight == multiset{}
     ensures Anchored(n.procs[Bucket])
     ensures forall p {:trigger n.procs[p]} :: p in n.procs && p.Node? ==> n.procs[p] == AtNode(map[], map[], 0, p.i + 1)
   {
-    var w := World(docs, clients, nodes, ask);
+    var w := World(docs, clients, nodes);
     assert n.procs == (map p | p in w.pids :: w.init(p));
     assert w.pids == Pids(clients, nodes);
     assert n.procs.Keys == w.pids;
     BucketIn(clients, nodes);
-    assert n.procs[Bucket] == w.init(Bucket) == Boot(docs, ask, Bucket);
+    assert n.procs[Bucket] == w.init(Bucket) == Boot(docs, Bucket);
     CoverLemma(docs);
     forall p | p in n.procs && p.Client?
-      ensures n.procs[p].AtClient? && Node(n.procs[p].node) in n.procs
+      ensures n.procs[p].AtClient?
     {
       ClientIndex(clients, nodes, p);
-      var c := p.c;
-      assert n.procs[p] == w.init(p) == Boot(docs, ask, p) == AtClient(ask(c).id, ask(c).node, ask(c).kind, true);
-      NodeIn(clients, nodes, ask(c).node);
-      assert Node(ask(c).node) in n.procs.Keys;
+      assert n.procs[p] == w.init(p) == Boot(docs, p) == AtClient;
     }
     forall p | p in n.procs && p.Node?
       ensures n.procs[p] == AtNode(map[], map[], 0, p.i + 1)
     {
-      assert n.procs[p] == w.init(p) == Boot(docs, ask, p) == AtNode(map[], map[], 0, p.i + 1);
+      assert n.procs[p] == w.init(p) == Boot(docs, p) == AtNode(map[], map[], 0, p.i + 1);
     }
   }
 
@@ -491,7 +482,7 @@ module Proof {
     requires forall q :: q in base.inflight ==> q in tr(n).state.inflight
     requires tr(n+1).state == Advance(base, self, r)
     requires self.Node? ==> r.state == tr(n).state.procs[self]
-    requires self.Client? ==> r.state.AtClient? && Node(r.state.node) in tr(n).state.procs
+    requires self.Client? ==> r.state.AtClient?
     requires self.Bucket? ==> r.state == tr(n).state.procs[Bucket]
     requires forall i {:trigger r.sends[i]} :: 0 <= i < |r.sends| ==> !IsGet(r.sends[i].msg) && !IsGot(r.sends[i].msg) && !IsPromiseReply(r.sends[i].msg)
     ensures Trace(docs, tr, n+1)
@@ -544,26 +535,16 @@ module Proof {
   }
 
   lemma OnTimeout(self: Pid, s: State, now: nat)
-    requires self.Client? ==> s.AtClient?
-    requires self.Node? ==> s.AtNode?
-    requires self.Bucket? ==> s.AtBucket?
-    ensures var r := Processes(self).step(self, s, Timeout, now);
-      if self.Client? && s.waiting then
-        var body :=
-          match s.kind
-          case Read => PromiseGet(s.id)
-          case Create(timeout) => PromiseCreate(Temp.CreateReq(s.id, timeout, Temp.Empty(), []));
-        r == Result(AtClient(s.id, s.node, s.kind, false), [ReqTo(Node(s.node), Uuid(0), body)], Keep)
-      else r == Result(s, [], Keep)
+    ensures Processes(self).step(self, s, Timeout, now) == Result(s, [], Keep)
   {
   }
 
-  lemma StepOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma StepOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                tr: nat -> Moment<Pid, Msg, State>, n: nat)
-    requires Behavior(docs, clients, nodes, ask, tr) && Inv(docs, tr, n)
+    requires Behavior(docs, clients, nodes, tr) && Inv(docs, tr, n)
     ensures Inv(docs, tr, n+1)
   {
-    var w := World(docs, clients, nodes, ask);
+    var w := World(docs, clients, nodes);
     assert w.process == Processes;
     assert NextStep(w, tr(n).state, tr(n+1).state, tr(n).event);
     assert Trace(docs, tr, n);
@@ -603,29 +584,24 @@ module Proof {
       assert base.inflight == tr(n).state.inflight && base.procs == tr(n).state.procs;
       assert tr(n+1).state == Advance(base, pid, r);
       OnTimeout(pid, tr(n).state.procs[pid], tr(n).state.now);
-      if pid.Client? {
-        assert tr(n).state.procs[pid].AtClient?;
-        assert r.state.node == tr(n).state.procs[pid].node;
-        assert Node(r.state.node) in tr(n).state.procs;
-      }
       QuietStep(docs, tr, n, base, pid, r);
     case Deliver(p) =>
-      DeliverOk(docs, clients, nodes, ask, tr, n, p);
+      DeliverOk(docs, clients, nodes, tr, n, p);
     }
     assert Trace(docs, tr, n+1);
     if forall key | key in docs :: Temp.WellFormed(docs[key], 0) {
       assert Formed(tr(n).state);
-      FormedStep(docs, clients, nodes, ask, tr(n).state, tr(n+1).state, tr(n).event);
+      FormedStep(docs, clients, nodes, tr(n).state, tr(n+1).state, tr(n).event);
     }
   }
 
-  lemma DeliverOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma DeliverOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                   tr: nat -> Moment<Pid, Msg, State>, n: nat, p: Packet<Pid, Msg>)
-    requires Behavior(docs, clients, nodes, ask, tr) && Trace(docs, tr, n)
+    requires Behavior(docs, clients, nodes, tr) && Trace(docs, tr, n)
     requires tr(n).event == Deliver(p)
     ensures Trace(docs, tr, n+1)
   {
-    var w := World(docs, clients, nodes, ask);
+    var w := World(docs, clients, nodes);
     assert w.process == Processes;
     assert NextStep(w, tr(n).state, tr(n+1).state, Deliver(p));
     var base := tr(n).state.(inflight := tr(n).state.inflight - multiset{p});
@@ -637,7 +613,6 @@ module Proof {
       var s := tr(n).state.procs[p.dst];
       assert s.AtClient?;
       assert r == Result(s, [], Keep);
-      assert Node(r.state.node) in tr(n).state.procs;
       QuietStep(docs, tr, n, base, p.dst, r);
     case Bucket =>
       BucketDeliver(docs, tr, n, base, p, r);
@@ -1111,15 +1086,15 @@ module Proof {
     }
   }
 
-  lemma Safe(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma Safe(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
              tr: nat -> Moment<Pid, Msg, State>, n: nat)
-    requires Behavior(docs, clients, nodes, ask, tr)
+    requires Behavior(docs, clients, nodes, tr)
     ensures Inv(docs, tr, n)
     decreases n
   {
     if n == 0 {
-      assert IsInit(World(docs, clients, nodes, ask), tr(0).state);
-      Booted(docs, clients, nodes, ask, tr(0).state);
+      assert IsInit(World(docs, clients, nodes), tr(0).state);
+      Booted(docs, clients, nodes, tr(0).state);
       forall node | node in tr(0).state.procs && node.Node?
         ensures NodeOpen(tr, 0, node)
       {
@@ -1129,11 +1104,11 @@ module Proof {
       }
       assert Trace(docs, tr, 0);
       if forall key | key in docs :: Temp.WellFormed(docs[key], 0) {
-        FormedBoot(docs, clients, nodes, ask, tr(0).state);
+        FormedBoot(docs, clients, nodes, tr(0).state);
       }
     } else {
-      Safe(docs, clients, nodes, ask, tr, n - 1);
-      StepOk(docs, clients, nodes, ask, tr, n - 1);
+      Safe(docs, clients, nodes, tr, n - 1);
+      StepOk(docs, clients, nodes, tr, n - 1);
     }
   }
 
@@ -1410,14 +1385,13 @@ module Proof {
   }
 
   // One network step. Documents that were well-formed are well-formed afterwards.
-  lemma FormedStep(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma FormedStep(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                    n: Net<Pid, Msg, State>, n': Net<Pid, Msg, State>, a: Action<Pid, Msg>)
-    requires Routed(clients, nodes, ask)
     requires Formed(n)
-    requires NextStep(World(docs, clients, nodes, ask), n, n', a)
+    requires NextStep(World(docs, clients, nodes), n, n', a)
     ensures Formed(n')
   {
-    var w := World(docs, clients, nodes, ask);
+    var w := World(docs, clients, nodes);
     assert w.process == Processes;
     match a
     case Tick =>
@@ -1436,28 +1410,15 @@ module Proof {
     case Fire(pid) =>
       var s0 := n.procs[pid];
       var r := w.process(pid).step(pid, s0, Timeout, n.now);
-      if pid.Client? && s0.AtClient? && s0.waiting {
-        OnTimeout(pid, s0, n.now);
-        assert |r.sends| == 1 && r.sends[0].msg.Req? && !r.sends[0].msg.ask.WriteDoc?;
-        assert r.state.AtClient?;
-      } else {
-        assert r == Result(s0, [], Keep);
-      }
+      OnTimeout(pid, s0, n.now);
+      assert r == Result(s0, [], Keep);
       var base := n.(timers := n.timers - {pid});
       assert n' == Advance(base, pid, r);
       assert n'.now == n.now;
       forall id | id in n'.procs
         ensures StoredOk(n'.procs[id], n'.now) && HeldOk(n'.procs[id], n'.now)
       {
-        if id == pid {
-          if pid.Client? && s0.AtClient? && s0.waiting {
-            assert n'.procs[id].AtClient?;
-          } else {
-            assert n'.procs[id] == n.procs[id];
-          }
-        } else {
-          assert n'.procs[id] == n.procs[id];
-        }
+        assert n'.procs[id] == n.procs[id];
       }
       if |r.sends| == 0 {
         assert n'.inflight == base.inflight;
@@ -1537,14 +1498,13 @@ module Proof {
         FlightAdd(n.inflight, p.dst, r.sends, n.now, p);
   }
 
-  lemma FormedBoot(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma FormedBoot(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                    n: Net<Pid, Msg, State>)
-    requires Routed(clients, nodes, ask)
-    requires IsInit(World(docs, clients, nodes, ask), n)
+    requires IsInit(World(docs, clients, nodes), n)
     requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
     ensures Formed(n)
   {
-    Booted(docs, clients, nodes, ask, n);
+    Booted(docs, clients, nodes, n);
     var bucket := n.procs[Bucket];
     assert bucket == AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs));
     forall key | key in bucket.docs
@@ -1560,13 +1520,13 @@ module Proof {
     }
   }
 
-  lemma DocumentsStay(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma DocumentsStay(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                       tr: nat -> Moment<Pid, Msg, State>, n: nat)
-    requires Behavior(docs, clients, nodes, ask, tr)
+    requires Behavior(docs, clients, nodes, tr)
     requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
     ensures Formed(tr(n).state)
   {
-    Safe(docs, clients, nodes, ask, tr, n);
+    Safe(docs, clients, nodes, tr, n);
     assert Inv(docs, tr, n);
   }
 

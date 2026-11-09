@@ -16,13 +16,9 @@ module Worlds {
     (set c | c in clients :: Client(c)) + (set i | i in nodes :: Node(i)) + {Bucket}
   }
 
-  ghost predicate Routed(clients: set<nat>, nodes: set<nat>, ask: nat -> Ask) {
-    forall c {:trigger ask(c)} :: c in clients ==> ask(c).node in nodes
-  }
-
-  function Boot(docs: map<string, Temp.Doc>, ask: nat -> Ask, self: Pid): State {
+  function Boot(docs: map<string, Temp.Doc>, self: Pid): State {
     match self
-    case Client(c) => AtClient(ask(c).id, ask(c).node, ask(c).kind, true)
+    case Client(_) => AtClient
     case Node(i) => AtNode(map[], map[], 0, i + 1)
     case Bucket => AtBucket(docs, map[], Bucket.BootTimeouts(docs), Bucket.BootAnchor(docs))
   }
@@ -35,18 +31,15 @@ module Worlds {
     case Bucket => Network.Process(Bucket.step)
   }
 
-  function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask): Sys<Pid, Msg, State>
-    requires Routed(clients, nodes, ask)
+  function World(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>): Sys<Pid, Msg, State>
   {
-    Sys(Pids(clients, nodes), true, self => Boot(docs, ask, self), Processes)
+    Sys(Pids(clients, nodes), true, self => Boot(docs, self), Processes)
   }
 
   // A trace of this world: at every time, the state and the event that takes it to the next state.
-  // The world is defined when every client asks a node that is in it.
-  ghost predicate Behavior(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  ghost predicate Behavior(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                            tr: nat -> Moment<Pid, Msg, State>)
   {
-    && Routed(clients, nodes, ask)
-    && IsBehavior(World(docs, clients, nodes, ask), tr)
+    IsBehavior(World(docs, clients, nodes), tr)
   }
 }

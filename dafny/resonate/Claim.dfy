@@ -14,10 +14,10 @@ module Claim {
   // on that node, strictly between the request and the reply, while that
   // continuation was open. A missing id is 404. An id that is present is the
   // projection of that promise at the instant of the read.
-  lemma PromiseGetReceived(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma PromiseGetReceived(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                            tr: nat -> Moment<Pid, Msg, State>,
                            r: nat, node: Pid, from: Pid, cid: Uuid, answer: Temp.Answer)
-    requires Behavior(docs, clients, nodes, ask, tr)
+    requires Behavior(docs, clients, nodes, tr)
     requires node.Node?
     requires tr(r).event == Deliver(Packet(node, from, Res(cid, PromiseReply(answer))))
     ensures exists i: nat, k: nat, id, doc, version {:trigger tr(i).event, tr(k).event, GotPacket(node, Hash(cid), id, doc, version)} ::
@@ -33,8 +33,8 @@ module Claim {
       && (id in Temp.ObjectsOf(doc) ==>
            answer == Temp.Answer(200, Temp.Some(Temp.Project(Temp.ObjectsOf(doc)[id], tr(k).state.now).promise)))
   {
-    Safe(docs, clients, nodes, ask, tr, r);
-    var w := World(docs, clients, nodes, ask);
+    Safe(docs, clients, nodes, tr, r);
+    var w := World(docs, clients, nodes);
     assert NextStep(w, tr(r).state, tr(r+1).state, tr(r).event);
     var pk := Packet(node, from, Res(cid, PromiseReply(answer)));
     reveal Lt();
@@ -53,31 +53,30 @@ module Claim {
     Cases(doc, id, tr(k).state.now);
   }
 
-  // The bucket starts empty. Whatever the clients ask, every document is well-formed at every time:
+  // The bucket starts empty. Every document is well-formed at every time:
   // stored in the bucket, in flight, or waiting on a continuation.
   lemma DocumentsStayWellFormed(clients: set<nat>, nodes: set<nat>,
                                 tr: nat -> Moment<Pid, Msg, State>)
-    requires exists ask :: Behavior(map[], clients, nodes, ask, tr)
+    requires Behavior(map[], clients, nodes, tr)
     ensures forall t: nat :: Formed(tr(t).state)
   {
-    var ask :| Behavior(map[], clients, nodes, ask, tr);
     forall t: nat ensures Formed(tr(t).state) {
-      DocumentsStay(map[], clients, nodes, ask, tr, t);
+      DocumentsStay(map[], clients, nodes, tr, t);
     }
   }
 
   // Every stored document that owes a deadline has a timeout at or before it.
   // A document that owes nothing does not need one.
-  lemma WorkflowsHaveTimeouts(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
+  lemma WorkflowsHaveTimeouts(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>,
                               tr: nat -> Moment<Pid, Msg, State>, n: nat)
-    requires Behavior(docs, clients, nodes, ask, tr)
+    requires Behavior(docs, clients, nodes, tr)
     ensures Bucket in tr(n).state.procs && tr(n).state.procs[Bucket].AtBucket?
     ensures forall key | key in tr(n).state.procs[Bucket].docs ::
       match Temp.Nearest(tr(n).state.procs[Bucket].docs[key])
       case None => true
       case Some(d) => exists t :: t in tr(n).state.procs[Bucket].timeouts && t.key == key && t.at <= d
   {
-    Safe(docs, clients, nodes, ask, tr, n);
+    Safe(docs, clients, nodes, tr, n);
     var bucket := tr(n).state.procs[Bucket];
     assert Anchored(bucket);
     forall key | key in bucket.docs

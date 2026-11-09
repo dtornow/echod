@@ -9,7 +9,6 @@ module Protocol {
   import Temp
 
   datatype Pid = Client(c: nat) | Node(i: nat) | Bucket
-  datatype Kind = Read | Create(timeout: nat)
   datatype Clock = Due(key: string, at: nat, owner: nat, token: nat)
   // What the read was for. Every handler starts as one of these.
   datatype Job = AskGet | AskCreate(req: Temp.CreateReq)
@@ -27,7 +26,6 @@ module Protocol {
     | Process(caller: Pid, id: string, reply: Temp.Answer, effects: seq<Effect>, keep: Temp.Opt<Clock>, remember: bool, cid: Uuid)
 
   predicate AwaitsGet(c: Cont) { c.Prepare? && c.job.AskGet? }
-  datatype Ask = Ask(id: string, node: nat, kind: Kind)
   // The two bodies of one exchange. A request carries a ReqBody. A response
   // carries a ResBody and cites the request's id.
   datatype ReqBody =
@@ -47,7 +45,7 @@ module Protocol {
     | TimeoutDropped(id: string, clock: Clock)
   type Msg = RR<ReqBody, ResBody>
   datatype State =
-    | AtClient(id: string, node: nat, kind: Kind, waiting: bool)
+    | AtClient
     // `open` is keyed by the correlation id of the request in flight.
     // The response cites that same id.
     | AtNode(open: map<Uuid, Cont>, armed: map<string, Clock>, next: nat, owner: nat)
