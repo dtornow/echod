@@ -24,7 +24,7 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    EntryV, Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, spec_bytes,
+    EntryV, Fleet, LocalV, Message as CMessage, Spec as CModel, NodeV, Pid as CPid, spec_bytes,
     spec_get, spec_initial_node as initial_node, spec_node as spec_node_step, spec_nodes,
     spec_notes, spec_notify, spec_one, spec_reply, spec_step, spec_store, spec_string, spec_world,
     StoreV as CStore,
@@ -60,7 +60,7 @@ use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::{BoundaryEvent, Call, Model as AModel, Output, ServerConfig};
+use echod_abstract::{BoundaryEvent, Call, Spec as AModel, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,

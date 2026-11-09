@@ -24,7 +24,7 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    Fleet, LocalV, Message as CMessage, Model as CModel, NodeV, Pid as CPid, spec_string,
+    Fleet, LocalV, Message as CMessage, Spec as CModel, NodeV, Pid as CPid, spec_string,
     StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
@@ -37,7 +37,7 @@ use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreC
 #[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{Model as AModel, Pid as APid, spec_run_timeout, StateV};
+use echod_abstract::model::{Spec as AModel, Pid as APid, spec_run_timeout, StateV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]

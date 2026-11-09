@@ -47,7 +47,7 @@ pub mod refine;
 pub use refine::abstract_model;
 
 pub use echod_types::*;
-pub use model::Model;
+pub use model::{Model, Spec};
 #[cfg(verus_keep_ghost)]
 pub use node::{lemma_doc_view, lemma_obj_view, lemma_outbound_view, lemma_pending_view};
 pub use node::{

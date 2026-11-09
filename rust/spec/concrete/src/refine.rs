@@ -21,11 +21,11 @@
 //! sends no output to the outside is an empty abstract execution. The step
 //! that begins a flight is one abstract step, taken on the owners' caches;
 //! the store steps and the reply that closes the flight are stutters.
-//! The trait's `ensures` on `initial` and `on_event` states that the
-//! executable results equal `spec_initial` and `spec_on_event`: the
-//! executable models are the ones this theorem is about. Verus checks it for
-//! the abstract model and for the concrete model, node (`Node::step`) and
-//! store (`Store::step`) alike. The concrete node trusts its JSON codec, its
+//! The theorem is about the distinct abstract and concrete `Spec` types.
+//! Each executable `Model` names its `Spec` through `RoverExec`; the trait's
+//! contracts prove that `initial` and `on_event` realize `spec_initial` and
+//! `spec_on_event`. Verus checks those bridges, node (`Node::step`) and store
+//! (`Store::step`) alike. The concrete node trusts its JSON codec, its
 //! key hash, its string characters, and the abstract crate's cron engine and
 //! id template; `node.rs` names them.
 //!
@@ -43,5 +43,5 @@
 
 /// The abstract Resonate model, `echod-abstract`.
 pub fn abstract_model() -> &'static str {
-    std::any::type_name::<echod_abstract::Model>()
+    std::any::type_name::<echod_abstract::Spec>()
 }

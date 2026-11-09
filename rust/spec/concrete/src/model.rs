@@ -60,6 +60,9 @@ pub struct Fleet {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Model;
 
+/// The mathematical concrete Rover model, with no executable local state.
+pub struct Spec;
+
 // ---------------------------------------------------------------------------
 // What crosses the boundary
 // ---------------------------------------------------------------------------
@@ -435,7 +438,12 @@ impl Process<(), Pid, Message> for Store {
 }
 
 impl RoverExec for Model {
+    type Spec = Spec;
     type State = Local;
+
+    open spec fn spec(&self) -> Spec {
+        Spec
+    }
 
     fn outside(&self) -> Pid {
         Pid::Outside
@@ -552,7 +560,7 @@ impl RoverExec for Model {
     }
 }
 
-impl RoverSpec for Model {
+impl RoverSpec for Spec {
     type Config = Fleet;
     type Pid = Pid;
     type StateV = LocalV;

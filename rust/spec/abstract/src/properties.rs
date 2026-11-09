@@ -521,7 +521,7 @@ pub open spec fn step_catalogue(
 /// The exact obligation every allowed `on_event` outcome must discharge.
 pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
     forall|before: StateV, now: Time, event: ProcessEvent<Pid, Message>, i: int|
-        #![trigger super::model::Model.spec_on_event(
+        #![trigger super::model::Spec.spec_on_event(
             config,
             Pid::Service,
             before,
@@ -530,7 +530,7 @@ pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
         )[i]]
         state_catalogue(now, before)
         && 0 <= i
-        && i < super::model::Model.spec_on_event(
+        && i < super::model::Spec.spec_on_event(
             config,
             Pid::Service,
             before,
@@ -541,7 +541,7 @@ pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
             now,
             before,
             event,
-            super::model::Model.spec_on_event(
+            super::model::Spec.spec_on_event(
                 config,
                 Pid::Service,
                 before,

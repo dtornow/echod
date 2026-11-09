@@ -46,7 +46,7 @@ pub enum ProcessEvent<P, M> {
 /// One possible local transition result.
 pub struct StepResult<M: RoverExec + ?Sized> {
     pub state: M::State,
-    pub send: Vec<(M::Pid, M::Message)>,
+    pub send: Vec<(PidOf<M>, MessageOf<M>)>,
 }
 
 /// An event at the system boundary. Process sends remain hidden until a
@@ -118,51 +118,56 @@ pub trait RoverSpec {
 
 /// An executable realization of a [`RoverSpec`].
 ///
-/// Search and replay require this trait. Each method's contract connects the
-/// executable representation to the mathematical model inherited from
-/// [`RoverSpec`]. A proof-only model implements `RoverSpec` and stops there.
-pub trait RoverExec: RoverSpec {
-    type State: Clone + Eq + std::fmt::Debug + View<V = Self::StateV>;
+/// Search and replay require this trait. `Spec` is a distinct type: each
+/// method's contract connects the executable representation to that
+/// mathematical model. A proof-only model implements `RoverSpec` and stops
+/// there.
+pub trait RoverExec {
+    type Spec: RoverSpec;
+    type State: Clone + Eq + std::fmt::Debug + View<V = <Self::Spec as RoverSpec>::StateV>;
+
+    /// The mathematical model this value executes.
+    spec fn spec(&self) -> Self::Spec;
 
     /// The executable outside endpoint.
-    fn outside(&self) -> (r: Self::Pid)
+    fn outside(&self) -> (r: PidOf<Self>)
         ensures
-            r == self.spec_outside();
+            r == self.spec().spec_outside();
 
     /// All process-local initial states. Slots make process lookup executable;
     /// process ids should be unique. The outside endpoint is never stepped,
     /// even if a malformed model includes it in this list.
-    fn initial(&self, config: &Self::Config) -> (r: Vec<(Self::Pid, Self::State)>)
+    fn initial(&self, config: &ConfigOf<Self>) -> (r: Vec<(PidOf<Self>, Self::State)>)
         ensures
-            r@.map_values(|entry: (Self::Pid, Self::State)| (entry.0, entry.1@))
-                == self.spec_initial(*config),
-            r@.map_values(|entry: (Self::Pid, Self::State)| entry.0).no_duplicates(),
-            forall|i: int| 0 <= i < r@.len() ==> #[trigger] r@[i].0 != self.spec_outside();
+            r@.map_values(|entry: (PidOf<Self>, Self::State)| (entry.0, entry.1@))
+                == self.spec().spec_initial(*config),
+            r@.map_values(|entry: (PidOf<Self>, Self::State)| entry.0).no_duplicates(),
+            forall|i: int| 0 <= i < r@.len() ==> #[trigger] r@[i].0 != self.spec().spec_outside();
 
     /// Which messages the environment may inject.
-    fn injectable(&self, config: &Self::Config, message: &Self::Message) -> (r: bool)
+    fn injectable(&self, config: &ConfigOf<Self>, message: &MessageOf<Self>) -> (r: bool)
         ensures
-            r == self.spec_injectable(*config, *message);
+            r == self.spec().spec_injectable(*config, *message);
 
     /// Every possible result of one local process event. Unlike Lean's
     /// `Outcomes`, an empty result is admitted here and means the event is
     /// disabled; models that need input-enabledness prove non-emptiness.
     fn on_event(
         &self,
-        config: &Self::Config,
-        pid: &Self::Pid,
+        config: &ConfigOf<Self>,
+        pid: &PidOf<Self>,
         state: &Self::State,
         now: Time,
-        event: &ProcessEvent<Self::Pid, Self::Message>,
+        event: &ProcessEvent<PidOf<Self>, MessageOf<Self>>,
     ) -> (r: Vec<StepResult<Self>>)
         ensures
-            r@.len() == self.spec_on_event(*config, *pid, state@, now, *event).len(),
+            r@.len() == self.spec().spec_on_event(*config, *pid, state@, now, *event).len(),
             forall|i: int| 0 <= i < r@.len() ==> {
                 let result = #[trigger] r@[i];
                 semantics::StepResultV {
                     state: result.state@,
                     send: result.send@,
-                } == self.spec_on_event(*config, *pid, state@, now, *event)[i]
+                } == self.spec().spec_on_event(*config, *pid, state@, now, *event)[i]
             };
 
 }
@@ -185,3 +190,12 @@ pub trait Process<Config, Pid, Message> {
 
 /// A boundary event for specification `M`.
 pub type EventOf<M> = BoundaryEvent<<M as RoverSpec>::Pid, <M as RoverSpec>::Message>;
+
+/// The mathematical model implemented by executable model `M`.
+pub type SpecOf<M> = <M as RoverExec>::Spec;
+pub type ConfigOf<M> = <SpecOf<M> as RoverSpec>::Config;
+pub type PidOf<M> = <SpecOf<M> as RoverSpec>::Pid;
+pub type StateVOf<M> = <SpecOf<M> as RoverSpec>::StateV;
+pub type MessageOf<M> = <SpecOf<M> as RoverSpec>::Message;
+pub type BoundaryOf<M> = <SpecOf<M> as RoverSpec>::Boundary;
+pub type ExecEventOf<M> = EventOf<SpecOf<M>>;

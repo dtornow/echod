@@ -6,7 +6,7 @@
 use crate::Time;
 
 use super::replay::{Action, ActionOf, Certificate, World};
-use super::{BoundaryEvent, EventOf, ProcessEvent, RoverExec};
+use super::{BoundaryEvent, ConfigOf, ExecEventOf, ProcessEvent, RoverExec};
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ impl CheckConfig {
     }
 }
 
-fn visible_action<M: RoverExec>(event: &EventOf<M>) -> ActionOf<M> {
+fn visible_action<M: RoverExec>(event: &ExecEventOf<M>) -> ActionOf<M> {
     match event {
         BoundaryEvent::Input {
             recipient,
@@ -93,7 +93,7 @@ fn hidden_actions<M: RoverExec>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<
 
 fn search_from<M: RoverExec>(
     world: World<'_, M>,
-    events: &[EventOf<M>],
+    events: &[ExecEventOf<M>],
     visible: usize,
     remaining: usize,
     certificate: &mut Certificate<M>,
@@ -144,8 +144,8 @@ fn search_from<M: RoverExec>(
 /// search did not find one; no completeness claim is made.
 pub fn search<M: RoverExec>(
     model: &M,
-    config: &M::Config,
-    events: &[EventOf<M>],
+    config: &ConfigOf<M>,
+    events: &[ExecEventOf<M>],
     limits: CheckConfig,
 ) -> Option<Certificate<M>> {
     let world = World::initial(model, config);
@@ -157,8 +157,8 @@ pub fn search<M: RoverExec>(
 /// result covered by [`super::replay`]'s Verus soundness theorem.
 pub fn check<M: RoverExec>(
     model: &M,
-    config: &M::Config,
-    events: &[EventOf<M>],
+    config: &ConfigOf<M>,
+    events: &[ExecEventOf<M>],
     limits: CheckConfig,
 ) -> Option<Certificate<M>> {
     let certificate = search(model, config, events, limits)?;

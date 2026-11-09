@@ -62,6 +62,9 @@ impl View for State {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Model;
 
+/// The mathematical Resonate Rover model, with no executable state.
+pub struct Spec;
+
 pub open spec fn empty_store() -> StoreV {
     StoreV {
         promises: Map::empty(),
@@ -194,7 +197,7 @@ pub proof fn lemma_shed_is_last(
                 sender: Pid::Outside,
                 message: Message::Request(call),
             };
-            let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+            let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
             &&& outcomes.len() > 0
             &&& outcomes[outcomes.len() as int - 1] == spec_shed(state, call)
         }),
@@ -203,7 +206,7 @@ pub proof fn lemma_shed_is_last(
         sender: Pid::Outside,
         message: Message::Request(call),
     };
-    let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+    let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
     let served = spec_run(config, state, call, now);
     let lost = spec_losses(state, call, spec_handler(config, call.request, state.store, now));
     let shed = seq![spec_shed(state, call)];
@@ -243,7 +246,7 @@ pub proof fn lemma_empty_heartbeat_is_first(
                 sender: Pid::Outside,
                 message: Message::Request(call),
             };
-            let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+            let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
             &&& outcomes.len() > 0
             &&& outcomes[0].state == state
             &&& outcomes[0].send == spec_send(
@@ -257,7 +260,7 @@ pub proof fn lemma_empty_heartbeat_is_first(
         sender: Pid::Outside,
         message: Message::Request(call),
     };
-    let outcomes = Model.spec_on_event(config, Pid::Service, state, now, event);
+    let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
     let handler = spec_handler(config, call.request, state.store, now);
     assert(handler.len() == 1);
     let outcome = handler[0];
@@ -1134,7 +1137,12 @@ impl Process<ServerConfig, Pid, Message> for State {
 }
 
 impl RoverExec for Model {
+    type Spec = Spec;
     type State = State;
+
+    open spec fn spec(&self) -> Spec {
+        Spec
+    }
 
     fn outside(&self) -> (outside: Pid) {
         Pid::Outside
@@ -1196,7 +1204,7 @@ impl RoverExec for Model {
     }
 }
 
-impl RoverSpec for Model {
+impl RoverSpec for Spec {
     type Config = ServerConfig;
     type Pid = Pid;
     type StateV = StateV;

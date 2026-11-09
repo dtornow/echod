@@ -270,7 +270,7 @@ Rover instantiated with the abstract model
 ```
 
 The statement is `echod_rover::rover::refinement::refines` of
-`echod_concrete::Model` against `resonate::abstract_model::Model`: every
+`echod_concrete::Spec` against `echod_abstract::Spec`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

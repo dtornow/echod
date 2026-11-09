@@ -18,6 +18,7 @@ enum Message {
 }
 
 struct Counter;
+struct CounterSpec;
 
 /// A mathematical model need not provide executable state or transitions.
 struct SpecOnly;
@@ -30,7 +31,7 @@ impl RoverSpec for SpecOnly {
     type Boundary = ();
 }
 
-impl RoverSpec for Counter {
+impl RoverSpec for CounterSpec {
     type Config = ();
     type Pid = Pid;
     type StateV = u64;
@@ -39,6 +40,7 @@ impl RoverSpec for Counter {
 }
 
 impl RoverExec for Counter {
+    type Spec = CounterSpec;
     type State = u64;
 
     fn outside(&self) -> Pid {
@@ -86,6 +88,12 @@ type Event = BoundaryEvent<Pid, Message>;
 fn a_specification_does_not_need_an_executable_realization() {
     fn accepts_spec<S: RoverSpec>(_: S) {}
     accepts_spec(SpecOnly);
+}
+
+#[test]
+fn an_executable_realization_names_its_distinct_specification() {
+    fn accepts_exec<E: RoverExec<Spec = CounterSpec>>(_: E) {}
+    accepts_exec(Counter);
 }
 
 fn input(at: Time, amount: u64) -> Event {

@@ -3,9 +3,9 @@
 //! `machine` is the store and its handlers, `model` is one process's step,
 //! `view` is the view types and their lemmas, and `trusted` is the maps and
 //! the cron engine. Each file holds the executable code and, below it, the
-//! same step as a specification (`spec_*`, over the view types). `model::Model`
-//! implements the mathematical `RoverSpec` separately from its optional
-//! `RoverExec` realization.
+//! same step as a specification (`spec_*`, over the view types). `model::Spec`
+//! is the mathematical `RoverSpec`; the distinct `model::Model` is its
+//! optional `RoverExec` realization.
 
 #![allow(
     clippy::ptr_arg,
@@ -26,7 +26,7 @@ pub mod protocol;
 pub mod properties;
 pub mod view;
 
-pub use model::Model;
+pub use model::{Model, Spec};
 pub use trusted::{PMap, PSet};
 pub use echod_types as types;
 pub use machine::*;
