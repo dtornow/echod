@@ -9,11 +9,9 @@ use crate::certificate::trusted::{copy, same};
 use crate::Time;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::super::spec::{self as semantics, Execution, Label, RoverSpec, StepResultV};
+use super::super::spec::{self as specification, Execution, Label, RoverSpec, StepResultV};
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::{
-    ConfigOf, ExecEventOf, MessageOf, PidOf, ProcOf, RoverExec, RoverProcExec, SpecOf,
-};
+use super::{RoverExec, RoverProcExec};
 use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
 #[allow(unused_imports)]
 use super::super::spec::{RoverModel, RoverProc};
@@ -44,16 +42,21 @@ pub enum Action<P, M> {
     },
 }
 
-pub type ActionOf<M> = Action<PidOf<M>, MessageOf<M>>;
-pub type Certificate<M> = Vec<ActionOf<M>>;
+pub type Certificate<P, M> = Vec<Action<P, M>>;
 
 /// The label a successful action must make.
 pub(crate) open spec fn action_label<M: RoverExec>(
-    spec: SpecOf<M>,
-    config: ConfigOf<M>,
-    world: semantics::World<SpecOf<M>>,
-    action: ActionOf<M>,
-) -> semantics::Lab<SpecOf<M>> {
+    model: M::Model,
+    config: <M::Model as RoverModel>::Config,
+    world: RoverSpec<M::Model>,
+    action: Action<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >,
+) -> Label<
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Message,
+> {
     match action {
         Action::Inject { recipient, at, message } =>
             Label::Input { recipient, at, message },
@@ -83,18 +86,21 @@ pub(crate) open spec fn shown<P, M>(
 }
 
 /// Executable replay state. Its view is exactly the mathematical Rover world.
-pub(crate) struct World<'a, M: RoverExec> {
+pub(crate) struct ReplayState<'a, M: RoverExec> {
     pub(crate) model: &'a M,
-    pub(crate) config: &'a ConfigOf<M>,
-    pub(crate) process: Vec<(PidOf<M>, M::Proc)>,
-    pub(crate) network: Vec<Envelope<PidOf<M>, MessageOf<M>>>,
+    pub(crate) config: &'a <M::Model as RoverModel>::Config,
+    pub(crate) process: Vec<(<M::Model as RoverModel>::Pid, M::Proc)>,
+    pub(crate) network: Vec<Envelope<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >>,
     pub(crate) now: Time,
 }
 
-impl<M: RoverExec> View for World<'_, M> {
-    type V = semantics::World<SpecOf<M>>;
+impl<M: RoverExec> View for ReplayState<'_, M> {
+    type V = RoverSpec<M::Model>;
 
-    open(crate) spec fn view(&self) -> semantics::World<SpecOf<M>> {
+    open(crate) spec fn view(&self) -> RoverSpec<M::Model> {
         RoverSpec {
             process: process_view::<M>(self.process@),
             network: self.network@,
@@ -105,19 +111,27 @@ impl<M: RoverExec> View for World<'_, M> {
 
 /// Executable process slots as the mathematical world sees their state views.
 pub(crate) open spec fn process_view<M: RoverExec>(
-    process: Seq<(PidOf<M>, M::Proc)>,
-) -> Seq<(PidOf<M>, ProcOf<M>)> {
-    process.map_values(|entry: (PidOf<M>, M::Proc)| (entry.0, entry.1@))
+    process: Seq<(<M::Model as RoverModel>::Pid, M::Proc)>,
+) -> Seq<(
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Proc,
+)> {
+    process.map_values(
+        |entry: (<M::Model as RoverModel>::Pid, M::Proc)| (entry.0, entry.1@)
+    )
 }
 
-impl<'a, M: RoverExec> World<'a, M> {
-    pub(crate) fn initial(model: &'a M, config: &'a ConfigOf<M>) -> (world: Self)
+impl<'a, M: RoverExec> ReplayState<'a, M> {
+    pub(crate) fn initial(
+        model: &'a M,
+        config: &'a <M::Model as RoverModel>::Config,
+    ) -> (world: Self)
         ensures
-            world@ == RoverSpec::<SpecOf<M>>::init(model.spec(), *config),
+            world@ == RoverSpec::<M::Model>::init(model.model(), *config),
             world.model == model,
             world.config == config,
     {
-        World {
+        ReplayState {
             model,
             config,
             process: model.initial(config),
@@ -127,7 +141,7 @@ impl<'a, M: RoverExec> World<'a, M> {
     }
 
     /// Whether some initial process slot has this id.
-    fn process_present(&self, pid: &PidOf<M>) -> (present: bool)
+    fn process_present(&self, pid: &<M::Model as RoverModel>::Pid) -> (present: bool)
         ensures
             present ==> exists|i: int| 0 <= i < self@.process.len()
                 && #[trigger] self@.process[i].0 == *pid,
@@ -145,9 +159,9 @@ impl<'a, M: RoverExec> World<'a, M> {
     /// append-only network.
     fn receive_valid(
         &self,
-        recipient: &PidOf<M>,
-        sender: &PidOf<M>,
-        message: &MessageOf<M>,
+        recipient: &<M::Model as RoverModel>::Pid,
+        sender: &<M::Model as RoverModel>::Pid,
+        message: &<M::Model as RoverModel>::Message,
     ) -> (valid: bool)
         ensures
             valid ==> exists|i: int| 0 <= i < self@.network.len()
@@ -177,9 +191,9 @@ impl<'a, M: RoverExec> World<'a, M> {
     /// If this returns true, the exact output envelope was previously sent.
     fn output_sent(
         &self,
-        sender: &PidOf<M>,
-        outside: &PidOf<M>,
-        message: &MessageOf<M>,
+        sender: &<M::Model as RoverModel>::Pid,
+        outside: &<M::Model as RoverModel>::Pid,
+        message: &<M::Model as RoverModel>::Message,
     ) -> (sent: bool)
         ensures
             sent ==> exists|i: int| 0 <= i < self@.network.len()
@@ -209,12 +223,15 @@ impl<'a, M: RoverExec> World<'a, M> {
     /// Append every message sent by one process.
     fn append_sends(
         &mut self,
-        sender: PidOf<M>,
-        send: Vec<(PidOf<M>, MessageOf<M>)>,
+        sender: <M::Model as RoverModel>::Pid,
+        send: Vec<(
+            <M::Model as RoverModel>::Pid,
+            <M::Model as RoverModel>::Message,
+        )>,
     )
         ensures
             final(self)@ == (RoverSpec {
-                network: old(self)@.network + semantics::envelopes(sender, send@),
+                network: old(self)@.network + specification::envelopes(sender, send@),
                 ..old(self)@
             }),
             final(self).model == old(self).model,
@@ -231,7 +248,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                 self@.now == old(self)@.now,
                 send@.len() <= all.len(),
                 send@ == all.subrange(all.len() - send@.len(), all.len() as int),
-                self@.network == before + semantics::envelopes(
+                self@.network == before + specification::envelopes(
                     sender,
                     all.subrange(0, all.len() - send@.len()),
                 ),
@@ -245,7 +262,7 @@ impl<'a, M: RoverExec> World<'a, M> {
             });
             proof {
                 assert(send@ =~= all.subrange(all.len() - send@.len(), all.len() as int));
-                assert(self@.network =~= before + semantics::envelopes(
+                assert(self@.network =~= before + specification::envelopes(
                     sender,
                     all.subrange(0, all.len() - send@.len()),
                 ));
@@ -253,30 +270,36 @@ impl<'a, M: RoverExec> World<'a, M> {
         }
         proof {
             assert(all.subrange(0, all.len() as int) =~= all);
-            assert(semantics::envelopes(
+            assert(specification::envelopes(
                 sender,
                 all.subrange(0, all.len() as int),
-            ) =~= semantics::envelopes(sender, all));
+            ) =~= specification::envelopes(sender, all));
             assert(self@.network
-                =~= before + semantics::envelopes(sender, all));
+                =~= before + specification::envelopes(sender, all));
         }
     }
 
     /// Execute and validate one certificate action.
     pub(crate) fn apply(
         &mut self,
-        action: &ActionOf<M>,
-    ) -> (result: Result<Option<ExecEventOf<M>>, ()>)
+        action: &Action<
+            <M::Model as RoverModel>::Pid,
+            <M::Model as RoverModel>::Message,
+        >,
+    ) -> (result: Result<Option<BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >>, ()>)
         ensures
             result is Ok ==> {
                 let label = action_label::<M>(
-                    old(self).model.spec(),
+                    old(self).model.model(),
                     *old(self).config,
                     old(self)@,
                     *action,
                 );
                 &&& old(self)@.step(
-                    old(self).model.spec(),
+                    old(self).model.model(),
                     *old(self).config,
                     label,
                     final(self)@,
@@ -313,18 +336,18 @@ impl<'a, M: RoverExec> World<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*recipient == outside));
-                    assert(outside == self.model.spec().outside());
-                    assert(semantics::is_process(
-                        self.model.spec(),
+                    assert(outside == self.model.model().outside());
+                    assert(specification::is_process(
+                        self.model.model(),
                         before,
                         *recipient,
                     ));
                     assert(before == original);
                     assert(original.step(
-                        self.model.spec(),
+                        self.model.model(),
                         *self.config,
                         action_label::<M>(
-                            self.model.spec(),
+                            self.model.model(),
                             *self.config,
                             original,
                             *action,
@@ -364,7 +387,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                     return Err(());
                 }
                 proof {
-                    reveal(semantics::event_valid);
+                    reveal(specification::event_valid);
                     match event {
                         ProcessEvent::Timeout => {}
                         ProcessEvent::Receive { sender, message } => {
@@ -376,7 +399,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                                 });
                         }
                     }
-                    assert(semantics::event_valid(self@, *process, *event));
+                    assert(specification::event_valid(self@, *process, *event));
                 }
                 let ghost spec_outcomes = state@.on_event(
                     *self.config,
@@ -416,13 +439,13 @@ impl<'a, M: RoverExec> World<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*process == outside));
-                    assert(outside == self.model.spec().outside());
-                    assert(semantics::is_process(
-                        self.model.spec(),
+                    assert(outside == self.model.model().outside());
+                    assert(specification::is_process(
+                        self.model.model(),
                         before,
                         *process,
                     ));
-                    assert(self@ == semantics::land(
+                    assert(self@ == specification::land(
                         before,
                         *slot as int,
                         *process,
@@ -431,12 +454,12 @@ impl<'a, M: RoverExec> World<'a, M> {
                     ));
                     assert(before == original);
                     assert(original.now <= *at);
-                    assert(semantics::is_process(
-                        self.model.spec(),
+                    assert(specification::is_process(
+                        self.model.model(),
                         original,
                         *process,
                     ));
-                    assert(semantics::event_valid(original, *process, *event));
+                    assert(specification::event_valid(original, *process, *event));
                     assert(original.process[*slot as int].0 == *process);
                     assert(exists|i: int| 0 <= i < original.process.len()
                         && #[trigger] original.process[i].0 == *process) by {
@@ -455,7 +478,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                         *event,
                     )[*outcome as int] == selected_v);
                     let label = action_label::<M>(
-                        self.model.spec(),
+                        self.model.model(),
                         *self.config,
                         original,
                         *action,
@@ -483,7 +506,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                             );
                             &&& 0 <= j < outcomes.len()
                             &&& outcomes[j].send == selected_v.send
-                            &&& self@ == semantics::land(
+                            &&& self@ == specification::land(
                                 original,
                                 i,
                                 *process,
@@ -492,7 +515,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                             )
                         }
                     }) by {
-                        assert(self@ == semantics::land(
+                        assert(self@ == specification::land(
                             original,
                             *slot as int,
                             *process,
@@ -500,8 +523,8 @@ impl<'a, M: RoverExec> World<'a, M> {
                             selected_v,
                         ));
                     }
-                    semantics::process_step(
-                        self.model.spec(),
+                    specification::process_step(
+                        self.model.model(),
                         *self.config,
                         original,
                         *slot as int,
@@ -511,7 +534,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                     );
                     reveal(RoverSpec::step);
                     assert(original.step(
-                        self.model.spec(),
+                        self.model.model(),
                         *self.config,
                         label,
                         self@,
@@ -531,13 +554,13 @@ impl<'a, M: RoverExec> World<'a, M> {
                 let ghost before = self@;
                 self.now = *at;
                 proof {
-                    assert(outside == self.model.spec().outside());
+                    assert(outside == self.model.model().outside());
                     assert(before == original);
                     assert(original.step(
-                        self.model.spec(),
+                        self.model.model(),
                         *self.config,
                         action_label::<M>(
-                            self.model.spec(),
+                            self.model.model(),
                             *self.config,
                             original,
                             *action,
@@ -564,40 +587,40 @@ impl<'a, M: RoverExec> World<'a, M> {
 proof fn extend<S: RoverModel>(
     spec: S,
     config: S::Config,
-    first: semantics::World<S>,
+    first: RoverSpec<S>,
     execution: Execution<S>,
-    label: semantics::Lab<S>,
-    next: semantics::World<S>,
+    label: Label<S::Pid, S::Message>,
+    next: RoverSpec<S>,
 )
     requires
-        semantics::legal(spec, config, first, execution),
-        semantics::before::<S>(first, execution, execution.len() as int).step(
+        specification::legal(spec, config, first, execution),
+        specification::before::<S>(first, execution, execution.len() as int).step(
             spec,
             config,
             label,
             next,
         ),
     ensures
-        semantics::legal(spec, config, first, execution.push((label, next))),
-        semantics::before::<S>(
+        specification::legal(spec, config, first, execution.push((label, next))),
+        specification::before::<S>(
             first,
             execution.push((label, next)),
             execution.len() as int + 1,
         ) == next,
-        semantics::trace::<S>(execution.push((label, next)))
-            == semantics::trace::<S>(execution) + semantics::observe(label),
+        specification::trace::<S>(execution.push((label, next)))
+            == specification::trace::<S>(execution) + specification::observe(label),
 {
     let more = execution.push((label, next));
     assert(more.drop_last() =~= execution);
     assert forall|i: int| 0 <= i < more.len() implies #[trigger]
-        semantics::before::<S>(first, more, i).step(
+        specification::before::<S>(first, more, i).step(
             spec,
             config,
             more[i].0,
             more[i].1,
         ) by {
         if i < execution.len() {
-            assert(semantics::before::<S>(first, execution, i).step(
+            assert(specification::before::<S>(first, execution, i).step(
                 spec,
                 config,
                 execution[i].0,
@@ -608,13 +631,16 @@ proof fn extend<S: RoverModel>(
 }
 
 proof fn action_observe<M: RoverExec>(
-    spec: SpecOf<M>,
-    config: ConfigOf<M>,
-    world: semantics::World<SpecOf<M>>,
-    action: ActionOf<M>,
+    model: M::Model,
+    config: <M::Model as RoverModel>::Config,
+    world: RoverSpec<M::Model>,
+    action: Action<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >,
 )
     ensures
-        semantics::observe(action_label::<M>(spec, config, world, action))
+        specification::observe(action_label::<M>(model, config, world, action))
             == match shown(action) {
                 Some(event) => seq![event],
                 None => Seq::empty(),
@@ -633,32 +659,38 @@ proof fn action_observe<M: RoverExec>(
 /// certificate proves that the supplied trace is a valid Rover trace.
 pub fn replay<M: RoverExec>(
     model: &M,
-    config: &ConfigOf<M>,
-    events: &[ExecEventOf<M>],
-    certificate: &[ActionOf<M>],
+    config: &<M::Model as RoverModel>::Config,
+    events: &[BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >],
+    certificate: &[Action<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >],
 ) -> (result: Result<(), usize>)
     ensures
-        result is Ok ==> semantics::valid_trace(model.spec(), *config, events@),
+        result is Ok ==> specification::valid_trace(model.model(), *config, events@),
 {
-    let mut world = World::initial(model, config);
+    let mut world = ReplayState::initial(model, config);
     let mut visible = 0usize;
-    let ghost first = RoverSpec::<SpecOf<M>>::init(model.spec(), *config);
-    let ghost mut execution: Execution<SpecOf<M>> = Seq::empty();
+    let ghost first = RoverSpec::<M::Model>::init(model.model(), *config);
+    let ghost mut execution: Execution<M::Model> = Seq::empty();
 
     for k in 0..certificate.len()
         invariant
             world.model == model,
             world.config == config,
             visible <= events.len(),
-            semantics::legal(model.spec(), *config, first, execution),
-            semantics::before::<SpecOf<M>>(first, execution, execution.len() as int)
+            specification::legal(model.model(), *config, first, execution),
+            specification::before::<M::Model>(first, execution, execution.len() as int)
                 == world@,
-            semantics::trace::<SpecOf<M>>(execution)
+            specification::trace::<M::Model>(execution)
                 == events@.subrange(0, visible as int),
     {
         let ghost before_world = world@;
         let ghost label = action_label::<M>(
-            model.spec(),
+            model.model(),
             *config,
             before_world,
             certificate@[k as int],
@@ -675,13 +707,13 @@ pub fn replay<M: RoverExec>(
                 visible += 1;
                 proof {
                     action_observe::<M>(
-                        model.spec(),
+                        model.model(),
                         *config,
                         before_world,
                         certificate@[k as int],
                     );
                     extend(
-                        model.spec(),
+                        model.model(),
                         *config,
                         first,
                         execution,
@@ -689,20 +721,20 @@ pub fn replay<M: RoverExec>(
                         world@,
                     );
                     execution = execution.push((label, world@));
-                    assert(semantics::trace::<SpecOf<M>>(execution)
+                    assert(specification::trace::<M::Model>(execution)
                         =~= events@.subrange(0, visible as int));
                 }
             }
             None => {
                 proof {
                     action_observe::<M>(
-                        model.spec(),
+                        model.model(),
                         *config,
                         before_world,
                         certificate@[k as int],
                     );
                     extend(
-                        model.spec(),
+                        model.model(),
                         *config,
                         first,
                         execution,
@@ -719,8 +751,8 @@ pub fn replay<M: RoverExec>(
     }
     proof {
         assert(events@.subrange(0, events@.len() as int) =~= events@);
-        assert(semantics::trace::<SpecOf<M>>(execution) == events@);
-        assert(semantics::valid_trace(model.spec(), *config, events@));
+        assert(specification::trace::<M::Model>(execution) == events@);
+        assert(specification::valid_trace(model.model(), *config, events@));
     }
     Ok(())
 }
@@ -729,9 +761,9 @@ pub fn replay<M: RoverExec>(
 
 // Search needs cheap snapshots. This code is ordinary Rust; replay remains the
 // verified acceptance boundary.
-impl<M: RoverExec> Clone for World<'_, M> {
+impl<M: RoverExec> Clone for ReplayState<'_, M> {
     fn clone(&self) -> Self {
-        World {
+        ReplayState {
             model: self.model,
             config: self.config,
             process: self.process.clone(),
@@ -741,7 +773,7 @@ impl<M: RoverExec> Clone for World<'_, M> {
     }
 }
 
-impl<M: RoverExec> World<'_, M> {
+impl<M: RoverExec> ReplayState<'_, M> {
     pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
         self.process == other.process && self.network == other.network && self.now == other.now
     }

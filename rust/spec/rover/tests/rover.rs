@@ -1,8 +1,9 @@
 //! Executable examples for the Rust + Verus Rover world.
 
-use echod_rover::rover::{
-    check, replay, Action, BoundaryEvent, CheckConfig, ProcResult, ProcessEvent, RoverExec,
-    RoverModel, RoverProc, RoverProcExec,
+use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
+use echod_rover::rover::spec::{RoverModel, RoverProc};
+use echod_rover::rover::test::{
+    check, replay, Action, CheckConfig, ProcResult, RoverExec, RoverProcExec,
 };
 use echod_rover::Time;
 use vstd::prelude::View;
@@ -89,7 +90,7 @@ impl RoverModel for CounterSpec {
 }
 
 impl RoverExec for Counter {
-    type Spec = CounterSpec;
+    type Model = CounterSpec;
     type Proc = CounterState;
 
     fn outside(&self) -> Pid {
@@ -116,7 +117,7 @@ fn a_specification_does_not_need_an_executable_realization() {
 
 #[test]
 fn an_executable_realization_names_its_distinct_specification() {
-    fn accepts_exec<E: RoverExec<Spec = CounterSpec>>(_: E) {}
+    fn accepts_exec<E: RoverExec<Model = CounterSpec>>(_: E) {}
     accepts_exec(Counter);
 }
 

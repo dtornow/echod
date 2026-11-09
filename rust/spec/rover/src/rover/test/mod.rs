@@ -5,7 +5,7 @@ use vstd::prelude::*;
 use crate::Time;
 
 use super::comm::ProcessEvent;
-use super::spec::{EventOf, RoverModel, RoverProc};
+use super::spec::{RoverModel, RoverProc};
 
 mod checker;
 mod replay;
@@ -53,36 +53,36 @@ pub trait RoverProcExec:
 /// An executable realization of a distinct [`RoverModel`] and its
 /// [`super::spec::RoverSpec`] worlds.
 pub trait RoverExec {
-    type Spec: RoverModel;
-    type Proc: RoverProcExec<Spec = <Self::Spec as RoverModel>::Proc>;
+    type Model: RoverModel;
+    type Proc: RoverProcExec<Spec = <Self::Model as RoverModel>::Proc>;
 
-    spec fn spec(&self) -> Self::Spec;
+    spec fn model(&self) -> Self::Model;
 
-    fn outside(&self) -> (r: PidOf<Self>)
+    fn outside(&self) -> (r: <Self::Model as RoverModel>::Pid)
         ensures
-            r == self.spec().outside();
+            r == self.model().outside();
 
-    fn initial(&self, config: &ConfigOf<Self>) -> (r: Vec<(PidOf<Self>, Self::Proc)>)
+    fn initial(
+        &self,
+        config: &<Self::Model as RoverModel>::Config,
+    ) -> (r: Vec<(<Self::Model as RoverModel>::Pid, Self::Proc)>)
         ensures
-            r@.map_values(|entry: (PidOf<Self>, Self::Proc)| (entry.0, entry.1@))
-                == self.spec().processes(*config),
-            r@.map_values(|entry: (PidOf<Self>, Self::Proc)| entry.0).no_duplicates(),
+            r@.map_values(
+                |entry: (<Self::Model as RoverModel>::Pid, Self::Proc)| (entry.0, entry.1@)
+            ) == self.model().processes(*config),
+            r@.map_values(
+                |entry: (<Self::Model as RoverModel>::Pid, Self::Proc)| entry.0
+            ).no_duplicates(),
             forall|i: int| 0 <= i < r@.len()
-                ==> #[trigger] r@[i].0 != self.spec().outside();
+                ==> #[trigger] r@[i].0 != self.model().outside();
 
-    fn injectable(&self, config: &ConfigOf<Self>, message: &MessageOf<Self>) -> (r: bool)
+    fn injectable(
+        &self,
+        config: &<Self::Model as RoverModel>::Config,
+        message: &<Self::Model as RoverModel>::Message,
+    ) -> (r: bool)
         ensures
-            r == self.spec().injectable(*config, *message);
+            r == self.model().injectable(*config, *message);
 }
 
 } // verus!
-
-pub type SpecOf<M> = <M as RoverExec>::Spec;
-pub type ConfigOf<M> = <SpecOf<M> as RoverModel>::Config;
-pub type PidOf<M> = <SpecOf<M> as RoverModel>::Pid;
-pub type ProcOf<M> = <SpecOf<M> as RoverModel>::Proc;
-pub type MessageOf<M> = <SpecOf<M> as RoverModel>::Message;
-pub type BoundaryOf<M> = <SpecOf<M> as RoverModel>::Boundary;
-pub type ExecEventOf<M> = EventOf<SpecOf<M>>;
-pub type ExecProcOf<M> = <M as RoverExec>::Proc;
-pub type StepResult<M> = ProcResult<ExecProcOf<M>>;

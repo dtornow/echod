@@ -11,15 +11,15 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use super::{before, legal, Execution, Lab, RoverModel, RoverSpec, World};
+use super::{before, legal, Execution, Label, RoverModel, RoverSpec};
 
 verus! {
 
 /// Where an execution ends.
 pub open spec fn end<M: RoverModel>(
-    first: World<M>,
+    first: RoverSpec<M>,
     execution: Execution<M>,
-) -> World<M> {
+) -> RoverSpec<M> {
     if execution.len() == 0 {
         first
     } else {
@@ -58,9 +58,9 @@ pub open spec fn valid_boundary_trace<M: RoverModel>(
 pub open spec fn matches<A: RoverModel>(
     abstract_model: A,
     abstract_config: A::Config,
-    start: World<A>,
+    start: RoverSpec<A>,
     visible: Seq<A::Boundary>,
-    finish: World<A>,
+    finish: RoverSpec<A>,
 ) -> bool {
     exists|execution: Execution<A>|
         #![trigger legal(abstract_model, abstract_config, start, execution)]
@@ -79,13 +79,13 @@ pub open spec fn simulation<
     concrete_config: C::Config,
     abstract_model: A,
     abstract_config: A::Config,
-    relation: spec_fn(World<C>, World<A>) -> bool,
+    relation: spec_fn(RoverSpec<C>, RoverSpec<A>) -> bool,
 ) -> bool {
     forall|
-        concrete_before: World<C>,
-        concrete_label: Lab<C>,
-        concrete_after: World<C>,
-        abstract_before: World<A>,
+        concrete_before: RoverSpec<C>,
+        concrete_label: Label<C::Pid, C::Message>,
+        concrete_after: RoverSpec<C>,
+        abstract_before: RoverSpec<A>,
     |
         #![trigger
             relation(concrete_before, abstract_before),
@@ -103,7 +103,7 @@ pub open spec fn simulation<
             concrete_label,
             concrete_after,
         )
-        ==> exists|abstract_after: World<A>|
+        ==> exists|abstract_after: RoverSpec<A>|
             #[trigger] matches(
                 abstract_model,
                 abstract_config,
@@ -170,7 +170,7 @@ pub proof fn lemma_project_add<M: RoverModel>(
 }
 
 pub proof fn lemma_end_add<M: RoverModel>(
-    first: World<M>,
+    first: RoverSpec<M>,
     prefix: Execution<M>,
     suffix: Execution<M>,
 )
@@ -188,7 +188,7 @@ pub proof fn lemma_end_add<M: RoverModel>(
 pub proof fn lemma_legal_add<M: RoverModel>(
     model: M,
     config: M::Config,
-    first: World<M>,
+    first: RoverSpec<M>,
     prefix: Execution<M>,
     suffix: Execution<M>,
 )
@@ -231,7 +231,7 @@ proof fn lemma_simulate_prefix<
     concrete_config: C::Config,
     abstract_model: A,
     abstract_config: A::Config,
-    relation: spec_fn(World<C>, World<A>) -> bool,
+    relation: spec_fn(RoverSpec<C>, RoverSpec<A>) -> bool,
     concrete_execution: Execution<C>,
     k: int,
 )
@@ -381,7 +381,7 @@ proof fn lemma_simulate_prefix<
             concrete_label,
             concrete_after,
         ));
-        let abstract_after = choose|world: World<A>|
+        let abstract_after = choose|world: RoverSpec<A>|
             #[trigger] matches(
                 abstract_model,
                 abstract_config,
@@ -498,7 +498,7 @@ pub proof fn concrete_refines_abstract<
     concrete_config: C::Config,
     abstract_model: A,
     abstract_config: A::Config,
-    relation: spec_fn(World<C>, World<A>) -> bool,
+    relation: spec_fn(RoverSpec<C>, RoverSpec<A>) -> bool,
 )
     requires
         relation(

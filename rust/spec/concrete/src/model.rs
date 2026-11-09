@@ -17,9 +17,9 @@ use echod_abstract::{BoundaryEvent, Call, Output};
 use echod_rover::rover::spec::Label;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::spec::StepResultV;
-use echod_rover::rover::{
-    ProcResult, ProcessEvent, RoverExec, RoverModel, RoverProc, RoverProcExec,
-};
+use echod_rover::rover::comm::ProcessEvent;
+use echod_rover::rover::spec::{RoverModel, RoverProc};
+use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
 use echod_rover::Time;
 
 use echod_types::Response;
@@ -490,10 +490,10 @@ impl RoverProcExec for Local {
 }
 
 impl RoverExec for Model {
-    type Spec = Spec;
+    type Model = Spec;
     type Proc = Local;
 
-    open spec fn spec(&self) -> Spec {
+    open spec fn model(&self) -> Spec {
         Spec
     }
 

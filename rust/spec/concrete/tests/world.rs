@@ -7,7 +7,8 @@ use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
     PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
 };
-use echod_rover::rover::{ProcessEvent, RoverExec, RoverProcExec, StepResult};
+use echod_rover::rover::comm::ProcessEvent;
+use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {
@@ -29,7 +30,7 @@ fn step(
     state: &Local,
     now: u64,
     event: &ProcessEvent<Pid, Message>,
-) -> Vec<StepResult<Model>> {
+) -> Vec<ProcResult<Local>> {
     state.on_event(&Fleet::new(1, true), now, event)
 }
 

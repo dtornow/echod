@@ -5,9 +5,10 @@
 
 use crate::Time;
 
-use super::replay::{Action, ActionOf, Certificate, World};
-use super::{ConfigOf, ExecEventOf, RoverExec, RoverProcExec};
+use super::replay::{Action, Certificate, ReplayState};
+use super::{RoverExec, RoverProcExec};
 use super::super::comm::{BoundaryEvent, ProcessEvent};
+use super::super::spec::RoverModel;
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +26,15 @@ impl CheckConfig {
     }
 }
 
-fn visible_action<M: RoverExec>(event: &ExecEventOf<M>) -> ActionOf<M> {
+fn visible_action<M: RoverExec>(
+    event: &BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >,
+) -> Action<
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Message,
+> {
     match event {
         BoundaryEvent::Input {
             recipient,
@@ -49,7 +58,13 @@ fn visible_action<M: RoverExec>(event: &ExecEventOf<M>) -> ActionOf<M> {
 }
 
 /// Candidate hidden process actions at `at`.
-fn hidden_actions<M: RoverExec>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<M>> {
+fn hidden_actions<M: RoverExec>(
+    world: &ReplayState<'_, M>,
+    at: Time,
+) -> Vec<Action<
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Message,
+>> {
     if at < world.now {
         return Vec::new();
     }
@@ -91,11 +106,17 @@ fn hidden_actions<M: RoverExec>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<
 }
 
 fn search_from<M: RoverExec>(
-    world: World<'_, M>,
-    events: &[ExecEventOf<M>],
+    world: ReplayState<'_, M>,
+    events: &[BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >],
     visible: usize,
     remaining: usize,
-    certificate: &mut Certificate<M>,
+    certificate: &mut Certificate<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >,
 ) -> bool {
     if visible == events.len() {
         return true;
@@ -143,11 +164,17 @@ fn search_from<M: RoverExec>(
 /// search did not find one; no completeness claim is made.
 pub fn search<M: RoverExec>(
     model: &M,
-    config: &ConfigOf<M>,
-    events: &[ExecEventOf<M>],
+    config: &<M::Model as RoverModel>::Config,
+    events: &[BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >],
     limits: CheckConfig,
-) -> Option<Certificate<M>> {
-    let world = World::initial(model, config);
+) -> Option<Certificate<
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Message,
+>> {
+    let world = ReplayState::initial(model, config);
     let mut certificate = Vec::new();
     search_from(world, events, 0, limits.max_steps, &mut certificate).then_some(certificate)
 }
@@ -156,10 +183,16 @@ pub fn search<M: RoverExec>(
 /// result covered by [`super::replay`]'s Verus soundness theorem.
 pub fn check<M: RoverExec>(
     model: &M,
-    config: &ConfigOf<M>,
-    events: &[ExecEventOf<M>],
+    config: &<M::Model as RoverModel>::Config,
+    events: &[BoundaryEvent<
+        <M::Model as RoverModel>::Pid,
+        <M::Model as RoverModel>::Message,
+    >],
     limits: CheckConfig,
-) -> Option<Certificate<M>> {
+) -> Option<Certificate<
+    <M::Model as RoverModel>::Pid,
+    <M::Model as RoverModel>::Message,
+>> {
     let certificate = search(model, config, events, limits)?;
     super::replay(model, config, events, &certificate).ok()?;
     Some(certificate)

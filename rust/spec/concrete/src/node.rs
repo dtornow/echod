@@ -34,7 +34,7 @@ use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::machine::{lemma_tags_ext, lemma_value_ext};
 use echod_abstract::{Call, Dispatch, Output};
-use echod_rover::rover::ProcessEvent;
+use echod_rover::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::spec::StepResultV;
 use echod_rover::Time;

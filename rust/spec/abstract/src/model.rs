@@ -9,9 +9,9 @@ use vstd::prelude::*;
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use echod_rover::rover::spec::{Label, StepResultV};
-use echod_rover::rover::{
-    ProcResult, ProcessEvent, RoverExec, RoverModel, RoverProc, RoverProcExec, StepResult,
-};
+use echod_rover::rover::comm::ProcessEvent;
+use echod_rover::rover::spec::{RoverModel, RoverProc};
+use echod_rover::rover::test::{ProcResult, RoverExec, RoverProcExec};
 use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
@@ -143,8 +143,8 @@ pub open spec fn spec_request_outcome(
 }
 
 /// The results of a step, as the trait reads them.
-pub open spec fn results_v(results: Seq<StepResult<Model>>) -> Seq<StepResultV<StateV, Pid, Message>> {
-    results.map_values(|result: StepResult<Model>| StepResultV {
+pub open spec fn results_v(results: Seq<ProcResult<State>>) -> Seq<StepResultV<StateV, Pid, Message>> {
+    results.map_values(|result: ProcResult<State>| StepResultV {
         state: result.state@,
         send: result.send@,
     })
@@ -429,7 +429,7 @@ fn request_outcome(
     before: &State,
     call: &Call,
     outcome: Out,
-) -> (result: StepResult<Model>)
+) -> (result: ProcResult<State>)
     ensures
         (StepResultV {
             state: result.state@,
@@ -456,7 +456,7 @@ fn lose_outcome(
     before: &State,
     call: &Call,
     outcome: Out,
-) -> (result: StepResult<Model>)
+) -> (result: ProcResult<State>)
     ensures
         (StepResultV {
             state: result.state@,
@@ -479,7 +479,7 @@ fn lose_outcome(
     }
 }
 
-fn shed_outcome(before: &State, call: &Call) -> (result: StepResult<Model>)
+fn shed_outcome(before: &State, call: &Call) -> (result: ProcResult<State>)
     ensures
         (StepResultV {
             state: result.state@,
@@ -508,7 +508,7 @@ fn request_results(
     call: &Call,
     mut outcomes: Vec<Out>,
     lost: bool,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == if lost {
             spec_losses(state@, *call, outcomes@.map_values(|o: Out| o@))
@@ -517,7 +517,7 @@ fn request_results(
         },
 {
     let ghost all = outcomes@;
-    let mut results: Vec<StepResult<Model>> = Vec::new();
+    let mut results: Vec<ProcResult<State>> = Vec::new();
     while !outcomes.is_empty()
         invariant
             outcomes@ == all.skip(results@.len() as int),
@@ -562,7 +562,7 @@ fn run(
     state: &State,
     call: &Call,
     now: Time,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == spec_run(*config, state@, *call, now)
             + spec_losses(state@, *call, spec_handler(*config, call.request, state@.store, now))
@@ -627,7 +627,7 @@ fn internal_result(
     before: &State,
     i: usize,
     outcome: InOut,
-) -> (result: StepResult<Model>)
+) -> (result: ProcResult<State>)
     requires
         i < before.pending.len(),
     ensures
@@ -698,7 +698,7 @@ fn run_timeout_from(
     state: &State,
     now: Time,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= state.pending.len(),
     ensures
@@ -706,7 +706,7 @@ fn run_timeout_from(
     decreases state.pending.len() - i,
 {
     if i == state.pending.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(results_v(results@) =~= spec_queue(*config, state@, now, i as int));
         }
@@ -735,7 +735,7 @@ fn run_timeout_from(
     }
 }
 
-fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>)
+fn due_result(before: &State, outcome: InOut) -> (result: ProcResult<State>)
     ensures
         (StepResultV {
             state: result.state@,
@@ -780,12 +780,12 @@ fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>)
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
-fn keep(config: &ServerConfig, state: &State, now: Time, work: Work) -> (results: Vec<StepResult<Model>>)
+fn keep(config: &ServerConfig, state: &State, now: Time, work: Work) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == spec_keep(*config, state@, now, work@, Seq::empty()),
 {
     let outcome = config.process_work(&work, &state.store, now);
-    let mut results: Vec<StepResult<Model>> = Vec::new();
+    let mut results: Vec<ProcResult<State>> = Vec::new();
     if !outcome.not_due {
         results.push(due_result(state, outcome));
     }
@@ -802,7 +802,7 @@ fn over_callbacks(
     awaited: &String,
     awaiters: &Vec<String>,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= awaiters.len(),
     ensures
@@ -811,7 +811,7 @@ fn over_callbacks(
 {
     broadcast use super::view::group_views;
     if i == awaiters.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(strs(awaiters@).skip(i as int) =~= Seq::<Seq<char>>::empty());
             assert(results_v(results@) =~= Seq::empty());
@@ -839,7 +839,7 @@ fn over_listeners(
     awaited: &String,
     addresses: &Vec<String>,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= addresses.len(),
     ensures
@@ -848,7 +848,7 @@ fn over_listeners(
 {
     broadcast use super::view::group_views;
     if i == addresses.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(strs(addresses@).skip(i as int) =~= Seq::<Seq<char>>::empty());
             assert(results_v(results@) =~= Seq::empty());
@@ -875,7 +875,7 @@ fn over_promises(
     now: Time,
     keys: &Vec<String>,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= keys.len(),
         forall|j: int| 0 <= j < keys.len() ==> state.store.promises@.contains_key(#[trigger] keys[j]@),
@@ -885,7 +885,7 @@ fn over_promises(
 {
     broadcast use super::view::group_views;
     if i == keys.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(strs(keys@).skip(i as int) =~= Seq::<Seq<char>>::empty());
             assert(results_v(results@) =~= Seq::empty());
@@ -932,7 +932,7 @@ fn over_tasks(
     now: Time,
     keys: &Vec<String>,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= keys.len(),
         forall|j: int| 0 <= j < keys.len() ==> state.store.tasks@.contains_key(#[trigger] keys[j]@),
@@ -942,7 +942,7 @@ fn over_tasks(
 {
     broadcast use super::view::group_views;
     if i == keys.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(strs(keys@).skip(i as int) =~= Seq::<Seq<char>>::empty());
             assert(results_v(results@) =~= Seq::empty());
@@ -996,7 +996,7 @@ fn over_schedules(
     now: Time,
     keys: &Vec<String>,
     i: usize,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     requires
         i <= keys.len(),
         forall|j: int| 0 <= j < keys.len() ==> state.store.schedules@.contains_key(#[trigger] keys[j]@),
@@ -1006,7 +1006,7 @@ fn over_schedules(
 {
     broadcast use super::view::group_views;
     if i == keys.len() {
-        let results: Vec<StepResult<Model>> = Vec::new();
+        let results: Vec<ProcResult<State>> = Vec::new();
         proof {
             assert(strs(keys@).skip(i as int) =~= Seq::<Seq<char>>::empty());
             assert(results_v(results@) =~= Seq::empty());
@@ -1040,7 +1040,7 @@ fn over_schedules(
 
 /// The steps the three maps offer, in the order the specification walks
 /// them: `spec_derived`.
-fn derived(config: &ServerConfig, state: &State, now: Time) -> (results: Vec<StepResult<Model>>)
+fn derived(config: &ServerConfig, state: &State, now: Time) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == spec_derived(*config, state@, now),
 {
@@ -1069,7 +1069,7 @@ fn run_timeout(
     config: &ServerConfig,
     state: &State,
     now: Time,
-) -> (results: Vec<StepResult<Model>>)
+) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == spec_run_timeout(*config, state@, now),
 {
@@ -1091,11 +1091,11 @@ pub open spec fn spec_idle(state: StateV) -> Seq<StepResultV<StateV, Pid, Messag
     }]
 }
 
-fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
+fn idle(state: &State) -> (results: Vec<ProcResult<State>>)
     ensures
         results_v(results@) == spec_idle(state@),
 {
-    let mut results: Vec<StepResult<Model>> = Vec::new();
+    let mut results: Vec<ProcResult<State>> = Vec::new();
     results.push(ProcResult {
         state: copy(state),
         send: Vec::new(),
@@ -1113,7 +1113,7 @@ impl State {
         config: &ServerConfig,
         now: Time,
         event: &ProcessEvent<Pid, Message>,
-    ) -> (results: Vec<StepResult<Model>>)
+    ) -> (results: Vec<ProcResult<State>>)
         ensures
             results_v(results@) == spec_service(*config, self@, now, *event),
     {
@@ -1148,10 +1148,10 @@ impl RoverProcExec for State {
 }
 
 impl RoverExec for Model {
-    type Spec = Spec;
+    type Model = Spec;
     type Proc = State;
 
-    open spec fn spec(&self) -> Spec {
+    open spec fn model(&self) -> Spec {
         Spec
     }
 
