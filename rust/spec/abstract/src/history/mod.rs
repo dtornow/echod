@@ -27,7 +27,7 @@ use footprint::origin;
 use super::view::{as_sched, group_views, sched_v, works};
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
-/// the ones no run reached. `tests/marks.rs` checks it against `exec`.
+/// the ones no run reached. `resonate_marks.rs` checks it against `machine`.
 pub const MARKS: &[&str] = &[
     "acquire: no such task (404)",
     "acquire: not pending, or stale version (409)",

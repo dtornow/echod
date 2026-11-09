@@ -1251,7 +1251,7 @@ impl RoverSpec for Spec {
 // `spec_service`. A request is served, lost, or shed, the
 // three outcomes of the Lean step. A timeout is one ready queued occurrence, or
 // one step derived from the three maps. Anything else leaves the state as it
-// was. `RoverExec::on_event` proves that its executable results have exactly
+// was. `RoverProcExec::on_event` proves that its executable results have exactly
 // the views in this sequence.
 // ---------------------------------------------------------------------------
 
