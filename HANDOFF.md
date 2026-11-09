@@ -146,7 +146,8 @@ It contains no protocol decisions.
 Domain-independent formal machinery:
 
 - append-only network world
-- process slots and routing
+- an ordered finite map from pid to a stateful `RoverProc`
+- generic process selection, message/timeout delivery, and routing
 - clean boundary observation
 - certificates and verified replay
 - bounded trace search
@@ -167,7 +168,9 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Rover model in `model.rs`: nodes and one store, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`
+- the Rover model in `model.rs`: one `LocalV` process enum (`Node` or `Store`),
+  nodes and one store in `spec_world`, and `RoverProc::on_event` dispatching
+  each enum variant to its local step
 - the abstract model, which that step refines
 
 Still open, and the reason concrete depends on the abstract model:

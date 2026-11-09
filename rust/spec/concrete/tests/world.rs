@@ -7,7 +7,7 @@ use echod_concrete::{
     Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
     PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
 };
-use echod_rover::rover::{ProcessEvent, RoverExec, StepResult};
+use echod_rover::rover::{ProcessEvent, RoverExec, RoverProcExec, StepResult};
 
 fn node(local: &Local) -> &echod_concrete::model::Node {
     match local {
@@ -25,12 +25,12 @@ fn store(local: &Local) -> &Store {
 
 /// One local step; the fleet does not enter it.
 fn step(
-    pid: &Pid,
+    _pid: &Pid,
     state: &Local,
     now: u64,
     event: &ProcessEvent<Pid, Message>,
 ) -> Vec<StepResult<Model>> {
-    Model.on_event(&Fleet::new(1, true), pid, state, now, event)
+    state.on_event(&Fleet::new(1, true), now, event)
 }
 
 #[test]

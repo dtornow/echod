@@ -26,7 +26,7 @@ use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, re
 use crate::model::{
     EntryV, Fleet, LocalV, Message as CMessage, Spec as CModel, NodeV, Pid as CPid, spec_bytes,
     spec_get, spec_initial_node as initial_node, spec_node as spec_node_step, spec_nodes,
-    spec_notes, spec_notify, spec_one, spec_reply, spec_step, spec_store, spec_string, spec_world,
+    spec_notes, spec_notify, spec_one, spec_reply, spec_store, spec_string, spec_world,
     StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
@@ -71,7 +71,7 @@ use echod_rover::rover::semantics::{
     observe_outside, step, StepResultV, World, WorldV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, ProcessEvent, RoverSpec};
+use echod_rover::rover::{Envelope, ProcessEvent, RoverProc, RoverSpec};
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]
@@ -544,11 +544,11 @@ pub proof fn lemma_process_step<M: RoverSpec>(
         0 <= i < world.process.len(),
         is_process(m, world, world.process[i].0),
         event_valid(world, world.process[i].0, event),
-        0 <= j < m.spec_on_event(config, world.process[i].0, world.process[i].1, at, event).len(),
+        0 <= j < world.process[i].1.on_event(config, at, event).len(),
     ensures
         ({
             let process = world.process[i].0;
-            let outcome = m.spec_on_event(config, process, world.process[i].1, at, event)[j];
+            let outcome = world.process[i].1.on_event(config, at, event)[j];
             step(
                 m,
                 config,
@@ -558,27 +558,7 @@ pub proof fn lemma_process_step<M: RoverSpec>(
             )
         }),
 {
-    let process = world.process[i].0;
-    let outcome = m.spec_on_event(config, process, world.process[i].1, at, event)[j];
-    let next = land(world, i, process, at, outcome);
-    assert(exists|i2: int, j2: int|
-        #![trigger m.spec_on_event(config, process, world.process[i2].1, at, event)[j2]]
-        {
-            &&& 0 <= i2 < world.process.len()
-            &&& world.process[i2].0 == process
-            &&& {
-                let outcomes = m.spec_on_event(config, process, world.process[i2].1, at, event);
-                &&& 0 <= j2 < outcomes.len()
-                &&& outcomes[j2].send == outcome.send
-                &&& next == land(world, i2, process, at, outcomes[j2])
-            }
-        }) by {
-        assert(0 <= i < world.process.len() && world.process[i].0 == process && 0 <= j
-            < m.spec_on_event(config, process, world.process[i].1, at, event).len()
-            && m.spec_on_event(config, process, world.process[i].1, at, event)[j].send == outcome.send
-            && next == land(world, i, process, at, m.spec_on_event(config, process, world.process[i].1, at, event)[j]));
-    };
-    assert(step(m, config, world, Label::Process { process, at, event, send: outcome.send }, next));
+    echod_rover::rover::semantics::process_step(m, config, world, i, at, event, j);
 }
 
 /// One abstract process step of the service, with the outcome at `index`.
@@ -595,10 +575,10 @@ pub proof fn lemma_service_step(
         single(before_a),
         before_a.now <= at,
         event_valid(before_a, APid::Service, event),
-        0 <= index < abstract_model().spec_on_event(config, APid::Service, astate(before_a), at, event).len(),
+        0 <= index < astate(before_a).on_event(config, at, event).len(),
     ensures
         ({
-            let outcome = abstract_model().spec_on_event(config, APid::Service, astate(before_a), at, event)[index];
+            let outcome = astate(before_a).on_event(config, at, event)[index];
             &&& after_a == land(before_a, 0, APid::Service, at, outcome)
             &&& single(after_a)
             &&& astate(after_a) == outcome.state
@@ -609,7 +589,7 @@ pub proof fn lemma_service_step(
         }),
 {
     reveal(step);
-    let outcomes = abstract_model().spec_on_event(config, APid::Service, astate(before_a), at, event);
+    let outcomes = astate(before_a).on_event(config, at, event);
     let outcome = outcomes[index];
     lemma_single_present(before_a);
     let label = Label::Process { process: APid::Service, at, event, send: outcome.send };
@@ -1564,7 +1544,7 @@ pub proof fn lemma_queue_offers(config: ServerConfig, state: StateV, now: Time, 
         !spec_process_work(config, spec_body(state.pending[k]), state.store, now).not_due,
     ensures
         ({
-            let outcomes = abstract_model().spec_on_event(config, APid::Service, state, now, ProcessEvent::Timeout);
+            let outcomes = state.on_event(config, now, ProcessEvent::Timeout);
             let outcome = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
             &&& 0 <= j < outcomes.len()
             &&& outcomes[j] == spec_internal_result(state, k, outcome)
@@ -1579,7 +1559,7 @@ pub proof fn lemma_queue_offers(config: ServerConfig, state: StateV, now: Time, 
     assert(results == queued + crate::simulation::derived(config, state, now));
     assert(results[j] == queued[j]);
     assert(results.len() > 0);
-    assert(abstract_model().spec_on_event(config, APid::Service, state, now, ProcessEvent::Timeout) == results);
+    assert(state.on_event(config, now, ProcessEvent::Timeout) == results);
     j
 }
 
@@ -1594,7 +1574,7 @@ pub proof fn lemma_timeout_offers(config: ServerConfig, state: StateV, now: Time
         0 <= j < spec_run_timeout(config, state, now).len(),
     ensures
         ({
-            let outcomes = abstract_model().spec_on_event(config, APid::Service, state, now, ProcessEvent::Timeout);
+            let outcomes = state.on_event(config, now, ProcessEvent::Timeout);
             &&& outcomes == spec_run_timeout(config, state, now)
             &&& 0 <= j < outcomes.len()
         }),
@@ -3022,7 +3002,7 @@ pub proof fn lemma_request_served(
     assert(outs[0].resp == response);
     let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(call) };
     assert(event_valid(ab, APid::Service, event));
-    let outcomes = abstract_model().spec_on_event(config, APid::Service, state, at, event);
+    let outcomes = state.on_event(config, at, event);
     let served = spec_run(config, state, call, at);
     assert(served.len() == 1);
     assert(served[0] == spec_request_outcome(state, call, outs[0]));
@@ -3100,7 +3080,7 @@ pub proof fn lemma_request(
             message: AMessage::Request(call),
         };
     assert(event_valid(ab, APid::Service, event));
-    let outcomes = abstract_model().spec_on_event(config, APid::Service, state, at, event);
+    let outcomes = state.on_event(config, at, event);
     match spec_key(call.request) {
         None => {
             assert(node2 == node0);
@@ -3271,7 +3251,7 @@ pub proof fn lemma_occurrence_begin(
         assert(spec_process_work(config, work, s, at) == out);
         let j = lemma_queue_offers(config, state, at, k);
         let aa = lemma_service_step(config, ab, at, ProcessEvent::Timeout, j);
-        let outcome = abstract_model().spec_on_event(config, APid::Service, state, at, ProcessEvent::Timeout)[j];
+        let outcome = state.on_event(config, at, ProcessEvent::Timeout)[j];
         assert(outcome == spec_internal_result(state, k, out));
         assert(astate(aa).store == out.next);
         assert(finite_store(astate(aa).store));
@@ -4494,31 +4474,30 @@ pub proof fn lemma_process(
     let i = choose|i: int|
         #![trigger cb.process[i]]
         exists|j: int|
-            #![trigger concrete_model().spec_on_event(fleet, process, cb.process[i].1, at, event)[j]]
+            #![trigger cb.process[i].1.on_event(fleet, at, event)[j]]
             {
                 &&& 0 <= i < cb.process.len()
                 &&& cb.process[i].0 == process
                 &&& {
-                    let outcomes = concrete_model().spec_on_event(fleet, process, cb.process[i].1, at, event);
+                    let outcomes = cb.process[i].1.on_event(fleet, at, event);
                     &&& 0 <= j < outcomes.len()
                     &&& outcomes[j].send == send
                     &&& ca == land(cb, i, process, at, outcomes[j])
                 }
             };
     let j = choose|j: int|
-        #![trigger concrete_model().spec_on_event(fleet, process, cb.process[i].1, at, event)[j]]
+        #![trigger cb.process[i].1.on_event(fleet, at, event)[j]]
         {
             &&& 0 <= i < cb.process.len()
             &&& cb.process[i].0 == process
             &&& {
-                let outcomes = concrete_model().spec_on_event(fleet, process, cb.process[i].1, at, event);
+                let outcomes = cb.process[i].1.on_event(fleet, at, event);
                 &&& 0 <= j < outcomes.len()
                 &&& outcomes[j].send == send
                 &&& ca == land(cb, i, process, at, outcomes[j])
             }
         };
-    let outcomes = concrete_model().spec_on_event(fleet, process, cb.process[i].1, at, event);
-    assert(outcomes == spec_step(fleet, process, cb.process[i].1, at, event));
+    let outcomes = cb.process[i].1.on_event(fleet, at, event);
     assert(concrete_model().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
     assert(shaped(fleet, cb));
     if i < fleet.nodes {

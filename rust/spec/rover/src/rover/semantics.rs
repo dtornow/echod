@@ -7,7 +7,8 @@ use vstd::prelude::*;
 
 use crate::Time;
 
-use super::{BoundaryEvent, Envelope, ProcessEvent, RoverSpec};
+#[allow(unused_imports)] // RoverProc is used only by specification bodies
+use super::{BoundaryEvent, Envelope, ProcessEvent, RoverProc, RoverSpec};
 
 verus! {
 
@@ -17,16 +18,21 @@ pub struct StepResultV<S, P, M> {
     pub send: Seq<(P, M)>,
 }
 
+/// An ordered finite process map. Executable initialization proves pids are
+/// unique; the order is retained so search can enumerate processes and
+/// certificates can name a stable slot.
+pub type ProcMap<P, S> = Seq<(P, S)>;
+
 /// The complete world: process-local states, append-only network, and time.
 pub struct WorldV<P, S, M> {
-    pub process: Seq<(P, S)>,
+    pub process: ProcMap<P, S>,
     pub network: Seq<Envelope<P, M>>,
     pub now: Time,
 }
 
 pub type World<M> = WorldV<
     <M as RoverSpec>::Pid,
-    <M as RoverSpec>::StateV,
+    <M as RoverSpec>::Proc,
     <M as RoverSpec>::Message,
 >;
 
@@ -117,6 +123,34 @@ pub open spec fn observe_outside<P, S, M>(
     WorldV { now: at, ..world }
 }
 
+/// The process-delivery arm of [`step`].
+pub open spec fn process_transition<M: RoverSpec>(
+    model: M,
+    config: M::Config,
+    world: World<M>,
+    process: M::Pid,
+    at: Time,
+    event: ProcessEvent<M::Pid, M::Message>,
+    send: Seq<(M::Pid, M::Message)>,
+    next: World<M>,
+) -> bool {
+    &&& world.now <= at
+    &&& is_process(model, world, process)
+    &&& event_valid(world, process, event)
+    &&& exists|i: int, j: int|
+        #![trigger world.process[i].1.on_event(config, at, event)[j]]
+    {
+        &&& 0 <= i < world.process.len()
+        &&& world.process[i].0 == process
+        &&& {
+            let outcomes = world.process[i].1.on_event(config, at, event);
+            &&& 0 <= j < outcomes.len()
+            &&& outcomes[j].send == send
+            &&& next == land(world, i, process, at, outcomes[j])
+        }
+    }
+}
+
 /// One atomic Rover transition.
 pub open spec fn step<M: RoverSpec>(
     m: M,
@@ -127,47 +161,104 @@ pub open spec fn step<M: RoverSpec>(
 ) -> bool {
     match label {
         Label::Input { recipient, at, message } => {
-            world.now <= at
-                && is_process(m, world, recipient)
-                && m.spec_injectable(config, message)
-                && next == inject(world, m.spec_outside(), recipient, at, message)
+            &&& world.now <= at
+            &&& is_process(m, world, recipient)
+            &&& m.spec_injectable(config, message)
+            &&& next == inject(world, m.spec_outside(), recipient, at, message)
         }
         Label::Process { process, at, event, send } => {
-            world.now <= at
-                && is_process(m, world, process)
-                && event_valid(world, process, event)
-                && exists|i: int, j: int|
-                    #![trigger m.spec_on_event(
-                        config,
-                        process,
-                        world.process[i].1,
-                        at,
-                        event,
-                    )[j]]
-                {
-                    &&& 0 <= i < world.process.len()
-                    &&& world.process[i].0 == process
-                    &&& {
-                    let outcomes = m.spec_on_event(config, process, world.process[i].1, at, event);
-                    &&& 0 <= j < outcomes.len()
-                    &&& outcomes[j].send == send
-                    &&& next == land(world, i, process, at, outcomes[j])
-                    }
-                }
+            process_transition(m, config, world, process, at, event, send, next)
         }
         Label::Outside { sender, at, message } => {
-            world.now <= at
-                && exists|i: int| {
-                    0 <= i < world.network.len()
-                        && #[trigger] world.network[i] == Envelope {
-                            sender,
-                            recipient: m.spec_outside(),
-                            message,
-                        }
+            &&& world.now <= at
+            &&& exists|i: int| {
+                &&& 0 <= i < world.network.len()
+                &&& #[trigger] world.network[i] == Envelope {
+                    sender,
+                    recipient: m.spec_outside(),
+                    message,
                 }
-                && next == observe_outside(world, at)
+            }
+            &&& next == observe_outside(world, at)
         }
     }
+}
+
+/// One process outcome witnesses one complete Rover process step.
+pub proof fn process_step<M: RoverSpec>(
+    model: M,
+    config: M::Config,
+    world: World<M>,
+    i: int,
+    at: Time,
+    event: ProcessEvent<M::Pid, M::Message>,
+    j: int,
+)
+    requires
+        world.now <= at,
+        0 <= i < world.process.len(),
+        is_process(model, world, world.process[i].0),
+        event_valid(world, world.process[i].0, event),
+        0 <= j < world.process[i].1.on_event(config, at, event).len(),
+    ensures
+        ({
+            let process = world.process[i].0;
+            let outcome = world.process[i].1.on_event(config, at, event)[j];
+            step(
+                model,
+                config,
+                world,
+                Label::Process { process, at, event, send: outcome.send },
+                land(world, i, process, at, outcome),
+            )
+        }),
+{
+    let process = world.process[i].0;
+    let outcome = world.process[i].1.on_event(config, at, event)[j];
+    assert(exists|i2: int, j2: int|
+        #![trigger world.process[i2].1.on_event(config, at, event)[j2]]
+    {
+        &&& 0 <= i2 < world.process.len()
+        &&& world.process[i2].0 == process
+        &&& {
+            let outcomes = world.process[i2].1.on_event(config, at, event);
+            &&& 0 <= j2 < outcomes.len()
+            &&& outcomes[j2].send == outcome.send
+            &&& land(world, i, process, at, outcome)
+                == land(world, i2, process, at, outcomes[j2])
+        }
+    }) by {
+        assert(0 <= i < world.process.len());
+    }
+    assert(process_transition(
+        model,
+        config,
+        world,
+        process,
+        at,
+        event,
+        outcome.send,
+        land(world, i, process, at, outcome),
+    )) by {
+        reveal(process_transition);
+        assert(world.now <= at);
+        assert(is_process(model, world, process));
+        assert(event_valid(world, process, event));
+        assert(exists|i2: int, j2: int|
+            #![trigger world.process[i2].1.on_event(config, at, event)[j2]]
+        {
+            &&& 0 <= i2 < world.process.len()
+            &&& world.process[i2].0 == process
+            &&& {
+                let outcomes = world.process[i2].1.on_event(config, at, event);
+                &&& 0 <= j2 < outcomes.len()
+                &&& outcomes[j2].send == outcome.send
+                &&& land(world, i, process, at, outcome)
+                    == land(world, i2, process, at, outcomes[j2])
+            }
+        });
+    }
+    reveal(crate::rover::semantics::step);
 }
 
 /// The observable boundary contribution of a label.
@@ -255,7 +346,7 @@ pub proof fn step_preserves_network<M: RoverSpec>(
     ensures
         network_extends::<M>(before, after),
 {
-    reveal(step);
+    reveal(crate::rover::semantics::step);
     reveal(network_extends);
     match label {
         Label::Input {
@@ -281,10 +372,8 @@ pub proof fn step_preserves_network<M: RoverSpec>(
             let i = choose|i: int|
                 #![trigger before.process[i]]
                 exists|j: int|
-                #![trigger model.spec_on_event(
+                #![trigger before.process[i].1.on_event(
                     config,
-                    process,
-                    before.process[i].1,
                     at,
                     event,
                 )[j]]
@@ -292,10 +381,8 @@ pub proof fn step_preserves_network<M: RoverSpec>(
                 &&& 0 <= i < before.process.len()
                 &&& before.process[i].0 == process
                 &&& {
-                    let outcomes = model.spec_on_event(
+                    let outcomes = before.process[i].1.on_event(
                         config,
-                        process,
-                        before.process[i].1,
                         at,
                         event,
                     );
@@ -304,10 +391,8 @@ pub proof fn step_preserves_network<M: RoverSpec>(
                 }
             };
             let j = choose|j: int|
-                #![trigger model.spec_on_event(
+                #![trigger before.process[i].1.on_event(
                     config,
-                    process,
-                    before.process[i].1,
                     at,
                     event,
                 )[j]]
@@ -315,10 +400,8 @@ pub proof fn step_preserves_network<M: RoverSpec>(
                 &&& 0 <= i < before.process.len()
                 &&& before.process[i].0 == process
                 &&& {
-                    let outcomes = model.spec_on_event(
+                    let outcomes = before.process[i].1.on_event(
                         config,
-                        process,
-                        before.process[i].1,
                         at,
                         event,
                     );
@@ -326,10 +409,8 @@ pub proof fn step_preserves_network<M: RoverSpec>(
                     &&& after == land(before, i, process, at, outcomes[j])
                 }
             };
-            let outcome = model.spec_on_event(
+            let outcome = before.process[i].1.on_event(
                 config,
-                process,
-                before.process[i].1,
                 at,
                 event,
             )[j];

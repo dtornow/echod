@@ -1,9 +1,11 @@
 //! Executable examples for the Rust + Verus Rover world.
 
 use echod_rover::rover::{
-    check, replay, Action, BoundaryEvent, CheckConfig, ProcessEvent, RoverExec, RoverSpec, StepResult,
+    check, replay, Action, BoundaryEvent, CheckConfig, ProcResult, ProcessEvent, RoverExec,
+    RoverProc, RoverProcExec, RoverSpec,
 };
 use echod_rover::Time;
+use vstd::prelude::View;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Pid {
@@ -19,6 +21,53 @@ enum Message {
 
 struct Counter;
 struct CounterSpec;
+struct SpecOnlyProc;
+#[allow(dead_code)] // read only by the erased View specification
+struct CounterProc(u64);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CounterState(u64);
+
+impl View for CounterState {
+    type V = CounterProc;
+}
+
+impl RoverProc for SpecOnlyProc {
+    type Config = ();
+    type Pid = ();
+    type Message = ();
+}
+
+impl RoverProc for CounterProc {
+    type Config = ();
+    type Pid = Pid;
+    type Message = Message;
+}
+
+impl RoverProcExec for CounterState {
+    type Spec = CounterProc;
+
+    fn on_event(
+        &self,
+        _: &(),
+        _: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> Vec<ProcResult<Self>> {
+        match event {
+            ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Add(amount),
+            } => {
+                let next = self.0 + amount;
+                vec![ProcResult {
+                    state: CounterState(next),
+                    send: vec![(Pid::Outside, Message::Value(next))],
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+}
 
 /// A mathematical model need not provide executable state or transitions.
 struct SpecOnly;
@@ -26,7 +75,7 @@ struct SpecOnly;
 impl RoverSpec for SpecOnly {
     type Config = ();
     type Pid = ();
-    type StateV = u64;
+    type Proc = SpecOnlyProc;
     type Message = ();
     type Boundary = ();
 }
@@ -34,52 +83,27 @@ impl RoverSpec for SpecOnly {
 impl RoverSpec for CounterSpec {
     type Config = ();
     type Pid = Pid;
-    type StateV = u64;
+    type Proc = CounterProc;
     type Message = Message;
     type Boundary = Event;
 }
 
 impl RoverExec for Counter {
     type Spec = CounterSpec;
-    type State = u64;
+    type Proc = CounterState;
 
     fn outside(&self) -> Pid {
         Pid::Outside
     }
 
-    fn initial(&self, _: &()) -> Vec<(Pid, u64)> {
-        vec![(Pid::Service, 0)]
+    fn initial(&self, _: &()) -> Vec<(Pid, CounterState)> {
+        vec![(Pid::Service, CounterState(0))]
     }
 
     fn injectable(&self, _: &(), message: &Message) -> bool {
         matches!(message, Message::Add(_))
     }
 
-    fn on_event(
-        &self,
-        _: &(),
-        pid: &Pid,
-        state: &u64,
-        _: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<StepResult<Self>> {
-        match (pid, event) {
-            (
-                Pid::Service,
-                ProcessEvent::Receive {
-                    sender: Pid::Outside,
-                    message: Message::Add(amount),
-                },
-            ) => {
-                let next = state + amount;
-                vec![StepResult {
-                    state: next,
-                    send: vec![(Pid::Outside, Message::Value(next))],
-                }]
-            }
-            _ => Vec::new(),
-        }
-    }
 }
 
 type Event = BoundaryEvent<Pid, Message>;

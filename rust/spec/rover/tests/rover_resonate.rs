@@ -1,6 +1,8 @@
 //! The complete standalone Resonate protocol through Rover's world.
 
-use echod_rover::rover::{check, BoundaryEvent, CheckConfig, ProcessEvent, RoverExec};
+use echod_rover::rover::{
+    check, BoundaryEvent, CheckConfig, ProcessEvent, RoverExec, RoverProcExec,
+};
 use echod_abstract::model::Pid;
 use echod_abstract::types::*;
 use echod_abstract::*;
@@ -157,10 +159,10 @@ fn timeout_runs_the_internal_work_started_by_a_request() {
         sender: Pid::Outside,
         message: Message::Request(call),
     };
-    let created = Model.on_event(&config, &Pid::Service, &state, 0, &event);
+    let created = state.on_event(&config, 0, &event);
     assert!(created[0].state.pending.is_empty(), "a deadline is read off the promise, not queued");
 
-    let timed_out = Model.on_event(&config, &Pid::Service, &created[0].state, 10, &ProcessEvent::Timeout);
+    let timed_out = created[0].state.on_event(&config, 10, &ProcessEvent::Timeout);
     assert!(!timed_out.is_empty());
     assert!(timed_out.iter().any(|result| {
         result

@@ -9,7 +9,9 @@ use vstd::prelude::*;
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use echod_rover::rover::semantics::{Label, StepResultV};
-use echod_rover::rover::{Process, ProcessEvent, RoverExec, RoverSpec, StepResult};
+use echod_rover::rover::{
+    ProcResult, ProcessEvent, RoverExec, RoverProc, RoverProcExec, RoverSpec, StepResult,
+};
 use echod_rover::{Sched, Time};
 
 use echod_types::{Request, Response};
@@ -46,6 +48,21 @@ pub struct State {
 pub struct StateV {
     pub store: StoreV,
     pub pending: Seq<Sched<InternalV>>,
+}
+
+impl RoverProc for StateV {
+    type Config = ServerConfig;
+    type Pid = Pid;
+    type Message = Message;
+
+    open spec fn on_event(
+        self,
+        config: ServerConfig,
+        now: Time,
+        event: ProcessEvent<Pid, Message>,
+    ) -> Seq<StepResultV<StateV, Pid, Message>> {
+        spec_service(config, self, now, event)
+    }
 }
 
 impl View for State {
@@ -197,7 +214,7 @@ pub proof fn lemma_shed_is_last(
                 sender: Pid::Outside,
                 message: Message::Request(call),
             };
-            let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
+            let outcomes = state.on_event(config, now, event);
             &&& outcomes.len() > 0
             &&& outcomes[outcomes.len() as int - 1] == spec_shed(state, call)
         }),
@@ -206,7 +223,7 @@ pub proof fn lemma_shed_is_last(
         sender: Pid::Outside,
         message: Message::Request(call),
     };
-    let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
+    let outcomes = state.on_event(config, now, event);
     let served = spec_run(config, state, call, now);
     let lost = spec_losses(state, call, spec_handler(config, call.request, state.store, now));
     let shed = seq![spec_shed(state, call)];
@@ -246,7 +263,7 @@ pub proof fn lemma_empty_heartbeat_is_first(
                 sender: Pid::Outside,
                 message: Message::Request(call),
             };
-            let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
+            let outcomes = state.on_event(config, now, event);
             &&& outcomes.len() > 0
             &&& outcomes[0].state == state
             &&& outcomes[0].send == spec_send(
@@ -260,7 +277,7 @@ pub proof fn lemma_empty_heartbeat_is_first(
         sender: Pid::Outside,
         message: Message::Request(call),
     };
-    let outcomes = Spec.spec_on_event(config, Pid::Service, state, now, event);
+    let outcomes = state.on_event(config, now, event);
     let handler = spec_handler(config, call.request, state.store, now);
     assert(handler.len() == 1);
     let outcome = handler[0];
@@ -426,7 +443,7 @@ fn request_outcome(
         send: dispatches,
         marks: _,
     } = outcome;
-    StepResult {
+    ProcResult {
         state: State {
             store: next,
             pending: append_work(&before.pending, work),
@@ -453,7 +470,7 @@ fn lose_outcome(
         send: dispatches,
         marks: _,
     } = outcome;
-    StepResult {
+    ProcResult {
         state: State {
             store: next,
             pending: append_work(&before.pending, work),
@@ -470,7 +487,7 @@ fn shed_outcome(before: &State, call: &Call) -> (result: StepResult<Model>)
         }) == spec_shed(before@, *call),
 {
     let dispatches: Vec<Dispatch> = Vec::new();
-    let result = StepResult {
+    let result = ProcResult {
         state: copy(before),
         send: send(call, unavailable(&call.request), dispatches),
     };
@@ -667,7 +684,7 @@ fn internal_result(
             )),
         )));
     }
-    StepResult {
+    ProcResult {
         state: State {
             store: next,
             pending,
@@ -759,7 +776,7 @@ fn due_result(before: &State, outcome: InOut) -> (result: StepResult<Model>)
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
         )));
     }
-    StepResult { state: State { store: next, pending }, send }
+    ProcResult { state: State { store: next, pending }, send }
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
@@ -1079,7 +1096,7 @@ fn idle(state: &State) -> (results: Vec<StepResult<Model>>)
         results_v(results@) == spec_idle(state@),
 {
     let mut results: Vec<StepResult<Model>> = Vec::new();
-    results.push(StepResult {
+    results.push(ProcResult {
         state: copy(state),
         send: Vec::new(),
     });
@@ -1113,32 +1130,26 @@ impl State {
     }
 }
 
-impl Process<ServerConfig, Pid, Message> for State {
+impl RoverProcExec for State {
+    type Spec = StateV;
+
     fn on_event(
         &self,
         config: &ServerConfig,
         now: Time,
         event: &ProcessEvent<Pid, Message>,
-    ) -> (pairs: Vec<(State, Vec<(Pid, Message)>)>) {
-        let mut results = self.step(config, now, event);
-        let ghost n = results@.len() as int;
-        let mut pairs: Vec<(State, Vec<(Pid, Message)>)> = Vec::new();
-        while !results.is_empty()
-            invariant
-                pairs@.len() + results@.len() == n,
-                results@.len() == n - pairs@.len(),
-            decreases results@.len(),
-        {
-            let result = results.remove(0);
-            pairs.push((result.state, result.send));
+    ) -> (results: Vec<ProcResult<Self>>) {
+        let results = self.step(config, now, event);
+        proof {
+            assert(results_v(results@) == self@.on_event(*config, now, *event));
         }
-        pairs
+        results
     }
 }
 
 impl RoverExec for Model {
     type Spec = Spec;
-    type State = State;
+    type Proc = State;
 
     open spec fn spec(&self) -> Spec {
         Spec
@@ -1185,29 +1196,12 @@ impl RoverExec for Model {
         }
     }
 
-    fn on_event(
-        &self,
-        config: &ServerConfig,
-        pid: &Pid,
-        state: &State,
-        now: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> (results: Vec<StepResult<Self>>) {
-        let results = match pid {
-            Pid::Service => state.step(config, now, event),
-            _ => idle(state),
-        };
-        proof {
-            assert(results_v(results@) == spec_step(*config, *pid, state@, now, *event));
-        }
-        results
-    }
 }
 
 impl RoverSpec for Spec {
     type Config = ServerConfig;
     type Pid = Pid;
-    type StateV = StateV;
+    type Proc = StateV;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
@@ -1232,19 +1226,6 @@ impl RoverSpec for Spec {
         }
     }
 
-    /// One local step. `spec_step` is that transition. `RoverExec::on_event`
-    /// proves that the executable results equal this function.
-    open spec fn spec_on_event(
-        &self,
-        config: ServerConfig,
-        pid: Pid,
-        state: StateV,
-        now: Time,
-        event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<StateV, Pid, Message>> {
-        spec_step(config, pid, state, now, event)
-    }
-
     open spec fn spec_observe(
         &self,
         label: Label<Pid, Message>,
@@ -1266,8 +1247,8 @@ impl RoverSpec for Spec {
 }
 
 // ---------------------------------------------------------------------------
-// The step, as a specification. `spec_step` is what
-// `RoverSpec::spec_on_event` returns. A request is served, lost, or shed, the
+// The process step as a specification. `StateV::on_event` calls
+// `spec_service`. A request is served, lost, or shed, the
 // three outcomes of the Lean step. A timeout is one ready queued occurrence, or
 // one step derived from the three maps. Anything else leaves the state as it
 // was. `RoverExec::on_event` proves that its executable results have exactly
@@ -1430,21 +1411,6 @@ pub open spec fn spec_service(config: ServerConfig, state: StateV, now: Time, ev
             if results.len() == 0 { spec_idle(state) } else { results }
         },
         _ => spec_idle(state),
-    }
-}
-
-/// The results of one event at `pid`. A service runs the step. Any other
-/// process leaves its state and sends nothing.
-pub open spec fn spec_step(
-    config: ServerConfig,
-    pid: Pid,
-    state: StateV,
-    now: Time,
-    event: ProcessEvent<Pid, Message>,
-) -> Seq<StepResultV<StateV, Pid, Message>> {
-    match pid {
-        Pid::Service => spec_service(config, state, now, event),
-        Pid::Outside => spec_idle(state),
     }
 }
 

@@ -7,9 +7,9 @@
 //! `(node, op)` it has answered with a stutter. The abstract model is a
 //! different machine. See `simulation`.
 //!
-//! The initial world and the step are here twice: as `initial` and
-//! `on_event`, the Rover model the checker runs, and as `spec_world` and
-//! `spec_step`, the specification.
+//! The initial world has executable and specification forms (`initial` and
+//! `spec_world`). Each `Local` executes as a `RoverProcExec`; its `LocalV`
+//! specification dispatches to `spec_node` or `spec_store`.
 
 use vstd::prelude::*;
 
@@ -17,7 +17,9 @@ use echod_abstract::{BoundaryEvent, Call, Output};
 use echod_rover::rover::semantics::Label;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::semantics::StepResultV;
-use echod_rover::rover::{Process, ProcessEvent, RoverExec, RoverSpec, StepResult};
+use echod_rover::rover::{
+    ProcResult, ProcessEvent, RoverExec, RoverProc, RoverProcExec, RoverSpec,
+};
 use echod_rover::Time;
 
 use echod_types::Response;
@@ -96,6 +98,24 @@ pub struct LogicV {
 pub enum LocalV {
     Node(NodeV),
     Store(StoreV),
+}
+
+impl RoverProc for LocalV {
+    type Config = Fleet;
+    type Pid = Pid;
+    type Message = Message;
+
+    open spec fn on_event(
+        self,
+        _config: Fleet,
+        now: Time,
+        event: ProcessEvent<Pid, Message>,
+    ) -> Seq<StepResultV<LocalV, Pid, Message>> {
+        match self {
+            LocalV::Node(node) => spec_node(node, now, event),
+            LocalV::Store(store) => spec_store(store, event),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,11 +206,11 @@ impl View for Local {
 }
 
 // ---------------------------------------------------------------------------
-// The step, as a specification. `spec_step` is what
-// `RoverSpec::spec_on_event` returns: a node runs one flight, the store
-// applies one call. The executable `on_event` is obliged, by the trait, to
-// return results whose views are this sequence: `Node::step` computes
-// `spec_node` and `Store::step` computes `spec_store`.
+// The process steps as specifications. `LocalV::on_event` dispatches on the
+// model-specific process enum: a node runs one flight, the store applies one
+// call. `RoverProcExec::on_event` proves the executable process returns these
+// results: `Node::step` computes `spec_node` and `Store::step` computes
+// `spec_store`.
 // ---------------------------------------------------------------------------
 
 /// Opaque: the choice is read through the string lemmas alone.
@@ -281,20 +301,6 @@ pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) ->
                 )
             }
         },
-        _ => Seq::empty(),
-    }
-}
-
-pub open spec fn spec_step(
-    _config: Fleet,
-    pid: Pid,
-    state: LocalV,
-    now: Time,
-    event: ProcessEvent<Pid, Message>,
-) -> Seq<StepResultV<LocalV, Pid, Message>> {
-    match (pid, state) {
-        (Pid::Node(_), LocalV::Node(node)) => spec_node(node, now, event),
-        (Pid::Store, LocalV::Store(store)) => spec_store(store, event),
         _ => Seq::empty(),
     }
 }
@@ -425,21 +431,67 @@ impl Store {
     }
 }
 
-/// The store's step, as a process.
-impl Process<(), Pid, Message> for Store {
+impl RoverProcExec for Local {
+    type Spec = LocalV;
+
     fn on_event(
         &self,
-        _config: &(),
-        _now: Time,
+        _config: &Fleet,
+        now: Time,
         event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<(Self, Vec<(Pid, Message)>)> {
-        self.step(event)
+    ) -> Vec<ProcResult<Self>> {
+        let mut results: Vec<ProcResult<Local>> = Vec::new();
+        match self {
+            Local::Node(node) => {
+                let mut pairs = node.step(now, event);
+                let ghost all = pairs@;
+                while pairs.len() > 0
+                    invariant
+                        results@.len() + pairs@.len() == all.len(),
+                        pairs@ == all.skip(results@.len() as int),
+                        forall|i: int| 0 <= i < results@.len() ==> {
+                            let result = #[trigger] results@[i];
+                            StepResultV { state: result.state@, send: result.send@ } == node_results_v(all)[i]
+                        },
+                    decreases pairs@.len(),
+                {
+                    let ghost k = results@.len() as int;
+                    let (node, send) = pairs.remove(0);
+                    proof {
+                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+                    }
+                    results.push(ProcResult { state: Local::Node(node), send });
+                }
+            }
+            Local::Store(store) => {
+                let mut pairs = store.step(event);
+                let ghost all = pairs@;
+                while pairs.len() > 0
+                    invariant
+                        results@.len() + pairs@.len() == all.len(),
+                        pairs@ == all.skip(results@.len() as int),
+                        forall|i: int| 0 <= i < results@.len() ==> {
+                            let result = #[trigger] results@[i];
+                            StepResultV { state: result.state@, send: result.send@ } == store_results_v(all)[i]
+                        },
+                    decreases pairs@.len(),
+                {
+                    let ghost k = results@.len() as int;
+                    let (store, send) = pairs.remove(0);
+                    proof {
+                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+                    }
+                    results.push(ProcResult { state: Local::Store(store), send });
+                }
+            }
+        }
+        results
     }
 }
 
 impl RoverExec for Model {
     type Spec = Spec;
-    type State = Local;
+    type Proc = Local;
 
     open spec fn spec(&self) -> Spec {
         Spec
@@ -502,68 +554,12 @@ impl RoverExec for Model {
         }
     }
 
-    fn on_event(
-        &self,
-        _config: &Fleet,
-        pid: &Pid,
-        state: &Local,
-        now: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<StepResult<Self>> {
-        let mut results: Vec<StepResult<Model>> = Vec::new();
-        match (pid, state) {
-            (Pid::Node(_), Local::Node(node)) => {
-                let mut pairs = node.step(now, event);
-                let ghost all = pairs@;
-                while pairs.len() > 0
-                    invariant
-                        results@.len() + pairs@.len() == all.len(),
-                        pairs@ == all.skip(results@.len() as int),
-                        forall|i: int| 0 <= i < results@.len() ==> {
-                            let result = #[trigger] results@[i];
-                            StepResultV { state: result.state@, send: result.send@ } == node_results_v(all)[i]
-                        },
-                    decreases pairs@.len(),
-                {
-                    let ghost k = results@.len() as int;
-                    let (node, send) = pairs.remove(0);
-                    proof {
-                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-                    }
-                    results.push(StepResult { state: Local::Node(node), send });
-                }
-            }
-            (Pid::Store, Local::Store(store)) => {
-                let mut pairs = store.step(event);
-                let ghost all = pairs@;
-                while pairs.len() > 0
-                    invariant
-                        results@.len() + pairs@.len() == all.len(),
-                        pairs@ == all.skip(results@.len() as int),
-                        forall|i: int| 0 <= i < results@.len() ==> {
-                            let result = #[trigger] results@[i];
-                            StepResultV { state: result.state@, send: result.send@ } == store_results_v(all)[i]
-                        },
-                    decreases pairs@.len(),
-                {
-                    let ghost k = results@.len() as int;
-                    let (store, send) = pairs.remove(0);
-                    proof {
-                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-                    }
-                    results.push(StepResult { state: Local::Store(store), send });
-                }
-            }
-            _ => {}
-        }
-        results
-    }
 }
 
 impl RoverSpec for Spec {
     type Config = Fleet;
     type Pid = Pid;
-    type StateV = LocalV;
+    type Proc = LocalV;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
@@ -580,19 +576,6 @@ impl RoverSpec for Spec {
             Message::Request(_) | Message::Stop => true,
             Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
         }
-    }
-
-    /// One local step. `spec_step` is that transition. The trait's
-    /// `ensures` on `on_event` is the equality with the executable results.
-    open spec fn spec_on_event(
-        &self,
-        config: Fleet,
-        pid: Pid,
-        state: LocalV,
-        now: Time,
-        event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<LocalV, Pid, Message>> {
-        spec_step(config, pid, state, now, event)
     }
 
     /// A call in and an output out. Store traffic and `Stop` stay off the boundary,

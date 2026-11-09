@@ -26,7 +26,7 @@
 use vstd::prelude::*;
 
 use echod_rover::rover::semantics::StepResultV;
-use echod_rover::rover::{ProcessEvent, RoverSpec};
+use echod_rover::rover::{ProcessEvent, RoverProc};
 use echod_rover::Time;
 
 use super::model::{Pid, StateV};
@@ -521,33 +521,15 @@ pub open spec fn step_catalogue(
 /// The exact obligation every allowed `on_event` outcome must discharge.
 pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
     forall|before: StateV, now: Time, event: ProcessEvent<Pid, Message>, i: int|
-        #![trigger super::model::Spec.spec_on_event(
-            config,
-            Pid::Service,
-            before,
-            now,
-            event,
-        )[i]]
+        #![trigger before.on_event(config, now, event)[i]]
         state_catalogue(now, before)
         && 0 <= i
-        && i < super::model::Spec.spec_on_event(
-            config,
-            Pid::Service,
-            before,
-            now,
-            event,
-        ).len()
+        && i < before.on_event(config, now, event).len()
         ==> step_catalogue(
             now,
             before,
             event,
-            super::model::Spec.spec_on_event(
-                config,
-                Pid::Service,
-                before,
-                now,
-                event,
-            )[i],
+            before.on_event(config, now, event)[i],
         )
 }
 

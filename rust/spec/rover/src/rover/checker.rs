@@ -6,7 +6,7 @@
 use crate::Time;
 
 use super::replay::{Action, ActionOf, Certificate, World};
-use super::{BoundaryEvent, ConfigOf, ExecEventOf, ProcessEvent, RoverExec};
+use super::{BoundaryEvent, ConfigOf, ExecEventOf, ProcessEvent, RoverExec, RoverProcExec};
 
 /// Search limits. `max_steps` counts both visible and hidden Rover steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,9 +76,7 @@ fn hidden_actions<M: RoverExec>(world: &World<'_, M>, at: Time) -> Vec<ActionOf<
         );
         let state = &world.process[slot].1;
         for event in events {
-            let outcomes = world
-                .model
-                .on_event(world.config, &process, state, at, &event);
+            let outcomes = state.on_event(world.config, at, &event);
             actions.extend((0..outcomes.len()).map(|outcome| Action::Process {
                 slot,
                 process: process.clone(),

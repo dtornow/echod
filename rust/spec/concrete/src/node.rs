@@ -4381,17 +4381,6 @@ fn results_one(node: Node, send: Vec<(Pid, Message)>) -> (r: Vec<(Node, Vec<(Pid
     r
 }
 
-impl echod_rover::rover::Process<(), Pid, Message> for Node {
-    fn on_event(
-        &self,
-        _config: &(),
-        now: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<(Self, Vec<(Pid, Message)>)> {
-        self.step(now, event)
-    }
-}
-
 } // verus!
 verus! {
 

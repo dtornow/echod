@@ -12,8 +12,8 @@ use crate::Time;
 use super::semantics::{self, Execution, Label, StepResultV, WorldV};
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::{
-    BoundaryEvent, ConfigOf, Envelope, ExecEventOf, MessageOf, PidOf, ProcessEvent, RoverExec,
-    RoverSpec, SpecOf, StateVOf,
+    BoundaryEvent, ConfigOf, Envelope, ExecEventOf, MessageOf, PidOf, ProcOf, ProcessEvent,
+    RoverExec, RoverProc, RoverProcExec, RoverSpec, SpecOf,
 };
 
 verus! {
@@ -56,10 +56,8 @@ pub(crate) open spec fn action_label<M: RoverExec>(
         Action::Inject { recipient, at, message } =>
             Label::Input { recipient, at, message },
         Action::Process { slot, process, at, event, outcome } => {
-            let result = spec.spec_on_event(
+            let result = world.process[slot as int].1.on_event(
                 config,
-                process,
-                world.process[slot as int].1,
                 at,
                 event,
             )[outcome as int];
@@ -86,7 +84,7 @@ pub(crate) open spec fn shown<P, M>(
 pub(crate) struct World<'a, M: RoverExec> {
     pub(crate) model: &'a M,
     pub(crate) config: &'a ConfigOf<M>,
-    pub(crate) process: Vec<(PidOf<M>, M::State)>,
+    pub(crate) process: Vec<(PidOf<M>, M::Proc)>,
     pub(crate) network: Vec<Envelope<PidOf<M>, MessageOf<M>>>,
     pub(crate) now: Time,
 }
@@ -105,9 +103,9 @@ impl<M: RoverExec> View for World<'_, M> {
 
 /// Executable process slots as the mathematical world sees their state views.
 pub(crate) open spec fn process_view<M: RoverExec>(
-    process: Seq<(PidOf<M>, M::State)>,
-) -> Seq<(PidOf<M>, StateVOf<M>)> {
-    process.map_values(|entry: (PidOf<M>, M::State)| (entry.0, entry.1@))
+    process: Seq<(PidOf<M>, M::Proc)>,
+) -> Seq<(PidOf<M>, ProcOf<M>)> {
+    process.map_values(|entry: (PidOf<M>, M::Proc)| (entry.0, entry.1@))
 }
 
 impl<'a, M: RoverExec> World<'a, M> {
@@ -380,15 +378,12 @@ impl<'a, M: RoverExec> World<'a, M> {
                     }
                     assert(semantics::event_valid(self@, *process, *event));
                 }
-                let ghost spec_outcomes = self.model.spec().spec_on_event(
+                let ghost spec_outcomes = state@.on_event(
                     *self.config,
-                    *process,
-                    state@,
                     *at,
                     *event,
                 );
-                let mut outcomes =
-                    self.model.on_event(self.config, process, &state, *at, event);
+                let mut outcomes = state.on_event(self.config, *at, event);
                 if *outcome >= outcomes.len() {
                     return Err(());
                 }
@@ -435,21 +430,91 @@ impl<'a, M: RoverExec> World<'a, M> {
                         selected_v,
                     ));
                     assert(before == original);
+                    assert(original.now <= *at);
+                    assert(semantics::is_process(
+                        self.model.spec(),
+                        original,
+                        *process,
+                    ));
+                    assert(semantics::event_valid(original, *process, *event));
+                    assert(original.process[*slot as int].0 == *process);
                     assert(exists|i: int| 0 <= i < original.process.len()
                         && #[trigger] original.process[i].0 == *process) by {
                         assert(0 <= *slot as int);
                         assert((*slot as int) < original.process.len());
                     }
+                    assert(0 <= *outcome as int && (*outcome as int)
+                        < original.process[*slot as int].1.on_event(
+                            *self.config,
+                            *at,
+                            *event,
+                        ).len());
+                    assert(original.process[*slot as int].1.on_event(
+                        *self.config,
+                        *at,
+                        *event,
+                    )[*outcome as int] == selected_v);
+                    let label = action_label::<M>(
+                        self.model.spec(),
+                        *self.config,
+                        original,
+                        *action,
+                    );
+                    assert(label == Label::Process {
+                        process: *process,
+                        at: *at,
+                        event: *event,
+                        send: selected_v.send,
+                    });
+                    assert(exists|i: int, j: int|
+                        #![trigger original.process[i].1.on_event(
+                            *self.config,
+                            *at,
+                            *event,
+                        )[j]]
+                    {
+                        &&& 0 <= i < original.process.len()
+                        &&& original.process[i].0 == *process
+                        &&& {
+                            let outcomes = original.process[i].1.on_event(
+                                *self.config,
+                                *at,
+                                *event,
+                            );
+                            &&& 0 <= j < outcomes.len()
+                            &&& outcomes[j].send == selected_v.send
+                            &&& self@ == semantics::land(
+                                original,
+                                i,
+                                *process,
+                                *at,
+                                outcomes[j],
+                            )
+                        }
+                    }) by {
+                        assert(self@ == semantics::land(
+                            original,
+                            *slot as int,
+                            *process,
+                            *at,
+                            selected_v,
+                        ));
+                    }
+                    semantics::process_step(
+                        self.model.spec(),
+                        *self.config,
+                        original,
+                        *slot as int,
+                        *at,
+                        *event,
+                        *outcome as int,
+                    );
+                    reveal(semantics::step);
                     assert(semantics::step(
                         self.model.spec(),
                         *self.config,
                         original,
-                        action_label::<M>(
-                            self.model.spec(),
-                            *self.config,
-                            original,
-                            *action,
-                        ),
+                        label,
                         self@,
                     ));
                     assert(shown(*action) is None);

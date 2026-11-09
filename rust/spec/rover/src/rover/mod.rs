@@ -43,10 +43,13 @@ pub enum ProcessEvent<P, M> {
     Timeout,
 }
 
-/// One possible local transition result.
-pub struct StepResult<M: RoverExec + ?Sized> {
-    pub state: M::State,
-    pub send: Vec<(PidOf<M>, MessageOf<M>)>,
+/// One possible transition result of one executable process.
+pub struct ProcResult<P: RoverProcExec> {
+    pub state: P,
+    pub send: Vec<(
+        <P::Spec as RoverProc>::Pid,
+        <P::Spec as RoverProc>::Message,
+    )>,
 }
 
 /// An event at the system boundary. Process sends remain hidden until a
@@ -67,14 +70,58 @@ impl<P, M> BoundaryEvent<P, M> {
     }
 }
 
+/// One stateful process in a Rover world.
+///
+/// A model-specific enum can implement this trait to present heterogeneous
+/// process kinds as one homogeneous process type. The process value is its
+/// complete local state; an outcome carries the next complete value.
+pub trait RoverProc: Sized {
+    type Config;
+    type Pid: Data;
+    type Message: Data;
+
+    spec fn on_event(
+        self,
+        config: Self::Config,
+        now: Time,
+        event: ProcessEvent<Self::Pid, Self::Message>,
+    ) -> Seq<semantics::StepResultV<Self, Self::Pid, Self::Message>>;
+}
+
+/// A stateful executable process proved to realize one [`RoverProc`].
+pub trait RoverProcExec:
+    Sized + Clone + Eq + std::fmt::Debug + View<V = Self::Spec>
+{
+    type Spec: RoverProc;
+
+    fn on_event(
+        &self,
+        config: &<Self::Spec as RoverProc>::Config,
+        now: Time,
+        event: &ProcessEvent<
+            <Self::Spec as RoverProc>::Pid,
+            <Self::Spec as RoverProc>::Message,
+        >,
+    ) -> (r: Vec<ProcResult<Self>>)
+        ensures
+            r@.len() == self@.on_event(*config, now, *event).len(),
+            forall|i: int| 0 <= i < r@.len() ==> {
+                let result = #[trigger] r@[i];
+                semantics::StepResultV {
+                    state: result.state@,
+                    send: result.send@,
+                } == self@.on_event(*config, now, *event)[i]
+            };
+}
+
 /// The mathematical protocol interpreted by the Rover world.
 ///
 /// Semantics and refinement depend only on this trait. Its methods are ghost
 /// code and impose no executable state representation on a model.
-pub trait RoverSpec {
+pub trait RoverSpec: Sized {
     type Config;
     type Pid: Data;
-    type StateV;
+    type Proc: RoverProc<Config = Self::Config, Pid = Self::Pid, Message = Self::Message>;
     type Message: Data;
     /// The only values refinement and clients observe. Internal process ids
     /// and messages do not appear here.
@@ -86,7 +133,7 @@ pub trait RoverSpec {
     }
 
     /// All process-local initial states.
-    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::StateV)> {
+    open spec fn spec_initial(&self, config: Self::Config) -> Seq<(Self::Pid, Self::Proc)> {
         arbitrary()
     }
 
@@ -96,23 +143,78 @@ pub trait RoverSpec {
     }
 
     /// Every possible result of one local process event.
-    open spec fn spec_on_event(
-        &self,
-        config: Self::Config,
-        pid: Self::Pid,
-        state: Self::StateV,
-        now: Time,
-        event: ProcessEvent<Self::Pid, Self::Message>,
-    ) -> Seq<semantics::StepResultV<Self::StateV, Self::Pid, Self::Message>> {
-        arbitrary()
-    }
-
     /// Project one world label to zero or more clean boundary observations.
     open spec fn spec_observe(
         &self,
         label: semantics::Lab<Self>,
     ) -> Seq<Self::Boundary> {
         arbitrary()
+    }
+
+    /// Build the complete Rover world around this model's processes.
+    open spec fn init(self, config: Self::Config) -> semantics::World<Self> {
+        semantics::WorldV {
+            process: self.spec_initial(config),
+            network: Seq::empty(),
+            now: 0,
+        }
+    }
+
+    /// One complete world step: input, process delivery, or outside
+    /// observation. Process delivery selects a process and invokes its
+    /// stateful [`RoverProc::on_event`].
+    open spec fn step(
+        self,
+        config: Self::Config,
+        before: semantics::World<Self>,
+        label: semantics::Lab<Self>,
+        after: semantics::World<Self>,
+    ) -> bool {
+        match label {
+            semantics::Label::Input { recipient, at, message } => {
+                &&& before.now <= at
+                &&& recipient != self.spec_outside()
+                &&& exists|i: int| 0 <= i < before.process.len()
+                    && #[trigger] before.process[i].0 == recipient
+                &&& self.spec_injectable(config, message)
+                &&& after == semantics::inject(
+                    before,
+                    self.spec_outside(),
+                    recipient,
+                    at,
+                    message,
+                )
+            }
+            semantics::Label::Process { process, at, event, send } => {
+                &&& before.now <= at
+                &&& process != self.spec_outside()
+                &&& semantics::event_valid(before, process, event)
+                &&& exists|i: int, j: int|
+                    #![trigger before.process[i].1.on_event(config, at, event)[j]]
+                {
+                    &&& 0 <= i < before.process.len()
+                    &&& before.process[i].0 == process
+                    &&& {
+                        let outcomes = before.process[i].1.on_event(config, at, event);
+                        &&& 0 <= j < outcomes.len()
+                        &&& outcomes[j].send == send
+                        &&& after == semantics::land(before, i, process, at, outcomes[j])
+                    }
+                }
+            }
+            semantics::Label::Outside { sender, at, message } => {
+                &&& before.now <= at
+                &&& exists|i: int| {
+                    &&& 0 <= i < before.network.len()
+                    &&& #[trigger] before.network[i] == Envelope {
+                        sender,
+                        recipient: self.spec_outside(),
+                        message,
+                    }
+                }
+                &&& after == semantics::observe_outside(before, at)
+            }
+        }
     }
 }
 
@@ -124,7 +226,7 @@ pub trait RoverSpec {
 /// there.
 pub trait RoverExec {
     type Spec: RoverSpec;
-    type State: Clone + Eq + std::fmt::Debug + View<V = <Self::Spec as RoverSpec>::StateV>;
+    type Proc: RoverProcExec<Spec = <Self::Spec as RoverSpec>::Proc>;
 
     /// The mathematical model this value executes.
     spec fn spec(&self) -> Self::Spec;
@@ -137,11 +239,11 @@ pub trait RoverExec {
     /// All process-local initial states. Slots make process lookup executable;
     /// process ids should be unique. The outside endpoint is never stepped,
     /// even if a malformed model includes it in this list.
-    fn initial(&self, config: &ConfigOf<Self>) -> (r: Vec<(PidOf<Self>, Self::State)>)
+    fn initial(&self, config: &ConfigOf<Self>) -> (r: Vec<(PidOf<Self>, Self::Proc)>)
         ensures
-            r@.map_values(|entry: (PidOf<Self>, Self::State)| (entry.0, entry.1@))
+            r@.map_values(|entry: (PidOf<Self>, Self::Proc)| (entry.0, entry.1@))
                 == self.spec().spec_initial(*config),
-            r@.map_values(|entry: (PidOf<Self>, Self::State)| entry.0).no_duplicates(),
+            r@.map_values(|entry: (PidOf<Self>, Self::Proc)| entry.0).no_duplicates(),
             forall|i: int| 0 <= i < r@.len() ==> #[trigger] r@[i].0 != self.spec().spec_outside();
 
     /// Which messages the environment may inject.
@@ -149,41 +251,6 @@ pub trait RoverExec {
         ensures
             r == self.spec().spec_injectable(*config, *message);
 
-    /// Every possible result of one local process event. Unlike Lean's
-    /// `Outcomes`, an empty result is admitted here and means the event is
-    /// disabled; models that need input-enabledness prove non-emptiness.
-    fn on_event(
-        &self,
-        config: &ConfigOf<Self>,
-        pid: &PidOf<Self>,
-        state: &Self::State,
-        now: Time,
-        event: &ProcessEvent<PidOf<Self>, MessageOf<Self>>,
-    ) -> (r: Vec<StepResult<Self>>)
-        ensures
-            r@.len() == self.spec().spec_on_event(*config, *pid, state@, now, *event).len(),
-            forall|i: int| 0 <= i < r@.len() ==> {
-                let result = #[trigger] r@[i];
-                semantics::StepResultV {
-                    state: result.state@,
-                    send: result.send@,
-                } == self.spec().spec_on_event(*config, *pid, state@, now, *event)[i]
-            };
-
-}
-
-/// One process in a [`RoverExec`].
-///
-/// Every process in a model shares that model's `Pid` and `Message`. `on_event`
-/// returns the next instance and the messages it sends. `Config` is the model's
-/// configuration; a process that already holds what it needs takes `()`.
-pub trait Process<Config, Pid, Message> {
-    fn on_event(
-        &self,
-        config: &Config,
-        now: crate::Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> (r: Vec<(Self, Vec<(Pid, Message)>)>) where Self: Sized;
 }
 
 } // verus!
@@ -195,7 +262,9 @@ pub type EventOf<M> = BoundaryEvent<<M as RoverSpec>::Pid, <M as RoverSpec>::Mes
 pub type SpecOf<M> = <M as RoverExec>::Spec;
 pub type ConfigOf<M> = <SpecOf<M> as RoverSpec>::Config;
 pub type PidOf<M> = <SpecOf<M> as RoverSpec>::Pid;
-pub type StateVOf<M> = <SpecOf<M> as RoverSpec>::StateV;
+pub type ProcOf<M> = <SpecOf<M> as RoverSpec>::Proc;
 pub type MessageOf<M> = <SpecOf<M> as RoverSpec>::Message;
 pub type BoundaryOf<M> = <SpecOf<M> as RoverSpec>::Boundary;
 pub type ExecEventOf<M> = EventOf<SpecOf<M>>;
+pub type ExecProcOf<M> = <M as RoverExec>::Proc;
+pub type StepResult<M> = ProcResult<ExecProcOf<M>>;
