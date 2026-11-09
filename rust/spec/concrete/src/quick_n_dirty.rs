@@ -1996,8 +1996,8 @@ pub proof fn lemma_sweep_keeps_domain(
 
 /// Inserting a schedule occurrence into a closed workflow preserves every
 /// relaxed workflow clause.  The schedule validity condition excludes the
-/// invalid target+timer tag combination; due insertion and retry dispatch are
-/// closed by the caller's following sweep.
+/// invalid target+timer tag combination; the occurrence transition's atomic
+/// post-insertion bulk phase closes due insertion and retry dispatch.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(10)]
 pub proof fn lemma_occurrence_preserves_relaxed(
