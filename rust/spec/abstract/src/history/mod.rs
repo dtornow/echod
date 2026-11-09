@@ -1,14 +1,13 @@
-//! Adapter from the protocol model to the client-history checker.
+//! History traces and model-driven request generation.
 //!
-//! This module converts handler outcomes to checker outcomes, declares
-//! coverage marks, and suggests requests worth trying next. None of it
-//! decides protocol behavior.
+//! None of this decides protocol behavior.
 
-use vstd::prelude::*;
-
-use echod_rover::{
-    Action, Explore, ExternalOutcome, InternalOutcome, Model, Sched, Time,
+use echod_rover::rover::comm::Time;
+use echod_rover::rover::comm::{
+    BoundaryEvent as RoverBoundaryEvent, ProcessEvent,
 };
+use echod_rover::rover::RoverExec::Action as ExecAction;
+use std::collections::BTreeMap;
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
     PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq, ScheduleDeleteReq,
@@ -17,14 +16,152 @@ use echod_types::{
     TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
 
-mod footprint;
-
-pub use footprint::{next_cron, Key};
-
 use super::machine::*;
-use footprint::origin;
-#[cfg(verus_keep_ghost)]
-use super::view::{as_sched, group_views, sched_v, works};
+use super::model::Pid;
+use super::protocol::{Call, Message, Output};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action<X> {
+    Request(X),
+    Clock(Time),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryEvent {
+    Invoke { call: u64, req: Request },
+    Return { call: u64, res: Response },
+    Receive { msg: Dispatch },
+    Clock { at: Time },
+}
+
+pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
+    echod_cron::next_run_at(cron, after_ms)
+}
+
+fn origin(id: &str) -> &str {
+    echod_types::origin_of(id)
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig { retry_timeout: 5_000 }
+    }
+}
+
+pub fn rover_trace(history: &[HistoryEvent]) -> Vec<RoverBoundaryEvent<Pid, Message>> {
+    let mut now = 0;
+    let mut trace = Vec::with_capacity(history.len());
+    for event in history {
+        match event {
+            HistoryEvent::Clock { at } => {
+                now = *at;
+                trace.push(RoverBoundaryEvent::Clock { at: *at });
+            }
+            HistoryEvent::Invoke { call, req } => {
+                trace.push(RoverBoundaryEvent::Input {
+                    recipient: Pid::Service,
+                    at: now,
+                    message: Message::Request(Call {
+                        client: "history".into(),
+                        id: *call,
+                        request: req.clone(),
+                    }),
+                });
+            }
+            HistoryEvent::Return { call, res } => {
+                trace.push(RoverBoundaryEvent::Output {
+                    sender: Pid::Service,
+                    at: now,
+                    message: Message::Output(Output::Response {
+                        client: "history".into(),
+                        id: *call,
+                        response: res.clone(),
+                    }),
+                });
+            }
+            HistoryEvent::Receive { msg } => {
+                trace.push(RoverBoundaryEvent::Output {
+                    sender: Pid::Service,
+                    at: now,
+                    message: Message::Output(Output::Dispatch(msg.clone())),
+                });
+            }
+        }
+    }
+    trace
+}
+
+pub fn history_rank(
+    target: &RoverBoundaryEvent<Pid, Message>,
+    action: &ExecAction<Pid, Message>,
+    sent: &[echod_rover::rover::comm::Envelope<Pid, Message>],
+    expected: &BTreeMap<u64, Response>,
+) -> usize {
+    match (target, action) {
+        (
+            RoverBoundaryEvent::Input {
+                message: Message::Request(target),
+                ..
+            },
+            ExecAction::Process {
+                event: ProcessEvent::Receive {
+                    message: Message::Request(call),
+                    ..
+                },
+                ..
+            },
+        ) if call.id == target.id => {
+            let response = sent.iter().find_map(|envelope| match &envelope.message {
+                Message::Output(Output::Response { id, response, .. })
+                    if *id == target.id =>
+                {
+                    Some(response)
+                }
+                _ => None,
+            });
+            match (expected.get(&target.id), response) {
+                (Some(want), Some(have)) if want == have => 0,
+                (_, Some(_)) => 1,
+                _ => 2,
+            }
+        }
+        (
+            RoverBoundaryEvent::Output {
+                message: Message::Output(Output::Response { id, .. }),
+                ..
+            },
+            ExecAction::Process {
+                event: ProcessEvent::Receive {
+                    message: Message::Request(call),
+                    ..
+                },
+                ..
+            },
+        ) if call.id == *id => 0,
+        (
+            RoverBoundaryEvent::Output {
+                message: Message::Output(Output::Dispatch(_)),
+                ..
+            },
+            ExecAction::Process {
+                event: ProcessEvent::Receive { .. },
+                ..
+            },
+        ) => 0,
+        (_, ExecAction::Process { event: ProcessEvent::Receive { .. }, .. }) => 1,
+        (_, ExecAction::Process { event: ProcessEvent::Timeout, .. }) => 2,
+        _ => 3,
+    }
+}
+
+pub fn history_responses(history: &[HistoryEvent]) -> BTreeMap<u64, Response> {
+    history
+        .iter()
+        .filter_map(|event| match event {
+            HistoryEvent::Return { call, res } => Some((*call, res.clone())),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `resonate_marks.rs` checks it against `machine`.
@@ -165,13 +302,13 @@ fn suspend(id: &Id, version: u64, awaited: &Id) -> Request {
     Request::TaskSuspend(TaskSuspendReq { id: id.clone(), version, actions: vec![PromiseRegisterCallbackReq { awaited: awaited.clone(), awaiter: id.clone() }] })
 }
 
-impl Explore for ServerConfig {
+impl ServerConfig {
     /// Actions that reach the edges of what the state allows: fences and
     /// heartbeats at the current version and a stale one, the clock moved to
     /// just before and exactly at each deadline, promises settled while a task
     /// awaits them, settles and creates repeated, halts and continues in every
     /// task state, schedules fired and deleted.
-    fn suggest(&self, s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
+    pub fn suggest(&self, s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
         let mut out = Vec::new();
         let mut push = |a, why| out.push((a, why));
         let siblings = |id: &Id| -> Vec<&Id> { s.promises.iter().map(|(k, _)| k).filter(|k| *k != id && origin(k) == origin(id)).collect() };
@@ -292,14 +429,14 @@ impl Explore for ServerConfig {
         out
     }
 
-    fn arbitrary(&self, _s: &Store, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
+    pub fn arbitrary(&self, _s: &Store, now: Time, pick: &mut dyn FnMut(usize) -> usize) -> Action<Request> {
         random_action(pick, now)
     }
 
     /// Read everything, delete every schedule (or it fires forever), move the
     /// clock past every deadline, so every timer must have fired and every
     /// task is done, and read again.
-    fn finish(&self, s: &Store, now: Time) -> Vec<Action<Request>> {
+    pub fn finish(&self, s: &Store, now: Time) -> Vec<Action<Request>> {
         let reads = || {
             IDS.iter()
                 .flat_map(|id| [Request::TaskGet(TaskGetReq { id: id.to_string() }), Request::PromiseGet(PromiseGetReq { id: id.to_string() })])
@@ -390,99 +527,3 @@ fn random_action(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Action<Re
     };
     Action::Request(req)
 }
-
-verus! {
-
-fn sched(work: Work) -> (scheduled: Sched<Work>)
-    ensures
-        sched_v(scheduled) == as_sched(work),
-{
-    match &work {
-        Work::Occurrence { at, .. } => Sched::Timer(*at, work),
-        _ => Sched::Later(work),
-    }
-}
-
-fn items(mut work: Vec<Work>) -> (scheduled: Vec<Sched<Work>>)
-    ensures
-        scheduled@.map_values(|item: Sched<Work>| sched_v(item)) == works(work@),
-{
-    let ghost all = work@;
-    let mut scheduled: Vec<Sched<Work>> = Vec::new();
-    while !work.is_empty()
-        invariant
-            scheduled@.len() + work@.len() == all.len(),
-            work@ == all.skip(scheduled@.len() as int),
-            scheduled@.map_values(|item: Sched<Work>| sched_v(item))
-                == works(all.take(scheduled@.len() as int)),
-        decreases work@.len(),
-    {
-        broadcast use group_views;
-        let ghost k = scheduled@.len() as int;
-        let item = work.remove(0);
-        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-        assert(all.take(k + 1) =~= all.take(k).push(all[k]));
-        scheduled.push(sched(item));
-    }
-    assert(all.take(all.len() as int) =~= all);
-    scheduled
-}
-
-impl Model for ServerConfig {
-    type State = Store;
-    type External = Request;
-    type Response = Response;
-    type Internal = Work;
-    type Dispatch = Dispatch;
-
-    fn external(
-        &self,
-        request: &Request,
-        state: &Store,
-        now: Time,
-    ) -> (results: Vec<ExternalOutcome<Self>>) {
-        let mut outcomes = self.handler(request, state, now);
-        let mut results: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
-        while !outcomes.is_empty()
-            decreases outcomes@.len(),
-        {
-            let outcome = outcomes.remove(0);
-            let Out { resp, next, work, send, marks } = outcome;
-            results.push(ExternalOutcome {
-                next,
-                resp,
-                work: items(work),
-                send,
-                marks,
-            });
-        }
-        results
-    }
-
-    fn internal(
-        &self,
-        work: &Work,
-        state: &Store,
-        now: Time,
-    ) -> (results: Vec<InternalOutcome<Self>>) {
-        let outcome = self.process_work(work, state, now);
-        let mut results: Vec<InternalOutcome<ServerConfig>> = Vec::new();
-        if outcome.not_due {
-            return results;
-        }
-        let InOut { next, work, send, marks, not_due: _ } = outcome;
-        results.push(InternalOutcome {
-            next,
-            work: items(work),
-            send,
-            marks,
-        });
-        results
-    }
-
-    fn due(&self, state: &Store, now: Time) -> (work: Vec<Sched<Work>>) {
-        footprint::timeout_work(self, state, now)
-    }
-}
-
-} // verus!

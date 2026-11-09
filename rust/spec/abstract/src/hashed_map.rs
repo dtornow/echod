@@ -58,34 +58,8 @@ impl<K: Ord + Clone + Hash, V: Clone + Hash> HashedMap<K, V> {
         Some(old)
     }
 
-    /// Changes one value in place: `f` gets a copy and the result is stored.
-    pub fn update<Q>(&mut self, k: &Q, f: impl FnOnce(&mut V)) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let Some((key, mut v)) = self.map.get_key_value(k).map(|(k, v)| (k.clone(), v.clone())) else {
-            return false;
-        };
-        f(&mut v);
-        self.insert(key, v);
-        true
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.map.iter()
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &K> {
-        self.map.keys()
     }
 }
 
@@ -150,7 +124,7 @@ mod tests {
         a.insert(9, 20);
         b.insert(9, 20);
         b.insert(7, 5);
-        b.update(&7, |v| *v += 5);
+        b.insert(7, 10);
         b.insert(500, 1);
         b.remove(&500);
         assert_eq!(a, b);

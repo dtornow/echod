@@ -27,7 +27,7 @@ use vstd::prelude::*;
 
 use echod_rover::rover::comm::ProcessEvent;
 use echod_rover::rover::RoverSpec::{Proc, StepResultV};
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 
 use super::model::{Pid, StateV};
 #[cfg(verus_keep_ghost)]

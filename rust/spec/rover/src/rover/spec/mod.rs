@@ -4,9 +4,7 @@
 
 use vstd::prelude::*;
 
-use crate::{Data, Time};
-
-use super::comm::{BoundaryEvent, Envelope, ProcessEvent};
+use super::comm::{BoundaryEvent, Data, Envelope, ProcessEvent, Time};
 
 pub mod refinement;
 
@@ -85,6 +83,9 @@ pub enum Label<P, M> {
         sender: P,
         at: Time,
         message: M,
+    },
+    Clock {
+        at: Time,
     },
 }
 
@@ -224,6 +225,10 @@ impl<M: Spec> State<M> {
             }
             &&& next == observe_outside(world, at)
         }
+        Label::Clock { at } => {
+            &&& world.now <= at
+            &&& next == observe_outside(world, at)
+        }
         }
     }
 }
@@ -312,6 +317,7 @@ pub open spec fn observe<P, M>(label: Label<P, M>) -> Seq<BoundaryEvent<P, M>> {
         Label::Process { .. } => Seq::empty(),
         Label::Outside { sender, at, message } =>
             seq![BoundaryEvent::Output { sender, at, message }],
+        Label::Clock { at } => seq![BoundaryEvent::Clock { at }],
     }
 }
 
@@ -460,6 +466,13 @@ pub proof fn step_preserves_network<M: Spec>(
                 after.network == before.network + suffix);
         }
         Label::Outside { .. } => {
+            assert(after.network == before.network);
+            let suffix = Seq::<Envelope<M::Pid, M::Message>>::empty();
+            assert(after.network == before.network + suffix);
+            assert(exists|suffix: Seq<Envelope<M::Pid, M::Message>>|
+                after.network == before.network + suffix);
+        }
+        Label::Clock { .. } => {
             assert(after.network == before.network);
             let suffix = Seq::<Envelope<M::Pid, M::Message>>::empty();
             assert(after.network == before.network + suffix);

@@ -61,7 +61,7 @@ use echod_abstract::view::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{
     origin, PromiseRegisterCallbackReq, PromiseRes, PromiseState, Request, Response,

@@ -146,22 +146,12 @@ shows the panels with data.
 
 ## Smaller items
 
-- **Checker time on long histories.** The black-box trace leaves the
-  checker a choice per open write per clock instant: a settle in flight
-  across three instants may have landed at any of them, each a different
-  `settled_at`, until its return says. Several open writes on one origin
-  multiply, and a seed with many concurrent clients on few origins can
-  exceed the profile's width or the budget (`--budget`), which turn the
-  blowup into a report rather than a hang. The clock moves only to the
-  instants the nodes stamp at, clients back off, the checker is told which
-  calls never return and stale schedule work is a no-op, which keeps it
-  narrower: eleven of fifteen seeds decide in seconds, the rest give up
-  undecided, none refuted. The next lever is a client's knowledge that a
-  failed call is over: the node answered unavailable or the connection
-  dropped at an instant, after which the call's effect can land only
-  within the store's latency; told so, the checker would stop placing it
-  at every later instant. Fewer clients per origin or coarser clocks would
-  keep it narrower still.
+- **Checker time on long histories.** Client histories now feed Rover's
+  executable search directly. Inputs are tried at their arrival instant,
+  expected responses guide outcome order, and an explicit beam bounds
+  concurrent alternatives. Exhausting the step/node bounds is reported as
+  `undecided`, never as a refutation. The next lever is a persistent,
+  model-independent state key for deduplicating equivalent beam entries.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate

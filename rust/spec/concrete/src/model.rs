@@ -20,7 +20,7 @@ use RoverExec::ProcResult;
 use RoverSpec::Label;
 #[cfg(verus_keep_ghost)]
 use RoverSpec::StepResultV;
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 
 use echod_types::Response;
 
@@ -460,7 +460,11 @@ impl RoverExec::Proc for Local {
                     proof {
                         assert(all.skip(k).remove(0) =~= all.skip(k + 1));
                     }
-                    results.push(ProcResult { state: Local::Node(node), send });
+                    results.push(ProcResult {
+                        state: Local::Node(node),
+                        send,
+                        marks: Vec::new(),
+                    });
                 }
             }
             Local::Store(store) => {
@@ -481,7 +485,11 @@ impl RoverExec::Proc for Local {
                     proof {
                         assert(all.skip(k).remove(0) =~= all.skip(k + 1));
                     }
-                    results.push(ProcResult { state: Local::Store(store), send });
+                    results.push(ProcResult {
+                        state: Local::Store(store),
+                        send,
+                        marks: Vec::new(),
+                    });
                 }
             }
         }

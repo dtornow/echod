@@ -49,7 +49,7 @@ use echod_rover::rover::comm::Envelope;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::{is_process, Spec, State};
 #[cfg(verus_keep_ghost)]
-use echod_rover::Sched;
+use echod_rover::rover::comm::Sched;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, Request, Response};
 

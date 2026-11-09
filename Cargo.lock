@@ -1098,6 +1098,7 @@ dependencies = [
  "echod-cron",
  "echod-rover",
  "echod-types",
+ "imbl",
  "vstd",
 ]
 
@@ -1171,7 +1172,6 @@ name = "echod-rover"
 version = "0.1.0"
 dependencies = [
  "echod-abstract",
- "imbl",
  "vstd",
 ]
 

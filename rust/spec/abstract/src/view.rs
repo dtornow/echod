@@ -19,7 +19,7 @@
 
 use vstd::prelude::*;
 
-use echod_rover::Sched;
+use echod_rover::rover::comm::Sched;
 
 use echod_types::{
     PromiseRecord, PromiseState, Response, Schedule, Tags, TaskRecord, TaskState, Value,

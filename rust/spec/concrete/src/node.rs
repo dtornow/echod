@@ -37,7 +37,7 @@ use echod_abstract::{Call, Dispatch, Output};
 use echod_rover::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::StepResultV;
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, AValue};
 

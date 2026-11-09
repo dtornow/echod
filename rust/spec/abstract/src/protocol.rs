@@ -2,7 +2,7 @@
 
 use vstd::prelude::*;
 
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 
 use echod_types::{Request, Response};
 

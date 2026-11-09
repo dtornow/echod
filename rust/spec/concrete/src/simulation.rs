@@ -73,7 +73,7 @@ use echod_rover::rover::RoverSpec::{
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::{Envelope, ProcessEvent};
 #[cfg(verus_keep_ghost)]
-use echod_rover::{Sched, Time};
+use echod_rover::rover::comm::{Sched, Time};
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, Response};
 #[cfg(verus_keep_ghost)]
@@ -4551,6 +4551,25 @@ pub proof fn lemma_step(
             ca,
         ),
         Label::Outside { sender, at, message } => lemma_outside(fleet, config, cb, ab, sender, at, message, ca),
+        Label::Clock { .. } => {
+            reveal(State::step);
+            assert(ca.process == cb.process);
+            assert(ca.network == cb.network);
+            lemma_empty_matches(config, ab);
+            assert(concrete_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
+            lemma_matches_same_visible(
+                config,
+                ab,
+                Seq::<BoundaryEvent>::empty(),
+                concrete_model().observe(label),
+                ab,
+            );
+            lemma_extends_refl(ab.network);
+            lemma_extends_refl(cb.network);
+            lemma_invariant_grow(fleet, cb, ca);
+            lemma_carry(fleet, cb, ab, ca, ab);
+            ab
+        },
     }
 }
 

@@ -45,7 +45,7 @@ use echod_abstract::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore,
 #[cfg(verus_keep_ghost)]
 use echod_abstract::ServerConfig;
 #[cfg(verus_keep_ghost)]
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{
     origin, PromiseState, Request, Response, same_origin_spec, Schedule, Tags, TaskState, Value,

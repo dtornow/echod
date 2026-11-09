@@ -3,7 +3,7 @@
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
 use echod_rover::rover::{RoverExec, RoverSpec};
 use RoverExec::{check, replay, Action, CheckConfig, ProcResult};
-use echod_rover::Time;
+use echod_rover::rover::comm::Time;
 use vstd::prelude::View;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -61,6 +61,7 @@ impl RoverExec::Proc for CounterState {
                 vec![ProcResult {
                     state: CounterState(next),
                     send: vec![(Pid::Outside, Message::Value(next))],
+                    marks: Vec::new(),
                 }]
             }
             _ => Vec::new(),
@@ -136,6 +137,31 @@ fn output(at: Time, value: u64) -> Event {
 }
 
 #[test]
+fn clock_events_move_time_without_observing_a_process() {
+    let trace = [
+        Event::Clock { at: 5 },
+        input(5, 3),
+        output(5, 3),
+    ];
+    assert!(check(
+        &Counter,
+        &(),
+        &trace,
+        CheckConfig::for_trace_len(trace.len()),
+    )
+    .is_some());
+
+    let backwards = [Event::Clock { at: 5 }, Event::Clock { at: 4 }];
+    assert!(check(
+        &Counter,
+        &(),
+        &backwards,
+        CheckConfig::for_trace_len(backwards.len()),
+    )
+    .is_none());
+}
+
+#[test]
 fn check_finds_and_replays_a_valid_trace() {
     let trace = [input(0, 3), output(1, 3)];
     let certificate = check(
@@ -168,32 +194,32 @@ fn append_only_delivery_can_be_duplicated() {
     // The same injected request is received twice. Receiving never consumes
     // its network envelope, so the two hidden steps produce values 2 and 4.
     let trace = [input(0, 2), output(1, 2), output(2, 4)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 6 }).is_some());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 6, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn append_only_output_can_be_observed_twice() {
     let trace = [input(0, 2), output(1, 2), output(2, 2)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4 }).is_some());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn outputs_can_be_observed_in_a_different_order() {
     let trace = [input(0, 1), input(0, 10), output(1, 11), output(2, 1)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 8 }).is_some());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn replay_rejects_nonmonotone_time() {
     let trace = [input(2, 1), output(1, 1)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4 }).is_none());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_none());
 }
 
 #[test]
 fn a_bound_limits_search_without_claiming_invalidity() {
     let trace = [input(0, 3), output(1, 3)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 2 }).is_none());
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 3 }).is_some());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 2, max_nodes: 100_000 }).is_none());
+    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 3, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
@@ -238,6 +264,6 @@ fn injection_checks_the_boundary_policy_and_recipient() {
         message: Message::Add(7),
     }];
 
-    assert!(check(&Counter, &(), &noninjectable, CheckConfig { max_steps: 1 }).is_none());
-    assert!(check(&Counter, &(), &outside, CheckConfig { max_steps: 1 }).is_none());
+    assert!(check(&Counter, &(), &noninjectable, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
+    assert!(check(&Counter, &(), &outside, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
 }

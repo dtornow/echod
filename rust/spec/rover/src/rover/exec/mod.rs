@@ -2,16 +2,14 @@
 
 use vstd::prelude::*;
 
-use crate::Time;
-
-use super::comm::ProcessEvent;
+use super::comm::{ProcessEvent, Time};
 use super::spec::{Proc as SpecProc, Spec as SpecModel};
 
 mod checker;
 mod replay;
 
-pub use checker::{check, search, CheckConfig};
-pub use replay::{replay, Action, Certificate};
+pub use checker::{check, check_guided, search, CheckConfig};
+pub use replay::{marks, replay, Action, Certificate};
 
 verus! {
 
@@ -22,6 +20,8 @@ pub struct ProcResult<P: Proc> {
         <P::Spec as SpecProc>::Pid,
         <P::Spec as SpecProc>::Message,
     )>,
+    /// Coverage labels; erased from the mathematical process result.
+    pub marks: Vec<&'static str>,
 }
 
 /// A stateful executable process proved to realize one [`SpecProc`].

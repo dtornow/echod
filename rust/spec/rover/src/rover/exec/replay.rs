@@ -5,8 +5,7 @@
 
 use vstd::prelude::*;
 
-use crate::certificate::trusted::{copy, same};
-use crate::Time;
+use std::collections::BTreeSet;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::super::spec::{
@@ -14,11 +13,27 @@ use super::super::spec::{
 };
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::{Proc as ExecProc, Spec as ExecSpec};
-use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
+use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent, Time};
 #[allow(unused_imports)]
 use super::super::spec::{Proc as SpecProc, Spec as SpecModel};
 
 verus! {
+
+#[verifier::external_body]
+fn copy<T: Clone>(value: &T) -> (copy: T)
+    ensures
+        copy == *value,
+{
+    value.clone()
+}
+
+#[verifier::external_body]
+fn same<T: PartialEq>(left: &T, right: &T) -> (equal: bool)
+    ensures
+        equal == (*left == *right),
+{
+    left == right
+}
 
 /// One atomic Rover step named by a certificate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +56,9 @@ pub enum Action<P, M> {
         sender: P,
         at: Time,
         message: M,
+    },
+    Clock {
+        at: Time,
     },
 }
 
@@ -72,6 +90,7 @@ pub(crate) open spec fn action_label<M: ExecSpec>(
         }
         Action::Observe { sender, at, message } =>
             Label::Outside { sender, at, message },
+        Action::Clock { at } => Label::Clock { at },
     }
 }
 
@@ -84,6 +103,7 @@ pub(crate) open spec fn shown<P, M>(
         Action::Process { .. } => None,
         Action::Observe { sender, at, message } =>
             Some(BoundaryEvent::Output { sender, at, message }),
+        Action::Clock { at } => Some(BoundaryEvent::Clock { at }),
     }
 }
 
@@ -96,7 +116,12 @@ pub(crate) struct ReplayState<'a, M: ExecSpec> {
         <M::Spec as SpecModel>::Pid,
         <M::Spec as SpecModel>::Message,
     >>,
+    pub(crate) delivered: Vec<Envelope<
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
+    >>,
     pub(crate) now: Time,
+    pub(crate) marks: Vec<&'static str>,
 }
 
 impl<M: ExecSpec> View for ReplayState<'_, M> {
@@ -138,7 +163,9 @@ impl<'a, M: ExecSpec> ReplayState<'a, M> {
             config,
             process: model.initial(config),
             network: Vec::new(),
+            delivered: Vec::new(),
             now: 0,
+            marks: Vec::new(),
         }
     }
 
@@ -312,6 +339,7 @@ impl<'a, M: ExecSpec> ReplayState<'a, M> {
             final(self).config == old(self).config,
     {
         let ghost original = self@;
+        self.marks.clear();
         match action {
             Action::Inject { recipient, at, message } => {
                 if *at < self.now {
@@ -413,6 +441,14 @@ impl<'a, M: ExecSpec> ReplayState<'a, M> {
                     return Err(());
                 }
                 let selected = outcomes.swap_remove(*outcome);
+                self.marks = selected.marks;
+                if let ProcessEvent::Receive { sender, message } = event {
+                    self.delivered.push(Envelope {
+                        sender: copy(sender),
+                        recipient: copy(process),
+                        message: copy(message),
+                    });
+                }
                 let ghost next_state = selected.state@;
                 let ghost selected_v = StepResultV {
                     state: next_state,
@@ -581,6 +617,29 @@ impl<'a, M: ExecSpec> ReplayState<'a, M> {
                     message: copy(message),
                 }))
             }
+            Action::Clock { at } => {
+                if *at < self.now {
+                    return Err(());
+                }
+                let ghost before = self@;
+                self.now = *at;
+                proof {
+                    assert(before == original);
+                    assert(original.step(
+                        self.model.spec(),
+                        *self.config,
+                        action_label::<M>(
+                            self.model.spec(),
+                            *self.config,
+                            original,
+                            *action,
+                        ),
+                        self@,
+                    ));
+                    assert(shown(*action) == Some(BoundaryEvent::Clock { at: *at }));
+                }
+                Ok(Some(BoundaryEvent::Clock { at: *at }))
+            }
         }
     }
 }
@@ -652,6 +711,7 @@ proof fn action_observe<M: ExecSpec>(
         Action::Inject { .. } => {}
         Action::Process { .. } => {}
         Action::Observe { .. } => {}
+        Action::Clock { .. } => {}
     }
 }
 
@@ -761,6 +821,24 @@ pub fn replay<M: ExecSpec>(
 
 } // verus!
 
+/// Coverage labels along a certificate that replays successfully.
+pub fn marks<M: ExecSpec>(
+    model: &M,
+    config: &<M::Spec as SpecModel>::Config,
+    certificate: &[Action<
+        <M::Spec as SpecModel>::Pid,
+        <M::Spec as SpecModel>::Message,
+    >],
+) -> Option<BTreeSet<&'static str>> {
+    let mut state = ReplayState::initial(model, config);
+    let mut marks = BTreeSet::new();
+    for action in certificate {
+        state.apply(action).ok()?;
+        marks.extend(state.marks.iter().copied());
+    }
+    Some(marks)
+}
+
 // Search needs cheap snapshots. This code is ordinary Rust; replay remains the
 // verified acceptance boundary.
 impl<M: ExecSpec> Clone for ReplayState<'_, M> {
@@ -770,7 +848,9 @@ impl<M: ExecSpec> Clone for ReplayState<'_, M> {
             config: self.config,
             process: self.process.clone(),
             network: self.network.clone(),
+            delivered: self.delivered.clone(),
             now: self.now,
+            marks: self.marks.clone(),
         }
     }
 }

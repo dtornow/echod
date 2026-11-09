@@ -12,7 +12,7 @@ use echod_types::{
 };
 
 use super::super::trusted::*;
-use echod_rover::certificate::trusted::copy;
+use super::super::trusted::copy;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec};
 #[cfg(verus_keep_ghost)]

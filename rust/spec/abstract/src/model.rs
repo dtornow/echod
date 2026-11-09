@@ -6,17 +6,17 @@
 
 use vstd::prelude::*;
 
-use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
 use echod_rover::rover::comm::ProcessEvent;
 use echod_rover::rover::{RoverExec, RoverSpec};
 use RoverExec::ProcResult;
 use RoverSpec::{Label, Proc as _, StepResultV};
-use echod_rover::{Sched, Time};
+use echod_rover::rover::comm::{Sched, Time};
 
 use echod_types::{Request, Response};
 
 use super::machine::{unavailable, Dispatch, InOut, Out, ServerConfig, Store, Work};
+use super::trusted::copy;
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 pub use super::machine::spec_unavailable;
@@ -441,7 +441,7 @@ fn request_outcome(
         next,
         work,
         send: dispatches,
-        marks: _,
+        marks,
     } = outcome;
     ProcResult {
         state: State {
@@ -449,6 +449,7 @@ fn request_outcome(
             pending: append_work(&before.pending, work),
         },
         send: send(call, resp, dispatches),
+        marks,
     }
 }
 
@@ -468,7 +469,7 @@ fn lose_outcome(
         next,
         work,
         send: dispatches,
-        marks: _,
+        marks,
     } = outcome;
     ProcResult {
         state: State {
@@ -476,6 +477,7 @@ fn lose_outcome(
             pending: append_work(&before.pending, work),
         },
         send: send(call, unavailable(&call.request), dispatches),
+        marks,
     }
 }
 
@@ -490,6 +492,7 @@ fn shed_outcome(before: &State, call: &Call) -> (result: ProcResult<State>)
     let result = ProcResult {
         state: copy(before),
         send: send(call, unavailable(&call.request), dispatches),
+        marks: Vec::new(),
     };
     proof {
         assert(dispatches@.map_values(|d: Dispatch| d@) =~= Seq::<DispatchV>::empty());
@@ -641,7 +644,7 @@ fn internal_result(
         next,
         mut work,
         send: mut dispatches,
-        marks: _,
+        marks,
         not_due: _,
     } = outcome;
     let mut pending = copy(&before.pending);
@@ -690,6 +693,7 @@ fn internal_result(
             pending,
         },
         send,
+        marks,
     }
 }
 
@@ -743,7 +747,7 @@ fn due_result(before: &State, outcome: InOut) -> (result: ProcResult<State>)
         }) == spec_due_result(before@, outcome@),
 {
     let ghost outv = outcome@;
-    let InOut { next, mut work, send: mut dispatches, marks: _, not_due: _ } = outcome;
+    let InOut { next, mut work, send: mut dispatches, marks, not_due: _ } = outcome;
     let mut pending = copy(&before.pending);
     pending.append(&mut work);
     let ghost all = dispatches@;
@@ -776,7 +780,7 @@ fn due_result(before: &State, outcome: InOut) -> (result: ProcResult<State>)
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
         )));
     }
-    ProcResult { state: State { store: next, pending }, send }
+    ProcResult { state: State { store: next, pending }, send, marks }
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
@@ -1099,6 +1103,7 @@ fn idle(state: &State) -> (results: Vec<ProcResult<State>>)
     results.push(ProcResult {
         state: copy(state),
         send: Vec::new(),
+        marks: Vec::new(),
     });
     proof {
         assert(results_v(results@) =~= spec_idle(state@));

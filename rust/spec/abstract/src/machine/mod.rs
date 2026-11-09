@@ -46,7 +46,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_rover::Sched;
+use echod_rover::rover::comm::Sched;
 
 use echod_types::{
     PromiseRecord, PromiseRes, PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes, Tags,

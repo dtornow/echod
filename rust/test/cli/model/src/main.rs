@@ -35,6 +35,7 @@
 #[path = "../../diff/src/harness.rs"]
 mod harness;
 mod wire;
+mod choices;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -42,13 +43,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use echod_rover::{marks, Action, Checker, Choices, Config, Event, Explore, Keyed, Tried, Verdict, Violation};
-use echod_abstract::types::{PromiseRegisterListenerReq, Request, Response, TaskFenceAction};
-use echod_abstract::{Dispatch, ServerConfig, Store as Model, MARKS};
+use echod_rover::rover::RoverExec::{check_guided, marks, CheckConfig};
+use echod_abstract::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
+use echod_abstract::{
+    history_rank, history_responses, rover_trace, Action, Dispatch, HistoryEvent,
+    Model as RoverModel, ServerConfig, Store as Model, MARKS,
+};
 use serde_json::{json, Value};
 
 use crate::harness::{spawn_echod, start_sink, Client, Server, Sink};
 use crate::wire::{decode, encode, model_state, prec};
+use crate::choices::{Choices, Tried};
 
 #[derive(Parser, Debug)]
 #[command(name = "echod-model", about = "echod driven by the Resonate model, over HTTP")]
@@ -77,8 +82,7 @@ struct Cli {
     #[arg(long, default_value = "../../target/echod-diff")]
     logs: PathBuf,
 }
-
-type Trace = Vec<Event<Request, Response, Dispatch>>;
+type Trace = Vec<HistoryEvent>;
 
 const T0: u64 = 1_000_000;
 
@@ -180,25 +184,25 @@ impl Driver {
                     return;
                 }
                 *now = at;
-                trace.push(Event::Clock { at });
+                trace.push(HistoryEvent::Clock { at });
                 let (status, data) = self.send("debug.tick", &json!({ "time": at }), at).await;
                 assert_eq!(status, 200, "debug.tick: {data}");
                 for d in self.dispatches().await {
-                    trace.push(Event::Receive { msg: d });
+                    trace.push(HistoryEvent::Receive { msg: d });
                 }
             }
             Action::Request(req) => {
                 *call += 1;
                 let (kind, data) = encode(&req, &self.worker);
-                trace.push(Event::Invoke { call: *call, req: req.clone() });
+                trace.push(HistoryEvent::Invoke { call: *call, req: req.clone() });
                 let (status, body) = self.send(kind, &data, *now).await;
                 let res = decode(kind, status, &body);
                 // what the request made the server send comes before its answer
                 // is observed, as the model has it: the dispatch is the step's
                 for d in self.dispatches().await {
-                    trace.push(Event::Receive { msg: d });
+                    trace.push(HistoryEvent::Receive { msg: d });
                 }
-                trace.push(Event::Return { call: *call, res });
+                trace.push(HistoryEvent::Return { call: *call, res });
             }
         }
     }
@@ -209,7 +213,7 @@ impl Driver {
         let (status, _) = self.send("debug.reset", &json!({}), T0).await;
         assert_eq!(status, 200);
         self.drain().await;
-        let mut trace: Trace = vec![Event::Clock { at: T0 }];
+        let mut trace: Trace = vec![HistoryEvent::Clock { at: T0 }];
         let mut now = T0;
         let mut call: u64 = 0;
         for _ in 0..requests {
@@ -242,17 +246,36 @@ impl Driver {
 
 enum Outcome {
     Ok(BTreeSet<&'static str>),
-    Ko(Violation),
     Unknown(Violation),
 }
 
+struct Violation {
+    reason: String,
+}
+
+impl std::fmt::Display for Violation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
+    }
+}
+
 fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
-    let m = ServerConfig { retry_timeout: model.retry_timeout };
-    let mut c: Checker<Keyed<ServerConfig>> = Checker::with_footprints(m, Model::default(), Config { certify: true, ..Config::default() });
-    match Verdict::from(c.check_certified(trace.clone())) {
-        Verdict::Ok(cert) => Outcome::Ok(marks(model, Model::default(), trace, &cert).expect("the certificate replays")),
-        Verdict::Ko(v) => Outcome::Ko(v),
-        Verdict::Unknown(v) => Outcome::Unknown(v),
+    let config = ServerConfig { retry_timeout: model.retry_timeout };
+    let events = rover_trace(trace);
+    let expected = history_responses(trace);
+    match check_guided(
+        &RoverModel,
+        &config,
+        &events,
+        CheckConfig::for_trace_len(events.len()),
+        |event, action, sent| history_rank(event, action, sent, &expected),
+    ) {
+        Some(certificate) => Outcome::Ok(
+            marks(&RoverModel, &config, &certificate).expect("the certificate replays"),
+        ),
+        None => Outcome::Unknown(Violation {
+            reason: "bounded Rover search found no certificate".into(),
+        }),
     }
 }
 
@@ -260,10 +283,10 @@ fn show(trace: &Trace, upto: usize) -> String {
     let mut out = String::new();
     for (i, e) in trace.iter().enumerate().take(upto + 1) {
         let line = match e {
-            Event::Invoke { call, req } => format!("call {call:>2} → {req:?}"),
-            Event::Return { call, res } => format!("call {call:>2} ← {res:?}"),
-            Event::Receive { msg } => format!("        ⇐ {msg:?}"),
-            Event::Clock { at } => format!("        ⏲ clock {at}"),
+            HistoryEvent::Invoke { call, req } => format!("call {call:>2} → {req:?}"),
+            HistoryEvent::Return { call, res } => format!("call {call:>2} ← {res:?}"),
+            HistoryEvent::Receive { msg } => format!("        ⇐ {msg:?}"),
+            HistoryEvent::Clock { at } => format!("        ⏲ clock {at}"),
         };
         out.push_str(&format!("{i:>3}  {line}\n"));
     }
@@ -285,13 +308,10 @@ async fn main() {
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();
     println!("{} runs of {} requests each against echod, retry timeout {} ms\n", cli.runs, cli.requests, cli.retry_timeout);
-    println!("{:<8} {:>4} {:>4} {:>8} {:>9} {:>14}", "mode", "ok", "ko", "unknown", "marks", "first ko (seed)");
-    let mut examples: Vec<String> = Vec::new();
-    let mut kos_total = 0;
+    println!("{:<8} {:>4} {:>8} {:>9}", "mode", "ok", "unknown", "marks");
     for (k, guided) in [false, true].into_iter().enumerate() {
-        let (mut ok, mut ko, mut unknown, mut first_ko) = (0, 0, 0, None);
+        let (mut ok, mut unknown) = (0, 0);
         let tried = Tried::default();
-        let mut classes: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for seed in cli.seed..cli.seed + cli.runs {
             let mut choices = Choices::random(seed).learning(&tried);
             let trace = d.run(cli.requests, guided, &mut choices).await;
@@ -305,55 +325,19 @@ async fn main() {
                         table.get_mut(m).expect("a declared mark")[k] += 1;
                     }
                 }
-                Outcome::Ko(v) => {
-                    ko += 1;
-                    first_ko.get_or_insert(seed);
-                    // the class: the event no execution explains
-                    let class = match trace.get(v.index) {
-                        Some(Event::Return { call, res }) => {
-                            let req = trace.iter().find_map(|e| match e {
-                                Event::Invoke { call: c, req } if c == call => Some(req),
-                                _ => None,
-                            });
-                            format!("{} ← {res:?}", req.map(|r| short_req(r)).unwrap_or_default())
-                        }
-                        Some(Event::Receive { msg }) => format!("⇐ {msg:?}"),
-                        Some(Event::Clock { .. }) => "clock".to_string(),
-                        Some(Event::Invoke { req, .. }) => format!("→ {}", short_req(req)),
-                        None => "end".to_string(),
-                    };
-                    let e = classes.entry(class).or_insert_with(|| (0, format!("seed {seed}: {}\n{}", v.reason, show(&trace, v.index))));
-                    e.0 += 1;
-                }
                 Outcome::Unknown(v) => {
                     unknown += 1;
                     eprintln!("unknown (seed {seed}): {v}");
                 }
             }
         }
-        kos_total += ko;
         let covered = table.values().filter(|n| n[k] > 0).count();
         let mode = if guided { "guided" } else { "random" };
-        let first = first_ko.map_or("-".to_string(), |s| s.to_string());
-        println!("{mode:<8} {ok:>4} {ko:>4} {unknown:>8} {:>9} {first:>14}", format!("{covered}/{}", MARKS.len()));
-        for (class, (n, example)) in classes {
-            examples.push(format!("[{mode}] {n} run(s) stop at: {class}\n{example}"));
-        }
+        println!("{mode:<8} {ok:>4} {unknown:>8} {:>9}", format!("{covered}/{}", MARKS.len()));
     }
     println!("\n{:<50} {:>7} {:>7}", "mark (runs that reached it)", "random", "guided");
     for (m, [a, b]) in &table {
         println!("{m:<50} {a:>7} {b:>7}");
     }
-    for e in &examples {
-        println!("\n{e}");
-    }
     drop(d);
-    if kos_total > 0 {
-        std::process::exit(1);
-    }
-}
-
-fn short_req(r: &Request) -> String {
-    let s = format!("{r:?}");
-    s.split(|c: char| c == '(' || c == ' ').next().unwrap_or(&s).to_string()
 }

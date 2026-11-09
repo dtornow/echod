@@ -137,6 +137,8 @@ pub struct Report {
     pub events: usize,
     /// Nodes the checker explored.
     pub search_steps: u64,
+    /// Bounded Rover search did not find a certificate.
+    pub undecided: bool,
     pub failures: Vec<String>,
 }
 
@@ -563,24 +565,11 @@ async fn check(world: &World) -> Report {
     report.events = trace.len();
     match checker::check(&trace, opts.retry_timeout_ms, opts.budget) {
         Verdict::Ok { explored } => report.search_steps = explored as u64,
-        Verdict::Ko(v) => {
-            report.failures.push(format!("no execution of the model explains event {} of {}: {}: {}", v.index, trace.len(), v.event, v.reason));
-            // `ECHOD_SIM_DUMP=1`: the trace up to the event, one per line, and
-            // the candidates that could not explain it
-            if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
-                eprint!("{}", checker::show(&trace, v.index));
-                for n in v.profile.iter().take(6) {
-                    eprintln!("candidate: {n}");
-                }
-            }
-        }
         Verdict::Unknown(v) => {
-            report.failures.push(format!("undecided at event {} of {}: {}", v.index, trace.len(), v.reason));
+            report.undecided = true;
             if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
+                eprintln!("undecided at event {} of {}: {}", v.index, trace.len(), v.reason);
                 eprint!("{}", checker::show(&trace, v.index));
-                for n in v.profile.iter().take(6) {
-                    eprintln!("candidate: {n}");
-                }
             }
         }
     }

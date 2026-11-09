@@ -12,16 +12,16 @@
 
 use std::collections::BTreeSet;
 
-use echod_rover::HashedMap;
 use vstd::prelude::*;
 
+use super::hashed_map::HashedMap;
 pub use echod_types::same_origin;
 #[cfg(verus_keep_ghost)]
 pub use echod_types::origin;
 
 verus! {
 
-/// A persistent map from ids to `V`: `echod_rover::HashedMap`, seen by Verus as a
+/// A persistent map from ids to `V`, seen by Verus as a
 /// `Map` from the ids' characters.
 #[verifier::external_body]
 #[verifier::reject_recursive_types(V)]

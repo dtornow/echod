@@ -6,7 +6,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_rover::Sched;
+use echod_rover::rover::comm::Sched;
 #[cfg(verus_keep_ghost)]
 use echod_types::origin;
 use echod_types::{PromiseState, TaskState, Value};

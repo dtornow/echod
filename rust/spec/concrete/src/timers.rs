@@ -72,7 +72,7 @@ use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::StepResultV;
 #[cfg(verus_keep_ghost)]
-use echod_rover::{Sched, Time};
+use echod_rover::rover::comm::{Sched, Time};
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, PromiseRecord, PromiseState, Response, Schedule, TaskState};
 
