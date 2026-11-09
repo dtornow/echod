@@ -45,9 +45,9 @@ use echod_abstract::view::{InternalV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::semantics::{is_process, World};
+use echod_rover::rover::spec::{is_process, World};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, RoverSpec};
+use echod_rover::rover::{Envelope, RoverModel};
 #[cfg(verus_keep_ghost)]
 use echod_rover::Sched;
 #[cfg(verus_keep_ghost)]
@@ -100,7 +100,7 @@ pub proof fn lemma_single_present(world: World<AModel>)
     ensures
         is_process(AModel, world, APid::Service),
 {
-    assert(AModel.spec_outside() == APid::Outside);
+    assert(AModel.outside() == APid::Outside);
     assert(world.process[0].0 == APid::Service);
 }
 

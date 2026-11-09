@@ -1,7 +1,7 @@
 //! Verified replay for Rover certificates.
 //!
 //! Search is untrusted. This module re-executes every named action and proves
-//! that successful replay witnesses [`crate::rover::spec::semantics::valid_trace`].
+//! that successful replay witnesses [`crate::rover::spec::valid_trace`].
 
 use vstd::prelude::*;
 
@@ -9,14 +9,14 @@ use crate::certificate::trusted::{copy, same};
 use crate::Time;
 
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
-use super::super::spec::semantics::{self, Execution, Label, StepResultV, WorldV};
+use super::super::spec::{self as semantics, Execution, Label, RoverSpec, StepResultV};
 #[allow(unused_imports)] // proof-only names are erased by ordinary Rust
 use super::{
     ConfigOf, ExecEventOf, MessageOf, PidOf, ProcOf, RoverExec, RoverProcExec, SpecOf,
 };
 use super::super::comm::{BoundaryEvent, Envelope, ProcessEvent};
 #[allow(unused_imports)]
-use super::super::spec::{RoverProc, RoverSpec};
+use super::super::spec::{RoverModel, RoverProc};
 
 verus! {
 
@@ -95,7 +95,7 @@ impl<M: RoverExec> View for World<'_, M> {
     type V = semantics::World<SpecOf<M>>;
 
     open(crate) spec fn view(&self) -> semantics::World<SpecOf<M>> {
-        WorldV {
+        RoverSpec {
             process: process_view::<M>(self.process@),
             network: self.network@,
             now: self.now,
@@ -113,7 +113,7 @@ pub(crate) open spec fn process_view<M: RoverExec>(
 impl<'a, M: RoverExec> World<'a, M> {
     pub(crate) fn initial(model: &'a M, config: &'a ConfigOf<M>) -> (world: Self)
         ensures
-            world@ == semantics::initial(model.spec(), *config),
+            world@ == RoverSpec::<SpecOf<M>>::init(model.spec(), *config),
             world.model == model,
             world.config == config,
     {
@@ -213,7 +213,7 @@ impl<'a, M: RoverExec> World<'a, M> {
         send: Vec<(PidOf<M>, MessageOf<M>)>,
     )
         ensures
-            final(self)@ == (WorldV {
+            final(self)@ == (RoverSpec {
                 network: old(self)@.network + semantics::envelopes(sender, send@),
                 ..old(self)@
             }),
@@ -275,10 +275,9 @@ impl<'a, M: RoverExec> World<'a, M> {
                     old(self)@,
                     *action,
                 );
-                &&& semantics::step(
+                &&& old(self)@.step(
                     old(self).model.spec(),
                     *old(self).config,
-                    old(self)@,
                     label,
                     final(self)@,
                 )
@@ -314,17 +313,16 @@ impl<'a, M: RoverExec> World<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*recipient == outside));
-                    assert(outside == self.model.spec().spec_outside());
+                    assert(outside == self.model.spec().outside());
                     assert(semantics::is_process(
                         self.model.spec(),
                         before,
                         *recipient,
                     ));
                     assert(before == original);
-                    assert(semantics::step(
+                    assert(original.step(
                         self.model.spec(),
                         *self.config,
-                        original,
                         action_label::<M>(
                             self.model.spec(),
                             *self.config,
@@ -418,7 +416,7 @@ impl<'a, M: RoverExec> World<'a, M> {
                 self.now = *at;
                 proof {
                     assert(!(*process == outside));
-                    assert(outside == self.model.spec().spec_outside());
+                    assert(outside == self.model.spec().outside());
                     assert(semantics::is_process(
                         self.model.spec(),
                         before,
@@ -511,11 +509,10 @@ impl<'a, M: RoverExec> World<'a, M> {
                         *event,
                         *outcome as int,
                     );
-                    reveal(semantics::step);
-                    assert(semantics::step(
+                    reveal(RoverSpec::step);
+                    assert(original.step(
                         self.model.spec(),
                         *self.config,
-                        original,
                         label,
                         self@,
                     ));
@@ -534,12 +531,11 @@ impl<'a, M: RoverExec> World<'a, M> {
                 let ghost before = self@;
                 self.now = *at;
                 proof {
-                    assert(outside == self.model.spec().spec_outside());
+                    assert(outside == self.model.spec().outside());
                     assert(before == original);
-                    assert(semantics::step(
+                    assert(original.step(
                         self.model.spec(),
                         *self.config,
-                        original,
                         action_label::<M>(
                             self.model.spec(),
                             *self.config,
@@ -565,7 +561,7 @@ impl<'a, M: RoverExec> World<'a, M> {
 }
 
 /// A legal execution remains legal after one valid step.
-proof fn extend<S: RoverSpec>(
+proof fn extend<S: RoverModel>(
     spec: S,
     config: S::Config,
     first: semantics::World<S>,
@@ -575,10 +571,9 @@ proof fn extend<S: RoverSpec>(
 )
     requires
         semantics::legal(spec, config, first, execution),
-        semantics::step(
+        semantics::before::<S>(first, execution, execution.len() as int).step(
             spec,
             config,
-            semantics::before::<S>(first, execution, execution.len() as int),
             label,
             next,
         ),
@@ -595,18 +590,16 @@ proof fn extend<S: RoverSpec>(
     let more = execution.push((label, next));
     assert(more.drop_last() =~= execution);
     assert forall|i: int| 0 <= i < more.len() implies #[trigger]
-        semantics::step(
+        semantics::before::<S>(first, more, i).step(
             spec,
             config,
-            semantics::before::<S>(first, more, i),
             more[i].0,
             more[i].1,
         ) by {
         if i < execution.len() {
-            assert(semantics::step(
+            assert(semantics::before::<S>(first, execution, i).step(
                 spec,
                 config,
-                semantics::before::<S>(first, execution, i),
                 execution[i].0,
                 execution[i].1,
             ));
@@ -649,7 +642,7 @@ pub fn replay<M: RoverExec>(
 {
     let mut world = World::initial(model, config);
     let mut visible = 0usize;
-    let ghost first = semantics::initial(model.spec(), *config);
+    let ghost first = RoverSpec::<SpecOf<M>>::init(model.spec(), *config);
     let ghost mut execution: Execution<SpecOf<M>> = Seq::empty();
 
     for k in 0..certificate.len()

@@ -62,16 +62,16 @@ use echod_abstract::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{BoundaryEvent, Call, Spec as AModel, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::refinement::{
+use echod_rover::rover::spec::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::semantics::{
-    before, envelopes, event_valid, Execution, initial, inject, is_process, Label, land, legal,
-    observe_outside, step, StepResultV, World, WorldV,
+use echod_rover::rover::spec::{
+    before, envelopes, event_valid, Execution, inject, is_process, Label, land, legal,
+    observe_outside, RoverModel, RoverProc, RoverSpec, StepResultV, World,
 };
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::{Envelope, ProcessEvent, RoverProc, RoverSpec};
+use echod_rover::rover::{Envelope, ProcessEvent};
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]
@@ -204,12 +204,12 @@ pub open spec fn empty_heartbeat(call: Call) -> bool {
 // Network arithmetic
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_inject_keeps_process<P, S, M>(
-    world: WorldV<P, S, M>,
-    outside: P,
-    recipient: P,
+pub proof fn lemma_inject_keeps_process<M: RoverModel>(
+    world: World<M>,
+    outside: M::Pid,
+    recipient: M::Pid,
     at: Time,
-    message: M,
+    message: M::Message,
 )
     ensures
         inject(world, outside, recipient, at, message).process == world.process,
@@ -218,7 +218,7 @@ pub proof fn lemma_inject_keeps_process<P, S, M>(
     assert(after.process == world.process);
 }
 
-pub proof fn lemma_observe_keeps_world<P, S, M>(world: WorldV<P, S, M>, at: Time)
+pub proof fn lemma_observe_keeps_world<M: RoverModel>(world: World<M>, at: Time)
     ensures
         observe_outside(world, at).process == world.process,
         observe_outside(world, at).network == world.network,
@@ -457,10 +457,10 @@ pub proof fn lemma_empty_matches(config: ServerConfig, before: World<AModel>)
         matches(abstract_model(), config, before, Seq::<BoundaryEvent>::empty(), before),
 {
     let execution = Seq::<(Label<APid, AMessage>, World<AModel>)>::empty();
-    assert forall|i: int| 0 <= i < execution.len() implies #[trigger] step(
+    assert forall|i: int| 0 <= i < execution.len() implies #[trigger]
+        echod_rover::rover::spec::before::<AModel>(before, execution, i).step(
         abstract_model(),
         config,
-        echod_rover::rover::semantics::before::<AModel>(before, execution, i),
         execution[i].0,
         execution[i].1,
     ) by {
@@ -479,8 +479,8 @@ pub proof fn lemma_matched_step(
     visible: Seq<BoundaryEvent>,
 )
     requires
-        step(abstract_model(), config, before, label, after),
-        abstract_model().spec_observe(label) == visible,
+        before.step(abstract_model(), config, label, after),
+        abstract_model().observe(label) == visible,
     ensures
         matches(abstract_model(), config, before, visible, after),
 {
@@ -494,15 +494,15 @@ pub proof fn lemma_matched_step(
     let empty = Seq::<BoundaryEvent>::empty();
     assert(empty.add(visible) =~= visible);
     assert(project::<AModel>(abstract_model(), execution) =~= visible);
-    assert forall|i: int| 0 <= i < execution.len() implies #[trigger] step(
+    assert forall|i: int| 0 <= i < execution.len() implies #[trigger]
+        echod_rover::rover::spec::before::<AModel>(before, execution, i).step(
         abstract_model(),
         config,
-        echod_rover::rover::semantics::before::<AModel>(before, execution, i),
         execution[i].0,
         execution[i].1,
     ) by {
         assert(i == 0);
-        assert(echod_rover::rover::semantics::before::<AModel>(before, execution, 0) == before);
+        assert(echod_rover::rover::spec::before::<AModel>(before, execution, 0) == before);
     };
     assert(legal(abstract_model(), config, before, execution));
     assert(end::<AModel>(before, execution) == after);
@@ -530,7 +530,7 @@ pub proof fn lemma_matches_same_visible(
 
 /// A process step with the outcome at `j`, stated over the model's trait: the
 /// witness `step` asks for is in the form `step` names it.
-pub proof fn lemma_process_step<M: RoverSpec>(
+pub proof fn lemma_process_step<M: RoverModel>(
     m: M,
     config: M::Config,
     world: World<M>,
@@ -549,16 +549,15 @@ pub proof fn lemma_process_step<M: RoverSpec>(
         ({
             let process = world.process[i].0;
             let outcome = world.process[i].1.on_event(config, at, event)[j];
-            step(
+            world.step(
                 m,
                 config,
-                world,
                 Label::Process { process, at, event, send: outcome.send },
                 land(world, i, process, at, outcome),
             )
         }),
 {
-    echod_rover::rover::semantics::process_step(m, config, world, i, at, event, j);
+    echod_rover::rover::spec::process_step(m, config, world, i, at, event, j);
 }
 
 /// One abstract process step of the service, with the outcome at `index`.
@@ -588,7 +587,7 @@ pub proof fn lemma_service_step(
             &&& matches(abstract_model(), config, before_a, Seq::<BoundaryEvent>::empty(), after_a)
         }),
 {
-    reveal(step);
+    reveal(RoverSpec::step);
     let outcomes = astate(before_a).on_event(config, at, event);
     let outcome = outcomes[index];
     lemma_single_present(before_a);
@@ -596,8 +595,8 @@ pub proof fn lemma_service_step(
     let after_a = land(before_a, 0, APid::Service, at, outcome);
     assert(before_a.process[0].1 == astate(before_a));
     lemma_process_step(abstract_model(), config, before_a, 0, at, event, index);
-    assert(step(abstract_model(), config, before_a, label, after_a));
-    assert(abstract_model().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
+    assert(before_a.step(abstract_model(), config, label, after_a));
+    assert(abstract_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
     lemma_matched_step(config, before_a, label, after_a, Seq::<BoundaryEvent>::empty());
     assert(after_a.process.len() == 1);
     assert(after_a.process[0] == (APid::Service, outcome.state));
@@ -4326,15 +4325,15 @@ pub proof fn lemma_input(
 ) -> (aa: World<AModel>)
     requires
         related(fleet, cb, ab),
-        step(concrete_model(), fleet, cb, Label::Input { recipient, at, message }, ca),
+        cb.step(concrete_model(), fleet, Label::Input { recipient, at, message }, ca),
     ensures
-        matches(abstract_model(), config, ab, concrete_model().spec_observe(Label::Input { recipient, at, message }), aa),
+        matches(abstract_model(), config, ab, concrete_model().observe(Label::Input { recipient, at, message }), aa),
         related(fleet, ca, aa),
 {
-    reveal(step);
+    reveal(RoverSpec::step);
     let label = Label::<CPid, CMessage>::Input { recipient, at, message };
     assert(cb.now <= at);
-    assert(concrete_model().spec_injectable(fleet, message));
+    assert(concrete_model().injectable(fleet, message));
     assert(ca == inject(cb, CPid::Outside, recipient, at, message));
     let added = Envelope { sender: CPid::Outside, recipient, message };
     assert(ca.process == cb.process);
@@ -4351,13 +4350,13 @@ pub proof fn lemma_input(
             let alabel = Label::<APid, AMessage>::Input { recipient: APid::Service, at, message: amessage };
             let aa = inject(ab, APid::Outside, APid::Service, at, amessage);
             lemma_single_present(ab);
-            assert(abstract_model().spec_injectable(config, amessage));
-            assert(step(abstract_model(), config, ab, alabel, aa));
+            assert(abstract_model().injectable(config, amessage));
+            assert(ab.step(abstract_model(), config, alabel, aa));
             let visible = seq![BoundaryEvent::Input { at, call }];
-            assert(abstract_model().spec_observe(alabel) =~= visible);
-            assert(concrete_model().spec_observe(label) =~= visible);
+            assert(abstract_model().observe(alabel) =~= visible);
+            assert(concrete_model().observe(label) =~= visible);
             lemma_matched_step(config, ab, alabel, aa, visible);
-            lemma_matches_same_visible(config, ab, visible, concrete_model().spec_observe(label), aa);
+            lemma_matches_same_visible(config, ab, visible, concrete_model().observe(label), aa);
             let aenv = Envelope { sender: APid::Outside, recipient: APid::Service, message: amessage };
             assert(aa.network == ab.network.push(aenv));
             lemma_extends_push(ab.network, aenv);
@@ -4371,8 +4370,8 @@ pub proof fn lemma_input(
         },
         _ => {
             lemma_empty_matches(config, ab);
-            assert(concrete_model().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
-            lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().spec_observe(label), ab);
+            assert(concrete_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
+            lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), ab);
             lemma_extends_refl(ab.network);
             assert(carried_request(added, ab.network));
             assert(carried_output(added, ab.network));
@@ -4395,12 +4394,12 @@ pub proof fn lemma_outside(
 ) -> (aa: World<AModel>)
     requires
         related(fleet, cb, ab),
-        step(concrete_model(), fleet, cb, Label::Outside { sender, at, message }, ca),
+        cb.step(concrete_model(), fleet, Label::Outside { sender, at, message }, ca),
     ensures
-        matches(abstract_model(), config, ab, concrete_model().spec_observe(Label::Outside { sender, at, message }), aa),
+        matches(abstract_model(), config, ab, concrete_model().observe(Label::Outside { sender, at, message }), aa),
         related(fleet, ca, aa),
 {
-    reveal(step);
+    reveal(RoverSpec::step);
     let label = Label::<CPid, CMessage>::Outside { sender, at, message };
     assert(cb.now <= at);
     assert(ca == observe_outside(cb, at));
@@ -4424,12 +4423,12 @@ pub proof fn lemma_outside(
                 };
             let alabel = Label::<APid, AMessage>::Outside { sender: APid::Service, at, message: AMessage::Output(output) };
             let aa = observe_outside(ab, at);
-            assert(step(abstract_model(), config, ab, alabel, aa));
+            assert(ab.step(abstract_model(), config, alabel, aa));
             let visible = seq![BoundaryEvent::Output { at, output }];
-            assert(abstract_model().spec_observe(alabel) =~= visible);
-            assert(concrete_model().spec_observe(label) =~= visible);
+            assert(abstract_model().observe(alabel) =~= visible);
+            assert(concrete_model().observe(label) =~= visible);
             lemma_matched_step(config, ab, alabel, aa, visible);
-            lemma_matches_same_visible(config, ab, visible, concrete_model().spec_observe(label), aa);
+            lemma_matches_same_visible(config, ab, visible, concrete_model().observe(label), aa);
             assert(aa.process == ab.process);
             assert(aa.network == ab.network);
             lemma_extends_refl(ab.network);
@@ -4438,8 +4437,8 @@ pub proof fn lemma_outside(
         },
         _ => {
             lemma_empty_matches(config, ab);
-            assert(concrete_model().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
-            lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().spec_observe(label), ab);
+            assert(concrete_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
+            lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), ab);
             lemma_extends_refl(ab.network);
             lemma_carry(fleet, cb, ab, ca, ab);
             ab
@@ -4462,12 +4461,12 @@ pub proof fn lemma_process(
         config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
-        step(concrete_model(), fleet, cb, Label::Process { process, at, event, send }, ca),
+        cb.step(concrete_model(), fleet, Label::Process { process, at, event, send }, ca),
     ensures
-        matches(abstract_model(), config, ab, concrete_model().spec_observe(Label::Process { process, at, event, send }), aa),
+        matches(abstract_model(), config, ab, concrete_model().observe(Label::Process { process, at, event, send }), aa),
         related(fleet, ca, aa),
 {
-    reveal(step);
+    reveal(RoverSpec::step);
     let label = Label::<CPid, CMessage>::Process { process, at, event, send };
     assert(cb.now <= at);
     assert(event_valid(cb, process, event));
@@ -4498,7 +4497,7 @@ pub proof fn lemma_process(
             }
         };
     let outcomes = cb.process[i].1.on_event(fleet, at, event);
-    assert(concrete_model().spec_observe(label) =~= Seq::<BoundaryEvent>::empty());
+    assert(concrete_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
     assert(shaped(fleet, cb));
     if i < fleet.nodes {
         assert(process == node_pid(i));
@@ -4506,7 +4505,7 @@ pub proof fn lemma_process(
         assert(cb.process[i].1 == LocalV::Node(node));
         assert(outcomes == spec_node_step(node, at, event));
         let aa = lemma_node(fleet, config, cb, ab, i, at, event, j, ca);
-        lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().spec_observe(label), aa);
+        lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), aa);
         aa
     } else {
         assert(i == fleet.nodes);
@@ -4515,7 +4514,7 @@ pub proof fn lemma_process(
         assert(cb.process[i].1 == LocalV::Store(store));
         assert(outcomes == spec_store(store, event));
         lemma_store(fleet, config, cb, ab, at, event, j, ca);
-        lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().spec_observe(label), ab);
+        lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), ab);
         ab
     }
 }
@@ -4533,9 +4532,9 @@ pub proof fn lemma_step(
         config == abstract_config(fleet),
         agreement(config),
         related(fleet, cb, ab),
-        step(concrete_model(), fleet, cb, label, ca),
+        cb.step(concrete_model(), fleet, label, ca),
     ensures
-        matches(abstract_model(), config, ab, concrete_model().spec_observe(label), aa),
+        matches(abstract_model(), config, ab, concrete_model().observe(label), aa),
         related(fleet, ca, aa),
 {
     match label {
@@ -4609,10 +4608,14 @@ pub proof fn lemma_empty_reads(key: Seq<char>)
 
 pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
     ensures
-        related(fleet, initial(concrete_model(), fleet), initial(abstract_model(), config)),
+        related(
+            fleet,
+            RoverSpec::<CModel>::init(concrete_model(), fleet),
+            RoverSpec::<AModel>::init(abstract_model(), config),
+        ),
 {
-    let cw = initial(concrete_model(), fleet);
-    let aw = initial(abstract_model(), config);
+    let cw = RoverSpec::<CModel>::init(concrete_model(), fleet);
+    let aw = RoverSpec::<AModel>::init(abstract_model(), config);
     assert(cw.process == spec_world(fleet));
     assert(cw.network =~= Seq::<Envelope<CPid, CMessage>>::empty());
     assert(cw.now == 0);
@@ -4762,13 +4765,13 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 {
     let relation = link(fleet);
     assert forall|cb: World<CModel>, label: Label<CPid, CMessage>, ca: World<CModel>, ab: World<AModel>|
-        #![trigger relation(cb, ab), step(concrete_model(), fleet, cb, label, ca)]
-        relation(cb, ab) && step(concrete_model(), fleet, cb, label, ca) implies exists|aa: World<AModel>|
-            #[trigger] matches(abstract_model(), config, ab, concrete_model().spec_observe(label), aa) && relation(ca, aa) by {
+        #![trigger relation(cb, ab), cb.step(concrete_model(), fleet, label, ca)]
+        relation(cb, ab) && cb.step(concrete_model(), fleet, label, ca) implies exists|aa: World<AModel>|
+            #[trigger] matches(abstract_model(), config, ab, concrete_model().observe(label), aa) && relation(ca, aa) by {
         lemma_link(fleet, cb, ab);
         let aa = lemma_step(fleet, config, cb, label, ca, ab);
         lemma_link(fleet, ca, aa);
-        assert(matches(abstract_model(), config, ab, concrete_model().spec_observe(label), aa) && relation(ca, aa));
+        assert(matches(abstract_model(), config, ab, concrete_model().observe(label), aa) && relation(ca, aa));
     };
 }
 
@@ -4784,7 +4787,11 @@ pub proof fn lemma_refines(concrete_config: Fleet)
     let config = abstract_config(fleet);
     crate::timers::lemma_agreement(config);
     lemma_initial(fleet, config);
-    lemma_link(fleet, initial(concrete_model(), fleet), initial(abstract_model(), config));
+    lemma_link(
+        fleet,
+        RoverSpec::<CModel>::init(concrete_model(), fleet),
+        RoverSpec::<AModel>::init(abstract_model(), config),
+    );
     lemma_simulation(fleet, config);
     concrete_refines_abstract(concrete_model(), fleet, abstract_model(), config, link(fleet));
 }

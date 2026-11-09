@@ -11,14 +11,12 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use super::semantics::{before, initial, legal, step, Execution, Lab, World};
-#[cfg(verus_keep_ghost)]
-use super::RoverSpec;
+use super::{before, legal, Execution, Lab, RoverModel, RoverSpec, World};
 
 verus! {
 
 /// Where an execution ends.
-pub open spec fn end<M: RoverSpec>(
+pub open spec fn end<M: RoverModel>(
     first: World<M>,
     execution: Execution<M>,
 ) -> World<M> {
@@ -30,7 +28,7 @@ pub open spec fn end<M: RoverSpec>(
 }
 
 /// Project an execution through a model-specific boundary observer.
-pub open spec fn project<M: RoverSpec>(
+pub open spec fn project<M: RoverModel>(
     model: M,
     execution: Execution<M>,
 ) -> Seq<M::Boundary>
@@ -40,24 +38,24 @@ pub open spec fn project<M: RoverSpec>(
         Seq::empty()
     } else {
         project::<M>(model, execution.drop_last())
-            + model.spec_observe(execution.last().0)
+            + model.observe(execution.last().0)
     }
 }
 
 /// A boundary trace admitted by one Rover model.
-pub open spec fn valid_boundary_trace<M: RoverSpec>(
+pub open spec fn valid_boundary_trace<M: RoverModel>(
     model: M,
     config: M::Config,
     events: Seq<M::Boundary>,
 ) -> bool {
     exists|execution: Execution<M>|
-        #![trigger legal(model, config, initial(model, config), execution)]
-        legal(model, config, initial(model, config), execution)
+        #![trigger legal(model, config, RoverSpec::<M>::init(model, config), execution)]
+        legal(model, config, RoverSpec::<M>::init(model, config), execution)
             && project::<M>(model, execution) == events
 }
 
 /// Abstract steps matching one concrete label's visible boundary contribution.
-pub open spec fn matches<A: RoverSpec>(
+pub open spec fn matches<A: RoverModel>(
     abstract_model: A,
     abstract_config: A::Config,
     start: World<A>,
@@ -74,8 +72,8 @@ pub open spec fn matches<A: RoverSpec>(
 /// Every concrete step from related worlds has a matching finite abstract run
 /// and leaves the worlds related again.
 pub open spec fn simulation<
-    C: RoverSpec,
-    A: RoverSpec<Boundary = C::Boundary>,
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -91,19 +89,17 @@ pub open spec fn simulation<
     |
         #![trigger
             relation(concrete_before, abstract_before),
-            step(
+            concrete_before.step(
                 concrete_model,
                 concrete_config,
-                concrete_before,
                 concrete_label,
                 concrete_after,
             )
         ]
         relation(concrete_before, abstract_before)
-        && step(
+        && concrete_before.step(
             concrete_model,
             concrete_config,
-            concrete_before,
             concrete_label,
             concrete_after,
         )
@@ -112,7 +108,7 @@ pub open spec fn simulation<
                 abstract_model,
                 abstract_config,
                 abstract_before,
-                concrete_model.spec_observe(concrete_label),
+                concrete_model.observe(concrete_label),
                 abstract_after,
             )
             && relation(concrete_after, abstract_after)
@@ -120,8 +116,8 @@ pub open spec fn simulation<
 
 /// Trace inclusion at the shared boundary.
 pub open spec fn refines<
-    C: RoverSpec,
-    A: RoverSpec<Boundary = C::Boundary>,
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -150,7 +146,7 @@ pub open spec fn refines<
 // Execution algebra
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_project_add<M: RoverSpec>(
+pub proof fn lemma_project_add<M: RoverModel>(
     model: M,
     first: Execution<M>,
     second: Execution<M>,
@@ -173,7 +169,7 @@ pub proof fn lemma_project_add<M: RoverSpec>(
     }
 }
 
-pub proof fn lemma_end_add<M: RoverSpec>(
+pub proof fn lemma_end_add<M: RoverModel>(
     first: World<M>,
     prefix: Execution<M>,
     suffix: Execution<M>,
@@ -189,7 +185,7 @@ pub proof fn lemma_end_add<M: RoverSpec>(
     }
 }
 
-pub proof fn lemma_legal_add<M: RoverSpec>(
+pub proof fn lemma_legal_add<M: RoverModel>(
     model: M,
     config: M::Config,
     first: World<M>,
@@ -204,10 +200,9 @@ pub proof fn lemma_legal_add<M: RoverSpec>(
 {
     let combined = prefix + suffix;
     assert forall|i: int| 0 <= i < combined.len() implies
-        #[trigger] step(
+        #[trigger] before::<M>(first, combined, i).step(
             model,
             config,
-            before::<M>(first, combined, i),
             combined[i].0,
             combined[i].1,
         ) by {
@@ -229,8 +224,8 @@ pub proof fn lemma_legal_add<M: RoverSpec>(
 // ---------------------------------------------------------------------------
 
 proof fn lemma_simulate_prefix<
-    C: RoverSpec,
-    A: RoverSpec<Boundary = C::Boundary>,
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -242,8 +237,8 @@ proof fn lemma_simulate_prefix<
 )
     requires
         relation(
-            initial(concrete_model, concrete_config),
-            initial(abstract_model, abstract_config),
+            RoverSpec::<C>::init(concrete_model, concrete_config),
+            RoverSpec::<A>::init(abstract_model, abstract_config),
         ),
         simulation(
             concrete_model,
@@ -255,7 +250,7 @@ proof fn lemma_simulate_prefix<
         legal(
             concrete_model,
             concrete_config,
-            initial(concrete_model, concrete_config),
+            RoverSpec::<C>::init(concrete_model, concrete_config),
             concrete_execution,
         ),
         0 <= k <= concrete_execution.len(),
@@ -264,13 +259,13 @@ proof fn lemma_simulate_prefix<
             #![trigger legal(
                 abstract_model,
                 abstract_config,
-                initial(abstract_model, abstract_config),
+                RoverSpec::<A>::init(abstract_model, abstract_config),
                 abstract_execution,
             )]
             legal(
                 abstract_model,
                 abstract_config,
-                initial(abstract_model, abstract_config),
+                RoverSpec::<A>::init(abstract_model, abstract_config),
                 abstract_execution,
             )
             && project::<A>(abstract_model, abstract_execution)
@@ -280,19 +275,19 @@ proof fn lemma_simulate_prefix<
                 )
             && relation(
                 before::<C>(
-                    initial(concrete_model, concrete_config),
+                    RoverSpec::<C>::init(concrete_model, concrete_config),
                     concrete_execution,
                     k,
                 ),
                 end::<A>(
-                    initial(abstract_model, abstract_config),
+                    RoverSpec::<A>::init(abstract_model, abstract_config),
                     abstract_execution,
                 ),
             ),
     decreases k,
 {
-    let concrete_initial = initial(concrete_model, concrete_config);
-    let abstract_initial = initial(abstract_model, abstract_config);
+    let concrete_initial = RoverSpec::<C>::init(concrete_model, concrete_config);
+    let abstract_initial = RoverSpec::<A>::init(abstract_model, abstract_config);
     if k == 0 {
         let abstract_execution = Execution::<A>::empty();
         assert(concrete_execution.take(0)
@@ -380,10 +375,9 @@ proof fn lemma_simulate_prefix<
         let concrete_label = concrete_execution[k - 1].0;
         let concrete_after = concrete_execution[k - 1].1;
         let abstract_before = end::<A>(abstract_initial, abstract_prefix);
-        assert(step(
+        assert(concrete_before.step(
             concrete_model,
             concrete_config,
-            concrete_before,
             concrete_label,
             concrete_after,
         ));
@@ -392,7 +386,7 @@ proof fn lemma_simulate_prefix<
                 abstract_model,
                 abstract_config,
                 abstract_before,
-                concrete_model.spec_observe(concrete_label),
+                concrete_model.observe(concrete_label),
                 world,
             )
             && relation(concrete_after, world);
@@ -412,7 +406,7 @@ proof fn lemma_simulate_prefix<
             && project::<A>(
                 abstract_model,
                 execution,
-            ) == concrete_model.spec_observe(concrete_label)
+            ) == concrete_model.observe(concrete_label)
             && end::<A>(abstract_before, execution) == abstract_after;
         let abstract_execution = abstract_prefix + abstract_suffix;
         lemma_legal_add(
@@ -442,7 +436,7 @@ proof fn lemma_simulate_prefix<
         ) =~= project::<C>(
             concrete_model,
             concrete_execution.take(k - 1),
-        ) + concrete_model.spec_observe(concrete_label));
+        ) + concrete_model.observe(concrete_label));
         assert(before::<C>(
             concrete_initial,
             concrete_execution,
@@ -497,8 +491,8 @@ proof fn lemma_simulate_prefix<
 /// The generic theorem: a related initial world and a proved forward
 /// simulation imply concrete boundary traces are included in abstract traces.
 pub proof fn concrete_refines_abstract<
-    C: RoverSpec,
-    A: RoverSpec<Boundary = C::Boundary>,
+    C: RoverModel,
+    A: RoverModel<Boundary = C::Boundary>,
 >(
     concrete_model: C,
     concrete_config: C::Config,
@@ -508,8 +502,8 @@ pub proof fn concrete_refines_abstract<
 )
     requires
         relation(
-            initial(concrete_model, concrete_config),
-            initial(abstract_model, abstract_config),
+            RoverSpec::<C>::init(concrete_model, concrete_config),
+            RoverSpec::<A>::init(abstract_model, abstract_config),
         ),
         simulation(
             concrete_model,
@@ -542,7 +536,7 @@ pub proof fn concrete_refines_abstract<
             abstract_config,
             events,
         ) by {
-        let concrete_initial = initial(concrete_model, concrete_config);
+        let concrete_initial = RoverSpec::<C>::init(concrete_model, concrete_config);
         let concrete_execution = choose|execution: Execution<C>|
             #![trigger legal(
                 concrete_model,
@@ -572,13 +566,13 @@ pub proof fn concrete_refines_abstract<
             #![trigger legal(
                 abstract_model,
                 abstract_config,
-                initial(abstract_model, abstract_config),
+                RoverSpec::<A>::init(abstract_model, abstract_config),
                 execution,
             )]
             legal(
                 abstract_model,
                 abstract_config,
-                initial(abstract_model, abstract_config),
+                RoverSpec::<A>::init(abstract_model, abstract_config),
                 execution,
             )
             && project::<A>(
@@ -591,7 +585,7 @@ pub proof fn concrete_refines_abstract<
             && relation(
                 end::<C>(concrete_initial, concrete_execution),
                 end::<A>(
-                    initial(abstract_model, abstract_config),
+                    RoverSpec::<A>::init(abstract_model, abstract_config),
                     execution,
                 ),
             );

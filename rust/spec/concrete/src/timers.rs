@@ -70,7 +70,7 @@ use echod_abstract::trusted::{pset_seq, spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::spec::StepResultV;
 #[cfg(verus_keep_ghost)]
 use echod_rover::{Sched, Time};
 #[cfg(verus_keep_ghost)]

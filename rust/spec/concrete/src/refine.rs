@@ -23,7 +23,7 @@
 //! the store steps and the reply that closes the flight are stutters.
 //! The theorem is about the distinct abstract and concrete `Spec` types.
 //! Each executable `Model` names its `Spec` through `RoverExec`; the trait's
-//! contracts prove that `initial` realizes `spec_initial`, while each
+//! contracts prove that `initial` realizes `processes`, while each
 //! `RoverProcExec::on_event` realizes its stateful `RoverProc::on_event`.
 //! Verus checks those bridges, node (`Node::step`) and store
 //! (`Store::step`) alike. The concrete node trusts its JSON codec, its

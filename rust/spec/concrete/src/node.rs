@@ -36,7 +36,7 @@ use echod_abstract::machine::{lemma_tags_ext, lemma_value_ext};
 use echod_abstract::{Call, Dispatch, Output};
 use echod_rover::rover::ProcessEvent;
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::spec::StepResultV;
 use echod_rover::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, AValue};

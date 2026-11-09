@@ -25,7 +25,7 @@
 
 use vstd::prelude::*;
 
-use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::spec::StepResultV;
 use echod_rover::rover::{ProcessEvent, RoverProc};
 use echod_rover::Time;
 

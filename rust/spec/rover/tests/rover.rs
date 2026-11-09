@@ -2,7 +2,7 @@
 
 use echod_rover::rover::{
     check, replay, Action, BoundaryEvent, CheckConfig, ProcResult, ProcessEvent, RoverExec,
-    RoverProc, RoverProcExec, RoverSpec,
+    RoverModel, RoverProc, RoverProcExec,
 };
 use echod_rover::Time;
 use vstd::prelude::View;
@@ -72,7 +72,7 @@ impl RoverProcExec for CounterState {
 /// A mathematical model need not provide executable state or transitions.
 struct SpecOnly;
 
-impl RoverSpec for SpecOnly {
+impl RoverModel for SpecOnly {
     type Config = ();
     type Pid = ();
     type Proc = SpecOnlyProc;
@@ -80,7 +80,7 @@ impl RoverSpec for SpecOnly {
     type Boundary = ();
 }
 
-impl RoverSpec for CounterSpec {
+impl RoverModel for CounterSpec {
     type Config = ();
     type Pid = Pid;
     type Proc = CounterProc;
@@ -110,7 +110,7 @@ type Event = BoundaryEvent<Pid, Message>;
 
 #[test]
 fn a_specification_does_not_need_an_executable_realization() {
-    fn accepts_spec<S: RoverSpec>(_: S) {}
+    fn accepts_spec<S: RoverModel>(_: S) {}
     accepts_spec(SpecOnly);
 }
 

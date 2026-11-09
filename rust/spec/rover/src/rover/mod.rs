@@ -10,9 +10,9 @@ pub mod comm;
 pub mod spec;
 pub mod test;
 
-// Stable facade for existing users; new code may import the layer directly.
+// Convenient facade; layer-specific imports remain available.
 pub use comm::{BoundaryEvent, Envelope, ProcessEvent};
-pub use spec::{refinement, semantics, EventOf, RoverProc, RoverSpec};
+pub use spec::{refinement, EventOf, RoverModel, RoverProc, RoverSpec};
 pub use test::{
     check, replay, search, Action, BoundaryOf, Certificate, CheckConfig, ConfigOf,
     ExecEventOf, ExecProcOf, MessageOf, PidOf, ProcOf, ProcResult, RoverExec,

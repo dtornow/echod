@@ -4,8 +4,9 @@
 //! Rover; `view` holds mathematical views and their lemmas; `catalogue` states
 //! conformance properties; `trusted` contains the explicit trust boundary.
 //! `history` is only the adapter to the client-history checker and driver.
-//! `model::Spec` is the mathematical `RoverSpec`; the distinct `model::Model`
-//! is its optional `RoverExec` realization.
+//! `model::Spec` supplies the abstract `RoverModel`; `RoverSpec<model::Spec>`
+//! is the complete world, and the distinct `model::Model` is its executable
+//! realization.
 
 #![allow(
     clippy::ptr_arg,

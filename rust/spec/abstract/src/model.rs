@@ -8,9 +8,9 @@ use vstd::prelude::*;
 
 use echod_rover::certificate::trusted::copy;
 #[allow(unused_imports)] // specification-only name is erased by ordinary Rust
-use echod_rover::rover::semantics::{Label, StepResultV};
+use echod_rover::rover::spec::{Label, StepResultV};
 use echod_rover::rover::{
-    ProcResult, ProcessEvent, RoverExec, RoverProc, RoverProcExec, RoverSpec, StepResult,
+    ProcResult, ProcessEvent, RoverExec, RoverModel, RoverProc, RoverProcExec, StepResult,
 };
 use echod_rover::{Sched, Time};
 
@@ -1198,18 +1198,18 @@ impl RoverExec for Model {
 
 }
 
-impl RoverSpec for Spec {
+impl RoverModel for Spec {
     type Config = ServerConfig;
     type Pid = Pid;
     type Proc = StateV;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
-    open spec fn spec_outside(&self) -> Pid {
+    open spec fn outside(&self) -> Pid {
         Pid::Outside
     }
 
-    open spec fn spec_initial(&self, _config: ServerConfig) -> Seq<(Pid, StateV)> {
+    open spec fn processes(&self, _config: ServerConfig) -> Seq<(Pid, StateV)> {
         seq![(
             Pid::Service,
             StateV {
@@ -1219,14 +1219,14 @@ impl RoverSpec for Spec {
         )]
     }
 
-    open spec fn spec_injectable(&self, _config: ServerConfig, message: Message) -> bool {
+    open spec fn injectable(&self, _config: ServerConfig, message: Message) -> bool {
         match message {
             Message::Request(_) => true,
             Message::Output(_) => false,
         }
     }
 
-    open spec fn spec_observe(
+    open spec fn observe(
         &self,
         label: Label<Pid, Message>,
     ) -> Seq<BoundaryEvent> {

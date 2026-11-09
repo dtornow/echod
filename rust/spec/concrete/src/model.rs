@@ -14,11 +14,11 @@
 use vstd::prelude::*;
 
 use echod_abstract::{BoundaryEvent, Call, Output};
-use echod_rover::rover::semantics::Label;
+use echod_rover::rover::spec::Label;
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::semantics::StepResultV;
+use echod_rover::rover::spec::StepResultV;
 use echod_rover::rover::{
-    ProcResult, ProcessEvent, RoverExec, RoverProc, RoverProcExec, RoverSpec,
+    ProcResult, ProcessEvent, RoverExec, RoverModel, RoverProc, RoverProcExec,
 };
 use echod_rover::Time;
 
@@ -556,22 +556,22 @@ impl RoverExec for Model {
 
 }
 
-impl RoverSpec for Spec {
+impl RoverModel for Spec {
     type Config = Fleet;
     type Pid = Pid;
     type Proc = LocalV;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
-    open spec fn spec_outside(&self) -> Pid {
+    open spec fn outside(&self) -> Pid {
         Pid::Outside
     }
 
-    open spec fn spec_initial(&self, config: Fleet) -> Seq<(Pid, LocalV)> {
+    open spec fn processes(&self, config: Fleet) -> Seq<(Pid, LocalV)> {
         spec_world(config)
     }
 
-    open spec fn spec_injectable(&self, _config: Fleet, message: Message) -> bool {
+    open spec fn injectable(&self, _config: Fleet, message: Message) -> bool {
         match message {
             Message::Request(_) | Message::Stop => true,
             Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
@@ -580,7 +580,7 @@ impl RoverSpec for Spec {
 
     /// A call in and an output out. Store traffic and `Stop` stay off the boundary,
     /// the same projection the abstract model uses for its own messages.
-    open spec fn spec_observe(&self, label: Label<Pid, Message>) -> Seq<BoundaryEvent> {
+    open spec fn observe(&self, label: Label<Pid, Message>) -> Seq<BoundaryEvent> {
         match label {
             Label::Input { at, message: Message::Request(call), .. } => {
                 seq![BoundaryEvent::Input { at, call }]
