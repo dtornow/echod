@@ -4,16 +4,16 @@ namespace Resonate
 
 open Rover
 
-/-- Every behavior of the concrete model, at every step: every document the
+/-- Every valid trace of the concrete model, at every step: every document the
 store holds is well-formed. The initial store is empty. -/
 theorem documents_stay_well_formed
     (appConfig : Resonate.Config)
     (concreteConfig : Concrete.Config)
     (nodes : List Addr)
-    (execution : Execution (Concrete.model nodes appConfig))
-    (hbehavior : Behavior (Concrete.model nodes appConfig) concreteConfig execution) :
-    ∀ entry ∈ execution, Concrete.Formed entry.2 :=
+    (trace : Trace (Concrete.model nodes appConfig))
+    (h : ValidTrace (Concrete.model nodes appConfig) concreteConfig trace) :
+    ∀ entry ∈ trace, Concrete.Formed entry.2 :=
   fun entry hentry _ hstore =>
-    Concrete.reachable_store_well_formed (hbehavior.reachable entry hentry) hstore
+    Concrete.reachable_store_well_formed (h.reachable entry hentry) hstore
 
 end Resonate

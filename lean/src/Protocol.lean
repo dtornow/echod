@@ -130,7 +130,7 @@ structure Store where
   objects : List Object := []
   schedules : List Schedule := []
 
-/-- Internal work values are shared data.  Their execution is implementation
+/-- Internal work values are shared data.  Their trace is implementation
 specific. -/
 inductive WorkItem where
   | promiseTimeout (id : ServerModel.Ident)

@@ -80,14 +80,14 @@ def boundaryEvent :
       some (.message time entry)
   | _ => none
 
-def boundaryTrace (execution : Execution (model nodes appConfig)) :
+def boundaryTrace (trace : Trace (model nodes appConfig)) :
     List Resonate.BoundaryEvent :=
-  (Rover.trace execution).filterMap boundaryEvent
+  (Rover.observe trace).filterMap boundaryEvent
 
 def ValidBoundaryTrace (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Config) (events : List Resonate.BoundaryEvent) : Prop :=
-  ∃ execution,
-    Behavior (model nodes appConfig) config execution ∧
-    boundaryTrace execution = events
+  ∃ trace,
+    ValidTrace (model nodes appConfig) config trace ∧
+    boundaryTrace trace = events
 
 end Resonate.Concrete

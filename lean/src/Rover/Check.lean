@@ -198,7 +198,7 @@ theorem actionStep_complete {model : Model} {config : model.Config}
 
 /-- Replay every action, stopping at the first illegal move. -/
 def replayFrom (model : Model) (config : model.Config) :
-    System model → Certificate model → Option (Execution model)
+    System model → Certificate model → Option (Trace model)
   | _, [] => some []
   | system, action :: rest =>
       match actionStep model config system action with
@@ -208,13 +208,13 @@ def replayFrom (model : Model) (config : model.Config) :
 
 theorem replayFrom_sound (model : Model) (config : model.Config)
     (system : System model) (certificate : Certificate model)
-    (execution : Execution model)
-    (h : replayFrom model config system certificate = some execution) :
-    Legal model config system execution := by
-  induction certificate generalizing system execution with
+    (trace : Trace model)
+    (h : replayFrom model config system certificate = some trace) :
+    Legal model config system trace := by
+  induction certificate generalizing system trace with
   | nil =>
       simp only [replayFrom, Option.some.injEq] at h
-      subst execution
+      subst trace
       trivial
   | cons action rest ih =>
       simp only [replayFrom] at h
@@ -233,8 +233,8 @@ structure Observation (model : Model) where
   project : BoundaryEvent model → Option Event
 
 def Observation.executionTrace (observation : Observation model)
-    (execution : Execution model) : List observation.Event :=
-  (Rover.trace execution).filterMap observation.project
+    (trace : Trace model) : List observation.Event :=
+  (Rover.observe trace).filterMap observation.project
 
 @[simp] theorem Observation.executionTrace_nil
     (observation : Observation model) :
@@ -251,31 +251,31 @@ def labelTime : Label model → Time
 
 def Observation.Valid (observation : Observation model)
     (config : model.Config) (events : List observation.Event) : Prop :=
-  ∃ execution,
-    Behavior model config execution ∧
-    observation.executionTrace execution = events
+  ∃ trace,
+    ValidTrace model config trace ∧
+    observation.executionTrace trace = events
 
 /-- Replay and independently compare the complete projected trace. -/
 def replay (observation : Observation model) (config : model.Config)
     (initial : model.Pid → model.State) (events : List observation.Event)
-    (certificate : Certificate model) : Option (Execution model) :=
+    (certificate : Certificate model) : Option (Trace model) :=
   letI := observation.decEqEvent
   match replayFrom model config (System.initial initial) certificate with
   | none => none
-  | some execution =>
-      if observation.executionTrace execution = events then
-        some execution
+  | some trace =>
+      if observation.executionTrace trace = events then
+        some trace
       else none
 
 theorem replay_sound {observation : Observation model}
     {config : model.Config} {initial : model.Pid → model.State}
     (hinit : model.init config initial)
     {events : List observation.Event} {certificate : Certificate model}
-    {execution : Execution model}
+    {trace : Trace model}
     (h : replay observation config initial events certificate =
-      some execution) :
-    Behavior model config execution ∧
-      observation.executionTrace execution = events := by
+      some trace) :
+    ValidTrace model config trace ∧
+      observation.executionTrace trace = events := by
   letI := observation.decEqEvent
   simp only [replay] at h
   cases hr : replayFrom model config (System.initial initial) certificate with
@@ -285,7 +285,7 @@ theorem replay_sound {observation : Observation model}
       split at h
       next htrace =>
         simp only [Option.some.injEq] at h
-        subst execution
+        subst trace
         exact ⟨⟨initial, hinit,
           replayFrom_sound model config _ certificate replayed hr⟩, htrace⟩
       next _ => contradiction
@@ -294,12 +294,12 @@ theorem replay_valid {observation : Observation model}
     {config : model.Config} {initial : model.Pid → model.State}
     (hinit : model.init config initial)
     {events : List observation.Event} {certificate : Certificate model}
-    {execution : Execution model}
+    {trace : Trace model}
     (h : replay observation config initial events certificate =
-      some execution) :
+      some trace) :
     observation.Valid config events := by
-  obtain ⟨behavior, trace⟩ := replay_sound hinit h
-  exact ⟨execution, behavior, trace⟩
+  obtain ⟨hvalid, hobserved⟩ := replay_sound hinit h
+  exact ⟨trace, hvalid, hobserved⟩
 
 /-- Executable, potentially pruned candidates for one expected observation. -/
 structure Adapter (model : Model) extends Observation model where
@@ -474,15 +474,15 @@ theorem observed_nil_or_singleton (adapter : Adapter model)
 
 @[simp] theorem Observation.executionTrace_cons
     (observation : Observation model) (label : Label model)
-    (next : System model) (rest : Execution model) :
+    (next : System model) (rest : Trace model) :
     observation.executionTrace ((label, next) :: rest) =
       observation.labelTrace label ++ observation.executionTrace rest := by
   simp [Observation.executionTrace, Observation.labelTrace,
-    Rover.trace, List.filterMap_append]
+    Rover.observe, List.filterMap_append]
 
 theorem Observation.executionTrace_append
     (observation : Observation model)
-    (first second : Execution model) :
+    (first second : Trace model) :
     observation.executionTrace (first ++ second) =
       observation.executionTrace first ++
         observation.executionTrace second := by
@@ -495,19 +495,19 @@ theorem Observation.executionTrace_append
 /-- Replay extends by one checked action at the system where the prefix ends. -/
 theorem replayFrom_snoc {model : Model} {config : model.Config}
     {initial system : System model} {certificate : Certificate model}
-    {execution : Execution model} {action : Action model}
+    {trace : Trace model} {action : Action model}
     {label : Label model} {next : System model}
     (hreplay :
-      replayFrom model config initial certificate = some execution)
-    (hend : Rover.endOf initial execution = system)
+      replayFrom model config initial certificate = some trace)
+    (hend : Rover.endOf initial trace = system)
     (hstep :
       actionStep model config system action = some (label, next)) :
     replayFrom model config initial (certificate ++ [action]) =
-      some (execution ++ [(label, next)]) := by
-  induction certificate generalizing initial execution with
+      some (trace ++ [(label, next)]) := by
+  induction certificate generalizing initial trace with
   | nil =>
       simp only [replayFrom, Option.some.injEq] at hreplay
-      subst execution
+      subst trace
       simp only [Rover.endOf] at hend
       subst system
       simp [replayFrom, hstep]
@@ -526,9 +526,9 @@ theorem replayFrom_snoc {model : Model} {config : model.Config}
           rfl
 
 @[simp] theorem endOf_snoc (initial : System model)
-    (execution : Execution model) (entry : Label model × System model) :
-    Rover.endOf initial (execution ++ [entry]) = entry.2 := by
-  induction execution generalizing initial with
+    (trace : Trace model) (entry : Label model × System model) :
+    Rover.endOf initial (trace ++ [entry]) = entry.2 := by
+  induction trace generalizing initial with
   | nil => rfl
   | cons head rest ih => exact ih head.2
 
@@ -569,15 +569,15 @@ and extends the already-replayed prefix by exactly the remaining trace. -/
 theorem searchFrom_found_replays (adapter : Adapter model)
     (config : model.Config) {initial : System model}
     {fuel : Nat} {context : Context model} {events : List adapter.Event}
-    {found : Certificate model} {preExecution : Execution model}
+    {found : Certificate model} {preExecution : Trace model}
     (hprefix : replayFrom model config initial context.certificate =
       some preExecution)
     (hend : Rover.endOf initial preExecution = context.system)
     (hsearch :
       searchFrom adapter config fuel context events = .found found) :
-    ∃ execution,
-      replayFrom model config initial found = some execution ∧
-      adapter.executionTrace execution =
+    ∃ trace,
+      replayFrom model config initial found = some trace ∧
+      adapter.executionTrace trace =
         adapter.executionTrace preExecution ++ events := by
   induction fuel generalizing context events found preExecution with
   | zero =>
@@ -617,9 +617,9 @@ theorem searchFrom_found_replays (adapter : Adapter model)
               · simp only [hhidden] at hbranch
                 have hlabel :
                     adapter.toObservation.labelTrace label = [] := hhidden
-                obtain ⟨execution, hexecution, htrace⟩ :=
+                obtain ⟨trace, hexecution, htrace⟩ :=
                   ih hreplay hend' hbranch
-                refine ⟨execution, hexecution, ?_⟩
+                refine ⟨trace, hexecution, ?_⟩
                 rw [Observation.executionTrace_append] at htrace
                 simpa [hlabel, List.append_assoc] using htrace
               · by_cases heq : event = expected
@@ -628,9 +628,9 @@ theorem searchFrom_found_replays (adapter : Adapter model)
                   have hlabel :
                       adapter.toObservation.labelTrace label = [expected] :=
                     hobserved
-                  obtain ⟨execution, hexecution, htrace⟩ :=
+                  obtain ⟨trace, hexecution, htrace⟩ :=
                     ih hreplay hend' hbranch
-                  refine ⟨execution, hexecution, ?_⟩
+                  refine ⟨trace, hexecution, ?_⟩
                   rw [Observation.executionTrace_append] at htrace
                   simpa [hlabel, List.append_assoc] using htrace
                 · simp [hobserved, heq] at hbranch
@@ -641,36 +641,36 @@ theorem rawSearch_found_replays {adapter : Adapter model}
     {bound : Nat} {config : model.Config} {events : List adapter.Event}
     {certificate : Certificate model}
     (h : rawSearch adapter bound config events = .found certificate) :
-    ∃ execution,
+    ∃ trace,
       replayFrom model config
         (System.initial (adapter.initial config)) certificate =
-          some execution ∧
-      adapter.executionTrace execution = events := by
+          some trace ∧
+      adapter.executionTrace trace = events := by
   have hprefix :
       replayFrom model config (System.initial (adapter.initial config))
         ([] : Certificate model) = some [] := rfl
   have hend :
       Rover.endOf (System.initial (adapter.initial config)) [] =
         System.initial (adapter.initial config) := rfl
-  obtain ⟨execution, hexecution, htrace⟩ :=
+  obtain ⟨trace, hexecution, htrace⟩ :=
     searchFrom_found_replays adapter config hprefix hend h
-  exact ⟨execution, hexecution, by
-    simpa [Observation.executionTrace, Rover.trace] using htrace⟩
+  exact ⟨trace, hexecution, by
+    simpa [Observation.executionTrace, Rover.observe] using htrace⟩
 
-/-- Local action coverage is enough to find every legal execution. Its own
+/-- Local action coverage is enough to find every legal trace. Its own
 length is a sufficient fuel bound: each hidden or visible step consumes one
 unit, while visible steps additionally consume one expected event. -/
 theorem searchFrom_complete {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
     {config : model.Config} {context : Context model}
-    {events : List adapter.Event} {execution : Execution model}
+    {events : List adapter.Event} {trace : Trace model}
     (hreachable : Reachable model config context.system)
-    (hlegal : Legal model config context.system execution)
-    (htrace : adapter.executionTrace execution = events) :
+    (hlegal : Legal model config context.system trace)
+    (htrace : adapter.executionTrace trace = events) :
     ∃ certificate,
-      searchFrom adapter config execution.length context events =
+      searchFrom adapter config trace.length context events =
         .found certificate := by
-  induction execution generalizing context events with
+  induction trace generalizing context events with
   | nil =>
       simp only [Observation.executionTrace_nil] at htrace
       subst events
@@ -782,25 +782,25 @@ theorem searchFrom_complete {adapter : Adapter model}
               simpa [searchFrom, branch] using hfound⟩
 
 /-- With local finite coverage, exhaustion is a proof of closure. Along any
-legal explaining execution, every fuel bound either finds a witness or leaves
+legal explaining trace, every fuel bound either finds a witness or leaves
 an explicit cutoff branch. -/
 theorem searchFrom_ne_exhausted {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
     {config : model.Config} {context : Context model}
-    {events : List adapter.Event} {execution : Execution model}
+    {events : List adapter.Event} {trace : Trace model}
     (hreachable : Reachable model config context.system)
-    (hlegal : Legal model config context.system execution)
-    (htrace : adapter.executionTrace execution = events)
+    (hlegal : Legal model config context.system trace)
+    (htrace : adapter.executionTrace trace = events)
     (fuel : Nat) :
     searchFrom adapter config fuel context events ≠ .exhausted := by
-  induction fuel generalizing context events execution with
+  induction fuel generalizing context events trace with
   | zero =>
       cases events <;> simp [searchFrom]
   | succ fuel ih =>
       cases events with
       | nil => simp [searchFrom]
       | cons expected remaining =>
-          cases execution with
+          cases trace with
           | nil => simp at htrace
           | cons entry rest =>
               obtain ⟨label, next⟩ := entry
@@ -826,7 +826,7 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                   certificate := context.certificate ++ [action]
                 }
                 have htailSearch :=
-                  ih (context := nextContext) (execution := rest)
+                  ih (context := nextContext) (trace := rest)
                     hnext hrest htail
                 let branch : Action model → RawResult model :=
                   fun candidate =>
@@ -871,7 +871,7 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
                   certificate := context.certificate ++ [action]
                 }
                 have htailSearch :=
-                  ih (context := nextContext) (execution := rest)
+                  ih (context := nextContext) (trace := rest)
                     hnext hrest hparts.2
                 let branch : Action model → RawResult model :=
                   fun candidate =>
@@ -903,7 +903,7 @@ theorem searchFrom_ne_exhausted {adapter : Adapter model}
 
 /-- Search results expose only replayed validity. -/
 inductive SearchResult (model : Model) where
-  | valid (certificate : Certificate model) (execution : Execution model)
+  | valid (certificate : Certificate model) (trace : Trace model)
   | exhausted
   | cutoff
 
@@ -914,16 +914,16 @@ def boundedSearch (adapter : Adapter model) (bound : Nat)
   | .found certificate =>
       match replay adapter.toObservation config (adapter.initial config)
           events certificate with
-      | some execution => .valid certificate execution
+      | some trace => .valid certificate trace
       | none => .cutoff
   | .exhausted => .exhausted
   | .cutoff => .cutoff
 
 theorem boundedSearch_valid_sound {adapter : Adapter model}
     {bound : Nat} {config : model.Config} {events : List adapter.Event}
-    {certificate : Certificate model} {execution : Execution model}
+    {certificate : Certificate model} {trace : Trace model}
     (h : boundedSearch adapter bound config events =
-      .valid certificate execution) :
+      .valid certificate trace) :
     adapter.toObservation.Valid config events := by
   simp only [boundedSearch] at h
   cases hs : rawSearch adapter bound config events with
@@ -940,7 +940,7 @@ theorem boundedSearch_valid_sound {adapter : Adapter model}
           exact replay_valid (adapter.initial_valid config) hr
 
 /-- For a locally complete adapter, an exhausted result is a definitive
-refutation: every valid execution would contribute either a witness or a
+refutation: every valid trace would contribute either a witness or a
 cutoff branch at this bound. -/
 theorem boundedSearch_exhausted_sound {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
@@ -949,7 +949,7 @@ theorem boundedSearch_exhausted_sound {adapter : Adapter model}
       boundedSearch adapter bound config events = .exhausted) :
     ¬ adapter.toObservation.Valid config events := by
   intro hvalid
-  obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
+  obtain ⟨trace, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
   have hprocess : process = adapter.initial config :=
     adapter.initial_complete hinit
   subst process
@@ -977,18 +977,18 @@ structure ExhaustionLaw (adapter : Adapter model) : Prop where
     boundedSearch adapter bound config events = .exhausted →
     ¬ adapter.toObservation.Valid config events
 
-/-- A legal execution is found with its own length as fuel. This is derived
+/-- A legal trace is found with its own length as fuel. This is derived
 only from the adapter's local initial-state and action-enumeration laws. -/
 theorem boundedSearch_complete {adapter : Adapter model}
     (hcomplete : adapter.complete = true)
     {config : model.Config} {events : List adapter.Event}
-    {execution : Execution model}
-    (hbehavior : Behavior model config execution)
-    (htrace : adapter.executionTrace execution = events) :
+    {trace : Trace model}
+    (hvalid : ValidTrace model config trace)
+    (htrace : adapter.executionTrace trace = events) :
     ∃ certificate replayed,
-      boundedSearch adapter execution.length config events =
+      boundedSearch adapter trace.length config events =
         .valid certificate replayed := by
-  obtain ⟨process, hinit, hlegal⟩ := hbehavior
+  obtain ⟨process, hinit, hlegal⟩ := hvalid
   have hprocess : process = adapter.initial config :=
     adapter.initial_complete hinit
   subst process
@@ -1004,7 +1004,7 @@ theorem boundedSearch_complete {adapter : Adapter model}
     searchFrom_complete hcomplete
       (context := initialContext) hinitialReachable hlegal htrace
   have hraw :
-      rawSearch adapter execution.length config events =
+      rawSearch adapter trace.length config events =
         .found certificate := by
     simpa [rawSearch, initialContext] using hsearch
   obtain ⟨replayed, hreplayed, hreplayedTrace⟩ :=
@@ -1023,19 +1023,19 @@ theorem valid_iff_exists_bound {adapter : Adapter model}
     (hcomplete : adapter.complete = true) {config : model.Config}
     {events : List adapter.Event} :
     adapter.toObservation.Valid config events ↔
-      ∃ bound certificate execution,
+      ∃ bound certificate trace,
         boundedSearch adapter bound config events =
-          .valid certificate execution := by
+          .valid certificate trace := by
   constructor
-  · rintro ⟨execution, hbehavior, htrace⟩
+  · rintro ⟨trace, hvalid, htrace⟩
     obtain ⟨certificate, replayed, hsearch⟩ :=
-      boundedSearch_complete hcomplete hbehavior htrace
-    exact ⟨execution.length, certificate, replayed, hsearch⟩
-  · rintro ⟨bound, certificate, execution, h⟩
+      boundedSearch_complete hcomplete hvalid htrace
+    exact ⟨trace.length, certificate, replayed, hsearch⟩
+  · rintro ⟨bound, certificate, trace, h⟩
     exact boundedSearch_valid_sound h
 
 inductive Verdict (model : Model) where
-  | valid (certificate : Certificate model) (execution : Execution model)
+  | valid (certificate : Certificate model) (trace : Trace model)
   | invalid
   | unknown
 
@@ -1060,7 +1060,7 @@ def checkWithBound (adapter : Adapter model)
     .invalid
   else
     match boundedSearch adapter bound config events with
-    | .valid certificate execution => .valid certificate execution
+    | .valid certificate trace => .valid certificate trace
     | .exhausted =>
         if adapter.exhaustive then .invalid else .unknown
     | .cutoff => .unknown
@@ -1068,9 +1068,9 @@ def checkWithBound (adapter : Adapter model)
 theorem checkWithBound_valid_sound {adapter : Adapter model}
     {law : ExhaustionLaw adapter} {bound : Nat} {config : model.Config}
     {events : List adapter.Event} {certificate : Certificate model}
-    {execution : Execution model}
+    {trace : Trace model}
     (h : checkWithBound adapter law bound config events =
-      .valid certificate execution) :
+      .valid certificate trace) :
     adapter.toObservation.Valid config events := by
   simp only [checkWithBound] at h
   split at h
@@ -1096,7 +1096,7 @@ theorem checkWithBound_invalid_sound {adapter : Adapter model}
   next hinvalid => exact adapter.definitiveInvalid_sound hinvalid
   next _ =>
     cases hs : boundedSearch adapter bound config events with
-    | valid certificate execution => simp [hs] at h
+    | valid certificate trace => simp [hs] at h
     | cutoff => simp [hs] at h
     | exhausted =>
         simp only [hs] at h

@@ -8,7 +8,7 @@ import refinement_handlers
 The wire protocol remains untrusted and proof-free. Semantic provenance is
 reconstructed here as a ghost predicate over node-local flights and reachable
 network messages. The final simulation is factored into a one-step obligation
-and an execution fold, so delayed/reordered outside observations do not need a
+and an trace fold, so delayed/reordered outside observations do not need a
 special trace argument.
 -/
 
@@ -10427,12 +10427,12 @@ theorem simulate_inject
     {now : Time} (htime : concrete.now ≤ now) (call : Call) :
     let concreteNext :=
       concrete.inject (.node address) (.request call) now
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config concreteNext
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution =
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace =
         concreteObservation (nodes := nodes) (appConfig := appConfig)
           (.input (.node address) now (.request call)) := by
   let abstractNext :=
@@ -10455,12 +10455,12 @@ theorem simulate_outside
     {sender : Concrete.Pid} {now : Time} {message : Concrete.Msg}
     (htime : concrete.now ≤ now)
     (hmessage : (sender, .outside, message) ∈ concrete.network) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config (concrete.observeOutside now)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution =
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace =
         concreteObservation (nodes := nodes) (appConfig := appConfig)
           (.outside sender now message) := by
   cases message with
@@ -10656,13 +10656,13 @@ theorem simulate_external_written_store
       send := [(.node address,
         .storeReply { op, payload := .written })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let served :=
     Abstract.run appConfig call
@@ -10871,13 +10871,13 @@ theorem simulate_external_landed_failed_store
       send := [(.node address,
         .storeReply { op, payload := .failed })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let lost :=
     Abstract.runLose appConfig call
@@ -11065,13 +11065,13 @@ theorem simulate_external_not_landed_failed_store
       send := [(.node address,
         .storeReply { op, payload := .failed })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
@@ -11275,17 +11275,17 @@ theorem simulate_internal_committed_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now {
           state := .store (physical.commit key document)
           send := [(.node address,
             .storeReply { op, payload := reply })]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let abstractResult : Result Abstract.Pid State Message := {
     state := lifted.1
     send := Abstract.sends lifted.2
@@ -11463,17 +11463,17 @@ theorem simulate_internal_not_landed_failed_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now {
           state := .store (physical.fence key)
           send := [(.node address,
             .storeReply { op, payload := .failed })]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let concreteResult :
       Result Concrete.Pid Concrete.Local Concrete.Msg := {
     state := .store (physical.fence key)
@@ -11589,12 +11589,12 @@ theorem simulate_matching_put_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
-        (concrete.land .store now result) (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (concrete.land .store now result) (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   obtain ⟨provenance, hsnapshot, horigin, hagreement, heligible⟩ :=
     reachable_stageable_puts hreachable hphysical hrequest
   obtain ⟨node, flight, hnode, hflight, hphase, hnoreply⟩ :=
@@ -11631,17 +11631,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.commit key document)
             send := [(.node address,
               .storeReply { op, payload := reply })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] := by
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] := by
     cases hinstant
     let item : WorkItem := .occurrence request semanticTime
     have hitemKey : item.key = key := by
@@ -11758,17 +11758,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.commit key document)
             send := [(.node address,
               .storeReply { op, payload := reply })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] := by
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] := by
     have htarget : timer.target.key = key := by
       have hvalid :=
         related.flights address node op flight haddress hnode hflight
@@ -11867,17 +11867,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.fence key)
             send := [(.node address,
               .storeReply { op, payload := .failed })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     simulate_internal_not_landed_failed_store hreachable related hphysical
       hrequest provenance hfailure haddress hnode hflight hkey
       hflightTransaction htime hconcreteResult
@@ -11977,12 +11977,12 @@ theorem simulate_store_process
       result ∈
         (Concrete.step appConfig config .store (.store physical)
           now event).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
-        (concrete.land .store now result) (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (concrete.land .store now result) (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   have hinert
       {inert : Result Concrete.Pid Concrete.Local Concrete.Msg}
       {nextPhysical : Concrete.Store}
@@ -12006,12 +12006,12 @@ theorem simulate_store_process
           (.node address,
             Concrete.Msg.storeReply { op, payload := .failed }) ∉
               inert.send) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.land .store now inert) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (concrete.land .store now inert) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     ⟨[], trivial,
       related_after_inert_store hreachable related hphysical htime hvalid
         hmember hstate hkeys hvalues hreplies hnoWritten hnoFailed,
@@ -13387,16 +13387,16 @@ theorem simulate_rejected_external_node
       } : Result Concrete.Pid Concrete.Local Concrete.Msg) ∈
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now {
           state := .node node
           send := Concrete.sendOutputs [Resonate.unavailable call]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := shed.1
@@ -13456,14 +13456,14 @@ theorem simulate_pure_external_node
       (Concrete.pureExternal appConfig node call) ∈
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now
           (Concrete.pureExternal appConfig node call))
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let served :=
     Abstract.run appConfig call
       (abstract.process .service)
@@ -13600,13 +13600,13 @@ theorem simulate_node_process
       result ∈
         (Concrete.step appConfig config (.node address) (.node node)
           now event).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now result)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   obtain ⟨validNode, hvalidNodeState, hnodeValid⟩ :=
     reachable_nodes_valid hreachable address haddress
   rw [hnode] at hvalidNodeState
@@ -13623,13 +13623,13 @@ theorem simulate_node_process
           (.outside, Concrete.Msg.output output) ∈ result.send →
           (Abstract.Pid.service, .outside, Message.output output) ∈
             abstract.network) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land (.node address) now result)
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     ⟨[], trivial,
       related_after_stuttering_node hreachable related haddress hnode
         hnodeValid hserial htime hvalid hresult hstate houtputs,
@@ -13953,11 +13953,11 @@ def StepSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     Reachable (CModel nodes appConfig) config concrete →
     Related nodes appConfig config concrete abstract →
     Step (CModel nodes appConfig) config concrete label next →
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
-      Related nodes appConfig config next (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = concreteObservation label
+        abstract trace ∧
+      Related nodes appConfig config next (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = concreteObservation label
 
 def ProcessSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
@@ -13972,12 +13972,12 @@ def ProcessSimulation (nodes : List Addr) (appConfig : Resonate.Config)
       result ∈
         ((CModel nodes appConfig).step config pid
           (concrete.process pid) now event).val →
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.land pid now result) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = []
+          (concrete.land pid now result) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = []
 
 def InjectSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
@@ -13989,12 +13989,12 @@ def InjectSimulation (nodes : List Addr) (appConfig : Resonate.Config)
       concrete.now ≤ now →
       (CModel nodes appConfig).isProcess to →
       (CModel nodes appConfig).injectable config message →
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.inject to message now) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution =
+          (concrete.inject to message now) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace =
           concreteObservation (nodes := nodes) (appConfig := appConfig)
             (.input to now message)
 
@@ -14056,9 +14056,9 @@ theorem stepSimulation_of_processSimulation
       simpa using
         simulate_outside hreachable related htime hmessage
   | @process pid now event result htime hreal hvalid hresult =>
-      obtain ⟨execution, hlegal, hrelated, htrace⟩ :=
+      obtain ⟨trace, hlegal, hrelated, htrace⟩ :=
         hprocess hreachable related htime hreal hvalid hresult
-      exact ⟨execution, hlegal, hrelated, by
+      exact ⟨trace, hlegal, hrelated, by
         simpa only [concreteObservation, Label.observe,
           List.filterMap_nil] using htrace⟩
 
@@ -14069,7 +14069,7 @@ theorem stepSimulation
   stepSimulation_of_processSimulation injectSimulation processSimulation
 
 theorem legal_append {model : Model} {config : model.Config}
-    {system : System model} {first second : Execution model}
+    {system : System model} {first second : Trace model}
     (hfirst : Legal model config system first)
     (hsecond : Legal model config (endOf system first) second) :
     Legal model config system (first ++ second) := by
@@ -14079,7 +14079,7 @@ theorem legal_append {model : Model} {config : model.Config}
       exact ⟨hfirst.1, ih hfirst.2 hsecond⟩
 
 theorem endOf_append {model : Model} (system : System model)
-    (first second : Execution model) :
+    (first second : Trace model) :
     endOf system (first ++ second) =
       endOf (endOf system first) second := by
   induction first generalizing system with
@@ -14087,48 +14087,48 @@ theorem endOf_append {model : Model} (system : System model)
   | cons entry rest ih => exact ih entry.2
 
 theorem abstract_boundaryTrace_append
-    (first second : Execution AModel) :
+    (first second : Trace AModel) :
     Abstract.boundaryTrace (first ++ second) =
       Abstract.boundaryTrace first ++ Abstract.boundaryTrace second := by
   simp only [Abstract.boundaryTrace]
-  rw [show Rover.trace (first ++ second) =
-      Rover.trace first ++ Rover.trace second by
+  rw [show Rover.observe (first ++ second) =
+      Rover.observe first ++ Rover.observe second by
     induction first with
     | nil => rfl
     | cons entry rest ih =>
-        simp [Rover.trace, ih, List.append_assoc]]
+        simp [Rover.observe, ih, List.append_assoc]]
   exact List.filterMap_append
 
 theorem concrete_boundaryTrace_cons
     {nodes : List Addr} {appConfig : Resonate.Config}
     (label : Label (CModel nodes appConfig))
     (next : System (CModel nodes appConfig))
-    (rest : Execution (CModel nodes appConfig)) :
+    (rest : Trace (CModel nodes appConfig)) :
     Concrete.boundaryTrace ((label, next) :: rest) =
       concreteObservation label ++ Concrete.boundaryTrace rest := by
-  simp [Concrete.boundaryTrace, concreteObservation, Rover.trace,
+  simp [Concrete.boundaryTrace, concreteObservation, Rover.observe,
     List.filterMap_append]
 
-/-- Generic execution folding from one-step simulation to finite execution
+/-- Generic trace folding from one-step simulation to finite trace
 simulation without any additional trace assumption. -/
 theorem simulate_execution
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
     (hsim : StepSimulation nodes appConfig config)
     {concrete : System (CModel nodes appConfig)}
-    {execution : Execution (CModel nodes appConfig)}
+    {trace : Trace (CModel nodes appConfig)}
     {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
-    (legal : Legal (CModel nodes appConfig) config concrete execution) :
+    (legal : Legal (CModel nodes appConfig) config concrete trace) :
     ∃ abstractExecution,
       Legal AModel appConfig
         abstract abstractExecution ∧
-      Related nodes appConfig config (endOf concrete execution)
+      Related nodes appConfig config (endOf concrete trace)
         (endOf abstract abstractExecution) ∧
       Abstract.boundaryTrace abstractExecution =
-        Concrete.boundaryTrace execution := by
-  induction execution generalizing concrete abstract with
+        Concrete.boundaryTrace trace := by
+  induction trace generalizing concrete abstract with
   | nil => exact ⟨[], trivial, related, rfl⟩
   | cons entry rest ih =>
       obtain ⟨label, next⟩ := entry
@@ -14234,7 +14234,7 @@ def Refines (nodes : List Addr) (appConfig : Resonate.Config)
       appConfig events
 
 /-- End-to-end trace inclusion from a protocol-specific reachable one-step
-simulation, including all execution and delayed-observation plumbing. -/
+simulation, including all trace and delayed-observation plumbing. -/
 theorem boundary_refinement_of_stepSimulation
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
@@ -14242,7 +14242,7 @@ theorem boundary_refinement_of_stepSimulation
     Refines nodes appConfig config := by
   unfold Refines
   intro events hvalid
-  obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
+  obtain ⟨trace, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
   obtain ⟨abstractExecution, abstractLegal, _, abstractTrace⟩ :=
     simulate_execution hsim (Reachable.init hinit)
       (initial_related hinit) hlegal

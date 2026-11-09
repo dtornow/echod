@@ -148,16 +148,16 @@ inductive Step (model : Model) (config : model.Config) :
         (.outside sender now message)
         (system.observeOutside now)
 
-abbrev Execution (model : Model) := List (Label model × System model)
+abbrev Trace (model : Model) := List (Label model × System model)
 
-/-- Every execution entry is a valid step from the system before it. -/
+/-- Every trace entry is a valid step from the system before it. -/
 def Legal (model : Model) (config : model.Config) :
-    System model → Execution model → Prop
+    System model → Trace model → Prop
   | _, [] => True
   | system, (label, next) :: rest =>
       Step model config system label next ∧ Legal model config next rest
 
-def endOf (system : System model) : Execution model → System model
+def endOf (system : System model) : Trace model → System model
   | [] => system
   | (_, next) :: rest => endOf next rest
 
@@ -181,25 +181,25 @@ theorem Reachable.invariant {P : System model → Prop}
   | init hi => exact hinit _ hi
   | step _ hs ih => exact hstep ih hs
 
-/-- The boundary trace shown by an execution. -/
-def trace : Execution model → List (BoundaryEvent model)
+/-- The boundary events a trace shows. -/
+def observe : Trace model → List (BoundaryEvent model)
   | [] => []
-  | (label, _) :: rest => label.observe ++ trace rest
+  | (label, _) :: rest => label.observe ++ observe rest
 
-/-- A complete finite behavior starts in an allowed process state and follows
-only legal system transitions. -/
-def Behavior (model : Model) (config : model.Config)
-    (execution : Execution model) : Prop :=
+/-- A valid trace starts in an allowed process state and follows only legal
+system transitions. -/
+def ValidTrace (model : Model) (config : model.Config)
+    (trace : Trace model) : Prop :=
   ∃ process,
     model.init config process ∧
-    Legal model config (System.initial process) execution
+    Legal model config (System.initial process) trace
 
-/-- Every system a legal execution passes through is reachable. -/
-theorem Legal.reachable {system : System model} {execution : Execution model}
+/-- Every system a legal trace passes through is reachable. -/
+theorem Legal.reachable {system : System model} {trace : Trace model}
     (hreachable : Reachable model config system)
-    (hlegal : Legal model config system execution) :
-    ∀ entry ∈ execution, Reachable model config entry.2 := by
-  induction execution generalizing system with
+    (hlegal : Legal model config system trace) :
+    ∀ entry ∈ trace, Reachable model config entry.2 := by
+  induction trace generalizing system with
   | nil => intro _ h; nomatch h
   | cons head rest ih =>
       obtain ⟨label, next⟩ := head
@@ -209,17 +209,17 @@ theorem Legal.reachable {system : System model} {execution : Execution model}
       · exact hnext
       · exact ih hnext hlegal.2 entry hentry
 
-/-- Every system a behavior passes through is reachable. -/
-theorem Behavior.reachable {execution : Execution model}
-    (hbehavior : Behavior model config execution) :
-    ∀ entry ∈ execution, Reachable model config entry.2 :=
-  let ⟨_, hinit, hlegal⟩ := hbehavior
+/-- Every system a valid trace passes through is reachable. -/
+theorem ValidTrace.reachable {trace : Trace model}
+    (hvalid : ValidTrace model config trace) :
+    ∀ entry ∈ trace, Reachable model config entry.2 :=
+  let ⟨_, hinit, hlegal⟩ := hvalid
   Legal.reachable (.init hinit) hlegal
 
-/-- Trace checking asks whether some legal execution from an allowed initial
+/-- Trace checking asks whether some legal trace from an allowed initial
 state shows exactly the supplied boundary trace. -/
-def ValidTrace (model : Model) (config : model.Config)
+def ValidObservation (model : Model) (config : model.Config)
     (events : List (BoundaryEvent model)) : Prop :=
-  ∃ execution, Behavior model config execution ∧ trace execution = events
+  ∃ trace, ValidTrace model config trace ∧ observe trace = events
 
 end Rover

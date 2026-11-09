@@ -137,10 +137,10 @@ theorem monotoneFrom_weaken {earlier later : Time}
       exact ⟨Nat.le_trans h hm.1, hm.2⟩
 
 theorem legal_boundary_times (config : Config) (system : System AModel)
-    (execution : Execution AModel)
-    (h : Legal AModel config system execution) :
-    monotoneFrom system.now (Abstract.boundaryTrace execution) = true := by
-  induction execution generalizing system with
+    (trace : Trace AModel)
+    (h : Legal AModel config system trace) :
+    monotoneFrom system.now (Abstract.boundaryTrace trace) = true := by
+  induction trace generalizing system with
   | nil => rfl
   | cons entry rest ih =>
       obtain ⟨label, next⟩ := entry
@@ -149,30 +149,30 @@ theorem legal_boundary_times (config : Config) (system : System AModel)
       cases hstep with
       | inject htime hprocess hinjectable =>
           obtain ⟨call, rfl⟩ := hinjectable
-          simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+          simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
             Abstract.boundaryEvent, Message.observeInput, monotoneFrom,
             eventTime, System.inject] using And.intro htime htail
       | process htime hprocess hevent hresult =>
           apply monotoneFrom_weaken htime
-          simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+          simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
             System.land] using htail
       | outside htime hmessage =>
           rename_i sender time message
           cases message with
           | request call =>
               apply monotoneFrom_weaken htime
-              simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+              simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                 Abstract.boundaryEvent, Message.observeOutput,
                 System.observeOutside] using htail
           | output output =>
               cases output with
               | response client id response =>
-                  simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+                  simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                     Abstract.boundaryEvent, Message.observeOutput,
                     monotoneFrom, eventTime, System.observeOutside] using
                       And.intro htime htail
               | message entry =>
-                  simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+                  simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                     Abstract.boundaryEvent, Message.observeOutput,
                     monotoneFrom, eventTime, System.observeOutside] using
                       And.intro htime htail
@@ -181,14 +181,14 @@ theorem valid_boundary_times {config : Config}
     {events : List BoundaryEvent}
     (h : observation.Valid config events) :
     monotoneTimes events = true := by
-  obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := h
+  obtain ⟨trace, ⟨process, hinit, hlegal⟩, htrace⟩ := h
   rw [← htrace]
-  exact legal_boundary_times config (System.initial process) execution hlegal
+  exact legal_boundary_times config (System.initial process) trace hlegal
 
 theorem legal_step_before_expected {config : Config}
     {system : System AModel} {expected : BoundaryEvent}
     {remaining : List BoundaryEvent} {label : Label AModel}
-    {next : System AModel} {rest : Execution AModel}
+    {next : System AModel} {rest : Trace AModel}
     (hreachable : Reachable AModel config system)
     (hstep : Step AModel config system label next)
     (hrest : Legal AModel config next rest)
@@ -452,7 +452,7 @@ def exhaustionLaw : Rover.Check.ExhaustionLaw adapter where
       (adapter := adapter) rfl hsearch
 
 def replay (config : Config) (events : List BoundaryEvent)
-    (certificate : Certificate) : Option (Execution AModel) :=
+    (certificate : Certificate) : Option (Trace AModel) :=
   Rover.Check.replay observation config Abstract.initialProcess
     events certificate
 
@@ -485,20 +485,20 @@ theorem check_nonmonotone {config : Config}
 theorem valid_iff_exists_bound {config : Config}
     {events : List BoundaryEvent} :
     Abstract.ValidBoundaryTrace config events ↔
-      ∃ bound certificate execution,
-        search bound config events = .valid certificate execution := by
+      ∃ bound certificate trace,
+        search bound config events = .valid certificate trace := by
   rw [← observation_valid_iff]
   have h := Rover.Check.valid_iff_exists_bound
     (adapter := adapter) (config := config) (events := events) rfl
   change observation.Valid config events ↔
-    (∃ bound certificate execution,
+    (∃ bound certificate trace,
       Rover.Check.boundedSearch adapter bound config events =
-        .valid certificate execution) at h
+        .valid certificate trace) at h
   simpa [search] using h
 
 theorem replay_valid {config : Config} {events : List BoundaryEvent}
-    {certificate : Certificate} {execution : Execution AModel}
-    (h : replay config events certificate = some execution) :
+    {certificate : Certificate} {trace : Trace AModel}
+    (h : replay config events certificate = some trace) :
     Abstract.ValidBoundaryTrace config events := by
   have hvalid := Rover.Check.replay_valid
     (observation := observation)
@@ -507,9 +507,9 @@ theorem replay_valid {config : Config} {events : List BoundaryEvent}
 
 theorem checkWithBound_valid_sound {bound : Nat} {config : Config}
     {events : List BoundaryEvent} {certificate : Certificate}
-    {execution : Execution AModel}
+    {trace : Trace AModel}
     (h : checkWithBound bound config events =
-      .valid certificate execution) :
+      .valid certificate trace) :
     Abstract.ValidBoundaryTrace config events := by
   have hvalid := Rover.Check.checkWithBound_valid_sound
     (adapter := adapter) (law := exhaustionLaw) h
@@ -517,8 +517,8 @@ theorem checkWithBound_valid_sound {bound : Nat} {config : Config}
   exact observation_valid_iff.mp hvalid
 
 theorem check_valid_sound {config : Config} {events : List BoundaryEvent}
-    {certificate : Certificate} {execution : Execution AModel}
-    (h : check config events = .valid certificate execution) :
+    {certificate : Certificate} {trace : Trace AModel}
+    (h : check config events = .valid certificate trace) :
     Abstract.ValidBoundaryTrace config events :=
   checkWithBound_valid_sound h
 
