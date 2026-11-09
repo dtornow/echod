@@ -54,8 +54,8 @@ module Claim {
     Cases(doc, id, b(k).now);
   }
 
-  // If the documents are well-formed at the start, they stay well-formed after every step.
-  // Stored in the bucket, in flight, or waiting on a continuation.
+  // The network invariant at every time. When the documents are well-formed at time 0,
+  // every document is well-formed: stored in the bucket, in flight, or waiting on a continuation.
   lemma DocumentsStayWellFormed(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                                 b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
     requires Routed(clients, nodes, ask)

@@ -110,8 +110,8 @@ module Proof {
         p.src.Node? && Justified(docs, b, a, n, p.src, p.dst, p.msg.id, p.msg.ans.answer)
   }
 
-  ghost predicate Inv(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
-                      a: nat -> Action<Pid, Msg>, n: nat)
+  ghost predicate Trace(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
+                        a: nat -> Action<Pid, Msg>, n: nat)
   {
     && Shaped(docs, b(n))
     && GetsOk(b(n))
@@ -119,6 +119,16 @@ module Proof {
     && OpenOk(b, a, n)
     && RepliesOk(docs, b, a, n)
     && Anchored(b(n).procs[Bucket])
+  }
+
+  // The network invariant. It holds at every time.
+  // When the documents at time 0 are well-formed, every document the world holds is well-formed:
+  // stored in the bucket, in flight, or waiting as a write on a continuation.
+  ghost predicate Inv(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>,
+                      a: nat -> Action<Pid, Msg>, n: nat)
+  {
+    && Trace(docs, b, a, n)
+    && ((forall key | key in docs :: Temp.WellFormed(docs[key], 0)) ==> Formed(b(n)))
   }
 
   // ---- one step of the network --------------------------------------------
@@ -290,7 +300,7 @@ module Proof {
   }
 
   lemma Carry(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires Shaped(docs, b(n+1))
     requires b(n+1).procs.Keys == b(n).procs.Keys
     requires forall node :: node in b(n).procs && node.Node? ==> b(n+1).procs[node] == b(n).procs[node]
@@ -298,7 +308,7 @@ module Proof {
     requires forall q :: q in b(n+1).inflight && IsGet(q.msg) ==> q in b(n).inflight
     requires forall q :: q in b(n+1).inflight && IsGot(q.msg) ==> q in b(n).inflight
     requires forall q :: q in b(n+1).inflight && IsPromiseReply(q.msg) ==> q in b(n).inflight
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     forall p | p in b(n+1).inflight && IsGet(p.msg)
       ensures p.src.Node? && p.src in b(n+1).procs && p.dst == Bucket
@@ -479,7 +489,7 @@ module Proof {
 
   lemma QuietStep(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                   n: nat, base: Net<Pid, Msg, State>, self: Pid, r: Result<Pid, Msg, State>)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires self in b(n).procs && base.procs == b(n).procs
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires b(n+1) == Advance(base, self, r)
@@ -487,7 +497,7 @@ module Proof {
     requires self.Client? ==> r.state.AtClient? && Node(r.state.node) in b(n).procs
     requires self.Bucket? ==> r.state == b(n).procs[Bucket]
     requires forall i {:trigger r.sends[i]} :: 0 <= i < |r.sends| ==> !IsGet(r.sends[i].msg) && !IsGot(r.sends[i].msg) && !IsPromiseReply(r.sends[i].msg)
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     ShapeAt(docs, b(n), self, r.state);
     assert b(n+1).procs == b(n).procs[self := r.state];
@@ -560,7 +570,8 @@ module Proof {
     var w := World(docs, clients, nodes, ask);
     assert w.process == Processes;
     assert NextStep(w, b(n), b(n+1), a(n));
-    match a(n)
+    assert Trace(docs, b, a, n);
+    match a(n) {
     case Tick =>
       assert b(n+1) == b(n).(now := b(n).now + 1);
       SameShape(docs, b(n), b(n+1));
@@ -604,14 +615,20 @@ module Proof {
       QuietStep(docs, b, a, n, base, pid, r);
     case Deliver(p) =>
       DeliverOk(docs, clients, nodes, ask, b, a, n, p);
+    }
+    assert Trace(docs, b, a, n+1);
+    if forall key | key in docs :: Temp.WellFormed(docs[key], 0) {
+      assert Formed(b(n));
+      FormedStep(docs, clients, nodes, ask, b(n), b(n+1), a(n));
+    }
   }
 
   lemma DeliverOk(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                   b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>, n: nat, p: Packet<Pid, Msg>)
     requires Routed(clients, nodes, ask)
-    requires IsBehavior(World(docs, clients, nodes, ask), b, a) && Inv(docs, b, a, n)
+    requires IsBehavior(World(docs, clients, nodes, ask), b, a) && Trace(docs, b, a, n)
     requires a(n) == Deliver(p)
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     var w := World(docs, clients, nodes, ask);
     assert w.process == Processes;
@@ -635,13 +652,13 @@ module Proof {
 
   lemma BucketKept(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                    n: nat, base: Net<Pid, Msg, State>, r: Result<Pid, Msg, State>)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires base.procs == b(n).procs
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires b(n+1) == Advance(base, Bucket, r)
     requires r.state.AtBucket? && Anchored(r.state)
     requires forall i {:trigger r.sends[i]} :: 0 <= i < |r.sends| ==> !IsGet(r.sends[i].msg) && !IsGot(r.sends[i].msg) && !IsPromiseReply(r.sends[i].msg)
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     ShapeAt(docs, b(n), Bucket, r.state);
     assert b(n+1).procs == b(n).procs[Bucket := r.state];
@@ -756,13 +773,13 @@ module Proof {
 
   lemma BucketDeliver(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                       n: nat, base: Net<Pid, Msg, State>, p: Packet<Pid, Msg>, r: Result<Pid, Msg, State>)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires p.dst == Bucket && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
     requires r == Processes(Bucket).step(Bucket, b(n).procs[Bucket], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, Bucket, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     var s0 := b(n).procs[Bucket];
     match p.msg
@@ -845,14 +862,14 @@ module Proof {
 
   lemma NodeDeliver(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                     n: nat, base: Net<Pid, Msg, State>, p: Packet<Pid, Msg>, r: Result<Pid, Msg, State>)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
     requires r == Processes(p.dst).step(p.dst, b(n).procs[p.dst], Request(p.src, p.msg), b(n).now)
     requires b(n+1) == Advance(base, p.dst, r)
     requires forall q :: q in base.inflight ==> q in b(n).inflight
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     var self := p.dst;
     var s := b(n).procs[self];
@@ -1026,7 +1043,7 @@ module Proof {
 
   lemma NodeKept(docs: map<string, Temp.Doc>, b: nat -> Net<Pid, Msg, State>, a: nat -> Action<Pid, Msg>,
                  n: nat, base: Net<Pid, Msg, State>, p: Packet<Pid, Msg>, r: Result<Pid, Msg, State>)
-    requires Inv(docs, b, a, n)
+    requires Trace(docs, b, a, n)
     requires a(n) == Deliver(p)
     requires p.dst.Node? && p.dst in b(n).procs && p in b(n).inflight
     requires base == b(n).(inflight := b(n).inflight - multiset{p})
@@ -1035,7 +1052,7 @@ module Proof {
     requires forall q :: q in base.inflight ==> q in b(n).inflight
     requires !(IsPromiseGet(p.msg) && Hash(p.msg.id) !in b(n).procs[p.dst].open)
     requires !(IsGot(p.msg) && p.msg.id in b(n).procs[p.dst].open && AwaitsGet(b(n).procs[p.dst].open[p.msg.id]) && b(n).procs[p.dst].open[p.msg.id].id == p.msg.ans.id)
-    ensures Inv(docs, b, a, n+1)
+    ensures Trace(docs, b, a, n+1)
   {
     var self := p.dst;
     var s := b(n).procs[self];
@@ -1115,6 +1132,10 @@ module Proof {
         var open := b(0).procs[node].open;
         assert open == map[];
         forall id | id in open && AwaitsGet(open[id]) ensures Entry(b, a, 0, node, id) {}
+      }
+      assert Trace(docs, b, a, 0);
+      if forall key | key in docs :: Temp.WellFormed(docs[key], 0) {
+        FormedBoot(docs, clients, nodes, ask, b(0));
       }
     } else {
       Safe(docs, clients, nodes, ask, b, a, n - 1);
@@ -1394,7 +1415,7 @@ module Proof {
     { Temp.WellFormedLater(p.msg.ask.doc, n.now, n'.now); }
   }
 
-  // One step. Documents that were well-formed are well-formed afterwards.
+  // One network step. Documents that were well-formed are well-formed afterwards.
   lemma FormedStep(docs: map<string, Temp.Doc>, clients: set<nat>, nodes: set<nat>, ask: nat -> Ask,
                    n: Net<Pid, Msg, State>, n': Net<Pid, Msg, State>, a: Action<Pid, Msg>)
     requires Routed(clients, nodes, ask)
@@ -1551,15 +1572,9 @@ module Proof {
     requires forall key | key in docs :: Temp.WellFormed(docs[key], 0)
     requires IsBehavior(World(docs, clients, nodes, ask), b, a)
     ensures Formed(b(n))
-    decreases n
   {
-    if n == 0 {
-      assert IsInit(World(docs, clients, nodes, ask), b(0));
-      FormedBoot(docs, clients, nodes, ask, b(0));
-    } else {
-      DocumentsStay(docs, clients, nodes, ask, b, a, n - 1);
-      FormedStep(docs, clients, nodes, ask, b(n - 1), b(n), a(n - 1));
-    }
+    Safe(docs, clients, nodes, ask, b, a, n);
+    assert Inv(docs, b, a, n);
   }
 
   lemma Cases(doc: Temp.Doc, id: string, now: nat)
