@@ -178,7 +178,13 @@ pub fn address_valid(addr: &String) -> (r: bool)
     ensures
         r == spec_address_valid(addr@),
 {
-    super::footprint::address_valid(addr)
+    let addr = addr.trim();
+    let Some((scheme, rest)) = addr.split_once(':') else { return false };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+        && !rest.is_empty()
+        && !rest.chars().any(char::is_whitespace)
 }
 
 /// Whether an id holds a `:`: the reference server keeps it as the separator
@@ -205,7 +211,7 @@ pub fn cron_valid(cron: &String) -> (r: bool)
     ensures
         r == spec_cron_valid(cron@),
 {
-    super::footprint::cron_valid(cron)
+    echod_cron::valid(cron)
 }
 
 /// Lean's `nextCron`, as the spec sees it: strictly after `after`.
@@ -226,7 +232,7 @@ pub fn next_cron(cron: &String, after: u64) -> (r: u64)
         r == spec_next_cron(cron@, after),
         r > after,
 {
-    super::footprint::next_cron(cron, after)
+    echod_cron::next_run_at(cron, after)
 }
 
 /// Lean's `expand`, as the spec sees it.
@@ -239,7 +245,7 @@ pub fn expand(template: &String, id: &String, at: u64) -> (r: String)
     ensures
         r@ == spec_expand(template@, id@, at),
 {
-    super::footprint::expand(template, id, at)
+    template.replace("{{.id}}", id).replace("{{.timestamp}}", &at.to_string())
 }
 
 // ------------------------------------------------------------------- axioms

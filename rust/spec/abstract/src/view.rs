@@ -19,10 +19,10 @@
 
 use vstd::prelude::*;
 
-use echod_rover::{ExternalOutcome, InternalOutcome, Model, Sched};
+use echod_rover::Sched;
 
 use echod_types::{
-    PromiseRecord, PromiseState, Request, Response, Schedule, Tags, TaskRecord, TaskState, Value,
+    PromiseRecord, PromiseState, Response, Schedule, Tags, TaskRecord, TaskState, Value,
 };
 
 use super::trusted::*;
@@ -479,91 +479,6 @@ pub proof fn lemma_lift_dispatch(d: Dispatch)
 {
     axiom_realised(d@);
     lemma_dispatch_ext(lift_dispatch(d@), d);
-}
-
-// ------------------------------------------------------------- the model
-
-fn sched(w: Work) -> (r: Sched<Work>)
-    ensures
-        sched_v(r) == as_sched(w),
-{
-    match &w {
-        Work::Occurrence { at, .. } => {
-            let at = *at;
-            Sched::Timer(at, w)
-        },
-        _ => Sched::Later(w),
-    }
-}
-
-/// The work an outcome starts, as the checker's items. Only an occurrence
-/// is queued; a timeout reads the rest off the maps.
-fn items(mut w: Vec<Work>) -> (r: Vec<Sched<Work>>)
-    ensures
-        r@.map_values(|x: Sched<Work>| sched_v(x)) == works(w@),
-{
-    let ghost all = w@;
-    let mut r: Vec<Sched<Work>> = Vec::new();
-    while w.len() > 0
-        invariant
-            r@.len() + w@.len() == all.len(),
-            w@ == all.skip(r@.len() as int),
-            r@.map_values(|x: Sched<Work>| sched_v(x)) == works(all.take(r@.len() as int)),
-        decreases w@.len(),
-    {
-        broadcast use group_views;
-        let ghost k = r@.len() as int;
-        let x = w.remove(0);
-        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-        assert(all.take(k + 1) =~= all.take(k).push(all[k]));
-        r.push(sched(x));
-    }
-    assert(all.take(all.len() as int) =~= all);
-    r
-}
-
-impl Model for ServerConfig {
-    type State = Store;
-
-    type External = Request;
-
-    type Response = Response;
-
-    type Internal = Work;
-
-    type Dispatch = Dispatch;
-
-    fn external(&self, op: &Request, s: &Store, now: Time) -> (r: Vec<ExternalOutcome<Self>>) {
-        let mut outs = self.handler(op, s, now);
-        let mut r: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
-        while outs.len() > 0
-            decreases outs@.len(),
-        {
-            let o = outs.remove(0);
-            let Out { resp, next, work, send, marks } = o;
-            let work = items(work);
-            let e = ExternalOutcome { next, resp, work, send, marks };
-            r.push(e);
-        }
-        r
-    }
-
-    fn internal(&self, step: &Work, s: &Store, now: Time) -> (r: Vec<InternalOutcome<Self>>) {
-        let o = self.process_work(step, s, now);
-        let mut r: Vec<InternalOutcome<ServerConfig>> = Vec::new();
-        if o.not_due {
-            return r;
-        }
-        let InOut { next, work, send, marks, not_due: _ } = o;
-        let work = items(work);
-        let e = InternalOutcome { next, work, send, marks };
-        r.push(e);
-        r
-    }
-
-    fn due(&self, s: &Store, now: Time) -> (r: Vec<Sched<Work>>) {
-        super::footprint::timeout_work(self, s, now)
-    }
 }
 
 // ---------------------------------------------------------------------------

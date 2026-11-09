@@ -1,12 +1,12 @@
-//! Executable behavioral specifications.
+//! Two reusable verification engines.
 //!
-//! A [`Model`] says, for any state and time, what the system does: how it answers
-//! an **external** request from a client, and what **internal** work it does on
-//! its own (a timeout fires, a lease expires, a resume runs). A [`Checker`]
-//! replays an observed history against it and keeps every explanation of that
-//! history that is still possible.
+//! - [`rover`] is the append-only message-passing world: stateful processes,
+//!   executable replay, bounded search, and generic trace refinement.
+//! - [`history`] is the client-history checker used by the simulator and model
+//!   driver. A [`Model`] describes external requests and internal work; a
+//!   [`Checker`] keeps every explanation of an observed history still possible.
 //!
-//! How a trace is read:
+//! History traces are read as follows:
 //!
 //! * **Request and response are separate events.** A call is `Invoke`, then a
 //!   point where it takes effect that the checker places, then `Return`. A call
@@ -28,21 +28,16 @@
 //! keys into independent parts. Pick the constructor that matches:
 //! [`Checker::new`], [`Checker::with_footprints`] or [`Checker::with_partitions`].
 
-pub mod certificate;
-mod checker;
-mod drive;
-mod sim;
 mod hashed_map;
 mod hashed_set;
+pub mod history;
 mod intern;
-pub mod refinement;
 pub mod rover;
-pub mod semantics;
 
-pub use certificate::{certify, marks, Certificate, Silent};
-pub use drive::{drive, Choice, Choices, Drive, Run, Tried};
-pub use sim::Sim;
-pub use checker::{Checker, Config, Factor, Node, Pending, Stats, Verdict, Violation};
+pub use history::{
+    certificate, certify, drive, marks, semantics, Certificate, Checker, Choice, Choices, Config,
+    Drive, Factor, Node, Pending, Run, Silent, Sim, Stats, Tried, Verdict, Violation,
+};
 pub use hashed_map::HashedMap;
 pub use hashed_set::HashedSet;
 pub use intern::{Interned, Interner};

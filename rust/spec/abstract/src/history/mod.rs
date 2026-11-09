@@ -1,15 +1,30 @@
-//! Testing glue, outside Verus: the list of the spec's marks, and requests
-//! worth trying next (suggestions). Neither decides what the server does: the
-//! spec marks its own branches (`mk` in `exec`); suggestions are
-//! requests built from the state, and the spec decides what they do.
+//! Adapter from the protocol model to the client-history checker.
+//!
+//! This module converts handler outcomes to checker outcomes, declares
+//! coverage marks, and suggests requests worth trying next. None of it
+//! decides protocol behavior.
 
-use echod_rover::{Action, Explore, Time};
+use vstd::prelude::*;
+
+use echod_rover::{
+    Action, Explore, ExternalOutcome, InternalOutcome, Model, Sched, Time,
+};
 use echod_types::{
-    PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq, PromiseSettleReq, PromiseState, Request, ScheduleCreateReq, ScheduleDeleteReq, ScheduleGetReq, Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction, TaskFenceReq, TaskFulfillReq, TaskGetReq, TaskHaltReq, TaskHeartbeatReq, TaskRef, TaskReleaseReq, TaskState, TaskSuspendReq, Value,
+    PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
+    PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq, ScheduleDeleteReq,
+    ScheduleGetReq, Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction,
+    TaskFenceReq, TaskFulfillReq, TaskGetReq, TaskHaltReq, TaskHeartbeatReq, TaskRef,
+    TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
 
+mod footprint;
+
+pub use footprint::{next_cron, Key};
+
 use super::machine::*;
-use super::footprint::{next_cron, origin};
+use footprint::origin;
+#[cfg(verus_keep_ghost)]
+use super::view::{as_sched, group_views, sched_v, works};
 
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/marks.rs` checks it against `exec`.
@@ -375,3 +390,99 @@ fn random_action(pick: &mut dyn FnMut(usize) -> usize, clock: Time) -> Action<Re
     };
     Action::Request(req)
 }
+
+verus! {
+
+fn sched(work: Work) -> (scheduled: Sched<Work>)
+    ensures
+        sched_v(scheduled) == as_sched(work),
+{
+    match &work {
+        Work::Occurrence { at, .. } => Sched::Timer(*at, work),
+        _ => Sched::Later(work),
+    }
+}
+
+fn items(mut work: Vec<Work>) -> (scheduled: Vec<Sched<Work>>)
+    ensures
+        scheduled@.map_values(|item: Sched<Work>| sched_v(item)) == works(work@),
+{
+    let ghost all = work@;
+    let mut scheduled: Vec<Sched<Work>> = Vec::new();
+    while !work.is_empty()
+        invariant
+            scheduled@.len() + work@.len() == all.len(),
+            work@ == all.skip(scheduled@.len() as int),
+            scheduled@.map_values(|item: Sched<Work>| sched_v(item))
+                == works(all.take(scheduled@.len() as int)),
+        decreases work@.len(),
+    {
+        broadcast use group_views;
+        let ghost k = scheduled@.len() as int;
+        let item = work.remove(0);
+        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
+        assert(all.take(k + 1) =~= all.take(k).push(all[k]));
+        scheduled.push(sched(item));
+    }
+    assert(all.take(all.len() as int) =~= all);
+    scheduled
+}
+
+impl Model for ServerConfig {
+    type State = Store;
+    type External = Request;
+    type Response = Response;
+    type Internal = Work;
+    type Dispatch = Dispatch;
+
+    fn external(
+        &self,
+        request: &Request,
+        state: &Store,
+        now: Time,
+    ) -> (results: Vec<ExternalOutcome<Self>>) {
+        let mut outcomes = self.handler(request, state, now);
+        let mut results: Vec<ExternalOutcome<ServerConfig>> = Vec::new();
+        while !outcomes.is_empty()
+            decreases outcomes@.len(),
+        {
+            let outcome = outcomes.remove(0);
+            let Out { resp, next, work, send, marks } = outcome;
+            results.push(ExternalOutcome {
+                next,
+                resp,
+                work: items(work),
+                send,
+                marks,
+            });
+        }
+        results
+    }
+
+    fn internal(
+        &self,
+        work: &Work,
+        state: &Store,
+        now: Time,
+    ) -> (results: Vec<InternalOutcome<Self>>) {
+        let outcome = self.process_work(work, state, now);
+        let mut results: Vec<InternalOutcome<ServerConfig>> = Vec::new();
+        if outcome.not_due {
+            return results;
+        }
+        let InOut { next, work, send, marks, not_due: _ } = outcome;
+        results.push(InternalOutcome {
+            next,
+            work: items(work),
+            send,
+            marks,
+        });
+        results
+    }
+
+    fn due(&self, state: &Store, now: Time) -> (work: Vec<Sched<Work>>) {
+        footprint::timeout_work(self, state, now)
+    }
+}
+
+} // verus!

@@ -1,11 +1,11 @@
 //! The complete standalone Resonate model interpreted by Rover.
 //!
-//! `machine` is the store and its handlers, `model` is one process's step,
-//! `view` is the view types and their lemmas, and `trusted` is the maps and
-//! the cron engine. Each file holds the executable code and, below it, the
-//! same step as a specification (`spec_*`, over the view types). `model::Spec`
-//! is the mathematical `RoverSpec`; the distinct `model::Model` is its
-//! optional `RoverExec` realization.
+//! `machine` is the store and handlers; `model` adapts one service process to
+//! Rover; `view` holds mathematical views and their lemmas; `catalogue` states
+//! conformance properties; `trusted` contains the explicit trust boundary.
+//! `history` is only the adapter to the client-history checker and driver.
+//! `model::Spec` is the mathematical `RoverSpec`; the distinct `model::Model`
+//! is its optional `RoverExec` realization.
 
 #![allow(
     clippy::ptr_arg,
@@ -20,16 +20,14 @@
 pub mod model;
 pub mod trusted;
 pub mod machine;
-mod explore;
-mod footprint;
+mod history;
 pub mod protocol;
-pub mod properties;
+pub mod catalogue;
 pub mod view;
 
 pub use model::{Model, Spec};
 pub use trusted::{PMap, PSet};
 pub use echod_types as types;
 pub use machine::*;
-pub use explore::{plain, IDS, MARKS, SCHEDULES};
-pub use footprint::{next_cron, Key};
+pub use history::{next_cron, plain, Key, IDS, MARKS, SCHEDULES};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

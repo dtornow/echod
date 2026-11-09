@@ -1,14 +1,16 @@
-//! The glue between the verified model and the checker: plain Rust, outside
-//! Verus. It says which keys a request touches and which origin a key belongs
-//! to, and holds the cron engine the spec trusts. `timeout_work` is the list
-//! of steps a timeout may run; the handler decides which of them do anything.
+//! History-checker footprints and partitions.
+//!
+//! This says which keys a request touches and which origin a key belongs to.
+//! `timeout_work` is the list of steps a timeout may run; the handler decides
+//! which of them do anything.
 
 use vstd::prelude::*;
 
 use echod_rover::{Footprint, Partitioned, Sched, Touches};
 use echod_types::{Request, TaskFenceAction};
 
-use super::machine::*;
+use super::super::machine::*;
+use super::super::trusted::expand;
 
 /// What a footprint names: a promise with its task, a schedule, or a whole
 /// origin (what a schedule's future occurrences will touch).
@@ -45,28 +47,8 @@ fn template_origin(template: &str, schedule: &str) -> Option<String> {
     }
 }
 
-/// Any absolute URL: a scheme, a colon, and a non-empty rest with no whitespace.
-/// Stands in for C#'s `Uri.TryCreate(.., Absolute)` plus its scheme regex.
-pub(crate) fn address_valid(addr: &str) -> bool {
-    let a = addr.trim();
-    let Some((scheme, rest)) = a.split_once(':') else { return false };
-    let mut cs = scheme.chars();
-    cs.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && cs.all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
-        && !rest.is_empty()
-        && !rest.chars().any(char::is_whitespace)
-}
-
-pub(crate) fn cron_valid(cron: &str) -> bool {
-    echod_cron::valid(cron)
-}
-
 pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
     echod_cron::next_run_at(cron, after_ms)
-}
-
-pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {
-    template.replace("{{.id}}", id).replace("{{.timestamp}}", &at.to_string())
 }
 
 // ------------------------------------------------------------------ the traits
