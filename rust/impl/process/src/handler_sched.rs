@@ -9,10 +9,10 @@
 
 use vstd::prelude::*;
 
-use echod_abstract::trusted::copy;
 use echod_concrete::{clone_doc, Doc};
 
 use crate::verified::flight::{self, Decided, Job};
+use crate::verified::runtime::copy;
 use crate::verified::text::{copy_string, text};
 
 use crate::doc::{self, Loaded};

@@ -1100,6 +1100,7 @@ dependencies = [
  "echod-rover-exec",
  "echod-rover-spec",
  "echod-types",
+ "imbl",
  "vstd",
 ]
 
@@ -1107,10 +1108,8 @@ dependencies = [
 name = "echod-abstract-spec"
 version = "0.1.0"
 dependencies = [
- "echod-cron",
  "echod-rover-spec",
  "echod-types",
- "imbl",
  "vstd",
 ]
 

@@ -48,8 +48,9 @@ Rover model, which `simulation.rs` proves refines the abstract one.
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
 models under `lean/` state it: 18 request handlers, the fence's check with
 no action for the detached create, and the due steps. Trusted there: the
-JSON codec (`assume_specification`), the key hash, `copy`, and the abstract
-crate's `expand` and `next_cron`.
+JSON codec (`assume_specification`), the key hash, `copy`, `expand`, and
+`next_cron`. Their contracts refer to the abstract crate's mathematical
+specifications; their executable bodies do not live in the spec crate.
 
 The process (`rust/impl/process`) runs that machine. `doc.rs` folds an
 object's rows into the model's `Doc` (`Objects::from_entries`) and writes

@@ -45,10 +45,10 @@ use std::time::Duration;
 use clap::Parser;
 use echod_rover_exec::{check_guided, marks, CheckConfig};
 use echod_abstract::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
-use echod_abstract::{Dispatch, ServerConfig, Store as Model};
+use echod_abstract::{Dispatch, ServerConfig};
 use echod_abstract_exec::{
     arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
-    Action, HistoryEvent, Model as RoverModel, MARKS,
+    Action, HistoryEvent, Model as RoverModel, Store as Model, MARKS,
 };
 use serde_json::{json, Value};
 

@@ -1,8 +1,9 @@
 //! The complete standalone Resonate model interpreted by Rover.
 //!
-//! `machine` is the store and handlers; `model` adapts one service process to
-//! Rover; `view` holds mathematical views and their lemmas; `catalogue` states
-//! conformance properties; `trusted` contains the explicit trust boundary.
+//! `machine` is the transition relation; `model` adapts one mathematical
+//! service process to Rover; `view` holds mathematical views and their lemmas;
+//! `catalogue` states conformance properties; `trusted` contains the explicit
+//! axiomatic boundary. Executable realizations live in `echod-abstract-exec`.
 //! `model::Spec` implements `RoverSpec::Spec`; `RoverSpec::State<model::Spec>`
 //! is the complete mathematical state.
 
@@ -19,13 +20,11 @@
 pub mod model;
 pub mod trusted;
 pub mod machine;
-mod hashed_map;
 pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
 pub use model::Spec;
-pub use trusted::{PMap, PSet};
 pub use echod_types as types;
-pub use machine::*;
+pub use machine::{Dispatch, ServerConfig};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

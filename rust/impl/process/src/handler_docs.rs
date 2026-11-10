@@ -19,11 +19,11 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_abstract::trusted::copy;
 use echod_concrete::{clone_doc, doc_len, peek, Doc, Outbound};
 
 use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequence};
 use crate::verified::node::Key;
+use crate::verified::runtime::copy;
 use crate::verified::table::Table;
 use crate::verified::text::{concat, copy_string, text};
 use crate::verified::{Request, Response, TaskFenceInnerRes, TaskFenceRes};

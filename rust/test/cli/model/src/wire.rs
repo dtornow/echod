@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use echod_abstract::types as rows;
-use echod_abstract::{PMap, PSet, Promise, Store as Model, Task};
+use echod_abstract_exec::{PMap, PSet, Promise, Store as Model, Task};
 use serde_json::{json, Value};
 
 fn tags_out(t: &rows::Tags) -> Value {

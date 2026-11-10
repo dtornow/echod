@@ -16,7 +16,7 @@ use echod_types::{
     TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
 
-use echod_abstract::machine::*;
+use crate::machine::*;
 use echod_abstract::model::Pid;
 use echod_abstract::protocol::{Call, Message, Output};
 

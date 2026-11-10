@@ -15,6 +15,7 @@ echod-cron = { path = "../../comm/cron" }
 echod-rover = { package = "echod-rover-spec", path = "../rover" }
 echod-rover-exec = { path = "../rover-exec" }
 echod-types = { path = "../../comm/types" }
+imbl = "7.0.2"
 vstd = "=0.0.0-2026-10-11-0230"
 
 [package.metadata.verus]

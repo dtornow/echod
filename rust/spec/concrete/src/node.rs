@@ -28,7 +28,7 @@ use echod_types::{
 #[cfg(not(verus_keep_ghost))]
 use serde::{Deserialize, Serialize};
 
-use echod_abstract::trusted::{copy, expand, next_cron};
+use crate::runtime::{copy, expand, next_cron};
 #[cfg(verus_keep_ghost)]
 use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
@@ -1045,7 +1045,7 @@ pub fn clone_doc(d: &Doc) -> (r: Doc)
 {
     match d {
         Doc::Origin(objs) => Doc::Origin(objs.clone()),
-        Doc::Schedule(slot) => Doc::Schedule(echod_abstract::trusted::copy(slot)),
+        Doc::Schedule(slot) => Doc::Schedule(copy(slot)),
     }
 }
 

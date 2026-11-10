@@ -106,7 +106,8 @@ Filesystem directories may be named `abstract` and `concrete`. Rust packages
 should avoid the reserved keyword:
 
 ```text
-echod-abstract  -> echod_abstract
+echod-abstract-spec  -> echod_abstract
+echod-abstract-exec  -> echod_abstract_exec
 echod-concrete  -> echod_concrete
 ```
 
@@ -162,14 +163,16 @@ The executable realization of Rover specifications:
 ### `spec/abstract`
 
 The independent mathematical Resonate model. It owns the protocol transition
-functions and conformance properties meaningful under Rover semantics.
+functions, mathematical state, and conformance properties meaningful under
+Rover semantics. It contains no executable store, handlers, or Rover process.
 
 It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
 
 ### `spec/abstract-exec`
 
-The executable realization of the abstract model: Rover adapters, client
-history translation, model-driven request generation, and coverage marks.
+The executable realization of the abstract model: persistent store types,
+verified handler bodies, the executable Rover process, client history
+translation, model-driven request generation, and coverage marks.
 
 ### `spec/concrete`
 

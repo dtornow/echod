@@ -38,7 +38,7 @@
 //!   `text::u64_text`, `node::clone_string`, `node::str_eq`.
 //! - Hashing: `node::fnv1a` computes `node_spec::hash`, an uninterpreted
 //!   function of the string; `echod_concrete::content_etag` likewise.
-//! - Copies: `echod_abstract::trusted::copy` returns its argument;
+//! - Copies: `runtime::copy` returns its argument;
 //!   `flight::copy_error` the same for a `StoreError`.
 //! - The store: `StoreOutcome` is what the store answered. Whether S3
 //!   answers as `echod_concrete::store::spec_apply` says is the store's
@@ -59,6 +59,7 @@ pub mod flight;
 pub mod flight_spec;
 pub mod node;
 pub mod node_spec;
+pub mod runtime;
 pub mod table;
 pub mod text;
 

@@ -28,7 +28,7 @@ rust/impl/cli         the echod binary
 rust/spec/rover       Rover mathematical state, steps, and refinement
 rust/spec/rover-exec  Rover executable search and verified replay
 rust/spec/abstract    the mathematical Resonate protocol model
-rust/spec/abstract-exec  its executable Rover realization and history tooling
+rust/spec/abstract-exec  its executable store, handlers, Rover realization, and history tooling
 rust/spec/concrete    the document machine the process runs, proved; the Rover model and its refinement
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests

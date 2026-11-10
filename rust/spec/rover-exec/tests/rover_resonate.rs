@@ -1,7 +1,7 @@
 //! The complete standalone Resonate protocol through Rover's world.
 
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover_exec::{check, CheckConfig, Proc as _, Spec as _};
+use echod_rover_exec::{check, CheckConfig, Spec as _};
 use echod_abstract::model::Pid;
 use echod_abstract::types::*;
 use echod_abstract::*;
@@ -30,7 +30,7 @@ fn settle(id: &str, data: &str) -> PromiseSettleReq {
 /// to rediscover and certify it from boundary events alone.
 fn trace_for(requests: Vec<Request>) -> Vec<Event> {
     let logic = ServerConfig::default();
-    let mut server = Store::default();
+    let mut state = Model.initial(&logic).remove(0).1;
     let mut trace = Vec::new();
 
     for (i, request) in requests.into_iter().enumerate() {
@@ -39,29 +39,28 @@ fn trace_for(requests: Vec<Request>) -> Vec<Event> {
             id: i as u64,
             request: request.clone(),
         };
-        let mut outcomes = logic.handler(&request, &server, 0);
-        let outcome = outcomes.remove(0);
-
         trace.push(Event::Input {
             recipient: Pid::Service,
             at: 0,
-            message: Message::Request(call),
+            message: Message::Request(call.clone()),
         });
-        trace.push(Event::Output {
-            sender: Pid::Service,
-            at: 0,
-            message: Message::Output(Output::Response {
-                client: "client".into(),
-                id: i as u64,
-                response: outcome.resp.clone(),
-            }),
-        });
-        trace.extend(outcome.send.iter().cloned().map(|dispatch| Event::Output {
-            sender: Pid::Service,
-            at: 0,
-            message: Message::Output(Output::Dispatch(dispatch)),
+        let mut outcomes = state.on_event(
+            &logic,
+            0,
+            &ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            },
+        );
+        let outcome = outcomes.remove(0);
+        trace.extend(outcome.send.iter().filter_map(|(recipient, message)| {
+            (*recipient == Pid::Outside).then(|| Event::Output {
+                sender: Pid::Service,
+                at: 0,
+                message: message.clone(),
+            })
         }));
-        server = outcome.next;
+        state = outcome.state;
     }
 
     trace
@@ -160,14 +159,13 @@ fn timeout_runs_the_internal_work_started_by_a_request() {
         message: Message::Request(call),
     };
     let created = state.on_event(&config, 0, &event);
-    assert!(created[0].state.0.pending.is_empty(), "a deadline is read off the promise, not queued");
+    assert!(created[0].state.pending.is_empty(), "a deadline is read off the promise, not queued");
 
     let timed_out = created[0].state.on_event(&config, 10, &ProcessEvent::Timeout);
     assert!(!timed_out.is_empty());
     assert!(timed_out.iter().any(|result| {
         result
             .state
-            .0
             .store
             .promises
             .get(&"o:deadline".to_string())
