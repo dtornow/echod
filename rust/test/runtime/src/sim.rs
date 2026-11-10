@@ -1,29 +1,20 @@
-//! The run: nodes over one store, clients, crashes, then the checks.
+//! A purely synchronous deterministic system around the production core.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use echod::env::{Clock, Notes};
-use echod::store::{MemoryStore, Store};
-use echod::{Config, Node as Server};
-use echod_logic::keys::{KeySpace, TimerEntry};
-use echod_logic::Note;
-use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
-use resonate_core::ResonateServer;
+use echod_abstract::Dispatch;
+use echod_logic::types::{Answer, Armed, Effect, Event, StoreCall};
+use echod_logic::{Call, Config, Message, Note, State, Target};
+use echod_types::{PromiseGetReq, PromiseState, Request, Response, ScheduleGetReq, TaskGetReq};
 use serde::Serialize;
 
-use echod_abstract::types::{PromiseGetReq, Request, ScheduleGetReq, TaskGetReq};
-
-use crate::bus::RecordingBus;
 use crate::checker::{self, Verdict};
-use crate::clock::{NodeClock, SimClock};
 use crate::history::History;
 use crate::rng::Rng;
-use crate::store::{Counters, Faults, FaultyStore, NodeStore};
-use crate::wire::encode;
-use crate::workload::{target_of, Generator, Seen, SCHEDULES, WORKER};
+use crate::store::{Counters, Disposition, Faults, FaultyStore};
+use crate::workload::{target_of, Generator, Seen, SCHEDULES};
+
+const START_MS: u64 = 1_700_000_000_000;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -33,43 +24,28 @@ pub struct Options {
     pub operations: u64,
     pub origins: u64,
     pub promises_per_origin: u64,
-    /// Whether clients touch schedules (`--schedules`).
     pub schedules: bool,
     pub faults: Faults,
-    /// Every `chaos_every_ms`, each of these is rolled once, in percent:
-    /// a node is killed and replaced; a node stops cleanly; a node joins; a
-    /// node loses the store for a while; a node's clock jumps, forwards or
-    /// back.
     pub crash_percent: u64,
     pub stop_percent: u64,
     pub join_percent: u64,
     pub outage_percent: u64,
     pub jump_percent: u64,
-    /// Requests sent to a node other than the origin's owner, in percent.
     pub misroute_percent: u64,
     pub chaos_every_ms: u64,
-    /// How long an outage lasts, at most.
     pub disruption_ms: u64,
-    /// A node's clock is off the reference by up to this, either way.
     pub skew_ms: u64,
-    /// A node's clock gains or loses up to this many parts per million.
     pub drift_ppm: u64,
-    /// A jump moves a node's clock by up to this, either way.
     pub jump_ms: u64,
-    /// The fleet never grows past this.
     pub max_servers: u32,
-    /// Promise timeouts fall within this many ms of their creation.
     pub timeout_ms: u64,
     pub ttl_ms: u64,
     pub retry_timeout_ms: u64,
     pub timer_bucket_ms: u64,
     pub heartbeat_ms: u64,
     pub node_ttl_ms: u64,
-    /// A client's pause between requests, at most.
     pub think_ms: u64,
-    /// How long the run idles after the last request so deadlines fire.
     pub settle_ms: u64,
-    /// The checker's budget: nodes to explore, at most.
     pub budget: u64,
 }
 
@@ -80,12 +56,15 @@ impl Default for Options {
             servers: 2,
             clients: 3,
             operations: 200,
-            // as the command line: three clients over six origins; over three,
-            // the in-flight writes on one origin widen the checker's profile
             origins: 6,
             promises_per_origin: 3,
             schedules: false,
-            faults: Faults { unavailable_percent: 2, lost_ack_percent: 2, conflict_percent: 2, latency_ms: 20 },
+            faults: Faults {
+                unavailable_percent: 2,
+                lost_ack_percent: 2,
+                conflict_percent: 2,
+                latency_ms: 20,
+            },
             crash_percent: 10,
             stop_percent: 5,
             join_percent: 8,
@@ -94,7 +73,6 @@ impl Default for Options {
             misroute_percent: 0,
             chaos_every_ms: 500,
             disruption_ms: 2_500,
-            // Clock chaos off: the checker's model keeps one clock (`checker.rs`).
             skew_ms: 0,
             drift_ppm: 0,
             jump_ms: 0,
@@ -133,480 +111,951 @@ pub struct Report {
     pub store_conflicts: u64,
     pub executes: u64,
     pub unblocks: u64,
-    /// Events in the checker's trace.
     pub events: usize,
-    /// Nodes the checker explored.
     pub search_steps: u64,
-    /// Bounded Rover search did not find a certificate.
     pub undecided: bool,
     pub failures: Vec<String>,
 }
 
-/// The nodes' own steps enter the history through the notes port: the
-/// instant each was decided at is a clock move the checker must know of
-/// (a document's stamp may rest on it), and the sweeps and fires are counted.
-struct StepNotes {
-    history: Arc<History>,
-    sweeps: AtomicU64,
-    fires: AtomicU64,
+#[derive(Debug, Clone)]
+pub struct Sent {
+    pub at: u64,
+    pub address: String,
+    pub kind: String,
+    pub id: String,
+    pub msg: Dispatch,
 }
 
-impl Notes for StepNotes {
-    fn note(&self, _node: &str, n: &Note) {
-        match n {
-            Note::SweepBegin { now, .. } => {
-                self.history.mark(*now);
-                self.sweeps.fetch_add(1, Ordering::Relaxed);
-            }
-            Note::FireBegin { now, .. } => {
-                self.history.mark(*now);
-                self.fires.fetch_add(1, Ordering::Relaxed);
-            }
-            Note::AdvanceBegin { now, .. } => self.history.mark(*now),
-            _ => {}
-        }
+struct Node {
+    state: State,
+    skew_ms: i64,
+    drift_ppm: i64,
+    offset_ms: i64,
+    band_ms: i64,
+    cut: bool,
+    outage_token: u64,
+    wake_token: u64,
+    routable: bool,
+}
+
+impl Node {
+    fn clock(&self, reference: u64) -> u64 {
+        let elapsed = reference.saturating_sub(START_MS) as i64;
+        let drift = elapsed.saturating_mul(self.drift_ppm) / 1_000_000;
+        (reference as i64 + self.skew_ms + drift + self.offset_ms).max(0) as u64
     }
 }
 
-/// One node, and the clock and store view it alone sees.
-struct Node {
-    server: Arc<Server>,
-    clock: Arc<NodeClock>,
-    store: Arc<NodeStore>,
+struct Active {
+    req: Request,
+    attempts: u32,
 }
 
-#[derive(Default)]
-struct Fleet {
-    live: BTreeMap<String, Node>,
-    next_id: u32,
+struct Client {
+    name: String,
+    rng: Rng,
+    seen: Seen,
+    active: Option<Active>,
+    planned: VecDeque<Request>,
+    generated: bool,
+}
+
+struct Pending {
+    client: usize,
+    node: String,
+}
+
+enum SystemEvent {
+    Store {
+        node: String,
+        op: u64,
+        call: StoreCall,
+        disposition: Disposition,
+    },
+    Wake {
+        node: String,
+        token: u64,
+        armed: Armed,
+    },
+    ClientReady(usize),
+    Retry(usize),
+    Chaos,
+    Heal {
+        node: String,
+        token: u64,
+    },
+}
+
+struct World {
+    opts: Options,
+    now: u64,
+    appendable: bool,
+    store: FaultyStore,
+    nodes: BTreeMap<String, Node>,
+    next_node: u32,
+    queue: BTreeMap<(u64, u64), SystemEvent>,
+    sequence: u64,
+    clients: Vec<Client>,
+    generated_clients: usize,
+    issued: u64,
+    pending: BTreeMap<u64, Pending>,
+    history: History,
+    sent: Vec<Sent>,
+    chaos_rng: Rng,
     crashes: u32,
     stops: u32,
     joins: u32,
     outages: u32,
     jumps: u32,
-}
-
-struct World {
-    opts: Options,
-    inner: Arc<MemoryStore>,
-    store: Arc<FaultyStore>,
-    clock: Arc<SimClock>,
-    bus: Arc<RecordingBus>,
-    history: Arc<History>,
-    notes: Arc<StepNotes>,
-    keys: KeySpace,
-    fleet: Mutex<Fleet>,
-    issued: AtomicU64,
-    appendable: bool,
-    rng: Mutex<Rng>,
+    sweeps: usize,
+    fires: usize,
+    executes: u64,
+    unblocks: u64,
+    message_violations: Vec<String>,
 }
 
 impl World {
-    async fn start_server(&self) -> Arc<Server> {
-        let id = {
-            let mut f = self.fleet.lock().unwrap();
-            f.next_id += 1;
-            format!("s{}", f.next_id)
-        };
-        let (skew, drift) = {
-            let mut rng = self.rng.lock().unwrap();
-            let skew = rng.range(0, 2 * self.opts.skew_ms) as i64 - self.opts.skew_ms as i64;
-            let drift = rng.range(0, 2 * self.opts.drift_ppm) as i64 - self.opts.drift_ppm as i64;
-            (skew, drift)
-        };
-        let clock = Arc::new(NodeClock::new(Arc::clone(&self.clock), skew, drift, self.opts.jump_ms as i64));
-        let node_store = Arc::new(NodeStore::new(Arc::clone(&self.store)));
-        let mut cfg = Config::memory("sim");
-        cfg.node_id = Some(id.clone());
-        cfg.url = Some(format!("sim://{id}/"));
+    fn new(opts: Options) -> Self {
+        let mut rng = Rng::new(opts.seed);
+        let appendable = rng.percent(50);
+        let store_rng = rng.fork();
+        let chaos_rng = rng.fork();
+        Self {
+            store: FaultyStore::new(appendable, opts.faults, store_rng),
+            opts,
+            now: START_MS,
+            appendable,
+            nodes: BTreeMap::new(),
+            next_node: 0,
+            queue: BTreeMap::new(),
+            sequence: 0,
+            clients: Vec::new(),
+            generated_clients: 0,
+            issued: 0,
+            pending: BTreeMap::new(),
+            history: History::new(),
+            sent: Vec::new(),
+            chaos_rng,
+            crashes: 0,
+            stops: 0,
+            joins: 0,
+            outages: 0,
+            jumps: 0,
+            sweeps: 0,
+            fires: 0,
+            executes: 0,
+            unblocks: 0,
+            message_violations: Vec::new(),
+        }
+    }
+
+    fn schedule(&mut self, at: u64, event: SystemEvent) {
+        let key = (at, self.sequence);
+        self.sequence = self.sequence.wrapping_add(1);
+        self.queue.insert(key, event);
+    }
+
+    fn pop(&mut self) -> Option<(u64, SystemEvent)> {
+        let key = *self.queue.keys().next()?;
+        let event = self.queue.remove(&key)?;
+        Some((key.0, event))
+    }
+
+    fn node_clock(&self, id: &str) -> Option<u64> {
+        self.nodes.get(id).map(|node| node.clock(self.now))
+    }
+
+    fn start_node(&mut self, rng: &mut Rng) {
+        self.next_node += 1;
+        let id = format!("s{}", self.next_node);
+        let skew =
+            rng.range(0, self.opts.skew_ms.saturating_mul(2)) as i64 - self.opts.skew_ms as i64;
+        let drift =
+            rng.range(0, self.opts.drift_ppm.saturating_mul(2)) as i64 - self.opts.drift_ppm as i64;
+        let mut cfg = Config::memory(&id);
+        cfg.url = format!("sim://{id}/");
         cfg.compact = if self.appendable { 8 } else { 0 };
+        cfg.appendable = self.appendable;
         cfg.retry_timeout = self.opts.retry_timeout_ms;
         cfg.timer_bucket_ms = self.opts.timer_bucket_ms;
         cfg.heartbeat_ms = self.opts.heartbeat_ms;
         cfg.node_ttl_ms = self.opts.node_ttl_ms;
-        cfg.debug = true; // the clock is the request's
-        let store: Arc<dyn Store> = Arc::clone(&node_store) as Arc<dyn Store>;
-        let server = Server::with_env(cfg, store, Arc::clone(&self.bus) as Arc<dyn resonate_core::ResonateRouter>, Arc::clone(&clock) as Arc<dyn Clock>, Arc::clone(&self.notes) as Arc<dyn Notes>);
-        // A node that cannot reach the store keeps trying on its own.
-        server.init(false).await.expect("a node starts");
-        tracing::info!(node = %id, skew, drift, at = self.clock.now(), "started");
-        self.fleet.lock().unwrap().live.insert(id, Node { server: Arc::clone(&server), clock, store: node_store });
-        server
+        cfg.debug = true;
+        let node = Node {
+            state: State::new(cfg),
+            skew_ms: skew,
+            drift_ppm: drift,
+            offset_ms: 0,
+            band_ms: self.opts.jump_ms as i64,
+            cut: false,
+            outage_token: 0,
+            wake_token: 0,
+            routable: true,
+        };
+        let clock = node.clock(self.now);
+        self.nodes.insert(id.clone(), node);
+        self.apply_node(&id, Event::Start { clock, loops: true });
     }
 
-    fn live_ids(&self) -> Vec<String> {
-        self.fleet.lock().unwrap().live.keys().cloned().collect()
-    }
-
-    fn pick_node(&self, rng: &mut Rng) -> Option<String> {
-        let ids = self.live_ids();
-        (!ids.is_empty()).then(|| rng.pick(&ids).clone())
-    }
-
-    /// Kill a node where it stands and start a replacement.
-    async fn crash_one(&self, rng: &mut Rng) {
-        let Some(victim) = self.pick_node(rng) else { return };
-        let node = self.fleet.lock().unwrap().live.remove(&victim);
-        if let Some(node) = node {
-            node.server.crash().await;
-            self.fleet.lock().unwrap().crashes += 1;
-            tracing::info!(node = %victim, at = self.clock.now(), "crashed");
-        }
-        self.start_server().await;
-    }
-
-    /// Stop a node cleanly: it withdraws its announcement. Never the last one.
-    async fn stop_one(&self, rng: &mut Rng) {
-        if self.live_ids().len() <= 1 {
-            return;
-        }
-        let Some(victim) = self.pick_node(rng) else { return };
-        let node = self.fleet.lock().unwrap().live.remove(&victim);
-        if let Some(node) = node {
-            let _ = node.server.stop().await;
-            self.fleet.lock().unwrap().stops += 1;
-            tracing::info!(node = %victim, at = self.clock.now(), "stopped");
-        }
-    }
-
-    /// A node joins, if the fleet has room.
-    async fn join_one(&self) {
-        if self.live_ids().len() as u32 >= self.opts.max_servers {
-            return;
-        }
-        self.start_server().await;
-        self.fleet.lock().unwrap().joins += 1;
-    }
-
-    /// A node loses the store for a while: long enough, sometimes, for its
-    /// view of the membership to go stale.
-    fn outage(self: &Arc<Self>, rng: &mut Rng) {
-        let Some(id) = self.pick_node(rng) else { return };
-        let store = match self.fleet.lock().unwrap().live.get(&id) {
-            Some(n) => Arc::clone(&n.store),
+    fn apply_node(&mut self, id: &str, event: Event) {
+        let effects = match self.nodes.get_mut(id) {
+            Some(node) => node.state.on_event(event),
             None => return,
         };
-        let for_ms = rng.range(100, self.opts.disruption_ms);
-        store.set_cut(true);
-        self.fleet.lock().unwrap().outages += 1;
-        tracing::info!(node = %id, for_ms, at = self.clock.now(), "cut off from the store");
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(for_ms)).await;
-            store.set_cut(false);
+        self.perform(id, effects);
+        if self.nodes.get(id).is_some_and(|node| node.state.stopped()) {
+            self.remove_node(id);
+        }
+    }
+
+    fn perform(&mut self, id: &str, effects: Vec<Effect>) {
+        for effect in effects {
+            match effect {
+                Effect::Store { op, call } => {
+                    let cut = self.nodes.get(id).is_none_or(|node| node.cut);
+                    let (delay, disposition) = if cut {
+                        (0, Disposition::Unavailable)
+                    } else {
+                        self.store.plan(&call)
+                    };
+                    self.schedule(
+                        self.now.saturating_add(delay),
+                        SystemEvent::Store {
+                            node: id.to_string(),
+                            op,
+                            call,
+                            disposition,
+                        },
+                    );
+                }
+                Effect::Reply {
+                    id: request,
+                    response,
+                } => {
+                    self.reply(request, response);
+                }
+                Effect::Send { address, message } => self.send(address, message),
+                Effect::Wake { after_ms, armed } => {
+                    if let Some(node) = self.nodes.get_mut(id) {
+                        node.wake_token = node.wake_token.wrapping_add(1);
+                        let token = node.wake_token;
+                        self.schedule(
+                            self.now.saturating_add(after_ms),
+                            SystemEvent::Wake {
+                                node: id.to_string(),
+                                token,
+                                armed,
+                            },
+                        );
+                    }
+                }
+                Effect::Note(note) => self.note(note),
+            }
+        }
+    }
+
+    fn note(&mut self, note: Note) {
+        match note {
+            Note::SweepBegin { now, .. } => {
+                self.sweeps += 1;
+                self.history.mark(now);
+            }
+            Note::FireBegin { now, .. } => {
+                self.fires += 1;
+                self.history.mark(now);
+            }
+            Note::AdvanceBegin { now, .. } => self.history.mark(now),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self, address: String, message: Message) {
+        let at = self.now;
+        let (kind, id, msg) = match &message {
+            Message::Execute { task_id, version } => {
+                self.executes += 1;
+                let rows = self.rows(echod_types::origin_of(task_id));
+                if !rows
+                    .iter()
+                    .any(|promise| promise.id == *task_id && promise.task.is_some())
+                {
+                    self.message_violations.push(format!(
+                        "execute for {task_id} at {at}: no such task in the bucket"
+                    ));
+                }
+                (
+                    "execute",
+                    task_id.clone(),
+                    Dispatch::Execute {
+                        id: task_id.clone(),
+                        version: *version,
+                    },
+                )
+            }
+            Message::Unblock(promise) => {
+                self.unblocks += 1;
+                let rows = self.rows(echod_types::origin_of(&promise.id));
+                let settled = rows
+                    .iter()
+                    .find(|row| row.id == promise.id)
+                    .is_some_and(|row| row.state != PromiseState::Pending || row.timeout_at <= at);
+                if !settled {
+                    self.message_violations.push(format!(
+                        "unblock for {} at {at}: the promise is not settled in the bucket",
+                        promise.id
+                    ));
+                }
+                if promise.state == PromiseState::Pending {
+                    self.message_violations.push(format!(
+                        "unblock for {} at {at}: carries a pending promise",
+                        promise.id
+                    ));
+                }
+                (
+                    "unblock",
+                    promise.id.clone(),
+                    Dispatch::Unblock {
+                        address: address.clone(),
+                        promise: promise.clone(),
+                    },
+                )
+            }
+        };
+        self.sent.push(Sent {
+            at,
+            address,
+            kind: kind.into(),
+            id,
+            msg,
         });
     }
 
-    /// A node's clock jumps, forwards or back.
-    fn jump(&self, rng: &mut Rng) {
-        let Some(id) = self.pick_node(rng) else { return };
-        let delta = rng.range(0, 2 * self.opts.jump_ms) as i64 - self.opts.jump_ms as i64;
-        if let Some(n) = self.fleet.lock().unwrap().live.get(&id) {
-            n.clock.jump(delta);
-        }
-        self.fleet.lock().unwrap().jumps += 1;
-        tracing::info!(node = %id, delta, at = self.clock.now(), "clock jumped");
+    fn rows(&self, origin: &str) -> Vec<echod_logic::doc::codec::Promise> {
+        let key = echod_logic::keys::KeySpace::new("", self.opts.timer_bucket_ms).doc_key(origin);
+        self.store
+            .get(&key)
+            .and_then(|bytes| echod_logic::doc::decode_origin(bytes).ok())
+            .map(|loaded| echod_logic::doc::codec::promises(&loaded.doc))
+            .unwrap_or_default()
     }
 
-    /// Heal every outage, so the run can settle.
-    fn heal(&self) {
-        let f = self.fleet.lock().unwrap();
-        for n in f.live.values() {
-            n.store.set_cut(false);
-        }
-    }
-
-    /// The node a request goes to: the owner by hash, as a load balancer
-    /// would route it, most of the time; any node otherwise.
-    fn route(&self, origin: &str, rng: &mut Rng) -> Option<Arc<Server>> {
-        let f = self.fleet.lock().unwrap();
-        let live: Vec<&Node> = f.live.values().collect();
-        if live.is_empty() {
-            return None;
-        }
-        // As a load balancer over the members would: the origin's owner,
-        // which serialises the origin's requests behind one flight. A
-        // misrouted request is served by any node, after revalidating its
-        // cache; a read there may miss a write the owner has decided and
-        // not yet landed, whose stamp precedes the read, which the model's
-        // one clock cannot show.
-        let i = if rng.percent(self.opts.misroute_percent) { rng.below(live.len() as u64) as usize } else { (echod_logic::keys::fnv1a(origin) % live.len() as u64) as usize };
-        Some(Arc::clone(&live[i].server))
-    }
-
-    async fn client(self: Arc<Self>, name: String, mut rng: Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
-        let mut seen = Seen::default();
-        while self.issued.fetch_add(1, Ordering::Relaxed) < self.opts.operations {
-            let now = self.clock.now();
-            let req = gen.next(&mut rng, &seen, now);
-            if let Some(data) = self.issue(&name, req, &mut rng).await {
-                seen.note(&data);
+    fn reply(&mut self, request: u64, answer: Result<Answer, String>) {
+        let Some(pending) = self.pending.remove(&request) else {
+            return;
+        };
+        match answer {
+            Ok(Answer::Step { response, .. }) => {
+                self.history.end(request, self.now, Some(response.clone()));
+                if let Some(client) = self.clients.get_mut(pending.client) {
+                    client.seen.note(&response);
+                    client.active = None;
+                }
+                self.ready_after(pending.client);
             }
-            tokio::time::sleep(Duration::from_millis(rng.range(0, self.opts.think_ms))).await;
+            Ok(Answer::Debug { .. }) | Err(_) => {
+                self.history.end(request, self.now, None);
+                self.retry_or_finish(pending.client);
+            }
         }
     }
 
-    /// One request, retried until answered, backing off as a client does (a
-    /// node cut off from the store answers nothing useful for seconds, and
-    /// every attempt in that time is one more call the checker must place).
-    /// Every attempt is its own entry and carries its own instant as
-    /// `debug_time`, the clock when it was sent: one that got no answer may
-    /// have taken effect, and a retry of it is not the same operation again
-    /// (an acquire retried after a lost answer is refused), nor is it decided
-    /// as of the first attempt's instant, which a server on its own clock
-    /// would not do either. The answer's data, if one came.
-    async fn issue(&self, name: &str, req: Request, rng: &mut Rng) -> Option<serde_json::Value> {
+    fn ready_after(&mut self, client: usize) {
+        let delay = if client < self.generated_clients {
+            self.clients[client].rng.range(0, self.opts.think_ms)
+        } else {
+            0
+        };
+        self.schedule(
+            self.now.saturating_add(delay),
+            SystemEvent::ClientReady(client),
+        );
+    }
+
+    fn retry_or_finish(&mut self, client: usize) {
+        let Some(active) = self.clients.get(client).and_then(|c| c.active.as_ref()) else {
+            return;
+        };
+        if active.attempts >= 30 {
+            self.clients[client].active = None;
+            self.ready_after(client);
+            return;
+        }
+        let attempts = active.attempts;
+        let base = (50u64 << attempts.saturating_sub(1).min(5)).min(1_000);
+        let jitter = self.clients[client].rng.range(1, 50);
+        self.schedule(
+            self.now.saturating_add(base).saturating_add(jitter),
+            SystemEvent::Retry(client),
+        );
+    }
+
+    fn client_ready(&mut self, client: usize) {
+        if self.clients.get(client).is_none() || self.clients[client].active.is_some() {
+            return;
+        }
+        let req = if let Some(req) = self.clients[client].planned.pop_front() {
+            Some(req)
+        } else if self.clients[client].generated && self.issued < self.opts.operations {
+            self.issued += 1;
+            let generator = Generator {
+                origins: self.opts.origins,
+                promises_per_origin: self.opts.promises_per_origin,
+                schedules: self.opts.schedules,
+                timeout_ms: self.opts.timeout_ms,
+                ttl_ms: self.opts.ttl_ms,
+            };
+            let client = &mut self.clients[client];
+            Some(generator.next(&mut client.rng, &client.seen, self.now))
+        } else {
+            None
+        };
+        if let Some(req) = req {
+            self.clients[client].active = Some(Active { req, attempts: 0 });
+            self.attempt(client);
+        }
+    }
+
+    fn attempt(&mut self, client: usize) {
+        let Some(active) = self.clients.get_mut(client).and_then(|c| c.active.as_mut()) else {
+            return;
+        };
+        active.attempts += 1;
+        let req = active.req.clone();
         let target = target_of(&req);
-        let (kind, data) = encode(&req, WORKER);
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let Some(server) = self.route(&target, rng) else {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                if attempts >= 200 {
-                    return None;
+        let ids: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.routable)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if ids.is_empty() {
+            if active.attempts >= 200 {
+                self.clients[client].active = None;
+                self.ready_after(client);
+            } else {
+                self.schedule(self.now.saturating_add(50), SystemEvent::Retry(client));
+            }
+            return;
+        }
+        let index = if self.clients[client].rng.percent(self.opts.misroute_percent) {
+            self.clients[client].rng.below(ids.len() as u64) as usize
+        } else {
+            (echod_logic::keys::fnv1a(&target) % ids.len() as u64) as usize
+        };
+        let node = ids[index].clone();
+        let entry = self
+            .history
+            .begin(&self.clients[client].name, req.clone(), self.now, self.now);
+        self.history.attempt(entry);
+        self.pending.insert(
+            entry,
+            Pending {
+                client,
+                node: node.clone(),
+            },
+        );
+        let call = Call {
+            id: entry,
+            kind: kind_of(&req).into(),
+            corr: format!("c{entry}"),
+            target: Target::of_name(&target),
+            action_kind: action_kind(&req).map(str::to_string),
+            request: req,
+            now: self.now,
+            pinned: true,
+            then: None,
+        };
+        let clock = self.node_clock(&node).unwrap_or(self.now);
+        self.apply_node(&node, Event::Request { clock, call });
+    }
+
+    fn remove_node(&mut self, id: &str) {
+        if self.nodes.remove(id).is_none() {
+            return;
+        }
+        let requests: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.node == id)
+            .map(|(request, _)| *request)
+            .collect();
+        for request in requests {
+            if let Some(pending) = self.pending.remove(&request) {
+                self.history.end(request, self.now, None);
+                self.retry_or_finish(pending.client);
+            }
+        }
+    }
+
+    fn routable_ids(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.routable)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn chaos(&mut self) {
+        if self.issued >= self.opts.operations {
+            return;
+        }
+        let mut rng = std::mem::replace(&mut self.chaos_rng, Rng::new(0));
+        let crash = rng.percent(self.opts.crash_percent);
+        let stop = rng.percent(self.opts.stop_percent);
+        let join = rng.percent(self.opts.join_percent);
+        let outage = rng.percent(self.opts.outage_percent);
+        let jump = rng.percent(self.opts.jump_percent);
+        if crash {
+            self.crash_one(&mut rng);
+        }
+        if stop {
+            self.stop_one(&mut rng);
+        }
+        if join {
+            self.join_one(&mut rng);
+        }
+        if outage {
+            self.outage_one(&mut rng);
+        }
+        if jump {
+            self.jump_one(&mut rng);
+        }
+        self.chaos_rng = rng;
+        self.schedule(
+            self.now.saturating_add(self.opts.chaos_every_ms.max(1)),
+            SystemEvent::Chaos,
+        );
+    }
+
+    fn picked(&self, rng: &mut Rng) -> Option<String> {
+        let ids = self.routable_ids();
+        (!ids.is_empty()).then(|| rng.pick(&ids).clone())
+    }
+
+    fn crash_one(&mut self, rng: &mut Rng) {
+        let Some(id) = self.picked(rng) else { return };
+        self.remove_node(&id);
+        self.crashes += 1;
+        self.start_node(rng);
+    }
+
+    fn stop_one(&mut self, rng: &mut Rng) {
+        if self.routable_ids().len() <= 1 {
+            return;
+        }
+        let Some(id) = self.picked(rng) else { return };
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.routable = false;
+        }
+        self.stops += 1;
+        let clock = self.node_clock(&id).unwrap_or(self.now);
+        self.apply_node(&id, Event::Stop { clock });
+    }
+
+    fn join_one(&mut self, rng: &mut Rng) {
+        if self.routable_ids().len() as u32 >= self.opts.max_servers {
+            return;
+        }
+        self.start_node(rng);
+        self.joins += 1;
+    }
+
+    fn outage_one(&mut self, rng: &mut Rng) {
+        let Some(id) = self.picked(rng) else { return };
+        let duration = rng.range(100, self.opts.disruption_ms);
+        let token = {
+            let node = self.nodes.get_mut(&id).expect("picked node");
+            node.cut = true;
+            node.outage_token = node.outage_token.wrapping_add(1);
+            node.outage_token
+        };
+        self.outages += 1;
+        self.schedule(
+            self.now.saturating_add(duration),
+            SystemEvent::Heal { node: id, token },
+        );
+    }
+
+    fn jump_one(&mut self, rng: &mut Rng) {
+        let Some(id) = self.picked(rng) else { return };
+        let delta =
+            rng.range(0, self.opts.jump_ms.saturating_mul(2)) as i64 - self.opts.jump_ms as i64;
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.offset_ms = (node.offset_ms + delta).clamp(-node.band_ms, node.band_ms);
+        }
+        self.jumps += 1;
+    }
+
+    fn step(&mut self, event: SystemEvent) {
+        match event {
+            SystemEvent::Store {
+                node,
+                op,
+                call,
+                disposition,
+            } => {
+                if !self.nodes.contains_key(&node) {
+                    return;
                 }
-                continue;
-            };
-            let now = self.clock.now();
-            let entry = self.history.begin(name, req.clone(), now, now);
-            self.history.attempt(entry);
-            let envelope = RequestEnvelope {
-                kind: kind.to_string(),
-                head: RequestHead { corr_id: format!("c{entry}"), version: PROTOCOL_VERSION.to_string(), auth: None, debug_time: Some(now as i64) },
-                data: data.clone(),
-            };
-            let mut crashed = server.crashed();
-            let answer = tokio::select! {
-                biased;
-                _ = crashed.changed() => Err(resonate_core::Unavailable::new("node crashed")),
-                r = server.process(&envelope) => r,
-            };
-            match answer {
-                Ok(resp) => {
-                    self.history.end(entry, self.clock.now(), Some((resp.head.status as u16, resp.data.clone())));
-                    return Some(resp.data);
+                let outcome = self.store.complete(&call, disposition);
+                let clock = self.node_clock(&node).unwrap_or(self.now);
+                self.apply_node(&node, Event::Completed { op, outcome, clock });
+            }
+            SystemEvent::Wake { node, token, armed } => {
+                let valid = self
+                    .nodes
+                    .get(&node)
+                    .is_some_and(|state| state.wake_token == token);
+                if !valid {
+                    return;
                 }
-                Err(_) => {
-                    self.history.end(entry, self.clock.now(), None);
-                    if attempts >= 30 {
-                        return None;
+                if let Some(state) = self.nodes.get_mut(&node) {
+                    state.wake_token = state.wake_token.wrapping_add(1);
+                }
+                let clock = self.node_clock(&node).unwrap_or(self.now);
+                self.apply_node(&node, Event::Due { clock, armed });
+            }
+            SystemEvent::ClientReady(client) => self.client_ready(client),
+            SystemEvent::Retry(client) => self.attempt(client),
+            SystemEvent::Chaos => self.chaos(),
+            SystemEvent::Heal { node, token } => {
+                if let Some(state) = self.nodes.get_mut(&node) {
+                    if state.outage_token == token {
+                        state.cut = false;
                     }
-                    // 50 ms, doubling to a second, with jitter
-                    let base = (50u64 << (attempts - 1).min(5)).min(1_000);
-                    tokio::time::sleep(Duration::from_millis(base + rng.range(1, 50))).await;
                 }
             }
         }
     }
 
-    /// The finishing reads: every id the run may have named, read once the
-    /// run has settled, so what the bucket holds is what the model shows.
-    async fn final_reads(&self, rng: &mut Rng) {
-        let gen = Generator { origins: self.opts.origins, promises_per_origin: self.opts.promises_per_origin, schedules: self.opts.schedules, timeout_ms: self.opts.timeout_ms, ttl_ms: self.opts.ttl_ms };
-        let mut reads = Vec::new();
-        for id in gen.ids() {
-            reads.push(Request::PromiseGet(PromiseGetReq { id: id.clone() }));
-            reads.push(Request::TaskGet(TaskGetReq { id }));
+    fn next_event(&mut self) -> bool {
+        let Some((at, event)) = self.pop() else {
+            return false;
+        };
+        self.now = self.now.max(at);
+        self.step(event);
+        true
+    }
+
+    fn run_until(&mut self, mut done: impl FnMut(&Self) -> bool) {
+        while !done(self) {
+            assert!(self.next_event(), "deterministic event queue drained");
+        }
+    }
+
+    fn run_through(&mut self, through: u64) {
+        while self
+            .queue
+            .keys()
+            .next()
+            .is_some_and(|(at, _)| *at <= through)
+        {
+            self.next_event();
+        }
+        self.now = self.now.max(through);
+    }
+
+    fn normal_done(&self) -> bool {
+        self.issued >= self.opts.operations
+            && self.clients[..self.generated_clients]
+                .iter()
+                .all(|client| client.active.is_none())
+    }
+
+    fn heal_all(&mut self) {
+        for node in self.nodes.values_mut() {
+            node.cut = false;
+            node.outage_token = node.outage_token.wrapping_add(1);
+        }
+    }
+
+    fn add_final_client(&mut self) -> usize {
+        let generator = Generator {
+            origins: self.opts.origins,
+            promises_per_origin: self.opts.promises_per_origin,
+            schedules: self.opts.schedules,
+            timeout_ms: self.opts.timeout_ms,
+            ttl_ms: self.opts.ttl_ms,
+        };
+        let mut planned = VecDeque::new();
+        for id in generator.ids() {
+            planned.push_back(Request::PromiseGet(PromiseGetReq { id: id.clone() }));
+            planned.push_back(Request::TaskGet(TaskGetReq { id }));
         }
         if self.opts.schedules {
             for id in SCHEDULES {
-                reads.push(Request::ScheduleGet(ScheduleGetReq { id: id.to_string() }));
+                planned.push_back(Request::ScheduleGet(ScheduleGetReq { id: id.into() }));
             }
         }
-        for req in reads {
-            self.issue("final", req, rng).await;
+        let index = self.clients.len();
+        self.clients.push(Client {
+            name: "final".into(),
+            rng: Rng::new(self.opts.seed ^ 0xf1a1),
+            seen: Seen::default(),
+            active: None,
+            planned,
+            generated: false,
+        });
+        self.schedule(self.now, SystemEvent::ClientReady(index));
+        index
+    }
+
+    fn final_done(&self, client: usize) -> bool {
+        self.clients[client].active.is_none() && self.clients[client].planned.is_empty()
+    }
+
+    fn stop_all(&mut self) {
+        let ids = self.routable_ids();
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.routable = false;
+            }
+            let clock = self.node_clock(&id).unwrap_or(self.now);
+            self.apply_node(&id, Event::Stop { clock });
         }
+        self.run_until(|world| world.nodes.is_empty());
     }
 }
 
-/// One run, on its own runtime, under the paused clock.
 pub fn run(opts: Options) -> Report {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().expect("a runtime");
-    rt.block_on(simulate(opts))
-}
-
-async fn simulate(opts: Options) -> Report {
-    let mut rng = Rng::new(opts.seed);
-    let appendable = rng.percent(50);
-    let inner = Arc::new(if appendable { MemoryStore::appendable() } else { MemoryStore::new() });
-    let store = Arc::new(FaultyStore::new(Arc::clone(&inner), opts.faults, rng.fork()));
-    let clock = Arc::new(SimClock::new(1_700_000_000_000));
-    let history = Arc::new(History::new());
-    let keys = KeySpace::new("", opts.timer_bucket_ms);
-    let bus = Arc::new(RecordingBus::new(Arc::clone(&inner), keys.clone(), Arc::clone(&clock) as Arc<dyn Clock>));
-    let world = Arc::new(World {
-        opts: opts.clone(),
-        inner,
-        store,
-        clock,
-        bus,
-        history: Arc::clone(&history),
-        notes: Arc::new(StepNotes { history, sweeps: AtomicU64::new(0), fires: AtomicU64::new(0) }),
-        keys,
-        fleet: Mutex::new(Fleet::default()),
-        issued: AtomicU64::new(0),
-        appendable,
-        rng: Mutex::new(rng.fork()),
-    });
+    let mut world = World::new(opts.clone());
+    let mut startup_rng = Rng::new(opts.seed ^ 0x51a7);
     for _ in 0..opts.servers {
-        world.start_server().await;
+        world.start_node(&mut startup_rng);
     }
-    // Let the nodes meet before the load arrives: a configuration naming
-    // them. Nothing is unsafe before that; requests would just not route.
-    tokio::time::sleep(Duration::from_millis(opts.node_ttl_ms + opts.heartbeat_ms * 4)).await;
+    world.run_through(
+        world
+            .now
+            .saturating_add(opts.node_ttl_ms)
+            .saturating_add(opts.heartbeat_ms.saturating_mul(4)),
+    );
 
-    let mut clients = Vec::new();
-    for c in 0..opts.clients {
-        clients.push(tokio::spawn(Arc::clone(&world).client(format!("client{c}"), rng.fork())));
+    let mut client_rng = Rng::new(opts.seed ^ 0xc11e_17);
+    for index in 0..opts.clients as usize {
+        world.clients.push(Client {
+            name: format!("client{index}"),
+            rng: client_rng.fork(),
+            seen: Seen::default(),
+            active: None,
+            planned: VecDeque::new(),
+            generated: true,
+        });
     }
-    let chaos = {
-        let world = Arc::clone(&world);
-        let mut rng = rng.fork();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(world.opts.chaos_every_ms)).await;
-                if world.issued.load(Ordering::Relaxed) >= world.opts.operations {
-                    return;
-                }
-                let o = &world.opts;
-                if rng.percent(o.crash_percent) {
-                    world.crash_one(&mut rng).await;
-                }
-                if rng.percent(o.stop_percent) {
-                    world.stop_one(&mut rng).await;
-                }
-                if rng.percent(o.join_percent) {
-                    world.join_one().await;
-                }
-                if rng.percent(o.outage_percent) {
-                    world.outage(&mut rng);
-                }
-                if rng.percent(o.jump_percent) {
-                    world.jump(&mut rng);
-                }
-            }
-        })
-    };
-    for c in clients {
-        let _ = c.await;
+    world.generated_clients = world.clients.len();
+    for client in 0..world.generated_clients {
+        world.schedule(world.now, SystemEvent::ClientReady(client));
     }
-    let _ = chaos.await;
-    world.heal();
-    if world.live_ids().is_empty() {
-        world.start_server().await;
-    }
-    tokio::time::sleep(Duration::from_millis(opts.settle_ms)).await;
-    world.final_reads(&mut rng).await;
-    let live: Vec<Arc<Server>> = world.fleet.lock().unwrap().live.values().map(|n| Arc::clone(&n.server)).collect();
-    for s in &live {
-        let _ = s.stop().await;
-    }
-    world.history.close_open(world.clock.now());
+    world.schedule(
+        world.now.saturating_add(opts.chaos_every_ms.max(1)),
+        SystemEvent::Chaos,
+    );
+    world.run_until(World::normal_done);
 
-    check(&world).await
+    world.heal_all();
+    if world.routable_ids().is_empty() {
+        world.start_node(&mut startup_rng);
+    }
+    world.run_through(world.now.saturating_add(opts.settle_ms));
+    let final_client = world.add_final_client();
+    world.run_until(|state| state.final_done(final_client));
+    world.stop_all();
+    world.history.close_open(world.now);
+    check(&world)
 }
 
-async fn check(world: &World) -> Report {
-    let opts = &world.opts;
+fn check(world: &World) -> Report {
     let entries = world.history.entries();
-    let mut report = Report { seed: opts.seed, entries: entries.len(), ..Default::default() };
-    report.sweeps = world.notes.sweeps.load(Ordering::Relaxed) as usize;
-    report.fires = world.notes.fires.load(Ordering::Relaxed) as usize;
-    {
-        let f = world.fleet.lock().unwrap();
-        report.crashes = f.crashes;
-        report.stops = f.stops;
-        report.joins = f.joins;
-        report.outages = f.outages;
-        report.jumps = f.jumps;
-    }
-    let c: Counters = world.store.counters();
-    report.store_operations = c.operations;
-    report.store_unavailable = c.unavailable;
-    report.store_lost_acks = c.lost_acks;
-    report.store_conflicts = c.conflicts;
-    let sent = {
-        let t = world.bus.tally.lock().unwrap();
-        report.executes = t.executes;
-        report.unblocks = t.unblocks;
-        for v in &t.violations {
-            report.failures.push(format!("message: {v}"));
-        }
-        world.bus.sent.lock().unwrap().clone()
+    let mut report = Report {
+        seed: world.opts.seed,
+        entries: entries.len(),
+        sweeps: world.sweeps,
+        fires: world.fires,
+        crashes: world.crashes,
+        stops: world.stops,
+        joins: world.joins,
+        outages: world.outages,
+        jumps: world.jumps,
+        executes: world.executes,
+        unblocks: world.unblocks,
+        ..Default::default()
     };
+    let counters: Counters = world.store.counters();
+    report.store_operations = counters.operations;
+    report.store_unavailable = counters.unavailable;
+    report.store_lost_acks = counters.lost_acks;
+    report.store_conflicts = counters.conflicts;
+    for violation in &world.message_violations {
+        report.failures.push(format!("message: {violation}"));
+    }
 
-    // Coverage: every kind answered 200 at least once, and the history overlapped.
     let all_kinds: BTreeSet<String> = [
-        "promise.get", "promise.create", "promise.settle", "promise.register_callback", "promise.register_listener",
-        "task.get", "task.create", "task.acquire", "task.fulfill", "task.release", "task.heartbeat", "task.suspend", "task.fence", "task.halt", "task.continue",
-        "schedule.get", "schedule.create", "schedule.delete",
-    ].iter().map(|s| s.to_string()).collect();
-    for e in &entries {
-        if let Some((200, _)) = &e.outcome {
-            report.kinds_succeeded.insert(encode(&e.req, WORKER).0.to_string());
+        "promise.get",
+        "promise.create",
+        "promise.settle",
+        "promise.register_callback",
+        "promise.register_listener",
+        "task.get",
+        "task.create",
+        "task.acquire",
+        "task.fulfill",
+        "task.release",
+        "task.heartbeat",
+        "task.suspend",
+        "task.fence",
+        "task.halt",
+        "task.continue",
+        "schedule.get",
+        "schedule.create",
+        "schedule.delete",
+    ]
+    .iter()
+    .map(|kind| kind.to_string())
+    .collect();
+    for entry in &entries {
+        if entry
+            .outcome
+            .as_ref()
+            .is_some_and(|response| status(response) == 200)
+        {
+            report.kinds_succeeded.insert(kind_of(&entry.req).into());
         }
     }
-    report.kinds_missing = all_kinds.difference(&report.kinds_succeeded).cloned().collect();
-    let clients: Vec<&crate::history::Entry> = entries.iter().filter(|e| e.client != "final").collect();
-    for (i, a) in clients.iter().enumerate() {
-        for b in &clients[i + 1..] {
+    report.kinds_missing = all_kinds
+        .difference(&report.kinds_succeeded)
+        .cloned()
+        .collect();
+    let clients: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.client != "final")
+        .collect();
+    for (index, a) in clients.iter().enumerate() {
+        for b in &clients[index + 1..] {
             if b.invoke < a.ret && a.invoke <= b.invoke {
                 report.overlapping_pairs += 1;
             }
         }
     }
-    if report.overlapping_pairs == 0 && opts.clients > 1 {
-        report.failures.push("the history never overlapped: nothing concurrent was checked".into());
+    if report.overlapping_pairs == 0 && world.opts.clients > 1 {
+        report
+            .failures
+            .push("the history never overlapped: nothing concurrent was checked".into());
     }
 
-    // The run as a trace of the model, checked by echod-rover.
-    let trace = checker::trace(&entries, &world.history.marks(), &sent);
+    let trace = checker::trace(&entries, &world.history.marks(), &world.sent);
     report.events = trace.len();
-    match checker::check(&trace, opts.retry_timeout_ms, opts.budget) {
+    match checker::check(&trace, world.opts.retry_timeout_ms, world.opts.budget) {
         Verdict::Ok { explored } => report.search_steps = explored as u64,
-        Verdict::Unknown(v) => {
+        Verdict::Unknown(violation) => {
             report.undecided = true;
             if std::env::var_os("ECHOD_SIM_DUMP").is_some() {
-                eprintln!("undecided at event {} of {}: {}", v.index, trace.len(), v.reason);
-                eprint!("{}", checker::show(&trace, v.index));
+                eprintln!(
+                    "undecided at event {} of {}: {}",
+                    violation.index,
+                    trace.len(),
+                    violation.reason
+                );
+                eprint!("{}", checker::show(&trace, violation.index));
             }
         }
     }
 
-    // Every deadline a document owes has a key.
-    let timer_keys = world.inner.list("t/", usize::MAX).await.unwrap_or_default();
-    let armed: BTreeSet<(String, u64)> = timer_keys
+    validate_deadlines(world, &mut report);
+    report.ok = report.failures.is_empty();
+    report
+}
+
+fn validate_deadlines(world: &World, report: &mut Report) {
+    let keys = echod_logic::keys::KeySpace::new("", world.opts.timer_bucket_ms);
+    let armed: BTreeSet<(String, u64)> = world
+        .store
+        .list("t/")
         .iter()
-        .filter_map(|k| match world.keys.parse_timer_key(k) {
-            Some(TimerEntry::Origin { origin, deadline, .. }) => Some((origin, deadline)),
-            Some(TimerEntry::Schedule { id, deadline, .. }) => Some((format!("sched:{id}"), deadline)),
+        .filter_map(|key| match keys.parse_timer_key(key) {
+            Some(echod_logic::keys::TimerEntry::Origin {
+                origin, deadline, ..
+            }) => Some((origin, deadline)),
+            Some(echod_logic::keys::TimerEntry::Schedule { id, deadline, .. }) => {
+                Some((format!("sched:{id}"), deadline))
+            }
             None => None,
         })
         .collect();
-    for key in world.inner.list("wf/", usize::MAX).await.unwrap_or_default() {
-        let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let Ok(loaded) = echod_logic::doc::decode_origin(&bytes) else { continue };
-        let origin = key.trim_start_matches("wf/");
-        let origin = echod_logic::keys::decode_key(origin).unwrap_or_else(|| origin.to_string());
-        if let Some(d) = echod_logic::doc::deadline(&loaded.doc) {
-            if !armed.contains(&(origin.clone(), d)) {
-                report.failures.push(format!("origin {origin}: owes a deadline at {d} and the bucket holds no key for it"));
+    for key in world.store.list("wf/") {
+        let Some(bytes) = world.store.get(&key) else {
+            continue;
+        };
+        let Ok(loaded) = echod_logic::doc::decode_origin(bytes) else {
+            continue;
+        };
+        let encoded = key.trim_start_matches("wf/");
+        let origin = echod_logic::keys::decode_key(encoded).unwrap_or_else(|| encoded.to_string());
+        if let Some(deadline) = echod_logic::doc::deadline(&loaded.doc) {
+            if !armed.contains(&(origin.clone(), deadline)) {
+                report.failures.push(format!(
+                    "origin {origin}: owes a deadline at {deadline} and the bucket holds no key for it"
+                ));
             }
         }
     }
-    for key in world.inner.list("sched/", usize::MAX).await.unwrap_or_default() {
-        let Ok(Some((bytes, _))) = world.inner.get(&key).await else { continue };
-        let Ok(loaded) = echod_logic::doc::decode_schedule(&bytes) else { continue };
-        let id = key.trim_start_matches("sched/");
-        let id = echod_logic::keys::decode_key(id).unwrap_or_else(|| id.to_string());
-        if let Some(d) = echod_logic::doc::deadline(&loaded.doc) {
-            if !armed.contains(&(format!("sched:{id}"), d)) {
-                report.failures.push(format!("schedule {id}: owes its next run at {d} and the bucket holds no key for it"));
+    for key in world.store.list("sched/") {
+        let Some(bytes) = world.store.get(&key) else {
+            continue;
+        };
+        let Ok(loaded) = echod_logic::doc::decode_schedule(bytes) else {
+            continue;
+        };
+        let encoded = key.trim_start_matches("sched/");
+        let id = echod_logic::keys::decode_key(encoded).unwrap_or_else(|| encoded.to_string());
+        if let Some(deadline) = echod_logic::doc::deadline(&loaded.doc) {
+            if !armed.contains(&(format!("sched:{id}"), deadline)) {
+                report.failures.push(format!(
+                    "schedule {id}: owes its next run at {deadline} and the bucket holds no key for it"
+                ));
             }
         }
     }
+}
 
-    report.ok = report.failures.is_empty();
-    report
+fn status(response: &Response) -> u16 {
+    match response {
+        Response::Promise(response) => response.status,
+        Response::Schedule(response) => response.status,
+        Response::Status(response) => response.status,
+        Response::TaskGet(response) => response.status,
+        Response::TaskClaim(response) => response.status,
+        Response::TaskFence(response) => response.status,
+    }
+}
+
+fn action_kind(request: &Request) -> Option<&'static str> {
+    match request {
+        Request::TaskFence(fence) => Some(match &fence.action {
+            echod_types::TaskFenceAction::Create(_) => "promise.create",
+            echod_types::TaskFenceAction::Settle(_) => "promise.settle",
+        }),
+        _ => None,
+    }
+}
+
+pub fn kind_of(request: &Request) -> &'static str {
+    match request {
+        Request::PromiseGet(_) => "promise.get",
+        Request::PromiseCreate(_) => "promise.create",
+        Request::PromiseSettle(_) => "promise.settle",
+        Request::PromiseRegisterCallback(_) => "promise.register_callback",
+        Request::PromiseRegisterListener(_) => "promise.register_listener",
+        Request::ScheduleGet(_) => "schedule.get",
+        Request::ScheduleCreate(_) => "schedule.create",
+        Request::ScheduleDelete(_) => "schedule.delete",
+        Request::TaskGet(_) => "task.get",
+        Request::TaskCreate(_) => "task.create",
+        Request::TaskAcquire(_) => "task.acquire",
+        Request::TaskFulfill(_) => "task.fulfill",
+        Request::TaskRelease(_) => "task.release",
+        Request::TaskHalt(_) => "task.halt",
+        Request::TaskContinue(_) => "task.continue",
+        Request::TaskFence(_) | Request::TaskFenceCheck(_) => "task.fence",
+        Request::TaskHeartbeat(_) => "task.heartbeat",
+        Request::TaskSuspend(_) => "task.suspend",
+    }
 }

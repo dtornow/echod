@@ -91,7 +91,7 @@ echod/
 │       └── lean/         # concrete model/refinement where still useful
 │
 ├── test/
-│   ├── runtime/          # deterministic Effect interpreter
+│   ├── runtime/          # synchronous deterministic Effect interpreter
 │   ├── sim/              # seeded simulation and trace capture
 │   ├── diff/             # differential validation
 │   ├── integration/      # real S3/HTTP tests
@@ -195,7 +195,7 @@ imports those local executable definitions.
 
 ### `test/runtime`
 
-A deterministic interpreter for the same Effects:
+A synchronous deterministic interpreter for the same Effects:
 
 ```text
 Store Effect -> simulated object store

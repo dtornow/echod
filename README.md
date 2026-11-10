@@ -30,7 +30,7 @@ rust/spec/rover-exec  Rover executable search and verified replay
 rust/spec/abstract    the mathematical Resonate protocol model
 rust/spec/abstract-exec  its executable store, handlers, Rover realization, and history tooling
 rust/spec/concrete    mathematical concrete document/Rover model and its refinement
-rust/test/runtime     the deterministic effect interpreter
+rust/test/runtime     the synchronous deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/src/Rover        the Rover world, for experiment
 lean/src/abstract     the Resonate model, for experiment

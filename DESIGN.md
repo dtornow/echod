@@ -15,7 +15,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/spec/abstract` | `echod-abstract-spec`: the mathematical Resonate protocol model |
 | `rust/spec/abstract-exec` | `echod-abstract-exec`: executable realization, history translation, and model driving |
 | `rust/spec/concrete` | `echod-concrete-spec`: the mathematical catalogue, Rover model, and its proved refinement to the abstract model |
-| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
+| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
@@ -356,17 +356,18 @@ the objects: what the simulator checks against the model (below).
 
 ### Simulation
 
-`echod-sim` runs several nodes over one in-memory store on one thread
-under tokio's paused clock, so time moves only between tasks and the same
-seed replays the same run. The simulation owns every port: one clock the
+`echod-sim` runs several production decision cores over one in-memory store
+in a synchronous deterministic event loop. Virtual time advances directly
+to the next queued event, so the same seed replays the same run. The
+simulation owns every port: one clock the
 clients stamp requests with and the nodes read (a node can be given skew,
 drift and jumps, backwards included, but the run leaves them off: the
 model it is checked against keeps one clock, and a node on a clock of its
 own would be reported, not tested); a store that
 answers nothing, loses acks or refuses conditional writes by seeded
 percentages and waits a seeded latency, and per node a store that can be cut
-off entirely; a bus that records every message as the model's dispatch and
-checks it against the bucket. A chaos task crashes nodes, stops them
+off entirely; sent effects are recorded as model dispatches and checked
+against the bucket. Scheduled chaos events crash nodes, stop them
 cleanly, starts new ones and cuts nodes off the store. Clients issue every
 request kind over a few origins, as the model types them; every attempt is
 a history entry, since an attempt that got no answer may have taken effect.

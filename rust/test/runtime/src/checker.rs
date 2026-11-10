@@ -3,8 +3,8 @@
 //! The history becomes a Rover boundary trace: every request a client made is
 //! an `Invoke` at the instant it was sent (its `head.debug_time`, the
 //! earliest the node decides it at, which its retries keep) and, if it was
-//! answered, a `Return` at the instant the answer came; every message the
-//! bus carried is a `Receive`; and the clock moves (`Clock`) at every
+//! answered, a `Return` at the instant the answer came; every emitted message
+//! is a `Receive`; and the clock moves (`Clock`) at every
 //! instant something happened, the nodes' own steps included. The checker
 //! then asks whether some execution of the model, with its internal work (a
 //! deadline, a lease, a resume, a retry, a schedule's occurrence) placed
@@ -19,16 +19,12 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use echod_rover_exec::{check_guided, CheckConfig};
 use echod_abstract::ServerConfig;
-use echod_abstract_exec::{
-    history_rank, history_responses, rover_trace, HistoryEvent, Model,
-};
+use echod_abstract_exec::{history_rank, history_responses, rover_trace, HistoryEvent, Model};
+use echod_rover_exec::{check_guided, CheckConfig};
 
-use crate::bus::Sent;
 use crate::history::Entry;
-use crate::wire::{decode, encode};
-use crate::workload::WORKER;
+use crate::sim::Sent;
 
 pub type Trace = Vec<HistoryEvent>;
 
@@ -44,14 +40,34 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
     // place the model may land its effect.
     let mut items: Vec<(u64, u8, u64, HistoryEvent)> = Vec::new();
     for e in entries {
-        items.push((e.now, 2, e.id, HistoryEvent::Invoke { call: e.id, req: e.req.clone() }));
-        if let Some((status, data)) = &e.outcome {
-            let (kind, _) = encode(&e.req, WORKER);
-            items.push((e.ret.max(e.now), 3, e.id, HistoryEvent::Return { call: e.id, res: decode(kind, *status, data) }));
+        items.push((
+            e.now,
+            2,
+            e.id,
+            HistoryEvent::Invoke {
+                call: e.id,
+                req: e.req.clone(),
+            },
+        ));
+        if let Some(response) = &e.outcome {
+            items.push((
+                e.ret.max(e.now),
+                3,
+                e.id,
+                HistoryEvent::Return {
+                    call: e.id,
+                    res: response.clone(),
+                },
+            ));
         }
     }
     for (i, s) in sent.iter().enumerate() {
-        items.push((s.at, 1, i as u64, HistoryEvent::Receive { msg: s.msg.clone() }));
+        items.push((
+            s.at,
+            1,
+            i as u64,
+            HistoryEvent::Receive { msg: s.msg.clone() },
+        ));
     }
     items.sort_by_key(|(t, rank, id, _)| (*t, *rank, *id));
     let mut marks = marks.to_vec();
@@ -105,7 +121,9 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
         limits,
         |event, action, sent| history_rank(event, action, sent, &expected),
     ) {
-        Some(certificate) => Verdict::Ok { explored: certificate.len() },
+        Some(certificate) => Verdict::Ok {
+            explored: certificate.len(),
+        },
         None => Verdict::Unknown(Violation {
             index: trace.len().saturating_sub(1),
             reason: "bounded Rover search found no certificate".into(),

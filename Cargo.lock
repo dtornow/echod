@@ -1227,7 +1227,6 @@ dependencies = [
  "clap",
  "echod-test-runtime",
  "serde_json",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1249,19 +1248,14 @@ dependencies = [
 name = "echod-test-runtime"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "echod-abstract-exec",
  "echod-abstract-spec",
  "echod-cron",
  "echod-process",
  "echod-rover-exec",
- "echod-rover-spec",
- "echod-runtime",
- "resonate-core",
+ "echod-types",
  "serde",
  "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
