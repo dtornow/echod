@@ -11046,7 +11046,7 @@ pub(crate) proof fn lemma_simulation(fleet: ConcreteConfig, config: AbstractConf
 /// agree by `work::lemma_agreement`.
 pub(crate) proof fn prove_refinement(concrete_config: ConcreteConfig)
     ensures
-        crate::refinement_claim(concrete_config),
+        crate::concrete_refines_abstract(concrete_config),
 {
     let fleet = concrete_config;
     let config = abstract_config(fleet);
@@ -11070,7 +11070,7 @@ verus! {
 /// Proves the complete concrete-to-abstract trace-refinement claim.
 pub proof fn refinement_proof(concrete_config: ConcreteConfig)
     ensures
-        crate::refinement_claim(concrete_config),
+        crate::concrete_refines_abstract(concrete_config),
 {
     simulation::prove_refinement(concrete_config);
 }

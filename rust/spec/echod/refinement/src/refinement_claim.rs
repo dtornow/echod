@@ -19,7 +19,7 @@ verus! {
 
 /// Every concrete boundary trace is an abstract boundary trace, with the
 /// concrete retry timeout mapped directly into the abstract configuration.
-pub open spec fn refinement_claim(concrete_config: ConcreteConfig) -> bool {
+pub open spec fn concrete_refines_abstract(concrete_config: ConcreteConfig) -> bool {
     refines(
         ConcreteSpec,
         concrete_config,
